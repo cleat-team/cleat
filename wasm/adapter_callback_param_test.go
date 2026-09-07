@@ -66,20 +66,12 @@ import (
 // A list that may only SHRINK, checked in both directions below. An entry that
 // stops describing a violation is a standing exemption covering nothing, which
 // is how an allowlist becomes a hole for whatever is added next.
-var callbackParamsNotPassedToTheHost = map[string]string{
-	"DurableCallWithHeartbeat.onProgress": "cleat#854: onProgress cannot be invoked across the ABI -- " +
-		"the guest is suspended inside the cleat_call_heartbeat import for the whole call, " +
-		"so there is no moment at which the host could run guest code. Rust's equivalent " +
-		"already takes no callback. Removing the parameter is a breaking change to a public " +
-		"SDK signature, which is the user's call, so it is recorded here rather than made. " +
-		"The host-side heartbeat itself works and is not in question.",
-
-	"DurableCallTypedWithHeartbeat.onProgress": "cleat#854: the typed wrapper forwards onProgress to " +
-		"DurableCallWithHeartbeat, which drops it, so it is equally inert -- one hop further out. " +
-		"Listed separately because the resolution has to cover both signatures: if the parameter is " +
-		"removed it is removed from both, and if it is wired both need wiring. Whoever fixes #854 by " +
-		"deleting only the entry above will see this one fail, which is the point.",
-}
+//
+// EMPTY, and that is the goal state rather than an oversight. Its only two
+// entries were DurableCallWithHeartbeat.onProgress and the typed wrapper's,
+// both removed in cleat#854 by deleting the parameter itself. An empty list
+// means every function-typed adapter parameter in the tree reaches the host.
+var callbackParamsNotPassedToTheHost = map[string]string{}
 
 type callbackSite struct {
 	origin string // which map: the two share three names, see the collision test

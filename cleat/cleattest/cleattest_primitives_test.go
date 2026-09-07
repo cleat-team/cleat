@@ -843,7 +843,7 @@ func TestDurableCallTypedWithHeartbeat(t *testing.T) {
 	}
 
 	var resp respType
-	err := env.H().DurableCallTypedWithHeartbeat("svc", "op", reqType{Input: "data"}, &resp, time.Second, nil)
+	err := env.H().DurableCallTypedWithHeartbeat("svc", "op", reqType{Input: "data"}, &resp, time.Second)
 	if err != nil {
 		t.Fatalf("DurableCallTypedWithHeartbeat failed: %v", err)
 	}
@@ -857,7 +857,7 @@ func TestDurableCallTypedWithHeartbeatNoResultPtr(t *testing.T) {
 	env.OnCall("svc", "op", nil).Return(`{"result":"ok"}`, nil)
 
 	// When result is nil, the call should succeed without unmarshaling.
-	err := env.H().DurableCallTypedWithHeartbeat("svc", "op", struct{}{}, nil, time.Second, nil)
+	err := env.H().DurableCallTypedWithHeartbeat("svc", "op", struct{}{}, nil, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1014,7 +1014,7 @@ func TestDurableCallTypedWithHeartbeatImplDirect(t *testing.T) {
 	}
 
 	var resp respType
-	err := env.durableCallTypedWithHeartbeatImpl("svc", "op", reqType{X: 42}, &resp, time.Second, nil)
+	err := env.durableCallTypedWithHeartbeatImpl("svc", "op", reqType{X: 42}, &resp, time.Second)
 	if err != nil {
 		t.Fatalf("durableCallTypedWithHeartbeatImpl failed: %v", err)
 	}
@@ -1027,7 +1027,7 @@ func TestDurableCallTypedWithHeartbeatImplDirectNilResult(t *testing.T) {
 	env := NewTestEnv()
 	env.OnCall("svc", "op", nil).Return("ignored", nil)
 
-	err := env.durableCallTypedWithHeartbeatImpl("svc", "op", struct{}{}, nil, 0, nil)
+	err := env.durableCallTypedWithHeartbeatImpl("svc", "op", struct{}{}, nil, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1037,7 +1037,7 @@ func TestDurableCallTypedWithHeartbeatImplDirectMarshalError(t *testing.T) {
 	env := NewTestEnv()
 
 	// An un-marshalable request should cause an error.
-	err := env.durableCallTypedWithHeartbeatImpl("svc", "op", func() {}, nil, 0, nil)
+	err := env.durableCallTypedWithHeartbeatImpl("svc", "op", func() {}, nil, 0)
 	if err == nil {
 		t.Fatal("expected marshal error")
 	}

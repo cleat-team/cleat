@@ -6,7 +6,7 @@ Demonstrates a fan-out/fan-in data pipeline using typed child workflows and conc
 
 - `ChildWorkflowTyped` for type-safe child workflow fan-out across items
 - `AwaitAllChildren` for concurrent fan-in (all children awaited concurrently)
-- `DurableCallTypedWithHeartbeat` for long-running steps with progress callbacks
+- `DurableCallTypedWithHeartbeat` for long-running steps that must keep their claim alive
 - `SetQueryState` for tracking pipeline and per-item progress
 - `DurableCall` for post-processing (notifications on completion)
 - `DurableLog` for structured audit logging

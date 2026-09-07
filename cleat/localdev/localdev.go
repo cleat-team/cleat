@@ -632,16 +632,16 @@ func (r *LocalRunner) awaitChildTyped(runID string, result interface{}) error {
 	return json.Unmarshal([]byte(resp), result)
 }
 
-func (r *LocalRunner) durableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+func (r *LocalRunner) durableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error) {
 	return r.durableCall(service, operation, requestJSON)
 }
 
-func (r *LocalRunner) durableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error {
+func (r *LocalRunner) durableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error {
 	reqJSON, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("localdev: marshaling request for %s.%s: %w", service, operation, err)
 	}
-	resp, err := r.durableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval, onProgress)
+	resp, err := r.durableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval)
 	if err != nil {
 		return err
 	}

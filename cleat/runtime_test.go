@@ -1094,9 +1094,8 @@ func TestChildWorkflowTypedFallsBackToChildWorkflow(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDurableCallTypedWithHeartbeatMarshalsAndUnmarshals(t *testing.T) {
-	progressCalled := false
 	h := NewHostCalls(HostCallsOptions{
-		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error) {
 			if service != "svc" || operation != "op" {
 				t.Errorf("unexpected service/operation: %s.%s", service, operation)
 			}
@@ -1105,10 +1104,6 @@ func TestDurableCallTypedWithHeartbeatMarshalsAndUnmarshals(t *testing.T) {
 			}
 			if heartbeatInterval != time.Second {
 				t.Errorf("unexpected heartbeatInterval: %v", heartbeatInterval)
-			}
-			if onProgress != nil {
-				onProgress(`{"pct":50}`)
-				progressCalled = true
 			}
 			return `{"result":"ok"}`, nil
 		},
@@ -1121,28 +1116,23 @@ func TestDurableCallTypedWithHeartbeatMarshalsAndUnmarshals(t *testing.T) {
 		Result string `json:"result"`
 	}
 	var resp MyResp
-	err := h.DurableCallTypedWithHeartbeat("svc", "op", MyReq{Data: "hello"}, &resp, time.Second, func(s string) {
-		progressCalled = true
-	})
+	err := h.DurableCallTypedWithHeartbeat("svc", "op", MyReq{Data: "hello"}, &resp, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if resp.Result != "ok" {
 		t.Errorf("expected result 'ok', got %q", resp.Result)
 	}
-	if !progressCalled {
-		t.Error("expected onProgress to be called")
-	}
 }
 
 func TestDurableCallTypedWithHeartbeatNilResult(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
-		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error) {
 			return `{"result":"ok"}`, nil
 		},
 	})
 	// Passing nil result should not panic or error.
-	err := h.DurableCallTypedWithHeartbeat("svc", "op", map[string]string{"key": "val"}, nil, time.Second, nil)
+	err := h.DurableCallTypedWithHeartbeat("svc", "op", map[string]string{"key": "val"}, nil, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error with nil result: %v", err)
 	}
@@ -1158,7 +1148,7 @@ func TestDurableCallTypedWithHeartbeatFallsBackToDurableCall(t *testing.T) {
 		Result string `json:"result"`
 	}
 	var resp MyResp
-	err := h.DurableCallTypedWithHeartbeat("svc", "op", map[string]string{}, &resp, time.Second, nil)
+	err := h.DurableCallTypedWithHeartbeat("svc", "op", map[string]string{}, &resp, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2476,7 +2466,7 @@ func TestDurableCallWithHeartbeatFallbackToDurableCall(t *testing.T) {
 		},
 	})
 
-	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second, nil)
+	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2488,13 +2478,13 @@ func TestDurableCallWithHeartbeatFallbackToDurableCall(t *testing.T) {
 func TestDurableCallWithHeartbeatDelegates(t *testing.T) {
 	var capturedInterval time.Duration
 	h := NewHostCalls(HostCallsOptions{
-		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error) {
 			capturedInterval = heartbeatInterval
 			return "hb_ok", nil
 		},
 	})
 
-	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", 500*time.Millisecond, nil)
+	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", 500*time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

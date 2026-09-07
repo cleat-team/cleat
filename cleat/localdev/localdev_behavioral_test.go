@@ -536,7 +536,7 @@ func TestLR_DurableCallWithHeartbeat(t *testing.T) {
 		return "heartbeat-resp", nil
 	}}
 	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
-	resp, err := r.durableCallWithHeartbeat("svc", "op", `{}`, 0, nil)
+	resp, err := r.durableCallWithHeartbeat("svc", "op", `{}`, 0)
 	if err != nil {
 		t.Fatalf("durableCallWithHeartbeat: %v", err)
 	}
@@ -871,7 +871,7 @@ func TestLR_DurableCallTypedWithHeartbeat_Success(t *testing.T) {
 	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
 	type resp struct{ Value int }
 	var result resp
-	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, &result, 0, nil)
+	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, &result, 0)
 	if err != nil {
 		t.Fatalf("durableCallTypedWithHeartbeat: %v", err)
 	}
@@ -885,7 +885,7 @@ func TestLR_DurableCallTypedWithHeartbeat_NilResult(t *testing.T) {
 		return `{"value":42}`, nil
 	}}
 	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
-	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, nil, 0, nil)
+	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, nil, 0)
 	if err != nil {
 		t.Fatalf("durableCallTypedWithHeartbeat with nil result: %v", err)
 	}
@@ -893,7 +893,7 @@ func TestLR_DurableCallTypedWithHeartbeat_NilResult(t *testing.T) {
 
 func TestLR_DurableCallTypedWithHeartbeat_MarshalError(t *testing.T) {
 	r := NewLocalRunner(WithLogWriter(io.Discard))
-	err := r.durableCallTypedWithHeartbeat("svc", "op", make(chan int), nil, 0, nil)
+	err := r.durableCallTypedWithHeartbeat("svc", "op", make(chan int), nil, 0)
 	if err == nil {
 		t.Fatal("expected marshal error")
 	}
@@ -907,7 +907,7 @@ func TestLR_DurableCallTypedWithHeartbeat_CallError(t *testing.T) {
 		return "", fmt.Errorf("heartbeat fail")
 	}}
 	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
-	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, nil, 0, nil)
+	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, nil, 0)
 	if err == nil {
 		t.Fatal("expected call error")
 	}
@@ -923,7 +923,7 @@ func TestLR_DurableCallTypedWithHeartbeat_UnmarshalError(t *testing.T) {
 	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
 	type resp struct{ Value int }
 	var result resp
-	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, &result, 0, nil)
+	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, &result, 0)
 	if err == nil {
 		t.Fatal("expected unmarshal error")
 	}

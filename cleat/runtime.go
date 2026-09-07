@@ -71,17 +71,23 @@ type Caller interface {
 	// unmarshals the response JSON into result.
 	DurableCallJSONWithOptions(opts CallOptions, service, operation, requestJSON string, result interface{}) error
 
-	// DurableCallWithHeartbeat makes a long-running durable API call and
-	// invokes onProgress periodically with status updates from the engine.
-	// The heartbeatInterval controls how often the host sends progress
-	// events. onProgress receives a JSON string with implementation-specific
-	// progress details. Falls back to a regular DurableCall if the host
-	// does not support heartbeats.
-	DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(progressJSON string)) (string, error)
+	// DurableCallWithHeartbeat makes a long-running durable API call, telling
+	// the host to heartbeat the claim every heartbeatInterval so a call that
+	// outlives the ordinary lease is not reaped as a stale instance. Falls
+	// back to a regular DurableCall if the host does not support heartbeats.
+	//
+	// It took an onProgress callback until cleat#854. The callback could never
+	// fire: the guest is suspended inside the cleat_call_heartbeat import for
+	// the whole call, so there is no moment at which the host could run guest
+	// code. It was inert in compiled workflows AND under localdev and
+	// cleattest, so no caller has ever received a progress update. Rust's
+	// equivalent never took one. Progress reporting, if it is wanted, needs a
+	// mechanism that does not require calling back into a suspended guest.
+	DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error)
 
 	// DurableCallTypedWithHeartbeat is like DurableCallWithHeartbeat but marshals
 	// request to JSON and unmarshals the response into result.
-	DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(progressJSON string)) error
+	DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error
 
 	// PluginCall invokes a named function on a registered plugin.
 	PluginCall(pluginName, functionName, inputJSON string) (string, error)
@@ -701,7 +707,7 @@ type HostCallsImpl struct {
 	durableCallTypedWithOptions   func(opts CallOptions, service, operation string, request, result interface{}) error
 	durableCallWithOptions        func(opts CallOptions, service, operation, requestJSON string) (string, error)
 	durableCallJSONWithOptions    func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
-	durableCallWithHeartbeat      func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error)
+	durableCallWithHeartbeat      func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error)
 	durableSleep                  func(ms int64)
 	durableAwaitSignals           func(signalNames []string, timeoutMs int64) (string, string, bool, error)
 	createPromise                 func(name string) (promiseID string, err error)
@@ -723,7 +729,7 @@ type HostCallsImpl struct {
 	awaitAllChildren              func(runIDs []string) ([]ChildResult, error)
 	awaitAnyChild                 func(runIDs []string) (completedRunID string, result string, err error)
 	pollChild                     func(runID string) (status string, result string, err error)
-	durableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
+	durableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error
 	childWorkflowTyped            func(name string, request interface{}) (string, error)
 	awaitChildTyped               func(runID string, result interface{}) error
 	durableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
@@ -859,7 +865,7 @@ type HostCallsOptions struct {
 	DurableCallTypedWithOptions   func(opts CallOptions, service, operation string, request, result interface{}) error
 	DurableCallWithOptions        func(opts CallOptions, service, operation, requestJSON string) (string, error)
 	DurableCallJSONWithOptions    func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
-	DurableCallWithHeartbeat      func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error)
+	DurableCallWithHeartbeat      func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error)
 	DurableSleep                  func(ms int64)
 	DurableSleepMs                func(ms int64)
 	DurableAwaitSignals           func(signalNames []string, timeoutMs int64) (string, string, bool, error)
@@ -883,7 +889,7 @@ type HostCallsOptions struct {
 	AwaitAnyChild                 func(runIDs []string) (completedRunID string, result string, err error)
 	PollChild                     func(runID string) (status string, result string, err error)
 	DurableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
-	DurableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
+	DurableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error
 	ChildWorkflowTyped            func(name string, request interface{}) (string, error)
 	AwaitChildTyped               func(runID string, result interface{}) error
 	Version                       func() int
@@ -1305,20 +1311,20 @@ func (h *HostCallsImpl) DurableCallJSONWithOptions(opts CallOptions, service, op
 	return nil
 }
 
-func (h *HostCallsImpl) DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+func (h *HostCallsImpl) DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error) {
 	if h.durableCallWithHeartbeat != nil {
-		return h.durableCallWithHeartbeat(service, operation, requestJSON, heartbeatInterval, onProgress)
+		return h.durableCallWithHeartbeat(service, operation, requestJSON, heartbeatInterval)
 	}
 	// Fallback: regular durable call without heartbeat support.
 	return h.DurableCall(service, operation, requestJSON)
 }
 
-func (h *HostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error {
+func (h *HostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error {
 	reqJSON, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("durable: marshaling request for %s.%s: %w", service, operation, err)
 	}
-	resp, err := h.DurableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval, onProgress)
+	resp, err := h.DurableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval)
 	if err != nil {
 		return err
 	}

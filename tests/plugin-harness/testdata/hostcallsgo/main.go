@@ -166,8 +166,7 @@ func ExerciseHostCall(h cleat.HostCalls, input string) (string, error) {
 		return ok(req.Call, r)
 
 	case "DurableCallWithHeartbeat":
-		r, err := h.DurableCallWithHeartbeat("harness-service", "harness-op", `{}`,
-			time.Second, func(string) {})
+		r, err := h.DurableCallWithHeartbeat("harness-service", "harness-op", `{}`, time.Second)
 		if err != nil {
 			return bad(req.Call, err)
 		}

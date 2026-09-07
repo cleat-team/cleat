@@ -539,7 +539,6 @@ var adapterDefs = map[string]adapterDef{
 			{"operation", "string"},
 			{"requestJSON", "string"},
 			{"heartbeatInterval", "time.Duration"},
-			{"onProgress", "func(string)"},
 		},
 		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
@@ -978,12 +977,11 @@ var hostWrapperDefs = map[string]hostWrapperDef{
 			{"request", "interface{}"},
 			{"result", "interface{}"},
 			{"heartbeatInterval", "time.Duration"},
-			{"onProgress", "func(string)"},
 		},
 		Body: []string{
 			"reqJSON, err := json.Marshal(request)",
 			`if err != nil { return fmt.Errorf("durable: marshaling request for %s.%s: %%w", service, operation, err) }`,
-			"resp, err := host_DurableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval, onProgress)",
+			"resp, err := host_DurableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval)",
 			"if err != nil { return err }",
 			"if result == nil { return nil }",
 			`return json.Unmarshal([]byte(resp), result)`,

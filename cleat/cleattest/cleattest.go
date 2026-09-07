@@ -1297,7 +1297,7 @@ func (e *TestEnv) awaitChildTypedImpl(runID string, result interface{}) error {
 	return json.Unmarshal([]byte(resp), result)
 }
 
-func (e *TestEnv) durableCallTypedWithHeartbeatImpl(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error {
+func (e *TestEnv) durableCallTypedWithHeartbeatImpl(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error {
 	reqJSON, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("cleattest: marshaling request for %s.%s: %w", service, operation, err)

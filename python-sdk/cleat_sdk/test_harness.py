@@ -29,7 +29,6 @@ Port of the Go pattern from ``durable/durabletest/durabletest.go``.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -487,7 +486,6 @@ class CleatTestHarness(HostCalls):
         operation: str,
         request: Any,
         heartbeat_interval_ms: int,
-        progress: Callable[[str], None],
     ) -> str:
         # Delegate to call (no heartbeat simulation)
         return self.call(service, operation, request)

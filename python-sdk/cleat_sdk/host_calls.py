@@ -1555,14 +1555,17 @@ class HostCalls:
         operation: str,
         request: Any,
         heartbeat_interval_ms: int,
-        progress: Callable[[str], None],
     ) -> str:
-        """Make a cleat call with periodic heartbeat / progress updates.
+        """Make a cleat call, heartbeating the claim while it runs.
 
-         The host sends periodic progress updates while the call is running.
-         Each progress update is delivered to the *progress* callback as a
-         JSON string.  (In the current MVP the callback is accepted but not
-        invoked by the stub; it will be wired in a future runtime.)
+         The host heartbeats every *heartbeat_interval_ms* so a call that
+         outlives the ordinary lease is not reaped as a stale instance.
+
+         This took a *progress* callback until cleat#854. It could never be
+         invoked: the guest is suspended inside the ``cleat_call_heartbeat``
+         import for the whole call, so there is no moment at which the host
+         could run guest code, and this method never passed it to the import
+         in the first place. Rust's equivalent never took one.
 
          Parameters
          ----------
@@ -1574,8 +1577,6 @@ class HostCalls:
              Request payload (dict or str).
          heartbeat_interval_ms : int
              Heartbeat interval in milliseconds.
-         progress : Callable[[str], None]
-             Callback invoked with progress JSON strings from the host.
 
          Returns
          -------

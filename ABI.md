@@ -294,7 +294,9 @@ Server-side retry variant of `cleat_call`. Retries happen inside the host; one e
 
 #### 2.3 `cleat_call_heartbeat`
 
-Long-running call with progress updates. The host sends periodic progress updates; the progress callback is handled at the SDK layer.
+Long-running call. The host heartbeats the claim every `heartbeatIntervalMs` so a call that outlives the ordinary lease is not reaped as a stale instance.
+
+There is no progress channel here and there never has been. The Go and Python SDKs carried an `onProgress`/`progress` callback parameter until cleat#854; it was never passed to this import, and could not have been — the guest is suspended inside this call for its whole duration, so the host has no moment in which to run guest code.
 
 ```
 (func (import "env" "cleat_call_heartbeat")

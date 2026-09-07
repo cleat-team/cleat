@@ -183,7 +183,7 @@ func DeferCallHeartbeat(h cleat.HostCalls, input string) (string, error) {
 	}
 
 	if _, err := h.DurableCallWithHeartbeat(
-		"billing", "charge", `{}`, time.Hour, func(string) {}); err != nil {
+		"billing", "charge", `{}`, time.Hour); err != nil {
 		return "", err
 	}
 	return `{"status":"ok"}`, nil
