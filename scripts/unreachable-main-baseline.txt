@@ -1,0 +1,14 @@
+cmd/cleat-worker	InflightRegistry.Add
+cmd/cleat-worker	InflightRegistry.Get
+cmd/cleat-worker	InflightRegistry.Len
+cmd/cleat-worker	InflightRegistry.Range
+cmd/cleat-worker	InflightRegistry.Remove
+cmd/cleat-worker	MemoryController.WorkflowMemoryEstimate
+cmd/cleat-worker	NewInflightRegistry
+cmd/cleat-worker	Worker.DrainComplete
+cmd/cleat-worker	Worker.compactionLoop
+cmd/cleat-worker	Worker.waitForDB
+cmd/cleat-worker	apiServer.inflightCount
+cmd/cleat-worker	baseDSNFromDSN
+cmd/cleat-worker	healthTracker.maxAge
+cmd/cleatctl	printCheckDBUsage
