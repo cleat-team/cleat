@@ -8365,3 +8365,89 @@ cannot be closed by editing prose.
     directly below says that path was deleted (#528).
   * CLAUDE.md's own `58` / `55` export counts are now stale for the same reason as everything
     above. Left for a PR against CLAUDE.md rather than smuggled into a docs sweep.
+
+---
+
+### 3.315 Both plugin mechanisms are built and unwired — the event subsystem does not run — 🔴 **OPEN** (WS-2, 2026-09-06)
+
+Found while investigating which code touches `ingested_events` and `event_stream` for the
+event-routing design (`docs/contributor/design/event-routing-design.md`, D3). The answer to
+that question turned out to be less interesting than the finding underneath it.
+
+**`cmd/cleat-worker` links exactly one plugin.**
+
+    _ "github.com/cleat-team/cleat/plugins/llm"
+    // _ "github.com/cleat-team/cleat/plugins/pgvector"  // requires pgvector extension
+
+That is the entire import list. There is no build-tagged bundle
+(`grep -ln 'go:build.*plugins' → nothing`), and `--plugin-config` supplies JSON
+*configuration* — it cannot link Go code, because `plugin.Register` runs in `init()`, which
+requires the package to be linked.
+
+**Measured, not inferred.** A probe with both controls, built against this tree:
+
+| probe | imports | `plugin.Discover()` returns |
+|---|---|---|
+| negative control | exactly the worker's list (`llm`) | **1** — `llm` |
+| known-positive | the same, plus `eventtriggers`, `eventstore` | **3** — `llm`, `eventstore`, `event-triggers` |
+
+The known-positive is the half that matters: it shows the probe can see the state it is
+looking for. Without it, "returns 1" is consistent with a broken probe — the failure mode
+CLAUDE.md names as *"a negative control is not enough — it needs a KNOWN-POSITIVE too"*.
+
+**So none of `event-triggers`, `event-store`, `webhook-ingest`, `kafka-connect` is
+registered in a running worker.** Their `Migrations()` never run, so `ingested_events`,
+`event_stream`, `event_subscriptions` and `event_awaiters` **do not exist in any deployed
+database**. Their routes are never served. `await_event` is never reachable from a workflow.
+
+**It was never otherwise — this is unfinished, not regressed.** The only files that have
+ever blank-imported these packages are two test files and a plan document:
+
+    git log -S '_ "github.com/cleat-team/cleat/plugins/eventtriggers"' --all --name-only
+    # -> internal/host/plugin_migrations_test.go, tests/plugin-harness/wasm_plugin_test.go
+
+**This is the second instance of the same shape, which is what makes it an item rather than
+a note.** §3.314 recorded that `PluginLoader.LoadPlugin` has no non-test callers and that
+`cmd/cleat-worker` constructs no loader, so **WASM** plugin execution is unwired too. Both
+plugin mechanisms — in-process Go and WASM — are fully built, documented as features, and
+reachable from nothing.
+
+**It explains a workaround that reads as a leaky abstraction and is not one.**
+`examples/event-driven/README.md` tells readers to wait for an event with
+
+    result := h.AwaitSignals([]string{"__evt:user.activated"}, 7*24*time.Hour)
+
+reaching around the public `await_event` host function into the plugin's private wakeup
+channel. That is not a style problem: `await_event` is *unreachable in a real worker*, so
+the example documents the only thing that can actually work.
+
+**What is NOT claimed here.** That the plugins are broken — they have tests, and the
+harness registers them explicitly. That anyone intended them to ship — `plugins/index.yaml`
+lists 4 of 21 plugin directories, so the registry is not a claim of completeness either.
+Only that nothing links them into the binary, and therefore nothing runs them.
+
+#### Why it matters more than a missing import
+
+The docs describe these as features. `docs/contributor/plugins/third-party-plugin-guide.md`
+tells third parties how to build WASM plugins; `examples/event-driven/` documents an event
+pipeline. `tiers.yaml` carries `plugins` as a **tier 2** component — "must run" — and the
+tier-2 gate cannot catch this, because the plugins' own tests import them directly and pass.
+**A test that constructs the thing under test cannot tell you the product never constructs
+it.** That is the same third state as §3.211: not bound / bound but never executed /
+executed with a recorded outcome.
+
+#### Suggested next steps, in order
+
+1. A `cleat-worker --list-plugins` flag that prints what `Discover()` returned and exits.
+   One command, settles this permanently, and gives the guard below something to assert.
+2. Decide, per plugin, whether it ships. `plugins/index.yaml` should then match the
+   binary's import list, and a test should assert they agree — the drift is currently
+   unobservable in either direction.
+3. Only then the event-routing P0 in the design doc, which was written assuming these
+   tables exist. They do not, which makes the schema work in P1 **greenfield** rather than
+   a migration.
+
+Re-derive everything above with:
+
+    grep -n '_ "github.com/cleat-team/cleat/plugins/' cmd/cleat-worker/main.go
+    git ls-files '*.go' | xargs grep -ln '_ "github.com/cleat-team/cleat/plugins/' | grep -v _test
