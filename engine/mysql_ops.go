@@ -411,8 +411,15 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 			FROM event_history
 			GROUP BY workflow_id
 		) e ON w.id = e.workflow_id
-		WHERE e.cnt > ?
-		  AND (w.compaction_step IS NULL OR w.compaction_step < e.cnt - ?)
+		-- LEFT, not INNER: see the PostgreSQL half in engine/db.go. A missing
+		-- definition row must fall through to the global threshold rather than
+		-- removing the workflow from compaction.
+		LEFT JOIN workflow_defs d
+		       ON d.name = w.def_name AND d.version = w.def_version
+		      AND d.tenant_id = w.tenant_id
+		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), ?)
+		  AND (w.compaction_step IS NULL
+		       OR w.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), ?))
 		  AND w.tenant_id = ?
 		ORDER BY e.cnt DESC
 		LIMIT ?

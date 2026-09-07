@@ -511,8 +511,16 @@ func (m *mockCompactStore) GetQueryState(ctx context.Context, workflowID, key st
 func (m *mockCompactStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	return nil, nil
 }
+
+// GetWorkflowByID returns a row rather than nil, because CompactWorkflowHistory
+// reads it to resolve the definition's max_history_length (cleat#889) and
+// treats nil as "deleted between candidate selection and now" -- a legitimate
+// production race, and a wrong answer for a mock whose whole premise is that
+// the workflow is there. LoadWorkflowConfig below returns 0, so every existing
+// test in this file keeps comparing against the global threshold exactly as
+// before.
 func (m *mockCompactStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
-	return nil, nil
+	return &WorkflowInstance{ID: id, DefName: "mock-wf", DefVersion: 1, Status: "running"}, nil
 }
 func (m *mockCompactStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
 	return nil, nil

@@ -327,17 +327,54 @@ type CompactedChild struct {
 // the compaction point, deletes those events from the database, and stores
 // the compaction state on the workflow_instances row.
 func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID string, threshold int, metrics *prometheus.Metrics) error {
+	// Resolve the effective threshold FIRST, before the early return below.
+	//
+	// workflow_defs.max_history_length overrides the worker's global
+	// --compaction-threshold for this definition, and 0 means "no override".
+	// It has to be resolved before `len(events) <= threshold` because a cap
+	// LOWER than the global one must compact where the global would not --
+	// which is the direction a chatty workflow would actually set it, and the
+	// direction that did nothing until cleat#889.
+	//
+	// The candidate query (GetCompactionCandidates) applies the same override,
+	// so the two agree about which workflows are eligible. Both halves are
+	// needed: that query decides what is CONSIDERED, this decides what is
+	// COMPACTED, and a per-definition cap wired into only one of them is
+	// either never reached or never honoured.
+	effective := threshold
+	wf, err := store.GetWorkflowByID(ctx, workflowID)
+	if err != nil {
+		return fmt.Errorf("compact: look up workflow to resolve its history limit: %w", err)
+	}
+	if wf == nil {
+		// Deleted between candidate selection and now. Not an error, and there
+		// is nothing left to compact.
+		return nil
+	}
+	perDefinition, err := store.LoadWorkflowConfig(ctx, wf.DefName, wf.DefVersion)
+	if err != nil {
+		// Deliberately NOT a silent fallback to the global threshold. A failed
+		// lookup and "no override configured" would then be the same outcome,
+		// and compaction would quietly use the wrong limit for as long as the
+		// failure lasted. The caller logs and retries on the next tick.
+		return fmt.Errorf("compact: load per-definition history limit for %s v%d: %w",
+			wf.DefName, wf.DefVersion, err)
+	}
+	if perDefinition > 0 {
+		effective = perDefinition
+	}
+
 	events, err := store.LoadEventHistory(ctx, workflowID)
 	if err != nil {
 		return fmt.Errorf("compact: load events: %w", err)
 	}
-	if len(events) <= threshold {
+	if len(events) <= effective {
 		return nil // Not enough events to compact.
 	}
 
-	// Determine the compaction point: keep the most recent threshold/2 events
+	// Determine the compaction point: keep the most recent effective/2 events
 	// as the tail, compact everything before that.
-	keepStep := len(events) - threshold/2
+	keepStep := len(events) - effective/2
 	if keepStep < 0 {
 		keepStep = 0
 	}
