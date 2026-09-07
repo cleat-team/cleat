@@ -61,6 +61,7 @@ type mockStore struct {
 	getQueryStateFn                    func(ctx context.Context, workflowID, key string) (string, error)
 	listWorkflowsFn                    func(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error)
 	getWorkflowByIDFn                  func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
+	validateVersionFn                  func(ctx context.Context, defName string, defVersion int) (bool, error)
 	getTerminalRunFn                   func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
 	createScheduleFn                   func(ctx context.Context, s engine.Schedule) error
 	listSchedulesFn                    func(ctx context.Context) ([]engine.Schedule, error)
@@ -3204,6 +3205,9 @@ func (m *mockStore) ResolveLatestVersion(ctx context.Context, defName string) (i
 	return 0, nil
 }
 func (m *mockStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
+	if m.validateVersionFn != nil {
+		return m.validateVersionFn(ctx, defName, defVersion)
+	}
 	return true, nil
 }
 func (m *mockStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {

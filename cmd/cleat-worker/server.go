@@ -533,6 +533,33 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		)
 	}
 
+	// Refuse a deprecated version, cleat#889.
+	//
+	// Deprecation was already enforced for CHILD workflows (cmd/cleat/main.go:
+	// "child workflow %q has no non-deprecated versions deployed") and for
+	// plugins, but not here -- so a version could be marked deprecated and
+	// still started by any API caller, which is the one path an operator
+	// deprecating a version is actually trying to close.
+	//
+	// AFTER the routing block on purpose. A routing rule names a version
+	// explicitly, so it can select a deprecated one; checking before would let
+	// exactly the case an operator most wants refused through. The check is on
+	// targetVersion, whatever chose it.
+	//
+	// 409, not 404: the definition exists and the caller is not wrong about
+	// its name. This matches how a stale generation is refused on the admin
+	// API -- the request is well-formed and the state says no.
+	ok, vErr := st.ValidateVersion(r.Context(), name, targetVersion)
+	if vErr != nil {
+		s.writeError(w, 500, vErr.Error())
+		return
+	}
+	if !ok {
+		s.writeError(w, 409, fmt.Sprintf(
+			"version %d of %q is deprecated and cannot be started", targetVersion, name))
+		return
+	}
+
 	// Inject entry point into input if provided.
 	in := input.Input
 	if input.EntryPoint != "" {

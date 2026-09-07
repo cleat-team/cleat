@@ -25,6 +25,9 @@ import (
 //	SetWorkflowTag              nothing consults tags                 -> tag family inert both ways
 //	DeleteDeadLetteredWorkflows n/a                                   -> dead-letter table only grows
 //	ValidateVersion             ListVersions has no deprecated filter -> deprecation unenforced
+//	                            WIRED 2026-09-07 (#889): the HTTP start path now
+//	                            refuses a deprecated version with 409, after the
+//	                            routing block so a routing rule cannot select one.
 //
 // Each passes its tests, because the tests call the store method directly.
 // Nothing asserted that production reaches it.
@@ -120,7 +123,6 @@ var storeUnreachedBaseline = map[string]bool{
 	"DeleteDeadLetteredWorkflows": true,
 	"SetRoutingRule":              true,
 	"SetWorkflowTag":              true,
-	"ValidateVersion":             true,
 
 	// Found by this guard. Each is the same shape: a write or read path with
 	// no production caller, whose siblings are live.
