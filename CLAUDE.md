@@ -46,8 +46,26 @@ these before believing any test outcome.
 All three printed `ok`. **Check the skipped count, not the clock:**
 
     go test ./engine/ -count=1 -json > /tmp/t.json
-    grep '"Action":"skip"' /tmp/t.json | grep -c '"Test":'   # 4 means all three dialects ran
-    grep '"Action":"fail"' /tmp/t.json | grep -c '"Test":'   # must be 0 -- see two paragraphs down
+    grep '"Action":"skip"' /tmp/t.json | grep -c '"Test":'    # 4 means all three dialects ran
+    grep '"Action":"fail"' /tmp/t.json | grep -c '"Test":'    # test failures; must be 0
+    grep '"Action":"fail"' /tmp/t.json | grep -vc '"Test":'   # PACKAGE failures; must also be 0
+
+**That third line is not decoration, and this file shipped without it.** A package that does
+not compile emits a **package-level** fail event carrying no `"Test"` field, so a count keyed
+on `'"Test":'` cannot see it. Measured 2026-09-07 on a two-package module, one compiling and
+one not:
+
+| | |
+|---|---|
+| fail events **with** a `"Test"` field | **0** — the check above says "must be 0", and it is |
+| fail events **without** one | 1 — the package that did not compile |
+| pass events with a `"Test"` field | 1 |
+
+So the documented check reports a clean run on a tree where a package never built. Worse than
+a skip, because a skip at least appears in the skip count: **a package that does not compile
+contributes nothing to any of the three numbers.** It reads cleanest exactly where it measured
+least, which is this section's whole subject, in this section's own command. Reported by the
+cleat-ports session after WS-3 lost a lint run to it; verified here before being written down.
 
 That column is exact, reproducible, and machine-independent: both orderings gave an identical
 876 / 581 / 4.
