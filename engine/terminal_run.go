@@ -90,31 +90,57 @@ func successorScan(row *sql.Row) (string, error) {
 	return next, nil
 }
 
+// runSuccessorFinder answers "which run continued from this one" for the rows
+// a single store holds, WITHOUT first requiring that it hold the given run.
+//
+// That distinction is the whole reason this interface exists. GetTerminalRun
+// begins by reading its head, and returns nil when the id names nothing it can
+// see -- correct for a single store, and wrong for a shard. A chain is not
+// shard-local: every continuation gets a fresh id and getShard hashes the id,
+// so run N and run N+1 routinely live on different shards. The shard holding
+// the SUCCESSOR does not hold the predecessor, so asking it GetTerminalRun(cur)
+// gets nil back before it ever looks at continued_from.
+//
+// ShardedStore therefore asks this instead, which is a bare indexed lookup and
+// has no opinion about who owns cur. Unexported: it is an implementation
+// detail between ShardedStore and the concrete stores, and putting it on
+// WorkflowStore would break every implementation of that interface to serve
+// one caller.
+type runSuccessorFinder interface {
+	successorOfRun(ctx context.Context, id string) (string, error)
+}
+
+func (s *PostgresStore) successorOfRun(ctx context.Context, id string) (string, error) {
+	return successorScan(s.db.QueryRowContext(ctx,
+		`SELECT id FROM workflow_instances WHERE continued_from = $1`, id))
+}
+
+func (s *MySQLStore) successorOfRun(ctx context.Context, id string) (string, error) {
+	return successorScan(s.db.QueryRowContext(ctx,
+		`SELECT id FROM workflow_instances WHERE continued_from = ? AND tenant_id = ?`,
+		id, s.tenantID))
+}
+
+func (s *MSSQLStore) successorOfRun(ctx context.Context, id string) (string, error) {
+	return successorScan(s.db.QueryRowContext(ctx,
+		`SELECT id FROM workflow_instances WHERE continued_from = @p1 AND tenant_id = @p2`,
+		id, s.tenantID))
+}
+
 // GetTerminalRun follows a ContinueAsNew chain forward from id. See
 // WorkflowStore.
 func (s *PostgresStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
-	return walkToTerminalRun(ctx, id, func(ctx context.Context, cur string) (string, error) {
-		return successorScan(s.db.QueryRowContext(ctx,
-			`SELECT id FROM workflow_instances WHERE continued_from = $1`, cur))
-	}, s.GetWorkflowByID)
+	return walkToTerminalRun(ctx, id, s.successorOfRun, s.GetWorkflowByID)
 }
 
 // GetTerminalRun follows a ContinueAsNew chain forward from id. See
 // WorkflowStore.
 func (s *MySQLStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
-	return walkToTerminalRun(ctx, id, func(ctx context.Context, cur string) (string, error) {
-		return successorScan(s.db.QueryRowContext(ctx,
-			`SELECT id FROM workflow_instances WHERE continued_from = ? AND tenant_id = ?`,
-			cur, s.tenantID))
-	}, s.GetWorkflowByID)
+	return walkToTerminalRun(ctx, id, s.successorOfRun, s.GetWorkflowByID)
 }
 
 // GetTerminalRun follows a ContinueAsNew chain forward from id. See
 // WorkflowStore.
 func (s *MSSQLStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
-	return walkToTerminalRun(ctx, id, func(ctx context.Context, cur string) (string, error) {
-		return successorScan(s.db.QueryRowContext(ctx,
-			`SELECT id FROM workflow_instances WHERE continued_from = @p1 AND tenant_id = @p2`,
-			cur, s.tenantID))
-	}, s.GetWorkflowByID)
+	return walkToTerminalRun(ctx, id, s.successorOfRun, s.GetWorkflowByID)
 }
