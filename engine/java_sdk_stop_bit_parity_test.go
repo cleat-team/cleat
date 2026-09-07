@@ -77,6 +77,8 @@ func TestTheJavaSDKAgreesOnTheStopBit(t *testing.T) {
 // TestTheRequiredJavaGuardsCoverEveryHostStopSite keeps it honest against the
 // engine.
 var javaCallsTheHostCanRefuse = []sdkRefusableCall{
+	{"pollUpdate", "DurablePollUpdate"},
+	{"completeUpdate", "DurableCompleteUpdate"},
 	{"cleatCall", "DurableCall"},
 	{"cleatCallWithRetry", "DurableCallWithRetry"},
 	{"cleatCallHeartbeat", "DurableCallWithHeartbeat"},

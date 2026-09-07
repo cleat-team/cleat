@@ -107,6 +107,18 @@ mod imports {
             payload_ptr: *mut u8, payload_max_len: u32,
         ) -> i64;
 
+        // cleat_poll_update - one string out (a JSON envelope)
+        pub fn cleat_poll_update(
+            envelope_ptr: *mut u8, envelope_max_len: u32,
+        ) -> i64;
+
+        // cleat_complete_update - three strings in
+        pub fn cleat_complete_update(
+            request_id_ptr: *const u8, request_id_len: u32,
+            result_ptr: *const u8, result_len: u32,
+            err_ptr: *const u8, err_len: u32,
+        ) -> i64;
+
         // cleatcontinue_as_new - one string in
         pub fn cleat_continue_as_new(
             input_ptr: *const u8, input_len: u32,
@@ -416,6 +428,7 @@ impl HostCalls {
     /// returns `Ok(())` -- the sleep is already satisfied and execution
     /// continues.
     pub fn cleat_sleep_ms(&self, ms: i64) -> Result<(), CallError> {
+        self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
         let result = unsafe { imports::cleat_sleep(ms) };
         // Some host runtimes return SUSPEND_SENTINEL directly.
         if result == memory::SUSPEND_SENTINEL {
@@ -625,6 +638,7 @@ impl HostCalls {
 
     /// Await child workflow completion. Mirrors Go's AwaitChild.
     pub fn await_child(&self, run_id: &str) -> Result<String, CallError> {
+        self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
         let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let r = unsafe {
             imports::cleat_await_child(
@@ -651,6 +665,7 @@ impl HostCalls {
 
     /// Await external signals in milliseconds. Mirrors Go's AwaitSignals.
     pub fn await_signals_ms(&self, signal_names: &[&str], timeout_ms: i64) -> Result<AwaitedSignal, CallError> {
+        self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
         // JSON-marshal the signal names array, matching Go's adapter.go behavior.
         let names_json = serde_json::to_string(signal_names).unwrap_or_else(|e| { eprintln!("warning: failed to serialize signal names: {}", e); "[]".to_string() });
         let mut sig_name_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
@@ -732,6 +747,7 @@ impl HostCalls {
     /// Await a durable promise in milliseconds. Mirrors Go's AwaitPromise (ABI 2.21).
     /// Returns (result, timed_out, error).
     pub fn await_promise_ms(&self, promise_id: &str, timeout_ms: i64) -> (String, bool, Option<String>) {
+        self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
         let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
             imports::cleat_await_promise(
@@ -767,6 +783,60 @@ impl HostCalls {
                 name.as_ptr(), name.len() as u32,
             );
         }
+    }
+
+    /// Poll for the next pending update.
+    ///
+    /// Returns (envelope_json, found, error). Low-level: prefer
+    /// [`dispatch_updates`](Self::dispatch_updates), which pairs this with
+    /// handler lookup, validation, and the guarantee that every delivered
+    /// update is answered. Delivery is durable, so an update returned here is
+    /// recorded as delivered whether or not you complete it.
+    pub fn poll_update(&self) -> (String, bool, Option<String>) {
+        let mut envelope_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_poll_update(envelope_buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+        };
+        // Ask before decoding: a stop is bit 31, which in this layout sits
+        // inside the flags word a decoder would read as an ordinary result.
+        if stop_requested(result) {
+            return (String::new(), false, Some("cleat: host refused this call -- the workflow is running its defer phase".to_string()));
+        }
+        let (envelope_len, found, err_code) = memory::decode_poll_signal_result(result);
+        if err_code != 0 {
+            return (String::new(), false, Some(format!("poll_update failed: host error code {}", err_code)));
+        }
+        if !found || envelope_len == 0 {
+            return (String::new(), false, None);
+        }
+        let envelope = unsafe { memory::read_string(envelope_buf.as_ptr(), envelope_len) };
+        (envelope, true, None)
+    }
+
+    /// Record an update handler's outcome and settle the caller's promise.
+    ///
+    /// A non-empty `err_msg` rejects; an empty one resolves. An empty `result`
+    /// with an empty `err_msg` resolves -- an empty result is an outcome, not a
+    /// missing one.
+    ///
+    /// Low-level: prefer [`dispatch_updates`](Self::dispatch_updates), which
+    /// cannot forget to call this.
+    pub fn complete_update(&self, request_id: &str, result_json: &str, err_msg: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::cleat_complete_update(
+                request_id.as_ptr(), request_id.len() as u32,
+                result_json.as_ptr(), result_json.len() as u32,
+                err_msg.as_ptr(), err_msg.len() as u32,
+            )
+        };
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
+        let err_code = (result as u64 & 0xFFFF_FFFF) as u32;
+        if err_code != 0 {
+            return Err(format!("complete_update failed: host error code {}", err_code));
+        }
+        Ok(())
     }
 
     /// Call a plugin host function. Mirrors Go's PluginCall (ABI 2.19).

@@ -82,6 +82,8 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"plugin_call_streaming", "PluginCallStreaming"},
 	{"await_signals_ms", "DurableAwaitSignals"},
 	{"acquire_lock_ms", "AcquireLock"},
+	{"poll_update", "DurablePollUpdate"},
+	{"complete_update", "DurableCompleteUpdate"},
 	{"signal_workflow", "SignalWorkflow"},
 	{"cleat_send", "DurableSend"},
 	{"schedule_invoke_ms", "DurableScheduleInvoke"},

@@ -39,6 +39,7 @@ export * from "./host-calls";
 export * from "./cleat-entry";
 export * from "./defer";
 export * from "./json";
+export * from "./updates";
 export * from "./plugins";
 export * from "./saga";
 export * from "./signal-envelope";

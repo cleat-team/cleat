@@ -53,6 +53,42 @@ public class HostCalls {
     /** Current scope prefix for virtual object state operations. */
     private String _scopePrefix = "";
 
+    /**
+     * Registered update handlers, by name.
+     * <p>
+     * Static rather than per-instance for the same reason {@link Defer} keeps
+     * its bodies static: a workflow may construct more than one HostCalls, and
+     * a handler registered through one must be reachable from the dispatch that
+     * happens through another. A WASM guest is single-threaded and one segment
+     * is one instance, so there is no sharing hazard.
+     */
+    private static final java.util.Map<String, UpdateHandlerEntry> UPDATE_HANDLERS =
+        new java.util.HashMap<>();
+
+    /**
+     * Reentrancy guard for {@link #dispatchUpdates()}.
+     * <p>
+     * Every dispatch point is a suspension point, and an update handler is
+     * ordinary workflow code that may sleep or await -- so without this a
+     * handler doing either would re-enter dispatch and recurse. Nesting would
+     * also be wrong if it terminated: the inner dispatch would interleave a
+     * second update's events inside the first one's, and the received/completed
+     * pair would no longer bracket the handler that produced it.
+     */
+    private static boolean dispatchingUpdates = false;
+
+    /** One registered handler and its optional validator. */
+    private static final class UpdateHandlerEntry {
+        final java.util.function.Function<String, String> handler;
+        final java.util.function.Function<String, String> validator;
+
+        UpdateHandlerEntry(java.util.function.Function<String, String> handler,
+                           java.util.function.Function<String, String> validator) {
+            this.handler = handler;
+            this.validator = validator;
+        }
+    }
+
     // ========================================================================
     // Raw WASM imports (18 host functions from the "env" module)
     // ========================================================================
@@ -150,6 +186,16 @@ public class HostCalls {
     @Import(module = "env", name = "cleat_register_update_handler")
     private static native long cleatRegisterUpdateHandlerRaw(
         int namePtr, int nameLen);
+
+    @Import(module = "env", name = "cleat_poll_update")
+    private static native long cleatPollUpdateRaw(
+        int envelopeOut, int envelopeMax);
+
+    @Import(module = "env", name = "cleat_complete_update")
+    private static native long cleatCompleteUpdateRaw(
+        int requestIdPtr, int requestIdLen,
+        int resultPtr, int resultLen,
+        int errPtr, int errLen);
 
     @Import(module = "env", name = "set_query_state")
     private static native long setQueryStateRaw(
@@ -459,6 +505,7 @@ public class HostCalls {
      *         {@code false} to continue (replay)
      */
     public boolean cleatSleepMs(long timeoutMs) {
+        dispatchUpdates(); // dispatch point; see dispatchUpdates()
         long result = cleatSleepRaw(timeoutMs);
         int status = Memory.decodeSleepStatus(result);
         if (status == Memory.SLEEP_STATUS_SUSPEND) {
@@ -852,6 +899,7 @@ public class HostCalls {
      *         error description on failure
      */
     public CleatResult<String> awaitChild(String runID) {
+        dispatchUpdates(); // dispatch point; see dispatchUpdates()
         int[] p = packStrings(runID);
 
         long result = cleatAwaitChildRaw(
@@ -920,6 +968,7 @@ public class HostCalls {
      *         resolved value and timeout indicator
      */
     public CleatResult<AwaitPromiseResult> awaitPromiseMs(String promiseId, long timeoutMs) {
+        dispatchUpdates(); // dispatch point; see dispatchUpdates()
         int[] p = packStrings(promiseId);
 
         long result = cleatAwaitPromiseRaw(
@@ -977,6 +1026,7 @@ public class HostCalls {
      *         received signal name, payload, and timeout indicator
      */
     public CleatResult<AwaitSignalsResult> awaitSignalsMs(String[] signalNames, long timeoutMs) {
+        dispatchUpdates(); // dispatch point; see dispatchUpdates()
         // Serialize signal names as a JSON string array (matching Go adapter).
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < signalNames.length; i++) {
@@ -1062,6 +1112,176 @@ public class HostCalls {
     public void registerUpdateHandler(String name) {
         int[] p = packStrings(name);
         cleatRegisterUpdateHandlerRaw(p[0], p[1]);
+    }
+
+    /**
+     * Register an update handler with an optional validator.
+     * <p>
+     * The validator returns null to accept, or a message to refuse. It runs
+     * first and must be read-only: a refusal costs nothing beyond the
+     * completion -- no state change, no durable work. That is the half of the
+     * API that makes an update different from a signal.
+     * <p>
+     * The name is registered with the host as well, which records it in the
+     * event history; the handler stays here, because only guest code can call
+     * it.
+     *
+     * @param name      the update name
+     * @param handler   receives the payload JSON, returns the result JSON
+     * @param validator receives the payload JSON, returns null or a refusal;
+     *                  may be null
+     */
+    public void registerUpdateHandler(String name,
+                                      java.util.function.Function<String, String> handler,
+                                      java.util.function.Function<String, String> validator) {
+        UPDATE_HANDLERS.put(name, new UpdateHandlerEntry(handler, validator));
+        registerUpdateHandler(name);
+    }
+
+    /**
+     * Deliver and run every update currently pending for this workflow.
+     * <p>
+     * The SDK already calls this before each suspension, so an ordinary
+     * workflow needs no update-specific code. It is exposed for workflows that
+     * want to service updates at additional points.
+     * <p>
+     * An update handler is a closure in guest memory, so only guest code can
+     * invoke it -- an arriving update cannot interrupt the workflow. And it
+     * must be asked for at a fixed PROGRAM POSITION rather than a moment in
+     * time, because replay re-executes the guest and matches host calls against
+     * the recorded history in order. See engine/updater.go.
+     * <p>
+     * The consequence, stated rather than hidden: an update is handled at the
+     * next dispatch point, not the instant it arrives.
+     */
+    public void dispatchUpdates() {
+        if (dispatchingUpdates) {
+            return;
+        }
+        dispatchingUpdates = true;
+        try {
+            while (true) {
+                CleatResult<String> polled = pollUpdate();
+                if (polled.isErr()) {
+                    return;
+                }
+                String envelope = polled.getValue();
+                if (envelope == null || envelope.isEmpty()) {
+                    return;
+                }
+                java.util.Map<String, Object> d = JsonHelper.parseObject(envelope);
+                Object name = d.get("name");
+                Object requestId = d.get("request_id");
+                if (!(name instanceof String) || !(requestId instanceof String)) {
+                    // The envelope is written by the host, so this is not a
+                    // caller error. Returning rather than continuing avoids
+                    // spinning on a delivery that decodes the same way next
+                    // time.
+                    return;
+                }
+                Object payload = d.get("payload");
+                runUpdate((String) name, payload instanceof String ? (String) payload : "",
+                    (String) requestId);
+            }
+        } finally {
+            dispatchingUpdates = false;
+        }
+    }
+
+    /**
+     * Apply one delivered update and report the outcome.
+     * <p>
+     * Every path completes the request. A handler that is not registered, a
+     * validator that refuses and a handler that throws are all answers the
+     * caller is entitled to -- leaving any of them uncompleted would leave the
+     * caller holding a promise nothing settles, which is the defect updates
+     * exist to end.
+     */
+    private void runUpdate(String name, String payload, String requestId) {
+        UpdateHandlerEntry entry = UPDATE_HANDLERS.get(name);
+        if (entry == null) {
+            completeUpdate(requestId, "", "cleat: no update handler registered for \"" + name + "\"");
+            return;
+        }
+        if (entry.validator != null) {
+            String refusal;
+            try {
+                refusal = entry.validator.apply(payload);
+            } catch (SuspendSignal e) {
+                throw e;
+            } catch (RuntimeException e) {
+                completeUpdate(requestId, "", String.valueOf(e.getMessage()));
+                return;
+            }
+            if (refusal != null && !refusal.isEmpty()) {
+                completeUpdate(requestId, "", refusal);
+                return;
+            }
+        }
+        String result;
+        try {
+            result = entry.handler.apply(payload);
+        } catch (SuspendSignal e) {
+            // A stop must propagate: the segment is ending, and swallowing it
+            // here would complete the request with a message while the host has
+            // already refused the work.
+            throw e;
+        } catch (RuntimeException e) {
+            completeUpdate(requestId, "", String.valueOf(e.getMessage()));
+            return;
+        }
+        completeUpdate(requestId, result == null ? "" : result, "");
+    }
+
+    /**
+     * Poll for the next pending update request.
+     * <p>
+     * Low-level: prefer {@link #dispatchUpdates()}, which pairs this with
+     * handler lookup, validation, and the guarantee that every delivered update
+     * is answered. Delivery is durable, so an update returned here is recorded
+     * as delivered whether or not you complete it.
+     *
+     * @return the delivery envelope JSON, or an empty result when none is
+     *         pending
+     */
+    public CleatResult<String> pollUpdate() {
+        long result = cleatPollUpdateRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+        // Ask before decoding: a stop is bit 31, which in this layout sits
+        // inside the flags word a decoder reads as an ordinary result.
+        Memory.throwIfStopped(result);
+
+        if (!Memory.decodePollSigFound(result)) {
+            return CleatResult.ok("");
+        }
+        int len = Memory.decodePollSigPayloadLen(result);
+        return CleatResult.ok(readOutput(len));
+    }
+
+    /**
+     * Record an update handler's outcome and settle the caller's promise.
+     * <p>
+     * A non-empty {@code errMsg} rejects; an empty one resolves. An empty
+     * {@code resultJSON} with an empty {@code errMsg} resolves -- an empty
+     * result is an outcome, not a missing one.
+     * <p>
+     * Low-level: prefer {@link #dispatchUpdates()}, which cannot forget to call
+     * this. An update delivered and never completed leaves its caller holding a
+     * promise nothing settles.
+     *
+     * @param requestId  the request id from {@link #pollUpdate()}, unchanged
+     * @param resultJSON the handler's result
+     * @param errMsg     the failure message, or empty on success
+     * @return a result indicating success, or an error description
+     */
+    public CleatResult<Void> completeUpdate(String requestId, String resultJSON, String errMsg) {
+        int[] p = packStrings(requestId, resultJSON, errMsg);
+        long result = cleatCompleteUpdateRaw(p[0], p[1], p[2], p[3], p[4], p[5]);
+        Memory.throwIfStopped(result);
+        int errCode = (int) (result & 0xFFFFFFFFL);
+        if (errCode != 0) {
+            return CleatResult.err("completeUpdate failed: host error code " + errCode);
+        }
+        return CleatResult.ok(null);
     }
 
     /**

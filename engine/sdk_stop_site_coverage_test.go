@@ -47,25 +47,6 @@ type sdkCoverageExemption struct {
 var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 	"rust": {
 		{
-			hostSite:    "DurablePollUpdate",
-			absentFrom:  "../crates/cleat-sdk/src/host_calls.rs",
-			absentToken: "cleat_poll_update",
-			why: "workflow updates are implemented for the Go SDK first. The Rust SDK " +
-				"declares no cleat_poll_update extern, so a Rust guest cannot reach this " +
-				"host function and there is no decoder to guard. absentToken makes that " +
-				"an assertion rather than a claim: adding the extern fails this test.",
-		},
-		{
-			hostSite:    "DurableCompleteUpdate",
-			absentFrom:  "../crates/cleat-sdk/src/host_calls.rs",
-			absentToken: "cleat_complete_update",
-			why: "the completion half of the same pair. the Java SDK declares no " +
-				"cleat_complete_update import, so there is no decoder to guard: a guest that " +
-				"cannot poll for an update never has one to complete. Exempt only until " +
-				"updates are implemented for this SDK, and absentToken fails this test on " +
-				"the day they are.",
-		},
-		{
 			hostSite: "DurableCallWithRetry",
 			why: "the Rust SDK has no call_with_retry: a Rust guest reaches the host's " +
 				"retry path through cleat_call, which is covered above. There is no " +
@@ -81,51 +62,11 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 	},
 	"java": {
 		{
-			hostSite:    "DurablePollUpdate",
-			absentFrom:  "../crates/cleat-java/src/main/java/cleat/HostCalls.java",
-			absentToken: "cleat_poll_update",
-			why: "workflow updates are implemented for the Go SDK first. The Java SDK " +
-				"declares no cleat_poll_update import, so a Java guest cannot reach this " +
-				"host function and there is no decoder to guard. absentToken makes that " +
-				"an assertion rather than a claim: adding the import fails this test.",
-		},
-		{
-			hostSite:    "DurableCompleteUpdate",
-			absentFrom:  "../crates/cleat-java/src/main/java/cleat/HostCalls.java",
-			absentToken: "cleat_complete_update",
-			why: "the completion half of the same pair. the Rust SDK declares no " +
-				"cleat_complete_update extern, so there is no decoder to guard: a guest that " +
-				"cannot poll for an update never has one to complete. Exempt only until " +
-				"updates are implemented for this SDK, and absentToken fails this test on " +
-				"the day they are.",
-		},
-		{
 			hostSite: "ScheduleCron",
 			why: "the Java SDK declares no scheduleCron method and no raw import for it, " +
 				"so a Java guest cannot register a cron trigger and there is no decoder " +
 				"to guard. Same absence as the Rust entry above; AssemblyScript DOES " +
 				"have one and is covered by its list rather than exempted here.",
-		},
-	},
-	"assemblyscript": {
-		{
-			hostSite:    "DurablePollUpdate",
-			absentFrom:  "../packages/cleat-as/assembly/host-calls.ts",
-			absentToken: "cleat_poll_update",
-			why: "workflow updates are implemented for the Go SDK first. The " +
-				"AssemblyScript SDK declares no cleat_poll_update @external, so an AS " +
-				"guest cannot reach this host function and there is no decoder to guard. " +
-				"absentToken makes that an assertion rather than a claim.",
-		},
-		{
-			hostSite:    "DurableCompleteUpdate",
-			absentFrom:  "../packages/cleat-as/assembly/host-calls.ts",
-			absentToken: "cleat_complete_update",
-			why: "the completion half of the same pair. the AssemblyScript SDK declares no " +
-				"cleat_complete_update @external, so there is no decoder to guard: a guest that " +
-				"cannot poll for an update never has one to complete. Exempt only until " +
-				"updates are implemented for this SDK, and absentToken fails this test on " +
-				"the day they are.",
 		},
 	},
 }
