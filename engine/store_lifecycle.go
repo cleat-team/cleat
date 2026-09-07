@@ -516,6 +516,7 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 		UPDATE workflow_instances
 		SET status = 'failed', error_msg = 'parent workflow terminated',
 		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
+		    completed_at = now(),
 		    assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'

@@ -949,6 +949,7 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 		UPDATE workflow_instances
 		SET status = 'failed', error_msg = 'parent workflow terminated',
 		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
+		    completed_at = NOW(6),
 		    assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
