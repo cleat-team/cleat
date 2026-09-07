@@ -754,7 +754,7 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			plugin_deps = VALUES(plugin_deps),
 			deprecated = VALUES(deprecated),
 			max_history_length = VALUES(max_history_length)
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID)
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID, def.MaxHistoryLength)
 	if err != nil {
 		return fmt.Errorf("DeployWorkflowDef: %w", err)
 	}
