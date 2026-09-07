@@ -28,14 +28,21 @@ use std::collections::HashMap;
 
 use crate::host_calls::HostCalls;
 
+/// A registered update handler: receives the payload JSON, returns the result
+/// JSON or a failure message.
+type BoxedHandler = Box<dyn Fn(&str) -> Result<String, String>>;
+
+/// A registered validator: returns Ok to accept, Err with a message to refuse.
+type BoxedValidator = Box<dyn Fn(&str) -> Result<(), String>>;
+
 /// One registered handler and its optional validator.
 ///
 /// The validator runs first and is read-only, so a refusal costs nothing
 /// beyond the completion -- no state change, no durable work. That is the half
 /// of the API that makes an update different from a signal.
 struct UpdateEntry {
-    handler: Box<dyn Fn(&str) -> Result<String, String>>,
-    validator: Option<Box<dyn Fn(&str) -> Result<(), String>>>,
+    handler: BoxedHandler,
+    validator: Option<BoxedValidator>,
 }
 
 thread_local! {
@@ -126,7 +133,7 @@ impl HostCalls {
                 name.to_string(),
                 UpdateEntry {
                     handler: Box::new(handler),
-                    validator: validator.map(|v| Box::new(v) as Box<dyn Fn(&str) -> Result<(), String>>),
+                    validator: validator.map(|v| Box::new(v) as BoxedValidator),
                 },
             );
         });
