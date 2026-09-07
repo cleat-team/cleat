@@ -6780,6 +6780,65 @@ fix: the revert is loud, the restore is silent. Commit before falsifying, or res
 `cleat_` names uses them as fixtures that make a real call, so a stale name fails to link;
 `grep -rn "must stay in sync" engine/*_test.go wasm/*_test.go` now returns only this section's own
 quotation of the comment that was removed.
+### 3.246 The OAuth middleware refused every bearer token that was not its own, so no API key worked — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+Reported by WS-3 as #912 after the `cleat-ports` suite went from 70 passing to failing every test.
+**Green on `dc543263`, broken on `bf199c23`** — a regression on `develop`, not in a branch.
+
+`plugins/oauthprovider`'s middleware intercepts any `Authorization: Bearer …`, looks the token up
+in `oauth_sessions`, and returned **401 `{"error":"invalid session"}`** when it was absent. A cleat
+API key is presented exactly that way (`auth/middleware.go:48`: *"Supports: Authorization: Bearer
+cleat_sk_<key>"*), so it never reached `auth.Middleware`.
+
+It became live when [§3.315](#3315) linked all 20 bundled plugins: `cmd/cleat-worker/main.go:747`
+wraps the whole handler chain in **every** plugin implementing `HasMiddleware`. `--require-auth`
+defaults to true, so a default deployment served an API where **no key worked at all** — the same
+practical outcome as §3.66, by a different route.
+
+**The middleware was correct in isolation and its own tests passed**, because they exercise it with
+OAuth tokens. It only becomes wrong sitting in front of a handler that accepts a *different* bearer
+scheme, which is exactly what linking it did. The general form is worth naming: **a middleware
+cannot ask a database "is this token mine?" — only "is this token a live session of mine?" — and a
+NO to the second was read as a NO to the first.**
+
+**The fix is not the obvious fall-through-on-error, and the difference matters.** Falling through on
+any lookup failure fixes #912 but also stops this plugin refusing a token that IS its own and is
+expired or revoked. The two schemes do not collide, so they can be told apart by shape:
+`generateSessionToken` emits the hex of 32 random bytes — 64 lowercase hex characters — and an API
+key carries a `cleat_sk_` prefix. `looksLikeSessionToken` gates the lookup, so:
+
+| token | before | after |
+|---|---|---|
+| `cleat_sk_…` | **401 invalid session** | falls through; `auth.Middleware` decides |
+| 64-hex, live session | session injected | session injected |
+| 64-hex, expired or unknown | 401 | **401** — still this plugin's business |
+
+Nothing is loosened. The middleware only ever *adds* `SessionInfo`, grants nothing on its own, and
+sits outside `auth.Middleware`, which still refuses a request carrying no valid credential.
+
+**Four existing tests had to change, and what they revealed is the point.** They authenticated with
+`"valid-mw-token"`, `"expired-mw-token"`, `"nonexistent-token"` — strings no production path can
+issue. Under a shape gate they fall through, so they were updated to real 64-hex tokens. A test
+whose fixture could never occur in production is a test that cannot see a defect about token shape,
+which is the defect that happened.
+
+`TestAFreshlyGeneratedSessionTokenLooksLikeOne` ties the predicate to the generator it describes,
+in both directions: 20 freshly generated tokens must be accepted, and `cleat_sk_…`, a 63-character
+hex string and a 64-character non-hex string must all be refused. Without it, a change to
+`generateSessionToken` would silently stop this plugin recognising its own sessions.
+
+**Falsified**: removing the gate returns the exact symptom, `401 {"error":"invalid session"}`.
+
+**Swept, and it is not a class.** Three plugins implement `Middleware` — `oauthprovider`,
+`ratelimiter`, `auditlog`. Only this one rejects on a credential decision; `ratelimiter` answers 429
+on a rate decision and consumes no shared auth header, `auditlog` never rejects. Re-derive with
+`grep -rln "func (p \*Plugin) Middleware(" plugins/`.
+
+**The standing lesson, which is WS-3's and worth recording as theirs:** linking 19 dormant plugins
+activated 19 sets of assumptions that had never been tested against each other. Three separate
+problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
+and this — and none of them is a defect in the plugin that carries it.
+
 ### 3.244 The Rust SDK read past its own buffer whenever the host refused a bad parameter — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
 
 `memory::read_string(ptr, len)` takes a raw pointer and does

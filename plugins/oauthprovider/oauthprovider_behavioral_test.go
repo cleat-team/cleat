@@ -451,7 +451,7 @@ func TestInvalidToken(t *testing.T) {
 	store := newFakeDBStore()
 	_, handler := setupTestPlugin(t, store)
 
-	req := authedRequest("GET", "/oauth/sessions", nil, "nonexistent-token")
+	req := authedRequest("GET", "/oauth/sessions", nil, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -1303,6 +1303,13 @@ func TestOA_Callback_UserInfoError(t *testing.T) {
 	}
 }
 
+// Middleware tokens below are 64 lowercase hex characters, which is what
+// generateSessionToken issues. That shape is load-bearing since
+// IMPROVEMENT-PLAN 3.246: the middleware only claims tokens shaped like its
+// own, so that a bearer token belonging to another scheme -- a cleat API key,
+// `Bearer cleat_sk_...` -- falls through instead of being refused as an invalid
+// session (#912). A placeholder like "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2" now falls through and the
+// test would assert nothing about the lookup.
 func TestOA_Middleware_TokenHashMismatch(t *testing.T) {
 	store := newFakeDBStore()
 	db := sql.OpenDB(&fakeConnector{store: store})
@@ -1316,7 +1323,7 @@ func TestOA_Middleware_TokenHashMismatch(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest("GET", "/api/protected", nil)
-	req.Header.Set("Authorization", "Bearer nonexistent-token")
+	req.Header.Set("Authorization", "Bearer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -1331,7 +1338,7 @@ func TestOA_Middleware_TokenHashMismatch(t *testing.T) {
 func TestOA_Middleware_ValidTokenInjectsSession(t *testing.T) {
 	store := newFakeDBStore()
 	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000950")
-	store.AddSession(sessionID, testTenantID, "valid-mw-token", "mw@example.com", 0)
+	store.AddSession(sessionID, testTenantID, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2", "mw@example.com", 0)
 
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
@@ -1348,7 +1355,7 @@ func TestOA_Middleware_ValidTokenInjectsSession(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest("GET", "/api/protected", nil)
-	req.Header.Set("Authorization", "Bearer valid-mw-token")
+	req.Header.Set("Authorization", "Bearer bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -1366,7 +1373,7 @@ func TestOA_Middleware_ValidTokenInjectsSession(t *testing.T) {
 func TestOA_Middleware_ExpiredTokenRejected(t *testing.T) {
 	store := newFakeDBStore()
 	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000951")
-	store.AddSession(sessionID, testTenantID, "expired-mw-token", "old@example.com", -1*time.Hour)
+	store.AddSession(sessionID, testTenantID, "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc3", "old@example.com", -1*time.Hour)
 
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
@@ -1379,7 +1386,7 @@ func TestOA_Middleware_ExpiredTokenRejected(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest("GET", "/api/protected", nil)
-	req.Header.Set("Authorization", "Bearer expired-mw-token")
+	req.Header.Set("Authorization", "Bearer ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc3")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if nextCalled {
