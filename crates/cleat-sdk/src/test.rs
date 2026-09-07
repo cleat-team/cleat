@@ -1268,8 +1268,13 @@ mod tests {
     /// (IMPROVEMENT-PLAN 3.220).
     ///
     /// It cannot assert the SENDER waking, because the mock's `await_promise`
-    /// returns immediately for a pending promise rather than suspending. Same
-    /// gap as the Go harness; see IMPROVEMENT-PLAN 3.235.
+    /// returns immediately for a pending promise rather than suspending
+    /// (IMPROVEMENT-PLAN 3.235). The Go harnesses had this and no longer do,
+    /// but their fix -- wait on a channel a concurrent resolver closes -- does
+    /// not port here: this mock's state is in a `RefCell` and is not `Sync`,
+    /// so there is no second thread to wait for. The shape for Rust is a
+    /// responder registered before the call, which settles the promise before
+    /// the await ever reads it.
     #[test]
     fn test_send_signal_and_wait_delivers_a_reply_address_and_the_original_payload() {
         let mut env = CleatTest::new();
