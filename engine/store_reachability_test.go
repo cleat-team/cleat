@@ -60,7 +60,7 @@ func TestEveryStoreMethodIsReachableFromProduction(t *testing.T) {
 			"A parse that finds almost nothing passes vacuously.", len(methods))
 	}
 
-	prod, testOnly := storeMethodReferences(t, methods)
+	prod, testOnly, _, _ := storeMethodReferences(t, methods)
 
 	var unreachable, onlyTests []string
 	for _, m := range methods {
@@ -145,7 +145,7 @@ func TestTheUnreachedBaselineOnlyShrinks(t *testing.T) {
 	for _, m := range methods {
 		known[m] = true
 	}
-	prod, _ := storeMethodReferences(t, methods)
+	prod, _, _, _ := storeMethodReferences(t, methods)
 
 	for m := range storeUnreachedBaseline {
 		if !known[m] {
@@ -215,7 +215,11 @@ func workflowStoreMethodNames(t *testing.T) []string {
 // worktrees under .claude/, and a walk descends into what is effectively a
 // second copy of the tree -- which would let a reference in a scratch checkout
 // vouch for the real one.
-func storeMethodReferences(t *testing.T, methods []string) (prod, testOnly map[string]bool) {
+func storeMethodReferences(t *testing.T, methods []string) (
+	prod, testOnly map[string]bool,
+	referrers map[string]map[string]bool,
+	prodNamesUsed map[string]bool,
+) {
 	t.Helper()
 	want := map[string]bool{}
 	for _, m := range methods {
@@ -236,6 +240,8 @@ func storeMethodReferences(t *testing.T, methods []string) (prod, testOnly map[s
 	}
 
 	prod, testOnly = map[string]bool{}, map[string]bool{}
+	referrers = map[string]map[string]bool{}
+	prodNamesUsed = map[string]bool{}
 	fset := token.NewFileSet()
 	scanned := 0
 	for _, rel := range files {
@@ -253,22 +259,43 @@ func storeMethodReferences(t *testing.T, methods []string) (prod, testOnly map[s
 		scanned++
 		isTest := strings.HasSuffix(rel, "_test.go")
 
-		ast.Inspect(f, func(n ast.Node) bool {
-			// Sel.Name covers a call (x.M()) and a method value (x.M) alike:
-			// both are SelectorExpr, and the difference is the enclosing node.
-			// That is the whole reason this is an AST walk -- see the doc
-			// comment on the test.
-			se, ok := n.(*ast.SelectorExpr)
-			if !ok || !want[se.Sel.Name] {
+		for _, decl := range f.Decls {
+			fd, isFunc := decl.(*ast.FuncDecl)
+			enclosing := ""
+			if isFunc {
+				enclosing = fd.Name.Name
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				switch v := n.(type) {
+				case *ast.SelectorExpr:
+					// Sel.Name covers a call (x.M()) and a method value (x.M)
+					// alike: both are SelectorExpr, and the difference is the
+					// enclosing node. That is the whole reason this is an AST
+					// walk -- see the doc comment on the test.
+					if want[v.Sel.Name] {
+						if isTest {
+							testOnly[v.Sel.Name] = true
+						} else {
+							prod[v.Sel.Name] = true
+							if enclosing != "" && enclosing != v.Sel.Name {
+								if referrers[v.Sel.Name] == nil {
+									referrers[v.Sel.Name] = map[string]bool{}
+								}
+								referrers[v.Sel.Name][enclosing] = true
+							}
+						}
+					}
+					if !isTest && enclosing != v.Sel.Name {
+						prodNamesUsed[v.Sel.Name] = true
+					}
+				case *ast.Ident:
+					if !isTest && v.Name != enclosing {
+						prodNamesUsed[v.Name] = true
+					}
+				}
 				return true
-			}
-			if isTest {
-				testOnly[se.Sel.Name] = true
-			} else {
-				prod[se.Sel.Name] = true
-			}
-			return true
-		})
+			})
+		}
 	}
 	if scanned < 100 {
 		t.Fatalf("scanned only %d parseable Go files; the skip list is too broad", scanned)
@@ -277,7 +304,7 @@ func storeMethodReferences(t *testing.T, methods []string) (prod, testOnly map[s
 	for m := range prod {
 		delete(testOnly, m)
 	}
-	return prod, testOnly
+	return prod, testOnly, referrers, prodNamesUsed
 }
 
 // skipForReachability drops the files that DEFINE the surface rather than
@@ -323,7 +350,7 @@ func TestEveryStoreReachabilityExemptionIsStillNeeded(t *testing.T) {
 	for _, m := range methods {
 		known[m] = true
 	}
-	prod, _ := storeMethodReferences(t, methods)
+	prod, _, _, _ := storeMethodReferences(t, methods)
 
 	for m, why := range storeReachabilityExemptions {
 		if !known[m] {
@@ -342,4 +369,100 @@ func TestEveryStoreReachabilityExemptionIsStillNeeded(t *testing.T) {
 				m, len(why))
 		}
 	}
+}
+
+// TestNoStoreMethodIsReachableOnlyThroughDeadCode closes the hole that
+// TestEveryStoreMethodIsReachableFromProduction had on the day it merged.
+//
+// That test asks "does production reference this method". It does not ask
+// whether the referencing FUNCTION is itself reached, so a method referenced
+// only from a function nothing calls reads as green. cleat#869 names the shape:
+// "in scope and falsely clean is worse than out of scope" -- a scan that covers
+// the file and reaches the wrong conclusion is worse than one that admits it
+// does not look there, because the coverage is what stops anyone checking.
+//
+// It found two on its first run, and one of them was a real defect:
+//
+//	GetCompactionCandidates  only in compactionLoop, which launchLoop never
+//	                         starts -- so history compaction has NEVER run
+//	                         (cleat#877). Every other piece is present: the
+//	                         --compaction-threshold flag, the store method on
+//	                         all three dialects, CompactWorkflowHistory, a fuzz
+//	                         test, and the loop's own unit tests.
+//	ClaimWorkflow            only in waitForDB, called from tests alone. The
+//	                         real claim path uses ClaimWorkflows (plural); this
+//	                         one is a DB-connectivity probe.
+//
+// # One level, not full reachability
+//
+// This asks whether the referring function's NAME is used anywhere in
+// production -- called, taken as a value, or passed to a loop launcher. It does
+// not compute transitive reachability from main; scripts/check-unreachable-main.sh
+// does that for package main, and duplicating it here would be a second
+// implementation of a hard analysis rather than a cheap check of a different
+// question.
+//
+// One level is enough for the shape this is about: a whole subsystem wired to
+// nothing. It would not catch a chain of two dead functions, which is a real
+// limit and is why this carries a baseline rather than claiming completeness.
+func TestNoStoreMethodIsReachableOnlyThroughDeadCode(t *testing.T) {
+	methods := workflowStoreMethodNames(t)
+	_, _, referrers, prodNamesUsed := storeMethodReferences(t, methods)
+
+	if len(prodNamesUsed) < 500 {
+		t.Fatalf("collected only %d production identifiers; the scan is broken. "+
+			"An identifier set that is nearly empty makes every referring function "+
+			"look dead, which reads as a wall of findings rather than as a fault.",
+			len(prodNamesUsed))
+	}
+
+	var dead []string
+	for m, fns := range referrers {
+		if storeDeadReferrerBaseline[m] {
+			continue
+		}
+		live := false
+		for fn := range fns {
+			if prodNamesUsed[fn] {
+				live = true
+				break
+			}
+		}
+		if live {
+			continue
+		}
+		names := make([]string, 0, len(fns))
+		for fn := range fns {
+			names = append(names, fn)
+		}
+		sort.Strings(names)
+		dead = append(dead, m+" (only in: "+strings.Join(names, ", ")+")")
+	}
+	sort.Strings(dead)
+
+	for _, d := range dead {
+		t.Errorf("WorkflowStore.%s is referenced only from production functions that nothing "+
+			"itself references.\n\n"+
+			"The method looks reached and is not. This is the shape cleat#869 describes: a scan "+
+			"that covers the file and reaches the wrong conclusion is worse than one that admits "+
+			"it does not look there. Wire the referring function up, delete it, or baseline it "+
+			"with an issue.", d)
+	}
+	t.Logf("%d methods have production referrers; %d baselined as dead-referrer",
+		len(referrers), len(storeDeadReferrerBaseline))
+}
+
+// storeDeadReferrerBaseline is the debt found when the check above was added.
+//
+// Shrink-only, like storeUnreachedBaseline, and for the same reason: these are
+// findings held open under an issue, not decisions.
+var storeDeadReferrerBaseline = map[string]bool{
+	// cleat#877: compactionLoop is never launched, so history compaction has
+	// never run. Removing this entry is part of fixing that.
+	"GetCompactionCandidates": true,
+
+	// waitForDB is called only from tests. Its ClaimWorkflow call is a
+	// DB-connectivity probe, not the claim path -- that is ClaimWorkflows.
+	// Tracked with cleat#877; either waitForDB is wired into startup or it goes.
+	"ClaimWorkflow": true,
 }
