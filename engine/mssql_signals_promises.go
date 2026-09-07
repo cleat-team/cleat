@@ -450,7 +450,7 @@ func (s *MSSQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, upda
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = @p3, error_msg = @p4, completed_at = SYSUTCDATETIME()
 		WHERE workflow_id = @p1 AND update_name = @p2 AND tenant_id = @p5 AND status = 'pending'
-	`, workflowID, updateName, result, errMsg, s.tenantID)
+	`, workflowID, updateName, jsonOrNull(result), errMsg, s.tenantID)
 	return err
 }
 

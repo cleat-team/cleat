@@ -122,7 +122,7 @@ func (h *HostCallsImpl) DispatchUpdates() {
 func (h *HostCallsImpl) runUpdate(d updateDelivery) {
 	entry, ok := h.updateHandlers[d.Name]
 	if !ok {
-		_ = h.completeUpdate(d.RequestID, "",
+		h.completeOrLog(d, "",
 			fmt.Sprintf("cleat: no update handler registered for %q", d.Name))
 		return
 	}
@@ -131,15 +131,35 @@ func (h *HostCallsImpl) runUpdate(d updateDelivery) {
 	// beyond the completion event -- no state change, no durable work.
 	if entry.validator != nil {
 		if err := entry.validator(d.Payload); err != nil {
-			_ = h.completeUpdate(d.RequestID, "", err.Error())
+			h.completeOrLog(d, "", err.Error())
 			return
 		}
 	}
 
 	result, err := entry.handler(d.Payload)
 	if err != nil {
-		_ = h.completeUpdate(d.RequestID, "", err.Error())
+		h.completeOrLog(d, "", err.Error())
 		return
 	}
-	_ = h.completeUpdate(d.RequestID, result, "")
+	h.completeOrLog(d, result, "")
+}
+
+// completeOrLog completes the request and says so when it cannot.
+//
+// These four calls discarded their error with `_ =` until IMPROVEMENT-PLAN
+// 3.245, which is why the defect that section describes was invisible: every
+// failing update passed an empty result, the store rejected "" as JSON, the
+// request stayed `pending`, the caller's promise was never settled -- and the
+// guest carried on as though it had answered.
+//
+// A failure here cannot be recovered from inside the guest: the row is the
+// host's, and the next poll will redeliver the same request. Logging is what
+// the guest can do, and it turns a silent hang into something a worker log
+// shows. The caller still waits, and that is the host's problem to fix.
+func (h *HostCallsImpl) completeOrLog(d updateDelivery, result, errMsg string) {
+	if err := h.completeUpdate(d.RequestID, result, errMsg); err != nil {
+		h.DurableLog(fmt.Sprintf(
+			"cleat: completing update %q (request %s) failed: %v -- the request stays pending "+
+				"and the caller's promise is unsettled", d.Name, d.RequestID, err))
+	}
 }

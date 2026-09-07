@@ -6839,6 +6839,56 @@ activated 19 sets of assumptions that had never been tested against each other. 
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
 
+### 3.245 A failed update could not be recorded as failed, so the caller's promise never settled — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+Reported by WS-3 as #908 against the stranded-update sweep. It is wider than that: **every** failing
+update, not only stranded ones.
+
+`workflow_update_requests.result` is JSONB on PostgreSQL and JSON on MySQL, and `""` is not valid
+JSON. Every failing update completes with an empty result **by construction** —
+`cleat/runtime_updates.go` passes `""` on all three failure paths (no handler registered, validator
+refusal, handler error) and `cmd/cleat-worker/setup.go:2667` passes it for a stranded one.
+
+So the `UPDATE` errored, the row stayed `pending`, and the caller's promise was never settled —
+[§3.238](#3238)'s defect restored on the failure path, reaching every caller whose update was
+refused. In the stranding sweep the error also skipped `RejectPromise` via `continue`, and the
+summary logged `count: len(updates)` a line below the ERROR, so it reported success.
+
+**All four call sites discarded the error with `_ =`**, which is why it was silent in the guest as
+well as in the log. They now go through `completeOrLog`, which cannot recover — the row is the
+host's and the next poll redelivers — but turns a silent hang into something a worker log shows.
+
+**Confirmed by measurement rather than by reading**, since the claim is about a database:
+
+    SELECT ''::jsonb   ->   pq: invalid input syntax for type json (22P02)
+
+**Fixed at the store layer, not at the four callers.** `jsonOrNull` renders `""` as SQL NULL in all
+three dialects. The column is nullable everywhere and `GetPendingUpdateRequests` already reads it
+back through `COALESCE(..., '')`, so NULL round-trips to `""` and nothing above the store sees a
+difference. Fixing the callers would have left the next one to rediscover it.
+
+**Why nothing caught it: `CompleteUpdateRequest` had four test doubles and no test.**
+`fakeUpdateStore`, `stubWorkflowStore`, `mockCollectMetricsStore`, `mockGCStore` — every appearance
+in the suite was a mock implementing the interface. A double accepts `""` happily, because a Go
+string has no opinion about JSON; only a database does. That is CLAUDE.md's *"watch which layer is
+holding the test up"*: the assertion passed on the strength of the layer that could not fail.
+
+`TestAFailedUpdateCompletesAndSettlesTheCallersPromise` runs against real databases on all three
+dialects, and asserts the row actually leaves `pending` — an `UPDATE` matching zero rows also
+returns nil.
+
+**A claim in the first draft was wrong, and the falsification caught it.** I wrote that SQL Server
+*accepted* `""`, having read `migrations/mssql/001_schema.sql`, which CHECKs `payload` and not
+`result`. The constraint is added by `037_json_column_checks.sql`. All three dialects refuse it,
+each in its own way:
+
+    postgres  pq: invalid input syntax for type json (22P02)
+    mysql     Error 3140 (22032): Invalid JSON text: "The document is empty."
+    mssql     conflicted with CHECK constraint "ck_workflow_update_requests_result"
+
+Reading the first migration and concluding is exactly what the *Project state* section warns
+against, and it was a paragraph I had quoted earlier the same day.
+
 ### 3.244 The Rust SDK read past its own buffer whenever the host refused a bad parameter — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
 
 `memory::read_string(ptr, len)` takes a raw pointer and does

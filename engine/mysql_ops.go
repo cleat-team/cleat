@@ -210,7 +210,7 @@ func (s *MySQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, upda
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = ?, error_msg = ?, completed_at = NOW(6)
 		WHERE workflow_id = ? AND update_name = ? AND status = 'pending'
-	`, result, errMsg, workflowID, updateName)
+	`, jsonOrNull(result), errMsg, workflowID, updateName)
 	return err
 }
 

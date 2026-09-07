@@ -273,6 +273,48 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 
 // CompleteUpdateRequest marks an update request as completed with a result or error.
 
+// jsonOrNull renders "" as SQL NULL rather than as an empty string.
+//
+// `workflow_update_requests.result` is JSONB on Postgres and JSON on MySQL, and
+// **"" is not valid JSON** -- Postgres rejects it with
+// `invalid input syntax for type json (22P02)` and MySQL with an invalid-JSON
+// error. Every FAILING update completes with an empty result by construction:
+// cleat/runtime_updates.go passes "" on all three failure paths (no handler
+// registered, validator refusal, handler error), and the worker's stranded-update
+// sweep passes "" too.
+//
+// So before this helper, an update that failed could not be recorded as failed.
+// The UPDATE errored, the row stayed `pending`, and the caller's promise was
+// never settled -- the exact symptom updates were built to fix, restored on the
+// failure path. See IMPROVEMENT-PLAN 3.245.
+//
+// The column is nullable in all three dialects and GetPendingUpdateRequests
+// already reads it back through COALESCE(...,”), so NULL round-trips to "" and
+// nothing above the store sees a difference.
+//
+// All three dialects reject "", and it took a measurement to know that. SQL
+// Server stores `result` as NVARCHAR(MAX), and `migrations/mssql/001_schema.sql`
+// carries a CHECK on `payload` only -- so reading 001 says MSSQL accepts "" and
+// silently holds a non-JSON value. It does not:
+// `migrations/mssql/037_json_column_checks.sql` adds
+//
+//	CHECK (result IS NULL OR ISJSON(result) = 1)
+//
+// and the falsification failed there too, with a CHECK-constraint conflict
+// rather than a JSON parse error. That is CLAUDE.md's rule about migrations --
+// find the highest-numbered one that defines a thing before concluding
+// anything -- and the first version of this comment broke it.
+//
+// Re-derive rather than trusting this paragraph:
+//
+//	grep -rln ck_workflow_update_requests_result migrations/mssql/
+func jsonOrNull(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 func (s *PostgresStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -284,7 +326,7 @@ func (s *PostgresStore) CompleteUpdateRequest(ctx context.Context, workflowID, u
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = $3, error_msg = $4, completed_at = now()
 		WHERE workflow_id = $1 AND update_name = $2 AND tenant_id = $5 AND status = 'pending'
-	`, workflowID, updateName, result, errMsg, s.tenantID)
+	`, workflowID, updateName, jsonOrNull(result), errMsg, s.tenantID)
 	if err != nil {
 		return err
 	}
