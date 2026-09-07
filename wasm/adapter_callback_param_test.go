@@ -130,7 +130,6 @@ func generatedCallbackSites(t *testing.T) []callbackSite {
 // correct answer -- a value passed in a ring and never used never reaches the
 // host.
 func reachedCallbackParams(sites []callbackSite) (map[string]bool, error) {
-
 	type edge struct {
 		callee string
 		index  int
@@ -399,7 +398,7 @@ func TestTheGuardSeesThroughOneHopOfForwarding(t *testing.T) {
 	}
 
 	if t.Failed() {
-		t.Log(fmt.Sprintf("reached map: %v", reached))
+		t.Logf("reached map: %v", reached)
 	}
 }
 
