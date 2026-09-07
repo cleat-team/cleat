@@ -410,6 +410,37 @@ public class HostCalls {
      * @param maxLen the number of bytes to read
      * @return the decoded string, or empty if maxLen is zero
      */
+    /**
+     * The host's own error message, or {@code fallback} when it wrote none.
+     *
+     * <p>A call with an output buffer usually puts its failure reason there --
+     * engine/children.go writes {@code rec.Err}, AwaitPromise writes
+     * {@code rec.PromiseError} -- and a guest reporting the bare error code
+     * throws that away. IMPROVEMENT-PLAN 3.200 fixed this for the generated Go
+     * adapters; eleven wrappers here still did it.
+     *
+     * <p>Truncating at the first NUL is the whole correctness of this method.
+     * "The host wrote nothing" and "the host reported a length" are
+     * independent: on a bad-parameter refusal engine/imports.go returns
+     * errBadParam <em>before</em> the handler runs, so nothing is written, yet
+     * a length is still decoded from the sentinel's bits. readOutput clamps
+     * that to the buffer, so a naive isEmpty() check sees a buffer of zero
+     * bytes, decides the host "wrote a message", and returns 64KB of NULs as
+     * the error text -- strictly worse than the code it replaced. The host
+     * writes UTF-8 with no interior NUL, so stopping at the first one is
+     * exactly what it wrote.
+     *
+     * <p>Java clamps in readOutput and renders a negative length as "", so the
+     * out-of-bounds half of this never applied here -- but the empty-looking
+     * buffer half does.
+     */
+    private static String hostMessageOr(int len, String fallback) {
+        String raw = readOutput(len);
+        int nul = raw.indexOf('\0');
+        String msg = nul >= 0 ? raw.substring(0, nul) : raw;
+        return msg.isEmpty() ? fallback : msg;
+    }
+
     private static String readOutput(int maxLen) {
         if (maxLen <= 0) {
             return "";
@@ -681,7 +712,7 @@ public class HostCalls {
         int deferIdLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("defer(description=\"" + description + "\") failed: host returned error code " + errCode + ". Check that the defer description is valid.");
+            return CleatResult.err(hostMessageOr(deferIdLen, "defer(description=\"" + description + "\") failed: host returned error code " + errCode + ". Check that the defer description is valid."));
         }
 
         String deferId = readOutput(deferIdLen);
@@ -818,7 +849,7 @@ public class HostCalls {
         int idLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("createPromise(name=\"" + name + "\") failed: host returned error code " + errCode + ". Check that the promise name is valid.");
+            return CleatResult.err(hostMessageOr(idLen, "createPromise(name=\"" + name + "\") failed: host returned error code " + errCode + ". Check that the promise name is valid."));
         }
 
         String promiseId = readOutput(idLen);
@@ -852,7 +883,7 @@ public class HostCalls {
         int runIdLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("childWorkflow(name=\"" + name + "\") failed: host returned error code " + errCode + ". Check that the child workflow name is correct and the workflow definition exists.");
+            return CleatResult.err(hostMessageOr(runIdLen, "childWorkflow(name=\"" + name + "\") failed: host returned error code " + errCode + ". Check that the child workflow name is correct and the workflow definition exists."));
         }
 
         String runId = readOutput(runIdLen);
@@ -898,7 +929,7 @@ public class HostCalls {
         int runIdLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("childWorkflowWithOptions(name=\"" + name + "\", version=" + version + ") failed: host returned error code " + errCode + ". Check that the child workflow name is correct.");
+            return CleatResult.err(hostMessageOr(runIdLen, "childWorkflowWithOptions(name=\"" + name + "\", version=" + version + ") failed: host returned error code " + errCode + ". Check that the child workflow name is correct."));
         }
 
         String runId = readOutput(runIdLen);
@@ -934,7 +965,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid.");
+            return CleatResult.err(hostMessageOr(resultLen, "awaitChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid."));
         }
 
         String childResult = readOutput(resultLen);
@@ -963,7 +994,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("pollChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid or the child has completed.");
+            return CleatResult.err(hostMessageOr(resultLen, "pollChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid or the child has completed."));
         }
 
         String childResult = readOutput(resultLen);
@@ -999,7 +1030,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitPromise(promiseId=\"" + promiseId + "\") failed: host returned error code " + errCode + ". Check that the promise ID is valid.");
+            return CleatResult.err(hostMessageOr(resultLen, "awaitPromise(promiseId=\"" + promiseId + "\") failed: host returned error code " + errCode + ". Check that the promise ID is valid."));
         }
 
         String promiseResult = readOutput(resultLen);
@@ -1080,7 +1111,19 @@ public class HostCalls {
         int payloadLen = Memory.decodeAwaitPayloadLen(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitSignals(names=" + namesJSON + ") failed: host returned error code " + errCode + ". Check that the signal names are valid.");
+            // Two buffers here, unlike the others, so the generic wrapper's
+            // implicit length does not apply. The signal NAME buffer sits at
+            // OUTPUT_OFFSET and is the one a reason would be written into, and
+            // its own clamp is preserved rather than falling back to
+            // OUT_BUF_SIZE -- without it an over-long reported length would read
+            // past the name region and into the payload buffer beside it.
+            //
+            // Every DurableAwaitSignals path in engine/signaller.go passes
+            // errCode 0, so in practice this fires only on errBadParam, where
+            // nothing is written and the fallback is returned. Wired anyway:
+            // "unreachable today" is a property of the host, not of this guest.
+            return CleatResult.err(hostMessageOr(Math.min(sigNameLen, sigNameBufSize),
+                "awaitSignals(names=" + namesJSON + ") failed: host returned error code " + errCode + ". Check that the signal names are valid."));
         }
 
         String sigName = Memory.readString(Memory.OUTPUT_OFFSET,
@@ -2071,7 +2114,7 @@ public class HostCalls {
         int outLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("sideEffect(...) failed: host returned error code " + errCode + ". Check that the input is valid.");
+            return CleatResult.err(hostMessageOr(outLen, "sideEffect(...) failed: host returned error code " + errCode + ". Check that the input is valid."));
         }
 
         String output = readOutput(outLen);
@@ -2120,7 +2163,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitAllChildren(runIDs=" + idsJson + ") failed: host returned error code " + errCode + ". Check that the run IDs are valid.");
+            return CleatResult.err(hostMessageOr(resultLen, "awaitAllChildren(runIDs=" + idsJson + ") failed: host returned error code " + errCode + ". Check that the run IDs are valid."));
         }
 
         String response = readOutput(resultLen);
@@ -2169,7 +2212,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitAnyChild(runIDs=" + idsJson + ") failed: host returned error code " + errCode + ". Check that the run IDs are valid.");
+            return CleatResult.err(hostMessageOr(resultLen, "awaitAnyChild(runIDs=" + idsJson + ") failed: host returned error code " + errCode + ". Check that the run IDs are valid."));
         }
 
         String childResult = readOutput(resultLen);

@@ -65,6 +65,53 @@ pub fn read_result(buf: &[u8], len: u32) -> String {
     String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
+/// Return the host's own error message, or `fallback` when it wrote none.
+///
+/// # Why a helper rather than a read at each site
+///
+/// A call that has an output buffer usually puts its failure reason there --
+/// `engine/children.go` writes `rec.Err`, `AwaitPromise` writes
+/// `rec.PromiseError`, `SideEffect` writes its `errMsg` -- and a guest that
+/// reports the bare `errCode` instead throws away the only thing that says what
+/// went wrong. That is IMPROVEMENT-PLAN 3.200, fixed there for the generated Go
+/// adapters and left standing in this SDK for fifteen wrappers.
+///
+/// The fallback is load-bearing, not decoration. Not every call writes on every
+/// error path: `cleat_json_parse` returns `packSimpleResult(1)` with nothing
+/// written when its input is unreadable, so an unconditional read would replace
+/// a useful message with an empty one. Preferring the host's text *when there is
+/// any* is strictly better than either alternative.
+///
+/// Taking the fallback by value rather than by closure is deliberate: every
+/// caller already had that `format!` written, so the change at each site is to
+/// wrap it, and the diff shows exactly what was preserved.
+pub fn host_message_or(buf: &[u8], len: u32, fallback: String) -> String {
+    // Stop at the first NUL, and this is the whole correctness of the function.
+    //
+    // "The host wrote nothing" and "the host reported a length" are independent.
+    // On a bad-parameter refusal `engine/imports.go` returns errBadParam BEFORE
+    // the handler runs -- nothing is written -- yet the guest still decodes a
+    // length out of the sentinel's bits: 4294967295 in the simple layout.
+    // read_result clamps that to the buffer, so a naive is_empty() check sees
+    // 65536 zero bytes, decides the host "wrote a message", and returns 64KB of
+    // NULs as the error text. Measured, not imagined:
+    //
+    //     decoded len = 4294967295   returned len = 65536   all NUL = true
+    //
+    // That is strictly worse than the bare code it replaces. The host writes a
+    // UTF-8 message with no interior NUL, and an unwritten buffer is zeroed, so
+    // truncating at the first NUL is exactly "what the host actually wrote".
+    let raw = read_result(buf, len);
+    let msg = match raw.find('\0') {
+        Some(i) => &raw[..i],
+        None => &raw[..],
+    };
+    if msg.is_empty() {
+        return fallback;
+    }
+    msg.to_string()
+}
+
 /// Read a string from WASM linear memory at (ptr, len).
 /// Matches readWasmString in memory.go.
 ///
@@ -270,6 +317,123 @@ mod tests {
         assert_eq!(read_result(&buf, 4), "xxxx");
         assert_eq!(read_result(&buf, 0), "");
         assert_eq!(read_result(&[], 99), "");
+    }
+
+    /// host_message_or prefers the host's text, and falls back when there is none.
+    ///
+    /// The NUL case is the one that matters and it is not hypothetical: on a
+    /// bad-parameter refusal the host writes nothing and the guest still decodes
+    /// a length of 4294967295, so a naive is_empty() check returns 64KB of NULs
+    /// as the error message -- worse than the bare code it replaced.
+    #[test]
+    fn host_message_or_prefers_the_hosts_text_and_falls_back_when_there_is_none() {
+        let fallback = || "host error code 1".to_string();
+
+        // The host wrote something: use it.
+        let mut wrote = vec![0u8; 64];
+        wrote[..11].copy_from_slice(b"no such run");
+        assert_eq!(host_message_or(&wrote, 11, fallback()), "no such run");
+
+        // The host wrote nothing and reported a real zero.
+        assert_eq!(host_message_or(&[0u8; 64], 0, fallback()), "host error code 1");
+
+        // The host wrote nothing and reported errBadParam's bogus length. This
+        // is the case a plain is_empty() gets wrong.
+        let (bogus, _) = decode_simple_result(0xFFFFFFFF_00000001u64 as i64);
+        let got = host_message_or(&vec![0u8; OUT_BUF_SIZE as usize], bogus, fallback());
+        assert_eq!(got, "host error code 1",
+            "an unwritten buffer with a bogus length must fall back, not return {} NUL bytes",
+            got.len());
+
+        // A real message that does not fill the buffer keeps its own bytes and
+        // does not drag the trailing zeros along.
+        let mut partial = vec![0u8; 512];
+        partial[..5].copy_from_slice(b"boom!");
+        assert_eq!(host_message_or(&partial, 512, fallback()), "boom!");
+    }
+
+    /// Every error branch must read the SAME buffer and length the success path
+    /// reads, and this is the property the wiring can actually get wrong.
+    ///
+    /// The 26 call sites were converted mechanically, deriving the buffer and
+    /// length from each function's own success-path `read_result`. That is
+    /// exactly the kind of edit that is right in bulk and wrong in one place,
+    /// and the failure is silent: a wrapper that reads a NEIGHBOURING buffer
+    /// still compiles, still returns a String, and reports another call's data
+    /// as this call's error message.
+    ///
+    /// It is not covered end-to-end. The plugin harness does not drive an error
+    /// through any of these paths -- in an in-memory environment they succeed or
+    /// suspend -- so nothing else in the tree would notice. This checks the
+    /// invariant directly instead of hoping a fixture reaches it.
+    ///
+    /// `await_signals_ms` is the deliberate exception: it has two buffers, and
+    /// the signal-NAME one is the one a reason is written into. It is excluded
+    /// by name rather than by loosening the rule for everyone.
+    #[test]
+    fn every_error_branch_reads_the_same_buffer_as_its_success_path() {
+        let src = include_str!("host_calls.rs");
+
+        let mut mismatched = Vec::new();
+        let mut checked = 0;
+
+        for (i, _) in src.match_indices("host_message_or(") {
+            // the enclosing fn name
+            let head = &src[..i];
+            let fn_start = match head.rfind("\n    pub fn ") {
+                Some(p) => p + "\n    pub fn ".len(),
+                None => continue,
+            };
+            let name: String = src[fn_start..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name == "await_signals_ms" {
+                continue; // two buffers, documented at the call site
+            }
+
+            // what the error branch reads
+            let call = &src[i..];
+            let open = call.find('(').unwrap();
+            let args = &call[open + 1..];
+            let err_buf: String = args
+                .trim_start()
+                .trim_start_matches('&')
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+
+            // what the success path reads, in the same function
+            let body = &src[fn_start..];
+            let ok = match body.find("memory::read_result(&") {
+                Some(p) => &body[p + "memory::read_result(&".len()..],
+                None => continue,
+            };
+            let ok_buf: String = ok
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+
+            checked += 1;
+            if err_buf != ok_buf {
+                mismatched.push(format!("  {name}: error branch reads {err_buf}, success path reads {ok_buf}"));
+            }
+        }
+
+        // Without this the loop can pass by matching nothing, which is how a
+        // renamed helper turns a guard into a no-op.
+        assert!(
+            checked >= 10,
+            "only {checked} host_message_or call sites were checked, far below the 13 wired in \
+             IMPROVEMENT-PLAN 3.251. The scan has stopped matching and this guard is now vacuous."
+        );
+        assert!(
+            mismatched.is_empty(),
+            "error branches reading a different buffer than their own success path:\n{}\n\n\
+             A wrapper that reads a neighbouring buffer compiles and returns a String, so it \
+             reports another call's data as this call's error message.",
+            mismatched.join("\n")
+        );
     }
 
     /// `host_calls.rs` must not read a host-reported length from a raw pointer.
