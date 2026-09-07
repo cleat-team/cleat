@@ -499,7 +499,7 @@ impl HostCalls {
         };
         let (id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return (String::new(), Some(format!("defer(description=\"{}\") failed: host error code {}. Check that the defer description is valid.", description, err_code)));
+            return (String::new(), Some(memory::host_message_or(&id_buf, id_len, format!("defer(description=\"{}\") failed: host error code {}. Check that the defer description is valid.", description, err_code))));
         }
         let id = memory::read_result(&id_buf, id_len);
         (id, None)
@@ -568,7 +568,7 @@ impl HostCalls {
         };
         let (payload_len, found, err_code) = memory::decode_poll_signal_result(result);
         if err_code != 0 {
-            return (String::new(), false, Some(format!("poll_signal(name=\"{}\") failed: host error code {}. Check that the signal name is valid.", name, err_code)));
+            return (String::new(), false, Some(memory::host_message_or(&payload_buf, payload_len, format!("poll_signal(name=\"{}\") failed: host error code {}. Check that the signal name is valid.", name, err_code))));
         }
         let payload = if found && payload_len > 0 {
             memory::read_result(&payload_buf, payload_len)
@@ -618,7 +618,7 @@ impl HostCalls {
 
         let (run_id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return (String::new(), Some(format!("child_workflow(name=\"{}\") failed: host error code {}. Check that the child workflow name is correct and the workflow definition exists.", name, err_code)));
+            return (String::new(), Some(memory::host_message_or(&run_id_buf, run_id_len, format!("child_workflow(name=\"{}\") failed: host error code {}. Check that the child workflow name is correct and the workflow definition exists.", name, err_code))));
         }
         let run_id = memory::read_result(&run_id_buf, run_id_len);
         (run_id, None)
@@ -649,7 +649,7 @@ impl HostCalls {
 
         let (run_id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return (String::new(), Some(format!("child_workflow_with_options(name=\"{}\", version={}) failed: host error code {}. Check that the child workflow name is correct.", name, opts.version, err_code)));
+            return (String::new(), Some(memory::host_message_or(&run_id_buf, run_id_len, format!("child_workflow_with_options(name=\"{}\", version={}) failed: host error code {}. Check that the child workflow name is correct.", name, opts.version, err_code))));
         }
         let run_id = memory::read_result(&run_id_buf, run_id_len);
         (run_id, None)
@@ -673,7 +673,7 @@ impl HostCalls {
         }
         let (result_len, err_code) = memory::decode_simple_result(r);
         if err_code != 0 {
-            return Err(CallError::Failed(format!("await_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code)));
+            return Err(CallError::Failed(memory::host_message_or(&result_buf, result_len, format!("await_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code))));
         }
         Ok(memory::read_result(&result_buf, result_len))
     }
@@ -713,7 +713,20 @@ impl HostCalls {
 
         let (sig_name_len, payload_len, timed_out, err_code) = memory::decode_await_signals_result(result);
         if err_code != 0 {
-            return Err(CallError::Failed(format!("await_signals(names={}, timeout_ms={}) failed: host error code {}. Check that the signal names are valid.", names_json, timeout_ms, err_code)));
+            // Two buffers here, unlike the others. The signal NAME buffer is
+            // the one the host would write a reason into -- packAwaitSignalsResult
+            // reports the name length in the same field -- so that is the one
+            // read. Every DurableAwaitSignals path in engine/signaller.go passes
+            // errCode 0, so in practice this branch fires only on errBadParam,
+            // where nothing is written and host_message_or falls back. It is
+            // wired anyway: "unreachable today" is a property of the host, and
+            // the guest should not be the thing that has to change if it stops
+            // being true.
+            return Err(CallError::Failed(memory::host_message_or(
+                &sig_name_buf,
+                sig_name_len as u32,
+                format!("await_signals(names={}, timeout_ms={}) failed: host error code {}. Check that the signal names are valid.", names_json, timeout_ms, err_code),
+            )));
         }
         let name = memory::read_result(&sig_name_buf, sig_name_len as u32);
         let payload = if !timed_out && payload_len > 0 {
@@ -753,7 +766,7 @@ impl HostCalls {
         };
         let (id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return (String::new(), Some(format!("create_promise(name=\"{}\") failed: host error code {}. Check that the promise name is valid.", name, err_code)));
+            return (String::new(), Some(memory::host_message_or(&id_buf, id_len, format!("create_promise(name=\"{}\") failed: host error code {}. Check that the promise name is valid.", name, err_code))));
         }
         let id = memory::read_result(&id_buf, id_len);
         (id, None)
@@ -778,7 +791,7 @@ impl HostCalls {
         };
         let (result_len, timed_out, err_code) = memory::decode_await_promise_result(result);
         if err_code != 0 {
-            return (String::new(), timed_out, Some(format!("await_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code)));
+            return (String::new(), timed_out, Some(memory::host_message_or(&result_buf, result_len, format!("await_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code))));
         }
         let result = if result_len > 0 {
             memory::read_result(&result_buf, result_len)
@@ -824,7 +837,7 @@ impl HostCalls {
         }
         let (envelope_len, found, err_code) = memory::decode_poll_signal_result(result);
         if err_code != 0 {
-            return (String::new(), false, Some(format!("poll_update failed: host error code {}", err_code)));
+            return (String::new(), false, Some(memory::host_message_or(&envelope_buf, envelope_len, format!("poll_update failed: host error code {}", err_code))));
         }
         if !found || envelope_len == 0 {
             return (String::new(), false, None);
@@ -1399,7 +1412,7 @@ impl HostCalls {
         }
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(CallError::Failed(format!("await_all_children(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code)));
+            return Err(CallError::Failed(memory::host_message_or(&buf, result_len, format!("await_all_children(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code))));
         }
         let resp = memory::read_result(&buf, result_len);
         Ok(resp)
@@ -1416,7 +1429,7 @@ impl HostCalls {
         };
         let (result_len, err_code) = memory::decode_simple_result(r);
         if err_code != 0 {
-            return (String::new(), Some(format!("poll_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code)));
+            return (String::new(), Some(memory::host_message_or(&result_buf, result_len, format!("poll_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code))));
         }
         let result = memory::read_result(&result_buf, result_len);
         (result, None)
@@ -1437,7 +1450,7 @@ impl HostCalls {
         }
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(CallError::Failed(format!("await_any_child(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code)));
+            return Err(CallError::Failed(memory::host_message_or(&buf, result_len, format!("await_any_child(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code))));
         }
         let resp = memory::read_result(&buf, result_len);
         Ok(resp)
@@ -1806,7 +1819,7 @@ impl HostCalls {
         }
         let (out_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("side_effect(...) failed: host error code {}. Check that the input is valid.", err_code));
+            return Err(memory::host_message_or(&out_buf, out_len, format!("side_effect(...) failed: host error code {}. Check that the input is valid.", err_code)));
         }
         let out = memory::read_result(&out_buf, out_len);
         Ok(out)

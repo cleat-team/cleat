@@ -6838,6 +6838,66 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.251 Rust and Java reported a bare error code where the host wrote a message — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+[§3.200](#3200)'s defect in two more SDKs, and the follow-up [§3.244](#3244) named as its own
+prerequisite: fixing these in Rust *first* would have added fifteen more out-of-bounds reads.
+
+A call with an output buffer usually puts its failure reason there — `engine/children.go` writes
+`rec.Err`, `AwaitPromise` writes `rec.PromiseError`, `SideEffect` writes its `errMsg` — and a guest
+reporting the bare `errCode` throws away the only thing that says what went wrong. **15 of 22 Rust
+wrappers and 11 of 20 Java wrappers did.**
+
+Now 13 and 11. The two Rust holdouts are `json_parse` and `json_stringify`, which return
+`Option<String>` and have **no error channel at all** — nothing to improve, and excluded for a
+reason rather than missed.
+
+**The obvious implementation is wrong, and it is worse than what it replaces.** "Read the buffer,
+fall back if empty" returns **65536 NUL characters** as the error text on a bad-parameter refusal:
+`errBadParam` is returned *before* the handler runs so nothing is written, yet a length is still
+decoded from the sentinel's bits — 4294967295 — which clamps to the whole zeroed buffer, and
+`is_empty()` is false. Measured before shipping it:
+
+    decoded len = 4294967295   returned len = 65536   is fallback? = false   all NUL? = true
+
+`host_message_or` therefore **truncates at the first NUL**. The host writes UTF-8 with no interior
+NUL and an unwritten buffer is zeroed, so "up to the first NUL" is exactly what it wrote.
+Falsified: removing the truncation fails with *"an unwritten buffer with a bogus length must fall
+back, not return 65536 NUL bytes"*.
+
+**A helper rather than an edit per site, because the return shapes differ.** The first attempt
+rewrote each branch to `return Err(...)` and did not compile: these wrappers return
+`(String, Option<String>)`, `(String, bool, Option<String>)`, `Result<_, CallError>` and more.
+Wrapping the `format!` each site already had preserves every signature and makes the diff show
+exactly what was kept.
+
+**`await_signals_ms` was skipped by the sweep for a mechanical reason, not a principled one** — two
+buffers and an `as u32` cast the extractor's pattern did not match. Wired by hand, reading the
+signal-NAME buffer with its own clamp preserved: without it an over-long reported length reads past
+the name region into the payload buffer beside it. Java's equivalent had the same shape and the same
+fix.
+
+**Not covered end-to-end, and that is stated rather than papered over.** The plugin harness drives
+no error through any of these paths — in an in-memory environment they succeed or suspend — so the
+recorded outcomes are unchanged and nothing else in the tree would notice a mis-wiring.
+
+What *is* checked is the property the bulk edit could actually get wrong:
+`every_error_branch_reads_the_same_buffer_as_its_success_path`. A wrapper reading a **neighbouring**
+buffer still compiles, still returns a `String`, and reports another call's data as this call's
+error message.
+
+**Falsifying that guard took three attempts, and the failures are the interesting part.** Pointing a
+branch at an undeclared name did not compile, so the test never ran and the empty output read as a
+pass. Inserting a decoy buffer landed *inside* a `vec![0u8; N]` macro, because the pattern stopped
+at the semicolon within it. Only the third — a correctly placed second buffer — compiled and made
+the guard report `create_promise: error branch reads decoy_buf, success path reads id_buf`.
+
+**Every wrapper except `await_signals_ms` has exactly one buffer today**, so the mismatch is
+currently structurally impossible; the guard earns its keep when the next two-buffer wrapper is
+added. That is worth saying plainly rather than implying it catches something live.
+
+clippy clean on all three crates; `gradle test` clean; `tests/plugin-harness` green.
+
 ### 3.250 A backed-off worker now says when runnable work exists — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
 
 The visibility half of [§3.249](#3249), implemented after WS-3's user decided against a behavioural
