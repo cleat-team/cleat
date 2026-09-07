@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,26 +58,63 @@ var engineOptionsNotWired = map[string]string{
 // The direction matters: the usual dead-code question is "does anything mention
 // this name", which a test mentioning it answers yes. This asks the narrower
 // question that matters for a knob -- does anything that SHIPS set it.
+// walkTrackedGoFiles visits each tracked .go file by absolute path.
+//
+// It keeps the same skip list the old filepath.Walk had, for the directories
+// that are tracked but not production Go: testdata is fixtures, docs is prose,
+// vendor is other people's code.
+func walkTrackedGoFiles(root string, tracked []string, visit func(path string) error) error {
+	for _, rel := range tracked {
+		switch {
+		case strings.HasPrefix(rel, "testdata/"), strings.Contains(rel, "/testdata/"),
+			strings.HasPrefix(rel, "docs/"), strings.HasPrefix(rel, "vendor/"),
+			strings.Contains(rel, "/vendor/"), strings.Contains(rel, "/node_modules/"):
+			continue
+		}
+		if err := visit(filepath.Join(root, rel)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func TestEveryEngineOptionIsReachableFromProduction(t *testing.T) {
 	root := moduleRoot(t)
 
 	declared := map[string]string{} // option name -> file it is declared in
 	callers := map[string][]string{}
 
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			switch info.Name() {
-			case ".git", "node_modules", "vendor", "testdata", "docs":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") {
-			return nil
-		}
+	// `git ls-files`, not filepath.Walk.
+	//
+	// A walk descends into .claude/worktrees/, which holds whole additional
+	// checkouts of this repo. This guard reported WithUpdateHandler as
+	// unreachable long after it was deleted (#872) because a STALE WORKTREE
+	// still declared it -- and it reported the path, which is how it was found:
+	//
+	//	WithUpdateHandler (declared in
+	//	.claude/worktrees/agent-java-object-results/engine/engine.go)
+	//
+	// The failure is local-only: CI checks out a clean tree with no worktrees,
+	// so the guard passes there and fails on a developer's machine, which is
+	// the direction that wastes the most time. CLAUDE.md states the rule --
+	// "prefer `git ls-files` over `rglob`/`find` for anything that reasons
+	// about 'the repo'" -- and records the same defect in a different guard.
+	//
+	// ls-files also excludes untracked scratch files for free, which a walk
+	// would have to enumerate exclusions for, and would therefore go on
+	// missing as new ones appeared.
+	out, gerr := exec.Command("git", "-C", root, "ls-files", "*.go").Output()
+	if gerr != nil {
+		t.Fatalf("git ls-files: %v", gerr)
+	}
+	tracked := strings.Fields(string(out))
+	if len(tracked) < 200 {
+		t.Fatalf("git ls-files returned %d .go files; expected hundreds. A near-empty "+
+			"file list makes every option look unreachable, which reads as a wall of "+
+			"findings rather than as a broken scan.", len(tracked))
+	}
+
+	err := walkTrackedGoFiles(root, tracked, func(path string) error {
 		isTest := strings.HasSuffix(path, "_test.go")
 
 		file, perr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
