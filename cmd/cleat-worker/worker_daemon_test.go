@@ -2619,6 +2619,21 @@ func TestAPICancel(t *testing.T) {
 	}
 }
 
+// existingWorkflow makes a mockStore answer "this run exists" for any id.
+//
+// Needed since cleat#900: the collection endpoints under a run -- /events,
+// /history, /promises -- now check the run exists before serving, so they
+// answer 404 for the zero-value mock whose GetWorkflowByID returns (nil, nil).
+//
+// A helper rather than six copies, because the next collection endpoint's test
+// will need the same thing and should not have to rediscover why.
+func existingWorkflow(ms *mockStore) *mockStore {
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "wf", DefVersion: 1, Status: "running"}, nil
+	}
+	return ms
+}
+
 func TestAPIGetHistory(t *testing.T) {
 	ms := &mockStore{}
 	ms.loadEventHistoryPaginatedFn = func(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error) {
@@ -2630,7 +2645,7 @@ func TestAPIGetHistory(t *testing.T) {
 		return 1, nil
 	}
 
-	api := newTestAPIServer(ms)
+	api := newTestAPIServer(existingWorkflow(ms))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/history", nil)
 	w := httptest.NewRecorder()
@@ -2660,7 +2675,7 @@ func TestAPIGetHistory_Nil(t *testing.T) {
 		return 0, nil
 	}
 
-	api := newTestAPIServer(ms)
+	api := newTestAPIServer(existingWorkflow(ms))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/history", nil)
 	w := httptest.NewRecorder()
@@ -2779,7 +2794,7 @@ func TestAPIListPromises(t *testing.T) {
 		}, nil
 	}
 
-	api := newTestAPIServer(ms)
+	api := newTestAPIServer(existingWorkflow(ms))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/promises", nil)
 	w := httptest.NewRecorder()
@@ -2805,7 +2820,7 @@ func TestAPIListPromises_Nil(t *testing.T) {
 		return nil, nil
 	}
 
-	api := newTestAPIServer(ms)
+	api := newTestAPIServer(existingWorkflow(ms))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/promises", nil)
 	w := httptest.NewRecorder()

@@ -723,9 +723,48 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 	s.writeJSON(w, 200, map[string]string{"status": "cancellation_requested"})
 }
 
+// runExists reports whether id names a workflow the caller can see, writing the
+// 404 itself when it does not.
+//
+// It exists so that a collection under a run answers the same way the run
+// itself does. Before cleat#900, GET /api/workflows/{id} and
+// /api/instances/{id}/state answered 404 for an unknown id while
+// /events, /history and /promises answered 200 with an empty array -- so a
+// caller could not tell "this run has no events" from "this run does not
+// exist", and a typo in an id looked like a healthy empty result.
+//
+// That mattered more here than in a typical REST API, because an empty
+// collection is a NORMAL state in cleat: event history is buffered within a
+// segment and purged at completion, so a legitimately finished run also
+// reports []. The empty response therefore already meant three things, with
+// nothing to separate them.
+//
+// One shared helper rather than a check in each handler: a fourth collection
+// endpoint added later inherits the behaviour instead of having to remember
+// it, which is the failure mode that produced the inconsistency.
+//
+// The cost is one indexed lookup per request on endpoints that previously did
+// none. The dashboard polls these, so it is not free -- but answering the
+// wrong question quickly is not a saving.
+func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, id string) bool {
+	wf, err := st.GetWorkflowByID(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return false
+	}
+	if wf == nil {
+		s.writeError(w, 404, "workflow not found")
+		return false
+	}
+	return true
+}
+
 func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if !s.runExists(w, r, st, id) {
 		return
 	}
 	offset := 0
@@ -888,6 +927,9 @@ func (s *apiServer) handleSetAllowedSignals(w http.ResponseWriter, r *http.Reque
 func (s *apiServer) handleListPromises(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if !s.runExists(w, r, st, id) {
 		return
 	}
 	promises, err := st.ListPromises(r.Context(), id)
