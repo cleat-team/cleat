@@ -58,24 +58,32 @@ func TestListPluginsReportsTheRegistryAndNotAConstant(t *testing.T) {
 // cmd/cleat-worker/main.go blank-imports it.
 //
 // It deliberately does NOT assert a count. The count is a product decision that
-// will change as plugins are wired in; what must stay true is the mechanism --
-// llm is linked, so it is listed, and event-triggers is not linked, so it is
-// not. Delete the llm import and this test goes red, which is the point: the
-// import block is the feature set and nothing else was checking it.
+// changes as plugins are wired in -- and it did: 3.315 found one plugin linked,
+// and every bundled plugin except pgvector is linked now.
+//
+// pgvector is the negative control and a real one, not a token. It is excluded
+// because its Migrations() creates an `embedding vector(1536)` column and
+// plugin.RunMigrations is FATAL at boot, so linking it would stop cleat-worker
+// starting on any PostgreSQL without the vector extension. If it ever appears
+// here, that decision was reversed and this test should fail until someone
+// confirms the migration degrades.
 func TestListPluginsReportsTheBinarysActualImportBlock(t *testing.T) {
 	var buf bytes.Buffer
 	runListPlugins(&buf)
 	out := buf.String()
 
-	if !strings.Contains(out, "llm") {
-		t.Errorf("llm is blank-imported by main.go but is not listed:\n%s", out)
+	// Linked, and each was reachable from nothing before 3.315 was acted on.
+	for _, name := range []string{"llm", "event-triggers", "eventstore", "webhook-ingest", "kafka-connect"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("%s is blank-imported by main.go but is not listed:\n%s", name, out)
+		}
 	}
-	// Not linked by cmd/cleat-worker. If this ever fails, the subsystem was
-	// wired in -- update 3.315 and the event-routing design's P0 rather than
-	// this assertion.
-	if strings.Contains(out, "event-triggers") {
-		t.Errorf("event-triggers is listed, so it is now linked into cleat-worker. "+
-			"That is a real change: its migrations will now run. Update "+
-			"IMPROVEMENT-PLAN.md 3.315 and docs/contributor/design/event-routing-design.md P0.\n%s", out)
+
+	// Not linked, deliberately.
+	if strings.Contains(out, "pgvector") {
+		t.Errorf("pgvector is listed, so it is now linked into cleat-worker. Its "+
+			"Migrations() creates a vector(1536) column and plugin.RunMigrations is "+
+			"fatal at boot, so this stops the worker starting wherever the extension "+
+			"is unavailable. Confirm the migration degrades before allowing this.\n%s", out)
 	}
 }

@@ -58,8 +58,50 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 
 	// Plugins
+	// Every bundled plugin, blank-imported so its init() registers it.
+	//
+	// A plugin registers via an init() in its own package, which runs only if
+	// the package is LINKED. --plugin-config supplies configuration and cannot
+	// change that, so this block is the plugin feature set of the binary --
+	// see IMPROVEMENT-PLAN.md 3.315, which found that only llm was here while
+	// event-triggers, event-store, webhook-ingest and kafka-connect were built,
+	// documented as features, and reachable from nothing. `cleat-worker
+	// --list-plugins` prints what this block yields.
+	//
+	// Adding one here is not free: plugin.RunMigrations is FATAL at boot
+	// (cmd/cleat-worker/main.go, os.Exit(1)), so a plugin whose migration
+	// cannot run stops the worker starting.
+	_ "github.com/cleat-team/cleat/plugins/auditlog"
+	_ "github.com/cleat-team/cleat/plugins/blobstore"
+	_ "github.com/cleat-team/cleat/plugins/dag"
+	_ "github.com/cleat-team/cleat/plugins/datadogexport"
+	_ "github.com/cleat-team/cleat/plugins/email"
+	_ "github.com/cleat-team/cleat/plugins/eventstore"
+	_ "github.com/cleat-team/cleat/plugins/eventtriggers"
+	_ "github.com/cleat-team/cleat/plugins/featureflags"
+	_ "github.com/cleat-team/cleat/plugins/jobqueue"
+	_ "github.com/cleat-team/cleat/plugins/kafkaconnect"
+	_ "github.com/cleat-team/cleat/plugins/kvstore"
 	_ "github.com/cleat-team/cleat/plugins/llm"
-	// _ "github.com/cleat-team/cleat/plugins/pgvector"  // requires pgvector extension
+	_ "github.com/cleat-team/cleat/plugins/notifications"
+	_ "github.com/cleat-team/cleat/plugins/oauthprovider"
+	_ "github.com/cleat-team/cleat/plugins/pagerdutyalert"
+	_ "github.com/cleat-team/cleat/plugins/ratelimiter"
+	_ "github.com/cleat-team/cleat/plugins/scheduledbackup"
+	_ "github.com/cleat-team/cleat/plugins/scheduler"
+	_ "github.com/cleat-team/cleat/plugins/slacknotify"
+	_ "github.com/cleat-team/cleat/plugins/webhookingest"
+	//
+	// pgvector is deliberately NOT here, and the reason is stronger than the
+	// "requires pgvector extension" note it replaces. Its Migrations() creates
+	// an `embedding vector(1536)` column, which is the FATAL path -- so on any
+	// PostgreSQL without the vector extension available, linking it would stop
+	// cleat-worker booting. Its Init() does run `CREATE EXTENSION IF NOT
+	// EXISTS vector`, and an Init failure is non-fatal (InitAll marks the
+	// plugin unhealthy and continues), but that only helps on a server where
+	// the extension is installable. Linking pgvector needs its migration to
+	// degrade instead, which is a change to the plugin, not to this list.
+	// _ "github.com/cleat-team/cleat/plugins/pgvector"
 )
 
 func main() {
