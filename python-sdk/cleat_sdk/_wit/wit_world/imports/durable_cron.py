@@ -29,6 +29,8 @@ def durable_schedule_cron(workflow_name: str, cron_expr: str, timezone: str, inp
     ``timezone`` is an IANA name ("Europe/Berlin"); empty means UTC. The
     cron expression is evaluated in that zone, not the worker's.
     Returns the schedule ID.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError
 def durable_delete_cron(schedule_id: str) -> None:

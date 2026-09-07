@@ -279,7 +279,17 @@ func TestEveryComponentDispatcherReadsTheFieldItsHandlerWrote(t *testing.T) {
 	// above can resolve them. They are correct today -- bit 32, matching the
 	// simple extractor -- and listed here rather than silently skipped, because
 	// an unresolvable site is exactly where the next mispairing would hide.
-	handRolled := map[string]bool{"PollCancellation": true, "PollSignal": true}
+	//
+	// DurablePollUpdate joins them for the same reason: writeUpdateDelivery
+	// builds `uint64(written)<<32 | updateFoundFlag` inline. Verified by hand
+	// rather than by the tracer -- the handler writes the length at bit 32 and
+	// dispatchPollUpdate reads it with extractStringFromSimplePacked, which is
+	// `uint32(r >> 32)`. Same bit, so the pairing is right.
+	handRolled := map[string]bool{
+		"PollCancellation":  true,
+		"PollSignal":        true,
+		"DurablePollUpdate": true,
+	}
 
 	checked := 0
 	for dispatch, facts := range dispatchers {

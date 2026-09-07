@@ -127,6 +127,11 @@ class LocalHostCalls:
         self._update_handlers: dict[
             str, tuple[Callable[[str], str], Callable[[str], bool] | None]
         ] = {}
+        # Workflow updates; see enqueue_update.
+        self._pending_updates: list[tuple[str, str, str, str]] = []
+        self._completed_updates: list[tuple[str, str, str, str]] = []
+        self._update_counter = 0
+        self._dispatching_updates = False
         self._scope_prefix: str = ""
         self._workflow_id: str = "local-wf-id"
         self._run_id: str = "local-run-id"
@@ -542,6 +547,7 @@ class LocalHostCalls:
 
     def sleep_ms(self, timeout_ms: int) -> bool:
         """Suspend workflow execution for a duration in milliseconds."""
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         if self._mode == "replay":
             return self._replay_next("sleep_ms")
         if timeout_ms > 0:
@@ -645,6 +651,7 @@ class LocalHostCalls:
 
     def await_signals_ms(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
         """Wait for one or more external signals, with a timeout in milliseconds."""
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         if self._mode == "replay":
             return self._replay_next("await_signals_ms")
 
@@ -928,6 +935,7 @@ class LocalHostCalls:
         str
             The child's output JSON.
         """
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         if self._mode == "replay":
             return self._replay_next("await_child")
         child = self._children.get(run_id)
@@ -1037,6 +1045,7 @@ class LocalHostCalls:
 
     def await_promise_ms(self, promise_id: str, timeout_ms: int) -> PromiseResult:
         """Wait for a cleat promise to resolve, with a timeout in milliseconds."""
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         if self._mode == "replay":
             return self._replay_next("await_promise_ms")
         ps = self._promises.get(promise_id)
@@ -1128,6 +1137,93 @@ class LocalHostCalls:
         if validator is None:
             return True
         return validator(payload)
+
+    # ------------------------------------------------------------------
+    # Workflow updates
+    #
+    # The queue the engine keeps in workflow_update_requests, so a test can
+    # enqueue an update and assert the handler ran, the workflow state changed,
+    # and the caller's promise settled. A delivery leaves the queue only when it
+    # is COMPLETED, mirroring the engine: the request row leaves 'pending' on
+    # completion, not on delivery, so a handler that raises leaves the update to
+    # be redelivered.
+    # ------------------------------------------------------------------
+
+    def enqueue_update(self, name: str, payload: str, promise_id: str = "") -> str:
+        """Make an update request pending, as ``POST /update/:name`` does.
+
+        ``promise_id`` may be empty for a request with no caller waiting on it.
+
+        Returns the request id.
+        """
+        self._update_counter += 1
+        request_id = f"upd-{name}-{self._update_counter}"
+        self._pending_updates.append((name, payload, request_id, promise_id))
+        return request_id
+
+    def completed_updates(self) -> list[tuple[str, str, str, str]]:
+        """The updates handled so far, as ``(name, request_id, result, error)``."""
+        return list(self._completed_updates)
+
+    def poll_update(self) -> str:
+        """Return the next pending update as a JSON envelope, or ""."""
+        if not self._pending_updates:
+            return ""
+        name, payload, request_id, _ = self._pending_updates[0]
+        return json.dumps(
+            {"name": name, "payload": payload, "request_id": request_id},
+            separators=(",", ":"),
+        )
+
+    def complete_update(self, request_id: str, result: str, err: str) -> None:
+        """Record an outcome and settle the caller's promise."""
+        for i, (name, _payload, rid, promise_id) in enumerate(self._pending_updates):
+            if rid != request_id:
+                continue
+            del self._pending_updates[i]
+            self._completed_updates.append((name, rid, result, err))
+            if not promise_id:
+                return
+            if err:
+                self.reject_promise(promise_id, err)
+            else:
+                self.resolve_promise(promise_id, result)
+            return
+        raise RuntimeError(f"no pending update request {request_id!r}")
+
+    def dispatch_updates(self) -> None:
+        """Deliver and run every pending update.
+
+        Mirrors ``HostCalls.dispatch_updates``. Every path completes the
+        request: an unregistered handler, a validator that refuses and a handler
+        that raises are all answers the caller is entitled to. Leaving any of
+        them uncompleted would leave the caller holding a promise nothing
+        settles, which is the defect updates exist to end.
+        """
+        if self._dispatching_updates:
+            return
+        self._dispatching_updates = True
+        try:
+            while self._pending_updates:
+                name, payload, request_id, _ = self._pending_updates[0]
+                if name not in self._update_handlers:
+                    self.complete_update(
+                        request_id, "", f"cleat: no update handler registered for {name!r}"
+                    )
+                    continue
+                try:
+                    if not self._validate_update(name, payload):
+                        self.complete_update(
+                            request_id, "", f"update {name!r} failed validation"
+                        )
+                        continue
+                    result = self._handle_update(name, payload)
+                except Exception as exc:  # noqa: BLE001 -- the caller is owed an answer
+                    self.complete_update(request_id, "", str(exc))
+                    continue
+                self.complete_update(request_id, result if result is not None else "", "")
+        finally:
+            self._dispatching_updates = False
 
     # There is no register_query_handler / _handle_query here (removed
     # 2026-08-09). register_query_handler recorded a handler name but nothing

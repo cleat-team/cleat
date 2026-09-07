@@ -132,6 +132,12 @@ try:
     from wit_world.imports.durable_handlers import (
         durable_register_update_handler as _import_cleat_register_update_handler,
     )
+    from wit_world.imports.durable_handlers import (
+        durable_poll_update as _import_cleat_poll_update,
+    )
+    from wit_world.imports.durable_handlers import (
+        durable_complete_update as _import_cleat_complete_update,
+    )
     from wit_world.imports.durable_identity import (
         durable_run_id as _import_cleat_run_id,
     )
@@ -954,6 +960,24 @@ if not _USING_WASM:
         )
 
 
+# -- 26a. cleat_poll_update / cleat_complete_update --------------------------
+
+
+if not _USING_WASM:
+
+    def _import_cleat_poll_update() -> str:
+        """Stub for WASM import ``(import "env" "cleat_poll_update") (param i32 i32) (result i64)``."""
+        raise NotImplementedError(
+            "cleat_poll_update can only be called within a cleat WASM runtime."
+        )
+
+    def _import_cleat_complete_update(request_id: str, outcome: str, err: str) -> int:
+        """Stub for WASM import ``(import "env" "cleat_complete_update") (param i32 i32 i32 i32 i32 i32) (result i64)``."""
+        raise NotImplementedError(
+            "cleat_complete_update can only be called within a cleat WASM runtime."
+        )
+
+
 # -- 27. cleat_workflow_id ---------------------------------------------------
 
 
@@ -1049,6 +1073,8 @@ class HostCalls:
         self._update_handlers: dict[
             str, tuple[Callable[[str], str], Callable[[str], bool] | None]
         ] = {}
+        # Reentrancy guard for dispatch_updates; see there.
+        self._dispatching_updates = False
         self._scope_prefix: str = ""
 
     # --------------------------------------------------------------------
@@ -1629,6 +1655,7 @@ class HostCalls:
         SuspendSentinel
             If the workflow should suspend (fresh execution).
         """
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         result = _import_cleat_sleep(timeout_ms)
 
         # Some host runtimes return SUSPEND_SENTINEL directly.
@@ -1876,6 +1903,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         names_json = json.dumps(signal_names)
 
         # Support indefinite wait: timeout_ms <= 0 means "wait forever".
@@ -2088,6 +2116,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         return _import_cleat_await_child(run_id)
 
     # --------------------------------------------------------------------
@@ -2222,6 +2251,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         result = _import_cleat_await_promise(promise_id, timeout_ms)
 
         if isinstance(result, str):
@@ -2379,6 +2409,121 @@ class HostCalls:
         if validator is None:
             return True
         return validator(payload)
+
+    def poll_update(self) -> str:
+        """Return the next pending update as a JSON envelope, or "".
+
+        The envelope is ``{"name", "payload", "request_id"}``.
+
+        Low-level: prefer :meth:`dispatch_updates`, which pairs this with
+        handler lookup, validation, and the guarantee that every delivered
+        update is answered.  Delivery is durable, so an update returned here is
+        recorded as delivered whether or not you complete it.
+        """
+        return _import_cleat_poll_update()
+
+    def complete_update(self, request_id: str, result: str, err: str) -> None:
+        """Record an update handler's outcome and settle the caller's promise.
+
+        A non-empty ``err`` rejects; an empty one resolves.  An empty ``result``
+        with an empty ``err`` resolves -- an empty result is an outcome, not a
+        missing one.
+
+        Low-level: prefer :meth:`dispatch_updates`, which cannot forget to call
+        this.  An update delivered and never completed leaves its caller holding
+        a promise nothing settles.
+        """
+        _check_host_result(
+            _import_cleat_complete_update(request_id, result, err),
+            f"complete_update(request_id={request_id!r})",
+        )
+
+    def dispatch_updates(self) -> None:
+        """Deliver and run every update currently pending for this workflow.
+
+        The SDK already calls this before each suspension, so an ordinary
+        workflow needs no update-specific code.  It is public for workflows that
+        want to service updates at additional points.
+
+        An update handler is a Python callable held in guest memory, so only
+        guest code can invoke it -- an arriving update cannot interrupt the
+        workflow.  And it must be asked for at a fixed *program position* rather
+        than a moment in time, because replay re-executes the workflow and
+        matches host calls against the recorded history in order.  See
+        ``engine/updater.go``.
+
+        The consequence, stated rather than hidden: an update is handled at the
+        next dispatch point, not the instant it arrives.
+        """
+        if not _USING_WASM:
+            # No host, so no queue to drain. This mirrors the Go SDK's
+            # `if h.pollUpdate == nil` guard, and it is load-bearing rather
+            # than defensive: dispatch_updates runs before EVERY suspension, and
+            # the non-WASM import is a stub that raises. Without this, any test
+            # or local run that sleeps or awaits would die inside a dispatch it
+            # never asked for.
+            return
+        if self._dispatching_updates:
+            # Reentrancy guard.  Every dispatch point is a suspension point, and
+            # a handler is ordinary workflow code that may sleep or await -- so
+            # without this a handler doing either would re-enter and recurse.
+            # Nesting would also be wrong if it terminated: the inner dispatch
+            # would interleave a second update's events inside the first one's.
+            return
+        self._dispatching_updates = True
+        try:
+            while True:
+                envelope = self.poll_update()
+                if not envelope:
+                    return
+                try:
+                    d = json.loads(envelope)
+                except ValueError:
+                    # The envelope is written by the host, so this is not a
+                    # caller error.  Returning rather than continuing avoids
+                    # spinning on a delivery that decodes the same way next time.
+                    return
+                if not isinstance(d, dict):
+                    return
+                name = d.get("name")
+                request_id = d.get("request_id")
+                payload = d.get("payload", "")
+                # A key lookup alone cannot tell "absent" from "present but not
+                # a string", and an empty request id would make complete_update
+                # address nothing.
+                if not isinstance(name, str) or not isinstance(request_id, str):
+                    return
+                if not name or not request_id:
+                    return
+                if not isinstance(payload, str):
+                    payload = ""
+                self._run_update(name, payload, request_id)
+        finally:
+            self._dispatching_updates = False
+
+    def _run_update(self, name: str, payload: str, request_id: str) -> None:
+        """Apply one delivered update and report the outcome.
+
+        Every path completes the request.  An unregistered handler, a validator
+        that refuses and a handler that raises are all answers the caller is
+        entitled to -- leaving any of them uncompleted would leave the caller
+        holding a promise nothing settles, which is the defect updates exist to
+        end.
+        """
+        if name not in self._update_handlers:
+            self.complete_update(
+                request_id, "", f"cleat: no update handler registered for {name!r}"
+            )
+            return
+        try:
+            if not self._validate_update(name, payload):
+                self.complete_update(request_id, "", f"update {name!r} failed validation")
+                return
+            result = self._handle_update(name, payload)
+        except Exception as exc:  # noqa: BLE001 -- the caller is owed an answer
+            self.complete_update(request_id, "", str(exc))
+            return
+        self.complete_update(request_id, result if result is not None else "", "")
 
     # There is no register_query_handler / _handle_query here (removed
     # 2026-08-09). register_query_handler recorded a handler name with the

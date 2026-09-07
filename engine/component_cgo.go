@@ -535,6 +535,8 @@ const (
 	// durable-handlers interface
 	cbTypeRegisterUpdateHandler // (string) -> u64
 	cbTypeRegisterQueryHandler  // (string) -> u64
+	cbTypePollUpdate            // () -> string
+	cbTypeCompleteUpdate        // (string,string,string) -> u64
 
 	// durable-messaging interface
 	cbTypeDurableSend    // (string,string,string) -> u64
@@ -815,6 +817,10 @@ func goComponentCallback(
 		return entry.backend.dispatchRegisterUpdateHandler(args, nargs, results, nresults)
 	case cbTypeRegisterQueryHandler:
 		return entry.backend.dispatchRegisterQueryHandler(args, nargs, results, nresults)
+	case cbTypePollUpdate:
+		return entry.backend.dispatchPollUpdate(args, nargs, results, nresults)
+	case cbTypeCompleteUpdate:
+		return entry.backend.dispatchCompleteUpdate(args, nargs, results, nresults)
 	case cbTypeDurableSend:
 		return entry.backend.dispatchDurableSend(args, nargs, results, nresults)
 	case cbTypeScheduleInvoke:
