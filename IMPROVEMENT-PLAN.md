@@ -6780,6 +6780,77 @@ fix: the revert is loud, the restore is silent. Commit before falsifying, or res
 `cleat_` names uses them as fixtures that make a real call, so a stale name fails to link;
 `grep -rn "must stay in sync" engine/*_test.go wasm/*_test.go` now returns only this section's own
 quotation of the comment that was removed.
+### 3.241 Nothing checked whether an SDK can reach every host call — 🟢 **GUARDED 2026-09-07** (WS-1, 2026-09-07)
+
+`TestEverySDKImportIsAHostExport` checks that every name an SDK imports exists on the host. That
+direction fails loudly — the guest does not instantiate. **Nothing checked the reverse**, and the
+reverse fails silently: the capability simply does not exist in that language, and nothing
+anywhere says so.
+
+The two are not redundant. **An SDK that binds nothing passes the forward test perfectly.**
+
+`TestEverySDKReachesEveryHostExport` adds the reverse, reusing the same five extractors — which
+are now a shared `sdkImportSources` table, so a fix to a parse improves both directions. Measured
+2026-09-07, over the 49 workflow-facing exports (52 less the worker handshake pair and the
+deliberately unbindable `cleat_register_query_handler`):
+
+| SDK | cannot reach | what |
+|---|---|---|
+| **assemblyscript** | **0** | full parity |
+| rust | 3 | `cleat_schedule_cron`, `cleat_list_crons`, `cleat_delete_cron` |
+| java | 3 | the same cron trio |
+| python | 5 | `cleat_await_any_child`, `cleat_poll_child`, `cleat_run_detached`, `cleat_json_parse`, `cleat_json_stringify` |
+| go | 6 | but only **3** are gaps — see below |
+
+**AssemblyScript, not Go, is the only SDK at full parity.** That is not what anyone would have
+guessed, and it is the reason this direction was worth checking. It is also the one row here that
+no existing document states.
+
+**The raw count overstates Go, and saying "6" would have been the flattering-direction error this
+document keeps recording.** Three of Go's six are reached another way and adding the host call
+would be redundant:
+
+- `cleat_json_parse` / `cleat_json_stringify` — `encoding/json` is in the standard library. The
+  host call exists for guests whose language has no JSON.
+- `cleat_uuid` — already durable as `SideEffect(func() string {...})`, and Go binds
+  `cleat_side_effect`. Worth stating precisely, because the near-miss is a determinism bug: a
+  native `uuid.New()` is **not** replay-safe. The host call is a convenience over the safe form,
+  not the only safe form.
+
+Go's three real gaps are `cleat_fetch` (a durable HTTP fetch; `net/http` in a guest is neither
+durable nor replayable) and `cleat_get_scope` / `cleat_set_scope`, which nothing else exposes.
+
+**The cron trio was already known, and this test did not discover it.** `tiers.yaml` holds
+`workflow-callable-cron` at **tier 2 for exactly this reason** — "rust and java SDKs declare no
+cron surface at all", with tier 1 requiring only `[go, python]` — and §3.170's coverage table
+already recorded rust at 52/55 naming the same three. Re-deriving it independently is
+corroboration, not a finding, and presenting it as new would be its own kind of inflation.
+
+What is new is that it is now **guarded**. The gap was recorded in two places that a code change
+cannot fail, so nothing stopped a third SDK from drifting the same way, or these three from
+widening to four. The baseline is shrink-only and lives next to the extractors, so the next
+regression is a red test rather than a paragraph someone has to remember to re-read.
+
+The one substantive addition to what tiers.yaml says: **nothing composes cron.** Unlike
+request/reply after [§3.220](#3220), there is no combination of other host calls that schedules
+one, so the gap cannot be worked around in-language.
+
+Held per-SDK in `sdkUnreachedBaseline`, shrink-only, each entry carrying its reason.
+
+**Known-positives**, because the empty-baseline version passed for four of five SDKs:
+
+| control | result |
+|---|---|
+| add a host export bound by no SDK | all **5** SDKs report it as widening |
+| put a name in a baseline the SDK does reach | fails, demanding the baseline shrink |
+| break an extractor | the floor fires — and note a broken extractor here reports the ABI as *unreachable*, the opposite direction from the forward test |
+
+**The new test was selected by no CI job**, and `-list` is what showed it. The workflow's term was
+`EverySDKImportIsAHostExport`, which stops matching one character into
+`TestEverySDKReachesEveryHostExport` — `I` against `R`. Exactly the `TestHostCalls` /
+`TestHostCallTable…` case this document already records. Widened to `EverySDK`:
+
+    cd tests/plugin-harness && go test . -list 'EverySDK' ./...   # 2, was 1
 
 ### 3.238 A pending update request outlived the workflow it was for, and its promise never settled — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
 

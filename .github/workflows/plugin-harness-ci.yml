@@ -252,14 +252,23 @@ jobs:
           #   cd tests/plugin-harness && go test -list 'TestHostCalls|HostCallTableCovers' ./...
           # must list 6. If it lists 3, the guards have come unselected again.
           #
-          # EverySDKImportIsAHostExport is named separately because it matches
-          # none of the other terms -- it is not a TestHostCalls* and not a
-          # TableCovers*. Added as its own term rather than by renaming the
-          # test to fit an existing one: the name should say what the test
-          # does, and the pattern should say what CI runs. Confirm with
-          #   go test -list 'EverySDKImportIsAHostExport' ./...    -> 1
+          # EverySDK is named separately because it matches none of the other
+          # terms -- these are not TestHostCalls* and not TableCovers*. Added
+          # as its own term rather than by renaming the tests to fit an
+          # existing one: the name should say what the test does, and the
+          # pattern should say what CI runs. Confirm with
+          #   go test -list 'EverySDK' ./...    -> 2
+          #
+          # The term is 'EverySDK', not 'EverySDKImportIsAHostExport' as it
+          # read until 2026-09-07. The reverse-direction guard is
+          # TestEverySDKReachesEveryHostExport, and the old term stops matching
+          # one character into it -- 'I' against 'R' -- so it was selected by
+          # no CI job on the commit that introduced it. That is CLAUDE.md's
+          # "a widened pattern that fixes one name can leave the next one out",
+          # and -list is what shows it; -run answers only by implication and is
+          # silent when the answer is "less than you think".
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDKImportIsAHostExport' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only

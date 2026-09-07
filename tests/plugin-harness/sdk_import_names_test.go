@@ -33,6 +33,65 @@ import (
 // IMPROVEMENT-PLAN 3.55 -- a declaration that disagrees with the host, where
 // the disagreement is fatal and silent.
 //
+// sdkImportSource names one SDK's import surface and how to read it.
+//
+// Shared by both directions -- TestEverySDKImportIsAHostExport (an SDK must not
+// import what the engine does not export) and TestEverySDKReachesEveryHostExport
+// (the engine should not export what an SDK cannot reach). One set of
+// extractors, so a fix to a parse improves both.
+type sdkImportSource struct {
+	name  string
+	floor int
+	fn    func(*testing.T, string) map[string]string // import name -> where
+}
+
+var sdkImportSources = []sdkImportSource{
+	// Rust's floor is 44 where the others are 45, and the two are the
+	// externs IMPROVEMENT-PLAN 3.220 removed: cleat_send_signal_and_wait
+	// and cleat_reply_to_signal. Request/reply is now composed from
+	// create_promise + signal_workflow + await_promise + resolve_promise,
+	// so a Rust guest declares neither import.
+	//
+	// The floor exists to catch the EXTRACTOR breaking, not to freeze the
+	// count, so it moves when imports are deliberately removed -- but only
+	// after checking the drop is the removal and not a silently broken
+	// parse. Measured 2026-09-06, extracting the extern block from each
+	// revision: origin/develop 46, this branch 44.
+	{"rust", 44, rustDeclaredImports},
+	// Java's floor is 44 for the same reason as Rust's above: the two
+	// @Import declarations IMPROVEMENT-PLAN 3.220 removed,
+	// cleat_send_signal_and_wait and cleat_reply_to_signal. Measured
+	// 2026-09-06 by diffing the SETS, not the counts -- origin/develop 46,
+	// this branch 44, removed exactly those two and added none.
+	{"java", 44, javaDeclaredImports},
+	{"assemblyscript", 45, asDeclaredImports},
+
+	// Go and Python declare nothing themselves, and are covered here by
+	// the tables that decide their import names instead.
+	//
+	// A Go guest gets its imports from a generated adapter -- there is no
+	// //go:wasmimport anywhere in the tree, only in docs -- and the name
+	// comes from hostFunctions in wasm/usage.go. Python reaches the host
+	// through the Component Model, so its names come from WitToEnvImport
+	// in wasm/component_rewrite.go, which maps WIT (module, function)
+	// pairs to flat "env" names.
+	//
+	// Both tables are host-side, so a mismatch is far less likely than in
+	// an SDK that spells the name itself -- which is a real reason these
+	// two are different in kind, not an excuse for skipping them. A typo
+	// in either table is the same fatal-and-silent instantiation failure,
+	// and neither had a check.
+	{"go (wasm/usage.go hostFunctions)", 30, goAdapterImportNames},
+	// Python's floor is 43 for the same reason as Rust's and Java's 44:
+	// the two names IMPROVEMENT-PLAN 3.220 removed. Python is the only
+	// SDK whose imports are decided host-side, by this table rather than
+	// by a declaration in its own source, so the removal there IS the
+	// removal here. Measured 2026-09-06 by diffing the SETS, not the
+	// counts -- origin/develop 45, this branch 43, removed exactly
+	// cleat_send_signal_and_wait and cleat_reply_to_signal, added none.
+	{"python (wasm/component_rewrite.go WitToEnvImport)", 43, witEnvImportNames},
+}
+
 // Anchored on DECLARATION SITES, per CLAUDE.md: the extern block, the @Import
 // annotation, the @external decorator. Not on names appearing in source, which
 // cannot tell a declaration from a comment about one.
@@ -45,56 +104,7 @@ func TestEverySDKImportIsAHostExport(t *testing.T) {
 			"test compares against a set it never found.", len(exports))
 	}
 
-	for _, sdk := range []struct {
-		name  string
-		floor int
-		fn    func(*testing.T, string) map[string]string // import name -> where
-	}{
-		// Rust's floor is 44 where the others are 45, and the two are the
-		// externs IMPROVEMENT-PLAN 3.220 removed: cleat_send_signal_and_wait
-		// and cleat_reply_to_signal. Request/reply is now composed from
-		// create_promise + signal_workflow + await_promise + resolve_promise,
-		// so a Rust guest declares neither import.
-		//
-		// The floor exists to catch the EXTRACTOR breaking, not to freeze the
-		// count, so it moves when imports are deliberately removed -- but only
-		// after checking the drop is the removal and not a silently broken
-		// parse. Measured 2026-09-06, extracting the extern block from each
-		// revision: origin/develop 46, this branch 44.
-		{"rust", 44, rustDeclaredImports},
-		// Java's floor is 44 for the same reason as Rust's above: the two
-		// @Import declarations IMPROVEMENT-PLAN 3.220 removed,
-		// cleat_send_signal_and_wait and cleat_reply_to_signal. Measured
-		// 2026-09-06 by diffing the SETS, not the counts -- origin/develop 46,
-		// this branch 44, removed exactly those two and added none.
-		{"java", 44, javaDeclaredImports},
-		{"assemblyscript", 45, asDeclaredImports},
-
-		// Go and Python declare nothing themselves, and are covered here by
-		// the tables that decide their import names instead.
-		//
-		// A Go guest gets its imports from a generated adapter -- there is no
-		// //go:wasmimport anywhere in the tree, only in docs -- and the name
-		// comes from hostFunctions in wasm/usage.go. Python reaches the host
-		// through the Component Model, so its names come from WitToEnvImport
-		// in wasm/component_rewrite.go, which maps WIT (module, function)
-		// pairs to flat "env" names.
-		//
-		// Both tables are host-side, so a mismatch is far less likely than in
-		// an SDK that spells the name itself -- which is a real reason these
-		// two are different in kind, not an excuse for skipping them. A typo
-		// in either table is the same fatal-and-silent instantiation failure,
-		// and neither had a check.
-		{"go (wasm/usage.go hostFunctions)", 30, goAdapterImportNames},
-		// Python's floor is 43 for the same reason as Rust's and Java's 44:
-		// the two names IMPROVEMENT-PLAN 3.220 removed. Python is the only
-		// SDK whose imports are decided host-side, by this table rather than
-		// by a declaration in its own source, so the removal there IS the
-		// removal here. Measured 2026-09-06 by diffing the SETS, not the
-		// counts -- origin/develop 45, this branch 43, removed exactly
-		// cleat_send_signal_and_wait and cleat_reply_to_signal, added none.
-		{"python (wasm/component_rewrite.go WitToEnvImport)", 43, witEnvImportNames},
-	} {
+	for _, sdk := range sdkImportSources {
 		t.Run(sdk.name, func(t *testing.T) {
 			declared := sdk.fn(t, root)
 			// Input assertion. An extractor that silently finds nothing
@@ -276,6 +286,166 @@ func witEnvImportNames(t *testing.T, root string) map[string]string {
 	re := regexp.MustCompile(`"[a-z0-9\-/:.]+"\s*:\s*"([a-z_][a-z0-9_]*)"`)
 	for _, m := range re.FindAllStringSubmatch(src, -1) {
 		out[m[1]] = "wasm/component_rewrite.go"
+	}
+	return out
+}
+
+// notWorkflowFacing are host exports no SDK should ever bind, so their absence
+// from every SDK is not a gap and must not be recorded as one.
+//
+// cleat_poll_work and cleat_complete are the worker handshake -- the runtime
+// calls them, a guest never does. cleat_register_query_handler is deliberately
+// unbindable: no engine version ever routed an external query to it, and every
+// SDK carries a comment saying it is absent on purpose (see
+// docs/determinism.md, "Why there is no RegisterQueryHandler").
+var notWorkflowFacing = map[string]bool{
+	"cleat_poll_work":              true,
+	"cleat_complete":               true,
+	"cleat_register_query_handler": true,
+}
+
+// sdkUnreachedBaseline records, per SDK, the workflow-facing host exports that
+// SDK cannot reach. SHRINK-ONLY: removing an entry when the binding lands is
+// the point; adding one widens the gap and needs a reason here.
+//
+// Measured 2026-09-07. Note that AssemblyScript, not Go, is the only SDK at
+// full parity -- which is the sort of thing nobody would have guessed, and the
+// reason this direction is worth checking at all.
+var sdkUnreachedBaseline = map[string][]string{
+	// Rust and Java: the cron trio. AssemblyScript and Python both bind these,
+	// so this is a two-SDK gap in a shipped capability, not an unbuilt feature.
+	// Nothing composes them either -- unlike request/reply after 3.220, there is
+	// no combination of other host calls that schedules a cron.
+	"rust": {
+		"cleat_delete_cron",
+		"cleat_list_crons",
+		"cleat_schedule_cron",
+	},
+	"java": {
+		"cleat_delete_cron",
+		"cleat_list_crons",
+		"cleat_schedule_cron",
+	},
+
+	// Go splits into two kinds, and calling all six "gaps" would overstate it.
+	//
+	// NOT gaps -- Go reaches the capability another way, and adding the host
+	// call would be redundant:
+	//   cleat_json_parse, cleat_json_stringify  encoding/json is in the standard
+	//                                           library; the host call exists for
+	//                                           guests whose language has no JSON.
+	//   cleat_uuid                              composable and already durable as
+	//                                           SideEffect(func() string {...}),
+	//                                           which Go does bind
+	//                                           (cleat_side_effect). A native
+	//                                           uuid.New() would NOT be
+	//                                           replay-safe; the host call is a
+	//                                           convenience over the safe form,
+	//                                           not the only safe form.
+	//
+	// REAL gaps -- no native or composed substitute:
+	//   cleat_fetch                 a durable HTTP fetch. net/http in a guest is
+	//                               not durable and not replayable.
+	//   cleat_get_scope, cleat_set_scope   workflow scope; nothing else exposes it.
+	"go (wasm/usage.go hostFunctions)": {
+		"cleat_fetch",
+		"cleat_get_scope",
+		"cleat_json_parse",
+		"cleat_json_stringify",
+		"cleat_set_scope",
+		"cleat_uuid",
+	},
+
+	// Python: five real gaps. Unlike Go's, none of these has a native or
+	// composed substitute -- await_any_child and poll_child are child-workflow
+	// control flow, run_detached is a lifecycle primitive, and the json pair is
+	// genuinely needed by a guest whose host-side rewrite table decides its
+	// imports.
+	//
+	// Note this is the WIT rewrite table (host-side), not python-sdk's own
+	// bindings. The two were compared on 2026-09-07 and agree on all 44 names
+	// they share, differing only on cleat_register_query_handler, which is in
+	// notWorkflowFacing above.
+	"python (wasm/component_rewrite.go WitToEnvImport)": {
+		"cleat_await_any_child",
+		"cleat_json_parse",
+		"cleat_json_stringify",
+		"cleat_poll_child",
+		"cleat_run_detached",
+	},
+
+	// assemblyscript: deliberately absent. It reaches every workflow-facing
+	// export, and an empty entry here would read as "not yet measured".
+}
+
+// TestEverySDKReachesEveryHostExport is the reverse of
+// TestEverySDKImportIsAHostExport, and it answers the question that one cannot.
+//
+// That test asks whether every name an SDK imports exists on the host. A
+// mismatch there is fatal and loud: the guest fails to instantiate. This one
+// asks whether every name the host offers is reachable from each SDK, and a
+// mismatch is silent -- the capability simply does not exist in that language,
+// and nothing anywhere says so.
+//
+// Both directions are needed because they fail differently, which is CLAUDE.md's
+// "a check can tell you whether it is consistent with itself; it cannot tell you
+// what it is not looking at". An SDK that binds NOTHING passes the forward test
+// perfectly.
+func TestEverySDKReachesEveryHostExport(t *testing.T) {
+	root := findProjectRoot(t)
+	exports := hostExportNames(t, root)
+	if len(exports) < 40 {
+		t.Fatalf("found only %d .Export( registrations in engine/imports.go", len(exports))
+	}
+
+	for _, sdk := range sdkImportSources {
+		t.Run(sdk.name, func(t *testing.T) {
+			declared := sdk.fn(t, root)
+			if len(declared) < sdk.floor {
+				t.Fatalf("%s: found only %d import declarations, expected at least %d -- "+
+					"the extractor is broken, and a broken extractor makes THIS test "+
+					"report the whole ABI as unreachable rather than reporting nothing.",
+					sdk.name, len(declared), sdk.floor)
+			}
+
+			var unreached []string
+			for name := range exports {
+				if notWorkflowFacing[name] {
+					continue
+				}
+				if _, ok := declared[name]; !ok {
+					unreached = append(unreached, name)
+				}
+			}
+			sort.Strings(unreached)
+
+			base := sdkUnreachedBaseline[sdk.name]
+			if widened := missingFrom(unreached, base); len(widened) > 0 {
+				t.Errorf("%s cannot reach %d host export(s) beyond its recorded baseline:\n  %s\n\n"+
+					"A host call added without a binding in this SDK widens the gap between "+
+					"languages. Either bind it, or add it to sdkUnreachedBaseline[%q] with a "+
+					"reason.", sdk.name, len(widened), strings.Join(widened, "\n  "), sdk.name)
+			}
+			if closed := missingFrom(base, unreached); len(closed) > 0 {
+				t.Errorf("sdkUnreachedBaseline[%q] names %d host export(s) this SDK now reaches:\n  %s\n\n"+
+					"Good news, and the baseline must shrink to match or it stops measuring "+
+					"anything.", sdk.name, len(closed), strings.Join(closed, "\n  "))
+			}
+		})
+	}
+}
+
+// missingFrom returns members of a that are not in b.
+func missingFrom(a, b []string) []string {
+	in := make(map[string]bool, len(b))
+	for _, x := range b {
+		in[x] = true
+	}
+	var out []string
+	for _, x := range a {
+		if !in[x] {
+			out = append(out, x)
+		}
 	}
 	return out
 }
