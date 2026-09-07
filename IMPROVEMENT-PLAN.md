@@ -6467,6 +6467,102 @@ with the symptom this section describes: `no reply to signal "ask" from workflow
 leave the wait by different branches.
 
 
+### 3.236 The plugin harness stripped the tenant RLS policies off a shared SQL Server database — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+`tests/plugin-harness`'s `RunCoreMigrations` split each migration file on `GO` and executed the
+batches on a bare connection, with no transaction. Running its MSSQL arm against a database that
+already carried the schema left **7 of 9 tenant SECURITY POLICYs permanently dropped**, and every
+tenant-scoped MSSQL test in the repo afterwards ran with no RLS backstop.
+
+Reproduced in one command, twice, against a database freshly built from the shipped migrations:
+
+    # before: 9    after: 2 -- TenantFilter_Promises, TenantFilter_Settings
+    go test ./tests/plugin-harness/ -run TestPluginCalls_MultiDB -count=1
+
+#### The mechanism was written down in advance
+
+`migrations/mssql/001_schema.sql` drops the seven base policies at the *top*, before the
+`CREATE OR ALTER` of the function they are schemabound to, and recreates them at the bottom. Its
+header explains why that is safe and names the single condition:
+
+> The condition: that atomicity is the runner's, not this file's. Applying this file by hand —
+> sqlcmd, a GUI, **any tool that treats GO as a real batch separator and autocommits each batch** —
+> does leave tenant-scoped tables unfiltered from here to the CREATE SECURITY POLICY block at the
+> end.
+
+`RunCoreMigrations` was that tool. And it is worse than the header's warning, which describes a
+*window*: 001 never reaches the recreate block on a re-run, because migration 031 adds
+`TenantFilter_Promises` — which 001 predates and therefore does not drop, and which holds a hard
+dependency on `dbo.fn_tenant_filter`. So `CREATE OR ALTER FUNCTION` fails, the seven drops before
+it are already committed, and the loss is permanent. The two survivors are exactly the two 001
+does not know about.
+
+#### Why CI could not see it, and a developer always could
+
+`plugin-harness-ci.yml:354` points `CLEAT_TEST_MSSQL` at `database=master` on a fresh SQL Server
+container. The migrations are applied exactly **once**, so there is never a second application to
+fail. A developer following CLAUDE.md and setting all three DSNs has the opposite: a long-lived
+database that already carries the schema. **This whole class of defect — anything that only goes
+wrong on re-application — is invisible to a CI that starts from an empty container every time.**
+
+The MSSQL arm of `OpenTestDB` creates a `SCHEMA`, not a database (MySQL gets its own database),
+so this ran against the shared `cleat` database in `dbo`.
+
+#### Fixed
+
+One transaction per migration file, which restores the atomicity 001's header depends on. The
+re-run still fails — that is a separate defect, [§3.237](#3237) — but it now fails the way 001's
+header calls "the OLD ordering failed safely", leaving the database as it was found.
+
+#### The regression test's first version passed the falsification
+
+Worth recording, because it is CLAUDE.md's "a falsification that stays green is telling you which
+case you did not write", and the flaw was invisible by inspection. The test measured the policy
+count after one application and compared it against the count after a second. Backing the
+transaction out left it **green**: on an already-migrated database the *first* application is the
+damaging one, so the test compared 2 against 2 and found them equal. The `before == 0` vacuity
+guard did not fire, because 2 is not 0.
+
+What it needed was not a delta but an **absolute** — the set of policies the migrations bind,
+parsed from the migrations — asserted after *both* applications. Two known-positives now fail
+without the fix, where the first version failed on neither:
+
+| starting state | without the transaction |
+|---|---|
+| fresh database | `RE-APPLYING … left 2 of the 9 … standing` |
+| already-stripped database | `after applying … carries 2 of the 9 …` + the drop-and-recreate instruction |
+
+The parse is anchored at line start (`^CREATE SECURITY POLICY dbo\.`) for the reason this document
+keeps re-learning: unanchored, it also matches 001's own header, which *discusses* the statement in
+prose. Measured 2026-09-06 — unanchored returns 16 distinct "names", 7 of them fragments of English
+sentences; anchored returns the 9 that exist.
+
+### 3.237 `migrations/mssql/001_schema.sql` cannot be re-applied once migration 031 has run — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
+
+Split out of [§3.236](#3236), which fixed the damage this causes but not the failure itself.
+
+001 drops the seven policies it owns by name, then `CREATE OR ALTER`s `dbo.fn_tenant_filter`.
+Migration 031 adds `TenantFilter_Promises` and 042 adds `TenantFilter_Settings`; both are
+schemabound to that function and neither is in 001's drop list, because 001 predates them. So a
+second application of 001 fails:
+
+    Cannot ALTER 'dbo.fn_tenant_filter' because it is being referenced by object 'TenantFilter_Promises'
+
+**The obvious repair is wrong.** Making 001's drop list dynamic — "drop every policy whose
+predicate references `fn_tenant_filter`" — would drop `TenantFilter_Promises` and
+`TenantFilter_Settings` *without recreating them*, because the migrations that create those are
+031 and 042 and they are already recorded as applied. That turns a loud failure into a quiet loss
+of two policies, which is the same shape as §3.236 with a smaller number.
+
+The real answer is that nothing should re-apply a recorded migration. `engine/testutil` uses
+`migration.Runner`, which records what it has applied and skips it; `tests/plugin-harness` has its
+own loop that re-applies everything unconditionally. Moving it onto the Runner is the fix, and the
+complication to measure first is `schemaPrefix` — plugin-harness prepends a per-file
+`SET search_path` / `USE` and pins one connection, which the Runner does not do.
+
+Affects only `TestPluginCalls_MultiDB/mssql`, and only against an already-migrated database, so
+CI is green on it (see §3.236 on why).
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

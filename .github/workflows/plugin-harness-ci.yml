@@ -389,7 +389,17 @@ jobs:
       # inside the module instead. See tests/plugin-harness/go.mod.
       # ../../test-report.json: the Skip budget step below runs from the repo
       # root, so the report must land there rather than inside the module.
-      - run: go test -count=1 -timeout=600s -json ./... -run 'TestPluginCalls_MultiDB' > ../../test-report.json 2>&1
+      # TestReapplyingTheCoreMigrations… is named separately because it matches
+      # no part of TestPluginCalls_MultiDB, and a -run pattern that does not
+      # name a test does not run it -- it was selected by no CI job at all when
+      # it was written. Confirm with, from tests/plugin-harness:
+      #   go test . -list 'TestPluginCalls_MultiDB|TestReapplyingTheCoreMigrations'
+      # which must list BOTH names. It creates and drops a database of its own
+      # (cleat_migration_rerun_test) rather than using the one this job's DSN
+      # names, because it applies the core migrations twice on purpose and Go
+      # would run it before TestPluginCalls_MultiDB -- see IMPROVEMENT-PLAN
+      # 3.236.
+      - run: go test -count=1 -timeout=600s -json ./... -run 'TestPluginCalls_MultiDB|TestReapplyingTheCoreMigrations' > ../../test-report.json 2>&1
         working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"

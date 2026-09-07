@@ -84,18 +84,63 @@ func OpenTestDB(t *testing.T, dialect plugin.Dialect, connStr string) (*sql.DB, 
 // Migration files are expected at ../../migrations/{postgres,mysql,mssql}/.
 // This function is a no-op if the migration directory cannot be found (the
 // caller is expected to have created the schemas another way).
+//
+// # One transaction per FILE, which is not a refinement
+//
+// migrations/mssql/001_schema.sql drops the seven tenant SECURITY POLICYs at
+// the top, before the CREATE OR ALTER of the function they are schemabound to,
+// and recreates them at the bottom. Its header explains why that is safe and
+// names the single condition it rests on:
+//
+//	"that atomicity is the runner's, not this file's. Applying this file by
+//	hand -- sqlcmd, a GUI, ANY TOOL THAT TREATS GO AS A REAL BATCH SEPARATOR
+//	AND AUTOCOMMITS EACH BATCH -- does leave tenant-scoped tables unfiltered"
+//
+// This function was that tool. It split on GO and executed each batch on a
+// bare connection, so a file that failed part-way left everything before the
+// failure committed.
+//
+// On SQL Server that was not a window, it was permanent. 001 cannot re-run
+// against a database that already carries migration 031: 031 adds
+// TenantFilter_Promises, which 001 predates and so does not drop, and which
+// holds a hard dependency on dbo.fn_tenant_filter -- so the CREATE OR ALTER
+// FUNCTION fails with "Cannot ALTER 'dbo.fn_tenant_filter' because it is being
+// referenced by object 'TenantFilter_Promises'". The seven drops had already
+// committed. Measured 2026-09-06 against a freshly migrated database:
+//
+//	before this test: 9 security policies
+//	after  this test: 2 -- TenantFilter_Promises and TenantFilter_Settings,
+//	                       the two that 001 does not know to drop
+//
+// The MSSQL arm of OpenTestDB creates a SCHEMA, not a database, so this ran
+// against the shared cleat database in dbo -- and every tenant-scoped MSSQL
+// test in the repo afterwards ran with no RLS backstop. CI never saw it
+// because CI does not set CLEAT_TEST_MSSQL for this suite; a developer
+// following CLAUDE.md and setting all three DSNs does.
+//
+// A transaction restores the atomicity 001's header depends on. The re-run
+// still fails -- that is a separate defect, and this file's own failure is now
+// the loud, safe one 001's header calls "the OLD ordering failed safely" --
+// but the database it fails against is left as it was found.
 func RunCoreMigrations(t *testing.T, db *sql.DB, dialect plugin.Dialect, schemaName string) {
 	t.Helper()
-
-	dir := coreMigrationDir(t, dialect)
-	if dir == "" {
-		t.Log("RunCoreMigrations: no migration directory found, skipping")
-		return
+	if err := runCoreMigrations(context.Background(), db, dialect, schemaName, coreMigrationDir(t, dialect)); err != nil {
+		t.Fatalf("RunCoreMigrations: %v", err)
 	}
+}
 
+// runCoreMigrations is RunCoreMigrations without the *testing.T, so that a
+// test can apply the migrations, observe the error, and go on to assert what
+// the database looks like afterwards. RunCoreMigrations cannot be used for
+// that: it calls t.Fatalf, which ends the test at the point the interesting
+// question starts.
+func runCoreMigrations(ctx context.Context, db *sql.DB, dialect plugin.Dialect, schemaName, dir string) error {
+	if dir == "" {
+		return nil
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("RunCoreMigrations: read dir %s: %v", dir, err)
+		return fmt.Errorf("read dir %s: %w", dir, err)
 	}
 
 	var files []fs.DirEntry
@@ -108,39 +153,51 @@ func RunCoreMigrations(t *testing.T, db *sql.DB, dialect plugin.Dialect, schemaN
 		return files[i].Name() < files[j].Name()
 	})
 
-	ctx := context.Background()
-
 	// Use a single dedicated connection so that SET search_path / USE
 	// database persists across all migration statements. Connection
 	// pooling would otherwise distribute statement execution across
 	// different connections, losing the schema/database context.
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		t.Fatalf("RunCoreMigrations: get conn: %v", err)
+		return fmt.Errorf("get conn: %w", err)
 	}
 	defer conn.Close()
 
 	if err := setSearchPath(ctx, conn, dialect, schemaName); err != nil {
-		t.Fatalf("RunCoreMigrations: set context %s: %v", schemaName, err)
+		return fmt.Errorf("set context %s: %w", schemaName, err)
 	}
 
 	for _, f := range files {
 		path := filepath.Join(dir, f.Name())
 		sqlBytes, err := os.ReadFile(path)
 		if err != nil {
-			t.Fatalf("RunCoreMigrations: read %s: %v", path, err)
+			return fmt.Errorf("read %s: %w", path, err)
 		}
 		sqlStr := string(sqlBytes)
 		if prefix := schemaPrefix(dialect, schemaName); prefix != "" {
 			sqlStr = prefix + ";" + "\n" + sqlStr
 		}
 		statements := splitStatements(dialect, sqlStr)
+
+		// See the doc comment above: the whole file, or none of it.
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin %s: %w", f.Name(), err)
+		}
 		for _, stmt := range statements {
-			if _, err := conn.ExecContext(ctx, stmt); err != nil {
-				t.Fatalf("RunCoreMigrations: execute %s: %v", f.Name(), err)
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				if rbErr := tx.Rollback(); rbErr != nil {
+					return fmt.Errorf("execute %s: %w (and rolling back failed: %v -- "+
+						"the database may be half-migrated)", f.Name(), err, rbErr)
+				}
+				return fmt.Errorf("execute %s: %w", f.Name(), err)
 			}
 		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit %s: %w", f.Name(), err)
+		}
 	}
+	return nil
 }
 
 // schemaPrefix returns a dialect-appropriate SET/USE statement to prepend
