@@ -376,7 +376,22 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 				// than guessing: answering "completed" here would reintroduce
 				// exactly the non-replayable answer #847 is about, and it
 				// would do it silently.
-				pr = pollResult{Status: "failed", Error: "child is complete but has no completion timestamp; poll_child cannot answer deterministically"}
+				//
+				// THERE IS A KNOWN POPULATION OF SUCH ROWS, so this is not a
+				// theoretical branch. Before #864 the first TERMINATE arm of
+				// enforceParentClosePolicy set status='failed' with no
+				// completed_at, in all three dialects. #864 fixed the write and
+				// touched no existing row, and every retention sweep gates on
+				// `completed_at IS NOT NULL` -- so those rows are never
+				// collected and the population never shrinks (#867).
+				//
+				// A child terminated that way is genuinely unanswerable here:
+				// its status is terminal and stable, but nothing on the row
+				// says WHEN it became terminal, so "was it complete at the
+				// parent's durable time" has no answer. Naming the cause beats
+				// a bare error, because the operator's next question is "which
+				// children?" and #867 has the enumeration.
+				pr = pollResult{Status: "failed", Error: "child is complete but has no completion timestamp, so poll_child cannot answer deterministically; if this child was terminated by a parent close policy before the #864 fix, its completed_at is permanently NULL -- see #867"}
 			case completedAtMs > s.nowMs:
 				// Completed, but AFTER the parent's durable clock. The original
 				// execution saw it running, so every replay must too.
