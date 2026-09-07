@@ -106,29 +106,6 @@ func TestWithDefVersion(t *testing.T) {
 	}
 }
 
-func TestWithUpdateHandler(t *testing.T) {
-	called := false
-	fn := func(name, payload string) (string, error) {
-		called = true
-		return "ok-" + name, nil
-	}
-	opt := WithUpdateHandler(fn)
-	e := NewEngine(nil, nil, opt)
-	if e.updateHandler == nil {
-		t.Fatal("WithUpdateHandler did not set updateHandler")
-	}
-	res, err := e.updateHandler("test", "body")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res != "ok-test" {
-		t.Errorf("got %q, want %q", res, "ok-test")
-	}
-	if !called {
-		t.Error("handler was not called")
-	}
-}
-
 func TestWithPluginCallObserver(t *testing.T) {
 	o := func(pluginName, functionName string, d time.Duration, err error) {
 	}

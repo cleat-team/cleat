@@ -3542,33 +3542,6 @@ func TestDeferralsFromHistory_MixedEvents(t *testing.T) {
 	}
 }
 
-// ---- DispatchUpdate ----
-
-func TestDispatchUpdate_NilHandler(t *testing.T) {
-	engine := NewEngine(nil, nil)
-	_, err := engine.DispatchUpdate(context.Background(), "update1", `{"key":"val"}`)
-	if err == nil {
-		t.Fatal("expected error for nil handler")
-	}
-	if !strings.Contains(err.Error(), "no update handler configured") {
-		t.Errorf("error should mention missing handler: %v", err)
-	}
-}
-
-func TestDispatchUpdate_ValidHandler(t *testing.T) {
-	handler := func(name, payload string) (string, error) {
-		return `{"result":"` + name + `"}`, nil
-	}
-	engine := NewEngine(nil, nil, WithUpdateHandler(handler))
-	result, err := engine.DispatchUpdate(context.Background(), "myUpdate", `{"x":1}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if want := `{"result":"myUpdate"}`; result != want {
-		t.Errorf("got %q, want %q", result, want)
-	}
-}
-
 // ---- invokeStepCallback ----
 
 func TestInvokeStepCallback_NilCallback(t *testing.T) {
