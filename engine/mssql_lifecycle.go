@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +36,32 @@ func (s *MSSQLStore) ClaimWorkflow(ctx context.Context, workerID string) (*Workf
 // a deadlock victim claimed nothing, so replaying the claim is sound. Errors
 // that leave the outcome unknown are not retried; see
 // withRollbackGuaranteedRetry (IMPROVEMENT-PLAN.md 2.26).
+// CountRunnableWorkflows mirrors claimWorkflowsOnce' candidate predicate
+// exactly, minus the READPAST/UPDLOCK hints and the TOP.
+//
+// `AND tenant_id` is explicit here for the reason recorded on the claim itself
+// (IMPROVEMENT-PLAN 3.91): dbo.fn_tenant_filter is off for the admin role, so
+// on SQL Server that predicate IS the whole of the tenant scoping. A count
+// without it would report other tenants' runnable work to this worker.
+//
+// The task queues travel as a comma-joined string through STRING_SPLIT, as the
+// claim's do -- not because it is nicer, but because differing from the claim
+// here is the one way this count can lie.
+func (s *MSSQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
+	if len(s.taskQueues) == 0 {
+		return 0, nil
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM workflow_instances
+		WHERE status IN ('ready', 'terminating')
+		  AND next_wake_at <= SYSUTCDATETIME()
+		  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p1, ','))
+		  AND tenant_id = @p2
+	`, strings.Join(s.taskQueues, ","), s.tenantID).Scan(&n)
+	return n, err
+}
+
 func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	var claimed []*WorkflowInstance
 	err := withRollbackGuaranteedRetry(ctx, "claim workflows", mssqlTxRetries, mssqlTxRetryDelay, func() error {

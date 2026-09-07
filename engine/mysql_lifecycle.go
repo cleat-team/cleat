@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +34,35 @@ func (s *MySQLStore) ClaimWorkflow(ctx context.Context, workerID string) (*Workf
 // Uses SELECT ... FOR UPDATE SKIP LOCKED to avoid contention.
 // MySQL does not support UPDATE ... RETURNING, so we use a three-step
 // process inside a transaction: SELECT FOR UPDATE, UPDATE, SELECT.
+// CountRunnableWorkflows mirrors ClaimWorkflows' candidate predicate exactly,
+// minus the lock and the LIMIT.
+//
+// MySQL carries `AND tenant_id = ?` explicitly, as its claim does -- it has no
+// RLS to lean on. The task_queue placeholders are built the same way for the
+// same reason: a fixed count would silently truncate a worker serving more
+// queues than the literal allows.
+func (s *MySQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
+	if len(s.taskQueues) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(s.taskQueues)), ",")
+	args := make([]any, 0, len(s.taskQueues)+1)
+	for _, q := range s.taskQueues {
+		args = append(args, q)
+	}
+	args = append(args, s.tenantID)
+
+	var n int
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT count(*) FROM workflow_instances
+		WHERE status IN ('ready', 'terminating')
+		  AND next_wake_at <= NOW(6)
+		  AND task_queue IN (%s)
+		  AND tenant_id = ?
+	`, placeholders), args...).Scan(&n)
+	return n, err
+}
+
 func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTx(ctx)
 	if err != nil {

@@ -33,6 +33,7 @@ import (
 // to that function. Otherwise it returns a safe zero-valued result.
 type mockStore struct {
 	claimWorkflowFn                    func(ctx context.Context, workerID string) (*engine.WorkflowInstance, error)
+	countRunnableWorkflowsFn           func(context.Context) (int, error)
 	claimWorkflowsFn                   func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error)
 	claimStickyWorkflowsFn             func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error)
 	loadEventHistoryFn                 func(ctx context.Context, workflowID string) ([]engine.EventRecord, error)
@@ -125,6 +126,17 @@ func (m *mockStore) ClaimWorkflows(ctx context.Context, workerID string, limit i
 		return m.claimWorkflowsFn(ctx, workerID, limit)
 	}
 	return nil, nil
+}
+
+// CountRunnableWorkflows: a double, so the honest answer is "I do not know".
+// Zero is what a store with nothing runnable returns, and the caller treats the
+// number as a floor, so a double reporting 0 never claims work exists that does
+// not. See IMPROVEMENT-PLAN 3.250.
+func (m *mockStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
+	if m.countRunnableWorkflowsFn != nil {
+		return m.countRunnableWorkflowsFn(ctx)
+	}
+	return 0, nil
 }
 
 func (m *mockStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {

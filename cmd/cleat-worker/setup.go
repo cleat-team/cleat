@@ -1174,6 +1174,15 @@ func (w *Worker) Run() {
 	w.wg.Wait()
 }
 
+// maxIdleTicks caps the dispatch loop's progressive idle backoff at
+// maxIdleTicks * pollInterval.
+//
+// Package-scoped rather than function-local so a test can bind to the real
+// value instead of a copy: TestTheRunnableCountIsAskedOnlyAtFullBackoff asserts
+// the runnable count is asked exactly once per idle streak, which is only
+// meaningful against the same number the loop uses.
+const maxIdleTicks = 6
+
 func (w *Worker) dispatchLoop() {
 	defer w.wg.Done()
 	w.healthTracker.setInterval("dispatch", w.pollInterval)
@@ -1183,7 +1192,6 @@ func (w *Worker) dispatchLoop() {
 
 	const maxBatchSize = 20 // cap claims per query to avoid oversized batches
 	idleTicks := 0
-	const maxIdleTicks = 6 // progressive backoff caps at 6 * pollInterval
 
 	for {
 		// When the worker is shutting down (context cancelled) or
@@ -1311,6 +1319,43 @@ func (w *Worker) dispatchLoop() {
 			sleep := time.Duration(idleTicks) * w.pollInterval
 			if idleTicks > maxIdleTicks {
 				sleep = maxIdleTicks * w.pollInterval
+			}
+
+			// A zero claim has two meanings and this loop cannot tell them
+			// apart: ClaimWorkflows uses FOR UPDATE SKIP LOCKED (READPAST on
+			// SQL Server), so a locked row is REMOVED from the result set
+			// rather than blocking. "Nothing to run" and "every candidate was
+			// locked" arrive here identically, and the second backs off to 6x
+			// while the work sits there. IMPROVEMENT-PLAN 3.249 and 3.250.
+			//
+			// Asking costs a query, so it is asked ONLY once fully backed off.
+			// That is the only state where the answer changes what anyone would
+			// do -- a briefly-idle worker does not need to know, one that has
+			// been at 6x for minutes with runnable rows does -- and at that
+			// point it is one query per six poll intervals rather than one per
+			// poll, on the loop's most common path.
+			//
+			// Deliberately NOT a behavioural change. Measured 2026-09-07,
+			// claim-vs-claim contention never produces this at any ratio: SKIP
+			// LOCKED skips, so with more candidates than lockers it takes the
+			// next free row. It needs a long-held lock, and nothing in the
+			// engine holds one today. Resetting the backoff here would add a
+			// mechanism against a condition nothing currently produces; saying
+			// so out loud costs a log line and catches the day that changes.
+			if idleTicks == maxIdleTicks {
+				if runnable, cErr := w.store.CountRunnableWorkflows(w.ctx); cErr != nil {
+					w.logger.DebugContext(w.ctx, "could not count runnable workflows while backed off",
+						"worker_id", w.id, "error", cErr)
+				} else if runnable > 0 {
+					w.logger.WarnContext(w.ctx,
+						"backed off to the maximum poll interval while runnable work exists; "+
+							"the claim is losing every race for these rows, which means something is "+
+							"holding a lock on them across poll intervals",
+						"worker_id", w.id,
+						"runnable", runnable,
+						"backoff", sleep,
+						"poll_interval", w.pollInterval)
+				}
 			}
 			select {
 			case <-w.ctx.Done():

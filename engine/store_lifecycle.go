@@ -32,6 +32,33 @@ func (s *PostgresStore) claimWorkflowImpl(ctx context.Context, workerID string) 
 // ClaimWorkflows atomically claims up to limit runnable workflow instances.
 // Like ClaimWorkflow but batches multiple claims into one query.
 
+// CountRunnableWorkflows mirrors ClaimWorkflows' candidate predicate exactly,
+// minus the lock and the LIMIT.
+//
+// Tenant scoping is beginTxWithRLS, as the claim's is: PostgreSQL carries no
+// explicit tenant_id predicate here because the application role is genuinely
+// subject to RLS. Adding one would not be harmless -- it would make this count
+// disagree with the claim on a connection where RLS is off, which is exactly
+// the case cross_tenant_claim_test.go exists to catch.
+func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count runnable workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var n int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM workflow_instances
+		WHERE status IN ('ready', 'terminating')
+		  AND next_wake_at <= now()
+		  AND task_queue = ANY($1)
+	`, pq.Array(s.taskQueues)).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
 func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {

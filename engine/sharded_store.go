@@ -177,6 +177,26 @@ func (s *ShardedStore) ClaimWorkflow(ctx context.Context, workerID string) (*Wor
 
 // ClaimWorkflows claims up to limit runnable workflows across all shards.
 // Iterates through shards collecting workflows until limit is reached or shards exhausted.
+// CountRunnableWorkflows sums every shard, because ClaimWorkflows walks every
+// shard. A count from one shard would answer a different question than the
+// claim asks and would under-report whenever the runnable work is elsewhere.
+//
+// A shard that errors is skipped rather than failing the whole count: this
+// feeds a diagnostic log line, and refusing to report anything because one
+// shard is unreachable is worse than reporting what the others say. The caller
+// treats the number as a floor.
+func (s *ShardedStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
+	total := 0
+	for _, sh := range s.shards {
+		n, err := sh.Store.CountRunnableWorkflows(ctx)
+		if err != nil {
+			continue
+		}
+		total += n
+	}
+	return total, nil
+}
+
 func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return s.claimAcrossShards(ctx, workerID, limit, "claim_workflows",
 		func(sh *Shard, budget int) ([]*WorkflowInstance, error) {

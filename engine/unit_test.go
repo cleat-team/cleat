@@ -1387,6 +1387,12 @@ func (s *stubWorkflowStore) ClaimWorkflow(ctx context.Context, workerID string) 
 func (s *stubWorkflowStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
+
+// CountRunnableWorkflows: a double, so the honest answer is "I do not know".
+// Zero is what a store with nothing runnable returns, and the caller treats the
+// number as a floor, so a double reporting 0 never claims work exists that does
+// not. See IMPROVEMENT-PLAN 3.250.
+func (s *stubWorkflowStore) CountRunnableWorkflows(_ context.Context) (int, error) { return 0, nil }
 func (s *stubWorkflowStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }

@@ -106,6 +106,12 @@ func (m *mockStore) ClaimWorkflows(ctx context.Context, workerID string, limit i
 	return nil, nil
 }
 
+// CountRunnableWorkflows: a double, so the honest answer is "I do not know".
+// Zero is what a store with nothing runnable returns, and the caller treats the
+// number as a floor, so a double reporting 0 never claims work exists that does
+// not. See IMPROVEMENT-PLAN 3.250.
+func (m *mockStore) CountRunnableWorkflows(_ context.Context) (int, error) { return 0, nil }
+
 func (m *mockStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 	if m.claimStickyWorkflowsFn != nil {
 		return m.claimStickyWorkflowsFn(ctx, workerID, limit)

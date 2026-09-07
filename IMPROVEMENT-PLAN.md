@@ -6838,6 +6838,59 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.250 A backed-off worker now says when runnable work exists — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+The visibility half of [§3.249](#3249), implemented after WS-3's user decided against a behavioural
+change. `ClaimWorkflows` uses `FOR UPDATE SKIP LOCKED`, so "nothing to run" and "every candidate was
+locked" arrive at the dispatch loop identically, and the second backs off to 6 × `pollInterval`
+while the work sits there.
+
+**`CountRunnableWorkflows` on `WorkflowStore`, and the cost objection is answered by WHERE it is
+paid.** The information needs a query, and a query on every idle poll is the objection that ruled
+out the behavioural fix — the idle poll is this loop's most common path. So it is asked only when
+`idleTicks == maxIdleTicks`: one query per six poll intervals, in the only state where the answer
+changes what anyone would do. A briefly-idle worker does not need to know; one fully backed off for
+minutes with runnable rows does.
+
+`TestTheRunnableCountIsAskedOnlyAtFullBackoff` pins that, and it is the test that protects the
+design rather than the behaviour. `idleTicks` resets only on a parent wake or a `NOTIFY`, so
+`== maxIdleTicks` is true **exactly once** per idle streak. Measured: **22 claim cycles, 1 count
+query.** Falsified both ways — `>=` in place of `==` gives **17**, and removing the call gives 0.
+A regression to `>=` would put a query on the hot path while every other test still passed.
+
+**The predicate must match the claim's, and the two ways to get it wrong are opposite:**
+
+- drop `task_queue` and it **over-reports** — rows a worker is correctly declining read as work it
+  is failing to claim. This was the one flaw in cleat#923 as filed, and it is now WS-3's note on
+  the issue.
+- drop the tenant scoping and it over-reports across tenants, which on SQL Server is not
+  hypothetical: `dbo.fn_tenant_filter` is off for the admin role, so `AND tenant_id` **is** the
+  whole of the scoping there ([§3.91](#391)).
+
+Asserted by **agreement with the claim** rather than by reading the SQL, because the SQL differs per
+dialect — PostgreSQL leans on RLS inside `beginTxWithRLS`, MySQL and SQL Server carry an explicit
+predicate. Agreement is the invariant; the spelling is not. Falsified per clause: dropping
+`task_queue` fails the blindness test, dropping the status predicate fails the agreement test.
+
+**A deliberate interface addition with four implementers** — `PostgresStore`, `MySQLStore`,
+`MSSQLStore`, `ShardedStore` (which sums across shards, because the claim walks all of them). Named
+as a decision rather than left as drift: unlike the options [§3.889](#3889) is about, this one has a
+production caller in `cmd/cleat-worker/setup.go` from the first commit. The alternative — logging
+the backoff state alone — was rejected because a genuinely idle worker emits the identical line: it
+makes the *state* visible without making the *distinction* visible, which is the entire point.
+
+**One test failure was its own fault, and the harness had already said so.** The task-queue test's
+raw `UPDATE` matched zero rows, and the count "failed to move" — because SQL Server's filter
+predicate hides every row from a connection with no tenant session context. `pluginDepsBackends`
+carries `prepareRawAccess` for exactly this, with a comment saying the test would otherwise "report
+a failure that is really its own". It now also asserts `RowsAffected() > 0`, so a fixture that moves
+nothing fails as a fixture rather than as a finding.
+
+`maxIdleTicks` moved from a function-local `const` to package scope so the test binds to the real
+value rather than a copy of it.
+
+`./engine/` on all three dialects: 4651 pass / 0 fail / 7 skip.
+
 ### 3.249 A locked row and an empty queue are the same answer to `ClaimWorkflows` — 🔵 **MEASURED, VISIBILITY-ONLY BY DECISION 2026-09-07** (WS-1, 2026-09-07)
 
 Raised by WS-3 as #923. `ClaimWorkflows` selects candidates `FOR UPDATE SKIP LOCKED`, so a locked
