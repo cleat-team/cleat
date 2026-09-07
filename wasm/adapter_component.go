@@ -63,8 +63,31 @@ func needsJSON(usage *UsageInfo) bool {
 }
 
 // needsUnsafe returns true if any adapter reads from output buffers.
+//
+// Both reasons the generated file can mention unsafe, and they are found
+// differently:
+//
+//   - An output buffer. generateField emits
+//     `unsafe.Pointer(unsafe.SliceData(xBuf))` for every kindOutString
+//     parameter, so the condition is numOutBufs > 0 -- the SAME predicate the
+//     generator uses, deliberately, rather than a second one that has to agree
+//     with it.
+//   - `unsafe.String`, which a def writes into its own ResultStmts to return a
+//     string that borrows the buffer.
+//
+// This used to test only the second, which asks what a def SAYS while the
+// unsafe.Pointer argument is SYNTHESISED by the generator from the import's
+// parameter kinds. PluginCallStreaming is the one adapter that has an output
+// buffer and no unsafe.String, so a workflow whose only host call was
+// PluginCallStreaming generated a file using unsafe without importing it and
+// failed to compile with "undefined: unsafe". Any second host call pulled the
+// import in and hid it, which is why it survived: the defect needed a workflow
+// that used this call and nothing else.
 func needsUnsafe(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
+		if numOutBufs(hf.ImportName) > 0 {
+			return true
+		}
 		adef, ok := adapterDefs[hf.FieldName]
 		if !ok {
 			continue
