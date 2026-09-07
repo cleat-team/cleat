@@ -1902,6 +1902,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		}
 	}
 
+	// A workflow that has just gone terminal can never handle an update, so
+	// anything still pending against it is stranded. IMPROVEMENT-PLAN 3.238.
+	if finalStatus == "done" || finalStatus == "failed" {
+		w.failStrandedUpdates(wf, finalStatus)
+	}
+
 	// Post-finalization: logging and non-DB side effects.
 	if finalStatus == "done" {
 		// No defer pass here.
@@ -2647,6 +2653,67 @@ func (w *Worker) waitForDB() {
 // The precedent is the two call sites that already handled ErrFenceLost (the
 // ContinueAsNew and FinalizeWorkflowSegment paths): debug-log and return,
 // having done nothing. See IMPROVEMENT-PLAN.md 1.2.
+// failStrandedUpdates rejects every update request still pending against a
+// workflow that has just reached a terminal status, and rejects the promise
+// each one carries.
+//
+// A pending update is dispatched only while its workflow is mid-segment (see
+// dispatchPendingUpdates and IMPROVEMENT-PLAN 3.238). Once the workflow is
+// done, failed or terminated there is no future segment, so a request left
+// pending at that moment can never be handled -- and the caller is holding the
+// promise_id the API handed back with its 202, waiting on a promise nothing
+// will ever settle. Rejecting it turns a permanent silent hang into an answer.
+//
+// Composed from GetPendingUpdateRequests + CompleteUpdateRequest +
+// RejectPromise rather than added as a store method. All three are already on
+// engine.WorkflowStore, so this needs no SQL and no per-dialect work -- the
+// same reasoning as SendSignalAndWait becoming a composite in §3.220.
+//
+// Errors are logged and not returned. The workflow's terminal status is
+// already committed; failing to tidy a stranded request must not change what
+// happened to the workflow, and there is no caller here that could act on it.
+func (w *Worker) failStrandedUpdates(wf *engine.WorkflowInstance, terminalStatus string) {
+	ctx := context.Background()
+	st := w.storeFor(wf)
+	if st == nil {
+		return
+	}
+
+	updates, err := st.GetPendingUpdateRequests(ctx, wf.ID)
+	if err != nil {
+		w.logger.ErrorContext(ctx, "error fetching pending updates to strand",
+			"worker_id", w.id, "workflow_id", wf.ID, "error", err)
+		return
+	}
+	if len(updates) == 0 {
+		return
+	}
+
+	reason := fmt.Sprintf("workflow %s reached terminal status %q with this update still pending, "+
+		"so it can never be handled", wf.ID, terminalStatus)
+
+	for _, upd := range updates {
+		if cErr := st.CompleteUpdateRequest(ctx, wf.ID, upd.UpdateName, "", reason); cErr != nil {
+			w.logger.ErrorContext(ctx, "error failing stranded update",
+				"worker_id", w.id, "workflow_id", wf.ID, "update_name", upd.UpdateName, "error", cErr)
+			continue
+		}
+		if upd.PromiseID == "" {
+			continue
+		}
+		// RejectPromise is keyed by promise ID alone and reports not-found
+		// rather than silently succeeding (#818), so a promise already settled
+		// by some other path logs rather than being overwritten.
+		if rErr := st.RejectPromise(ctx, upd.PromiseID, reason); rErr != nil {
+			w.logger.ErrorContext(ctx, "error rejecting stranded update promise",
+				"worker_id", w.id, "workflow_id", wf.ID, "update_name", upd.UpdateName,
+				"promise_id", upd.PromiseID, "error", rErr)
+		}
+	}
+	w.logger.InfoContext(ctx, "failed stranded update requests",
+		"worker_id", w.id, "workflow_id", wf.ID, "terminal_status", terminalStatus, "count", len(updates))
+}
+
 func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string) (applied, deadLettered bool) {
 	st := w.storeFor(wf)
 	ctx := context.Background()
@@ -2703,6 +2770,9 @@ func (w *Worker) recordTerminalFailure(wf *engine.WorkflowInstance, startedAt ti
 	if !applied {
 		return
 	}
+	// See failStrandedUpdates: the workflow is terminal, so no future segment
+	// can handle an update still pending against it.
+	w.failStrandedUpdates(wf, "failed")
 	ctx := context.Background()
 	w.Metrics.RecordWorkflowFailed(ctx, wf.DefName, "", "")
 	w.Metrics.RecordWorkflowDuration(ctx, time.Since(startedAt), wf.DefName, "failed", "")
@@ -2777,6 +2847,10 @@ func (w *Worker) finishDeferPhase(wf *engine.WorkflowInstance, execStore engine.
 	case w.parentWakeCh <- struct{}{}:
 	default:
 	}
+
+	// The recorded outcome is now applied, so this workflow is terminal and
+	// any update still pending against it is stranded. See failStrandedUpdates.
+	w.failStrandedUpdates(wf, wf.PendingTerminalStatus)
 
 	w.Metrics.RecordWorkflowDuration(ctx, time.Since(startedAt), wf.DefName, wf.PendingTerminalStatus, "")
 	w.logger.InfoContext(ctx, "defer phase complete; terminal outcome applied",

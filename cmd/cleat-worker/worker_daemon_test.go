@@ -3821,3 +3821,123 @@ func (m *mockStore) SetAllowedSignalCallers(ctx context.Context, workflowID stri
 	}
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Stranded update requests — IMPROVEMENT-PLAN 3.238
+// ---------------------------------------------------------------------------
+
+// TestAStrandedUpdateIsRejectedWhenItsWorkflowFails drives the real terminal
+// path rather than failStrandedUpdates directly, because the defect it guards
+// is a MISSING CALL: the helper on its own could be perfect and every caller
+// still hang.
+//
+// An update request is dispatched only while its workflow is mid-segment. Once
+// the workflow is terminal there is no future segment, so a request still
+// pending at that moment can never be handled -- and the caller is holding the
+// promise_id the API returned with its 202, waiting on a promise nothing will
+// ever settle. Before this, that wait was permanent and silent.
+func TestAStrandedUpdateIsRejectedWhenItsWorkflowFails(t *testing.T) {
+	ms := &mockStore{}
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
+		return []engine.UpdateRequestInfo{
+			{WorkflowID: workflowID, UpdateName: "set-address", Payload: `{"a":1}`, PromiseID: "prom-1"},
+		}, nil
+	}
+	var completedName, completedErr string
+	var completeCalls int
+	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+		completeCalls++
+		completedName, completedErr = updateName, errMsg
+		return nil
+	}
+	var rejectedID, rejectedErr string
+	var rejectCalls int
+	ms.rejectPromiseFn = func(ctx context.Context, promiseID, errMsg string) error {
+		rejectCalls++
+		rejectedID, rejectedErr = promiseID, errMsg
+		return nil
+	}
+
+	w := newTestWorker(ms)
+	w.recordTerminalFailure(&engine.WorkflowInstance{ID: "wf-1"}, time.Now(), "boom", "ERR_UNKNOWN", "")
+
+	if completeCalls != 1 {
+		t.Fatalf("the stranded update was completed %d times, want 1", completeCalls)
+	}
+	if completedName != "set-address" {
+		t.Fatalf("completed update name = %q, want %q", completedName, "set-address")
+	}
+	if completedErr == "" {
+		t.Fatal("the stranded update was completed with an empty error, so the caller is told it " +
+			"finished rather than that it can never be handled")
+	}
+	if rejectCalls != 1 {
+		t.Fatalf("the update's promise was rejected %d times, want 1 -- the caller holds this "+
+			"promise_id and waits on it", rejectCalls)
+	}
+	if rejectedID != "prom-1" {
+		t.Fatalf("rejected promise = %q, want %q", rejectedID, "prom-1")
+	}
+	if rejectedErr != completedErr {
+		t.Fatalf("the request and its promise carry different reasons:\n  request: %q\n  promise: %q\n\n"+
+			"A caller reading the promise and a caller reading the request must not be told "+
+			"different things about the same event.", completedErr, rejectedErr)
+	}
+}
+
+// TestAStrandedUpdateWithNoPromiseIsStillCompleted: the promise_id is optional
+// -- CreateUpdateRequest takes it as a plain string and the HTTP API is not the
+// only way a request can be made. A request with no promise has no caller
+// blocked on it, but leaving it 'pending' forever still misreports what
+// happened to it.
+func TestAStrandedUpdateWithNoPromiseIsStillCompleted(t *testing.T) {
+	ms := &mockStore{}
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
+		return []engine.UpdateRequestInfo{{WorkflowID: workflowID, UpdateName: "no-promise"}}, nil
+	}
+	completeCalls := 0
+	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+		completeCalls++
+		return nil
+	}
+	rejectCalls := 0
+	ms.rejectPromiseFn = func(ctx context.Context, promiseID, errMsg string) error {
+		rejectCalls++
+		return nil
+	}
+
+	w := newTestWorker(ms)
+	w.failStrandedUpdates(&engine.WorkflowInstance{ID: "wf-1"}, "done")
+
+	if completeCalls != 1 {
+		t.Fatalf("completed %d times, want 1", completeCalls)
+	}
+	if rejectCalls != 0 {
+		t.Fatalf("rejected a promise %d times for a request that carries none; RejectPromise is "+
+			"keyed by promise ID alone, so an empty one would address whatever a blank ID matches",
+			rejectCalls)
+	}
+}
+
+// TestNoPendingUpdatesMeansNoWrites is the negative control. Every workflow in
+// the system reaches a terminal status, and almost none of them has an update
+// outstanding, so this path must be silent by default -- a version that
+// completed or rejected something unconditionally would pass the two tests
+// above.
+func TestNoPendingUpdatesMeansNoWrites(t *testing.T) {
+	ms := &mockStore{}
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
+		return nil, nil
+	}
+	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+		t.Fatal("completed an update request when none was pending")
+		return nil
+	}
+	ms.rejectPromiseFn = func(ctx context.Context, promiseID, errMsg string) error {
+		t.Fatal("rejected a promise when no update request was pending")
+		return nil
+	}
+
+	w := newTestWorker(ms)
+	w.failStrandedUpdates(&engine.WorkflowInstance{ID: "wf-1"}, "done")
+}
