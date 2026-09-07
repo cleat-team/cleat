@@ -9235,3 +9235,54 @@ tier 1 on all three dialects without qualifying it.
 
 The event-routing design does not wait for this: D4 pins a binary collation on its own key
 slots explicitly, which is correct regardless of what is decided here.
+### 3.317 `cleat_fetch` fails in every real worker — nothing sets a fetcher — 🔴 **OPEN** (WS-2, 2026-09-07)
+
+Found triaging #878's ten unwired `EngineOption` constructors. Nine were test seams,
+embedder API, or alternate paths. This one is a gap.
+
+**ABI.md §2.48 documents `cleat_fetch` without a caveat:**
+
+> Perform an HTTP fetch request. The method, URL, headers (JSON), and body are all
+> configurable.
+
+It is registered on both runtimes and bound by the SDKs. A workflow author reading that
+has every reason to expect it to work.
+
+**Nothing sets a fetcher.** The only reference to `WithFetcher` outside test files is its
+own declaration:
+
+    git ls-files '*.go' | xargs grep -n 'WithFetcher(' | grep -v _test.go
+    # engine/engine.go:151:func WithFetcher(f Fetcher) EngineOption { ... }
+
+So `engine/lifecycle.go` takes the else branch on every call from a real worker:
+
+    fetchErr = fmt.Errorf("no fetcher configured: workflow %s attempted %s %s", ...)
+
+**This is #879's shape exactly** — a complete, documented read path behind a write path
+nobody wired, discovered the same way and in the same sweep. `WithPluginStreamRegistry`
+had seven references, all in one test file; `WithFetcher` has none outside its
+declaration, which is the more extreme version of the same signature.
+
+**Why this is filed rather than fixed.** Wiring a default fetcher is a product decision,
+not an omission to patch: a default `http.Client` gives **every workflow arbitrary
+outbound HTTP from the worker**, which is a capability question and a security boundary,
+not a knob. The options:
+
+1. **Wire a default fetcher**, with an opt-out flag. Makes the documented behaviour true;
+   grants outbound network to all workflow code by default.
+2. **Wire it behind an explicit flag**, default off. Documented behaviour becomes true only
+   for operators who ask, and the error message should then say which flag.
+3. **Document it as embedder-only** — `cleat_fetch` works when you embed the engine and
+   supply a `Fetcher`, not on a stock worker. Cheapest, and requires ABI.md §2.48 to say
+   so, because today it does not.
+
+Option 3 is the smallest honest change and can land immediately; 1 and 2 are the product
+call. **Whichever is chosen, the current state — documented as working, failing at
+runtime with a message that reads like misconfiguration — is the one option that should
+not persist.**
+
+Re-derive:
+
+    grep -n 'e.fetcher' engine/lifecycle.go
+    git ls-files '*.go' | xargs grep -n 'WithFetcher(' | grep -v _test.go
+    grep -c 'cleat_fetch' ABI.md engine/imports.go

@@ -35,21 +35,75 @@ var engineOptionsNotWired = map[string]string{
 	// nothing selects. See cleat#826, which is about the same feature.
 	"WithContinueAsNewHandler": "cleat#878: the worker calls execStore.ContinueAsNew directly, so the engine's handler branch is a dead alternate path",
 
-	// NOT TRIAGED. Each of these is either a legitimate test seam -- injecting
-	// a fake clock is a real reason for an option only tests set -- or an
-	// unwired knob like WithPluginStreamRegistry was. Telling those apart takes
-	// reading each one, and guessing in bulk is how a baseline becomes a
-	// standing exemption. Recorded honestly rather than described as though it
-	// had been checked; cleat#878 triages them.
-	"WithAllowVersionMismatch":        "cleat#878: not triaged -- test seam or unwired knob",
-	"WithAmbiguityResolver":           "cleat#878: not triaged -- test seam or unwired knob",
-	"WithBackend":                     "cleat#878: not triaged -- test seam or unwired knob",
-	"WithClock":                       "cleat#878: not triaged -- test seam or unwired knob",
-	"WithDeferPassBudget":             "cleat#878: not triaged -- test seam or unwired knob",
-	"WithFetcher":                     "cleat#878: not triaged -- test seam or unwired knob",
-	"WithPluginCallGuard":             "cleat#878: not triaged -- test seam or unwired knob",
-	"WithPluginCallObserver":          "cleat#878: not triaged -- test seam or unwired knob",
-	"WithWasmCumulativeAllocationMax": "cleat#878: not triaged -- test seam or unwired knob",
+	// TRIAGED 2026-09-07 (cleat#878). Four categories emerged, and the third
+	// was not one the issue anticipated:
+	//
+	//   TEST SEAM          an option only tests set, for a real reason.
+	//   EMBEDDER API       `cleat/` is a public Go API. An option that exists
+	//                      for an external embedder has no in-repo caller by
+	//                      design, and "nothing that ships sets it" is the
+	//                      expected answer rather than a finding.
+	//   ALTERNATE PATH     a second implementation of something the worker
+	//                      already does its own way. Not broken; unselected.
+	//   REAL GAP           the feature does not work in production.
+	//
+	// One real gap was found: WithFetcher. See IMPROVEMENT-PLAN.md 3.317.
+
+	// REAL GAP. ABI.md 2.48 documents cleat_fetch as "Perform an HTTP fetch
+	// request", with no caveat. Nothing anywhere sets a fetcher -- the only
+	// reference to WithFetcher outside tests is its own declaration -- so
+	// engine/lifecycle.go takes the else branch and every fetch from a real
+	// worker returns "no fetcher configured: workflow %s attempted %s %s".
+	// This is #879's shape exactly: a complete, documented read path behind a
+	// write path nobody wired. Kept baselined because wiring it is a product
+	// decision (a default fetcher gives every workflow arbitrary outbound
+	// HTTP), not because it is acceptable. 3.317 carries the decision.
+	"WithFetcher": "cleat#878 REAL GAP: cleat_fetch always fails in a real worker -- see 3.317",
+
+	// ALTERNATE PATH. The worker enforces this limit itself:
+	// --wasm-cumulative-allocation-max-mb feeds w.wasmCumulativeAllocationMaxBytes
+	// and tryClaimCumulativeAllocation (cmd/cleat-worker/setup.go), never this
+	// option. Zero references anywhere in the tree, tests included -- the only
+	// one of the ten with none. Same shape as WithContinueAsNewHandler.
+	"WithWasmCumulativeAllocationMax": "cleat#878 ALTERNATE PATH: worker does its own via tryClaimCumulativeAllocation",
+
+	// ALTERNATE PATH. The worker passes WithWasmtimeDeferBudget (a
+	// WasmtimeOption, cmd/cleat-worker/main.go) for the same quantity -- the
+	// wall-clock ceiling on the cleanup pass. Two knobs for one bound, one
+	// selected.
+	"WithDeferPassBudget": "cleat#878 ALTERNATE PATH: worker passes WithWasmtimeDeferBudget instead",
+
+	// ALTERNATE PATH. Production uses the PLURAL WithBackends, at
+	// cmd/cleat-worker/setup.go. The singular is a 42-site test convenience,
+	// which is why it is kept rather than deleted.
+	"WithBackend": "cleat#878 TEST SEAM: production uses WithBackends (plural); 42 test call sites",
+
+	// TEST SEAM. A fake clock is the textbook reason for an option only tests
+	// set, and four independent test files inject one -- not the single-file
+	// signature that WithPluginStreamRegistry had.
+	"WithClock": "cleat#878 TEST SEAM: fake clock, injected by four independent test files",
+
+	// CONSEQUENCE, not an independent finding. This guards the call_plugin
+	// capability for WASM plugins, and WASM plugin execution is itself unwired:
+	// PluginLoader.LoadPlugin has no non-test callers (IMPROVEMENT-PLAN 3.315).
+	// Wiring the guard before the thing it guards would be backwards.
+	"WithPluginCallGuard": "cleat#878: guards WASM plugin calls, which are themselves unwired -- see 3.315",
+
+	// EMBEDDER API, and deliberately degrading. Consulted when replay finds a
+	// call dispatched but never recorded; nil returns ("", false), which
+	// engine/callintent.go documents as leaving the ambiguity "exactly as it
+	// was ... and not a worse one". So an unset resolver is the designed
+	// default and the enhancement simply does not happen.
+	"WithAmbiguityResolver": "cleat#878 EMBEDDER API: nil is the designed default; degrades to no-op",
+
+	// EMBEDDER API. An escape hatch for a caller that knowingly wants replay
+	// against a mismatched version. There is deliberately no CLI flag -- a
+	// worker should not offer this -- so no in-repo caller is correct.
+	"WithAllowVersionMismatch": "cleat#878 EMBEDDER API: escape hatch, deliberately not a worker flag",
+
+	// EMBEDDER API. A post-invocation observer hook for an embedder that wants
+	// to instrument plugin calls. The worker uses metrics and tracing instead.
+	"WithPluginCallObserver": "cleat#878 EMBEDDER API: observer hook for embedders; worker uses metrics",
 }
 
 // TestEveryEngineOptionIsReachableFromProduction asserts that each With* option
