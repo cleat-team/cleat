@@ -115,12 +115,16 @@ var javaHostCallOutcomes = map[string]expectedOutcome{
 
 	// ---- calls the Java SDK does not bind ----
 	"ScheduleCron": {
-		status: statusUnsupported, detailContains: "no cleat_schedule_cron import in the Java SDK",
-		why: "catches the gap closing silently. grep -rn cron over crates/cleat-java/src/main/java/cleat/ returns nothing, while the host exports cleat_schedule_cron and the AssemblyScript SDK binds it -- so this is a guest-side gap, not a host limitation. The day Java gains the binding this row stops matching and somebody has to decide what the right answer is",
+		status: statusError, detailContains: `cannot schedule "harness-workflow"`,
+		why: "MEASURED after 3.242 bound the cron family in Java. The previous row said the day Java gained the binding this would stop matching and somebody would have to decide the right answer; the answer is that the call now reaches the host and is refused by it, which is a different fact from having no binding at all. " +
+			"Asserted on the tail because the host's text embeds the run ID, which changes every run, and the substring chosen proves the ARGUMENT crossed: `harness-workflow` is what the fixture passed. " +
+			"Byte-identical to the Rust row, which is the strongest thing this pair can say -- two SDKs that spell the import differently encoded four arguments into the same host answer",
 	},
 	"ListCrons": {
-		status: statusUnsupported, detailContains: "no cleat_list_crons import in the Java SDK",
-		why: "same gap as ScheduleCron, asserted separately so that adding one binding and not the other cannot leave a green row behind",
+		status: statusError, detailContains: "cannot list schedules",
+		why: "same closure as ScheduleCron and still asserted separately, so binding one and not the other cannot leave a green row behind. " +
+			"That the host's own sentence arrives here is load-bearing: cleat_list_crons writes its error into the OUTPUT BUFFER, and 11 of the 18 Java wrappers with a buffer still discard it and report a bare error code (IMPROVEMENT-PLAN 3.258 in a third SDK). " +
+			"This row would read `host returned error code 1` if the binding had followed the majority of its own file",
 	},
 }
 

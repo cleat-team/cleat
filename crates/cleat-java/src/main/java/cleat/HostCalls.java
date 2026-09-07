@@ -296,6 +296,25 @@ public class HostCalls {
         int runIdsPtr, int runIdsLen,
         int resultPtr, int resultMaxLen);
 
+    // The cron family. Present on the host since ABI 2.31 and bound by the
+    // AssemblyScript and Python SDKs; Rust and Java declared no cron surface at
+    // all, which is the stated reason tiers.yaml holds workflow-callable-cron at
+    // tier 2. IMPROVEMENT-PLAN 3.241.
+
+    @Import(module = "env", name = "cleat_schedule_cron")
+    private static native long cleatScheduleCronRaw(
+        int wfPtr, int wfLen,
+        int cronPtr, int cronLen,
+        int tzPtr, int tzLen,
+        int inputPtr, int inputLen,
+        int idPtr, int idMaxLen);
+
+    @Import(module = "env", name = "cleat_delete_cron")
+    private static native long cleatDeleteCronRaw(int idPtr, int idLen);
+
+    @Import(module = "env", name = "cleat_list_crons")
+    private static native long cleatListCronsRaw(int outPtr, int outMaxLen);
+
     @Import(module = "env", name = "cleat_continue_as_new_versioned")
     private static native long cleatContinueAsNewVersionedRaw(
         int inputPtr, int inputLen, int newVersion);
@@ -2155,6 +2174,118 @@ public class HostCalls {
 
         String childResult = readOutput(resultLen);
         return CleatResult.ok(childResult);
+    }
+
+    // ========================================================================
+    // cron
+    // ========================================================================
+
+    /**
+     * Create a recurring workflow trigger from a cron expression.
+     * <p>
+     * Returns the schedule ID, which {@link #deleteCron(String)} takes.
+     * Mirrors Go's {@code ScheduleCron(workflowName, cronExpr, timezone, inputJSON)}.
+     * <p>
+     * {@code timezone} is optional: {@code ""} means the engine's default. The
+     * host reads it as a payload rather than as a required string, which is
+     * what makes the empty value legal rather than a bad-parameter error.
+     *
+     * @param workflowName the workflow definition name to trigger
+     * @param cronExpr     a standard 5-field cron expression
+     * @param timezone     an IANA timezone name, or "" for the engine default
+     * @param inputJSON    the JSON input handed to each triggered run
+     * @return a result containing the schedule ID, or an error description
+     */
+    public CleatResult<String> scheduleCron(String workflowName, String cronExpr, String timezone, String inputJSON) {
+        int[] p = packStrings(workflowName, cronExpr, timezone, inputJSON);
+
+        long result = cleatScheduleCronRaw(
+            p[0], p[4],
+            p[1], p[5],
+            p[2], p[6],
+            p[3], p[7],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // Ask BEFORE decoding. A cron schedule is new work with the longest
+        // reach of anything in this family -- it registers a RECURRING trigger,
+        // so a workflow that kept going after a refusal would leave something
+        // starting fresh runs indefinitely. decodeSimpleErrCode reads the low
+        // byte, where a stop is 0, and the length as 0: an empty SUCCESSFUL
+        // response carrying an empty schedule ID.
+        Memory.throwIfStopped(result);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+        if (errCode != 0) {
+            // Read the BUFFER, not the code. The host writes its own message
+            // there on failure -- engine/schedules.go writes rec.Err into the
+            // id buffer and returns packSimpleResult(1, written) -- so a guest
+            // that prints the bare code throws away the only thing that says
+            // what went wrong. That is IMPROVEMENT-PLAN 3.258, fixed there for
+            // the generated Go adapters.
+            //
+            // Note this does NOT match what most of this file does: 11 of the
+            // 18 wrappers here with an output buffer still report a bare code.
+            // The seven that read it are cleatCall, cleatCallHeartbeat,
+            // cleatFetch, pluginCall, pluginCallStreaming, jsonParse and
+            // jsonStringify. The remaining 11 are tracked separately.
+            String msg = readOutput(resultLen);
+            if (msg.isEmpty()) {
+                return CleatResult.err("scheduleCron(workflowName=\"" + workflowName + "\", cronExpr=\"" + cronExpr
+                    + "\") failed: host returned error code " + errCode + ".");
+            }
+            return CleatResult.err(msg);
+        }
+        return CleatResult.ok(readOutput(resultLen));
+    }
+
+    /**
+     * Remove a previously registered cron schedule by its ID.
+     * <p>
+     * There is no stop-bit check here, and that is deliberate rather than an
+     * omission: {@code DeleteCron} does not call {@code stopBeforeNewWork}
+     * host-side, because removing a schedule is not new work. Verified against
+     * {@code engine/schedules.go} on 2026-09-07; {@code ScheduleCron} is the
+     * only one of the three that can be refused.
+     *
+     * @param scheduleID the schedule ID returned by scheduleCron
+     * @return a result indicating success, or an error description
+     */
+    public CleatResult<Void> deleteCron(String scheduleID) {
+        int[] p = packStrings(scheduleID);
+        long result = cleatDeleteCronRaw(p[0], p[1]);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("deleteCron(scheduleID=\"" + scheduleID
+                + "\") failed: host returned error code " + errCode
+                + ". Check that the schedule ID exists.");
+        }
+        return CleatResult.ok(null);
+    }
+
+    /**
+     * List all registered cron schedules, as a JSON array.
+     * <p>
+     * See {@link #deleteCron(String)} for why there is no stop-bit check here
+     * either.
+     *
+     * @return a result containing the JSON array of schedules, or an error
+     */
+    public CleatResult<String> listCrons() {
+        long result = cleatListCronsRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+        if (errCode != 0) {
+            // The host's message, not the code -- see scheduleCron above.
+            String msg = readOutput(resultLen);
+            if (msg.isEmpty()) {
+                return CleatResult.err("listCrons() failed: host returned error code " + errCode + ".");
+            }
+            return CleatResult.err(msg);
+        }
+        return CleatResult.ok(readOutput(resultLen));
     }
 
     // ========================================================================
