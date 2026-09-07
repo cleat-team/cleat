@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -138,93 +137,65 @@ func runCoreMigrations(ctx context.Context, db *sql.DB, dialect plugin.Dialect, 
 	if dir == "" {
 		return nil
 	}
-	entries, err := os.ReadDir(dir)
+
+	// migration.Runner, not a loop of our own.
+	//
+	// The hand-rolled loop re-applied EVERY migration file on every call, which
+	// is what IMPROVEMENT-PLAN 3.237 is about: migrations/mssql/001_schema.sql
+	// cannot be applied twice once migration 031 exists, because 031 adds
+	// TenantFilter_Promises -- schemabound to dbo.fn_tenant_filter, and not in
+	// 001's drop list, since 001 predates it. So the CREATE OR ALTER FUNCTION
+	// fails and TestPluginCalls_MultiDB/mssql fails for anyone whose database
+	// already carries the schema.
+	//
+	// The Runner records what it has applied in schema_migrations and skips it,
+	// so a second call is a no-op rather than a second application. It also
+	// wraps each file in one transaction, which is the property #853 added to
+	// the old loop by hand -- and which migrations/mssql/001_schema.sql's header
+	// names as the condition its drop-then-recreate ordering depends on.
+	//
+	// This is the same call engine/testutil makes. Two implementations of
+	// "apply the shipped migrations" was the defect, not a detail of one of
+	// them.
+	target := db
+	if dialect == plugin.DialectMySQL {
+		// The Runner uses the pool, and MySQL's current database is a
+		// per-connection property: OpenTestDB's `USE` reached one connection,
+		// and the old loop worked only because it pinned one for the whole run.
+		// Clamping the pool to a single connection restores that guarantee for
+		// the Runner's transactions, which is the smallest change that keeps
+		// the migrations inside the per-test database.
+		db.SetMaxOpenConns(1)
+		defer db.SetMaxOpenConns(0)
+		if _, err := db.ExecContext(ctx, `USE `+quoteIdent(dialect, schemaName)); err != nil {
+			return fmt.Errorf("use database %s: %w", schemaName, err)
+		}
+	}
+
+	md, err := toMigrationDialect(dialect)
 	if err != nil {
-		return fmt.Errorf("read dir %s: %w", dir, err)
+		return err
 	}
-
-	var files []fs.DirEntry
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			files = append(files, e)
-		}
-	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Name() < files[j].Name()
-	})
-
-	// Use a single dedicated connection so that SET search_path / USE
-	// database persists across all migration statements. Connection
-	// pooling would otherwise distribute statement execution across
-	// different connections, losing the schema/database context.
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("get conn: %w", err)
-	}
-	defer conn.Close()
-
-	if err := setSearchPath(ctx, conn, dialect, schemaName); err != nil {
-		return fmt.Errorf("set context %s: %w", schemaName, err)
-	}
-
-	for _, f := range files {
-		path := filepath.Join(dir, f.Name())
-		sqlBytes, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", path, err)
-		}
-		sqlStr := string(sqlBytes)
-		if prefix := schemaPrefix(dialect, schemaName); prefix != "" {
-			sqlStr = prefix + ";" + "\n" + sqlStr
-		}
-		statements := splitStatements(dialect, sqlStr)
-
-		// See the doc comment above: the whole file, or none of it.
-		tx, err := conn.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin %s: %w", f.Name(), err)
-		}
-		for _, stmt := range statements {
-			if _, err := tx.ExecContext(ctx, stmt); err != nil {
-				if rbErr := tx.Rollback(); rbErr != nil {
-					return fmt.Errorf("execute %s: %w (and rolling back failed: %v -- "+
-						"the database may be half-migrated)", f.Name(), err, rbErr)
-				}
-				return fmt.Errorf("execute %s: %w", f.Name(), err)
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit %s: %w", f.Name(), err)
-		}
+	root := filepath.Dir(dir) // coreMigrationDir returns migrations/<dialect>
+	if err := migration.NewRunner(target, md, root).Run(ctx); err != nil {
+		return fmt.Errorf("apply %s migrations from %s: %w", dialect, root, err)
 	}
 	return nil
 }
 
-// schemaPrefix returns a dialect-appropriate SET/USE statement to prepend
-// before migration SQL so the correct schema/database is targeted.
-func schemaPrefix(dialect plugin.Dialect, schemaName string) string {
-	switch dialect {
+// toMigrationDialect converts the harness's plugin.Dialect to the migration
+// package's own. The two carry identical strings and are declared separately;
+// see engine/testutil's function of the same name for why.
+func toMigrationDialect(d plugin.Dialect) (migration.Dialect, error) {
+	switch d {
 	case plugin.DialectPostgres:
-		return fmt.Sprintf(`SET search_path TO %s`, quoteIdent(dialect, schemaName))
+		return migration.DialectPostgres, nil
 	case plugin.DialectMySQL:
-		return fmt.Sprintf(`USE %s`, quoteIdent(dialect, schemaName))
-	default:
-		return ""
+		return migration.DialectMySQL, nil
+	case plugin.DialectMSSQL:
+		return migration.DialectMSSQL, nil
 	}
-}
-
-// setSearchPath ensures the connection targets the correct schema/database.
-func setSearchPath(ctx context.Context, conn *sql.Conn, dialect plugin.Dialect, schemaName string) error {
-	switch dialect {
-	case plugin.DialectPostgres:
-		_, err := conn.ExecContext(ctx, fmt.Sprintf(`SET search_path TO %s`, quoteIdent(dialect, schemaName)))
-		return err
-	case plugin.DialectMySQL:
-		_, err := conn.ExecContext(ctx, fmt.Sprintf(`USE %s`, quoteIdent(dialect, schemaName)))
-		return err
-	default:
-		return nil
-	}
+	return "", fmt.Errorf("unknown dialect %q", d)
 }
 
 // RunPluginMigrations runs each loaded plugin's database migrations for the
