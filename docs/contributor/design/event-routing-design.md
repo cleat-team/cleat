@@ -506,8 +506,40 @@ database-enforced isolation for event tables.
   readable in a query result, and it dissolves the ASCII question the option was
   originally framed around. See §4.3 for why the *explicit* part matters more than the
   choice between the two candidates.
-- **D5 — declared event schemas.** Slot mapping needs somewhere to live. Does a
-  declared trigger imply a declared event schema, or is the mapping standalone?
+- **D5 — where slot mappings live. DECIDED 2026-09-07: a standalone `//cleat:event`
+  declaration is the source of truth, with runtime registration as the fallback.**
+
+  ```go
+  //cleat:event type="payment.captured" key1="data.orderID" key2="data.tenantID"
+  ```
+
+  The mapping belongs to the **event**, not to a workflow. Declaring it on the trigger
+  was rejected: slots are populated once by the publisher at ingest, so two workflows
+  awaiting the same type could declare conflicting mappings for a single write — the
+  contract would sit on the consumer while the write is done by the producer.
+
+  **Runtime registration stays, because it has to.** `webhookingest` and `kafkaconnect`
+  both call `eventtriggers.PublishEvent` with events that originate outside cleat
+  entirely, and no Go-side declaration can bind a Kafka producer. So there are two classes
+  of publisher — those that can carry a declaration and those that cannot — and R6's
+  *warning* rather than error for an undeclared type is exactly the seam between them.
+  Declared types get the full build-time checking of R1–R3; undeclared ones get a
+  registered mapping and no checking, and the warning says which you have.
+
+  **The conflict rule, which the decision needs and did not come with.** Two rules,
+  because there are two places a conflict can appear:
+
+  * **R7, at build time: exactly one `//cleat:event` declaration per event type per
+    build.** A second is an error naming both sites. This is checkable the moment the
+    analyzer has the package set, and it is the same shape as R5.
+  * **At deploy time: a declaration that conflicts with the stored mapping fails the
+    deploy.** It does *not* overwrite. Silent repointing is the dangerous option and
+    "last deploy wins" is the worst available rule, for a reason specific to this design:
+    **every suspended awaiter holds a `key1` computed under the old mapping.** Repoint
+    the slot and those runs wait forever for an event whose key is now extracted from a
+    different field — a fleet-wide hang with no error anywhere. §4.5 already says changing
+    a slot's meaning is a new event type; this is the enforcement that makes that true
+    rather than advisory.
 - **D6 — RLS on plugin tables. DECIDED 2026-09-07: required, not optional.** Plugin
   tables carrying `tenant_id` must be database-enforced on the dialects that can do it.
 
