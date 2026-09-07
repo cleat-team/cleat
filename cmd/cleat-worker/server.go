@@ -1339,12 +1339,6 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (s *apiServer) inflightCount() int {
-	count := 0
-	s.worker.inflight.Range(func(_, _ any) bool { count++; return true })
-	return count
-}
-
 // generateUpdatePromiseID creates a unique ID for tracking an update's outcome.
 func generateUpdatePromiseID() (string, error) {
 	b := make([]byte, 16)
