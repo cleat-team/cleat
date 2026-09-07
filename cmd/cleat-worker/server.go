@@ -744,8 +744,25 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 // it, which is the failure mode that produced the inconsistency.
 //
 // The cost is one indexed lookup per request on endpoints that previously did
-// none. The dashboard polls these, so it is not free -- but answering the
-// wrong question quickly is not a saving.
+// none, and it is smaller than it looks. Measured against web/src, ignoring
+// tests:
+//
+//	setInterval / refreshInterval / refetchInterval / useSWR   0 occurrences
+//	/api/instances/{id}/events                                 0 references
+//	/api/instances/{id}/state                                  0 references
+//	/api/workflows/{id}/promises                               0 references
+//	/api/workflows/{id}/history                                1 (lib/api.ts:72)
+//
+// So the dashboard does not poll -- there is no polling construct anywhere in
+// it -- and three of the four endpoints this helper guards are never called
+// by it at all. The fourth is fetched once, on demand, when a run's detail
+// view is opened.
+//
+// Recorded rather than removed because the sentence it replaces asserted the
+// opposite ("the dashboard polls these, so it is not free") and was the stated
+// justification for a cost nothing was incurring. A wrong reason for a right
+// decision is still load-bearing: the next person weighing this lookup would
+// have weighed it against traffic that does not exist.
 func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, id string) bool {
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
