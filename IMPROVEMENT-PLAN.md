@@ -6572,6 +6572,61 @@ keeps re-learning: unanchored, it also matches 001's own header, which *discusse
 prose. Measured 2026-09-06 — unanchored returns 16 distinct "names", 7 of them fragments of English
 sentences; anchored returns the 9 that exist.
 
+### 3.238 A pending update request outlived the workflow it was for, and its promise never settled — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+The smaller half of [#849](https://github.com/cleat-team/cleat/issues/849)'s suggested direction.
+`POST /api/workflows/:id/update/:name` returns `202` and a `promise_id`. An update is dispatched
+only while its workflow is mid-segment, so a request still pending when the workflow reaches a
+terminal status can never be handled — and the caller is left holding a `promise_id` for a promise
+nothing will ever settle, against a workflow that no longer exists. The wait was permanent and
+silent.
+
+`Worker.failStrandedUpdates` now completes each such request with a reason and rejects its promise
+with the same reason, from all three terminal paths: a successful terminal finalize, a terminal
+failure (`recordTerminalFailure`), and the defer phase applying its recorded outcome
+(`finishDeferPhase`).
+
+**Composed, not added to the store.** `GetPendingUpdateRequests`, `CompleteUpdateRequest` and
+`RejectPromise` are all already on `engine.WorkflowStore`, so this needed no SQL and no
+per-dialect work — a new store method would have been four implementations (postgres, mysql,
+mssql, `ShardedStore`) to express something the existing three already say. Same reasoning as
+§3.220's composites.
+
+**The test drives the terminal path, not the helper**, because the defect being guarded is a
+*missing call*: the helper could be perfect and every caller still hang. Removing the
+`recordTerminalFailure` call site fails it with `the stranded update was completed 0 times, want
+1`; removing the rejection alone fails it with `the update's promise was rejected 0 times`. A
+negative control asserts the path is silent when nothing is pending, which is almost every
+workflow — a version that wrote unconditionally would pass the other two.
+
+#### What this deliberately does NOT fix, and what is still broken underneath
+
+**Updates are still never delivered.** This makes a stranded request answer rather than hang; it
+does not make the feature work. Three independent breaks, in the order they have to be fixed —
+recorded on #849 with the greps:
+
+1. **No guest entry point, in any SDK.** Both SDKs register handlers into a map (Go
+   `cleat/runtime_promises.go:91`, Python `python-sdk/cleat_sdk/host_calls.py:2333`) and the only
+   thing that ever reads either is a **test harness** — Go's `HandleUpdate` is reached only from
+   `cleattest`, and Python's `_handle_update` has zero callers. `cleat_register_update_handler` is
+   a real host call the engine records, but no WASM export exists that would let the host ask a
+   running guest to run one.
+2. **The worker never calls `engine.WithUpdateHandler`.** Three references in the tree outside
+   tests: the definition, its doc comment, and the error string naming it. So `DispatchUpdate`
+   returns `no update handler configured for this engine`.
+3. **Delivery is a 5s ticker over `w.inflight`**, which is populated only for the lifetime of one
+   segment (#849's own finding).
+
+Note the ordering trap: fixing 3 alone converts a silent hang into a silent *rejection*, because
+2 makes `DispatchUpdate` fail and `dispatchPendingUpdates` then completes the request with that
+error and rejects the promise. **A fix for 3 verified by "the request is no longer pending" would
+read as success while delivering nothing.**
+
+This is the `RegisterQueryHandler` shape (removed 2026-08-09, "it recorded a handler name but
+nothing in the worker ever routed an external query to it") — and it is the whole story here
+rather than a parallel. Whether to implement updates end-to-end or stop advertising the API is a
+product decision; the `202` is untouched here for the same reason.
+
 ### 3.237 `migrations/mssql/001_schema.sql` cannot be re-applied once migration 031 has run — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
 
 Split out of [§3.236](#3236), which fixed the damage this causes but not the failure itself.
@@ -6595,8 +6650,25 @@ own loop that re-applies everything unconditionally. Moving it onto the Runner i
 complication to measure first is `schemaPrefix` — plugin-harness prepends a per-file
 `SET search_path` / `USE` and pins one connection, which the Runner does not do.
 
-Affects only `TestPluginCalls_MultiDB/mssql`, and only against an already-migrated database, so
-CI is green on it (see §3.236 on why).
+**Correction, same day: the blast radius above is wrong, and it was wrong in the direction that
+makes it look smaller.** This does not affect only `TestPluginCalls_MultiDB/mssql`. It fails any
+migration run against an MSSQL database that already carries the schema while its
+`schema_migrations` does not record it — and when that database is the shared test one, it takes
+**552 of `./engine/`'s tests** with it, every `/mssql` subtest, all reporting:
+
+    apply mssql migrations from …/migrations: migration 001_schema.sql: execute:
+    mssql: Cannot ALTER 'dbo.fn_tenant_filter' because it is being referenced by
+    object 'TenantFilter_Promises'
+
+Measured 2026-09-06 on clean `develop`; `cleat.dbo.schema_migrations` had 0 rows against 48 tables
+and 9 policies. The cure is CLAUDE.md's, unchanged: drop and recreate, then 4611 pass / 0 fail.
+
+The narrow claim was made from the one failing test that was in front of me, and generalised
+without being checked against anything else — which is this document's own "a count answers 'did
+this go up', it never answers 'is anything still missing'" in the shape of a blast radius.
+
+CI stays green on all of it for the reason §3.236 gives: a fresh container never has a second
+application to fail.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
