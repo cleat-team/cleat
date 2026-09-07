@@ -163,6 +163,24 @@ func createAPIKeyStmt(dialect string) (stmt string, needsKeyID bool) {
 // wrote keys to the base database and read them from the tenant's, and every
 // authenticated request 401'd. See cleat#866.
 func (s *TenantStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
+	// SQL Server returns UNIQUEIDENTIFIER in a byte order the uuid package does
+	// not scan directly, so the column is converted in the projection and parsed
+	// here -- the same shape as MSSQLStore.ResolveTenantFromAPIKey
+	// (engine/mssql_deployment.go:122). engine's TestMSSQLUUIDColumnsAreConverted
+	// InProjections enforces this across the tree and caught the first version
+	// of this function, which selected the raw column.
+	if s.dialect == DialectMSSQL {
+		var raw string
+		if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&raw); err != nil {
+			return uuid.Nil, err
+		}
+		tenantID, err := uuid.Parse(raw)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("resolve tenant from api key: parse uuid: %w", err)
+		}
+		return tenantID, nil
+	}
+
 	var tenantID uuid.UUID
 	if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&tenantID); err != nil {
 		return uuid.Nil, err
@@ -180,7 +198,7 @@ func resolveAPIKeyStmt(dialect string) string {
 		// the keys live in the base database the DSN names.
 		return `SELECT tenant_id FROM tenant_api_keys WHERE key_hash = ? AND revoked_at IS NULL`
 	case DialectMSSQL:
-		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = @p1 AND revoked_at IS NULL`
+		return `SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND revoked_at IS NULL`
 	default:
 		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND revoked_at IS NULL`
 	}
