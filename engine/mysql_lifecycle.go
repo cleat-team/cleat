@@ -658,11 +658,11 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	// Use the store's tenant scope to preserve tenant isolation.
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, continued_from)
 		VALUES (?, ?, ?, 'ready', ?,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-		        ?, ?)
-	`, newRunID, defName, defVersion, newInput, defName, defVersion, s.tenantID, s.tenantID, priority)
+		        ?, ?, ?)
+	`, newRunID, defName, defVersion, newInput, defName, defVersion, s.tenantID, s.tenantID, priority, currentRunID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}

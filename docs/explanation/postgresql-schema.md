@@ -91,6 +91,7 @@ CREATE TABLE workflow_instances (
     query_state JSONB DEFAULT '{}',
     sticky_worker_id TEXT,
     trace_id TEXT,
+    continued_from TEXT,
     FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
 );
 ```
@@ -114,6 +115,7 @@ CREATE TABLE workflow_instances (
 | `query_state` | JSONB | Queryable workflow state |
 | `sticky_worker_id` | TEXT | Preferred worker for cache locality |
 | `trace_id` | TEXT | OpenTelemetry trace ID for observability |
+| `continued_from` | TEXT | The run that continued into this one. `NULL` unless `ContinueAsNew` created this row, and `NULL` on every row written before migration 045. **Not** `parent_workflow_id`: a continuation is not a child, and `GetChildCount` and `enforceParentClosePolicy` both key off that column — see cleat#826 and the migration header. |
 
 **Indexes**:
 
