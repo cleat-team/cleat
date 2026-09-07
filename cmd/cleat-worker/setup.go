@@ -2507,11 +2507,15 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 // PostgreSQL: 5 runs, 0 dispatched (cleat#849).
 //
 // Even in the lucky case it delivered nothing, because it called
-// Engine.DispatchUpdate, which needs an updateHandler that nothing ever
+// Engine.DispatchUpdate, which needed an updateHandler that nothing ever
 // configured -- so the request would have been completed with "no update
 // handler configured for this engine" and the caller's promise REJECTED. A fix
 // for the scheduling alone, verified by "the request is no longer pending",
 // would have read as success while delivering nothing.
+//
+// That hook is gone too: WithUpdateHandler and Engine.DispatchUpdate were
+// exported API with no caller outside their own tests, and keeping them meant
+// keeping two names that read as the update path and are not.
 //
 // Updates are now delivered inside the segment, by the guest, at dispatch
 // points -- see cleat.HostCallsImpl.DispatchUpdates and engine/updater.go.
