@@ -190,7 +190,31 @@ type WorkflowStore interface {
 	ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error)
 
 	// GetWorkflowByID returns a single workflow instance by ID.
+	//
+	// It returns THE ROW WITH THAT ID and does not follow a ContinueAsNew
+	// chain. That is deliberate (cleat#887): four call sites and the admin
+	// dashboard read through this method and want the row they named, so
+	// following the chain here would silently change what an existing read
+	// returns. Callers who want the chain's outcome call GetTerminalRun.
 	GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error)
+
+	// GetTerminalRun follows a ContinueAsNew chain forward from id and returns
+	// the last run in it -- the one carrying the result the caller is waiting
+	// for. cleat#826, cleat#887.
+	//
+	// A workflow that never continued is its own terminal run, so this is
+	// equivalent to GetWorkflowByID for the overwhelming majority of ids. A
+	// workflow that continued N times is reached in N hops. Returns nil, nil
+	// when id names no workflow, matching GetWorkflowByID.
+	//
+	// COST: one indexed seek per hop, plus one full read at the end, rather
+	// than a single query. A recursive CTE would collapse that to one round
+	// trip and every dialect the project targets supports one -- but the repo
+	// uses no recursive CTE today, and adding three dialect-specific ones with
+	// three different recursion caps is a larger and less falsifiable change
+	// than this method is worth. It is an optimisation, not a correctness fix:
+	// the walk is bounded and cycle-safe either way.
+	GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error)
 
 	// CreateSchedule inserts a new cron schedule.
 	CreateSchedule(ctx context.Context, s Schedule) error

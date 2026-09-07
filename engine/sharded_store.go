@@ -634,6 +634,40 @@ func (s *ShardedStore) GetWorkflowByID(ctx context.Context, id string) (*Workflo
 	return nil, nil
 }
 
+// GetTerminalRun follows a ContinueAsNew chain forward from id. See
+// WorkflowStore.
+//
+// Delegated per hop rather than to one shard, because a chain is NOT
+// shard-local: every continuation gets a fresh id, and getShard hashes the id,
+// so successive runs of one chain routinely land on different shards. Walking
+// inside a single shard's GetTerminalRun would stop at the first hop that
+// moved, and report an intermediate run as terminal -- a wrong answer rather
+// than an error, which is the failure mode worth avoiding here.
+//
+// So the walk stays at this level and each successor lookup is a fan-out, the
+// same way GetWorkflowByID already scans shards for one id.
+func (s *ShardedStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
+	return walkToTerminalRun(ctx, id, func(ctx context.Context, cur string) (string, error) {
+		s.mu.RLock()
+		shards := s.shards
+		s.mu.RUnlock()
+		for _, sh := range shards {
+			next, err := sh.Store.GetTerminalRun(ctx, cur)
+			if err != nil {
+				return "", err
+			}
+			// A shard that holds cur and nothing after it returns cur itself;
+			// one that holds a successor returns the far end of the part of
+			// the chain IT holds. Either way the first id that is not cur is
+			// the next hop this level should follow.
+			if next != nil && next.ID != cur {
+				return next.ID, nil
+			}
+		}
+		return "", nil
+	}, s.GetWorkflowByID)
+}
+
 // CreateSchedule registers a schedule on every shard.
 func (s *ShardedStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	return s.forEachShard(func(store WorkflowStore) error {

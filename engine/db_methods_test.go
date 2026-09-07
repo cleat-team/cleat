@@ -660,6 +660,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 				int64(0),                   // priority
 				"",                         // trace_id
 				DefaultTenantUUID,          // tenant_id (3.99)
+				"wf-0",                     // continued_from (cleat#887)
 			}},
 		},
 	}, nil)
@@ -672,6 +673,12 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 	}
 	if wf == nil {
 		t.Fatal("expected non-nil workflow")
+	}
+	// cleat#887: the column is in the SELECT, so it must reach the struct. A
+	// value supplied by the fake row and then dropped would leave this test
+	// green while GetWorkflowByID silently returned "" for every chain.
+	if wf.ContinuedFrom != "wf-0" {
+		t.Errorf("ContinuedFrom = %q, want %q", wf.ContinuedFrom, "wf-0")
 	}
 	if wf.ID != "wf-1" || wf.Status != "done" || wf.AssignedTo != "worker-1" {
 		t.Errorf("unexpected workflow fields: %+v", wf)
@@ -1891,6 +1898,7 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 				int64(0),          // priority
 				"",                // trace_id (COALESCE)
 				DefaultTenantUUID, // tenant_id (3.99)
+				nil,               // continued_from (NULL: not a continuation)
 			}},
 		},
 	}, nil)

@@ -466,18 +466,19 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	var assignedTo, errorMsg sql.NullString
 	var result sql.NullString
 	var errorCode, errorOp sql.NullString
+	var continuedFrom sql.NullString
 	var inputRaw json.RawMessage
 
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
 		       assigned_to, heartbeat_at, next_wake_at, completed_at, result #>> '{}', error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
-		       COALESCE(trace_id, ''), tenant_id
+		       COALESCE(trace_id, ''), tenant_id, continued_from
 		FROM workflow_instances WHERE id = $1
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
-		&wf.TraceID, &wf.TenantID)
+		&wf.TraceID, &wf.TenantID, &continuedFrom)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
@@ -496,6 +497,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	wf.Error = errorMsg.String
 	wf.ErrorCode = errorCode.String
 	wf.ErrorOp = errorOp.String
+	wf.ContinuedFrom = continuedFrom.String
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
 	}

@@ -508,6 +508,9 @@ func (m *mockCompactStore) ListWorkflows(ctx context.Context, filter WorkflowFil
 func (m *mockCompactStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
 	return nil, nil
 }
+func (m *mockCompactStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
+	return nil, nil
+}
 func (m *mockCompactStore) CreateSchedule(ctx context.Context, s Schedule) error  { return nil }
 func (m *mockCompactStore) ListSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
 func (m *mockCompactStore) DeleteSchedule(ctx context.Context, name string) error { return nil }

@@ -1473,6 +1473,7 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 			"wf-1", "test-wf", int64(1), "running", `{"key":"val"}`,
 			"worker-1", now, now, nil, nil, nil, nil, nil,
 			int64(3), int64(0), "", DefaultTenantUUID, // tenant_id (3.99)
+			"wf-0", // continued_from (cleat#887)
 		}}},
 	}, nil)
 	defer db.Close()
@@ -1490,6 +1491,11 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 	}
 	if wf.Generation != 3 {
 		t.Errorf("generation = %d, want 3", wf.Generation)
+	}
+	// cleat#887, as in the PostgreSQL and MySQL tests: supplied by the fake
+	// row, so it must reach the struct rather than being scanned and dropped.
+	if wf.ContinuedFrom != "wf-0" {
+		t.Errorf("ContinuedFrom = %q, want %q", wf.ContinuedFrom, "wf-0")
 	}
 }
 
