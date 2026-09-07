@@ -6747,7 +6747,7 @@ nothing in the worker ever routed an external query to it") — and it is the wh
 rather than a parallel. Whether to implement updates end-to-end or stop advertising the API is a
 product decision; the `202` is untouched here for the same reason.
 
-### 3.237 `migrations/mssql/001_schema.sql` cannot be re-applied once migration 031 has run — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
+### 3.237 `migrations/mssql/001_schema.sql` cannot be re-applied once migration 031 has run — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-06)
 
 Split out of [§3.236](#3236), which fixed the damage this causes but not the failure itself.
 
@@ -6789,6 +6789,50 @@ this go up', it never answers 'is anything still missing'" in the shape of a bla
 
 CI stays green on all of it for the reason §3.236 gives: a fresh container never has a second
 application to fail.
+
+**Fixed 2026-09-07 (#890).** `tests/plugin-harness/testdb.go`'s `runCoreMigrations` now calls
+`migration.NewRunner(...).Run(ctx)` — the same call `engine/testutil` makes — instead of its own
+read-dir-and-exec loop. The Runner records applied versions in `schema_migrations` and skips them,
+so a second call is a no-op and 001 is never applied twice. **Two implementations of "apply the
+shipped migrations" was the defect**, not a detail of either of them; the alternative repairs all
+kept both loops and tried to make the second one survive re-application.
+
+The `schemaPrefix` complication the paragraph above says to measure first turned out to be real
+for exactly one dialect:
+
+| dialect | what the old loop's prefix did | under the Runner |
+|---|---|---|
+| postgres | `SET search_path TO public` | `schemaName` is hardcoded `"public"`, so the prefix was already a no-op |
+| mssql | nothing — `schemaPrefix` returns `""` for it | unchanged |
+| mysql | `USE <db>`, on a pinned `*sql.Conn` | **needed work** |
+
+MySQL's current database is a per-connection property and the Runner uses the pool, so the fix
+pins it for the run: `db.SetMaxOpenConns(1)` plus one `USE`, restored by `defer`. That is the
+smallest change that keeps the per-test database guarantee the pinned connection used to give.
+`schemaPrefix` and `setSearchPath` had no callers left afterwards and are deleted.
+
+**The regression test got stronger, not weaker.**
+`TestReapplyingTheCoreMigrationsLeavesTheTenantPoliciesStanding` (#853) was written expecting the
+second application to *fail*, and asserted only that the failure left the nine policies standing.
+It now asserts the second application **succeeds**. That is the sharper claim: "it does not damage
+anything" has become "it does not even try", and a regression to re-applying fails on the error
+rather than on a policy count.
+
+Known-positive, measured 2026-09-07 — deleting the rows from `schema_migrations` before the second
+call forces the Runner to re-apply, and the test reports it:
+
+    re-applying the core migrations failed: apply mssql migrations from ../../migrations:
+    migration 001_schema.sql: execute: mssql: Cannot ALTER 'dbo.fn_tenant_filter' because it is
+    being referenced by object 'TenantFilter_Promises'
+
+Verified on all three dialects against an already-migrated database — the condition that used to
+fail — with `tests/plugin-harness` at 139 pass / 0 fail / 2 skip (`TestBlobstore_S3` and
+`TestPluginCalls_Wasm_Python`, both environmental). MSSQL policy count stayed at 9.
+
+**And the first run of that suite was measured against two DSNs reconstructed from memory**, which
+reported postgres and mysql failing with `28P01` / `1045` — this file's opening section exactly,
+caught only because the errors were authentication rather than schema. WS-1's rows are 5432/3306/
+1433 with `postgres:postgres` and `root:cleat`; read them from WORKSTREAM.md.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 

@@ -40,6 +40,13 @@ import (
 // CLAUDE.md and setting all three DSNs has the opposite: a long-lived database
 // that already carries the schema.
 //
+// # Since 3.237, the second application is a no-op
+//
+// The harness applies migrations through migration.Runner now, which skips what
+// schema_migrations records. So this test asserts two things: that re-applying
+// SUCCEEDS, and that the policy set is untouched either way. The first is the
+// stronger one, and it is the one that would catch a return to re-applying.
+//
 // # The shipped count, not a before/after delta
 //
 // The first version of this test measured the policy count after one
@@ -111,10 +118,25 @@ func TestReapplyingTheCoreMigrationsLeavesTheTenantPoliciesStanding(t *testing.T
 			len(got), len(want), want, got)
 	}
 
-	// Second application. It is EXPECTED to fail against a database that
-	// already carries migration 031 -- see the doc comment. The assertion is
-	// about what it leaves behind, not whether it succeeds.
+	// Second application. It must now SUCCEED, and that is a stronger claim
+	// than the one this test was written with.
+	//
+	// It originally expected a failure -- 001 cannot be applied twice once
+	// migration 031 exists -- and only asserted that the failure left the
+	// policies standing. Since IMPROVEMENT-PLAN 3.237 the harness applies
+	// migrations through migration.Runner, which records what it has applied
+	// and skips it, so the second call does not re-apply at all. "It does not
+	// damage anything" has become "it does not even try", and asserting the
+	// error is nil is what pins that: a regression to re-applying would fail
+	// here on the error rather than on the policy count.
 	reErr := runCoreMigrations(ctx, db, plugin.DialectMSSQL, dbName, dir)
+	if reErr != nil {
+		t.Fatalf("re-applying the core migrations failed: %v\n\n"+
+			"Since 3.237 this is a no-op: migration.Runner records applied versions in "+
+			"schema_migrations and skips them. An error here means something re-applies "+
+			"the files, which is what made 001_schema.sql fail against any database "+
+			"already carrying migration 031.", reErr)
+	}
 
 	if got := securityPolicyNames(t, db); !equalStrings(got, want) {
 		t.Fatalf("RE-APPLYING the core migrations left %d of the %d tenant security "+
