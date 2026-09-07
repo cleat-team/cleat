@@ -164,7 +164,52 @@ func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reason
 // when that line first executed (#882).
 //
 // A sweep of all 50 host-call entry points found exactly two reading live state
-// without replay handling: PollChild and this. The family is closed.
+// without replay handling: PollChild and this. The family is closed, confirmed
+// independently from the opposite direction -- enumerate everything that reads
+// live state, then ask which are entry points, so a call the first enumeration
+// missed still surfaces in the second.
+//
+// The two sweeps quote different totals because they count different things,
+// not because either is wrong: 50 is the host-call entry points HostHandler
+// declares, 98 is the methods on *execSession, of which 25 touch a store. If
+// you meet both numbers below, that is why.
+//
+// Also naming the comparison, since the instruction "read the durable-time
+// comparison instead" points at a different symbol in each: PollChild compares
+// completed_at, this method compares DeliveredAtMs, both against s.nowMs.
+//
+// WARNING TO WHOEVER RUNS THAT SWEEP NEXT, because it will mislead you:
+//
+// This method and PollChild have NO isReplay check, no history read and record
+// no event -- deliberately, because both derive their answer from durable time
+// instead. A scan that looks for replay handling by name (isReplay,
+// advanceReplayStep, exitReplay) therefore flags the two calls in this codebase
+// that solved the problem most thoroughly, and flags them exactly as it flagged
+// them when they were broken.
+//
+// The output looks identical before and after the fix. Do not conclude from it
+// that these were reverted; read the comparison against s.nowMs instead.
+//
+// Recorded here rather than on the closed issue, because a sweep is written by
+// someone reading the code, not the tracker.
+//
+// THE SAME WARNING FROM THE OTHER SIDE, and the more alarming half.
+//
+// The first version of that sweep hard-coded five store field names and did not
+// include childWfStore. That blind spot was not one method, it was SEVEN -- the
+// entire child-workflow surface of execSession: AwaitAnyChild, AwaitChild,
+// PollChild, RunDetached, childWorkflowWithVersion, freshAwaitAllChildren and
+// resolveChildVersion. Verified by counting.
+//
+// It still produced the right total, because the total was known independently.
+// PollChild was already filed as #847 by the person running the sweep -- so the
+// sweep was run against a case already known to be broken, DID NOT REPORT IT,
+// and was believed anyway because its answer matched what its author already
+// thought.
+//
+// So: one sweep will flag two calls that are fine, and another can miss seven
+// and still look right. Neither failure is visible in the output. Give any such
+// scan a case you already know it must find, and check that it finds it.
 func (s *execSession) PollSignal(ctx context.Context, m api.Module, signalName string, payloadPtr, payloadMaxLen uint32) int64 {
 	if s.engine.signalStore != nil {
 		d, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, signalName)
