@@ -323,9 +323,26 @@ inventing a second mechanism.
 workflow can observe.**
 
 - `ingested_events.received_at` and `workflow_instances.completed_at` are the **database
-  clock** — `completed_at = now()` inside `finalize_workflow_status`
-  (`migrations/postgres/004_fix_finalize_workflow_status_fence.sql`, which is the
-  current definition; 003 still contains the older body).
+  clock** — `completed_at = now()` inside `finalize_workflow_status`, and it is not a
+  parameter, so no worker supplies it.
+
+  **No migration number is given here on purpose.** `finalize_workflow_status` is
+  `CREATE OR REPLACE`d by four migrations and counting; this document named 004 for
+  half a day, and by the time anyone read it the authoritative body was 044 — two
+  redefinitions had landed the same afternoon. Re-run the enumeration rather than
+  trusting a filename, and strip comments first so a header quoting a `CREATE` does not
+  count as a definition:
+
+      python3 - <<'EOF'
+      import re, glob, os
+      def strip(s):
+          s = re.sub(r'/\*.*?\*/', '', s, flags=re.S)
+          return '\n'.join(re.sub(r'--.*$', '', l) for l in s.split('\n'))
+      for f in sorted(glob.glob('migrations/postgres/*.sql')):
+          if re.search(r'CREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\s+\S*finalize_workflow_status',
+                       strip(open(f).read()), re.I):
+              print(os.path.basename(f))     # the LAST line is authoritative
+      EOF
 - A workflow's durable clock is the **worker clock**. `execSession.Now`
   (`engine/lifecycle.go`) derives it from `event_history.created_at` plus sleep anchors,
   and `created_at` is supplied by the worker in the INSERT column list
