@@ -151,7 +151,6 @@ tests/integrity	buildStressWasm	2
 tests/integrity	newStressEngine	1
 tests/plugin-harness	TestBlobstore_S3	2
 tests/plugin-harness	TestHostCallsAS	1
-tests/plugin-harness	TestHostCallsGo	1
 tests/plugin-harness	TestHostCallsJava	1
 tests/plugin-harness	TestHostCallsRust	1
 tests/plugin-harness	TestPluginCalls_MultiDB	1
@@ -160,9 +159,9 @@ tests/plugin-harness	TestPluginCalls_Wasm_Go	1
 tests/plugin-harness	TestPluginCalls_Wasm_Java	1
 tests/plugin-harness	TestPluginCalls_Wasm_Python	1
 tests/plugin-harness	TestPluginCalls_Wasm_Rust	1
+tests/plugin-harness	TestReapplyingTheCoreMigrationsLeavesTheTenantPoliciesStanding	2
 tests/plugin-harness	buildASHostCallWasm	1
 tests/plugin-harness	buildASWorkflowWasm	1
-tests/plugin-harness	buildGoHostCallWasm	1
 tests/plugin-harness	buildGoWorkflowWasm	2
 tests/plugin-harness	buildJavaHostCallWasm	1
 tests/plugin-harness	buildJavaWorkflowWasm	1
