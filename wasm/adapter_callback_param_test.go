@@ -129,8 +129,7 @@ func generatedCallbackSites(t *testing.T) []callbackSite {
 // to be reached. Forwarding cycles therefore settle at unreached, which is the
 // correct answer -- a value passed in a ring and never used never reaches the
 // host.
-func reachedCallbackParams(t *testing.T, sites []callbackSite) map[string]bool {
-	t.Helper()
+func reachedCallbackParams(sites []callbackSite) (map[string]bool, error) {
 
 	type edge struct {
 		callee string
@@ -155,6 +154,13 @@ func reachedCallbackParams(t *testing.T, sites []callbackSite) map[string]bool {
 	// resolve a forward to SOMETHING rather than nothing, and this analysis
 	// treats "forwarded somewhere unknown" as reached, so a wrong guess fails
 	// toward the flattering answer.
+	// Set when resolve() meets a name it cannot disambiguate. Recorded rather
+	// than fatal so that the guard's own regression test can assert on it: a
+	// branch that kills the process cannot be exercised by a test in the same
+	// process, and an unexercised branch of a guard is exactly what this file
+	// exists to be suspicious of.
+	var ambiguous error
+
 	resolve := func(callee string) (callbackSite, bool) {
 		if bare := strings.TrimPrefix(callee, "host_"); bare != callee {
 			site, ok := known["adapterDefs:"+bare]
@@ -167,10 +173,13 @@ func reachedCallbackParams(t *testing.T, sites []callbackSite) map[string]bool {
 		case 1:
 			return candidates[0], true
 		default:
-			t.Fatalf("a generated body calls %q, which is defined in both adapterDefs and "+
-				"hostWrapperDefs with different parameters. This analysis cannot tell which one "+
-				"the call means, and guessing fails toward \"reached\". Give the call the "+
-				"\"host_\" prefix if it means the adapter, or qualify it here.", callee)
+			if ambiguous == nil {
+				ambiguous = fmt.Errorf("a generated body calls %q, which is defined in both "+
+					"adapterDefs and hostWrapperDefs with different parameters. This analysis "+
+					"cannot tell which one the call means, and guessing fails toward "+
+					"\"reached\". Give the call the \"host_\" prefix if it means the adapter, "+
+					"or qualify it here.", callee)
+			}
 			return callbackSite{}, false
 		}
 	}
@@ -185,8 +194,8 @@ func reachedCallbackParams(t *testing.T, sites []callbackSite) map[string]bool {
 		if err != nil {
 			// Not a skip. A body this guard cannot parse is a body it cannot
 			// check, and silently passing it is the failure mode being fixed.
-			t.Fatalf("%s: generated body does not parse, so it cannot be checked: %v\n\n%s",
-				site.name, err, src)
+			return nil, fmt.Errorf("%s: generated body does not parse, so it cannot be "+
+				"checked: %w\n\n%s", site.name, err, src)
 		}
 		body := file.Decls[0].(*ast.FuncDecl).Body
 
@@ -262,12 +271,18 @@ func reachedCallbackParams(t *testing.T, sites []callbackSite) map[string]bool {
 			}
 		}
 	}
-	return reached
+	if ambiguous != nil {
+		return nil, ambiguous
+	}
+	return reached, nil
 }
 
 func TestEveryCallbackParameterReachesTheGeneratedBody(t *testing.T) {
 	sites := generatedCallbackSites(t)
-	reached := reachedCallbackParams(t, sites)
+	reached, err := reachedCallbackParams(sites)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, site := range sites {
 		for _, p := range site.params {
@@ -362,7 +377,10 @@ func TestTheGuardSeesThroughOneHopOfForwarding(t *testing.T) {
 		{"adapterDefs", "Commenter", []adapterParam{{"a", "string"}, sink}, "// onProgress is deliberately not called yet\n_ = a"},
 	}
 
-	reached := reachedCallbackParams(t, sites)
+	reached, err := reachedCallbackParams(sites)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
 		site string
@@ -403,6 +421,17 @@ func TestTheGuardSeesThroughOneHopOfForwarding(t *testing.T) {
 // Raised by WS-3 against #869: a collision makes a forward resolve to SOMETHING
 // rather than nothing, and this analysis reads "forwarded somewhere unknown" as
 // reached -- so the failure direction is the flattering one.
+//
+// One note for whoever checks a guard like this out of a pull request and runs
+// it, because it is silent when it goes wrong. A test file checked out from a
+// PR still reads adapter_metadata.go from wherever the working tree's HEAD
+// happens to be. Reviewing #869 that way produced "37 adapters, 3 collisions"
+// against a tree six adapters behind, and reported it as a property of the PR.
+// The conclusion survived -- same three names, still none func-typed -- but by
+// luck: any of the six unseen adapters could have carried a fourth collision.
+// The tell was two counts of the same set in the same conversation, 49 and 55,
+// read as two numbers rather than as a contradiction. Run a guard against the
+// tree it is guarding.
 func TestTheTwoMapsDoNotShareANameWithACallback(t *testing.T) {
 	hasCallback := func(params []adapterParam) bool {
 		for _, p := range params {
@@ -423,5 +452,63 @@ func TestTheTwoMapsDoNotShareANameWithACallback(t *testing.T) {
 				"which no longer names one parameter for %q. Qualify the affected exemption key "+
 				"with its map, the way the analysis already keys itself.", name, name)
 		}
+	}
+}
+
+// TestTheGuardRefusesAnAmbiguousForward is the known-positive for resolve()'s
+// ambiguity branch, which no real body exercises today.
+//
+// adapterDefs and hostWrapperDefs share three names -- AcquireLock, DurableSleep
+// and Now -- with DIFFERENT parameter lists on each side. Nothing currently
+// forwards a callback into one of them, so the branch that refuses to guess has
+// never run. A guard path that has never executed is a claim, not a check, and
+// this file's whole subject is the difference.
+//
+// The refusal has to be a refusal and not a guess, because the direction is not
+// symmetric: this analysis treats "forwarded somewhere I do not recognise" as
+// REACHED, since an unrecognised callee is normally an import and reaching an
+// import is the thing being confirmed. So a wrong guess about a shared name
+// silently produces the flattering answer -- the parameter is reported as
+// reaching the host when it may do nothing of the kind. Worse, which of the two
+// a guess picked would depend on Go's randomized map iteration, so the guard's
+// answer would differ between runs of the same tree.
+//
+// Synthetic sites, for the same reason TestTheGuardSeesThroughOneHopOfForwarding
+// uses them: this must keep testing the branch after the real maps change.
+func TestTheGuardRefusesAnAmbiguousForward(t *testing.T) {
+	sink := adapterParam{"onProgress", "func(string)"}
+
+	// "Shared" stands in for Now/DurableSleep/AcquireLock: one name, two
+	// definitions, different parameters. Note the two disagree on arity, which
+	// is what makes a guess actively wrong rather than merely unprincipled.
+	sites := []callbackSite{
+		{"adapterDefs", "Shared", []adapterParam{{"a", "string"}, sink}, `_ = a`},
+		{"hostWrapperDefs", "Shared", []adapterParam{sink}, `_ = onProgress`},
+		{"hostWrapperDefs", "Forwarder", []adapterParam{{"a", "string"}, sink}, `Shared(a, onProgress)`},
+	}
+
+	_, err := reachedCallbackParams(sites)
+	if err == nil {
+		t.Fatal("a callback forwarded into a name defined in BOTH maps was resolved without " +
+			"complaint. resolve() must refuse rather than guess: an unrecognised callee counts " +
+			"as reached, so guessing wrong reports a dead callback as live, and which way it " +
+			"guesses depends on map iteration order.")
+	}
+	if !strings.Contains(err.Error(), "Shared") {
+		t.Errorf("the refusal does not name the ambiguous callee, so it cannot be acted on: %v", err)
+	}
+
+	// Second direction: the SAME forward is unambiguous once the call says
+	// which map it means, and then it must resolve rather than refuse.
+	// "host_Shared" names the adapter, whose onProgress is dropped -- so the
+	// forwarder's parameter is correctly unreached rather than erroring.
+	sites[2].body = `host_Shared(a, onProgress)`
+	reached, err := reachedCallbackParams(sites)
+	if err != nil {
+		t.Fatalf("host_-qualified forward should resolve, not refuse: %v", err)
+	}
+	if reached["hostWrapperDefs:Forwarder.onProgress"] {
+		t.Error("Forwarder.onProgress forwards only into adapterDefs:Shared, which drops it, " +
+			"so it must not be reported as reaching the host.")
 	}
 }
