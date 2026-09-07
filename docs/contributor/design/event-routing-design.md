@@ -390,6 +390,14 @@ MySQL and SQL Server variants follow the existing per-dialect pattern in
 > **`CREATE TABLE IF NOT EXISTS` never adds a column.** The existing migrations are all
 > `IF NOT EXISTS`, so these `ALTER`s must be a **new numbered migration**, and any
 > long-lived test database must be dropped and recreated rather than debugged.
+>
+> **But none of this is a data migration, because none of these tables is deployed.**
+> `cmd/cleat-worker` links exactly one plugin (`llm`); `event-triggers` is never
+> registered, so its `Migrations()` never run and `ingested_events`,
+> `event_subscriptions` and `event_awaiters` exist in no deployed database. Measured
+> with both controls in IMPROVEMENT-PLAN §3.315. **The schema below is therefore
+> greenfield** — the primary-key change on `event_awaiters` and the new columns cost
+> nothing to get right, and the only databases to recreate are test databases.
 
 **Tenancy — and this is a correction, not a restatement.** RLS in this repo covers
 **11** tables (`grep -rho 'ENABLE ROW LEVEL SECURITY' migrations/postgres/*.sql | wc -l`),
@@ -413,9 +421,13 @@ database-enforced isolation for event tables.
 - **D2 — retention vs eligibility.** These must be two windows, not one. Retained for
   debugging ≠ eligible for delivery; conflating them means a six-month-old payload can
   wake a brand-new run.
-- **D3 — `ingested_events` vs `event_stream`.** Two tables for two things both called
-  "event", in two plugins (`eventtriggers`, `eventstore`). **Needs an answer before
-  P1**, which alters one of them.
+- **D3 — `ingested_events` vs `event_stream`. ANSWERED 2026-09-06; no longer a
+  blocker.** They are different things, not duplicates: `event_stream` is a per-stream
+  append-only log with SSE fan-out and **no host functions** (its package doc says it
+  "demonstrates all plugin API patterns"); `ingested_events` is a routing buffer keyed
+  on a publisher-supplied idempotency id. Different keys, different lifecycle,
+  different readers. And neither table is deployed — see §8 and IMPROVEMENT-PLAN
+  §3.315.
 - **D4 — ASCII or binary slots.** UUIDs and Stripe-style IDs are ASCII, so
   `VARCHAR(128)` under an ASCII collation is fine. A non-ASCII key would need
   `VARBINARY(128)`. Cheap now, expensive after data exists.
@@ -537,17 +549,28 @@ That is also why §14's falsification table has no row asserting a count.
 
 ## 13. Phasing
 
-**P0 — fix today's semantics.** `ORDER BY received_at DESC` → ordered ascending by a
+**P0 — wire the plugin into the worker at all.** This was not in the first version of
+this plan, because the plan assumed the subsystem ran. It does not:
+`cmd/cleat-worker/main.go` blank-imports exactly one plugin (`llm`), so `event-triggers`
+is never registered and none of this design's tables exist anywhere (§3.315). One import
+line, plus whatever falls out of those migrations executing for the first time against
+all three dialects — which is the part that will not be one line.
+
+Nothing below is testable end-to-end until this lands, and `--list-plugins` (§3.315,
+step 1) is what makes it verifiable rather than assumed.
+
+**P0b — fix today's semantics.** `ORDER BY received_at DESC` → ordered ascending by a
 monotonic column; consume-and-record in one transaction (today's code marks consumed
 and logs on failure with "Continue even if marking fails", admitting a double-consume).
-Cheap *now*: `plugins` is a **tier 2** component, so nothing may describe it as
-production-ready and nothing should yet depend on these semantics.
+Cheap *now*, and cheaper than it looks: `plugins` is a **tier 2** component, nothing may
+describe it as production-ready, and — per P0 — nothing is running it, so there are no
+existing semantics for anyone to depend on.
 
 **P1 — key slots and correlation, inside the plugin.** The §8 schema, the surrogate
 primary key, three slots on both tables, the composite indexes, and the `Keys`
-parameter on `await_event`. **No ABI change** — it goes through `plugin_call` — but it
-is a schema change including a primary-key change, so it is not free. Proves the model
-before spending a host call.
+parameter on `await_event`. **No ABI change** — it goes through `plugin_call` — and,
+since §8 is greenfield, no data migration either. Proves the model before spending a
+host call.
 
 **P2 — promote to an engine suspend.** The §12 checklist, plus §6's write-then-read
 ordering and the sweeper. **This carries the risk**, and the earlier draft's claim that
