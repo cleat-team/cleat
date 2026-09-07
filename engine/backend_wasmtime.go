@@ -1180,6 +1180,12 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatPluginCallStreaming(linker); err != nil {
 		return err
 	}
+	if err := b.registerCleatPollUpdate(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatCompleteUpdate(linker); err != nil {
+		return err
+	}
 	if err := b.registerCleatRegisterUpdateHandler(linker); err != nil {
 		return err
 	}

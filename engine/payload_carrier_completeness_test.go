@@ -106,6 +106,7 @@ var allEventTypesForCarrierAudit = []EventType{
 	EventTypeChildWorkflow, EventTypeAwaitChild, EventTypeContinueAsNew, EventTypeHeartbeat,
 	EventTypeAwaitAllChildren, EventTypePluginCall, EventTypeCreatePromise, EventTypeAwaitPromise,
 	EventTypePromiseResolved, EventTypePromiseRejected, EventTypeUpdateHandler,
+	EventTypeUpdateReceived, EventTypeUpdateCompleted,
 	EventTypeStateMutation, EventTypeRunDetached, EventTypePluginCallStreamChunk,
 	EventTypeDurableLog, EventTypeAcquireLock, EventTypeReleaseLock, EventTypeSideEffect,
 	EventTypeScopeAcquired, EventTypeDurableSend, EventTypeDurableScheduleInvoke,

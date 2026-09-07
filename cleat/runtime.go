@@ -719,10 +719,14 @@ type HostCallsImpl struct {
 	setQueryState                 func(key, value string)
 	registerUpdateHandler         func(name string)
 	handleUpdate                  func(name, payload string) (string, error)
-	runDetached                   func(name, inputJSON string) error
-	now                           func() int64
-	random                        func() int64
-	newUUID                       func() string
+	pollUpdate                    func() (envelopeJSON string, found bool, err error)
+	completeUpdate                func(requestID, resultJSON, errMsg string) error
+	// dispatchingUpdates is the reentrancy guard for DispatchUpdates; see there.
+	dispatchingUpdates bool
+	runDetached        func(name, inputJSON string) error
+	now                func() int64
+	random             func() int64
+	newUUID            func() string
 
 	pluginCall             func(pluginName, functionName, inputJSON string) (string, error)
 	pluginCallStreaming    func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
@@ -788,6 +792,8 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		minVersion:                    opts.MinVersion,
 		setQueryState:                 opts.SetQueryState,
 		registerUpdateHandler:         opts.RegisterUpdateHandler,
+		pollUpdate:                    opts.PollUpdate,
+		completeUpdate:                opts.CompleteUpdate,
 		handleUpdate:                  opts.HandleUpdate,
 		runDetached:                   opts.RunDetached,
 		now:                           opts.Now,
@@ -871,6 +877,8 @@ type HostCallsOptions struct {
 	MinVersion                    func() int
 	SetQueryState                 func(key, value string)
 	RegisterUpdateHandler         func(name string)
+	PollUpdate                    func() (envelopeJSON string, found bool, err error)
+	CompleteUpdate                func(requestID, resultJSON, errMsg string) error
 	HandleUpdate                  func(name, payload string) (string, error)
 	RunDetached                   func(name, inputJSON string) error
 	Now                           func() int64

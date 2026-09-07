@@ -264,7 +264,24 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// 15 since 2026-09-06: SendSignalAndWait's stop site went with the host
 	// call itself (IMPROVEMENT-PLAN 3.220). Re-derive with
 	//	grep -rn "if s.stopBeforeNewWork() {" engine/*.go | grep -v _test | wc -l
-	const stopSitesOn20260904 = 15
+	//
+	// 17 since the end-to-end update implementation (IMPROVEMENT-PLAN 3.239):
+	// DurablePollUpdate and DurableCompleteUpdate both consult it, because
+	// delivering an update runs guest code that can start new work and
+	// completing one settles a caller's promise.
+	//
+	// The other side was checked rather than assumed, which is what this
+	// constant is for. Java needs NO new method here: the Java SDK declares
+	// neither cleat_poll_update nor cleat_complete_update, so a Java guest
+	// cannot reach either call and has no decoder to guard. Both are exempt in
+	// sdkStopSiteExemptions["java"], and those exemptions carry an absentToken
+	// so that adding the import fails TestEverySDKCoversEveryHostStopSite
+	// rather than being silently covered by the exemption.
+	//
+	// Note the pattern: the message below suggests
+	// `grep -rn "stopBeforeNewWork()"`, which also matches the function's own
+	// declaration and returns 18. The count here is call SITES.
+	const stopSitesOn20260904 = 17
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

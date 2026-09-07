@@ -79,6 +79,12 @@ func (h *stubHostHandler) PluginCall(_ context.Context, _ api.Module, _, _, _ st
 func (h *stubHostHandler) PluginCallStreaming(_ context.Context, _ api.Module, _, _, _ string, _, _ uint32) int64 {
 	return 0
 }
+func (h *stubHostHandler) DurablePollUpdate(_ context.Context, _ api.Module, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) DurableCompleteUpdate(_ context.Context, _ api.Module, _, _, _ string) int64 {
+	return 0
+}
 func (h *stubHostHandler) RegisterUpdateHandler(_ context.Context, _ api.Module, _ string) int64 {
 	return 0
 }

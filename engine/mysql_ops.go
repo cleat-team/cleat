@@ -149,6 +149,21 @@ func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 		INSERT IGNORE INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status)
 		VALUES (?, ?, ?, ?, 'pending')
 	`, workflowID, updateName, encodeJSONPayload(payload), promiseID)
+	if err != nil {
+		return err
+	}
+
+	// Wake the workflow, exactly as DeliverSignal does.
+	//
+	// Not optional: an update is delivered at a DISPATCH POINT in the guest,
+	// and a suspended workflow reaches no dispatch point. Without this the
+	// request sits pending until something else happens to wake the workflow --
+	// which for a workflow waiting on a signal or a long sleep may be never.
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET next_wake_at = NOW(6)
+		WHERE id = ? AND status IN ('ready', 'suspended')
+	`, workflowID)
 	return err
 }
 

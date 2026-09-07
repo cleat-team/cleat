@@ -6502,6 +6502,98 @@ addition rather than a port, and it is worth considering for all three, because 
 last hop without depending on thread scheduling.
 
 
+### 3.239 Workflow updates, implemented end to end — 🟢 **DONE 2026-09-06** (WS-1, 2026-09-06)
+
+Closes the substantive half of [#849](https://github.com/cleat-team/cleat/issues/849). §3.238 stopped
+a stranded update hanging its caller; this makes updates actually work.
+
+#### What was there before
+
+Nothing on the path. Three independent breaks, all recorded on #849:
+
+1. **No guest entry point, in any SDK.** Both SDKs registered handlers into a map read only by a
+   test harness — Go's `HandleUpdate` was reached from `cleattest` alone, Python's
+   `_handle_update` had zero callers. `cleat_register_update_handler` recorded a *name* and there
+   was no way to ask a running guest to run one.
+2. **The worker never called `engine.WithUpdateHandler`**, so `DispatchUpdate` returned
+   `no update handler configured for this engine`.
+3. **Delivery was a 5s ticker over `w.inflight`**, populated only for the lifetime of one segment.
+
+Note the ordering trap that made 3 dangerous to fix alone: with 2 unfixed, a scheduling fix would
+have completed each request with that error and **rejected** the caller's promise. A fix verified
+by "the request is no longer pending" would have read as success while delivering nothing.
+
+#### The design, and the constraint that forced it
+
+An update handler is a **closure in guest memory**. Only guest code can call it, so an arriving
+update cannot interrupt the workflow — something in the guest has to ask.
+
+And it has to ask at a fixed **program position**, not at a moment in time, because replay
+re-executes the guest and matches host calls against history in order. The constraint is hard
+rather than stylistic: `recordEvent` **appends** (`s.history = append(s.history, rec)`), so an
+event can only ever land at the frontier. There is no way to insert a delivery into the middle of
+an existing history — which is why an update cannot be dispatched at handler-registration time, as
+the first design attempt proposed: on every segment after the first, registration is replayed from
+deep inside history that is already written.
+
+So: **dispatch points**. The SDK calls `DispatchUpdates()` immediately before each suspension
+(`DurableSleep`, `AwaitSignals`, `AwaitPromise`, `AwaitChild`, `AwaitAllChildren`,
+`AwaitAnyChild`), and exports it for workflows that want more. Two new host calls carry it:
+
+| call | replaying | fresh |
+|---|---|---|
+| `cleat_poll_update` | return `history[stepCount]` if it is `update_received`, else not-found. **The table is never consulted** | read the table, record `update_received`, return it |
+| `cleat_complete_update` | replay the `update_completed` event and settle **nothing** | record it, complete the row, settle the caller's promise |
+
+`DurableAwaitSignals`' shape exactly, for the same reason.
+
+**Record before settle, not after.** A crash between the two leaves the event in history and the
+row still `pending`, so the next replay finds the delivery there and never re-reads the table —
+at-least-once delivery with idempotent replay. The other order loses the update entirely.
+
+**The handler re-runs on every replay, and that is the point.** The durable facts are its input and
+its output, not its execution; re-running it is what rebuilds the state it mutated.
+
+The cost, stated rather than hidden: an update is handled at the next dispatch point, not on
+arrival. A workflow in a tight loop of durable calls with no suspension does not service updates
+until it suspends.
+
+#### What else this needed
+
+- `CreateUpdateRequest` now wakes the workflow (`next_wake_at = now()`), like `DeliverSignal`. Not
+  optional: a suspended workflow reaches no dispatch point, so without it the request waits for
+  something else to wake the workflow — for one waiting on a signal, possibly never. Three dialects.
+- The 5s ticker and `dispatchPendingUpdates` are **deleted**, along with the three tests that
+  covered them. #849 named those tests as the reason this went unnoticed: each built the
+  precondition by hand (`w.inflight.Store(...)`, `WithUpdateHandler(...)`) and so asserted the
+  function worked *given* a state that never held when the ticker fired.
+- `engine.WithUpdateHandler` and `Engine.DispatchUpdate` are kept but documented as an embedder
+  hook that is **not** the workflow-update path. Removing them is a breaking API change and gets
+  its own decision.
+
+#### Two guards this change had to repair, both silent
+
+**The stop-correspondence guard caught the new calls immediately** — both consult
+`stopBeforeNewWork` and were not declared stop surfaces. That one worked as designed.
+
+**The compaction fuzzer could not reach them, and had already rotted twice.**
+`parseFuzzEvents` clamped its type byte with a literal `% 30`; the new codes are 34 and 35. The
+comment above that line documented the *previous* instance (`% 27` left three cron codes unfuzzed,
+fixed 2026-08-09) as though it were the last — but `AwaitAnyChild` (31), `PollChild` (32) and
+`AdminAction` (33) had been added since and were unreachable in exactly the same way. **Six event
+types unfuzzed across two occurrences, neither of which failed anything**, because an unreachable
+code makes the fuzzer explore *less* and nothing measures that. The bound is now derived from
+`codeToEventType`.
+
+That was not sufficient either. `compaction_fuzz_test.go` also carried
+`UpdatePayload`/`UpdateResponse`/`UpdateError` as exempt "dead fields with nothing to lose" — prose
+that stopped being true the moment these events began carrying a handler's input and result.
+Removing the exemptions changed nothing observable: deleting `rec.UpdatePayload = ce.Request` from
+compaction left the fuzz test **green**, because `FuzzCompactionEquivalence` run without `-fuzz`
+executes only its seed corpus and no seed produces those codes. `TestCompactionPreservesTheUpdateEvents`
+asserts the round trip directly and fails on that deletion. **A fuzzer finds cases nobody thought
+of; it does not assert the case you already know about.**
+
 ### 3.236 The plugin harness stripped the tenant RLS policies off a shared SQL Server database — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
 
 `tests/plugin-harness`'s `RunCoreMigrations` split each migration file on `GO` and executed the

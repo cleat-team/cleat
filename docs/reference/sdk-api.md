@@ -466,7 +466,43 @@ RegisterUpdateHandler(name string,
 ```
 
 Registers a handler for the named workflow update. Called during workflow
-init, before durable operations. The validator runs first (read-only).
+init, before durable operations. The validator runs first (read-only), so a
+request it refuses changes nothing and does no durable work.
+
+An update is a request/reply call into a *running* workflow. It is the only one
+of the three external interactions that both changes workflow state and returns
+a value to the caller:
+
+| | direction | changes state | returns a value |
+|---|---|---|---|
+| signal | in | yes | no |
+| `SetQueryState` | out | no | yes |
+| **update** | both | yes | yes |
+
+A caller posts `POST /api/workflows/:id/update/:name`, gets `202` with a
+`promise_id`, and waits on that promise for the handler's return value.
+
+```go
+DispatchUpdates()
+```
+
+Delivers and runs every update currently pending for this workflow.
+
+**The SDK already calls this before each suspension** -- `DurableSleep`,
+`AwaitSignals`, `AwaitPromise`, `AwaitChild`, `AwaitAllChildren`,
+`AwaitAnyChild` -- so an ordinary workflow needs no update-specific code. It is
+exported for workflows that want to service updates at additional points.
+
+Those call sites are *dispatch points*, and the position matters more than the
+timing. An update handler is a closure in guest memory, so only guest code can
+invoke it -- an arriving update cannot interrupt the workflow. Replay
+re-executes the workflow and matches host calls against the recorded history in
+order, so delivery has to happen at the same **program position** every run.
+That is what makes the handler's effect on workflow state reproducible.
+
+The consequence to know: **an update is handled at the next dispatch point, not
+the instant it arrives.** A workflow in a tight loop of durable calls with no
+suspension will not service updates until it suspends.
 
 There is no `RegisterQueryHandler` -- it was removed 2026-08-09 (see
 `docs/determinism.md`, "Why there is no RegisterQueryHandler"). It recorded a

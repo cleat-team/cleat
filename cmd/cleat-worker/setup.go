@@ -1143,8 +1143,6 @@ func (w *Worker) Run() {
 	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays) })
 
 	// Update dispatch loop (Feature 3: Update Handler).
-	w.registerLoopFunc("update_dispatch", func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) })
-	w.launchLoop("update_dispatch", func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) })
 
 	// Watchdog loop for background loop health monitoring.
 	if w.healthCheckInterval > 0 {
@@ -1608,6 +1606,17 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// unit test, and from nothing that ships, so every test had a promise
 		// store and the worker never did.
 		engine.WithPromiseStore(execStore.(engine.PromiseStore)),
+		// The update store. Without this DurablePollUpdate finds nothing and a
+		// workflow never sees an update -- which is what every environment did
+		// until updates were implemented end to end.
+		//
+		// Type-asserted rather than guarded, deliberately, and for the reason
+		// the promise store above records: a nil store here is indistinguishable
+		// from "no updates pending", so a missing wire-up would be silent. Every
+		// WorkflowStore satisfies UpdateStore -- all four of its methods are on
+		// WorkflowStore already -- so this cannot fail at runtime without the
+		// store itself having changed shape, and then it should be loud.
+		engine.WithUpdateStore(execStore.(engine.UpdateStore)),
 		engine.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, priority: wf.Priority, childVersions: childVersions}),
 		engine.WithWorkflowID(wf.ID),
 		// Anchors the session clock when the workflow has no history yet.
@@ -2485,86 +2494,29 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 	}
 }
 
-func (w *Worker) updateDispatchLoop(ctx context.Context) {
-	defer w.wg.Done()
-	w.healthTracker.setInterval("update_dispatch", 5*time.Second)
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			w.healthTracker.recordRun("update_dispatch")
-			w.dispatchPendingUpdates()
-		}
-	}
-}
-
-func (w *Worker) dispatchPendingUpdates() {
-	ctx := context.Background()
-
-	// Iterate over all claimed workflows.
-	w.inflight.Range(func(key, value any) bool {
-		wfID := key.(string)
-
-		// Get pending update requests for this workflow.
-		updates, err := w.store.GetPendingUpdateRequests(ctx, wfID)
-		if err != nil {
-			w.logger.ErrorContext(w.ctx, "error fetching pending updates", "worker_id", w.id, "workflow_id", wfID, "error", err)
-			return true
-		}
-		if len(updates) == 0 {
-			return true
-		}
-
-		// Find the running engine for this workflow.
-		envVal, ok := w.execEngines.Load(wfID)
-		if !ok {
-			// Engine not found (maybe not running on this worker right now).
-			// Leave the updates pending for the next claim cycle.
-			return true
-		}
-		env, ok := envVal.(*engine.Engine)
-		if !ok {
-			return true
-		}
-
-		for _, upd := range updates {
-			// Dispatch the update via the engine.
-			result, dErr := env.DispatchUpdate(ctx, upd.UpdateName, upd.Payload)
-
-			var resultStr, errStr string
-			if dErr != nil {
-				errStr = dErr.Error()
-				w.logger.ErrorContext(w.ctx, "update failed", "worker_id", w.id, "workflow_id", wfID, "update_name", upd.UpdateName, "error", dErr)
-			} else {
-				resultStr = result
-				w.logger.InfoContext(w.ctx, "update completed", "worker_id", w.id, "workflow_id", wfID, "update_name", upd.UpdateName)
-			}
-
-			// Store the result in the workflow_update_requests table.
-			if cErr := w.store.CompleteUpdateRequest(ctx, wfID, upd.UpdateName, resultStr, errStr); cErr != nil {
-				w.logger.ErrorContext(w.ctx, "error completing update", "worker_id", w.id, "workflow_id", wfID, "update_name", upd.UpdateName, "error", cErr)
-			}
-
-			// If the update request has an associated promise, resolve or reject it.
-			if upd.PromiseID != "" {
-				if dErr != nil {
-					if rErr := w.store.RejectPromise(ctx, upd.PromiseID, errStr); rErr != nil {
-						w.logger.ErrorContext(w.ctx, "error rejecting promise", "worker_id", w.id, "workflow_id", wfID, "promise_id", upd.PromiseID, "error", rErr)
-					}
-				} else {
-					if rErr := w.store.ResolvePromise(ctx, upd.PromiseID, resultStr); rErr != nil {
-						w.logger.ErrorContext(w.ctx, "error resolving promise", "worker_id", w.id, "workflow_id", wfID, "promise_id", upd.PromiseID, "error", rErr)
-					}
-				}
-			}
-		}
-		return true
-	})
-}
+// updateDispatchLoop and dispatchPendingUpdates lived here until updates were
+// implemented end to end. Both are gone, and it is worth recording why rather
+// than only that.
+//
+// The loop was a 5-second ticker over w.inflight, which is populated only for
+// the lifetime of ONE SEGMENT -- executeWorkflow stores the entry on claim and
+// deletes it on return. Segments run in tens to hundreds of milliseconds, so
+// the delivery condition was "the ticker happens to fire mid-segment", which is
+// a fraction of a percent of wall-clock time for a busy workflow and exactly
+// zero for one waiting on a sleep, a signal, a promise or a child. Measured on
+// PostgreSQL: 5 runs, 0 dispatched (cleat#849).
+//
+// Even in the lucky case it delivered nothing, because it called
+// Engine.DispatchUpdate, which needs an updateHandler that nothing ever
+// configured -- so the request would have been completed with "no update
+// handler configured for this engine" and the caller's promise REJECTED. A fix
+// for the scheduling alone, verified by "the request is no longer pending",
+// would have read as success while delivering nothing.
+//
+// Updates are now delivered inside the segment, by the guest, at dispatch
+// points -- see cleat.HostCallsImpl.DispatchUpdates and engine/updater.go.
+// Nothing polls from outside the workflow any more, which is what lets the
+// delivery be an event in the history and therefore replayable.
 
 func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 	key := fmt.Sprintf("%s:%d", defName, defVersion)

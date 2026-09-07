@@ -202,20 +202,43 @@ func fuzzSeed(typeCode byte, strs []string, ints ...int64) []byte {
 // parseFuzzEvents interprets a byte slice as a sequence of length-prefixed
 // events and returns the resulting EventRecord slice. Every byte sequence
 // produces a valid (possibly empty) result. This deterministic mapping allows
+// fuzzEventCodeSpan is one past the highest event code, so the fuzzer's type
+// byte can land on every one of them. Gaps in the code space are fine:
+// codeToEventType returns "" for an unassigned code and parseFuzzEvents
+// defaults it to a call, which is what it already did.
+var fuzzEventCodeSpan = func() int {
+	max := 0
+	for code := range codeToEventType {
+		if code > max {
+			max = code
+		}
+	}
+	return max + 1
+}()
+
 // Go's fuzzer to explore the event space through byte-level mutations.
 func parseFuzzEvents(data []byte) []EventRecord {
 	var events []EventRecord
 	r := &byteReader{data: data}
 
 	for step := 0; r.remaining() > 0; step++ {
-		// Clamp to [0, 29] -- the full EventCode* range (compaction.go). This
-		// was `% 27` (clamping to [0, 26]) until 2026-08-09, which meant
-		// EventCodeScheduleCron (27), EventCodeDeleteCron (28), and
-		// EventCodeListCrons (29) could never be generated: the fuzzer's type
-		// byte can never land on them, so three of the ~27 compacted event
-		// types went unfuzzed regardless of how long -fuzz ran. Found while
-		// auditing coverage for this same stream's compaction fix.
-		typeCode := int(r.readByte()) % 30
+		// DERIVED from codeToEventType, not written down. A literal here is a
+		// silent coverage hole that reopens every time an event code is added,
+		// and it has now done so twice:
+		//
+		//   `% 27` until 2026-08-09 -- ScheduleCron (27), DeleteCron (28) and
+		//   ListCrons (29) could never be generated. Fixed by raising it to 30.
+		//
+		//   `% 30` until the end-to-end update implementation -- by then
+		//   AwaitAnyChild (31), PollChild (32) and AdminAction (33) had been
+		//   added and were unreachable in exactly the same way, with the
+		//   comment above them still describing the previous instance as
+		//   though it were the last one.
+		//
+		// Six event types unfuzzed across two occurrences, neither of which
+		// failed anything: an unreachable code makes the fuzzer explore LESS,
+		// and nothing measures that. Deriving the bound removes the class.
+		typeCode := int(r.readByte()) % fuzzEventCodeSpan
 
 		ev := EventRecord{
 			Step:      step,
@@ -287,6 +310,15 @@ func parseFuzzEvents(data []byte) []EventRecord {
 			ev.PromiseError = r.readString()
 		case EventCodeUpdateHandler: // handlerName (1 string)
 			ev.UpdateHandlerName = r.readString()
+		case EventCodeUpdateReceived: // handlerName, requestID, payload (3 strings)
+			ev.UpdateHandlerName = r.readString()
+			ev.UpdateRequestID = r.readString()
+			ev.UpdatePayload = r.readString()
+		case EventCodeUpdateCompleted: // handlerName, requestID, response, error (4 strings)
+			ev.UpdateHandlerName = r.readString()
+			ev.UpdateRequestID = r.readString()
+			ev.UpdateResponse = r.readString()
+			ev.UpdateError = r.readString()
 		case EventCodeStateMutation: // key, value, op, stateKeys (4 strings), delta (1 int64)
 			ev.StateKey = r.readString()
 			ev.StateValue = r.readString()
@@ -429,13 +461,18 @@ var compactionExemptFields = map[string]string{
 		"extractCompactionState receives the event -- it does not survive an " +
 		"ordinary restart-replay either, independent of compaction. plugins.go " +
 		"falls back to a live registry lookup for exactly this reason.",
-	"UpdatePayload": "declared on EventRecord but never assigned anywhere in " +
-		"the engine as of 2026-08-09 (grep -rn 'UpdatePayload:' engine/*.go " +
-		"outside types.go returns nothing) -- a dead field with nothing to " +
-		"lose. RegisterUpdateHandler (lifecycle.go) only ever sets " +
-		"UpdateHandlerName.",
-	"UpdateResponse": "dead field, see UpdatePayload",
-	"UpdateError":    "dead field, see UpdatePayload",
+	// UpdatePayload, UpdateResponse and UpdateError were exempt here until
+	// updates were implemented end to end, on the grounds that nothing assigned
+	// them: "a dead field with nothing to lose". That stopped being true the
+	// moment DurablePollUpdate and DurableCompleteUpdate began recording
+	// update_received and update_completed events, and the exemptions were
+	// removed with the same change rather than left to be discovered.
+	//
+	// This is the shape worth naming: an exemption is prose, so nothing fails
+	// when the thing it describes stops being the case. It goes on being
+	// honoured, and the guard it belongs to quietly stops checking a field that
+	// now carries a handler's input and its result -- the two facts an update's
+	// replay depends on.
 }
 
 // eventFieldsMatch reports whether every non-exempt field of a and b is
@@ -518,6 +555,13 @@ func eventSummary(ev EventRecord) string {
 		return fmt.Sprintf("PromiseRejected{id=%s err=%q}", trunc(ev.PromiseID, 12), ev.PromiseError)
 	case EventTypeUpdateHandler:
 		return fmt.Sprintf("UpdateHandler{name=%s}", trunc(ev.UpdateHandlerName, 16))
+	case EventTypeUpdateReceived:
+		return fmt.Sprintf("UpdateReceived{name=%s req=%s payload=%s}",
+			trunc(ev.UpdateHandlerName, 12), trunc(ev.UpdateRequestID, 12), trunc(ev.UpdatePayload, 12))
+	case EventTypeUpdateCompleted:
+		return fmt.Sprintf("UpdateCompleted{name=%s req=%s resp=%s err=%q}",
+			trunc(ev.UpdateHandlerName, 12), trunc(ev.UpdateRequestID, 12),
+			trunc(ev.UpdateResponse, 12), ev.UpdateError)
 	case EventTypeStateMutation:
 		return fmt.Sprintf("StateMutation{key=%s value=%s op=%s delta=%d}", trunc(ev.StateKey, 8), trunc(ev.StateValue, 8), trunc(ev.StateOp, 8), ev.StateDelta)
 	case EventTypeRunDetached:

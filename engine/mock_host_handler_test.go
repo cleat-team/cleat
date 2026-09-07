@@ -176,6 +176,14 @@ func (h *mockHostHandler) RegisterUpdateHandler(ctx context.Context, m api.Modul
 	h.record("RegisterUpdateHandler", name)
 	return h.ret
 }
+
+func (h *mockHostHandler) DurablePollUpdate(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64 {
+	return 0
+}
+
+func (h *mockHostHandler) DurableCompleteUpdate(ctx context.Context, m api.Module, requestID, result, errMsg string) int64 {
+	return 0
+}
 func (h *mockHostHandler) SendSignalAndWait(ctx context.Context, m api.Module, targetRunID, signalName, payload string, timeoutMs int64, responsePtr, responseMaxLen uint32) int64 {
 	h.record("SendSignalAndWait", targetRunID, signalName, payload)
 	return h.ret

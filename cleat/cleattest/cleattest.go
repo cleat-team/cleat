@@ -280,22 +280,25 @@ func (e *TestEnv) ChildWorkflowCallHistory() []ChildWorkflowCallRecord {
 // Use NewTestEnv to create one, then wire up stubs with OnCall
 // and drive the workflow via the HostCalls returned by H().
 type TestEnv struct {
-	mu             sync.Mutex
-	h              cleat.HostCalls
-	nowMs          int64
-	versionVal     int
-	minVersionVal  int
-	queryState     map[string]string
-	callHistory    []CallRecord
-	callStubs      []*callStub
-	pendingSignals []scheduledSignal
-	detachedRuns   []DetachedRun
-	sleepRecs      []sleepRecord
-	signalWaiters  []signalWaiter
-	randomSeq      []int64
-	randomIdx      int
-	deferCounter   int
-	promises       map[string]promiseState // keyed by promiseID
+	mu               sync.Mutex
+	h                cleat.HostCalls
+	nowMs            int64
+	versionVal       int
+	minVersionVal    int
+	queryState       map[string]string
+	callHistory      []CallRecord
+	callStubs        []*callStub
+	pendingSignals   []scheduledSignal
+	detachedRuns     []DetachedRun
+	sleepRecs        []sleepRecord
+	signalWaiters    []signalWaiter
+	randomSeq        []int64
+	randomIdx        int
+	deferCounter     int
+	promises         map[string]promiseState // keyed by promiseID
+	pendingUpdates   []PendingUpdate
+	completedUpdates []UpdateOutcome
+	updateCounter    int
 
 	// crons holds schedules created by ScheduleCron, keyed by schedule ID.
 	// cronCounter makes those IDs deterministic so a test can assert on
@@ -422,6 +425,8 @@ func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
 		ListCrons:                     e.listCronsImpl,
 		AwaitPromise:                  e.awaitPromiseImpl,
 		RegisterUpdateHandler:         e.registerUpdateHandlerImpl,
+		PollUpdate:                    e.pollUpdateImpl,
+		CompleteUpdate:                e.completeUpdateImpl,
 		RunDetached:                   e.runDetachedImpl,
 		PluginCall:                    e.pluginCallImpl,
 		DurableSend:                   e.durableSendImpl,
@@ -1388,6 +1393,97 @@ func (e *TestEnv) createPromiseImpl(name string) (string, error) {
 		settled: make(chan struct{}),
 	}
 	return promiseID, nil
+}
+
+// pollUpdateImpl and completeUpdateImpl give cleattest the same update queue
+// the engine has, so a test can enqueue an update and assert the handler ran,
+// the workflow state changed, and the caller's promise settled.
+//
+// The queue is drained in order and a delivery is removed only when it is
+// completed, mirroring the engine: the request row leaves 'pending' on
+// completion, not on delivery, so a handler that panics leaves the update to be
+// redelivered.
+func (e *TestEnv) pollUpdateImpl() (string, bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.pendingUpdates) == 0 {
+		return "", false, nil
+	}
+	u := e.pendingUpdates[0]
+	b, err := json.Marshal(map[string]string{
+		"name":       u.Name,
+		"payload":    u.Payload,
+		"request_id": u.RequestID,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return string(b), true, nil
+}
+
+func (e *TestEnv) completeUpdateImpl(requestID, result, errMsg string) error {
+	e.mu.Lock()
+	for i, u := range e.pendingUpdates {
+		if u.RequestID == requestID {
+			e.pendingUpdates = append(e.pendingUpdates[:i], e.pendingUpdates[i+1:]...)
+			e.completedUpdates = append(e.completedUpdates, UpdateOutcome{
+				Name: u.Name, RequestID: requestID, Result: result, Error: errMsg,
+			})
+			promiseID := u.PromiseID
+			e.mu.Unlock()
+			if promiseID == "" {
+				return nil
+			}
+			if errMsg != "" {
+				e.settlePromise(promiseID, "rejected", "", errMsg)
+			} else {
+				e.settlePromise(promiseID, "resolved", result, "")
+			}
+			return nil
+		}
+	}
+	e.mu.Unlock()
+	return fmt.Errorf("cleattest: no pending update request %q", requestID)
+}
+
+// EnqueueUpdate makes an update request pending for this workflow, as
+// POST /api/workflows/:id/update/:name does. promiseID may be empty for a
+// request with no caller waiting on it.
+func (e *TestEnv) EnqueueUpdate(name, payload, promiseID string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.updateCounter++
+	requestID := fmt.Sprintf("upd-%s-%d", name, e.updateCounter)
+	e.pendingUpdates = append(e.pendingUpdates, PendingUpdate{
+		Name: name, Payload: payload, RequestID: requestID, PromiseID: promiseID,
+	})
+	return requestID
+}
+
+// CompletedUpdates returns the updates that have been handled, in order.
+func (e *TestEnv) CompletedUpdates() []UpdateOutcome {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]UpdateOutcome, len(e.completedUpdates))
+	copy(out, e.completedUpdates)
+	return out
+}
+
+// PendingUpdate is one update request waiting to be delivered.
+type PendingUpdate struct {
+	Name      string
+	Payload   string
+	RequestID string
+	PromiseID string
+}
+
+// UpdateOutcome is one handled update: exactly one of Result and Error is
+// meaningful, distinguished by Error being non-empty.
+type UpdateOutcome struct {
+	Name      string
+	RequestID string
+	Result    string
+	Error     string
 }
 
 func (e *TestEnv) registerUpdateHandlerImpl(name string) {

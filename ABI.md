@@ -773,6 +773,80 @@ Register an update handler for workflow updates (bi-directional RPC). Handler re
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
+#### 2.26a `cleat_poll_update`
+
+Deliver the next pending update request, or report that there is none.
+
+Registration (2.26) records a handler *name*; this is what delivers work to it.
+The handler itself is a closure in guest memory, so the host cannot invoke it —
+the guest polls at fixed program positions (the SDK does so before each
+suspension) and runs the handler itself.
+
+**Delivery is recorded in the event history**, as an `update_received` event, at
+the step the guest polled. That is what makes an update replayable: on replay
+the poll reads that event rather than the request table, so the handler sees the
+same input at the same point in the program. A request that arrived after the
+original run is therefore not delivered at an earlier step.
+
+```
+(func (import "env" "cleat_poll_update")
+  (param i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `out_ptr` | `i32` | Output buffer pointer |
+| `out_max_len` | `i32` | Output buffer capacity |
+
+The buffer receives a JSON object `{"name","payload","request_id"}`. One buffer
+rather than three out-params: three lengths plus a found flag do not fit an
+`i64` alongside each other.
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 32-63 | bytes written |
+| 8 | `found` — 1 when an update was delivered |
+| 0-7 | `errCode` — 0 = success |
+
+`request_id` is opaque to the guest: it is received here and returned unchanged
+to `cleat_complete_update`.
+
+#### 2.26b `cleat_complete_update`
+
+Record an update handler's outcome and settle the caller's promise.
+
+Recorded as an `update_completed` event. Without it every replay would settle
+the caller's promise again, and a settle matching no promise reports not-found —
+so replay would begin erroring on a workflow that had done nothing wrong.
+
+```
+(func (import "env" "cleat_complete_update")
+  (param i32 i32 i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `request_id_ptr` | `i32` | Request id pointer (as delivered by `cleat_poll_update`) |
+| `request_id_len` | `i32` | Request id length |
+| `result_ptr` | `i32` | Result JSON pointer |
+| `result_len` | `i32` | Result JSON length |
+| `err_ptr` | `i32` | Error message pointer |
+| `err_len` | `i32` | Error message length |
+
+A non-empty error rejects the caller's promise; an empty error resolves it. An
+empty *result* with an empty error resolves — an empty result is an outcome, not
+a missing one.
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-31 | `errCode` — 0 = success |
+
 #### 2.27 `set_query_state`
 
 Set a key-value pair in the workflow's query state.

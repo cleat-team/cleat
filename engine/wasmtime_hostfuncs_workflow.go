@@ -335,6 +335,50 @@ func (b *wasmtimeBackend) registerCleatRegisterUpdateHandler(linker *wasmtime.Li
 	})
 }
 
+func (b *wasmtimeBackend) registerCleatPollUpdate(linker *wasmtime.Linker) error {
+	if b.skipIfNotNeeded("cleat_poll_update") {
+		return nil
+	}
+
+	return b.hostFunc(linker, "env", "cleat_poll_update", func(caller *wasmtime.Caller,
+		outPtr, outMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		return h.DurablePollUpdate(ctxWithMem(context.Background(), buf), nil, uint32(outPtr), uint32(outMaxLen))
+	})
+}
+
+func (b *wasmtimeBackend) registerCleatCompleteUpdate(linker *wasmtime.Linker) error {
+	if b.skipIfNotNeeded("cleat_complete_update") {
+		return nil
+	}
+
+	return b.hostFunc(linker, "env", "cleat_complete_update", func(caller *wasmtime.Caller,
+		reqIDPtr, reqIDLen, resultPtr, resultLen, errPtr, errLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		requestID, ok := wasmtimeReadPayload(buf, reqIDPtr, reqIDLen, int32(MaxWasmStringLen))
+		if !ok {
+			return errBadParamInt64
+		}
+		result, ok := wasmtimeReadPayload(buf, resultPtr, resultLen, int32(MaxWasmStringLen))
+		if !ok {
+			return errBadParamInt64
+		}
+		errMsg, ok := wasmtimeReadPayload(buf, errPtr, errLen, int32(MaxWasmStringLen))
+		if !ok {
+			return errBadParamInt64
+		}
+		return h.DurableCompleteUpdate(context.Background(), nil, requestID, result, errMsg)
+	})
+}
+
 func (b *wasmtimeBackend) registerCleatSignalWorkflow(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_signal_workflow") {
 		return nil

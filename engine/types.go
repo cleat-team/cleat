@@ -19,21 +19,31 @@ const maxPayloadLen = 4096
 type EventType string
 
 const (
-	EventTypeCall                  EventType = "call"
-	EventTypeAwaitSignals          EventType = "await_signals"
-	EventTypeSignalReceived        EventType = "signal_received"
-	EventTypeDefer                 EventType = "defer"
-	EventTypeChildWorkflow         EventType = "child_workflow"
-	EventTypeAwaitChild            EventType = "await_child"
-	EventTypeContinueAsNew         EventType = "continue_as_new"
-	EventTypeHeartbeat             EventType = "heartbeat"
-	EventTypeAwaitAllChildren      EventType = "await_all_children"
-	EventTypePluginCall            EventType = "plugin_call"
-	EventTypeCreatePromise         EventType = "create_promise"
-	EventTypeAwaitPromise          EventType = "await_promise"
-	EventTypePromiseResolved       EventType = "promise_resolved"
-	EventTypePromiseRejected       EventType = "promise_rejected"
-	EventTypeUpdateHandler         EventType = "update_handler"
+	EventTypeCall             EventType = "call"
+	EventTypeAwaitSignals     EventType = "await_signals"
+	EventTypeSignalReceived   EventType = "signal_received"
+	EventTypeDefer            EventType = "defer"
+	EventTypeChildWorkflow    EventType = "child_workflow"
+	EventTypeAwaitChild       EventType = "await_child"
+	EventTypeContinueAsNew    EventType = "continue_as_new"
+	EventTypeHeartbeat        EventType = "heartbeat"
+	EventTypeAwaitAllChildren EventType = "await_all_children"
+	EventTypePluginCall       EventType = "plugin_call"
+	EventTypeCreatePromise    EventType = "create_promise"
+	EventTypeAwaitPromise     EventType = "await_promise"
+	EventTypePromiseResolved  EventType = "promise_resolved"
+	EventTypePromiseRejected  EventType = "promise_rejected"
+	EventTypeUpdateHandler    EventType = "update_handler"
+	// EventTypeUpdateReceived records that a pending update request was
+	// delivered to the guest at this step. It is what makes an update
+	// replayable: on replay the poll reads this event rather than the
+	// workflow_update_requests table, so the handler sees the same payload at
+	// the same point in the program. See execSession.DurablePollUpdate.
+	EventTypeUpdateReceived EventType = "update_received"
+	// EventTypeUpdateCompleted records the handler's outcome. Without it every
+	// replay would settle the caller's promise again, and a settle matching
+	// nothing reports not-found (#818), so replay would start erroring.
+	EventTypeUpdateCompleted       EventType = "update_completed"
 	EventTypeStateMutation         EventType = "state_mutation"
 	EventTypeRunDetached           EventType = "run_detached"
 	EventTypePluginCallStreamChunk EventType = "plugin_call_stream_chunk"
@@ -221,10 +231,20 @@ type EventRecord struct {
 	StreamErrCode int `json:"stream_err_code,omitempty"`
 
 	// Update handler fields.
+	//
+	// UpdateHandlerName carries the handler name on all three update events.
+	// UpdatePayload/UpdateResponse/UpdateError were declared here long before
+	// anything assigned them -- compaction_fuzz_test.go exempted all three as
+	// dead fields on 2026-08-09. They are live as of the end-to-end update
+	// implementation and those exemptions are gone.
 	UpdateHandlerName string `json:"update_handler_name,omitempty"`
 	UpdatePayload     string `json:"update_payload,omitempty"`
 	UpdateResponse    string `json:"update_response,omitempty"`
 	UpdateError       string `json:"update_error,omitempty"`
+
+	// UpdateRequestID identifies the workflow_update_requests row a delivery
+	// came from, so the completion can settle the right caller's promise.
+	UpdateRequestID string `json:"update_request_id,omitempty"`
 
 	// State mutation fields.
 	StateKey   string `json:"state_key,omitempty"`
@@ -298,6 +318,25 @@ type SignalStore interface {
 	ConsumeSignal(ctx context.Context, workflowID string, id int64) error
 	// PollCancellation checks whether the workflow has been cancelled.
 	PollCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error)
+}
+
+// UpdateStore provides update-request delivery for running workflows.
+//
+// Every method is already on WorkflowStore, so a store satisfies this by
+// assertion and no dialect had to change to support updates -- the same
+// composition move IMPROVEMENT-PLAN 3.220 used for request/reply signals.
+type UpdateStore interface {
+	// GetPendingUpdateRequests returns the requests still awaiting delivery,
+	// oldest first. Delivery does not consume the row: the guest's completion
+	// call is what moves it out of 'pending', so a handler that traps leaves
+	// the request to be redelivered on the next segment.
+	GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error)
+	// CompleteUpdateRequest records the handler's outcome on the request row.
+	CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error
+	// ResolvePromise and RejectPromise settle the promise the caller is
+	// holding. Both are keyed by promise ID alone; see PromiseStore.
+	ResolvePromise(ctx context.Context, promiseID, value string) error
+	RejectPromise(ctx context.Context, promiseID, errMsg string) error
 }
 
 // PromiseStore provides promise resolution capabilities for running workflows.

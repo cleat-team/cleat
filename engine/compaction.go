@@ -92,6 +92,8 @@ const (
 	EventCodeAwaitAnyChild         = 31
 	EventCodePollChild             = 32
 	EventCodeAdminAction           = 33
+	EventCodeUpdateReceived        = 34
+	EventCodeUpdateCompleted       = 35
 )
 
 // EventCodeSleep (1) is defined above but has no corresponding EventType
@@ -114,6 +116,8 @@ var eventTypeToCode = map[EventType]int{
 	EventTypePromiseResolved:       EventCodePromiseResolved,
 	EventTypePromiseRejected:       EventCodePromiseRejected,
 	EventTypeUpdateHandler:         EventCodeUpdateHandler,
+	EventTypeUpdateReceived:        EventCodeUpdateReceived,
+	EventTypeUpdateCompleted:       EventCodeUpdateCompleted,
 	EventTypeStateMutation:         EventCodeStateMutation,
 	EventTypeAwaitAnyChild:         EventCodeAwaitAnyChild,
 	EventTypePollChild:             EventCodePollChild,
@@ -149,6 +153,8 @@ var codeToEventType = map[int]EventType{
 	EventCodePromiseResolved:       EventTypePromiseResolved,
 	EventCodePromiseRejected:       EventTypePromiseRejected,
 	EventCodeUpdateHandler:         EventTypeUpdateHandler,
+	EventCodeUpdateReceived:        EventTypeUpdateReceived,
+	EventCodeUpdateCompleted:       EventTypeUpdateCompleted,
 	EventCodeStateMutation:         EventTypeStateMutation,
 	EventCodeAwaitAnyChild:         EventTypeAwaitAnyChild,
 	EventCodePollChild:             EventTypePollChild,
@@ -496,6 +502,18 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 		case EventTypeUpdateHandler:
 			// Reuse PromiseName/PromiseID fields for storage efficiency.
 			ce.PromiseName = ev.UpdateHandlerName
+		case EventTypeUpdateReceived:
+			// Same reuse. All three are required for replay: the name selects
+			// the handler, the payload is its input, and the request id is what
+			// the completion settles.
+			ce.PromiseName = ev.UpdateHandlerName
+			ce.PromiseID = ev.UpdateRequestID
+			ce.Request = ev.UpdatePayload
+		case EventTypeUpdateCompleted:
+			ce.PromiseName = ev.UpdateHandlerName
+			ce.PromiseID = ev.UpdateRequestID
+			ce.Response = ev.UpdateResponse
+			ce.Error = ev.UpdateError
 		case EventTypeAwaitAnyChild, EventTypePollChild:
 			// Both carry the run IDs asked about and the outcome, in the same
 			// two fields AwaitAllChildren uses.
@@ -679,6 +697,15 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.PromiseError = ce.PromiseError
 		case EventCodeUpdateHandler:
 			rec.UpdateHandlerName = ce.PromiseName
+		case EventCodeUpdateReceived:
+			rec.UpdateHandlerName = ce.PromiseName
+			rec.UpdateRequestID = ce.PromiseID
+			rec.UpdatePayload = ce.Request
+		case EventCodeUpdateCompleted:
+			rec.UpdateHandlerName = ce.PromiseName
+			rec.UpdateRequestID = ce.PromiseID
+			rec.UpdateResponse = ce.Response
+			rec.UpdateError = ce.Error
 		case EventCodeAwaitAnyChild, EventCodePollChild:
 			rec.Request = ce.Request
 			rec.Response = ce.Response

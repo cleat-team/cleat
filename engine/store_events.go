@@ -299,6 +299,29 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.UpdateHandlerName != "" {
 			payload["update_handler_name"] = rec.UpdateHandlerName
 		}
+	case "update_received":
+		if rec.UpdateHandlerName != "" {
+			payload["update_handler_name"] = rec.UpdateHandlerName
+		}
+		if rec.UpdateRequestID != "" {
+			payload["update_request_id"] = rec.UpdateRequestID
+		}
+		// Not omitted when empty: an update whose payload is "" must replay as
+		// "" rather than as absent, because the handler is called with it.
+		payload["update_payload"] = rec.UpdatePayload
+	case "update_completed":
+		if rec.UpdateHandlerName != "" {
+			payload["update_handler_name"] = rec.UpdateHandlerName
+		}
+		if rec.UpdateRequestID != "" {
+			payload["update_request_id"] = rec.UpdateRequestID
+		}
+		if rec.UpdateResponse != "" {
+			payload["update_response"] = rec.UpdateResponse
+		}
+		if rec.UpdateError != "" {
+			payload["update_error"] = rec.UpdateError
+		}
 	case "state_mutation":
 		if rec.StateKey != "" {
 			payload["state_key"] = rec.StateKey
@@ -696,6 +719,29 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 	case "update_handler":
 		if v, ok := m["update_handler_name"].(string); ok {
 			rec.UpdateHandlerName = v
+		}
+	case "update_received":
+		if v, ok := m["update_handler_name"].(string); ok {
+			rec.UpdateHandlerName = v
+		}
+		if v, ok := m["update_request_id"].(string); ok {
+			rec.UpdateRequestID = v
+		}
+		if v, ok := m["update_payload"].(string); ok {
+			rec.UpdatePayload = v
+		}
+	case "update_completed":
+		if v, ok := m["update_handler_name"].(string); ok {
+			rec.UpdateHandlerName = v
+		}
+		if v, ok := m["update_request_id"].(string); ok {
+			rec.UpdateRequestID = v
+		}
+		if v, ok := m["update_response"].(string); ok {
+			rec.UpdateResponse = v
+		}
+		if v, ok := m["update_error"].(string); ok {
+			rec.UpdateError = v
 		}
 	case "state_mutation":
 		if v, ok := m["state_key"].(string); ok {
