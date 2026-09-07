@@ -174,6 +174,19 @@ type Signaler interface {
 	// DurableAwaitSignals is the low-level signal wait. Prefer AwaitSignals.
 	DurableAwaitSignals(signalNames []string, timeoutMs int64) (signalName, payload string, timedOut bool, err error)
 
+	// PollUpdate and CompleteUpdate are the low-level update primitives.
+	// Prefer DispatchUpdates, which pairs them with handler lookup, validation
+	// and the guarantee that every delivered update is answered.
+	//
+	// They are on the interface for the same reason DurableAwaitSignals is: a
+	// generated adapter binds each host call to a named method, so a call the
+	// SDK reaches only through a wrapper still needs the wrapper's parts to be
+	// nameable. Calling them directly is legitimate but leaves the answering to
+	// you -- a delivered update that is never completed leaves its caller
+	// holding a promise nothing settles.
+	PollUpdate() (envelopeJSON string, found bool, err error)
+	CompleteUpdate(requestID, resultJSON, errMsg string) error
+
 	// SendSignalAndWait sends a signal to another workflow and waits for a response.
 	// The signal is sent with an embedded correlation ID; the target workflow uses
 	// ReplyToSignal to send a response back.
@@ -719,10 +732,14 @@ type HostCallsImpl struct {
 	setQueryState                 func(key, value string)
 	registerUpdateHandler         func(name string)
 	handleUpdate                  func(name, payload string) (string, error)
-	runDetached                   func(name, inputJSON string) error
-	now                           func() int64
-	random                        func() int64
-	newUUID                       func() string
+	pollUpdate                    func() (envelopeJSON string, found bool, err error)
+	completeUpdate                func(requestID, resultJSON, errMsg string) error
+	// dispatchingUpdates is the reentrancy guard for DispatchUpdates; see there.
+	dispatchingUpdates bool
+	runDetached        func(name, inputJSON string) error
+	now                func() int64
+	random             func() int64
+	newUUID            func() string
 
 	pluginCall             func(pluginName, functionName, inputJSON string) (string, error)
 	pluginCallStreaming    func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
@@ -788,6 +805,8 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		minVersion:                    opts.MinVersion,
 		setQueryState:                 opts.SetQueryState,
 		registerUpdateHandler:         opts.RegisterUpdateHandler,
+		pollUpdate:                    opts.PollUpdate,
+		completeUpdate:                opts.CompleteUpdate,
 		handleUpdate:                  opts.HandleUpdate,
 		runDetached:                   opts.RunDetached,
 		now:                           opts.Now,
@@ -871,6 +890,8 @@ type HostCallsOptions struct {
 	MinVersion                    func() int
 	SetQueryState                 func(key, value string)
 	RegisterUpdateHandler         func(name string)
+	PollUpdate                    func() (envelopeJSON string, found bool, err error)
+	CompleteUpdate                func(requestID, resultJSON, errMsg string) error
 	HandleUpdate                  func(name, payload string) (string, error)
 	RunDetached                   func(name, inputJSON string) error
 	Now                           func() int64

@@ -30,6 +30,7 @@ type Engine struct {
 	fetcher              Fetcher
 	signalStore          SignalStore
 	promiseStore         PromiseStore
+	updateStore          UpdateStore
 	state                WorkflowState
 	workflowID           string
 	childWfStore         ChildWorkflowStore
@@ -125,6 +126,14 @@ func WithSignalStore(ss SignalStore) EngineOption { return func(e *Engine) { e.s
 // WithPromiseStore sets the promise store.
 func WithPromiseStore(ps PromiseStore) EngineOption { return func(e *Engine) { e.promiseStore = ps } }
 
+// WithUpdateStore supplies the store the engine delivers update requests from.
+//
+// Without it DurablePollUpdate finds nothing and a workflow simply never sees
+// an update -- which is what every environment did before updates were
+// implemented end to end. It is not silently optional in the worker: see
+// cmd/cleat-worker/setup.go, which asserts the exec store satisfies it.
+func WithUpdateStore(us UpdateStore) EngineOption { return func(e *Engine) { e.updateStore = us } }
+
 // WithWorkflowState sets the workflow state for version info.
 func WithWorkflowState(ws WorkflowState) EngineOption { return func(e *Engine) { e.state = ws } }
 
@@ -167,7 +176,20 @@ func WithPluginStreamRegistry(psr *PluginStreamRegistry) EngineOption {
 	return func(e *Engine) { e.pluginStreamRegistry = psr }
 }
 
-// WithUpdateHandler sets the update handler function.
+// WithUpdateHandler sets a Go callback the embedder can invoke through
+// Engine.DispatchUpdate.
+//
+// THIS IS NOT HOW WORKFLOW UPDATES ARE DELIVERED, and the distinction matters
+// because the names suggest otherwise. A workflow update registered by a guest
+// with cleat_register_update_handler is delivered by the guest itself at a
+// dispatch point, through cleat_poll_update and cleat_complete_update -- see
+// engine/updater.go and cleat.HostCallsImpl.DispatchUpdates. The worker does
+// not call this option and never did.
+//
+// It survives as an embedder hook for a Go host that wants to route something
+// of its own through the engine. Whether it should survive at all is an open
+// question: it is exported API, so removing it is a breaking change and gets
+// its own decision rather than riding along with the update implementation.
 func WithUpdateHandler(fn func(name, payload string) (string, error)) EngineOption {
 	return func(e *Engine) { e.updateHandler = fn }
 }

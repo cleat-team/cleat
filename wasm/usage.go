@@ -112,6 +112,8 @@ var hostFunctions = []HostFunction{
 	{"cleat_await_promise", "AwaitPromise"},
 	// Update handlers
 	{"cleat_register_update_handler", "RegisterUpdateHandler"},
+	{"cleat_poll_update", "PollUpdate"},
+	{"cleat_complete_update", "CompleteUpdate"},
 	{"plugin_call", "PluginCall"},
 	{"plugin_call_streaming", "PluginCallStreaming"},
 	// Fetch / HTTP methods (all map to durable_call import)
@@ -247,16 +249,39 @@ var compositeRequires = map[string][]string{
 	"UUID":                   {"cleat_workflow_id"},
 	"Log":                    {"cleat_log"},
 	"Call":                   {"cleat_call"},
-	"AwaitCondition":         {"cleat_await_signals", "cleat_now"},
-	"AwaitSignalsWithQuorum": {"cleat_await_signals"},
-	"AwaitPromiseMs":         {"cleat_await_promise"},
+	"AwaitCondition":         {"cleat_await_signals", "cleat_now", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
+	"AwaitSignalsWithQuorum": {"cleat_await_signals", "cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	// Delegates to AwaitPromise, which is the dispatch point, so it reaches the
+	// update imports too. Merged into the existing row rather than added as a
+	// second one -- a duplicate map key does not override, it fails to compile,
+	// which is how this was caught.
+	"AwaitPromiseMs": {"cleat_await_promise", "cleat_poll_update", "cleat_complete_update", "cleat_log"},
 
 	// SendSignalAndWait and ReplyToSignal are composites, not host calls:
 	// the reply channel is a promise and its ID is the correlation ID, so
 	// request/reply needs no ABI of its own (IMPROVEMENT-PLAN 3.220). Each
 	// row is the transitive set its method actually reaches -- send, create
 	// the reply promise, await it; reply by resolving it.
-	"SendSignalAndWait":             {"cleat_create_promise", "cleat_signal_workflow", "cleat_await_promise"},
+	"SendSignalAndWait": {"cleat_create_promise", "cleat_signal_workflow", "cleat_await_promise", "cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	// DispatchUpdates polls, runs the handler, and completes -- plus DurableLog
+	// on the two paths where the host hands back something this SDK cannot use.
+	"AwaitChildTyped": {"cleat_complete_update", "cleat_log", "cleat_poll_update"},
+	"DispatchUpdates": {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	// EVERY SUSPENSION POINT IS A DISPATCH POINT, so each one transitively
+	// needs the update imports. This is not bookkeeping: without these rows the
+	// closure analysis omits cleat_poll_update from a workflow whose only
+	// suspension is a sleep, and the call the SDK makes there fails to link.
+	//
+	// The cost is real and worth naming -- a workflow that never uses updates
+	// still imports both calls, because the dispatch point is unconditional.
+	// See cleat.HostCallsImpl.DispatchUpdates for why it has to be.
+	"DurableSleep":                  {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"DurableSleepMs":                {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"AwaitSignals":                  {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"AwaitPromise":                  {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"AwaitChild":                    {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"AwaitAllChildren":              {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"AwaitAnyChild":                 {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
 	"ReplyToSignal":                 {"cleat_resolve_promise"},
 	"PollSignals":                   {"cleat_poll_signal"},
 	"ChildWorkflowWithOptions":      {"cleat_child_workflow"},
@@ -265,9 +290,9 @@ var compositeRequires = map[string][]string{
 	// DurableCallWithOptions sleeps between retry attempts, so a workflow that
 	// sets a RetryPolicy and never calls DurableSleep itself would compile with
 	// cleat_sleep unwired and back off for no time at all.
-	"DurableCallWithOptions":      {"cleat_sleep"},
-	"DurableCallTypedWithOptions": {"cleat_call", "cleat_call_retry", "cleat_sleep"},
-	"DurableCallJSONWithOptions":  {"cleat_sleep"},
+	"DurableCallWithOptions":      {"cleat_sleep", "cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"DurableCallTypedWithOptions": {"cleat_call", "cleat_call_retry", "cleat_sleep", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
+	"DurableCallJSONWithOptions":  {"cleat_sleep", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
 }
 
 // collectRequirements scans the target package's source files for

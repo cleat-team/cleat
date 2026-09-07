@@ -16,6 +16,9 @@ func (h *HostCallsImpl) DurableSleep(d time.Duration) {
 }
 
 func (h *HostCallsImpl) DurableSleepMs(ms int64) {
+	// Dispatch point: see DispatchUpdates. Before the suspension, not after --
+	// after would not run until the workflow woke again.
+	h.DispatchUpdates()
 	if h.durableSleep == nil {
 		log.Printf("durable: DurableSleep can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 		return

@@ -807,6 +807,10 @@ func (e *Engine) invokePerDeferExports(ctx context.Context, mod api.Module, defe
 // DispatchUpdate dispatches an update to a workflow by invoking its registered handler.
 // The handler receives the update name and payload JSON, and returns the result JSON.
 // Returns an error if no update handler is configured on the engine.
+// DispatchUpdate invokes the callback set by WithUpdateHandler.
+//
+// It is not on the workflow-update path -- see WithUpdateHandler for what that
+// is and where the real one lives.
 func (e *Engine) DispatchUpdate(ctx context.Context, name, payload string) (string, error) {
 	if e.updateHandler == nil {
 		return "", fmt.Errorf("host: no update handler configured for this engine. Call WithUpdateHandler before DispatchUpdate.")

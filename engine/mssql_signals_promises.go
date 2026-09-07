@@ -396,6 +396,21 @@ func (s *MSSQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4, 'pending', @p5)
 	`, workflowID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
+	if err != nil {
+		return err
+	}
+
+	// Wake the workflow, exactly as DeliverSignal does.
+	//
+	// Not optional: an update is delivered at a DISPATCH POINT in the guest,
+	// and a suspended workflow reaches no dispatch point. Without this the
+	// request sits pending until something else happens to wake the workflow --
+	// which for a workflow waiting on a signal or a long sleep may be never.
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET next_wake_at = SYSUTCDATETIME()
+		WHERE id = @p1 AND tenant_id = @p2 AND status IN ('ready', 'suspended')
+	`, workflowID, s.tenantID)
 	return err
 }
 

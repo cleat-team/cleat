@@ -147,6 +147,7 @@ func (h *HostCallsImpl) SignalWorkflow(targetRunID, signalName, payload string) 
 }
 
 func (h *HostCallsImpl) AwaitSignals(signalNames []string, timeout time.Duration) SignalResult {
+	h.DispatchUpdates() // dispatch point; see DispatchUpdates
 	if timeout <= 0 {
 		return SignalResult{
 			TimedOut: true,

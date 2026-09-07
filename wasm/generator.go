@@ -282,6 +282,23 @@ var importDefs = map[string]importDef{
 			{"name", kindInString},
 		},
 	},
+	// cleat_poll_update writes a JSON envelope into one out buffer. The
+	// generated adapter's buffer is named <param>Buf, so "envelope" here has to
+	// match the envelopeBuf/envelopeLen the PollUpdate ResultStmts refer to.
+	"cleat_poll_update": {
+		ImportName: "cleat_poll_update",
+		Params: []paramSpec{
+			{"envelope", kindOutString},
+		},
+	},
+	"cleat_complete_update": {
+		ImportName: "cleat_complete_update",
+		Params: []paramSpec{
+			{"requestID", kindInString},
+			{"resultJSON", kindInString},
+			{"errMsg", kindInString},
+		},
+	},
 	"plugin_call": {
 		ImportName: "plugin_call",
 		Params: []paramSpec{

@@ -62,6 +62,8 @@ type HostHandler interface {
 	PluginCall(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
 	PluginCallStreaming(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
 	RegisterUpdateHandler(ctx context.Context, m api.Module, name string) int64
+	DurablePollUpdate(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64
+	DurableCompleteUpdate(ctx context.Context, m api.Module, requestID, result, errMsg string) int64
 
 	// Signal correlation (ABI 2.23-2.25)
 	SignalWorkflow(ctx context.Context, m api.Module, targetRunID, signalName, payload string) int64
@@ -465,6 +467,35 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		}
 		return uint64(handlerFromContext(ctx).RegisterUpdateHandler(ctx, m, name))
 	}).Export("cleat_register_update_handler")
+
+	// cleat_poll_update: (ptr,maxLen) -> i64
+	//
+	// Writes a JSON envelope {"name","payload","request_id"} and returns
+	// written<<32 | flags, with 0x0100 meaning an update was delivered. See
+	// engine/updater.go for why delivery is an event rather than a table read.
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		outPtr, outMaxLen uint32) uint64 {
+		return uint64(handlerFromContext(ctx).DurablePollUpdate(ctx, m, outPtr, outMaxLen))
+	}).Export("cleat_poll_update")
+
+	// cleat_complete_update: (ptr,len x3) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		reqIDPtr, reqIDLen, resultPtr, resultLen, errPtr, errLen uint32) uint64 {
+		mem := m.Memory()
+		requestID, ok := readWasmPayload(mem, reqIDPtr, reqIDLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		result, ok := readWasmPayload(mem, resultPtr, resultLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		errMsg, ok := readWasmPayload(mem, errPtr, errLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		return uint64(handlerFromContext(ctx).DurableCompleteUpdate(ctx, m, requestID, result, errMsg))
+	}).Export("cleat_complete_update")
 	// cleat_create_promise: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen uint32) uint64 {

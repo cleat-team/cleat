@@ -111,6 +111,12 @@ func Entry(h cleat.HostCalls, input string) (string, error) {
 
 	// ---- updates ----
 	_, _ = h.HandleUpdate("upd", "{}")
+	// PollUpdate and CompleteUpdate are the two host calls behind
+	// DispatchUpdates. A workflow does not normally call them directly -- the
+	// SDK dispatches at every suspension point -- but this fixture exists to
+	// compile every adapter, so both are named here.
+	_, _, _ = h.PollUpdate()
+	_ = h.CompleteUpdate("req", `{"ok":true}`, "")
 
 	// ---- determinism sources ----
 	_ = h.Now()

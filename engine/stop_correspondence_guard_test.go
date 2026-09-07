@@ -198,6 +198,27 @@ var stopSurfaces = map[string]stopSurface{
 		wit:        nil,
 		witWhy:     reasonNotInTheComponentWorld,
 	},
+	// The two update calls. Both consult stopBeforeNewWork for the same reason
+	// DurableAwaitSignals does: delivering an update runs guest code that can
+	// start calls, children and timers, and completing one settles a caller's
+	// promise. A defer segment exists to run a terminated workflow's cleanup,
+	// not to service new requests.
+	//
+	// No WIT yet: updates are implemented for the core-ABI SDKs first, so a
+	// component guest cannot call either function and there is no signature to
+	// carry the refusal. That is reasonNotInTheComponentWorld rather than an
+	// oversight -- when the Python component path gains them, both need a WIT
+	// declaration and, if it returns a scalar, a `py` entry.
+	"DurablePollUpdate": {
+		adapters: []string{"PollUpdate"},
+		wit:      nil,
+		witWhy:   reasonNotInTheComponentWorld,
+	},
+	"DurableCompleteUpdate": {
+		adapters: []string{"CompleteUpdate"},
+		wit:      nil,
+		witWhy:   reasonNotInTheComponentWorld,
+	},
 	"DurableAwaitSignals": {
 		adapters: []string{"DurableAwaitSignals"},
 		// OPEN. Its WIT signature is

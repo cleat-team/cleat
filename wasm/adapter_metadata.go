@@ -186,6 +186,50 @@ var adapterDefs = map[string]adapterDef{
 			"return cancelled, unsafe.String(&reasonBuf[0], int(reasonLen))",
 		},
 	},
+	// PollUpdate returns a JSON envelope {"name","payload","request_id"} in one
+	// buffer rather than three out-params: three lengths plus a found flag do
+	// not fit an i64 alongside each other. The SDK decodes it.
+	//
+	// withSuspendCheck because delivering an update runs guest code that can
+	// start new work, so a defer segment must refuse it. See
+	// engine/updater.go and stopSurfaces["DurablePollUpdate"].
+	"PollUpdate": {
+		FieldName:  "PollUpdate",
+		ReturnType: "(string, bool, error)",
+		ResultStmts: withSuspendCheck(
+			"envelopeLen := uint32(uint64(result) >> 32)",
+			"flags := uint32(result)",
+			"errCode := flags & 0xFF",
+			"found := (flags >> 8) != 0",
+			"if errCode != 0 {",
+			`	return "", false, fmt.Errorf("cleat_poll_update: %s", hostErrMessage(envelopeBuf[:], envelopeLen))`,
+			"}",
+			"if !found {",
+			`	return "", false, nil`,
+			"}",
+			"return unsafe.String(&envelopeBuf[0], int(envelopeLen)), true, nil",
+		),
+	},
+	// CompleteUpdate: three strings in, nothing out but an error code.
+	"CompleteUpdate": {
+		FieldName:  "CompleteUpdate",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"requestID", "string"},
+			// Not "result": the generated ResultStmts below refer to a
+			// variable of that name holding the host call's return value, and a
+			// parameter would shadow it.
+			{"resultJSON", "string"},
+			{"errMsg", "string"},
+		},
+		ResultStmts: withSuspendCheck(
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_complete_update: error %d", errCode)`,
+			"}",
+			"return nil",
+		),
+	},
 	"PollSignal": {
 		FieldName:  "PollSignal",
 		ReturnType: "(string, bool, error)",

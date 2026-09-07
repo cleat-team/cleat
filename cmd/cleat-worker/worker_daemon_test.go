@@ -2295,35 +2295,20 @@ func TestLoadShardConfigsErrors(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// dispatchPendingUpdates tests
-// ---------------------------------------------------------------------------
-
-func TestDispatchPendingUpdates_EmptyInflight(t *testing.T) {
-	ms := &mockStore{}
-	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
-		t.Error("should not be called when inflight is empty")
-		return nil, nil
-	}
-
-	w := newTestWorker(ms)
-	// Should not panic or call store.
-	w.dispatchPendingUpdates()
-}
-
-func TestDispatchPendingUpdates_NoEngine(t *testing.T) {
-	ms := &mockStore{}
-	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
-		return []engine.UpdateRequestInfo{
-			{UpdateName: "update-1", Payload: "{}"},
-		}, nil
-	}
-
-	w := newTestWorker(ms)
-	w.inflight.Store("wf-1", &engine.WorkflowInstance{ID: "wf-1"})
-	// No engine in execEngines for wf-1 — should skip without error.
-	w.dispatchPendingUpdates()
-}
+// The three TestDispatchPendingUpdates_* tests were removed when updates were
+// implemented end to end, along with the function they exercised.
+//
+// They are worth a note rather than a silent deletion, because cleat#849 named
+// them as the reason the defect went unnoticed: each constructed the
+// precondition by hand -- storing an entry in w.inflight, and in one case
+// configuring an engine update handler with engine.WithUpdateHandler -- and so
+// asserted that dispatchPendingUpdates worked GIVEN a state that never
+// occurred when the ticker actually fired. w.inflight is populated only for the
+// lifetime of one segment; the ticker ran every five seconds.
+//
+// Updates are now delivered by the guest at dispatch points, and the tests that
+// replace these are in cleat/cleattest (update_dispatch_test.go) and
+// engine/update_replay_test.go, both of which drive the real path.
 
 // mockServiceCaller implements engine.ServiceCaller for tests.
 type mockServiceCaller struct{}
@@ -2373,62 +2358,6 @@ func TestExecEngines_MapLifecycle(t *testing.T) {
 	_, ok = w.execEngines.Load(wfID)
 	if ok {
 		t.Fatal("expected engine to be gone after Delete")
-	}
-}
-
-func TestDispatchPendingUpdates_WithEngine(t *testing.T) {
-	ms := &mockStore{}
-
-	var dispatchedName, dispatchedPayload string
-	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
-		return []engine.UpdateRequestInfo{
-			{UpdateName: "status-update", Payload: `{"status":"running"}`},
-		}, nil
-	}
-	completed := false
-	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, updateName, result, errMsg string) error {
-		completed = true
-		if updateName != "status-update" {
-			t.Errorf("updateName = %q, want %q", updateName, "status-update")
-		}
-		if result != `{"status":"ok"}` {
-			t.Errorf("result = %q, want %q", result, `{"status":"ok"}`)
-		}
-		if errMsg != "" {
-			t.Errorf("errMsg = %q, want empty", errMsg)
-		}
-		return nil
-	}
-
-	w := newTestWorker(ms)
-	wfID := "wf-dispatch-test"
-	w.inflight.Store(wfID, &engine.WorkflowInstance{ID: wfID})
-
-	// Create an engine that captures the dispatched update.
-	caller := &mockServiceCaller{}
-	eng := engine.NewEngine(nil, caller, engine.WithUpdateHandler(func(name, payload string) (string, error) {
-		dispatchedName = name
-		dispatchedPayload = payload
-		return `{"status":"ok"}`, nil
-	}))
-	w.execEngines.Store(wfID, eng)
-
-	w.dispatchPendingUpdates()
-
-	if dispatchedName != "status-update" {
-		t.Errorf("dispatched name = %q, want %q", dispatchedName, "status-update")
-	}
-	if dispatchedPayload != `{"status":"running"}` {
-		t.Errorf("dispatched payload = %q, want %q", dispatchedPayload, `{"status":"running"}`)
-	}
-	if !completed {
-		t.Error("expected CompleteUpdateRequest to be called")
-	}
-
-	// Verify cleanup: Delete removes engine, Load returns !ok.
-	w.execEngines.Delete(wfID)
-	if _, ok := w.execEngines.Load(wfID); ok {
-		t.Error("expected engine to be gone after Delete")
 	}
 }
 
