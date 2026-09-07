@@ -8904,3 +8904,65 @@ Re-derive everything above with:
 
     grep -n '_ "github.com/cleat-team/cleat/plugins/' cmd/cleat-worker/main.go
     git ls-files '*.go' | xargs grep -ln '_ "github.com/cleat-team/cleat/plugins/' | grep -v _test
+
+---
+
+### 3.316 No migration pins a collation, so string equality means different things per dialect — 🔴 **OPEN** (WS-2, 2026-09-07)
+
+Found while deciding D4 of the event-routing design (§3.313's neighbour,
+`docs/contributor/design/event-routing-design.md`), which needed a byte-exact comparison
+for correlation keys. The question generalised past that design immediately.
+
+**No collation or charset is specified anywhere in the schema.**
+
+    grep -rhno 'COLLATE [A-Za-z0-9_]*'       migrations/   # nothing
+    grep -rhno 'CHARACTER SET [A-Za-z0-9_]*' migrations/   # nothing
+    git ls-files '*.yml' '*.yaml' | xargs grep -n 'collation\|character-set'   # nothing
+
+Not in the DDL, not at table level, not in any compose file, not in a CI service config.
+So every string column inherits the **server** default, which is a property of whichever
+image or managed instance the operator happens to run.
+
+**The defaults are not the same, and one of them is not case-sensitive.** MySQL 8's
+default is `utf8mb4_0900_ai_ci` — accent-insensitive **and case-insensitive**. PostgreSQL
+and SQL Server default to case-sensitive comparison in the configurations this repo tests.
+
+So `WHERE def_name = ?` is a case-sensitive lookup on two dialects and a case-insensitive
+one on the third, and the affected columns are the user-supplied ones:
+
+    grep -nE '(def_name|name|plugin_name|role_name|signal_name)\s+VARCHAR' migrations/mysql/001_schema.sql
+
+**The concrete consequence.** Deploy workflows named `PlaceOrder` and `placeorder`: on
+PostgreSQL they are two definitions; on MySQL the second collides with the first on the
+unique index, and `WHERE def_name = 'placeorder'` returns the wrong one. Same input, same
+tier-1 dialect matrix, different behaviour — and nothing in the tree says which is
+intended.
+
+**NOT MEASURED, and that is the first thing to do.** No database is listening on this
+machine (5434 / 3308 / 1435 all closed, the DSNs in `WORKSTREAM.md`), so the above is
+derived from the absence of any `COLLATE` plus MySQL's documented default, not from a
+query. Before anything is changed, run this on each dialect:
+
+    -- MySQL: what did we actually get?
+    SELECT table_name, column_name, collation_name
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND collation_name IS NOT NULL;
+
+and confirm the behaviour directly — insert `PlaceOrder`, select `placeorder`, see whether
+a row comes back. **A grep for what is missing is not a measurement of what the server
+does**, which is this document's own recurring lesson.
+
+**Why it has stayed invisible.** Every cross-dialect test uses generated identifiers —
+UUIDs and fixed lowercase names — so no test has ever compared two strings that differ
+only in case. The divergence is not hidden behind a skip; it is behind the *absence of a
+case that would show it*, which is the third state §3.211 describes: not bound / bound but
+never executed / executed with a recorded outcome.
+
+**The fix is a decision before it is a migration.** Pinning `utf8mb4_bin` everywhere makes
+MySQL match the others and is a schema change to existing tables. Pinning `ai_ci` on all
+three makes them agree the other way and would change PostgreSQL's behaviour. Doing
+nothing keeps a documented boundary — but it is not documented, and `tiers.yaml` grants
+tier 1 on all three dialects without qualifying it.
+
+The event-routing design does not wait for this: D4 pins a binary collation on its own key
+slots explicitly, which is correct regardless of what is decided here.
