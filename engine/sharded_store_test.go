@@ -38,6 +38,8 @@ type mockShardStore struct {
 	listSchedulesFn              func(ctx context.Context) ([]Schedule, error)
 	listWorkflowsFn              func(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error)
 	getWorkflowByIDFn            func(ctx context.Context, id string) (*WorkflowInstance, error)
+	getTerminalRunFn             func(ctx context.Context, id string) (*WorkflowInstance, error)
+	successorOfRunFn             func(ctx context.Context, id string) (string, error)
 	batchHeartbeatFn             func(ctx context.Context, workerID string) (int64, error)
 	reapStaleInstancesFn         func(ctx context.Context, timeout time.Duration) (int, error)
 	reapExpiredConcurrencyKeysFn func(ctx context.Context) (int64, error)
@@ -392,8 +394,26 @@ func (m *mockShardStore) GetWorkflowByID(ctx context.Context, id string) (*Workf
 // GetTerminalRun mirrors GetWorkflowByID rather than returning nil
 // unconditionally: ShardedStore.GetTerminalRun walks by asking each shard, so a
 // mock that always answers nil would make that fan-out untestable here.
+// successorOfRun makes mockShardStore satisfy runSuccessorFinder, which
+// ShardedStore.GetTerminalRun requires of every shard. Modelled on the real
+// contract: it answers about continued_from WITHOUT needing to hold id, which
+// is the whole distinction the interface exists to draw.
+func (m *mockShardStore) successorOfRun(ctx context.Context, id string) (string, error) {
+	m.recordCall("successorOfRun")
+	if m.successorOfRunFn != nil {
+		return m.successorOfRunFn(ctx, id)
+	}
+	if m.err != nil {
+		return "", m.err
+	}
+	return "", nil
+}
+
 func (m *mockShardStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
 	m.recordCall("GetTerminalRun")
+	if m.getTerminalRunFn != nil {
+		return m.getTerminalRunFn(ctx, id)
+	}
 	if m.getWorkflowByIDFn != nil {
 		return m.getWorkflowByIDFn(ctx, id)
 	}

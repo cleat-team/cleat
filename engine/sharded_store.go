@@ -646,22 +646,39 @@ func (s *ShardedStore) GetWorkflowByID(ctx context.Context, id string) (*Workflo
 //
 // So the walk stays at this level and each successor lookup is a fan-out, the
 // same way GetWorkflowByID already scans shards for one id.
+//
+// The fan-out asks runSuccessorFinder, NOT GetTerminalRun. That is the fix for
+// the bug this design was already meant to avoid and did not: a per-shard
+// GetTerminalRun reads its head first and returns nil when the shard does not
+// hold the id, so the shard holding the SUCCESSOR -- which by definition does
+// not hold its predecessor -- returned nil before ever consulting
+// continued_from. Every cross-shard hop was invisible, and the walk stopped at
+// the first one, reporting an intermediate run as terminal. Exactly the wrong
+// answer the comment above says the design exists to prevent, which is why
+// TestShardedGetTerminalRunCrossesAShardBoundary is written against mocks that
+// answer only for ids they hold.
 func (s *ShardedStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
 	return walkToTerminalRun(ctx, id, func(ctx context.Context, cur string) (string, error) {
 		s.mu.RLock()
 		shards := s.shards
 		s.mu.RUnlock()
 		for _, sh := range shards {
-			next, err := sh.Store.GetTerminalRun(ctx, cur)
+			finder, ok := sh.Store.(runSuccessorFinder)
+			if !ok {
+				// Loudly, not silently. A shard that cannot answer the
+				// successor question makes every chain crossing into it
+				// invisible, and the symptom is a plausible id rather than an
+				// error -- the failure mode this whole method is about.
+				return "", fmt.Errorf("sharded terminal run: shard %q (%T) cannot look up "+
+					"continue-as-new successors, so a chain crossing it would silently "+
+					"appear to end", sh.Config.Name, sh.Store)
+			}
+			next, err := finder.successorOfRun(ctx, cur)
 			if err != nil {
 				return "", err
 			}
-			// A shard that holds cur and nothing after it returns cur itself;
-			// one that holds a successor returns the far end of the part of
-			// the chain IT holds. Either way the first id that is not cur is
-			// the next hop this level should follow.
-			if next != nil && next.ID != cur {
-				return next.ID, nil
+			if next != "" {
+				return next, nil
 			}
 		}
 		return "", nil
