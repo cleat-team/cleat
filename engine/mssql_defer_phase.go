@@ -31,7 +31,7 @@ func (s *MSSQLStore) finalizeDeferPhaseOnce(ctx context.Context, runID, workerID
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL,
-		    completed_at = GETDATE(),
+		    completed_at = SYSUTCDATETIME(),
 		    assigned_to = NULL
 		WHERE id = @p1
 		  AND assigned_to = @p2
@@ -87,7 +87,7 @@ func (s *MSSQLStore) expireDeferPhasesOnce(ctx context.Context) (int, error) {
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL,
-		    completed_at = GETDATE(),
+		    completed_at = SYSUTCDATETIME(),
 		    assigned_to = NULL,
 		    generation = generation + 1
 		OUTPUT INSERTED.id
