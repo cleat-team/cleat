@@ -141,7 +141,7 @@ var rustHostCallOutcomes = map[string]expectedOutcome{
 	"ListCrons": {
 		status: statusError, detailContains: "cannot list schedules",
 		why: "same closure as ScheduleCron and still asserted separately, so that binding one and not the other cannot leave a green row behind. " +
-			"That the host's own sentence arrives here at all is the load-bearing part: cleat_list_crons writes its error into the OUTPUT BUFFER, and 15 of the 20 Rust wrappers with a buffer still discard it and print a bare error code (IMPROVEMENT-PLAN 3.258 in a second SDK). " +
+			"That the host's own sentence arrives here at all is the load-bearing part: cleat_list_crons writes its error into the OUTPUT BUFFER, and 15 of the 22 Rust wrappers with a buffer still discard it and print a bare error code (IMPROVEMENT-PLAN 3.200 in a second SDK). " +
 			"This row would read `host error code 1` if the binding had followed the majority of its own file",
 	},
 }

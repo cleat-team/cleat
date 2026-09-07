@@ -427,10 +427,10 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            let err_msg = memory::read_result(&resp_buf, response_len);
             return (String::new(), Some(err_msg));
         }
-        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        let resp = memory::read_result(&resp_buf, response_len);
         (resp, None)
     }
 
@@ -501,7 +501,7 @@ impl HostCalls {
         if err_code != 0 {
             return (String::new(), Some(format!("defer(description=\"{}\") failed: host error code {}. Check that the defer description is valid.", description, err_code)));
         }
-        let id = unsafe { memory::read_string(id_buf.as_ptr(), id_len) };
+        let id = memory::read_result(&id_buf, id_len);
         (id, None)
     }
 
@@ -550,7 +550,7 @@ impl HostCalls {
         };
         let (reason_len, cancelled) = memory::decode_poll_cancellation_result(result);
         let reason = if cancelled && reason_len > 0 {
-            unsafe { memory::read_string(reason_buf.as_ptr(), reason_len) }
+            memory::read_result(&reason_buf, reason_len)
         } else {
             String::new()
         };
@@ -571,7 +571,7 @@ impl HostCalls {
             return (String::new(), false, Some(format!("poll_signal(name=\"{}\") failed: host error code {}. Check that the signal name is valid.", name, err_code)));
         }
         let payload = if found && payload_len > 0 {
-            unsafe { memory::read_string(payload_buf.as_ptr(), payload_len) }
+            memory::read_result(&payload_buf, payload_len)
         } else {
             String::new()
         };
@@ -620,7 +620,7 @@ impl HostCalls {
         if err_code != 0 {
             return (String::new(), Some(format!("child_workflow(name=\"{}\") failed: host error code {}. Check that the child workflow name is correct and the workflow definition exists.", name, err_code)));
         }
-        let run_id = unsafe { memory::read_string(run_id_buf.as_ptr(), run_id_len) };
+        let run_id = memory::read_result(&run_id_buf, run_id_len);
         (run_id, None)
     }
 
@@ -651,7 +651,7 @@ impl HostCalls {
         if err_code != 0 {
             return (String::new(), Some(format!("child_workflow_with_options(name=\"{}\", version={}) failed: host error code {}. Check that the child workflow name is correct.", name, opts.version, err_code)));
         }
-        let run_id = unsafe { memory::read_string(run_id_buf.as_ptr(), run_id_len) };
+        let run_id = memory::read_result(&run_id_buf, run_id_len);
         (run_id, None)
     }
 
@@ -675,7 +675,7 @@ impl HostCalls {
         if err_code != 0 {
             return Err(CallError::Failed(format!("await_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code)));
         }
-        Ok(unsafe { memory::read_string(result_buf.as_ptr(), result_len) })
+        Ok(memory::read_result(&result_buf, result_len))
     }
 
     /// Await external signals for a duration. Preferred over await_signals_ms.
@@ -715,9 +715,9 @@ impl HostCalls {
         if err_code != 0 {
             return Err(CallError::Failed(format!("await_signals(names={}, timeout_ms={}) failed: host error code {}. Check that the signal names are valid.", names_json, timeout_ms, err_code)));
         }
-        let name = unsafe { memory::read_string(sig_name_buf.as_ptr(), sig_name_len as u32) };
+        let name = memory::read_result(&sig_name_buf, sig_name_len as u32);
         let payload = if !timed_out && payload_len > 0 {
-            unsafe { memory::read_string(payload_buf.as_ptr(), payload_len as u32) }
+            memory::read_result(&payload_buf, payload_len as u32)
         } else {
             String::new()
         };
@@ -755,7 +755,7 @@ impl HostCalls {
         if err_code != 0 {
             return (String::new(), Some(format!("create_promise(name=\"{}\") failed: host error code {}. Check that the promise name is valid.", name, err_code)));
         }
-        let id = unsafe { memory::read_string(id_buf.as_ptr(), id_len) };
+        let id = memory::read_result(&id_buf, id_len);
         (id, None)
     }
 
@@ -781,7 +781,7 @@ impl HostCalls {
             return (String::new(), timed_out, Some(format!("await_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code)));
         }
         let result = if result_len > 0 {
-            unsafe { memory::read_string(result_buf.as_ptr(), result_len) }
+            memory::read_result(&result_buf, result_len)
         } else {
             String::new()
         };
@@ -829,7 +829,7 @@ impl HostCalls {
         if !found || envelope_len == 0 {
             return (String::new(), false, None);
         }
-        let envelope = unsafe { memory::read_string(envelope_buf.as_ptr(), envelope_len) };
+        let envelope = memory::read_result(&envelope_buf, envelope_len);
         (envelope, true, None)
     }
 
@@ -884,10 +884,10 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            let err_msg = memory::read_result(&resp_buf, response_len);
             return (String::new(), Some(err_msg));
         }
-        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        let resp = memory::read_result(&resp_buf, response_len);
         (resp, None)
     }
 
@@ -1061,7 +1061,7 @@ impl HostCalls {
         };
         let (prev_len, _err_code) = memory::decode_simple_result(result);
         if prev_len > 0 {
-            unsafe { memory::read_string(prev_buf.as_ptr(), prev_len) }
+            memory::read_result(&prev_buf, prev_len)
         } else {
             String::new()
         }
@@ -1080,12 +1080,12 @@ impl HostCalls {
         };
         let (obj_type_len, inst_key_len) = memory::decode_get_scope_result(result);
         let obj_type = if obj_type_len > 0 {
-            unsafe { memory::read_string(obj_type_buf.as_ptr(), obj_type_len) }
+            memory::read_result(&obj_type_buf, obj_type_len)
         } else {
             String::new()
         };
         let inst_key = if inst_key_len > 0 {
-            unsafe { memory::read_string(inst_key_buf.as_ptr(), inst_key_len) }
+            memory::read_result(&inst_key_buf, inst_key_len)
         } else {
             String::new()
         };
@@ -1106,7 +1106,7 @@ impl HostCalls {
         };
         let (prev_len, _err_code) = memory::decode_simple_result(result);
         if prev_len > 0 {
-            unsafe { memory::read_string(prev_buf.as_ptr(), prev_len) }
+            memory::read_result(&prev_buf, prev_len)
         } else {
             String::new()
         }
@@ -1124,7 +1124,7 @@ impl HostCalls {
         };
         let (uuid_len, _err_code) = memory::decode_simple_result(result);
         if uuid_len > 0 {
-            unsafe { memory::read_string(uuid_buf.as_ptr(), uuid_len) }
+            memory::read_result(&uuid_buf, uuid_len)
         } else {
             String::new()
         }
@@ -1138,7 +1138,7 @@ impl HostCalls {
         };
         let (id_len, _err_code) = memory::decode_simple_result(result);
         if id_len > 0 {
-            unsafe { memory::read_string(buf.as_ptr(), id_len) }
+            memory::read_result(&buf, id_len)
         } else {
             String::new()
         }
@@ -1152,7 +1152,7 @@ impl HostCalls {
         };
         let (id_len, _err_code) = memory::decode_simple_result(result);
         if id_len > 0 {
-            unsafe { memory::read_string(buf.as_ptr(), id_len) }
+            memory::read_result(&buf, id_len)
         } else {
             String::new()
         }
@@ -1280,16 +1280,16 @@ impl HostCalls {
             // there on failure -- engine/schedules.go writes rec.Err into the
             // id buffer and returns packSimpleResult(1, written) -- so a guest
             // that prints the bare code throws away the only thing that says
-            // what went wrong. That is IMPROVEMENT-PLAN 3.258, fixed there for
+            // what went wrong. That is IMPROVEMENT-PLAN 3.200, fixed there for
             // the generated Go adapters.
             //
             // Note this does NOT match what most of this file does: 15 of the
-            // 20 wrappers here that have an output buffer still report a bare
+            // 22 wrappers here that have an output buffer still report a bare
             // code. The five that read it are cleat_call, cleat_call_heartbeat,
             // cleat_fetch, plugin_call and plugin_call_streaming. Following the
             // majority would have been the easy call and the wrong one; the
             // remaining 15 are tracked separately.
-            let msg = unsafe { memory::read_string(buf.as_ptr(), result_len) };
+            let msg = memory::read_result(&buf, result_len);
             if msg.is_empty() {
                 return Err(format!(
                     "schedule_cron(workflow_name=\"{}\", cron_expr=\"{}\") failed: host error code {}.",
@@ -1298,7 +1298,7 @@ impl HostCalls {
             }
             return Err(msg);
         }
-        Ok(unsafe { memory::read_string(buf.as_ptr(), result_len) })
+        Ok(memory::read_result(&buf, result_len))
     }
 
     /// Remove a previously registered cron schedule by its ID.
@@ -1333,13 +1333,13 @@ impl HostCalls {
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             // The host's message, not the code -- see schedule_cron above.
-            let msg = unsafe { memory::read_string(buf.as_ptr(), result_len) };
+            let msg = memory::read_result(&buf, result_len);
             if msg.is_empty() {
                 return Err(format!("list_crons() failed: host error code {}.", err_code));
             }
             return Err(msg);
         }
-        Ok(unsafe { memory::read_string(buf.as_ptr(), result_len) })
+        Ok(memory::read_result(&buf, result_len))
     }
 
     /// Run a child workflow detached (fire-and-forget).
@@ -1401,7 +1401,7 @@ impl HostCalls {
         if err_code != 0 {
             return Err(CallError::Failed(format!("await_all_children(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code)));
         }
-        let resp = unsafe { memory::read_string(buf.as_ptr(), result_len) };
+        let resp = memory::read_result(&buf, result_len);
         Ok(resp)
     }
 
@@ -1418,7 +1418,7 @@ impl HostCalls {
         if err_code != 0 {
             return (String::new(), Some(format!("poll_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code)));
         }
-        let result = unsafe { memory::read_string(result_buf.as_ptr(), result_len) };
+        let result = memory::read_result(&result_buf, result_len);
         (result, None)
     }
 
@@ -1439,7 +1439,7 @@ impl HostCalls {
         if err_code != 0 {
             return Err(CallError::Failed(format!("await_any_child(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code)));
         }
-        let resp = unsafe { memory::read_string(buf.as_ptr(), result_len) };
+        let resp = memory::read_result(&buf, result_len);
         Ok(resp)
     }
 
@@ -1560,10 +1560,10 @@ impl HostCalls {
             if call_error_code == CALL_ERROR_RETRY_POLICY_TOO_LONG {
                 return Err(CallError::RetryPolicyTooLong);
             }
-            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            let err_msg = memory::read_result(&resp_buf, response_len);
             return Err(CallError::Failed(err_msg));
         }
-        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        let resp = memory::read_result(&resp_buf, response_len);
         serde_json::from_str(&resp)
             .map_err(|e| CallError::Failed(format!("deserialize response: {}", e)))
     }
@@ -1660,10 +1660,10 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            let err_msg = memory::read_result(&resp_buf, response_len);
             return Err(err_msg);
         }
-        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        let resp = memory::read_result(&resp_buf, response_len);
         serde_json::from_str(&resp).map_err(|e| format!("parse fetch response: {}", e))
     }
 
@@ -1769,10 +1769,10 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            let err_msg = memory::read_result(&resp_buf, response_len);
             return (String::new(), Some(err_msg));
         }
-        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        let resp = memory::read_result(&resp_buf, response_len);
         (resp, None)
     }
 
@@ -1808,7 +1808,7 @@ impl HostCalls {
         if err_code != 0 {
             return Err(format!("side_effect(...) failed: host error code {}. Check that the input is valid.", err_code));
         }
-        let out = unsafe { memory::read_string(out_buf.as_ptr(), out_len) };
+        let out = memory::read_result(&out_buf, out_len);
         Ok(out)
     }
 
@@ -1847,10 +1847,10 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            let err_msg = memory::read_result(&resp_buf, response_len);
             return (String::new(), Some(err_msg));
         }
-        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        let resp = memory::read_result(&resp_buf, response_len);
         (resp, None)
     }
 
@@ -1885,7 +1885,7 @@ impl HostCalls {
         if err_code != 0 || written == 0 {
             return None;
         }
-        Some(unsafe { memory::read_string(out_buf.as_ptr(), written) })
+        Some(memory::read_result(&out_buf, written))
     }
 
     /// Non-WASM stub for `json_parse`.
@@ -1915,7 +1915,7 @@ impl HostCalls {
         if err_code != 0 || written == 0 {
             return None;
         }
-        Some(unsafe { memory::read_string(out_buf.as_ptr(), written) })
+        Some(memory::read_result(&out_buf, written))
     }
 
     /// Non-WASM stub for `json_stringify`.

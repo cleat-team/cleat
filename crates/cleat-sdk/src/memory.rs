@@ -28,6 +28,43 @@ pub const SUSPEND_SENTINEL: i64 = 1 << 62;
 /// value.
 pub const SUSPEND_STOP_BIT: i64 = 1 << 31;
 
+/// Read a host-written result out of a guest-owned buffer, bounded by the
+/// buffer itself.
+///
+/// # Why this exists, and why it takes a slice
+///
+/// The host does not always write the buffer it reports a length for. On a
+/// bad-parameter refusal `engine/imports.go` returns `errBadParam` =
+/// `0xFFFFFFFF_00000001` from 54 sites, before the handler runs, and the guest
+/// decodes a LENGTH out of the very bits that carry the sentinel:
+///
+/// | layout | decoded length | against a 65536-byte buffer |
+/// |---|---|---|
+/// | `decode_simple_result` | 4294967295 | overruns by ~65535x |
+/// | `decode_cleat_call_result` | 16777215 | overruns by ~256x |
+///
+/// So a wrapper that reads its buffer on the error path -- which is the RIGHT
+/// thing to do, because the host's real message is usually there -- reads far
+/// out of bounds unless something bounds it. `read_string` cannot: it takes a
+/// raw pointer and has no idea how big the region is.
+///
+/// This takes the `&[u8]` instead, so the capacity travels with the data and
+/// there is no second argument to get wrong. It is also entirely safe code,
+/// which is the point: the buffers in `host_calls.rs` are ordinary `Vec<u8>`,
+/// and reading them back never needed `unsafe` at all.
+///
+/// The Java SDK's `readOutput` has clamped since it was written
+/// (`Math.min(maxLen, OUT_BUF_SIZE)`), and Go's `hostErrMessage` bounds-checks
+/// for exactly this reason -- see IMPROVEMENT-PLAN 3.200, which says so and
+/// which the Rust side did not follow.
+pub fn read_result(buf: &[u8], len: u32) -> String {
+    let n = (len as usize).min(buf.len());
+    if n == 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
 /// Read a string from WASM linear memory at (ptr, len).
 /// Matches readWasmString in memory.go.
 ///
@@ -180,4 +217,129 @@ pub fn decode_incr_state_result(result: i64) -> (i64, u8) {
 
 pub fn decode_has_state_result(result: i64) -> bool {
     result != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bad-parameter sentinel decodes to a length no buffer satisfies.
+    ///
+    /// This is the whole reason `read_result` exists, so it is asserted against
+    /// the sentinel's real value rather than against a made-up large number.
+    /// `engine/imports.go` returns `errBadParam` = 0xFFFFFFFF_00000001 from 54
+    /// sites when it cannot read a guest string -- BEFORE the handler runs, so
+    /// nothing has been written to the buffer at all -- and both result layouts
+    /// decode a length out of the bits carrying the sentinel.
+    #[test]
+    fn err_bad_param_decodes_to_a_length_no_buffer_satisfies() {
+        let bad = 0xFFFFFFFF_00000001u64 as i64;
+
+        let (simple_len, err) = decode_simple_result(bad);
+        assert_eq!(err, 1, "the low byte of errBadParam is 1");
+        assert_eq!(simple_len, 4_294_967_295);
+        assert!(
+            simple_len as usize > OUT_BUF_SIZE as usize,
+            "decode_simple_result gives {simple_len} against a {OUT_BUF_SIZE}-byte buffer"
+        );
+
+        let (call_len, _call_err, err2) = decode_cleat_call_result(bad);
+        assert_eq!(err2, 1);
+        assert_eq!(call_len, 16_777_215);
+        assert!(
+            call_len as usize > OUT_BUF_SIZE as usize,
+            "decode_cleat_call_result gives {call_len} against a {OUT_BUF_SIZE}-byte buffer"
+        );
+    }
+
+    /// read_result clamps to the buffer rather than to the reported length.
+    ///
+    /// Falsification: `String::from_utf8_lossy(&buf[..len as usize])` in place
+    /// of the clamp panics here with a slice-index error -- in the SDK proper,
+    /// where the read is from a raw pointer, the same mistake is an
+    /// out-of-bounds READ rather than a panic, which is why this is checked on
+    /// the safe helper.
+    #[test]
+    fn read_result_clamps_a_bogus_length_to_the_buffer() {
+        let buf = vec![b'x'; 16];
+
+        let (bogus, _) = decode_simple_result(0xFFFFFFFF_00000001u64 as i64);
+        assert_eq!(read_result(&buf, bogus).len(), 16);
+
+        // and the ordinary cases still behave
+        assert_eq!(read_result(&buf, 4), "xxxx");
+        assert_eq!(read_result(&buf, 0), "");
+        assert_eq!(read_result(&[], 99), "");
+    }
+
+    /// `host_calls.rs` must not read a host-reported length from a raw pointer.
+    ///
+    /// `read_string` takes a `*const u8` and cannot bound anything, so every
+    /// call site that passes a host-reported length is an out-of-bounds read
+    /// waiting for a bad-parameter refusal. All 40 sites in `host_calls.rs`
+    /// were converted to `read_result`; this stops the 41st being written.
+    ///
+    /// `read_string` itself is NOT deleted and must not be: `cleat-macro`'s
+    /// generated entry point calls it on `(args_ptr, args_len)` handed in by
+    /// the host, where there is no slice to bound against and the host is the
+    /// one that chose the length. That is a different situation from reading
+    /// back a buffer the guest allocated, and conflating them is what this
+    /// test exists to prevent.
+    ///
+    /// Reads the file rather than grepping the repo, so it cannot be satisfied
+    /// by a comment elsewhere and needs no tooling to run.
+    #[test]
+    fn host_calls_reads_every_buffer_through_read_result() {
+        let src = include_str!("host_calls.rs");
+
+        let unbounded = src
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                let t = l.trim_start();
+                !t.starts_with("//") && !t.starts_with("///") && t.contains("read_string(")
+            })
+            .map(|(i, l)| format!("  {}: {}", i + 1, l.trim()))
+            .collect::<Vec<_>>();
+
+        assert!(
+            unbounded.is_empty(),
+            "host_calls.rs reads a buffer through read_string, which takes a raw \
+             pointer and bounds nothing:\n{}\n\n\
+             Use memory::read_result(&buf, len) instead. On a bad-parameter refusal the \
+             host returns errBadParam without writing the buffer, and the length decodes \
+             to 4294967295 (simple layout) or 16777215 (call layout) against a 65536-byte \
+             buffer. See IMPROVEMENT-PLAN 3.244.",
+            unbounded.join("\n")
+        );
+
+        // A narrow backstop, and worth being honest about its scope: a rename
+        // or a moved file is caught by the COMPILER long before this runs
+        // (include_str! fails on a missing path, and the tests below call
+        // read_result by name), which was checked rather than assumed -- an
+        // attempted rename produced four E0425s and never reached this
+        // assertion.
+        //
+        // What it does still catch is the case the first assertion cannot: a
+        // host_calls.rs that reads no buffers at all, where "no unbounded
+        // reads" is true and vacuous.
+        assert!(
+            src.contains("read_result("),
+            "host_calls.rs contains no read_result( call at all, so the check above passed \
+             vacuously rather than because the reads are bounded."
+        );
+    }
+
+    /// A length shorter than the buffer must NOT be rounded up to it.
+    ///
+    /// Clamping is a maximum, not a replacement: the host reports how much it
+    /// actually wrote into a buffer that is almost always larger, so a helper
+    /// that returned the whole buffer would append thousands of NUL bytes to
+    /// every successful result. That failure passes the clamp test above.
+    #[test]
+    fn read_result_does_not_round_a_short_length_up() {
+        let mut buf = vec![0u8; 64];
+        buf[..5].copy_from_slice(b"hello");
+        assert_eq!(read_result(&buf, 5), "hello");
+    }
 }

@@ -123,7 +123,7 @@ var javaHostCallOutcomes = map[string]expectedOutcome{
 	"ListCrons": {
 		status: statusError, detailContains: "cannot list schedules",
 		why: "same closure as ScheduleCron and still asserted separately, so binding one and not the other cannot leave a green row behind. " +
-			"That the host's own sentence arrives here is load-bearing: cleat_list_crons writes its error into the OUTPUT BUFFER, and 11 of the 18 Java wrappers with a buffer still discard it and report a bare error code (IMPROVEMENT-PLAN 3.258 in a third SDK). " +
+			"That the host's own sentence arrives here is load-bearing: cleat_list_crons writes its error into the OUTPUT BUFFER, and 11 of the 20 Java wrappers with a buffer still discard it and report a bare error code (IMPROVEMENT-PLAN 3.200 in a third SDK). " +
 			"This row would read `host returned error code 1` if the binding had followed the majority of its own file",
 	},
 }
