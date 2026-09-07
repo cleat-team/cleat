@@ -77,6 +77,21 @@ func TestEachRewiredMethodWiresItsImport(t *testing.T) {
 				"TestEveryCompositeHostCallHasAnImportRow -- which scans for h.<Uppercase>( -- cannot see " +
 				"it. Unwired it returned 0, an epoch timestamp, from a clock",
 		},
+		{
+			method: "AwaitSignals (update dispatch)",
+			pkg:    "github.com/cleat-team/cleat/testdata/updatedispatch",
+			imp:    "cleat_poll_update",
+			why: "EVERY SUSPENSION POINT IS A DISPATCH POINT, so a workflow that registers an update " +
+				"handler and then waits needs the update imports -- and it never NAMES them: " +
+				"AwaitSignals calls DispatchUpdates, which calls the pollUpdate and completeUpdate " +
+				"closure fields. Nothing in such a workflow's own source says it needs them, so the " +
+				"wiring rests entirely on compositeRequires rows in usage.go. " +
+				"Unwired, DispatchUpdates returns at its `h.pollUpdate == nil` guard and the workflow " +
+				"accepts updates forever and handles none, silently. " +
+				"This is the first thing worth checking when a delivery failure is reported: WS-3's " +
+				"#910 looked exactly like this and turned out to be a timing artefact, but ruling it " +
+				"out took a hand-built fixture because nothing pinned it",
+		},
 	}
 
 	for _, tc := range cases {
