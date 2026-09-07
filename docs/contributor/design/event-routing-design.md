@@ -120,9 +120,13 @@ engine, because that is a suspend, and suspends are engine-level.
 **Three slots, string-typed, on both the event and the awaiter.**
 
 ```sql
-key1  VARCHAR(128)  NOT NULL DEFAULT ''
-key2  VARCHAR(128)  NOT NULL DEFAULT ''
-key3  VARCHAR(128)  NOT NULL DEFAULT ''
+-- PostgreSQL
+key1  VARCHAR(128) COLLATE "C"                            NOT NULL DEFAULT ''
+-- MySQL
+key1  VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin  NOT NULL DEFAULT ''
+-- SQL Server
+key1  NVARCHAR(128) COLLATE Latin1_General_BIN2           NOT NULL DEFAULT ''
+--   ... key2, key3 identical
 ```
 
 One composite index per side:
@@ -168,6 +172,26 @@ limit**. The index would be rejected on MySQL while building fine on the other t
 At `VARCHAR(128)` with an ASCII-compatible collation the composite lands near 550
 bytes: comfortable against MySQL's 3072, SQL Server's 1700 nonclustered limit, and
 PostgreSQL's ~2704 btree row limit.
+
+**The collation is explicit and binary, and that is the load-bearing half.** No
+migration in this repo specifies a collation or charset anywhere
+(`grep -rhno 'COLLATE [A-Za-z0-9_]*' migrations/` → nothing), so every string column
+inherits the server default. On MySQL 8 that default is `utf8mb4_0900_ai_ci` —
+**accent-insensitive and case-insensitive**. A correlation key under it would match
+`ORDER-1` against `order-1`, and `café` against `cafe`: two distinct business keys
+colliding silently, on one dialect only.
+
+A binary collation makes the comparison byte-exact by construction, which is what an
+opaque identifier wants, and it removes the question D4 was originally about — whether
+keys are ASCII — because non-ASCII keys compare correctly too. `VARBINARY` would also be
+byte-exact, and was rejected for the reason hashing was: `bytea` renders as
+`\x4f524445522d31` and an engineer looking at a stuck awaiter could not read what it is
+waiting for.
+
+Cost, stated: `utf8mb4_bin` is still up to 4 bytes per character, so three 128-char slots
+is 1536 bytes of InnoDB's 3072-byte index budget. That fits, with the leading columns, but
+it is half the budget — a fourth slot would not fit, which is an additional reason for
+three.
 
 **Store the raw value; hard-error above the cap; never truncate.** A silently truncated
 correlation key is a silent-never-matches bug — the failure mode this whole design
@@ -476,9 +500,12 @@ database-enforced isolation for event tables.
   on a publisher-supplied idempotency id. Different keys, different lifecycle,
   different readers. And neither table is deployed — see §8 and IMPROVEMENT-PLAN
   §3.315.
-- **D4 — ASCII or binary slots.** UUIDs and Stripe-style IDs are ASCII, so
-  `VARCHAR(128)` under an ASCII collation is fine. A non-ASCII key would need
-  `VARBINARY(128)`. Cheap now, expensive after data exists.
+- **D4 — slot type and collation. DECIDED 2026-09-07: `VARCHAR(128)` with an
+  explicitly binary collation per dialect** (`COLLATE "C"` / `utf8mb4_bin` /
+  `Latin1_General_BIN2`), never the server default. Byte-exact like `VARBINARY` but
+  readable in a query result, and it dissolves the ASCII question the option was
+  originally framed around. See §4.3 for why the *explicit* part matters more than the
+  choice between the two candidates.
 - **D5 — declared event schemas.** Slot mapping needs somewhere to live. Does a
   declared trigger imply a declared event schema, or is the mapping standalone?
 - **D6 — RLS on plugin tables. DECIDED 2026-09-07: required, not optional.** Plugin
