@@ -169,6 +169,13 @@ type WorkflowStore interface {
 	// GetChildResult checks whether a child workflow has completed and returns its result.
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
 
+	// GetChildCompletedAtMs returns when a child completed, in Unix
+	// milliseconds, and whether it has completed at all. PollChild needs the
+	// instant rather than GetChildResult's boolean, because "is it complete
+	// now" is not a replayable question -- see engine/children.go's
+	// pollChildIsDeterministic and issue #847. DATABASE clock.
+	GetChildCompletedAtMs(ctx context.Context, runID string) (completedAtMs int64, ok bool, err error)
+
 	// ReapStaleInstances reclaims workflow instances that have been running
 	// but whose heartbeat has not been updated within the given timeout.
 	// Returns the number of instances reclaimed.

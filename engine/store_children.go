@@ -187,3 +187,36 @@ func (s *PostgresStore) GetChildCount(ctx context.Context, parentWorkflowID stri
 }
 
 // ReapStaleInstances reclaims workflow instances with stale heartbeats.
+
+// GetChildCompletedAtMs returns the child's completion instant in Unix
+// milliseconds. See the ChildWorkflowStore doc comment for why PollChild needs
+// the instant rather than a boolean, and engine/children.go's
+// pollChildIsDeterministic for the clock-domain caveat.
+//
+// completed_at is written by now() inside finalize_workflow_status, so this is
+// the DATABASE clock.
+func (s *PostgresStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("get child completed_at: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var completedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `
+		SELECT completed_at FROM workflow_instances WHERE id = $1
+	`, runID).Scan(&completedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, tx.Commit()
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("get child completed_at: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("get child completed_at: commit: %w", err)
+	}
+	if !completedAt.Valid {
+		return 0, false, nil
+	}
+	return completedAt.Time.UnixMilli(), true, nil
+}

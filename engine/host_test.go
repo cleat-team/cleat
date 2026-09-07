@@ -3706,3 +3706,11 @@ func TestPluginCallStreamingFresh_CallGuardRejection(t *testing.T) {
 		t.Errorf("expected EventTypePluginCallStreamChunk, got %s", s.history[0].EventType)
 	}
 }
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockChildWorkflowStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}

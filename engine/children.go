@@ -306,6 +306,41 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 	return packAwaitChildResultSuspend()
 }
 
+// pollChildIsDeterministic explains why PollChild records no event.
+//
+// The rule this repo works to is not "everything records an event", it is
+// "the answer must be a function of recorded state". DurableSleep is the
+// precedent: it stores nothing, and what makes it replayable is time -- the
+// timestamp of the last event the workflow recorded, advanced by sleeps.
+//
+// PollChild meets the same bar without an event:
+//
+//	the child is completed as of durable time T  <=>  completed_at <= T
+//
+// where T is s.nowMs, the parent's durable clock. Both operands are stable
+// across replays -- nowMs is derived from recorded history, and completed_at
+// is written once when the child finalizes -- so the comparison returns the
+// same answer on every execution. Before #847 this call queried the child
+// live and answered "completed" on replay where the original run had seen
+// "running", then let the workflow branch on the difference.
+//
+// THE RESIDUAL WINDOW, stated because it is real and small rather than
+// hidden. completed_at is the DATABASE clock; nowMs is the WORKER clock.
+// They were measured 40ms apart (#804) and ~60ms apart on another machine.
+// So a child that completes within the skew of T can still be reported
+// completed on replay where the original saw running. The window is
+// |skew|, and it closes to zero when the parent has recorded any event
+// after the child finished -- which is the ordinary case, because the
+// await that wakes the parent records one.
+//
+// A constant safety margin was considered and REJECTED. To cover the skew it
+// would have to exceed it, but to preserve the case #847 itself documents --
+// poll, await, poll again, where the second poll must answer completed -- it
+// would have to be smaller than the parent's wake latency after the child
+// finishes. Those two bounds are the same order of magnitude, so a margin
+// large enough to be worth having breaks the behaviour the fix exists to
+// provide. The honest fix for the residual window is a single clock, not a
+// fudge factor.
 func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
 	// Non-blocking check of a child's status. Never suspends.
 	// Returns: {"status":"running|completed|failed", "result":"...", "error":"..."}
@@ -317,21 +352,56 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 	}
 
 	var pr pollResult
-	if s.engine.childWfStore != nil {
+	switch {
+	case s.engine.childWfStore == nil:
+		pr = pollResult{Status: "failed", Error: "no child workflow store"}
+	default:
 		result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
-		if err != nil {
+		switch {
+		case err != nil:
 			pr = pollResult{Status: "failed", Error: err.Error()}
-		} else if completed {
-			if result != "" {
+		case !completed:
+			// Not complete now, so it was not complete at any earlier durable
+			// time either. No second query needed.
+			pr = pollResult{Status: "running"}
+		default:
+			// Complete NOW. The replayable question is whether it was complete
+			// as of the parent's durable time.
+			completedAtMs, ok, cerr := s.engine.childWfStore.GetChildCompletedAtMs(context.Background(), runID)
+			switch {
+			case cerr != nil:
+				pr = pollResult{Status: "failed", Error: cerr.Error()}
+			case !ok:
+				// Complete but with no recorded instant. Fail closed rather
+				// than guessing: answering "completed" here would reintroduce
+				// exactly the non-replayable answer #847 is about, and it
+				// would do it silently.
+				//
+				// THERE IS A KNOWN POPULATION OF SUCH ROWS, so this is not a
+				// theoretical branch. Before #864 the first TERMINATE arm of
+				// enforceParentClosePolicy set status='failed' with no
+				// completed_at, in all three dialects. #864 fixed the write and
+				// touched no existing row, and every retention sweep gates on
+				// `completed_at IS NOT NULL` -- so those rows are never
+				// collected and the population never shrinks (#867).
+				//
+				// A child terminated that way is genuinely unanswerable here:
+				// its status is terminal and stable, but nothing on the row
+				// says WHEN it became terminal, so "was it complete at the
+				// parent's durable time" has no answer. Naming the cause beats
+				// a bare error, because the operator's next question is "which
+				// children?" and #867 has the enumeration.
+				pr = pollResult{Status: "failed", Error: "child is complete but has no completion timestamp, so poll_child cannot answer deterministically; if this child was terminated by a parent close policy before the #864 fix, its completed_at is permanently NULL -- see #867"}
+			case completedAtMs > s.nowMs:
+				// Completed, but AFTER the parent's durable clock. The original
+				// execution saw it running, so every replay must too.
+				pr = pollResult{Status: "running"}
+			case result != "":
 				pr = pollResult{Status: "completed", Result: result}
-			} else {
+			default:
 				pr = pollResult{Status: "failed", Error: "child workflow failed (empty result)"}
 			}
-		} else {
-			pr = pollResult{Status: "running"}
 		}
-	} else {
-		pr = pollResult{Status: "failed", Error: "no child workflow store"}
 	}
 
 	out, _ := json.Marshal(pr)
