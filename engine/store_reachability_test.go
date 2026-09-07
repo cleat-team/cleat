@@ -124,13 +124,12 @@ var storeUnreachedBaseline = map[string]bool{
 
 	// Found by this guard. Each is the same shape: a write or read path with
 	// no production caller, whose siblings are live.
-	"GetWorkflowTag":        true,
-	"GetWorkflowTags":       true,
-	"LoadWorkflowConfig":    true,
-	"RemoveRoutingRule":     true,
-	"RemoveWorkflowTag":     true,
-	"StreamEventHistory":    true,
-	"UpdateScheduleNextRun": true,
+	"GetWorkflowTag":     true,
+	"GetWorkflowTags":    true,
+	"LoadWorkflowConfig": true,
+	"RemoveRoutingRule":  true,
+	"RemoveWorkflowTag":  true,
+	"StreamEventHistory": true,
 }
 
 // TestTheUnreachedBaselineOnlyShrinks is the baseline's second direction.

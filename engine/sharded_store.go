@@ -699,13 +699,6 @@ func (s *ShardedStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) 
 	return all, nil
 }
 
-// UpdateScheduleNextRun updates a schedule on every shard.
-func (s *ShardedStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return s.forEachShard(func(store WorkflowStore) error {
-		return store.UpdateScheduleNextRun(ctx, name, nextRun)
-	})
-}
-
 // LoadWorkflowConfig tries each shard (defs are replicated across shards).
 func (s *ShardedStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
 	var lastErr error
@@ -1536,8 +1529,11 @@ func (s *ShardedStore) AdminReReplay(ctx context.Context, workflowID string, gen
 
 // ClaimDueSchedule claims on the shard that holds the schedule.
 //
-// Unlike UpdateScheduleNextRun, this deliberately does NOT fan out to every
-// shard. The CAS is what decides who owns a firing instant, and a fan-out
+// This deliberately does NOT fan out to every shard.
+//
+// The comparison here used to be with UpdateScheduleNextRun, which fanned out
+// and has since been deleted -- unfenced, superseded by this call, and reached
+// by nothing that ships. The CAS is what decides who owns a firing instant, and a fan-out
 // would report "claimed" if any shard's row matched -- turning a
 // single-winner election into a poll. Schedules are replicated across shards,
 // so the first shard whose row still holds expectedNextRun is the winner and

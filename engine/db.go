@@ -617,22 +617,6 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 	return schedules, tx.Commit()
 }
 
-func (s *PostgresStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	tx, err := s.beginTxWithRLS(ctx)
-	if err != nil {
-		return fmt.Errorf("update schedule next run: begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_schedules SET next_run_at = $2, last_run_at = now() WHERE name = $1 AND tenant_id = $3
-	`, name, nextRun, s.tenantID)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
 // CompactHistory deletes old events and saves compaction state for a workflow.
 func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
 	tx, err := s.beginTxWithRLS(ctx)

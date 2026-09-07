@@ -423,11 +423,6 @@ func (m *mockShardStore) GetDueSchedules(ctx context.Context) ([]Schedule, error
 	return nil, nil
 }
 
-func (m *mockShardStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	m.recordCall("UpdateScheduleNextRun")
-	return m.err
-}
-
 func (m *mockShardStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -2737,19 +2732,6 @@ func TestSetScheduleEnabled_ForEachShard(t *testing.T) {
 	for i, m := range mocks {
 		if n := m.CallCount("SetScheduleEnabled"); n != 1 {
 			t.Errorf("shard-%d: expected 1 SetScheduleEnabled call, got %d", i, n)
-		}
-	}
-}
-
-func TestUpdateScheduleNextRun_ForEachShard(t *testing.T) {
-	ss, mocks := makeShardedStore(t, 3)
-	err := ss.UpdateScheduleNextRun(context.Background(), "my-schedule", time.Now())
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	for i, m := range mocks {
-		if n := m.CallCount("UpdateScheduleNextRun"); n != 1 {
-			t.Errorf("shard-%d: expected 1 UpdateScheduleNextRun call, got %d", i, n)
 		}
 	}
 }

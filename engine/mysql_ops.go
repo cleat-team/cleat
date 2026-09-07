@@ -396,17 +396,6 @@ func (s *MySQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	return schedules, rows.Err()
 }
 
-// UpdateScheduleNextRun updates a schedule's next_run_at after firing.
-func (s *MySQLStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_schedules SET next_run_at = ?, last_run_at = NOW(6) WHERE name = ? AND tenant_id = ?
-	`, nextRun, name, s.tenantID)
-	if err != nil {
-		return fmt.Errorf("UpdateScheduleNextRun: %w", err)
-	}
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // Compaction
 // ---------------------------------------------------------------------------

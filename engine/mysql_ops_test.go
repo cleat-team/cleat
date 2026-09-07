@@ -554,16 +554,6 @@ func TestMySQLStore_GetDueSchedules_Error(t *testing.T) {
 	}
 }
 
-func TestMySQLStore_UpdateScheduleNextRun(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_schedules SET next_run_at", affected: 1},
-	})
-	err := store.UpdateScheduleNextRun(testCtx, "daily", time.Date(2025, 1, 2, 2, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatalf("UpdateScheduleNextRun: %v", err)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Compaction
 // ---------------------------------------------------------------------------

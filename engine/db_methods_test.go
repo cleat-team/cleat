@@ -2941,30 +2941,6 @@ func TestPostgresStore_SetScheduleEnabled_ExecError(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_UpdateScheduleNextRun_ExecError(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_schedules SET next_run_at", err: errors.New("update failed")},
-	})
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	err := store.UpdateScheduleNextRun(testCtx, "daily", time.Now())
-	if err == nil {
-		t.Fatal("expected error from update failure")
-	}
-}
-
-func TestPostgresStore_UpdateScheduleNextRun_BeginError(t *testing.T) {
-	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	err := store.UpdateScheduleNextRun(testCtx, "daily", time.Now())
-	if err == nil {
-		t.Fatal("expected error from begin failure")
-	}
-}
-
 func TestPostgresStore_GetDueSchedules_BeginError(t *testing.T) {
 	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
 	defer db.Close()

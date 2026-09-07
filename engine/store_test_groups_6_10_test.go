@@ -957,53 +957,6 @@ func TestGetDueSchedules(t *testing.T) {
 	}
 }
 
-func TestUpdateScheduleNextRun(t *testing.T) {
-	for _, backend := range registeredBackends {
-		backend := backend
-		t.Run(backend.Name(), func(t *testing.T) {
-			store, teardown := backend.Setup(t)
-			defer teardown()
-			setupTestData(t, store)
-
-			ctx := context.Background()
-
-			sch := Schedule{
-				Name:           "test-update-schedule",
-				DefName:        "test-workflow",
-				EntryPoint:     "main",
-				CronExpression: "0 * * * *",
-				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
-				NextRunAt:      time.Now().Add(time.Hour),
-			}
-			if err := store.CreateSchedule(ctx, sch); err != nil {
-				t.Fatalf("CreateSchedule: %v", err)
-			}
-
-			futureTime := time.Now().Add(24 * time.Hour)
-			if err := store.UpdateScheduleNextRun(ctx, "test-update-schedule", futureTime); err != nil {
-				t.Fatalf("UpdateScheduleNextRun: %v", err)
-			}
-
-			// Verify the schedule still exists via ListSchedules.
-			schedules, err := store.ListSchedules(ctx)
-			if err != nil {
-				t.Fatalf("ListSchedules: %v", err)
-			}
-			found := false
-			for _, s := range schedules {
-				if s.Name == "test-update-schedule" {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Fatal("ListSchedules: expected 'test-update-schedule' to exist after UpdateScheduleNextRun")
-			}
-		})
-	}
-}
-
 func TestSetScheduleEnabled(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend

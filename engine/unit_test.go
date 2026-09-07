@@ -1477,10 +1477,6 @@ func (s *stubWorkflowStore) SetScheduleEnabled(ctx context.Context, name string,
 func (s *stubWorkflowStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	return nil, nil
 }
-func (s *stubWorkflowStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (s *stubWorkflowStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -2633,10 +2629,6 @@ func (m *mockCollectMetricsStore) SetScheduleEnabled(ctx context.Context, name s
 func (m *mockCollectMetricsStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	return nil, nil
 }
-func (m *mockCollectMetricsStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (m *mockCollectMetricsStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -2827,10 +2819,6 @@ func (m *mockCheckStaleStore) SetScheduleEnabled(ctx context.Context, name strin
 func (m *mockCheckStaleStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	return nil, nil
 }
-func (m *mockCheckStaleStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (m *mockCheckStaleStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -3018,10 +3006,6 @@ func (m *mockGCStore) SetScheduleEnabled(ctx context.Context, name string, enabl
 	return nil
 }
 func (m *mockGCStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
-func (m *mockGCStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (m *mockGCStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -3199,10 +3183,6 @@ func (m *mockPurgeStore) SetScheduleEnabled(ctx context.Context, name string, en
 	return nil
 }
 func (m *mockPurgeStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
-func (m *mockPurgeStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (m *mockPurgeStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }

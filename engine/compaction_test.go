@@ -515,10 +515,6 @@ func (m *mockCompactStore) SetScheduleEnabled(ctx context.Context, name string, 
 	return nil
 }
 func (m *mockCompactStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
-func (m *mockCompactStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (m *mockCompactStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
