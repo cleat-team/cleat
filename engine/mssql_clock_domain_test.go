@@ -64,14 +64,32 @@ import (
 // is safe because it contains no SQL -- and the exclusion is asserted to have
 // matched, so renaming the file cannot silently turn the guard on itself again.
 func TestNoMSSQLStatementUsesTheServersLocalClock(t *testing.T) {
-	files, err := filepath.Glob("*.go")
+	goFiles, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("globbing engine/*.go: %v", err)
 	}
-	if len(files) < 50 {
+	if len(goFiles) < 50 {
 		t.Fatalf("found only %d .go files in engine/; there were 174 on 2026-09-06. "+
-			"A glob that matches almost nothing passes vacuously.", len(files))
+			"A glob that matches almost nothing passes vacuously.", len(goFiles))
 	}
+
+	// The migrations are in scope, not merely nearby. They are where this
+	// file's doc comment gets its third witness -- 34 SYSUTCDATETIME() and 0
+	// GETDATE() in migrations/mssql/*.sql, measured 2026-09-06 with
+	// `grep -o ... | wc -l`, never `grep -co`, which counts different things
+	// under ugrep and BSD grep. A DEFAULT or a stored procedure introduced
+	// there with GETDATE() would be exactly this defect, and a Go-only scan
+	// would not see it: the highest-severity item in this repo's history is a
+	// defect inside a stored procedure.
+	sqlFiles, err := filepath.Glob(filepath.Join("..", "migrations", "mssql", "*.sql"))
+	if err != nil {
+		t.Fatalf("globbing migrations/mssql/*.sql: %v", err)
+	}
+	if len(sqlFiles) < 10 {
+		t.Fatalf("found only %d .sql files in migrations/mssql/; there were 30+ on 2026-09-06. "+
+			"A glob that matches almost nothing passes vacuously.", len(sqlFiles))
+	}
+	files := append(append([]string{}, goFiles...), sqlFiles...)
 
 	// This file's own string literals contain the token; see the doc comment.
 	const selfName = "mssql_clock_domain_test.go"
@@ -88,8 +106,17 @@ func TestNoMSSQLStatementUsesTheServersLocalClock(t *testing.T) {
 			t.Fatalf("reading %s: %v", f, err)
 		}
 		scanned++
+		// Strip the comment syntax of the language actually being read. SQL
+		// uses -- and Go uses //, and using the wrong one turns prose into a
+		// finding: a migration header warning "do not use GETDATE() here"
+		// would be reported as a use of it, which is the retraction trap this
+		// file's doc comment is about.
+		strip := stripGoLineComment
+		if strings.HasSuffix(f, ".sql") {
+			strip = stripSQLLineComment
+		}
 		for i, line := range strings.Split(string(b), "\n") {
-			code := stripGoLineComment(line)
+			code := strip(line)
 			if strings.Contains(code, "GETDATE()") {
 				offenders = append(offenders, fmt.Sprintf("%s:%d: %s", f, i+1, strings.TrimSpace(line)))
 			}
@@ -114,7 +141,8 @@ func TestNoMSSQLStatementUsesTheServersLocalClock(t *testing.T) {
 			"this file's own string literals contain the token being searched for.",
 			selfName, skippedSelf)
 	}
-	t.Logf("%d files in engine/ scanned (1 excluded: itself), no local-clock call outside comments", scanned)
+	t.Logf("%d files scanned across engine/*.go and migrations/mssql/*.sql (1 excluded: itself), "+
+		"no local-clock call outside comments", scanned)
 }
 
 // stripGoLineComment removes a // comment from a line, leaving string literals
@@ -136,6 +164,24 @@ func stripGoLineComment(line string) string {
 			}
 		case '/':
 			if !inQuote && !inBacktick && i+1 < len(line) && line[i+1] == '/' {
+				return line[:i]
+			}
+		}
+	}
+	return line
+}
+
+// stripSQLLineComment removes a -- comment, leaving string literals alone.
+// SQL's escape for a quote inside a literal is a doubled quote, which this
+// handles by toggling: ” flips the state twice and lands where it started.
+func stripSQLLineComment(line string) string {
+	inQuote := false
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\'':
+			inQuote = !inQuote
+		case '-':
+			if !inQuote && i+1 < len(line) && line[i+1] == '-' {
 				return line[:i]
 			}
 		}
