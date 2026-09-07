@@ -385,7 +385,7 @@ func TestExtractSessionInvalidToken(t *testing.T) {
 
 	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	req := httptest.NewRequest("GET", "/test", nil)
-	req.Header.Set("Authorization", "Bearer nonexistent-token")
+	req.Header.Set("Authorization", "Bearer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1")
 
 	session := p.extractSession(req)
 	if session != nil {
