@@ -403,6 +403,43 @@ already been removed; three of them concluded that a working feature was broken.
 write the command, do not write the number. Every count in this repo's docs was wrong when
 checked — linter totals, finding counts, skip counts, branch counts, all of them.
 
+**And when the value moves faster than a reader arrives, carry ONLY the command.** A date
+plus a command is enough for a fact that changes monthly. It is not enough for one that
+changes hourly, because the reader takes the number and skips the command — that is what
+the number is *for*. Two instances, both measured 2026-09-06, both by the author of this
+paragraph:
+
+  * The engine's export count moved **three times in one day** — 58 → 52 when #767 removed
+    the durable-state family, → 50 when #843 removed the two inert signal calls. Each value
+    was correct when measured and stale within hours. Two of the three were written into
+    documentation before they aged out.
+  * `finalize_workflow_status` is `CREATE OR REPLACE`d by four migrations. A design doc
+    cited 004 as authoritative, which had been true that morning; 043 (#844) and 044 (#846)
+    both landed the same afternoon, so it shipped four behind.
+
+**The rule this generalises — and it is the one that failed, not the number rule: a live
+query has to be RE-RUN, not remembered.** The *Project state* section below already says to
+find the highest-numbered migration that defines a routine before concluding anything. That
+was done. The answer was then written down, which converted a live query into a stale fact
+and reintroduced exactly the defect the instruction exists to prevent. **Running a check
+once and recording its output is not the same as having the check.** Where the answer moves,
+publish the query and let the reader run it:
+
+    # not "004_fix_finalize_workflow_status_fence.sql", but:
+    python3 - <<'EOF'
+    import re, glob, os
+    def strip(s):
+        s = re.sub(r'/\*.*?\*/', '', s, flags=re.S)
+        return '\n'.join(re.sub(r'--.*$', '', l) for l in s.split('\n'))
+    for f in sorted(glob.glob('migrations/postgres/*.sql')):
+        if re.search(r'CREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\s+\S*<routine>',
+                     strip(open(f).read()), re.I):
+            print(os.path.basename(f))     # the LAST line is authoritative
+    EOF
+
+Strip comments first, or a header quoting a `CREATE` counts as a definition — the same
+"a text search cannot tell a thing from a sentence about the thing" trap as *Build* above.
+
 **And the command has to answer the question you think it does.** A command that runs clean is
 not a command that is right. `git log --date=iso` prints a *local* time with an offset —
 `2026-09-03 14:20:48 -0400` — and pasting that clock reading into a UTC comparison moves the
