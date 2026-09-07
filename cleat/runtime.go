@@ -174,6 +174,19 @@ type Signaler interface {
 	// DurableAwaitSignals is the low-level signal wait. Prefer AwaitSignals.
 	DurableAwaitSignals(signalNames []string, timeoutMs int64) (signalName, payload string, timedOut bool, err error)
 
+	// PollUpdate and CompleteUpdate are the low-level update primitives.
+	// Prefer DispatchUpdates, which pairs them with handler lookup, validation
+	// and the guarantee that every delivered update is answered.
+	//
+	// They are on the interface for the same reason DurableAwaitSignals is: a
+	// generated adapter binds each host call to a named method, so a call the
+	// SDK reaches only through a wrapper still needs the wrapper's parts to be
+	// nameable. Calling them directly is legitimate but leaves the answering to
+	// you -- a delivered update that is never completed leaves its caller
+	// holding a promise nothing settles.
+	PollUpdate() (envelopeJSON string, found bool, err error)
+	CompleteUpdate(requestID, resultJSON, errMsg string) error
+
 	// SendSignalAndWait sends a signal to another workflow and waits for a response.
 	// The signal is sent with an embedded correlation ID; the target workflow uses
 	// ReplyToSignal to send a response back.

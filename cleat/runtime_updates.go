@@ -2,6 +2,7 @@ package cleat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -12,6 +13,30 @@ type updateDelivery struct {
 	Name      string `json:"name"`
 	Payload   string `json:"payload"`
 	RequestID string `json:"request_id"`
+}
+
+// PollUpdate returns the next pending update as a JSON envelope
+// {"name","payload","request_id"}, or found=false when there is none.
+//
+// Low-level: prefer DispatchUpdates. Delivery is durable, so an update returned
+// here is recorded as having been delivered whether or not you complete it --
+// see engine/updater.go.
+func (h *HostCallsImpl) PollUpdate() (string, bool, error) {
+	if h.pollUpdate == nil {
+		return "", false, errors.New("durable: PollUpdate can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	}
+	return h.pollUpdate()
+}
+
+// CompleteUpdate records an update handler's outcome and settles the caller's
+// promise. A non-empty errMsg rejects; an empty one resolves.
+//
+// Low-level: prefer DispatchUpdates, which cannot forget to call this.
+func (h *HostCallsImpl) CompleteUpdate(requestID, resultJSON, errMsg string) error {
+	if h.completeUpdate == nil {
+		return errors.New("durable: CompleteUpdate can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	}
+	return h.completeUpdate(requestID, resultJSON, errMsg)
 }
 
 // DispatchUpdates delivers and runs every update request currently pending for
