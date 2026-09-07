@@ -1060,6 +1060,33 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 }
 
 // handleWorkflowUpdate handles POST /api/workflows/:id/update/:name
+// isTerminalStatus reports whether a workflow can no longer run guest code, and
+// therefore can never service an update.
+//
+// The four settled statuses are obvious. 'terminating' is included and is worth
+// explaining: a terminating workflow is running its DEFER phase, and the engine
+// refuses new work there on purpose -- engine/updater.go's poll says so, "a
+// defer segment exists to run a terminated workflow's cleanup, not to service
+// new requests". So an update accepted then could not be delivered either.
+//
+// The two cases differ in what happens to a request that slips through, and the
+// difference is why this is not just a tidy list:
+//
+//   - accepted while 'terminating': failStrandedUpdates runs on the transition
+//     to the final status and rejects it, so the caller learns.
+//   - accepted while ALREADY final: nothing collects it. The sweep runs AS a
+//     workflow goes terminal, and that has happened. The promise never settles.
+//
+// The second is cleat#910 and is the reason this check exists. The first is
+// refused for consistency and because a 409 now beats a rejection later.
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "done", "failed", "terminated", "dead_lettered", "terminating":
+		return true
+	}
+	return false
+}
+
 func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id, updateName string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
@@ -1073,6 +1100,40 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	}
 	if wf == nil {
 		s.writeError(w, 404, "workflow not found")
+		return
+	}
+
+	// Refuse an update against a workflow that has already finished, cleat#910.
+	//
+	// An update is delivered at a dispatch point inside a segment. A terminal
+	// workflow has no future segment, so a request created after it finished can
+	// never be delivered -- and nothing sweeps it up either: failStrandedUpdates
+	// runs AS a workflow goes terminal, so a request created afterwards is
+	// collected by nothing. The caller gets a 202 and a promise id for a promise
+	// that provably cannot settle.
+	//
+	// That is cleat#849's original complaint in its residual form. The
+	// scheduling half was fixed; accepting a request that cannot be delivered
+	// was not.
+	//
+	// Refused at ADMISSION rather than by adding a sweep. The workflow is
+	// already in hand here for the existence check above, so this costs nothing,
+	// and it never creates the unsettleable promise in the first place. A sweep
+	// would still leave a window in which a caller holds a 202 that is already
+	// meaningless.
+	//
+	// 409, matching how a stale generation and a deprecated version are refused:
+	// the request is well-formed and the state says no.
+	//
+	// A note on the race this does NOT close: a workflow can finish between this
+	// check and the insert. That window is small and self-correcting --
+	// failStrandedUpdates runs on the transition and collects anything pending
+	// at that moment. What is being closed is the case where the workflow was
+	// ALREADY terminal, which no sweep covers because the sweep has run.
+	if isTerminalStatus(wf.Status) {
+		s.writeError(w, 409, fmt.Sprintf(
+			"workflow is %s and cannot accept updates; it has no future segment to deliver one in",
+			wf.Status))
 		return
 	}
 
