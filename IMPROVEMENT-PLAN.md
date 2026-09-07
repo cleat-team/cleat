@@ -6780,6 +6780,94 @@ fix: the revert is loud, the restore is silent. Commit before falsifying, or res
 `cleat_` names uses them as fixtures that make a real call, so a stale name fails to link;
 `grep -rn "must stay in sync" engine/*_test.go wasm/*_test.go` now returns only this section's own
 quotation of the comment that was removed.
+### 3.244 The Rust SDK read past its own buffer whenever the host refused a bad parameter — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+`memory::read_string(ptr, len)` takes a raw pointer and does
+`slice::from_raw_parts(ptr, len as usize)`. It bounds nothing. All 40 call sites in
+`host_calls.rs` passed it a length the **host** reported.
+
+On the success path that is fine — the host wrote that many bytes. On a **bad-parameter refusal**
+it is not. `engine/imports.go` returns `errBadParam` = `0xFFFFFFFF_00000001` from **54 sites**,
+*before the handler runs*, so nothing has been written to the buffer at all — and the guest decodes
+a length out of the very bits carrying the sentinel:
+
+| layout | decoded length | buffer | overrun |
+|---|---|---|---|
+| `decode_simple_result` | 4,294,967,295 | 65,536 | ~65,535× |
+| `decode_cleat_call_result` | 16,777,215 | 65,536 | ~256× |
+
+Any wrapper that reads its buffer on the error path — which is the **right** thing to do, since the
+host's real message is usually there — therefore read far out of bounds. Seven did:
+`cleat_call`, `cleat_call_heartbeat`, `cleat_fetch`, `plugin_call`, `plugin_call_streaming`, and
+`schedule_cron` / `list_crons`.
+
+**Two of those seven are mine, from [§3.242](#3242), merged hours earlier.** That PR argued at
+length that reading the buffer is correct and that following the file's majority would be "the easy
+call and the wrong one". It was right about that and wrong about the read: it cited
+[§3.200](#3200), which says in as many words that `hostErrMessage` *"bounds-checks the length
+against the buffer, so `errBadParam`'s `0xFFFFFFFF` decodes to a length no buffer satisfies"* — I
+read that sentence, quoted the section, and did not apply it.
+
+**Guest-reachable, not theoretical.** `cleat_schedule_cron` alone returns `errBadParam` from 4
+sites in its own wrapper, on a workflow name, cron expression, timezone or input that fails
+validation — all guest-supplied.
+
+**Java was already safe**, which is why this is Rust-only: `readOutput` has always clamped with
+`Math.min(maxLen, OUT_BUF_SIZE)` and returns `""` for a non-positive length, and
+`decodeSimpleExtra` renders `0xFFFFFFFF` as `-1`. Go's `hostErrMessage` bounds-checks. Rust was the
+one SDK with no bound anywhere.
+
+**Fixed as a mechanism rather than at the seven sites.** `memory::read_result(buf: &[u8], len: u32)`
+takes the **slice**, so the capacity travels with the data and there is no second argument to get
+wrong; it is entirely safe code, because these buffers are ordinary `Vec<u8>` and reading them back
+never needed `unsafe` at all. All 40 sites converted; `host_calls.rs` now contains zero
+`read_string` calls.
+
+`read_string` itself is kept, deliberately: `cleat-macro`'s generated entry point calls it on
+`(args_ptr, args_len)` handed in by the host, where there is no slice to bound against. That is a
+different situation from reading back a guest-allocated buffer, and conflating them is what the
+guard exists to prevent.
+
+**Falsified in both directions**, because a clamp has two ways to be wrong and only one of them is
+the bug being fixed:
+
+| control | result |
+|---|---|
+| remove the clamp | `read_result_clamps_a_bogus_length_to_the_buffer` panics on a slice-index |
+| clamp to the whole buffer always | `read_result_does_not_round_a_short_length_up` fails — a short length must not be rounded up, or every success gains thousands of NULs |
+| reintroduce one `read_string` | the guard names the file and line |
+
+The second is the one worth having: it fails a "fix" that passes the first.
+
+The sentinel test asserts against `errBadParam`'s **real value** rather than a made-up large number,
+so it stays true only while the engine's constant does.
+
+`tests/plugin-harness` on all three dialects: 145 pass / 0 fail / 2 skip, unchanged — the Rust
+harness drives 27 host calls through the converted reads.
+
+**Still open, and this was the prerequisite for it:** 15 of 22 Rust and 11 of 20 Java wrappers
+still report a bare error code where the host wrote a message ([§3.200](#3200)'s defect in two more
+SDKs). Fixing those in Rust *requires* this change first, or it would have added 15 more
+out-of-bounds reads.
+
+**A citation error went out with [§3.242](#3242) and is corrected here.** Four merged files and a
+plan section cited "IMPROVEMENT-PLAN 3.258" for the host-message defect. **There is no §3.258.** I
+had run `sed -n '3250,3268p' IMPROVEMENT-PLAN.md`, read the passage about `hostErrMessage` at
+**line** 3258, and written it down as a **section** number. The real section is [§3.200](#3200),
+whose heading — *"A Go guest was told 'error 1 (timeout)' for every plugin failure, and the host's
+real message was in the buffer beside it"* — is the thing I was describing all along.
+
+A number that looks like a section number and came from a line-numbered tool is the same shape as
+this file's `TestTenantIsolationAcrossDialects`: a name that existed only in prose, cited
+confidently, matching nothing. **Check that a `§` you cite resolves to a heading** — one grep, and
+it would not have shipped:
+
+    grep -c '^### 3\.258 ' IMPROVEMENT-PLAN.md     # 0
+
+The same pass corrected two denominators that [§3.242](#3242) itself had made stale within the
+hour: the Rust and Java wrapper counts read "of the 20" and "of the 18", the totals *before* cron
+added two wrappers to each.
+
 ### 3.243 Java's executed host-call coverage skipped its own fixture, so 8/70 was not a fact about Java — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
 
 `scripts/sdk-host-call-coverage.py` reported java at **8/70 executed** against rust's 27/70 and
@@ -6838,7 +6926,7 @@ all three handlers; AssemblyScript already had it this way.
 **The error branches read the OUTPUT BUFFER, which is deliberately not what the rest of either file
 does.** `engine/schedules.go` writes its message into the id buffer and returns
 `packSimpleResult(1, written)`, so a guest printing the bare code discards the only thing that says
-what went wrong — [§3.258](#3258), fixed there for the generated Go adapters. Measured across both
+what went wrong — [§3.200](#3200), fixed there for the generated Go adapters. Measured across both
 SDKs on 2026-09-07, counting only `read_string`/`readOutput` **inside** the error branch:
 
 | SDK | wrappers with an output buffer | read it on error | report a bare code |

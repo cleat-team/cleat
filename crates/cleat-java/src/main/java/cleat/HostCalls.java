@@ -2221,11 +2221,11 @@ public class HostCalls {
             // there on failure -- engine/schedules.go writes rec.Err into the
             // id buffer and returns packSimpleResult(1, written) -- so a guest
             // that prints the bare code throws away the only thing that says
-            // what went wrong. That is IMPROVEMENT-PLAN 3.258, fixed there for
+            // what went wrong. That is IMPROVEMENT-PLAN 3.200, fixed there for
             // the generated Go adapters.
             //
             // Note this does NOT match what most of this file does: 11 of the
-            // 18 wrappers here with an output buffer still report a bare code.
+            // 20 wrappers here with an output buffer still report a bare code.
             // The seven that read it are cleatCall, cleatCallHeartbeat,
             // cleatFetch, pluginCall, pluginCallStreaming, jsonParse and
             // jsonStringify. The remaining 11 are tracked separately.
