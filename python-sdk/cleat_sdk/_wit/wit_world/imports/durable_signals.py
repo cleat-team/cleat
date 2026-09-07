@@ -28,6 +28,12 @@ def durable_poll_signal(name: str) -> str:
     raise NotImplementedError
 def durable_signal_workflow(target_run_id: str, signal_name: str, payload: str) -> int:
     """
+    durable-send-signal-and-wait and durable-reply-to-signal were removed
+    on 2026-09-06. Both mapped to host calls that were inert engine-side,
+    and request/reply is now composed from create-promise + signal-workflow
+    + await-promise + resolve-promise (IMPROVEMENT-PLAN 3.220). Declaring
+    them here made every Python component import two host functions it
+    never called.
     Send a signal to a target workflow (fire-and-forget, recorded).
     """
     raise NotImplementedError

@@ -101,6 +101,13 @@ def _exercise_every_host_call(h: HostCalls) -> None:
 
     # ---- updates, defer, detached ----
     h.register_update_handler("upd", lambda payload: payload)
+    # poll_update and complete_update are the two host calls behind
+    # dispatch_updates. A workflow does not normally call them directly -- the
+    # SDK dispatches at every suspension point -- but this fixture exists to
+    # compile every host call, so all three are named.
+    h.poll_update()
+    h.complete_update("req", '{"ok":true}', "")
+    h.dispatch_updates()
     h.defer("cleanup")
     h.defer_func(lambda: None)
     h.run_detached(lambda: None)

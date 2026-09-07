@@ -39,13 +39,12 @@ def durable_call_heartbeat(service: str, operation: str, request: str, heartbeat
     """
     Make a durable call with periodic heartbeat/progress updates.
     
-    This one cannot currently return ``suspended``: unlike the two above,
-    the host's DurableCallWithHeartbeat does not consult
-    ``stopBeforeNewWork``, so a defer segment does not stop it. That is a
-    host-side gap on every SDK rather than anything about this type, and it
-    is recorded in IMPROVEMENT-PLAN 3.110. The type is the same shape as
-    its two siblings because the failure half applies to it identically and
-    a third convention for one function would be worse.
+    The type is the same shape as its two siblings because the failure half
+    applies to it identically, and because a third convention for one
+    function would be worse. The host half arrived in IMPROVEMENT-PLAN 3.111
+    (#672): DurableCallWithHeartbeat consults stopBeforeNewWork, so a defer
+    segment stops it, and the component dispatch masks the sentinel ahead of
+    any field decode -- both ends of `suspended` are real on this call.
     
     Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """

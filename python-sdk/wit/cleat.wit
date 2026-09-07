@@ -256,6 +256,21 @@ interface durable-handlers {
 
     /// Register a read-only query handler for external queries.
     durable-register-query-handler: func(name: string) -> u64;
+
+    /// Deliver the next pending update request.
+    ///
+    /// Returns a JSON envelope {"name","payload","request_id"}, or an empty
+    /// string when nothing is pending. Delivery is recorded in the event
+    /// history, which is what makes an update replayable: the handler sees the
+    /// same input at the same point in the program on every run.
+    durable-poll-update: func() -> string;
+
+    /// Record an update handler's outcome and settle the caller's promise.
+    ///
+    /// A non-empty err rejects; an empty one resolves. outcome carries the
+    /// handler result. request-id is the value
+    /// durable-poll-update returned, unchanged.
+    durable-complete-update: func(request-id: string, outcome: string, err: string) -> u64;
 }
 
 /// Fire-and-forget and scheduled messaging.

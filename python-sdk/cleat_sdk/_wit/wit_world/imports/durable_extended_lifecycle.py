@@ -23,5 +23,7 @@ def side_effect(value: str) -> str:
     """
     Record non-deterministic computation result in event history.
     Returns the previously recorded result on replay.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError

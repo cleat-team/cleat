@@ -528,6 +528,43 @@ func (b *wasmtimeBackend) dispatchRegisterQueryHandler(
 // ---------------------------------------------------------------------------
 
 // dispatchDurableSend handles (string,string,string) -> u64.
+// dispatchPollUpdate handles () -> string.
+//
+// The component signature returns the envelope directly rather than writing
+// into a guest buffer, so "nothing pending" is the empty string. A component
+// guest therefore cannot misread a not-found as a delivery, which is the same
+// property the result<> calls have.
+func (b *wasmtimeBackend) dispatchPollUpdate(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if b.handler == nil {
+		return nil
+	}
+	buf := make([]byte, 65536)
+	packed := b.handler.DurablePollUpdate(ctxWithMem(context.Background(), buf), nil, 0, 65536)
+	// found=false packs as 0, and extractStringFromSimplePacked then yields "".
+	envelope := extractStringFromSimplePacked(packed, buf)
+	setResultString(results, nresults, envelope)
+	return nil
+}
+
+// dispatchCompleteUpdate handles (string,string,string) -> u64.
+func (b *wasmtimeBackend) dispatchCompleteUpdate(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 3 || b.handler == nil {
+		return nil
+	}
+	requestID := readStrArg(args, 0, nargs)
+	result := readStrArg(args, 1, nargs)
+	errMsg := readStrArg(args, 2, nargs)
+	r := b.handler.DurableCompleteUpdate(context.Background(), nil, requestID, result, errMsg)
+	setResultU64(results, nresults, uint64(r))
+	return nil
+}
+
 func (b *wasmtimeBackend) dispatchDurableSend(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
@@ -955,6 +992,8 @@ var witTypeMap = map[string]map[string]cbType{
 	},
 	"cleat:host-calls/durable-handlers": {
 		"durable-register-update-handler": cbTypeRegisterUpdateHandler,
+		"durable-poll-update":             cbTypePollUpdate,
+		"durable-complete-update":         cbTypeCompleteUpdate,
 		"durable-register-query-handler":  cbTypeRegisterQueryHandler,
 	},
 	"cleat:host-calls/durable-messaging": {

@@ -63,6 +63,8 @@ var WitToEnvImport = map[string]map[string]string{
 	},
 	"cleat:host-calls/durable-handlers": {
 		"durable-register-update-handler": "cleat_register_update_handler",
+		"durable-poll-update":             "cleat_poll_update",
+		"durable-complete-update":         "cleat_complete_update",
 		"durable-register-query-handler":  "cleat_register_query_handler",
 	},
 	"cleat:host-calls/durable-messaging": {

@@ -6574,6 +6574,31 @@ until it suspends.
   leaves two exported names that read as the update path and are not. The names were the whole
   problem, so the names are gone.
 
+#### The other SDKs
+
+Rust, Java and AssemblyScript followed in the core-ABI shape; Python is the component path. Every
+one of the `absentToken` exemptions this section created is gone, and **the mechanism worked on
+its first real use**: adding each binding failed `TestEverySDKCoversEveryHostStopSite` until the
+exemption was removed and the method added to that SDK's refusable-call list. The only exemptions
+left are the three that predate this work.
+
+Python needed three things the others did not, all worth recording:
+
+  * **`result` is a WIT keyword**, so `durable-complete-update`'s parameter is `outcome`.
+    componentize-py refuses the file otherwise, with the column of the offending token.
+  * **`dispatch_updates` must be a no-op when there is no host.** Go guards on a nil closure;
+    Python's non-WASM import is a stub that *raises*, and dispatch runs before every suspension —
+    so without the guard any local run that slept died inside a dispatch it never asked for.
+    Caught by two existing stop tests, not by anything new.
+  * **`json.dumps` needs `separators=(",", ":")`.** Its default `", "` / `": "` would make the
+    Python harness's envelope differ from every other SDK's for no reason — the same trap §3.220
+    hit.
+
+Regenerating the bindings also surfaced **pre-existing docstring drift in four unrelated generated
+files**: they still described a `DurableCallWithHeartbeat` limitation that §3.111 removed. The
+generated artefacts had not been regenerated when the WIT prose changed. Docstrings only — verified
+no signature changed before copying, rather than after.
+
 #### Two guards this change had to repair, both silent
 
 **The stop-correspondence guard caught the new calls immediately** — both consult
