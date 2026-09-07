@@ -6780,6 +6780,74 @@ fix: the revert is loud, the restore is silent. Commit before falsifying, or res
 `cleat_` names uses them as fixtures that make a real call, so a stale name fails to link;
 `grep -rn "must stay in sync" engine/*_test.go wasm/*_test.go` now returns only this section's own
 quotation of the comment that was removed.
+### 3.242 The cron family is bound in Rust and Java — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+`tiers.yaml` holds `workflow-callable-cron` at **tier 2** for one stated reason: *"rust and java
+SDKs declare no cron surface at all"*. Both now do.
+
+`cleat_schedule_cron`, `cleat_delete_cron` and `cleat_list_crons` are declared in
+`crates/cleat-sdk/src/host_calls.rs` and `crates/cleat-java/.../HostCalls.java`, with safe wrappers
+mirroring Go's `ScheduleCron(workflowName, cronExpr, timezone, inputJSON) -> (scheduleID, error)`.
+
+**Only `ScheduleCron` checks the stop bit, and that asymmetry is measured rather than copied.**
+`engine/schedules.go` calls `stopBeforeNewWork` in `ScheduleCron` and in neither of the other two —
+a cron schedule is new work with the longest reach of anything in this family, since it registers a
+*recurring* trigger, while deleting and listing are not new work. Verified 2026-09-07 by reading
+all three handlers; AssemblyScript already had it this way.
+
+**The error branches read the OUTPUT BUFFER, which is deliberately not what the rest of either file
+does.** `engine/schedules.go` writes its message into the id buffer and returns
+`packSimpleResult(1, written)`, so a guest printing the bare code discards the only thing that says
+what went wrong — [§3.258](#3258), fixed there for the generated Go adapters. Measured across both
+SDKs on 2026-09-07, counting only `read_string`/`readOutput` **inside** the error branch:
+
+| SDK | wrappers with an output buffer | read it on error | report a bare code |
+|---|---|---|---|
+| rust | 20 | 5 | **15** |
+| java | 18 | 7 | **11** |
+
+Following the majority would have been the easy call and the wrong one. **The first measurement of
+this said 20 of 20 read the buffer**, because the detector looked for `read_string` anywhere after
+`err_code != 0` — and every one of these reads the buffer on the *success* path, immediately below.
+The corrected detector matches braces. That is this document's recurring shape again, and again in
+the flattering direction: the wrong answer said the SDK was already doing the right thing
+everywhere.
+
+The remaining 26 are a real defect and are **not** fixed here — one PR, one thing.
+
+**Proven by execution, not by declaration.** `ScheduleCron` and `ListCrons` are wave-1 calls, so
+both SDKs already had rows asserting the *gap*: `statusUnsupported`, "no cleat_schedule_cron
+import". Java's row said, in as many words, that the day Java gained the binding somebody would
+have to decide the right answer. The answer is that the call reaches the host and is refused by it,
+which is a different fact from having no binding. Recorded with `CLEAT_HOSTCALL_RECORD=1`:
+
+    RECORD  ScheduleCron  error  no workflow store configured: workflow <run-id> cannot schedule "harness-workflow"
+    RECORD  ListCrons     error  no workflow store configured: workflow <run-id> cannot list schedules
+
+**Byte-identical between Rust and Java**, which is the strongest thing this pair can say: two SDKs
+that spell the import differently encoded four arguments into the same host answer. The rows assert
+the tail rather than the whole string, because the host's text embeds the run ID; the substring
+chosen is the one that proves the *argument* crossed — `harness-workflow` is what the fixture
+passed, coming back inside a message the host composed.
+
+**Falsified.** Reverting the Rust error branch to a bare code fails the row with *"status error as
+expected, but the detail changed"* — so the row asserts the host's message specifically, not merely
+that something failed. Restored from a saved copy and re-verified, not with `git checkout`.
+
+**[§3.241](#3241)'s baseline worked on its first real use.** Applying the bindings turned that test
+red with *"sdkUnreachedBaseline[\"rust\"] names 3 host export(s) this SDK now reaches"*, naming all
+three, for Rust and Java both. The shrink-only direction is the half that is easy to get wrong,
+because nothing else notices an improvement.
+
+`tests/plugin-harness` on all three dialects: 145 pass / 0 fail / 2 skip. `cargo clippy
+--all-targets -- -D warnings` clean; `gradle test` clean.
+
+**What this does NOT do: it does not move `workflow-callable-cron` to tier 1.** That entry gives
+two reasons for its tier, and this closes one. The gate coverage it asks for is a real cron
+end-to-end on each SDK — `engine.TestPythonCronEndToEnd` is the model — and the harness rows here
+run against an env with no workflow store, so they prove the binding and the boundary, not the
+scheduling. Changing `tiers.yaml` is a separate decision with its own evidence.
+
 ### 3.241 Nothing checked whether an SDK can reach every host call — 🟢 **GUARDED 2026-09-07** (WS-1, 2026-09-07)
 
 `TestEverySDKImportIsAHostExport` checks that every name an SDK imports exists on the host. That

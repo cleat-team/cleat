@@ -258,15 +258,24 @@ fn exercise_host_call(h: &HostCalls, input: Request) -> Result<Outcome, String> 
         // AssemblyScript declares both imports; Rust declares neither. The
         // host exports them (`engine/imports.go`), so this is a guest-side
         // gap, which is the category this whole round is about.
-        "ScheduleCron" => unsupported(
-            call,
-            "cleat-sdk declares no cleat_schedule_cron import; the host exports it and the AssemblyScript SDK binds it",
-        ),
+        // Arguments mirror the Go fixture exactly -- "harness-workflow",
+        // "0 0 * * *", "UTC", "{}" -- because the harness's only view of what
+        // the guest passed is the detail string, so an identical answer across
+        // two SDKs is evidence they encoded the same values the same way.
+        //
+        // The in-memory env wires no workflow store, so both of these are
+        // EXPECTED to fail. That is the point: the row asserts the host's own
+        // message survives the boundary, which is only possible once the
+        // binding exists at all. It read "unsupported" until 3.242.
+        "ScheduleCron" => match h.schedule_cron("harness-workflow", "0 0 * * *", "UTC", "{}") {
+            Ok(id) => ok(call, id),
+            Err(e) => bad(call, e),
+        },
 
-        "ListCrons" => unsupported(
-            call,
-            "cleat-sdk declares no cleat_list_crons import; the host exports it and the AssemblyScript SDK binds it",
-        ),
+        "ListCrons" => match h.list_crons() {
+            Ok(r) => ok(call, r),
+            Err(e) => bad(call, e),
+        },
 
         // ---- plugins ----
         //

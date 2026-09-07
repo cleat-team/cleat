@@ -132,12 +132,17 @@ var rustHostCallOutcomes = map[string]expectedOutcome{
 	//     grep -c cron crates/cleat-sdk/src/host_calls.rs                     # 0
 	//     grep -c cleat_schedule_cron packages/cleat-as/assembly/host-calls.ts # non-zero
 	"ScheduleCron": {
-		status: statusUnsupported, detailContains: "no cleat_schedule_cron import",
-		why: "the Rust SDK declares no cron imports -- zero occurrences of the string `cron` in host_calls.rs. The host exports cleat_schedule_cron and the AssemblyScript SDK binds it, so this is a guest-side gap and not a host limitation. Go's row for this call is an ERROR from the host; the difference between the two rows is the whole point",
+		status: statusError, detailContains: `cannot schedule "harness-workflow"`,
+		why: "MEASURED after 3.242 bound the cron family in Rust; it read statusUnsupported/`no cleat_schedule_cron import` before that, and the row existed to catch the gap closing silently. " +
+			"Asserted on the tail rather than on the whole message because the host's text embeds the run ID, which changes every run. " +
+			"The substring chosen is the one that proves the ARGUMENT crossed the boundary: `harness-workflow` is the workflow name the fixture passed, and it comes back inside a message the host composed. " +
+			"Go's row asserts `cleat_schedule_cron: no workflow store configured` for the same call -- the same refusal, differently rendered, because the Go adapter prefixes the import name and the Rust binding returns the host's text as-is. Recorded as a difference rather than normalised away",
 	},
 	"ListCrons": {
-		status: statusUnsupported, detailContains: "no cleat_list_crons import",
-		why: "same gap as ScheduleCron, asserted separately so that adding one binding and not the other cannot leave a green row behind",
+		status: statusError, detailContains: "cannot list schedules",
+		why: "same closure as ScheduleCron and still asserted separately, so that binding one and not the other cannot leave a green row behind. " +
+			"That the host's own sentence arrives here at all is the load-bearing part: cleat_list_crons writes its error into the OUTPUT BUFFER, and 15 of the 20 Rust wrappers with a buffer still discard it and print a bare error code (IMPROVEMENT-PLAN 3.258 in a second SDK). " +
+			"This row would read `host error code 1` if the binding had followed the majority of its own file",
 	},
 }
 

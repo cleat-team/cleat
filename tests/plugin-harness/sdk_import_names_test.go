@@ -312,20 +312,11 @@ var notWorkflowFacing = map[string]bool{
 // full parity -- which is the sort of thing nobody would have guessed, and the
 // reason this direction is worth checking at all.
 var sdkUnreachedBaseline = map[string][]string{
-	// Rust and Java: the cron trio. AssemblyScript and Python both bind these,
-	// so this is a two-SDK gap in a shipped capability, not an unbuilt feature.
-	// Nothing composes them either -- unlike request/reply after 3.220, there is
-	// no combination of other host calls that schedules a cron.
-	"rust": {
-		"cleat_delete_cron",
-		"cleat_list_crons",
-		"cleat_schedule_cron",
-	},
-	"java": {
-		"cleat_delete_cron",
-		"cleat_list_crons",
-		"cleat_schedule_cron",
-	},
+	// rust and java: deliberately absent, as assemblyscript is. Both bound the
+	// cron trio in 3.242 -- which is what this baseline existed to make
+	// visible, and it worked on its first real use: applying the bindings made
+	// this test fail with "names 3 host export(s) this SDK now reaches", naming
+	// all three.
 
 	// Go splits into two kinds, and calling all six "gaps" would overstate it.
 	//

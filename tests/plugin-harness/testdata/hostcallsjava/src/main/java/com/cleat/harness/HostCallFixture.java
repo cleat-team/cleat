@@ -140,18 +140,22 @@ public class HostCallFixture {
 
         // ---- cron ----
         //
-        // The Java SDK declares NO cron bindings -- `grep -rn cron` over
-        // crates/cleat-java/src/main/java/cleat/ returns nothing. The host
-        // exports cleat_schedule_cron and cleat_list_crons and the
-        // AssemblyScript SDK binds both, so this is a guest-side gap and not a
-        // host limitation. Reported as "unsupported" rather than "error"
-        // because a binding that does not exist and a binding that ran and was
-        // refused are different facts.
+        // Arguments mirror the Go fixture exactly -- "harness-workflow",
+        // "0 0 * * *", "UTC", "{}" -- because the harness's only view of what
+        // the guest passed is the detail string, so an identical answer across
+        // two SDKs is evidence they encoded the same values the same way.
+        //
+        // The in-memory env wires no workflow store, so both of these are
+        // EXPECTED to fail. That is the point: the row asserts the host's own
+        // message survives the boundary, which is only possible once the
+        // binding exists at all. These read "unsupported" until 3.242, and the
+        // note there said the day Java gained the binding somebody would have
+        // to decide what the right answer is. This is that answer.
         if (call.equals("ScheduleCron")) {
-            return emit(call, "unsupported", "no cleat_schedule_cron import in the Java SDK");
+            return result(call, h.scheduleCron("harness-workflow", "0 0 * * *", "UTC", "{}"));
         }
         if (call.equals("ListCrons")) {
-            return emit(call, "unsupported", "no cleat_list_crons import in the Java SDK");
+            return result(call, h.listCrons());
         }
 
         // ---- plugins ----

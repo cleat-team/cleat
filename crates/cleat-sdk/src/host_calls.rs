@@ -257,6 +257,26 @@ mod imports {
         // cleat_run_detached - ABI 2.36, two strings in
         pub fn cleat_run_detached(name_ptr: *const u8, name_len: u32, input_ptr: *const u8, input_len: u32) -> i64;
 
+        // The cron family. Present on the host since ABI 2.31 and bound by the
+        // AssemblyScript and Python SDKs; Rust and Java declared no cron surface
+        // at all, which is the stated reason tiers.yaml holds
+        // workflow-callable-cron at tier 2. IMPROVEMENT-PLAN 3.241.
+
+        // cleat_schedule_cron - four string pairs in, one string out (schedule ID)
+        pub fn cleat_schedule_cron(
+            wf_ptr: *const u8, wf_len: u32,
+            cron_ptr: *const u8, cron_len: u32,
+            tz_ptr: *const u8, tz_len: u32,
+            input_ptr: *const u8, input_len: u32,
+            id_ptr: *mut u8, id_max_len: u32,
+        ) -> i64;
+
+        // cleat_delete_cron - one string in (schedule ID)
+        pub fn cleat_delete_cron(id_ptr: *const u8, id_len: u32) -> i64;
+
+        // cleat_list_crons - one string out (JSON array of schedules)
+        pub fn cleat_list_crons(out_ptr: *mut u8, out_max_len: u32) -> i64;
+
 
 
 
@@ -1218,6 +1238,108 @@ impl HostCalls {
             return Err(format!("schedule_invoke(service=\"{}\", operation=\"{}\") failed: host error code {}. Check that the service and operation are valid.", service, operation, err_code));
         }
         Ok(())
+    }
+
+    /// Create a recurring workflow trigger from a cron expression.
+    ///
+    /// Returns the schedule ID, which `delete_cron` takes. Mirrors Go's
+    /// `ScheduleCron(workflowName, cronExpr, timezone, inputJSON)`.
+    ///
+    /// `timezone` is optional: `""` means the engine's default. It is read
+    /// host-side as a payload rather than as a required string, which is what
+    /// makes the empty value legal rather than a bad-parameter error.
+    pub fn schedule_cron(
+        &self,
+        workflow_name: &str,
+        cron_expr: &str,
+        timezone: &str,
+        input_json: &str,
+    ) -> Result<String, String> {
+        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_schedule_cron(
+                workflow_name.as_ptr(), workflow_name.len() as u32,
+                cron_expr.as_ptr(), cron_expr.len() as u32,
+                timezone.as_ptr(), timezone.len() as u32,
+                input_json.as_ptr(), input_json.len() as u32,
+                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        // Ask BEFORE decoding. A cron schedule is new work with the longest
+        // reach of anything in this family -- it registers a RECURRING trigger,
+        // so a workflow that kept going after a refusal would leave something
+        // starting fresh runs indefinitely. decode_simple_result reads errCode
+        // from the low byte, where a stop is 0, and the length as 0: an empty
+        // SUCCESSFUL response carrying an empty schedule ID.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
+        let (result_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            // Read the BUFFER, not the code. The host writes its own message
+            // there on failure -- engine/schedules.go writes rec.Err into the
+            // id buffer and returns packSimpleResult(1, written) -- so a guest
+            // that prints the bare code throws away the only thing that says
+            // what went wrong. That is IMPROVEMENT-PLAN 3.258, fixed there for
+            // the generated Go adapters.
+            //
+            // Note this does NOT match what most of this file does: 15 of the
+            // 20 wrappers here that have an output buffer still report a bare
+            // code. The five that read it are cleat_call, cleat_call_heartbeat,
+            // cleat_fetch, plugin_call and plugin_call_streaming. Following the
+            // majority would have been the easy call and the wrong one; the
+            // remaining 15 are tracked separately.
+            let msg = unsafe { memory::read_string(buf.as_ptr(), result_len) };
+            if msg.is_empty() {
+                return Err(format!(
+                    "schedule_cron(workflow_name=\"{}\", cron_expr=\"{}\") failed: host error code {}.",
+                    workflow_name, cron_expr, err_code
+                ));
+            }
+            return Err(msg);
+        }
+        Ok(unsafe { memory::read_string(buf.as_ptr(), result_len) })
+    }
+
+    /// Remove a previously registered cron schedule by its ID.
+    ///
+    /// No stop-bit check, and that is deliberate rather than an omission:
+    /// `DeleteCron` does not call `stopBeforeNewWork` host-side, because
+    /// removing a schedule is not new work. Verified against
+    /// `engine/schedules.go` on 2026-09-07; `ScheduleCron` is the only one of
+    /// the three that can be refused.
+    pub fn delete_cron(&self, schedule_id: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::cleat_delete_cron(schedule_id.as_ptr(), schedule_id.len() as u32)
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!(
+                "delete_cron(schedule_id=\"{}\") failed: host error code {}. Check that the schedule ID exists.",
+                schedule_id, err_code
+            ));
+        }
+        Ok(())
+    }
+
+    /// List all registered cron schedules, as a JSON array.
+    ///
+    /// See `delete_cron` for why there is no stop-bit check here either.
+    pub fn list_crons(&self) -> Result<String, String> {
+        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_list_crons(buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+        };
+        let (result_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            // The host's message, not the code -- see schedule_cron above.
+            let msg = unsafe { memory::read_string(buf.as_ptr(), result_len) };
+            if msg.is_empty() {
+                return Err(format!("list_crons() failed: host error code {}.", err_code));
+            }
+            return Err(msg);
+        }
+        Ok(unsafe { memory::read_string(buf.as_ptr(), result_len) })
     }
 
     /// Run a child workflow detached (fire-and-forget).
