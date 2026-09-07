@@ -6848,8 +6848,14 @@ came back `resolved` and the handler ran. Then the workflow failed:
 
 `updateRequestKey` joined the update name and the promise ID with a literal `\x00`. That key is
 recorded as `UpdateRequestID` on the `update_received` event, `store_events.go` puts it in the
-event payload, and `event_history.payload` is **JSONB** on PostgreSQL. A NUL is legal in a JSON
-string and PostgreSQL refuses it anyway.
+event payload, and `event_history.payload` is **JSONB** on PostgreSQL.
+
+**The precise mechanism matters, because the obvious statement of it is wrong.** PostgreSQL does
+not reject a raw NUL *byte* here — the byte never reaches it. `json.Marshal` escapes a NUL to the
+six characters `\u0000`, so what the engine sends is valid JSON *text*. PostgreSQL rejects that
+**escape**, because `jsonb` cannot represent the codepoint even escaped. Credit to WS-3 for
+separating the two questions: their first probe asked about a raw byte, which never occurs, and got
+`ISJSON = 0` from SQL Server — the right answer to the wrong question.
 
 **Unconditional** — the NUL is the separator, not a property of the data — so it was every update
 that reached a dispatch point.
@@ -6859,14 +6865,17 @@ segment finalizes, so the caller was told the update succeeded and *then* the wo
 the state the handler produced was discarded. A caller polling that promise is told the update
 landed when it was thrown away.
 
-**Dialect-divergent, and measured rather than assumed** (2026-09-07, a JSON document with a NUL
-inside a string):
+**Dialect-divergent, and measured rather than assumed** — the input is what `json.Marshal` really
+produces, `{"k":"a\u0000b"}`, not a raw byte:
 
-| dialect | result |
-|---|---|
-| **postgres** | `ERROR: unsupported Unicode escape sequence (22P05)` |
-| mysql | accepted, stored as the escaped form |
-| mssql | accepted, `ISJSON()` returned 1 |
+| dialect | storage model | result |
+|---|---|---|
+| **postgres** | `jsonb`, a parsed representation | **`ERROR: unsupported Unicode escape sequence (22P05)`** |
+| mysql | `JSON`, parsed but permits the codepoint | accepted |
+| mssql | `NVARCHAR` + `ISJSON()`, a text check | accepted, `ISJSON` = 1 |
+
+Three storage models, three answers, one input. The escape is well-formed JSON text, so a validator
+that checks *text* passes it and a type that must *represent* the value cannot.
 
 So a single-dialect test on MySQL would have passed while the primary backend was broken — and the
 two that accept it were silently storing a NUL in a column the third validates. WS-3 explicitly

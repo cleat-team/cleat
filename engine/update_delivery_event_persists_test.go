@@ -13,7 +13,12 @@ import (
 // DurablePollUpdate records an update_received event carrying
 // updateRequestKey(...) as UpdateRequestID, and store_events.go puts that into
 // event_history.payload, which is JSONB on PostgreSQL. The key joined its two
-// halves with a literal NUL, and PostgreSQL refuses a NUL inside JSONB:
+// halves with a literal NUL.
+//
+// PostgreSQL does not reject the raw byte -- it never sees one. json.Marshal
+// escapes a NUL to the six characters \u0000, so the engine sends valid JSON
+// TEXT, and PostgreSQL rejects that escape because jsonb cannot represent the
+// codepoint even escaped:
 //
 //	pq: unsupported Unicode escape sequence (22P05)
 //
@@ -27,11 +32,16 @@ import (
 //
 // # Why all three dialects, and what they actually do
 //
-// Measured 2026-09-07, sending a JSON document with a NUL inside a string:
+// Measured 2026-09-07, sending what json.Marshal really produces --
+// {"k":"a\u0000b"} -- and not a raw byte, which is a different question with a
+// different answer:
 //
-//	postgres   ERROR: unsupported Unicode escape sequence (22P05)
-//	mysql      accepted, stored as the escaped form
-//	mssql      accepted, ISJSON() returned 1
+//	postgres   jsonb, a parsed representation    ERROR: 22P05
+//	mysql      JSON, permits the codepoint       accepted
+//	mssql      NVARCHAR + ISJSON, a text check   accepted, ISJSON = 1
+//
+// The escape is well-formed JSON text, so a validator that checks TEXT passes
+// it and a type that must REPRESENT the value cannot.
 //
 // Only PostgreSQL fails, so a single-dialect test on MySQL would have passed
 // while the primary backend was broken -- and the two that accept it were
