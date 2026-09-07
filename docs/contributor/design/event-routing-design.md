@@ -317,6 +317,33 @@ are possible at any clock resolution. `event_history` already carries an unused
 `global_seq BIGINT` column with no non-test Go referencing it — read that before
 inventing a second mechanism.
 
+### 6.7 Two clock domains, and why D1 must be sequence-based
+
+**cleat has two clocks, and an event timestamp is in the wrong one for anything a
+workflow can observe.**
+
+- `ingested_events.received_at` and `workflow_instances.completed_at` are the **database
+  clock** — `completed_at = now()` inside `finalize_workflow_status`
+  (`migrations/postgres/004_fix_finalize_workflow_status_fence.sql`, which is the
+  current definition; 003 still contains the older body).
+- A workflow's durable clock is the **worker clock**. `execSession.Now`
+  (`engine/lifecycle.go`) derives it from `event_history.created_at` plus sleep anchors,
+  and `created_at` is supplied by the worker in the INSERT column list
+  (`engine/store_event_write.go`) rather than taking the column's `DEFAULT now()`.
+
+They were measured ~60ms apart on one machine by the cleat-ports session, and under real
+skew between a database host and several worker hosts the gap is unbounded.
+
+**This settles D1.** An eligibility window expressed in *time* would compare an event's
+database-clock `received_at` against a workflow's worker-clock `Now()` — a cross-domain
+comparison, wrong by at least the skew and silently so. **Eligibility must be expressed
+as a sequence watermark, not a duration.** That is a correctness argument, not a
+preference, and it is the reverse of the tradeoff D1 originally described.
+
+The general rule, which is worth stating once here because the design touches both:
+**never compare a value from `received_at`/`completed_at` with one from `h.Now()` or an
+event-history timestamp.** They answer different questions on different machines.
+
 ### 6.6 Delivery state is a per-run cursor, not a table
 
 An earlier draft proposed an `event_deliveries` join table, because fan-out means an
@@ -413,11 +440,11 @@ database-enforced isolation for event tables.
 
 ## 9. Open questions
 
-- **D1 — eligibility window.** How far back does the §6 scan look? A run-start
-  watermark is deterministic and replay-safe but can be arbitrarily old for a
-  long-running or `continue_as_new` workflow, making the range large and letting stale
-  events wake new steps. A time window is bounded but introduces a clock. Interacts
-  with D2.
+- **D1 — eligibility window. NARROWED 2026-09-06: it must be sequence-based**, because
+  a time window is a cross-clock-domain comparison (§6.7). What remains open is how the
+  watermark is chosen — a run-start watermark is deterministic and replay-safe but can
+  be arbitrarily old for a long-running or `continue_as_new` workflow, making the range
+  large and letting stale events wake new steps. Interacts with D2.
 - **D2 — retention vs eligibility.** These must be two windows, not one. Retained for
   debugging ≠ eligible for delivery; conflating them means a six-month-old payload can
   wake a brand-new run.
