@@ -856,9 +856,29 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	// Load the dag_spec from workflow_defs.
+	//
+	// A load FAILURE is a 500; only a missing spec is a 404. They were the same
+	// answer until cleat#900's follow-up, and collapsing them erased the
+	// distinction one level above where #899 fixed it.
+	//
+	// It mattered because of who calls this. web/src/pages/WorkflowDetail.svelte
+	// fetches the DAG on every workflow detail view inside a try whose comment
+	// reads "silently ignore if not available" -- so a 404 is displayed as
+	// nothing at all. While a store error also answered 404, a connection loss
+	// or a permission failure reached a user as an empty panel.
+	//
+	// That is exactly the shape #899 was: a broken answer and an absent one
+	// arriving identically. #899 fixed the cause -- LoadDAGSpec no longer errors
+	// on the NULL dag_spec that every non-DAG workflow has -- and this fixes the
+	// erasure, so the dashboard's swallow is now CORRECT rather than currently
+	// harmless. Once 404 means only "no DAG spec", "silently ignore if not
+	// available" is an accurate comment.
+	//
+	// This was the only error path in this file answering anything but 500;
+	// the other twelve handlers already did. Found by WS-3 sweeping the shape.
 	spec, err := st.LoadDAGSpec(r.Context(), wf.DefName, wf.DefVersion)
 	if err != nil {
-		s.writeError(w, 404, err.Error())
+		s.writeError(w, 500, err.Error())
 		return
 	}
 	if spec == nil {
