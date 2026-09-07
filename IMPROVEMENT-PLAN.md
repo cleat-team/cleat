@@ -6838,6 +6838,34 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.248 Nothing pinned that a dispatch point wires the update imports — 🟢 **GUARDED 2026-09-07** (WS-1, 2026-09-07)
+
+A workflow that registers an update handler and then waits **never names the imports it needs**.
+`AwaitSignals` calls `DispatchUpdates`, which calls the `pollUpdate` and `completeUpdate` *closure
+fields* — so nothing in such a workflow's own source mentions `PollUpdate` or `CompleteUpdate`, and
+the wiring rests entirely on a `compositeRequires` row in `wasm/usage.go`.
+
+Remove that row and `DispatchUpdates` returns at its `h.pollUpdate == nil` guard: the workflow
+accepts updates forever and handles none, **silently**. No error, no log, no failed call — the
+guard exists precisely because a guest compiled before updates existed must not crash.
+
+**This was the first thing worth checking when WS-3 reported #910**, a delivery failure that looked
+exactly like it. Ruling it out took a hand-built fixture and a temporary test row, because nothing
+in the tree pinned it. #910 turned out to be a timing artefact — the workflow had completed 0.31s
+before the update was created — but the elimination cost more than it should have.
+
+`testdata/updatedispatch` is that fixture, made permanent as a row of
+`TestEachRewiredMethodWiresItsImport`. Its shape is the real one: register a handler, then wait in
+slices so there is a dispatch point to service it, and **never call `DispatchUpdates` explicitly**.
+
+**The fixture shipped in [§3.247](#3247) already, unreferenced**, with a doc comment describing a
+test row that did not exist — a comment that was false about the tree the moment it landed. This
+adds the row it names.
+
+**Falsified**: dropping `AwaitSignals`'s `compositeRequires` row fails with *"a workflow whose only
+host call is h.AwaitSignals(...) wires no cleat_poll_update import; it would compile and be unable
+to act."*
+
 ### 3.247 The update request key used a NUL separator, which PostgreSQL refuses inside JSONB — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
 
 Reported by WS-3 as #914, on a run that had already proved delivery works — the caller's promise
