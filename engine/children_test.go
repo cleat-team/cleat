@@ -18,10 +18,11 @@ const EventTypeSleep = "sleep"
 // ---------------------------------------------------------------------------
 
 type mockChildStore struct {
-	startChildAtomicFn func(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error)
-	startChildFn       func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
-	getChildResultFn   func(ctx context.Context, runID string) (string, bool, error)
-	resolveTagFn       func(ctx context.Context, workflowName string, tag string) (int, error)
+	startChildAtomicFn      func(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error)
+	startChildFn            func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
+	getChildResultFn        func(ctx context.Context, runID string) (string, bool, error)
+	getChildCompletedAtMsFn func(ctx context.Context, runID string) (int64, bool, error)
+	resolveTagFn            func(ctx context.Context, workflowName string, tag string) (int, error)
 }
 
 func (m *mockChildStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
@@ -479,10 +480,20 @@ func TestAwaitChild_FreshNoStore(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPollChild_Completed(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return `{"ok":true}`, true, nil
-	}}
+	// Since #847, "completed" is not a property of now -- it is a property of
+	// the parent's durable clock: the child must have completed at or before
+	// it. This test used to say only that the child was done, which is the
+	// question PollChild stopped asking.
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
+			return `{"ok":true}`, true, nil
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return 1_000, true, nil
+		},
+	}
 	s := newTestExecSession()
+	s.nowMs = 2_000 // durable clock is after the child completed
 	s.engine.childWfStore = mock
 
 	buf := make([]byte, 256)
@@ -575,10 +586,20 @@ func TestPollChild_NilStore(t *testing.T) {
 }
 
 func TestPollChild_EmptyResult(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", true, nil // completed but empty result == failed
-	}}
+	// Since #847, "completed" is not a property of now -- it is a property of
+	// the parent's durable clock: the child must have completed at or before
+	// it. This test used to say only that the child was done, which is the
+	// question PollChild stopped asking.
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
+			return "", true, nil // completed but empty result == failed
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return 1_000, true, nil
+		},
+	}
 	s := newTestExecSession()
+	s.nowMs = 2_000 // durable clock is after the child completed
 	s.engine.childWfStore = mock
 
 	buf := make([]byte, 256)
@@ -1183,5 +1204,117 @@ func TestChildWorkflowWithOptions_NegativePriority(t *testing.T) {
 	}
 	if s.stepCount != 1 {
 		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockChildStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	if m.getChildCompletedAtMsFn != nil {
+		return m.getChildCompletedAtMsFn(ctx, runID)
+	}
+	return 0, false, nil
+}
+
+// pollChildStatus drives PollChild once and returns the decoded status/error.
+func pollChildStatus(t *testing.T, completedAtMs, nowMs int64) (string, string) {
+	t.Helper()
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
+			return `{"done":true}`, true, nil // complete NOW, on every call
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return completedAtMs, true, nil
+		},
+	}
+	s := newTestExecSession()
+	s.nowMs = nowMs
+	s.engine.childWfStore = mock
+
+	buf := make([]byte, 256)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+	res := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
+	var pr struct {
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(buf[:res>>32], &pr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return pr.Status, pr.Error
+}
+
+// TestPollChildAnswersFromDurableTimeNotFromNow is the regression test for
+// #847. The store says "complete" on every call -- that is what a replay sees,
+// because by then the child really has finished. The question PollChild must
+// answer is not that one. It is whether the child had finished as of the
+// parent's durable clock, which is what the first execution observed.
+//
+// The failure this catches is not a crash. It is a workflow taking the other
+// branch of an `if status == "running"` on replay, which produces divergence
+// by a route the divergence check cannot attribute, because no poll event
+// exists in the history to disagree about.
+func TestPollChildAnswersFromDurableTimeNotFromNow(t *testing.T) {
+	// The child completed at 5000. The parent's durable clock is 1000, so at
+	// the point this call is being replayed the parent had not yet seen it.
+	status, errMsg := pollChildStatus(t, 5_000, 1_000)
+	if status != "running" {
+		t.Fatalf("PollChild answered %q (err %q) for a child that completed at 5000 "+
+			"when the parent's durable clock was 1000.\n"+
+			"The store reports it complete NOW, and answering from NOW is exactly "+
+			"the #847 defect: the original execution saw 'running' and this replay "+
+			"would see 'completed', letting the workflow branch differently.",
+			status, errMsg)
+	}
+}
+
+// TestPollChildFlipsOnceDurableTimeReachesCompletion is the other half, and it
+// is what stops the fix from being "always answer running", which would pass
+// the test above and be useless. Same store state, later durable clock.
+func TestPollChildFlipsOnceDurableTimeReachesCompletion(t *testing.T) {
+	if status, errMsg := pollChildStatus(t, 5_000, 5_000); status != "completed" {
+		t.Errorf("at durable time == completion the child must read completed, got %q (%q)", status, errMsg)
+	}
+	if status, errMsg := pollChildStatus(t, 5_000, 9_000); status != "completed" {
+		t.Errorf("at durable time after completion the child must read completed, got %q (%q)", status, errMsg)
+	}
+	// One millisecond earlier and it must still be running -- the boundary is
+	// <=, and an off-by-one here is a silent determinism hole rather than a
+	// visible failure.
+	if status, _ := pollChildStatus(t, 5_000, 4_999); status != "running" {
+		t.Errorf("one ms before completion must read running, got %q", status)
+	}
+}
+
+// TestPollChildFailsClosedWithoutACompletionInstant: a store that reports a
+// child complete but cannot say when leaves PollChild with no replayable
+// answer. It must say so rather than guess, because guessing "completed"
+// reinstates #847 silently -- the same reason resolveBackend fails closed on a
+// language it does not route.
+func TestPollChildFailsClosedWithoutACompletionInstant(t *testing.T) {
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
+			return `{"done":true}`, true, nil
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return 0, false, nil // complete, but no instant
+		},
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+	buf := make([]byte, 256)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+	res := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
+	var pr struct {
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(buf[:res>>32], &pr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pr.Status != "failed" || !strings.Contains(pr.Error, "no completion timestamp") {
+		t.Errorf("expected a failed status naming the missing timestamp, got %q / %q", pr.Status, pr.Error)
 	}
 }

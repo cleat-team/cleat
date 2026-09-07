@@ -1812,3 +1812,11 @@ func (m *mockStore) ResolveVersionByTag(ctx context.Context, workflowName string
 func (_ *mockStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []string) error {
 	return nil
 }
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}

@@ -444,6 +444,21 @@ type ChildWorkflowStore interface {
 
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
 
+	// GetChildCompletedAtMs returns the child's completion time in Unix
+	// milliseconds, and whether it has one. A child that is still running
+	// returns ok=false.
+	//
+	// PollChild needs this and GetChildResult's `completed` is not enough,
+	// because "is it complete NOW" is not a replayable question -- see
+	// IMPROVEMENT-PLAN.md and issue #847. The replayable question is "was it
+	// complete as of the parent's durable time", which needs the instant.
+	//
+	// CLOCK DOMAIN: this is the DATABASE clock (`completed_at` is written by
+	// `now()` inside finalize_workflow_status), while the parent's durable
+	// clock is the WORKER clock. Callers comparing the two must read the note
+	// on PollChild before assuming the comparison is exact.
+	GetChildCompletedAtMs(ctx context.Context, runID string) (completedAtMs int64, ok bool, err error)
+
 	// ResolveVersionByTag resolves a workflow version by tag name (e.g. "stable", "canary").
 	// Returns the version number and nil error on success, or 0 and an error if the tag
 	// is not found.

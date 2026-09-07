@@ -529,3 +529,35 @@ func (s *MSSQLStore) GetConcurrencyKeyCount(ctx context.Context, workflowID stri
 	}
 	return count, tx.Commit()
 }
+
+// GetChildCompletedAtMs returns the child's completion instant in Unix
+// milliseconds. See ChildWorkflowStore and engine/children.go's
+// pollChildIsDeterministic. This is the DATABASE clock.
+//
+// completed_at is DATETIMEOFFSET here. Before #863 three write paths used
+// GETDATE() (server-local) and the rest SYSUTCDATETIME() (UTC), both landing
+// in a column carrying +00:00 -- so local time was labelled UTC and nothing
+// downstream could tell. That is fixed tree-wide (no GETDATE() remains in
+// migrations/mssql), which is what makes this comparison viable at all.
+func (s *MSSQLStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	var completedAt sql.NullTime
+	// Tenant-scoped explicitly, unlike the sibling GetChildResult, which is
+	// allowlisted as scopedByCaller. dbo.fn_tenant_filter is OFF for a
+	// dbo.cleat_admin connection -- which is what a multi-tenant deployment
+	// uses -- so on MSSQL this predicate is the whole of the isolation. The
+	// MySQL implementation already scopes the same query; matching it is
+	// cheaper than arguing the caller has done it.
+	err := s.db.QueryRowContext(ctx, `
+		SELECT completed_at FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
+	`, runID, s.tenantID).Scan(&completedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("get child completed_at: %w", err)
+	}
+	if !completedAt.Valid {
+		return 0, false, nil
+	}
+	return completedAt.Time.UnixMilli(), true, nil
+}

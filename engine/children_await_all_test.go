@@ -100,3 +100,11 @@ func TestAwaitAllChildrenCarriesEachChildsResult(t *testing.T) {
 		}
 	}
 }
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (f *fakeChildResultStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}

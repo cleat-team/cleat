@@ -1614,3 +1614,13 @@ func (s *ShardedStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 	}
 	return total, nil
 }
+
+// GetChildCompletedAtMs routes to the shard owning the child, matching
+// GetChildResult.
+func (s *ShardedStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	shard := s.getShard(runID)
+	if shard == nil {
+		return 0, false, fmt.Errorf("get_child_completed_at: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.GetChildCompletedAtMs(ctx, runID)
+}

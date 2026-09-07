@@ -330,6 +330,30 @@ func (s *InMemoryChildWorkflowStore) GetChildResult(_ context.Context, runID str
 	return "", false, nil
 }
 
+// GetChildCompletedAtMs implements engine.ChildWorkflowStore.
+//
+// This store completes a child synchronously when it is registered, before the
+// parent runs a step -- so any child it knows about was already complete at
+// every durable time the parent can observe. Epoch (0) is the honest encoding
+// of that, not a stub: PollChild's predicate is `completedAt > nowMs`, and 0 is
+// never greater than a parent's clock, so a known child always reads
+// "completed" and an unknown one reads "running", which is exactly this store's
+// behaviour before #847.
+//
+// A fake that completed children asynchronously would have to record real
+// instants here, or PollChild would answer from the wrong clock.
+func (s *InMemoryChildWorkflowStore) GetChildCompletedAtMs(_ context.Context, runID string) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.childResults[runID]; ok {
+		return 0, true, nil
+	}
+	if _, ok := s.childErrors[runID]; ok {
+		return 0, true, nil
+	}
+	return 0, false, nil
+}
+
 // ResolveVersionByTag implements engine.ChildWorkflowStore.
 // In-memory stores have no tags, so this always returns an error.
 func (s *InMemoryChildWorkflowStore) ResolveVersionByTag(_ context.Context, workflowName, tag string) (int, error) {

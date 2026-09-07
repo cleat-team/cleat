@@ -811,3 +811,23 @@ func (f *MySQLStoreFactory) DriverName() string { return "mysql" }
 
 // Dialect returns DialectMySQL.
 func (f *MySQLStoreFactory) Dialect() Dialect { return DialectMySQL }
+
+// GetChildCompletedAtMs returns the child's completion instant in Unix
+// milliseconds. See ChildWorkflowStore and engine/children.go's
+// pollChildIsDeterministic. This is the DATABASE clock.
+func (s *MySQLStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	var completedAt sql.NullTime
+	err := s.db.QueryRowContext(ctx, `
+		SELECT completed_at FROM workflow_instances WHERE id = ? AND tenant_id = ?
+	`, runID, s.tenantID).Scan(&completedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("get child completed_at: %w", err)
+	}
+	if !completedAt.Valid {
+		return 0, false, nil
+	}
+	return completedAt.Time.UnixMilli(), true, nil
+}
