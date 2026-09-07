@@ -465,19 +465,24 @@ func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 func (s *MySQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
 	var id int64
 	var payload string
+	var deliveredAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, payload FROM workflow_signals
+		SELECT id, payload, delivered_at FROM workflow_signals
 		WHERE workflow_id = ? AND signal_name = ? AND tenant_id = ?
 		ORDER BY id
 		LIMIT 1
-	`, workflowID, signalName, s.tenantID).Scan(&id, &payload)
+	`, workflowID, signalName, s.tenantID).Scan(&id, &payload, &deliveredAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SignalDelivery{}, false, nil
 	}
 	if err != nil {
 		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", err)
 	}
-	return SignalDelivery{ID: id, Payload: decodeJSONPayload(payload)}, true, nil
+	return SignalDelivery{
+		ID:            id,
+		Payload:       decodeJSONPayload(payload),
+		DeliveredAtMs: deliveredAt.UnixMilli(),
+	}, true, nil
 }
 
 // PollCancellation checks whether the workflow has been cancelled.

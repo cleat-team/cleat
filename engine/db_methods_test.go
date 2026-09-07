@@ -1834,8 +1834,12 @@ func TestPostgresStore_CleanupMemorySamples_WithDefs(t *testing.T) {
 func TestPostgresStore_PollSignal(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT id, payload FROM workflow_signals",
-			data:  [][]driver.Value{{int64(42), `{"polled":true}`}},
+			match: "SELECT id, payload, delivered_at FROM workflow_signals",
+			// delivered_at rides along so PollSignal can be answered from
+			// recorded state rather than from when the poll runs (#882). The
+			// instant here is arbitrary; what the store must do is carry it
+			// back, and execSession.signalIsVisibleNow does the comparing.
+			data: [][]driver.Value{{int64(42), `{"polled":true}`, time.UnixMilli(1_700_000_000_000)}},
 		},
 	}, nil)
 	defer db.Close()
@@ -1850,6 +1854,12 @@ func TestPostgresStore_PollSignal(t *testing.T) {
 	}
 	if d.ID != 42 {
 		t.Errorf("expected the row id to be carried back, got %d", d.ID)
+	}
+	if d.DeliveredAtMs != 1_700_000_000_000 {
+		t.Errorf("expected delivered_at to be carried back as %d, got %d. A zero "+
+			"here is treated as visible, so dropping this field silently restores "+
+			"#882 while every other assertion still passes.",
+			1_700_000_000_000, d.DeliveredAtMs)
 	}
 }
 

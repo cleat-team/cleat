@@ -1234,7 +1234,8 @@ func TestMSSQLStore_DeliverSignal_BeginError(t *testing.T) {
 
 func TestMSSQLStore_PollSignal_Found(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM workflow_signals", data: [][]driver.Value{{int64(1), `{"approved":true}`}}},
+		{match: "FROM workflow_signals", data: [][]driver.Value{
+			{int64(1), `{"approved":true}`, time.UnixMilli(1_700_000_000_000)}}},
 	}, nil)
 	defer db.Close()
 
