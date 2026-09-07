@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"strings"
 
 	"github.com/tetratelabs/wazero/api"
 )
@@ -218,15 +220,67 @@ const updateFoundFlag = uint32(0x0100)
 // is keyed by promise_id, so the guest has to hand both back. They travel as
 // one opaque string because the guest must not have to know the shape -- it
 // receives this and returns it unchanged.
+//
+// # Length-prefixed, because there is no safe separator
+//
+// This joined the halves with a literal NUL until IMPROVEMENT-PLAN 3.247, and
+// the key is recorded as UpdateRequestID on the update_received event, which
+// store_events.go puts in `event_history.payload` -- JSONB on PostgreSQL. A NUL
+// is legal in a JSON string and PostgreSQL refuses it anyway:
+//
+//	pq: unsupported Unicode escape sequence (22P05)
+//
+// so finalizing the segment failed for EVERY update that reached a dispatch
+// point. The harmful part was the ordering: runUpdate settles the caller's
+// promise before the segment finalizes, so the caller was told `resolved` and
+// then the workflow failed and the handler's state was discarded (#914).
+//
+// Measured 2026-09-07, and it is dialect-divergent -- which is why the fix is
+// not "pick a different control character":
+//
+//	postgres   ERROR: unsupported Unicode escape sequence (22P05)
+//	mysql      accepted, stored as \u0000
+//	mssql      accepted, ISJSON() = 1
+//
+// **No separator is safe**, because UpdateName is chosen by the workflow author
+// and can contain anything. A rarer delimiter moves the collision rather than
+// removing it. The length prefix is unambiguous for every possible input:
+//
+//	"add" + "p-1"    ->  "3:addp-1"
+//	"a:b" + ""       ->  "3:a:b"
+//	"" + "p-1"       ->  "0:p-1"
+//
+// splitUpdateRequestKey is the only reader, so the encoding is free to change.
 func updateRequestKey(u UpdateRequestInfo) string {
-	return u.UpdateName + "\x00" + u.PromiseID
+	return strconv.Itoa(len(u.UpdateName)) + ":" + u.UpdateName + u.PromiseID
 }
 
+// splitUpdateRequestKey reverses updateRequestKey.
+//
+// It also still reads the NUL-separated form. Those keys cannot exist on
+// PostgreSQL -- the write that would have persisted one is the write that
+// failed -- but MySQL and SQL Server accepted them, so a workflow suspended
+// mid-update on either has one in its history and must still replay.
 func splitUpdateRequestKey(key string) (updateName, promiseID string) {
+	// Legacy NUL form first: a length-prefixed key cannot contain a NUL,
+	// because neither the digits nor the colon is one, so the two forms cannot
+	// be confused.
 	for i := 0; i < len(key); i++ {
 		if key[i] == 0 {
 			return key[:i], key[i+1:]
 		}
 	}
-	return key, ""
+
+	colon := strings.IndexByte(key, ':')
+	if colon < 0 {
+		// Not a form this function wrote. Returning the whole key as the name
+		// preserves the pre-3.247 behaviour for a malformed key rather than
+		// inventing a new failure mode here.
+		return key, ""
+	}
+	n, err := strconv.Atoi(key[:colon])
+	if err != nil || n < 0 || colon+1+n > len(key) {
+		return key, ""
+	}
+	return key[colon+1 : colon+1+n], key[colon+1+n:]
 }
