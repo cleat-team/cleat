@@ -462,9 +462,13 @@ database-enforced isolation for event tables.
   watermark is chosen — a run-start watermark is deterministic and replay-safe but can
   be arbitrarily old for a long-running or `continue_as_new` workflow, making the range
   large and letting stale events wake new steps. Interacts with D2.
-- **D2 — retention vs eligibility.** These must be two windows, not one. Retained for
-  debugging ≠ eligible for delivery; conflating them means a six-month-old payload can
-  wake a brand-new run.
+- **D2 — retention vs eligibility. DECIDED 2026-09-07: two separate configurable
+  windows.** Retained-for-debugging and eligible-for-delivery are different questions and
+  get different knobs. Eligibility bounds which events can wake a run; retention bounds
+  how long an event is answerable in "why did nothing start?". Eligibility must be
+  <= retention — an event eligible after it has been swept is a delivery that vanishes —
+  and the sweeper should refuse to start rather than silently clamp if configured
+  otherwise, on the same principle as `resolveBackend` failing closed.
 - **D3 — `ingested_events` vs `event_stream`. ANSWERED 2026-09-06; no longer a
   blocker.** They are different things, not duplicates: `event_stream` is a per-stream
   append-only log with SSE fan-out and **no host functions** (its package doc says it
@@ -477,9 +481,28 @@ database-enforced isolation for event tables.
   `VARBINARY(128)`. Cheap now, expensive after data exists.
 - **D5 — declared event schemas.** Slot mapping needs somewhere to live. Does a
   declared trigger imply a declared event schema, or is the mapping standalone?
-- **D6 — RLS on plugin tables.** Can a `plugin.Migration` install a FORCEd policy? If
-  not, event tables are application-enforced only, and that is a documented boundary
-  rather than a gap (as MySQL tenancy is).
+- **D6 — RLS on plugin tables. DECIDED 2026-09-07: required, not optional.** Plugin
+  tables carrying `tenant_id` must be database-enforced on the dialects that can do it.
+
+  **It is achievable, checked 2026-09-07.** Plugin migrations run *after* core migrations
+  (`cmd/cleat-worker/main.go`), so `cleat.assert_tenant_set()` on PostgreSQL and
+  `dbo.fn_tenant_filter` on SQL Server already exist by then; and a plugin migration
+  creates its own tables, so the migrating role owns them and may `ENABLE`/`FORCE ROW
+  LEVEL SECURITY` and `CREATE POLICY` on them. The core pattern to mirror is
+  `tenant_id = cleat.assert_tenant_set()`.
+
+  **No plugin does this today** (`git ls-files 'plugins/*' | xargs grep -l 'ROW LEVEL
+  SECURITY\|CREATE POLICY'` → nothing), so all 21 plugins' tenant-scoped tables are
+  currently application-enforced only — this design's tables among them.
+
+  The half that matters is not the DDL, it is the **guard**: a test asserting that every
+  plugin table with a `tenant_id` column has a policy, in the style of
+  `TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate`, which caught exactly this
+  class of omission in #871 while it was being written. A helper in the plugin API that
+  emits the right per-dialect DDL makes it easy; the guard is what makes it true.
+
+  MySQL keeps the documented boundary: no row-level security feature exists, so plugin
+  tables there are single-tenant on the same terms as core.
 
 ---
 
