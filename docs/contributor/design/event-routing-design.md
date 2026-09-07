@@ -120,9 +120,13 @@ engine, because that is a suspend, and suspends are engine-level.
 **Three slots, string-typed, on both the event and the awaiter.**
 
 ```sql
-key1  VARCHAR(128)  NOT NULL DEFAULT ''
-key2  VARCHAR(128)  NOT NULL DEFAULT ''
-key3  VARCHAR(128)  NOT NULL DEFAULT ''
+-- PostgreSQL
+key1  VARCHAR(128) COLLATE "C"                            NOT NULL DEFAULT ''
+-- MySQL
+key1  VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin  NOT NULL DEFAULT ''
+-- SQL Server
+key1  NVARCHAR(128) COLLATE Latin1_General_BIN2           NOT NULL DEFAULT ''
+--   ... key2, key3 identical
 ```
 
 One composite index per side:
@@ -168,6 +172,26 @@ limit**. The index would be rejected on MySQL while building fine on the other t
 At `VARCHAR(128)` with an ASCII-compatible collation the composite lands near 550
 bytes: comfortable against MySQL's 3072, SQL Server's 1700 nonclustered limit, and
 PostgreSQL's ~2704 btree row limit.
+
+**The collation is explicit and binary, and that is the load-bearing half.** No
+migration in this repo specifies a collation or charset anywhere
+(`grep -rhno 'COLLATE [A-Za-z0-9_]*' migrations/` → nothing), so every string column
+inherits the server default. On MySQL 8 that default is `utf8mb4_0900_ai_ci` —
+**accent-insensitive and case-insensitive**. A correlation key under it would match
+`ORDER-1` against `order-1`, and `café` against `cafe`: two distinct business keys
+colliding silently, on one dialect only.
+
+A binary collation makes the comparison byte-exact by construction, which is what an
+opaque identifier wants, and it removes the question D4 was originally about — whether
+keys are ASCII — because non-ASCII keys compare correctly too. `VARBINARY` would also be
+byte-exact, and was rejected for the reason hashing was: `bytea` renders as
+`\x4f524445522d31` and an engineer looking at a stuck awaiter could not read what it is
+waiting for.
+
+Cost, stated: `utf8mb4_bin` is still up to 4 bytes per character, so three 128-char slots
+is 1536 bytes of InnoDB's 3072-byte index budget. That fits, with the leading columns, but
+it is half the budget — a fourth slot would not fit, which is an additional reason for
+three.
 
 **Store the raw value; hard-error above the cap; never truncate.** A silently truncated
 correlation key is a silent-never-matches bug — the failure mode this whole design
@@ -462,9 +486,13 @@ database-enforced isolation for event tables.
   watermark is chosen — a run-start watermark is deterministic and replay-safe but can
   be arbitrarily old for a long-running or `continue_as_new` workflow, making the range
   large and letting stale events wake new steps. Interacts with D2.
-- **D2 — retention vs eligibility.** These must be two windows, not one. Retained for
-  debugging ≠ eligible for delivery; conflating them means a six-month-old payload can
-  wake a brand-new run.
+- **D2 — retention vs eligibility. DECIDED 2026-09-07: two separate configurable
+  windows.** Retained-for-debugging and eligible-for-delivery are different questions and
+  get different knobs. Eligibility bounds which events can wake a run; retention bounds
+  how long an event is answerable in "why did nothing start?". Eligibility must be
+  <= retention — an event eligible after it has been swept is a delivery that vanishes —
+  and the sweeper should refuse to start rather than silently clamp if configured
+  otherwise, on the same principle as `resolveBackend` failing closed.
 - **D3 — `ingested_events` vs `event_stream`. ANSWERED 2026-09-06; no longer a
   blocker.** They are different things, not duplicates: `event_stream` is a per-stream
   append-only log with SSE fan-out and **no host functions** (its package doc says it
@@ -472,14 +500,68 @@ database-enforced isolation for event tables.
   on a publisher-supplied idempotency id. Different keys, different lifecycle,
   different readers. And neither table is deployed — see §8 and IMPROVEMENT-PLAN
   §3.315.
-- **D4 — ASCII or binary slots.** UUIDs and Stripe-style IDs are ASCII, so
-  `VARCHAR(128)` under an ASCII collation is fine. A non-ASCII key would need
-  `VARBINARY(128)`. Cheap now, expensive after data exists.
-- **D5 — declared event schemas.** Slot mapping needs somewhere to live. Does a
-  declared trigger imply a declared event schema, or is the mapping standalone?
-- **D6 — RLS on plugin tables.** Can a `plugin.Migration` install a FORCEd policy? If
-  not, event tables are application-enforced only, and that is a documented boundary
-  rather than a gap (as MySQL tenancy is).
+- **D4 — slot type and collation. DECIDED 2026-09-07: `VARCHAR(128)` with an
+  explicitly binary collation per dialect** (`COLLATE "C"` / `utf8mb4_bin` /
+  `Latin1_General_BIN2`), never the server default. Byte-exact like `VARBINARY` but
+  readable in a query result, and it dissolves the ASCII question the option was
+  originally framed around. See §4.3 for why the *explicit* part matters more than the
+  choice between the two candidates.
+- **D5 — where slot mappings live. DECIDED 2026-09-07: a standalone `//cleat:event`
+  declaration is the source of truth, with runtime registration as the fallback.**
+
+  ```go
+  //cleat:event type="payment.captured" key1="data.orderID" key2="data.tenantID"
+  ```
+
+  The mapping belongs to the **event**, not to a workflow. Declaring it on the trigger
+  was rejected: slots are populated once by the publisher at ingest, so two workflows
+  awaiting the same type could declare conflicting mappings for a single write — the
+  contract would sit on the consumer while the write is done by the producer.
+
+  **Runtime registration stays, because it has to.** `webhookingest` and `kafkaconnect`
+  both call `eventtriggers.PublishEvent` with events that originate outside cleat
+  entirely, and no Go-side declaration can bind a Kafka producer. So there are two classes
+  of publisher — those that can carry a declaration and those that cannot — and R6's
+  *warning* rather than error for an undeclared type is exactly the seam between them.
+  Declared types get the full build-time checking of R1–R3; undeclared ones get a
+  registered mapping and no checking, and the warning says which you have.
+
+  **The conflict rule, which the decision needs and did not come with.** Two rules,
+  because there are two places a conflict can appear:
+
+  * **R7, at build time: exactly one `//cleat:event` declaration per event type per
+    build.** A second is an error naming both sites. This is checkable the moment the
+    analyzer has the package set, and it is the same shape as R5.
+  * **At deploy time: a declaration that conflicts with the stored mapping fails the
+    deploy.** It does *not* overwrite. Silent repointing is the dangerous option and
+    "last deploy wins" is the worst available rule, for a reason specific to this design:
+    **every suspended awaiter holds a `key1` computed under the old mapping.** Repoint
+    the slot and those runs wait forever for an event whose key is now extracted from a
+    different field — a fleet-wide hang with no error anywhere. §4.5 already says changing
+    a slot's meaning is a new event type; this is the enforcement that makes that true
+    rather than advisory.
+- **D6 — RLS on plugin tables. DECIDED 2026-09-07: required, not optional.** Plugin
+  tables carrying `tenant_id` must be database-enforced on the dialects that can do it.
+
+  **It is achievable, checked 2026-09-07.** Plugin migrations run *after* core migrations
+  (`cmd/cleat-worker/main.go`), so `cleat.assert_tenant_set()` on PostgreSQL and
+  `dbo.fn_tenant_filter` on SQL Server already exist by then; and a plugin migration
+  creates its own tables, so the migrating role owns them and may `ENABLE`/`FORCE ROW
+  LEVEL SECURITY` and `CREATE POLICY` on them. The core pattern to mirror is
+  `tenant_id = cleat.assert_tenant_set()`.
+
+  **No plugin does this today** (`git ls-files 'plugins/*' | xargs grep -l 'ROW LEVEL
+  SECURITY\|CREATE POLICY'` → nothing), so all 21 plugins' tenant-scoped tables are
+  currently application-enforced only — this design's tables among them.
+
+  The half that matters is not the DDL, it is the **guard**: a test asserting that every
+  plugin table with a `tenant_id` column has a policy, in the style of
+  `TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate`, which caught exactly this
+  class of omission in #871 while it was being written. A helper in the plugin API that
+  emits the right per-dialect DDL makes it easy; the guard is what makes it true.
+
+  MySQL keeps the documented boundary: no row-level security feature exists, so plugin
+  tables there are single-tenant on the same terms as core.
 
 ---
 
