@@ -29,6 +29,7 @@ import {
 
 import { jsonStrArray, jsonExtractString, jsonExtractNumber } from "./json";
 import { decodeSignalEnvelope, encodeSignalEnvelope, SignalEnvelope } from "./signal-envelope";
+import { decodeUpdateDelivery, UpdateDelivery, UpdateHandler, UpdateValidator } from "./updates";
 
 /**
  * Map an error code from the host runtime to a human-readable name.
@@ -255,6 +256,33 @@ export declare function import_cleat_await_promise(
 export declare function import_cleat_register_update_handler(
   namePtr: i32,
   nameLen: i32,
+): i64;
+
+/**
+ * 18a. cleat_poll_update: Deliver the next pending update request.
+ * (import "env" "cleat_poll_update") (param i32 i32) (result i64)
+ *
+ * Writes a JSON envelope {"name","payload","request_id"} and packs
+ * written<<32 | flags, with 0x0100 meaning an update was delivered.
+ */
+@external("env", "cleat_poll_update")
+export declare function import_cleat_poll_update(
+  envelopePtr: i32,
+  envelopeMaxLen: i32,
+): i64;
+
+/**
+ * 18b. cleat_complete_update: Record an outcome and settle the caller's promise.
+ * (import "env" "cleat_complete_update") (param i32 i32 i32 i32 i32 i32) (result i64)
+ */
+@external("env", "cleat_complete_update")
+export declare function import_cleat_complete_update(
+  requestIdPtr: i32,
+  requestIdLen: i32,
+  resultPtr: i32,
+  resultLen: i32,
+  errPtr: i32,
+  errLen: i32,
 ): i64;
 
 /**
@@ -858,6 +886,20 @@ export class HostCalls {
   private _scopePrefix: string = "";
 
   /**
+   * Registered update handlers, in parallel arrays.
+   *
+   * Parallel arrays rather than a Map because AssemblyScript's Map requires a
+   * managed key type and this is hot on every suspension; indexOf over a
+   * handful of names is cheaper than the alternative and has no allocation.
+   */
+  private _updateNames: string[] = [];
+  private _updateHandlers: UpdateHandler[] = [];
+  private _updateValidators: (UpdateValidator | null)[] = [];
+
+  /** Reentrancy guard for dispatchUpdates(); see there. */
+  private _dispatchingUpdates: bool = false;
+
+  /**
    * @param memory - Optional Memory instance. A default one is created if
    *                 not provided.
    */
@@ -1162,6 +1204,7 @@ export class HostCalls {
    * @returns `true` if the workflow should suspend, `false` if completed.
    */
   cleatSleepMs(timeoutMs: i64): bool {
+    this.dispatchUpdates(); // dispatch point; see dispatchUpdates()
     let result: i64 = import_cleat_sleep(timeoutMs);
     let decoded = decodeSleepResult(result);
     let shouldSuspend: bool = decoded.status === 1;
@@ -1529,6 +1572,7 @@ export class HostCalls {
    * @returns A DurableResult containing the child's result JSON on success.
    */
   awaitChild(runId: string): DurableResult<string> {
+    this.dispatchUpdates(); // dispatch point; see dispatchUpdates()
     let runIdLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, runId);
 
     let result: i64 = import_cleat_await_child(
@@ -1672,6 +1716,7 @@ export class HostCalls {
    * @returns The outcome with signal name, payload, and timeout status.
    */
   awaitSignalsMs(namesJson: string, timeoutMs: i64): AwaitSignalsOutcome {
+    this.dispatchUpdates(); // dispatch point; see dispatchUpdates()
     // Write the signal names JSON into the lower portion of the scratch buffer
     let namesLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE / 2, namesJson);
 
@@ -1842,6 +1887,7 @@ export class HostCalls {
    * @returns The outcome with the resolved value and timeout status.
    */
   awaitPromiseMs(id: string, timeoutMs: i64): AwaitPromiseOutcome {
+    this.dispatchUpdates(); // dispatch point; see dispatchUpdates()
     let idLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, id);
 
     let result: i64 = import_cleat_await_promise(
@@ -1885,6 +1931,149 @@ export class HostCalls {
   registerUpdateHandler(name: string): void {
     let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
     import_cleat_register_update_handler(SCRATCH_BASE as i32, nameLen);
+  }
+
+  /**
+   * Register an update handler with an optional validator.
+   *
+   * The validator returns "" to accept, or a message to refuse. It runs first
+   * and must be read-only: a refusal costs nothing beyond the completion.
+   *
+   * The name is registered with the host as well, which records it in the
+   * event history; the handler stays here, because only guest code can call it.
+   */
+  registerUpdateHandlerFn(
+    name: string,
+    handler: UpdateHandler,
+    validator: UpdateValidator | null = null,
+  ): void {
+    let idx: i32 = this._updateNames.indexOf(name);
+    if (idx >= 0) {
+      this._updateHandlers[idx] = handler;
+      this._updateValidators[idx] = validator;
+    } else {
+      this._updateNames.push(name);
+      this._updateHandlers.push(handler);
+      this._updateValidators.push(validator);
+    }
+    this.registerUpdateHandler(name);
+  }
+
+  /**
+   * Deliver and run every update currently pending for this workflow.
+   *
+   * The SDK already calls this before each suspension, so an ordinary workflow
+   * needs no update-specific code. It is exposed for workflows that want to
+   * service updates at additional points.
+   *
+   * Every path completes the request. An unregistered handler and a validator
+   * that refuses are both answers the caller is entitled to -- leaving either
+   * uncompleted would leave the caller holding a promise nothing settles.
+   */
+  dispatchUpdates(): void {
+    if (this._dispatchingUpdates) {
+      // Reentrancy guard. Every dispatch point is a suspension point, and a
+      // handler is ordinary workflow code that may sleep or await -- so without
+      // this a handler doing either would re-enter and recurse. Nesting would
+      // also be wrong if it terminated: the inner dispatch would interleave a
+      // second update's events inside the first one's.
+      return;
+    }
+    this._dispatchingUpdates = true;
+
+    while (true) {
+      let envelope: string = this.pollUpdate();
+      if (envelope.length === 0) break;
+
+      let d = decodeUpdateDelivery(envelope);
+      if (d === null) {
+        // The envelope is written by the host, so this is not a caller error.
+        // Stopping rather than continuing avoids spinning on a delivery that
+        // will decode the same way next time.
+        break;
+      }
+      let delivery = <UpdateDelivery>d;
+
+      let idx: i32 = this._updateNames.indexOf(delivery.name);
+      if (idx < 0) {
+        this.completeUpdate(delivery.requestId, "",
+          "cleat: no update handler registered for '" + delivery.name + "'");
+        continue;
+      }
+
+      let validator = this._updateValidators[idx];
+      if (validator !== null) {
+        let refusal: string = (<UpdateValidator>validator)(delivery.payload);
+        if (refusal.length > 0) {
+          this.completeUpdate(delivery.requestId, "", refusal);
+          continue;
+        }
+      }
+      let handler = this._updateHandlers[idx];
+      this.completeUpdate(delivery.requestId, handler(delivery.payload), "");
+    }
+
+    this._dispatchingUpdates = false;
+  }
+
+  /**
+   * Poll for the next pending update request.
+   *
+   * Low-level: prefer dispatchUpdates(), which pairs this with handler lookup,
+   * validation, and the guarantee that every delivered update is answered.
+   * Delivery is durable, so an update returned here is recorded as delivered
+   * whether or not you complete it.
+   *
+   * @returns The delivery envelope JSON, or "" when nothing is pending.
+   */
+  pollUpdate(): string {
+    let result: i64 = import_cleat_poll_update(OUTPUT_OFFSET as i32, OUT_BUF_SIZE);
+
+    // Ask before decoding: a stop is bit 31, which in this layout sits inside
+    // the flags word a decoder would read as an ordinary result.
+    if (stopRequested(result)) {
+      return "";
+    }
+
+    let decoded = decodePollSignalResult(result);
+    if (decoded.errCode !== 0 || !decoded.found || decoded.payloadLen === 0) {
+      return "";
+    }
+    return this.memory.readString(OUTPUT_OFFSET, decoded.payloadLen as i32);
+  }
+
+  /**
+   * Record an update handler's outcome and settle the caller's promise.
+   *
+   * A non-empty errMsg rejects; an empty one resolves. An empty result with an
+   * empty errMsg resolves -- an empty result is an outcome, not a missing one.
+   *
+   * Low-level: prefer dispatchUpdates(), which cannot forget to call this. An
+   * update delivered and never completed leaves its caller holding a promise
+   * nothing settles.
+   *
+   * @param requestId - The request id from pollUpdate(), unchanged.
+   * @param resultJson - The handler's result.
+   * @param errMsg - The failure message, or "" on success.
+   */
+  completeUpdate(requestId: string, resultJson: string, errMsg: string): void {
+    let idLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, requestId);
+    let resOffset: usize = SCRATCH_BASE + idLen;
+    let remaining: i32 = OUT_BUF_SIZE - idLen;
+    let resLen: i32 = this.writeScratch(resOffset, remaining, resultJson, "resultJson");
+    let errOffset: usize = resOffset + resLen;
+    remaining -= resLen;
+    let errLen: i32 = this.writeScratch(errOffset, remaining, errMsg, "errMsg");
+
+    let result: i64 = import_cleat_complete_update(
+      SCRATCH_BASE as i32,
+      idLen,
+      resOffset as i32,
+      resLen,
+      errOffset as i32,
+      errLen,
+    );
+    stopRequested(result);
   }
 
   // ────────────────────────────────────────────

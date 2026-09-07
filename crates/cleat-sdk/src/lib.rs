@@ -10,6 +10,7 @@ pub mod plugins;
 pub mod saga;
 pub mod signal_envelope;
 pub mod test;
+pub mod updates;
 pub mod version;
 
 // Native stubs for WASM host imports — provided so that crates depending on

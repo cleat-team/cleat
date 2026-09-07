@@ -67,6 +67,8 @@ func TestTheAssemblyScriptSDKAgreesOnTheStopBit(t *testing.T) {
 // "every host call": bit 31 is REACHABLE in packSleepResult, so a guard on the
 // sleep path would be a defect. See asCallsThatMustNotCheck.
 var asCallsTheHostCanRefuse = []sdkRefusableCall{
+	{"pollUpdate", "DurablePollUpdate"},
+	{"completeUpdate", "DurableCompleteUpdate"},
 	{"cleatCallMs", "DurableCall"},
 	{"cleatCallRetry", "DurableCallWithRetry"},
 	{"cleatCallHeartbeat", "DurableCallWithHeartbeat"},

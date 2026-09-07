@@ -460,6 +460,132 @@ public class TestHostCalls {
         // No-op in mock mode — we just acknowledge it was called
     }
 
+    // ------------------------------------------------------------------
+    // Workflow updates
+    //
+    // The queue the engine keeps in workflow_update_requests, so a test can
+    // enqueue an update and assert the handler ran, the workflow state changed,
+    // and the caller's promise settled. A delivery leaves the queue only when
+    // it is COMPLETED, mirroring the engine: the request row leaves 'pending'
+    // on completion, not on delivery, so a handler that throws leaves the
+    // update to be redelivered.
+    // ------------------------------------------------------------------
+
+    /** One update request waiting to be delivered. */
+    public static final class PendingUpdate {
+        public final String name;
+        public final String payload;
+        public final String requestId;
+        public final String promiseId;
+
+        PendingUpdate(String name, String payload, String requestId, String promiseId) {
+            this.name = name;
+            this.payload = payload;
+            this.requestId = requestId;
+            this.promiseId = promiseId;
+        }
+    }
+
+    /**
+     * One handled update. Exactly one of result and error is meaningful,
+     * distinguished by error being non-empty.
+     */
+    public static final class UpdateOutcome {
+        public final String name;
+        public final String requestId;
+        public final String result;
+        public final String error;
+
+        UpdateOutcome(String name, String requestId, String result, String error) {
+            this.name = name;
+            this.requestId = requestId;
+            this.result = result;
+            this.error = error;
+        }
+    }
+
+    private final java.util.List<PendingUpdate> pendingUpdates = new java.util.ArrayList<>();
+    private final java.util.List<UpdateOutcome> completedUpdates = new java.util.ArrayList<>();
+    private final java.util.Map<String, java.util.function.Function<String, String>> updateHandlers =
+        new java.util.HashMap<>();
+    private final java.util.Map<String, java.util.function.Function<String, String>> updateValidators =
+        new java.util.HashMap<>();
+    private int updateCounter = 0;
+
+    /** Register an update handler with an optional validator. */
+    public void registerUpdateHandler(String name,
+                                      java.util.function.Function<String, String> handler,
+                                      java.util.function.Function<String, String> validator) {
+        updateHandlers.put(name, handler);
+        if (validator != null) {
+            updateValidators.put(name, validator);
+        }
+    }
+
+    /**
+     * Make an update request pending, as POST /api/workflows/:id/update/:name
+     * does. promiseId may be empty for a request with no caller waiting.
+     *
+     * @return the request id
+     */
+    public String enqueueUpdate(String name, String payload, String promiseId) {
+        updateCounter++;
+        String requestId = "upd-" + name + "-" + updateCounter;
+        pendingUpdates.add(new PendingUpdate(name, payload, requestId, promiseId));
+        return requestId;
+    }
+
+    /** The updates that have been handled, in order. */
+    public java.util.List<UpdateOutcome> completedUpdates() {
+        return new java.util.ArrayList<>(completedUpdates);
+    }
+
+    /**
+     * Deliver and run every pending update.
+     *
+     * <p>Every path completes the request: an unregistered handler, a validator
+     * that refuses and a handler that throws are all answers the caller is
+     * entitled to. Leaving any of them uncompleted would leave the caller
+     * holding a promise nothing settles, which is the defect updates exist to
+     * end.
+     */
+    public void dispatchUpdates() {
+        while (!pendingUpdates.isEmpty()) {
+            PendingUpdate u = pendingUpdates.get(0);
+            java.util.function.Function<String, String> handler = updateHandlers.get(u.name);
+            if (handler == null) {
+                settleUpdate(u, "", "cleat: no update handler registered for \"" + u.name + "\"");
+                continue;
+            }
+            java.util.function.Function<String, String> validator = updateValidators.get(u.name);
+            if (validator != null) {
+                String refusal = validator.apply(u.payload);
+                if (refusal != null && !refusal.isEmpty()) {
+                    settleUpdate(u, "", refusal);
+                    continue;
+                }
+            }
+            try {
+                settleUpdate(u, handler.apply(u.payload), "");
+            } catch (RuntimeException e) {
+                settleUpdate(u, "", String.valueOf(e.getMessage()));
+            }
+        }
+    }
+
+    private void settleUpdate(PendingUpdate u, String result, String error) {
+        pendingUpdates.remove(0);
+        completedUpdates.add(new UpdateOutcome(u.name, u.requestId, result, error));
+        if (u.promiseId == null || u.promiseId.isEmpty()) {
+            return;
+        }
+        if (error != null && !error.isEmpty()) {
+            rejectPromise(u.promiseId, error);
+        } else {
+            resolvePromise(u.promiseId, result);
+        }
+    }
+
     /**
      * Call a plugin function via the host runtime.
      */
