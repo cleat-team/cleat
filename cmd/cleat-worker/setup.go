@@ -1638,6 +1638,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithWorkflowStore(execStore),
 		engine.WithChildWorkflowStore(execStore),
 		engine.WithPluginRegistry(w.pluginRegistry),
+		engine.WithPluginStreamRegistry(w.pluginStreamRegistry),
 		engine.WithMaxRetryAttempts(w.maxRetries),
 		engine.WithSchema(w.schemaName),
 		engine.WithEncryption(w.encryption, w.encryptSensitivePayloads),
