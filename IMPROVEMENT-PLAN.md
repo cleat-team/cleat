@@ -6567,9 +6567,12 @@ until it suspends.
   covered them. #849 named those tests as the reason this went unnoticed: each built the
   precondition by hand (`w.inflight.Store(...)`, `WithUpdateHandler(...)`) and so asserted the
   function worked *given* a state that never held when the ticker fired.
-- `engine.WithUpdateHandler` and `Engine.DispatchUpdate` are kept but documented as an embedder
-  hook that is **not** the workflow-update path. Removing them is a breaking API change and gets
-  its own decision.
+- `engine.WithUpdateHandler` and `Engine.DispatchUpdate` are **removed**. They were exported API
+  with no caller anywhere outside their own four tests — the option existed so the worker could
+  configure an update handler, and the worker never did. They were briefly kept and documented as
+  "an embedder hook that is not the workflow-update path", which is a fair description and still
+  leaves two exported names that read as the update path and are not. The names were the whole
+  problem, so the names are gone.
 
 #### Two guards this change had to repair, both silent
 

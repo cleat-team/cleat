@@ -246,37 +246,6 @@ func TestExecuteWithBackend_Suspend(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DispatchUpdate tests
-// ---------------------------------------------------------------------------
-
-func TestDispatchUpdate_NoHandler(t *testing.T) {
-	e := NewEngine(nil, nil)
-	_, err := e.DispatchUpdate(context.Background(), "my-update", `{}`)
-	if err == nil {
-		t.Fatal("expected error without update handler")
-	}
-}
-
-func TestDispatchUpdate_WithHandler(t *testing.T) {
-	e := NewEngine(nil, nil, WithUpdateHandler(func(name, payload string) (string, error) {
-		if name != "my-update" {
-			t.Errorf("expected name 'my-update', got %q", name)
-		}
-		if payload != `{"key":"val"}` {
-			t.Errorf("expected payload %q, got %q", `{"key":"val"}`, payload)
-		}
-		return `{"result":"ok"}`, nil
-	}))
-	result, err := e.DispatchUpdate(context.Background(), "my-update", `{"key":"val"}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result != `{"result":"ok"}` {
-		t.Errorf("expected %q, got %q", `{"result":"ok"}`, result)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // executeCompiled and Execute/ExecuteCompiled/ReplayCompiled tests
 // ---------------------------------------------------------------------------
 

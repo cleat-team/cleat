@@ -2324,11 +2324,13 @@ func TestExecEngines_MapLifecycle(t *testing.T) {
 	wfID := "wf-store-delete-test"
 	w.inflight.Store(wfID, &engine.WorkflowInstance{ID: wfID})
 
-	// Create a minimal engine with an update handler.
+	// A minimal engine. It used to be constructed with an update handler and
+	// the test then called DispatchUpdate through the loaded value -- both of
+	// which are gone with that hook. Nothing is lost: this test is about the
+	// execEngines map, and `loaded != eng` is the identity check that says the
+	// same thing without needing the engine to do anything.
 	caller := &mockServiceCaller{}
-	eng := engine.NewEngine(nil, caller, engine.WithUpdateHandler(func(name, payload string) (string, error) {
-		return "ok", nil
-	}))
+	eng := engine.NewEngine(nil, caller)
 
 	// Store the engine.
 	w.execEngines.Store(wfID, eng)
@@ -2340,15 +2342,6 @@ func TestExecEngines_MapLifecycle(t *testing.T) {
 	}
 	if loaded != eng {
 		t.Errorf("loaded engine = %v, want %v", loaded, eng)
-	}
-
-	// Verify DispatchUpdate works through the loaded engine.
-	result, err := loaded.(*engine.Engine).DispatchUpdate(context.Background(), "test-update", "{}")
-	if err != nil {
-		t.Fatalf("DispatchUpdate failed: %v", err)
-	}
-	if result != "ok" {
-		t.Errorf("DispatchUpdate = %q, want %q", result, "ok")
 	}
 
 	// Delete the engine.
