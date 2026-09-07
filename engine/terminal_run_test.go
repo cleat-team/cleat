@@ -148,6 +148,37 @@ func TestGetTerminalRunFollowsTheChainAndGetWorkflowByIDDoesNot(t *testing.T) {
 					tail, fromMiddle)
 			}
 
+			// THE CHAIN IS STILL RUNNING, and that is the case this test was
+			// already in without asserting anything about it: chain[2] was
+			// claimed above and never continued, so it is 'running' with no
+			// result. GetTerminalRun still answers, and what it answers is the
+			// last link SO FAR -- not an outcome.
+			//
+			// #904: the interface doc claimed this returned "the one carrying
+			// the result the caller is waiting for". A port-suite test believed
+			// that, read .Result immediately, and dereferenced a nil. Asserting
+			// the honest semantics here is what stops the sentence coming back.
+			if term.Status != "running" {
+				t.Errorf("mid-chain, GetTerminalRun returned status %q; the last link is the "+
+					"one currently executing, so this is the case a caller must handle",
+					term.Status)
+			}
+			if term.Result != "" {
+				t.Errorf("mid-chain, GetTerminalRun returned result %q; a still-running chain "+
+					"has no outcome to carry, and a caller that reads Result without checking "+
+					"Status gets nothing", term.Result)
+			}
+
+			// The corollary, and the reason polling the id you started is not
+			// enough: the FIRST run reached a terminal status the moment it
+			// continued. "The run I started is done" is true almost at once and
+			// says nothing about the chain.
+			if named.Status != "done" {
+				t.Errorf("the head of a chain reports status %q, want \"done\" -- it completes "+
+					"as soon as it continues, which is exactly why waiting on it is not "+
+					"waiting for the work", named.Status)
+			}
+
 			// And the terminal run is its own terminal run.
 			atEnd, err := store.GetTerminalRun(ctx, tail)
 			if err != nil {

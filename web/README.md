@@ -79,7 +79,7 @@ All API calls are defined in `src/lib/api.ts` and return typed promises. The API
 |--------------------------------|--------|--------------------------------|
 | `/api/workflows`               | GET    | List workflow instances        |
 | `/api/workflows/:id`           | GET    | Get single workflow instance   |
-| `/api/workflows/:id/terminal`  | GET    | Get the last run in this id's continue-as-new chain |
+| `/api/workflows/:id/terminal`  | GET    | Get the last run in this id's continue-as-new chain (may still be running — poll on `status`) |
 | `/api/workflows/:name/start`   | POST   | Start a new workflow           |
 | `/api/workflows/:id/signal`    | POST   | Signal a running workflow      |
 | `/api/workflows/:id/cancel`    | POST   | Cancel a workflow              |
