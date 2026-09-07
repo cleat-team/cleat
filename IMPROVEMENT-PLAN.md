@@ -6838,6 +6838,78 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.247 The update request key used a NUL separator, which PostgreSQL refuses inside JSONB — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+Reported by WS-3 as #914, on a run that had already proved delivery works — the caller's promise
+came back `resolved` and the handler ran. Then the workflow failed:
+
+    finalize workflow: append events: step 2:
+    pq: unsupported Unicode escape sequence (22P05)
+
+`updateRequestKey` joined the update name and the promise ID with a literal `\x00`. That key is
+recorded as `UpdateRequestID` on the `update_received` event, `store_events.go` puts it in the
+event payload, and `event_history.payload` is **JSONB** on PostgreSQL.
+
+**The precise mechanism matters, because the obvious statement of it is wrong.** PostgreSQL does
+not reject a raw NUL *byte* here — the byte never reaches it. `json.Marshal` escapes a NUL to the
+six characters `\u0000`, so what the engine sends is valid JSON *text*. PostgreSQL rejects that
+**escape**, because `jsonb` cannot represent the codepoint even escaped. Credit to WS-3 for
+separating the two questions: their first probe asked about a raw byte, which never occurs, and got
+`ISJSON = 0` from SQL Server — the right answer to the wrong question.
+
+**Unconditional** — the NUL is the separator, not a property of the data — so it was every update
+that reached a dispatch point.
+
+**The ordering is what makes it harmful.** `runUpdate` settles the caller's promise *before* the
+segment finalizes, so the caller was told the update succeeded and *then* the workflow failed and
+the state the handler produced was discarded. A caller polling that promise is told the update
+landed when it was thrown away.
+
+**Dialect-divergent, and measured rather than assumed** — the input is what `json.Marshal` really
+produces, `{"k":"a\u0000b"}`, not a raw byte:
+
+| dialect | storage model | result |
+|---|---|---|
+| **postgres** | `jsonb`, a parsed representation | **`ERROR: unsupported Unicode escape sequence (22P05)`** |
+| mysql | `JSON`, parsed but permits the codepoint | accepted |
+| mssql | `NVARCHAR` + `ISJSON()`, a text check | accepted, `ISJSON` = 1 |
+
+Three storage models, three answers, one input. The escape is well-formed JSON text, so a validator
+that checks *text* passes it and a type that must *represent* the value cannot.
+
+So a single-dialect test on MySQL would have passed while the primary backend was broken — and the
+two that accept it were silently storing a NUL in a column the third validates. WS-3 explicitly
+declined to guess this, citing [§3.245](#3245), where reading `001_schema.sql` and concluding gave
+the wrong answer about a CHECK that lived in `037`.
+
+**The fix is not a rarer separator.** `UpdateName` is chosen by the workflow author and can contain
+anything, so no delimiter is safe — a rarer one moves the collision rather than removing it. The
+key is now **length-prefixed**, which is unambiguous for every possible input:
+
+    "add"   + "p-1"  ->  "3:addp-1"
+    "a:b"   + "p-1"  ->  "3:a:bp-1"
+    "3:add" + "p-1"  ->  "5:3:addp-1"
+
+`splitUpdateRequestKey` is the only reader, so the encoding was free to change. It still accepts the
+NUL form: those keys cannot exist on PostgreSQL — the write that would have persisted one is the
+write that failed — but MySQL and SQL Server accepted them, so a workflow suspended mid-update on
+either has one in its history and must still replay. The two forms cannot be confused, because a
+length-prefixed key never contains a NUL.
+
+**The test that would have caught it, and did not exist.**
+`TestAnUpdateDeliveryEventPersists` writes the delivery event through a real store on all three
+dialects. Falsified by restoring the NUL, it reproduces both failure modes at once:
+
+    postgres  append one event: exec step 0: pq: unsupported Unicode escape sequence (22P05)
+    mysql     the persisted request key contains a NUL: "bump\x0001234567-..."
+    mssql     the persisted request key contains a NUL: "bump\x0001234567-..."
+
+**This is the third defect in one feature traceable to one missing test**, with [§3.245](#3245) and
+WS-3's withdrawn #910. `WithUpdateStore` had exactly one test, against a fake whose
+`GetPendingUpdateRequests` ignores its `workflowID` argument, and the end-to-end update tests run
+against `cleattest.NewTestEnv()` — no engine, no store, no guest. **A Go string holds a NUL
+happily; only a database objects.** Every assertion about this path was being held up by the layer
+that could not fail.
 
 ### 3.245 A failed update could not be recorded as failed, so the caller's promise never settled — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
 
