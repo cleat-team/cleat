@@ -488,7 +488,8 @@ EXECUTED = {
         {
             "globs": ["tests/plugin-harness/testdata/hostcallsrust/src/*.rs"],
             "test": "TestHostCallsRust",
-            "why": "the host-call execution harness (C2); 22 of the 24 wave-1 arms make a call, of which 21 credit a surface method -- the two cron arms have no Rust binding, and the retry arm's turbofish defeats the call pattern",
+            "why": "the host-call execution harness (C2); 24 of the 24 wave-1 arms make a call, of which 23 credit a surface method -- the retry arm's turbofish defeats the call pattern. "
+                   "This said 22 of 24 and blamed the two cron arms for having no Rust binding until 3.242 gave them one",
         },
     ],
     "java": [
@@ -501,6 +502,15 @@ EXECUTED = {
             "globs": ["examples/saga-java-port/**/*.java"],
             "test": "TestJavaWorkflowExecute",
             "why": "engine/java_workflow_e2e_test.go:24 builds examples/saga-java-port and executes it",
+        },
+        {
+            "globs": ["tests/plugin-harness/testdata/hostcallsjava/**/*.java"],
+            "test": "TestHostCallsJava",
+            "why": "the host-call execution harness, which java was the ONLY SDK not to count. go, rust and "
+                   "assemblyscript all list their own hostcalls* fixture here and java did not, so java's "
+                   "executed number was measured over a strictly smaller set of sources than its peers' and "
+                   "was not comparable to them -- it read 8/70 against rust's 27/70, a difference that was "
+                   "mostly about which files the scan opened",
         },
     ],
     "assemblyscript": [
@@ -740,9 +750,57 @@ def check_surface_extraction() -> list[str]:
     return problems
 
 
+def check_hostcall_fixtures_are_counted() -> list[str]:
+    """Every SDK with a host-call fixture on disk must count it as executed.
+
+    Java's executed number read 8/70 against rust's 27/70 until 2026-09-07, and
+    the gap was not about Java. `tests/plugin-harness/testdata/hostcallsjava/`
+    existed, was built and executed by TestHostCallsJava, and exercised roughly
+    two dozen host calls -- and was simply not in java's EXECUTED globs, where
+    go, rust and assemblyscript all listed their own. Adding it moved java from
+    8 to 26 with no Java code changed at all.
+
+    So the number was never a statement about the SDK. It was a statement about
+    which files the scan opened, and it read as the former. That is why this is
+    checked rather than left to whoever adds the next SDK: a per-SDK list of
+    globs is exactly the kind of thing that gets four entries right and the
+    fifth omitted, and nothing about the output says which happened.
+
+    Anchored on the fixture DIRECTORY existing, not on a name appearing in this
+    file, so it cannot be satisfied by a comment.
+    """
+    problems = []
+    fixtures = ROOT / "tests" / "plugin-harness" / "testdata"
+    if not fixtures.is_dir():
+        return problems
+    for d in sorted(fixtures.iterdir()):
+        if not d.is_dir() or not d.name.startswith("hostcalls"):
+            continue
+        sdk_key = d.name[len("hostcalls"):]          # hostcallsjava -> java
+        aliases = {"as": "assemblyscript"}
+        sdk = aliases.get(sdk_key, sdk_key)
+        if sdk not in EXECUTED:
+            continue
+        rel = f"tests/plugin-harness/testdata/{d.name}/"
+        counted = any(
+            g.startswith(rel)
+            for e in EXECUTED[sdk]
+            for g in e["globs"]
+        )
+        if not counted:
+            problems.append(
+                f"{sdk}: {rel} exists and is a host-call execution fixture, but no "
+                f"entry in EXECUTED[{sdk!r}] covers it. Its executed count is therefore "
+                f"measured over fewer sources than the other SDKs' and is not comparable "
+                f"to them -- which is not a fact about {sdk}, but it reads as one."
+            )
+    return problems
+
+
 def check_executed_wiring() -> list[str]:
     """Verify each declared executed fixture is actually run. Returns problems."""
     problems = []
+    problems += check_hostcall_fixtures_are_counted()
     invs = _invocations()
     # git ls-files, not rglob: the working tree can contain whole COPIES of the
     # repo that are not part of it -- .claude/worktrees/ is one -- and rglob

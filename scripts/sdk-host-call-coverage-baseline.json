@@ -17,7 +17,7 @@
   "java": {
     "covered": 64,
     "surface": 64,
-    "executed": 8
+    "executed": 26
   },
   "assemblyscript": {
     "covered": 60,

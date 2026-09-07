@@ -6780,6 +6780,46 @@ fix: the revert is loud, the restore is silent. Commit before falsifying, or res
 `cleat_` names uses them as fixtures that make a real call, so a stale name fails to link;
 `grep -rn "must stay in sync" engine/*_test.go wasm/*_test.go` now returns only this section's own
 quotation of the comment that was removed.
+### 3.243 Java's executed host-call coverage skipped its own fixture, so 8/70 was not a fact about Java — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+`scripts/sdk-host-call-coverage.py` reported java at **8/70 executed** against rust's 27/70 and
+go's 26/45. That gap was not about Java.
+
+`tests/plugin-harness/testdata/hostcallsjava/` exists, is built and executed by `TestHostCallsJava`,
+and exercises two dozen host calls. It was simply **not in java's `EXECUTED` globs**, where go, rust
+and assemblyscript all list their own:
+
+| SDK | lists its own `hostcalls*` fixture |
+|---|---|
+| go | ✅ | 
+| rust | ✅ |
+| assemblyscript | ✅ |
+| **java** | ❌ — only `javaworkflow/**` and `saga-java-port/**` |
+
+Adding it moves java from **8 to 26**, with **no Java code changed at all**. So this is a
+measurement correction, not an improvement, and the distinction is the whole entry: the number was
+never a statement about the SDK's coverage. It was a statement about which files the scan opened,
+and it read as the former.
+
+**Found because [§3.242](#3242) made it visible.** Binding cron in Rust *and* Java raised rust's
+executed count 25 → 27 and left java's at 8. Two SDKs, the same two calls wired into the same
+harness, one number moving — which is the shape that says the instrument is wrong rather than the
+subject.
+
+**Fixed as a mechanism, not a sweep.** `check_hostcall_fixtures_are_counted()` walks
+`tests/plugin-harness/testdata/hostcalls*` and requires each SDK's `EXECUTED` entry to cover its own
+fixture. A per-SDK list of globs is exactly the kind of thing that gets four entries right and omits
+the fifth, and nothing in the output says which happened. **Anchored on the fixture directory
+existing**, not on a name appearing in the script, so a comment cannot satisfy it.
+
+Known-positives, both directions: removing java's glob reports java; removing rust's reports rust.
+The check is general, not fitted to the case that prompted it.
+
+**One stale sentence went with it.** The rust entry's `why` read *"22 of the 24 wave-1 arms make a
+call ... the two cron arms have no Rust binding"* — true when written, false the moment §3.242
+landed an hour earlier. Corrected to 24 of 24, with the old claim and its expiry recorded rather
+than silently overwritten.
+
 ### 3.242 The cron family is bound in Rust and Java — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
 
 `tiers.yaml` holds `workflow-callable-cron` at **tier 2** for one stated reason: *"rust and java
