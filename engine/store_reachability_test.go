@@ -457,10 +457,6 @@ func TestNoStoreMethodIsReachableOnlyThroughDeadCode(t *testing.T) {
 // Shrink-only, like storeUnreachedBaseline, and for the same reason: these are
 // findings held open under an issue, not decisions.
 var storeDeadReferrerBaseline = map[string]bool{
-	// cleat#877: compactionLoop is never launched, so history compaction has
-	// never run. Removing this entry is part of fixing that.
-	"GetCompactionCandidates": true,
-
 	// waitForDB is called only from tests. Its ClaimWorkflow call is a
 	// DB-connectivity probe, not the claim path -- that is ClaimWorkflows.
 	// Tracked with cleat#877; either waitForDB is wired into startup or it goes.
