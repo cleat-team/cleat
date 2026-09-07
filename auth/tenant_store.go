@@ -143,6 +143,49 @@ func createAPIKeyStmt(dialect string) (stmt string, needsKeyID bool) {
 	}
 }
 
+// ResolveTenantFromAPIKey turns an API key hash into a tenant, on a connection
+// that is NOT scoped to any tenant.
+//
+// That is the whole point of it living here rather than only on the engine's
+// per-tenant stores. Resolving the key is what TELLS you which tenant's store
+// to open, so a lookup that must already know the tenant is circular.
+//
+// migrations/postgres/031 says this outright about the table, explaining why it
+// carries no RLS policy: it is read "specifically to *determine* the tenant
+// from an API key, before any tenant is known ... authenticating is exactly the
+// step that has not yet established a tenant. This table is correctly unscoped
+// by design, not an accidental gap."
+//
+// On PostgreSQL and SQL Server a tenant-scoped pool reaches the table anyway --
+// one database, isolation by RLS or by session context -- so running the lookup
+// through such a pool was harmless and stayed invisible. On MySQL, tenant
+// isolation IS a database boundary (one database per tenant), so the same code
+// wrote keys to the base database and read them from the tenant's, and every
+// authenticated request 401'd. See cleat#866.
+func (s *TenantStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
+	var tenantID uuid.UUID
+	if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&tenantID); err != nil {
+		return uuid.Nil, err
+	}
+	return tenantID, nil
+}
+
+// resolveAPIKeyStmt mirrors createAPIKeyStmt: same table per dialect, same
+// placeholder style. The two must agree about WHERE the row lives, and cleat#866
+// is what happens when the write and the read disagree.
+func resolveAPIKeyStmt(dialect string) string {
+	switch dialect {
+	case DialectMySQL:
+		// No admin schema: schema and database are one namespace in MySQL, and
+		// the keys live in the base database the DSN names.
+		return `SELECT tenant_id FROM tenant_api_keys WHERE key_hash = ? AND revoked_at IS NULL`
+	case DialectMSSQL:
+		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = @p1 AND revoked_at IS NULL`
+	default:
+		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND revoked_at IS NULL`
+	}
+}
+
 // RevokeAPIKey revokes an API key.
 func (s *TenantStore) RevokeAPIKey(ctx context.Context, keyID uuid.UUID) error {
 	// Same reasoning as CreateTenant: no production caller, and now() /

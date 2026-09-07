@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/cleat-team/cleat/engine"
 	"github.com/google/uuid"
 )
 
@@ -28,8 +27,20 @@ func TenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	return tid, ok
 }
 
+// TenantResolver is the only thing this middleware needs from a store: turning
+// an API key hash into a tenant.
+//
+// Narrowed from engine.WorkflowStore (99 methods) so that the resolver can be
+// something that is NOT tenant-scoped. On MySQL it must be: tenant isolation
+// there is one database per tenant, so a tenant-scoped store looks for the key
+// in the tenant's database while every writer puts it in the base one. Both
+// engine.WorkflowStore and auth.TenantStore satisfy this. See cleat#866.
+type TenantResolver interface {
+	ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error)
+}
+
 // TenantFromAPIKey looks up a tenant by API key hash.
-func TenantFromAPIKey(ctx context.Context, store engine.WorkflowStore, keyHash []byte) (uuid.UUID, error) {
+func TenantFromAPIKey(ctx context.Context, store TenantResolver, keyHash []byte) (uuid.UUID, error) {
 	return store.ResolveTenantFromAPIKey(ctx, keyHash)
 }
 
@@ -57,7 +68,7 @@ func TenantFromAPIKey(ctx context.Context, store engine.WorkflowStore, keyHash [
 // cmd/cleat-worker/main.go is the option available without those changes. Anyone
 // adding a new externally-triggered plugin endpoint must add it here too -- nothing
 // enforces that the two stay in sync.
-func Middleware(store engine.WorkflowStore, requireAuth bool, publicPatterns ...string) func(http.Handler) http.Handler {
+func Middleware(store TenantResolver, requireAuth bool, publicPatterns ...string) func(http.Handler) http.Handler {
 	publicMatcher := buildPublicMatcher(publicPatterns)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
