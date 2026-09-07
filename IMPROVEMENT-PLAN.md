@@ -6838,6 +6838,57 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.249 A locked row and an empty queue are the same answer to `ClaimWorkflows` — 🔵 **MEASURED, VISIBILITY-ONLY BY DECISION 2026-09-07** (WS-1, 2026-09-07)
+
+Raised by WS-3 as #923. `ClaimWorkflows` selects candidates `FOR UPDATE SKIP LOCKED`, so a locked
+row is *removed from the result set* rather than blocking. A zero result means either "nothing to
+run" or "every candidate was locked", and `cmd/cleat-worker/setup.go` acts on it — `idleTicks++`,
+sleeping up to `maxIdleTicks = 6` × `pollInterval`. `NOTIFY` and the parent wake both reset the
+backoff and neither closes this: both fire on *new* work, not on existing work becoming unlocked.
+
+**The ambiguity is real and reachable.** With a lock held on every candidate, the claim returns 0
+while the rows are ready and runnable — `TestAZeroClaimIsAmbiguousWhenRowsAreMerelyLocked`.
+
+**Contention does not produce it, at any ratio.** Two claimers racing with `LIMIT 1`:
+
+| runnable rows | 2 | 3 | 4 | 6 | 11 | 41 | 6, lock **held** |
+|---|---|---|---|---|---|---|---|
+| claims | 1565 | 1604 | 1613 | 1711 | 1884 | 1631 | 2184 |
+| zero-with-work | 0 | 0 | 0 | 0 | 0 | 0 | **2184 (100%)** |
+| backoff | 0× | 0× | 0× | 0× | 0× | 0× | **6×** |
+
+~10,000 contended claims, not one. **The held-lock column is why the zeros are a finding rather
+than a blind harness** — same counter, reports the condition every time. A sweep that finds nothing
+everywhere is otherwise indistinguishable from an instrument that can see nothing, and the first
+version of this sweep had no control.
+
+The explanation is structural, not statistical, which turns the empty table into a prediction:
+**`SKIP LOCKED` skips.** With more candidates than lockers it takes the next free row, so a zero
+needs *every* candidate the inner `SELECT` would take locked at once — and a claim transaction is
+far too short to overlap that way. No ratio will produce it.
+
+**Nothing else in the engine holds such a lock, checked by predicate rather than by shape.**
+`deleteDeadLetteredWorkflowsBatch` and `deleteCompletedWorkflowsBatch` do
+`DELETE FROM event_history WHERE workflow_id = ANY($1)`, taking an FK `KEY SHARE` lock on many
+parents at once — which is exactly the mechanism to worry about — but on **completed and
+dead-lettered** rows, which are not `status IN ('ready','terminating')` and so are not claim
+candidates. *The lock exists and cannot collide* is a stronger and more useful statement than
+*no such lock exists*. `CompactHistory` holds one row for one short transaction.
+
+**Decision (WS-3's user, 2026-09-07): make it visible, do not change the behaviour.** A behavioural
+fix would add a mechanism against a condition nothing currently produces, and it costs an extra
+query on the *most common* path — the idle poll. The case worth catching is a future long-running
+transaction touching `workflow_instances`, which would present as "the queue is slow" with nothing
+pointing at the cause.
+
+**A correction to the issue, which is on it as WS-3's:** the suggested ready-count predicate omits
+`task_queue = ANY($2)` and the tenant scoping that `ClaimWorkflows` has. Counting without them
+over-reports — rows a worker is *correctly* declining would read as ambiguous zeros. Anything
+implemented must use the claim's own predicate.
+
+The frequency sweep is **not** kept as a test: 35s of runtime for a result that cannot change while
+`SKIP LOCKED` means what it means. Its numbers and the command are in the test's doc comment.
+
 ### 3.248 Nothing pinned that a dispatch point wires the update imports — 🟢 **GUARDED 2026-09-07** (WS-1, 2026-09-07)
 
 A workflow that registers an update handler and then waits **never names the imports it needs**.
