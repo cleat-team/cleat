@@ -6692,6 +6692,95 @@ keeps re-learning: unanchored, it also matches 001's own header, which *discusse
 prose. Measured 2026-09-06 — unanchored returns 16 distinct "names", 7 of them fragments of English
 sentences; anchored returns the 9 that exist.
 
+### 3.240 `TestPythonWasmAbiBoundary` compared two hardcoded lists in the same file — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+The test's stated job is to catch a Python SDK that imports a host function the engine does not
+register — which is not a degradation but a hard failure, since a guest importing an unregistered
+name does not instantiate at all.
+
+It never read either side. `pythonExpectedImports` was a literal in
+`engine/python_wasm_e2e_test.go`, and so was `registeredImportNames()` in the same file, carrying
+the comment:
+
+    // This list must stay in sync with the Export("...") calls in registerHostFunctions
+    // in imports.go. When adding new host functions, add them here too.
+
+Nothing read `imports.go`. Nothing read the Python SDK. The test asked whether the file agreed
+with itself, and it always did.
+
+**It had rotted in both directions, and reported green throughout.** Measured 2026-09-07:
+
+| | count | what |
+|---|---|---|
+| named by both lists, not exported | **8** | the six durable-state calls ([§3.216](#3216)) and the two inert signal calls ([§3.220](#3220)) |
+| exported, named by `registeredImportNames` | missing **13** | including `cleat_poll_update` and `cleat_complete_update`, added days earlier |
+
+The first row is the exact condition the test exists to detect: eight names it asserted a Python
+workflow needs and the engine does not have. Had the Python SDK really still imported them, every
+Python workflow would have failed to instantiate and this test would have said fine.
+
+It did not — the SDK had dropped all eight — so **no live defect, only a guard that could not
+have found one.** Confirming that took care of its own, because the sole occurrence of
+`cleat_send_signal_and_wait` in `host_calls.py` is a *retraction*:
+
+    # There is no _import_cleat_send_signal_and_wait or
+    # _import_cleat_reply_to_signal here (removed 2026-09-06, ...)
+
+A name scan reads that as a confirmation. It is the [§3.213](#3213) AssemblyScript trap verbatim,
+in a second SDK.
+
+**Both sides are now derived.** The engine side calls `wazeroCleatABI`, which instantiates the
+host module and enumerates `ExportedFunctionDefinitions()` — the real registration, already used
+by `engine/hostabi_runtime_parity_test.go`. The Python side is read out of `host_calls.py` twice,
+in two ways chosen to fail in opposite directions:
+
+- **strict** — line-anchored, accepting an alias only where an `import ... as _import_X` can
+  legally appear. A comment line begins with `#` and cannot match.
+- **loose** — the alias token anywhere at all, prose included. Wrong by construction; its only
+  job is to disagree.
+
+The test fails if they differ, naming which reading saw what. Both returned the same 44 names,
+and a third reading — Python's own `ast` module over the same file, collecting `alias.asname` —
+returned the identical 44. Two readings agreeing is evidence; the strict one alone was a claim.
+
+**The alias is not the ABI name**, which a single reading would have got wrong: six aliases drop
+the `cleat_` prefix (`_import_uuid`, `_import_fetch`, `_import_side_effect`, `_import_get_scope`,
+`_import_set_scope`, `_import_continue_as_new_versioned`). Treating the alias as the name reports
+six phantom gaps. The mapping rule is validated by its own output rather than asserted: applied
+to all 44 it lands every one on a real engine export, with nothing missing.
+
+**Five real Python SDK gaps fell out**, held in `pythonUnboundBaseline` as shrink-only so that
+closing one is noticed. `cleat_await_any_child`, `cleat_poll_child`, `cleat_json_parse`,
+`cleat_json_stringify`, `cleat_run_detached` — things a Go workflow can do and a Python one
+cannot. Three further unbound names are in the baseline and are not gaps: `cleat_poll_work` and
+`cleat_complete` are the worker handshake, and `cleat_register_query_handler` is deliberately
+unbindable.
+
+**Four known-positives, one per mechanism** — because the broken version passed too, so "it
+passes" was never evidence:
+
+| control | result |
+|---|---|
+| add a Python binding the engine does not export | fails, names `cleat_not_a_real_host_call` |
+| add a retraction *comment* naming a phantom alias | fails as a strict/loose **disagreement** — not counted as a binding |
+| add an engine export with no Python binding | fails, names it as beyond the baseline |
+| break the strict regex so it matches nothing | fails on the floor, rather than passing vacuously |
+
+The third is the widen-detector; the fourth is the [§3.213](#3213) lesson made mechanical — an
+extractor that sees less inflates every metric built on it, and with zero names "every Python
+import is registered" is vacuously true.
+
+**A note on method, since it cost a rewrite.** Restoring after known-positive four with
+`git checkout HEAD -- engine/python_wasm_e2e_test.go` discarded the entire uncommitted change,
+because the file's committed state was the *old* test. CLAUDE.md's "a falsification has two steps,
+and only one of them announces failure" applies to an uncommitted rewrite as much as to a reverted
+fix: the revert is loud, the restore is silent. Commit before falsifying, or restore from a copy.
+
+**This was a single instance, not a sweep.** Every other Go test file holding ten or more literal
+`cleat_` names uses them as fixtures that make a real call, so a stale name fails to link;
+`grep -rn "must stay in sync" engine/*_test.go wasm/*_test.go` now returns only this section's own
+quotation of the comment that was removed.
+
 ### 3.238 A pending update request outlived the workflow it was for, and its promise never settled — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
 
 The smaller half of [#849](https://github.com/cleat-team/cleat/issues/849)'s suggested direction.

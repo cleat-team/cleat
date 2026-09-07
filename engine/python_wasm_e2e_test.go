@@ -6,6 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -183,77 +186,73 @@ func TestPythonWasmEndToEnd(t *testing.T) {
 // TestPythonWasmAbiBoundary verifies that all host functions expected by the
 // Python SDK's WASM imports are registered in the Go host runtime.
 func TestPythonWasmAbiBoundary(t *testing.T) {
-	// These are the host function names that the Python SDK expects
-	// (documented in host_calls.py stubs as (import "env" "<name>")).
-	pythonExpectedImports := []string{
-		"cleat_call",
-		"cleat_call_retry",
-		"cleat_call_heartbeat",
-		"cleat_sleep",
-		"cleat_now",
-		"cleat_random",
-		"cleat_log",
-		"cleat_version",
-		"cleat_min_version",
-		"cleat_defer",
-		"cleat_poll_cancellation",
-		"cleat_poll_signal",
-		"cleat_continue_as_new",
-		"cleat_child_workflow",
-		"cleat_child_workflow_with_options",
-		"cleat_await_child",
-		"cleat_await_signals",
-		"set_query_state",
-		"cleat_await_all_children",
-		"plugin_call",
-		"plugin_call_streaming",
-		"cleat_create_promise",
-		"cleat_await_promise",
-		"cleat_resolve_promise",
-		"cleat_reject_promise",
-		"cleat_send",
-		"cleat_schedule_invoke",
-		"cleat_register_update_handler",
-		"cleat_register_query_handler",
-		"cleat_workflow_id",
-		"cleat_run_id",
-		"cleat_send_signal_and_wait",
-		"cleat_reply_to_signal",
-		"cleat_signal_workflow",
-		"cleat_acquire_lock",
-		"cleat_release_lock",
-		"cleat_side_effect",
-		// Stream R host functions
-		"cleat_run_detached",
-		"cleat_set_state",
-		"cleat_get_state",
-		"cleat_delete_state",
-		"cleat_incr_state",
-		"cleat_has_state",
-		"cleat_list_state",
-		"cleat_fetch",
-	}
-	// The list of host functions that can be discovered through the
-	// registerHostFunctions registrations. We verify every expected
-	// import has a corresponding registration.
-	hostRegistered := make(map[string]bool)
-	for _, name := range registeredImportNames() {
+	// # This test compared two hardcoded lists in this same file until 2026-09-07
+	//
+	// `pythonExpectedImports` was a literal, and so was `registeredImportNames`,
+	// whose comment read "this list must stay in sync with the Export(...) calls
+	// in imports.go. When adding new host functions, add them here too." Nothing
+	// read imports.go and nothing read the Python SDK. The test asked whether the
+	// file agreed with itself, and the answer was always yes.
+	//
+	// It had rotted in both directions by the time anyone looked:
+	//
+	//   - Both lists still named the six durable-state calls (3.216) and the two
+	//     inert signal calls (3.220), which the engine had stopped exporting.
+	//     Eight names this test asserted a Python workflow needs and the engine
+	//     does not have -- the exact failure it exists to catch -- reported green.
+	//   - `registeredImportNames` was missing thirteen real exports, including
+	//     cleat_poll_update and cleat_complete_update, added days earlier.
+	//
+	// Both sides are now derived. See CLAUDE.md, "a check can tell you whether it
+	// is consistent with itself; it cannot tell you what it is not looking at."
+	hostRegistered := map[string]bool{}
+	for name := range wazeroCleatABI(t) {
 		hostRegistered[name] = true
 	}
 
+	pythonImports := pythonSDKHostImports(t)
+
+	// The direction that breaks a workflow. A Python guest importing a name the
+	// host does not register fails to instantiate -- it does not degrade, it does
+	// not run.
 	var missing []string
-	for _, name := range pythonExpectedImports {
+	for _, name := range pythonImports {
 		if !hostRegistered[name] {
 			missing = append(missing, name)
 		}
 	}
-
+	sort.Strings(missing)
 	if len(missing) > 0 {
-		t.Errorf("Python SDK expects %d host imports that are not registered on the Go host:\n  %s",
+		t.Errorf("the Python SDK imports %d host function(s) the engine does not register:\n  %s\n\n"+
+			"A guest importing an unregistered name does not fail gracefully -- the module "+
+			"fails to instantiate. Either the engine dropped an export the SDK still binds, "+
+			"or the SDK gained a binding ahead of the host.",
 			len(missing), strings.Join(missing, "\n  "))
-		for _, name := range missing {
-			t.Logf("  Missing: %s", name)
+	}
+
+	// The other direction is a gap, not a break: the engine offers something the
+	// Python SDK cannot reach. Held as a shrink-only baseline so the gaps are
+	// named rather than merely absent, and so closing one is noticed.
+	var unbound []string
+	for name := range hostRegistered {
+		if !slices.Contains(pythonImports, name) {
+			unbound = append(unbound, name)
 		}
+	}
+	sort.Strings(unbound)
+
+	if extra := setDiff(unbound, pythonUnboundBaseline); len(extra) > 0 {
+		t.Errorf("the engine exports %d host function(s) the Python SDK does not bind, "+
+			"beyond the recorded baseline:\n  %s\n\n"+
+			"Adding a host call without a Python binding widens the SDK gap. Either bind it "+
+			"in python-sdk/cleat_sdk/host_calls.py, or add it to pythonUnboundBaseline with "+
+			"a reason.", len(extra), strings.Join(extra, "\n  "))
+	}
+	if closed := setDiff(pythonUnboundBaseline, unbound); len(closed) > 0 {
+		t.Errorf("pythonUnboundBaseline names %d host function(s) the Python SDK now binds:\n  %s\n\n"+
+			"This is good news and the baseline must shrink to match, or it stops measuring "+
+			"anything. Remove them from pythonUnboundBaseline.",
+			len(closed), strings.Join(closed, "\n  "))
 	}
 
 	// Also verify bit-packing conventions match.
@@ -532,63 +531,156 @@ func findRepoRoot(t *testing.T) string {
 	}
 }
 
-// registeredImportNames returns the names of all registered host function imports.
-// This is used by the ABI boundary test to verify against Python's expectations.
-func registeredImportNames() []string {
-	// This list must stay in sync with the Export("...") calls in registerHostFunctions
-	// in imports.go. When adding new host functions, add them here too.
-	return []string{
-		"cleat_call",
-		"cleat_sleep",
-		"cleat_now",
-		"cleat_random",
-		"cleat_log",
-		"cleat_version",
-		"cleat_min_version",
-		"cleat_defer",
-		"cleat_poll_cancellation",
-		"cleat_poll_signal",
-		"cleat_continue_as_new",
-		"cleat_continue_as_new_versioned",
-		"cleat_child_workflow",
-		"cleat_child_workflow_with_options",
-		"cleat_await_child",
-		"cleat_call_retry",
-		"cleat_await_signals",
-		"set_query_state",
-		"cleat_call_heartbeat",
-		"cleat_await_all_children",
-		"cleat_create_promise",
-		"cleat_await_promise",
-		"plugin_call_streaming",
-		"plugin_call",
-		"cleat_register_update_handler",
-		"cleat_send_signal_and_wait",
-		"cleat_reply_to_signal",
-		"cleat_signal_workflow",
-		"cleat_set_scope",
-		"cleat_get_scope",
-		"cleat_uuid",
-		"cleat_acquire_lock",
-		"cleat_release_lock",
-		"cleat_side_effect",
-		"cleat_workflow_id",
-		"cleat_run_id",
-		"cleat_resolve_promise",
-		"cleat_reject_promise",
-		"cleat_send",
-		"cleat_schedule_invoke",
-		"cleat_register_query_handler",
-		// Stream R host functions
-		"cleat_run_detached",
-		"cleat_set_state",
-		"cleat_get_state",
-		"cleat_delete_state",
-		"cleat_incr_state",
-		"cleat_has_state",
-		"cleat_list_state",
-		"cleat_fetch",
+// pythonUnboundBaseline is the set of host functions the engine registers that
+// the Python SDK does not bind. SHRINK-ONLY: an entry may be removed when the
+// binding lands, and adding one requires a reason here.
+//
+// Measured 2026-09-07. The first three are not gaps and never will be; the rest
+// are.
+var pythonUnboundBaseline = []string{
+	// Not workflow-facing. The worker handshake -- a guest never calls these,
+	// the runtime does. CLAUDE.md names this pair explicitly when warning that
+	// the export total and the workflow-facing total are different questions.
+	"cleat_complete",
+	"cleat_poll_work",
+
+	// Deliberately unbindable. See docs/determinism.md, "Why there is no
+	// RegisterQueryHandler" -- no engine version ever routed an external query
+	// to it. Every SDK carries a comment saying it is absent on purpose.
+	"cleat_register_query_handler",
+
+	// Real gaps in the Python SDK, in the sense that a Go workflow can do these
+	// and a Python one cannot.
+	"cleat_await_any_child",
+	"cleat_json_parse",
+	"cleat_json_stringify",
+	"cleat_poll_child",
+	"cleat_run_detached",
+}
+
+// pythonSDKHostImports returns the host function names the Python SDK binds,
+// read out of python-sdk/cleat_sdk/host_calls.py.
+//
+// # Why this is read twice, on purpose
+//
+// A name scan over source cannot tell a thing from a sentence about the thing.
+// host_calls.py contains, at line 1031, the comment
+//
+//	# There is no _import_cleat_send_signal_and_wait or
+//	# _import_cleat_reply_to_signal here (removed 2026-09-06, ...)
+//
+// -- an explicit denial that a careless scan reads as a confirmation, which is
+// exactly how the AssemblyScript surface was once scored as HAVING a binding it
+// had removed (IMPROVEMENT-PLAN 3.213).
+//
+// So the file is read two ways that go wrong in opposite directions: a strict
+// line-anchored parse that only accepts an import alias where one can appear,
+// and a deliberately loose scan that matches the alias token ANYWHERE, comments
+// included. The loose one is wrong by construction; its only job is to disagree.
+// Both readings agreeing is evidence. The strict one alone is a claim.
+//
+// Verified 2026-09-07 against a third reading -- Python's own `ast` module over
+// the same file, collecting `alias.asname` -- which returned the identical 44.
+func pythonSDKHostImports(t *testing.T) []string {
+	t.Helper()
+
+	path := filepath.Join(findRepoRoot(t), "python-sdk", "cleat_sdk", "host_calls.py")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the Python SDK host calls: %v", err)
 	}
+	lines := strings.Split(string(src), "\n")
+
+	// Strict: an alias binding, at a position where one can legally appear.
+	// A comment cannot match this, because a comment line begins with '#'.
+	strictRe := regexp.MustCompile(`^(?:from\s+\S+\s+import\s+)?\s*[A-Za-z_][A-Za-z0-9_]*\s+as\s+_import_([A-Za-z0-9_]+),?\s*$`)
+	strict := map[string]bool{}
+	for _, line := range lines {
+		if m := strictRe.FindStringSubmatch(line); m != nil {
+			strict[m[1]] = true
+		}
+	}
+
+	// Loose: the alias token anywhere at all, prose included.
+	looseRe := regexp.MustCompile(`\bas\s+_import_([A-Za-z0-9_]+)`)
+	loose := map[string]bool{}
+	for _, m := range looseRe.FindAllStringSubmatch(string(src), -1) {
+		loose[m[1]] = true
+	}
+
+	// An extractor that sees less inflates every metric derived from it, and
+	// nothing else in this test would notice: with zero names, "every Python
+	// import is registered" is vacuously true. rust_surface() scored SDK
+	// coverage at 100% while missing ten of seventy-one methods for want of
+	// this check (IMPROVEMENT-PLAN 3.213).
+	if len(strict) < 40 {
+		t.Fatalf("the strict parse of %s found only %d import aliases, which is far below the "+
+			"44 measured on 2026-09-07. The extractor has stopped matching, and every "+
+			"assertion built on it is now vacuous rather than failing.", path, len(strict))
+	}
+
+	var onlyStrict, onlyLoose []string
+	for n := range strict {
+		if !loose[n] {
+			onlyStrict = append(onlyStrict, n)
+		}
+	}
+	for n := range loose {
+		if !strict[n] {
+			onlyLoose = append(onlyLoose, n)
+		}
+	}
+	sort.Strings(onlyStrict)
+	sort.Strings(onlyLoose)
+	if len(onlyStrict) > 0 || len(onlyLoose) > 0 {
+		t.Fatalf("the two readings of %s disagree, so neither can be trusted:\n"+
+			"  only the strict (declaration-anchored) parse saw: %v\n"+
+			"  only the loose (matches prose too) scan saw:      %v\n\n"+
+			"A name appearing only in the loose scan is usually a comment ABOUT a binding -- "+
+			"often one that was removed -- which must not be counted as a binding. A name "+
+			"appearing only in the strict parse means the alias moved to a form the loose "+
+			"scan cannot see, which should be impossible and means the file changed shape.",
+			path, onlyStrict, onlyLoose)
+	}
+
+	out := make([]string, 0, len(strict))
+	for alias := range strict {
+		out = append(out, pythonAliasToHostName(alias))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// pythonAliasToHostName maps a Python import alias to the host function name.
+//
+// The convention is `_import_<hostname>`, but six aliases drop the `cleat_`
+// prefix -- _import_uuid, _import_fetch, _import_side_effect, _import_get_scope,
+// _import_set_scope, _import_continue_as_new_versioned -- so the alias is NOT
+// the ABI name and treating it as one silently reports six phantom gaps.
+//
+// The rule is validated by its own output rather than asserted: applied to all
+// 44 aliases it lands every one of them on a real engine export, with nothing
+// missing. A wrong rule would produce names that resolve to nothing, and the
+// `missing` check above is what would report it.
+func pythonAliasToHostName(alias string) string {
+	if strings.HasPrefix(alias, "cleat_") || strings.HasPrefix(alias, "plugin_") {
+		return alias
+	}
+	if alias == "set_query_state" {
+		return alias
+	}
+	return "cleat_" + alias
+}
+
+// setDiff returns the members of a that are not in b.
+func setDiff(a, b []string) []string {
+	var out []string
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
