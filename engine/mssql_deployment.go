@@ -312,10 +312,11 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			abi_version = @p4,
 			min_version = @p5,
 			plugin_deps = @p6,
-			deprecated = @p7
-		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
-		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8);
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, string(pluginDepsJSON), def.Deprecated, s.tenantID)
+			deprecated = @p7,
+			max_history_length = @p9
+		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id, max_history_length)
+		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9);
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, string(pluginDepsJSON), def.Deprecated, s.tenantID, def.MaxHistoryLength)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}

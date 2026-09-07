@@ -1004,3 +1004,80 @@ func TestCountActiveInstances(t *testing.T) {
 		})
 	}
 }
+
+// TestMaxHistoryLengthRoundTripsThroughDeploy is the end-to-end half of
+// cleat#889, and it exists because the reachability guard cannot supply it.
+//
+// That guard answers "is this method called by production". It would have gone
+// green the moment DeployWorkflowDef named the column, whether or not the value
+// survived the write -- and the read half (GetCompactionCandidates resolving a
+// per-row threshold) would then have been driven by a column nothing could set,
+// which is the shape #889 exists to eliminate one layer up.
+//
+// So this drives the actual round trip on every registered backend: set a cap
+// at deploy, read it back through the same accessor compaction uses.
+func TestMaxHistoryLengthRoundTripsThroughDeploy(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			ctx := context.Background()
+
+			const name = "max-history-length-round-trip"
+
+			// 0 is the column default and means "use the global threshold". A
+			// deploy that does not set it must not change anything, which is
+			// what makes the field safe to add to an existing payload.
+			if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
+				Name: name, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
+			}); err != nil {
+				t.Fatalf("DeployWorkflowDef (unset): %v", err)
+			}
+			got, err := store.LoadWorkflowConfig(ctx, name, 1)
+			if err != nil {
+				t.Fatalf("LoadWorkflowConfig (unset): %v", err)
+			}
+			if got != 0 {
+				t.Errorf("an unset MaxHistoryLength must leave the column at its default 0, got %d", got)
+			}
+
+			// Set it.
+			if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
+				Name: name, Version: 2, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
+				MaxHistoryLength: 250,
+			}); err != nil {
+				t.Fatalf("DeployWorkflowDef (set): %v", err)
+			}
+			got, err = store.LoadWorkflowConfig(ctx, name, 2)
+			if err != nil {
+				t.Fatalf("LoadWorkflowConfig (set): %v", err)
+			}
+			if got != 250 {
+				t.Errorf("MaxHistoryLength did not survive the write: set 250, read %d.\n"+
+					"Before #889 nothing wrote this column at all, so a read of 0 here is "+
+					"the original defect rather than a new one.", got)
+			}
+
+			// A REDEPLOY of the same version must update it. This is the case
+			// that makes the deploy payload workable instead of forcing a
+			// version bump to retune a number: every dialect's upsert arm
+			// (ON CONFLICT / ON DUPLICATE KEY / MERGE WHEN MATCHED) has to name
+			// the column, and it is easy to add it to the insert arm only.
+			if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
+				Name: name, Version: 2, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
+				MaxHistoryLength: 400,
+			}); err != nil {
+				t.Fatalf("DeployWorkflowDef (redeploy): %v", err)
+			}
+			got, err = store.LoadWorkflowConfig(ctx, name, 2)
+			if err != nil {
+				t.Fatalf("LoadWorkflowConfig (redeploy): %v", err)
+			}
+			if got != 400 {
+				t.Errorf("a redeploy of the same version did not update MaxHistoryLength: "+
+					"set 400, read %d. The upsert arm is probably missing the column.", got)
+			}
+		})
+	}
+}

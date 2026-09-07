@@ -227,15 +227,16 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	// redeploy of the same version, which is an ordinary upsert.
 	// IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id, max_history_length)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 			wasm_bytes = EXCLUDED.wasm_bytes,
 			abi_version = EXCLUDED.abi_version,
 			min_version = EXCLUDED.min_version,
 			plugin_deps = EXCLUDED.plugin_deps,
-			deprecated = EXCLUDED.deprecated
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, tenantID)
+			deprecated = EXCLUDED.deprecated,
+			max_history_length = EXCLUDED.max_history_length
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, tenantID, def.MaxHistoryLength)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}

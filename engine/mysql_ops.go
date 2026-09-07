@@ -745,14 +745,15 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id, max_history_length)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			wasm_bytes = VALUES(wasm_bytes),
 			abi_version = VALUES(abi_version),
 			min_version = VALUES(min_version),
 			plugin_deps = VALUES(plugin_deps),
-			deprecated = VALUES(deprecated)
+			deprecated = VALUES(deprecated),
+			max_history_length = VALUES(max_history_length)
 	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("DeployWorkflowDef: %w", err)
