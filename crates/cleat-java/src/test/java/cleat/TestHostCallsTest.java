@@ -724,8 +724,12 @@ class TestHostCallsTest {
      * HashMap had been written to.
      *
      * <p>It cannot assert the SENDER waking, because awaitPromise returns
-     * immediately for a pending promise rather than suspending. Same gap as
-     * the Go, Rust and Python harnesses; see IMPROVEMENT-PLAN 3.235.
+     * immediately for a pending promise rather than suspending
+     * (IMPROVEMENT-PLAN 3.235). The Go harnesses had this and no longer do --
+     * they wait on a channel a concurrent resolver closes. That fix ports
+     * here, because TestHostCalls is an ordinary object a second thread can
+     * reach; it does not port to the Rust harnesses, whose state is in a
+     * RefCell.
      */
     @Test
     void testSendSignalAndWaitDeliversAReplyAddressAndTheOriginalPayload() {

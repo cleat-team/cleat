@@ -1716,8 +1716,11 @@ mod tests {
     /// address settles the promise the sender is waiting on.
     ///
     /// It cannot assert the SENDER waking, because await_promise returns
-    /// immediately for a pending promise rather than suspending -- the same
-    /// harness gap as the Go and cleat-sdk ones, IMPROVEMENT-PLAN 3.235.
+    /// immediately for a pending promise rather than suspending
+    /// (IMPROVEMENT-PLAN 3.235). The Go harnesses no longer have this; the
+    /// cleat-sdk mock still does, and for the same reason as here -- state in
+    /// a `RefCell`, no second thread to wait for, so the Go fix does not
+    /// port. See §3.235 for the shape that does.
     #[test]
     fn test_send_signal_and_wait_delivers_a_reply_address_and_the_original_payload() {
         let env = TestEnv::new();

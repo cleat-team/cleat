@@ -6389,7 +6389,7 @@ them". The list is now empty. The list-may-only-shrink property is what turned a
 a check that reported its own obsolescence, and it is the argument for writing the remedy into a
 failure message rather than into a comment.
 
-### 3.235 `cleattest`'s `AwaitPromise` cannot observe a promise anyone else resolves — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+### 3.235 A test harness's `AwaitPromise` cannot observe a promise anyone else resolves — 🟡 **GO FIXED 2026-09-06; RUST, PYTHON AND JAVA OPEN** (WS-1, 2026-09-06)
 
 Found while landing §3.220, which is what makes it matter: once a reply address is a promise ID,
 "can a test see a promise resolved by someone else" and "can a test see a request/reply round
@@ -6465,6 +6465,41 @@ waking with the reply, which §3.235 recorded as tested nowhere. Backing the wai
 with the symptom this section describes: `no reply to signal "ask" from workflow "target" within
 1s`. Plus a wake-on-resolve and a wake-on-reject test in each harness, because resolve and reject
 leave the wait by different branches.
+
+#### Still open: the same defect in three more harnesses
+
+**The marker on this section read 🟢 FIXED for the length of one PR, and that was wrong.** The fix
+landed in the two Go harnesses; the identical code is in three others, and this section's original
+title said "`cleattest`'s", which made a four-harness gap look like a one-harness one. Renamed.
+Re-derive with a read of the pending branch in each:
+
+| harness | file | pending branch |
+|---|---|---|
+| Go `cleattest` | `cleat/cleattest/cleattest.go` | **fixed** — selects on a `settled` channel |
+| Go `embedded` | `cleat/embedded/runner.go` | **fixed** — same |
+| Rust | `crates/cleat-test/src/lib.rs:924` | `PromiseState::Pending => { now_ms += timeout; (…, true, None) }` |
+| Python | `python-sdk/cleat_sdk/local_host.py:1053` | `# Pending — simulate timeout` |
+| Java | `crates/cleat-java/src/main/java/cleat/TestHostCalls.java:451` | `// Pending — advance time to simulate timeout` |
+
+AssemblyScript has no row: it ships no test harness with a promise store of its own.
+
+It was already recorded, in a place a reader of this section would not look — the Python test's own
+docstring says *"It cannot assert the SENDER waking … Same gap as the Go and Rust harnesses,
+IMPROVEMENT-PLAN 3.235."* So the consequence is the same in all three: **`SendSignalAndWait` always
+times out**, and the round trip §3.220 shipped is asserted in the engine and in Go, and nowhere
+else.
+
+**The Go fix does not port unchanged to all three, which is why this is not one commit away.** Go's
+fix waits on a channel a concurrent resolver closes. Python and Java can do that — both harnesses
+are ordinary mutable objects a second thread can reach. Rust cannot: `TestEnv` holds its state in a
+`RefCell` and is not `Sync`, so no second thread can settle the promise, and a blocking wait would
+have nothing to wait for.
+
+For Rust the shape has to be a **responder registered before the call** — the harness already loops
+a sent signal back onto its own queue, so `send_signal` can hand a signal carrying a reply address
+to a registered handler and settle the promise before the await ever reads it. That is a small API
+addition rather than a port, and it is worth considering for all three, because it tests the same
+last hop without depending on thread scheduling.
 
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)

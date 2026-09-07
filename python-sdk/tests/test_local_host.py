@@ -515,8 +515,12 @@ class TestCallErrorHandling:
         to request/reply (IMPROVEMENT-PLAN 3.220).
 
         It cannot assert the SENDER waking: await_promise_ms returns
-        immediately for a pending promise rather than suspending. Same gap as
-        the Go and Rust harnesses, IMPROVEMENT-PLAN 3.235.
+        immediately for a pending promise rather than suspending
+        (IMPROVEMENT-PLAN 3.235). The Go harnesses had this and no longer do --
+        they wait on a channel a concurrent resolver closes. That fix ports
+        here, because LocalHostCalls is an ordinary object a second thread can
+        reach; it does not port to the Rust harness, which holds its state in a
+        RefCell.
         """
         with pytest.raises(RuntimeError, match="no reply to signal"):
             host.send_signal_and_wait("target-run", "sig", '{"key":"val"}', 5.0)
