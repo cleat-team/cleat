@@ -250,6 +250,12 @@ type promiseState struct {
 	status string // "pending", "resolved", "rejected"
 	result string
 	errMsg string
+
+	// settled is closed by settlePromise the first time this promise leaves
+	// "pending". awaitPromise blocks on it; see its doc comment and
+	// IMPROVEMENT-PLAN 3.235. Nil is tolerated: a promiseState built by any
+	// route other than createPromise simply never wakes an awaiter.
+	settled chan struct{}
 }
 
 type childResult struct {
@@ -607,8 +613,9 @@ func (e *execution) createPromise(name string) (string, error) {
 	defer e.mu.Unlock()
 	id := uuid.New().String()
 	e.promises[id] = &promiseState{
-		name:   name,
-		status: "pending",
+		name:    name,
+		status:  "pending",
+		settled: make(chan struct{}),
 	}
 	return id, nil
 }
@@ -637,26 +644,84 @@ func (e *execution) settlePromise(promiseID, status, result, errMsg string) erro
 	if !ok {
 		return fmt.Errorf("embedded: settle promise %s: promise not found", promiseID)
 	}
+	wasPending := ps.status == "pending"
 	ps.status = status
 	ps.result = result
 	ps.errMsg = errMsg
+	// Only the first settlement closes the channel; closing a closed channel
+	// panics.
+	if wasPending && ps.settled != nil {
+		close(ps.settled)
+	}
 	return nil
 }
 
+// pendingAwaitCeiling bounds how long awaitPromise will really wait for a
+// pending promise, whatever timeout the workflow asked for. Same value and
+// same reasoning as cleattest's constant of the same name: workflows pass
+// production durations, and a test awaiting with 7*24*time.Hour must not hang
+// the suite for a week.
+const pendingAwaitCeiling = 2 * time.Second
+
 func (e *execution) awaitPromise(promiseID string, timeout time.Duration) (string, bool, error) {
+	// The map holds *promiseState, so its fields must be copied under the lock
+	// rather than read through the pointer afterwards. Reading them outside it
+	// was a data race with settlePromise -- pre-existing, and unobservable
+	// until this function could be waiting while another goroutine settled:
+	// `go test -race` reports it on the very first test that does
+	// (runner.go's read of ps.status against settlePromise's write).
 	e.mu.Lock()
 	ps, ok := e.promises[promiseID]
+	var status, result, errMsg string
+	var settled chan struct{}
+	if ok {
+		status, result, errMsg, settled = ps.status, ps.result, ps.errMsg, ps.settled
+	}
 	e.mu.Unlock()
 
 	if !ok {
 		return "", false, fmt.Errorf("embedded: promise %s not found", promiseID)
 	}
 
-	if ps.status == "resolved" {
-		return ps.result, false, nil
+	if status == "resolved" {
+		return result, false, nil
 	}
-	if ps.status == "rejected" {
-		return "", false, fmt.Errorf("promise rejected: %s", ps.errMsg)
+	if status == "rejected" {
+		return "", false, fmt.Errorf("promise rejected: %s", errMsg)
+	}
+
+	// Pending. Wait for a settlement rather than reporting a timeout without
+	// waiting at all, which is what this did until IMPROVEMENT-PLAN 3.235:
+	// a promise pending at the instant of the call could never be observed
+	// settling, so SendSignalAndWait -- a composite over CreatePromise +
+	// SignalWorkflow + AwaitPromise since §3.220 -- always timed out here.
+	//
+	// The runner drives one workflow at a time, so nothing in a plain
+	// embedded run settles a promise concurrently and this select falls
+	// through to the timeout as before. It is here because "single-threaded
+	// today" is a property of the runner, not of the API: a caller holding a
+	// promise ID may settle it from its own goroutine, and the old code could
+	// not see that no matter when it happened.
+	if settled != nil {
+		wait := timeout
+		if wait > pendingAwaitCeiling {
+			wait = pendingAwaitCeiling
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-settled:
+			e.mu.Lock()
+			status, result, errMsg = ps.status, ps.result, ps.errMsg
+			e.mu.Unlock()
+			if status == "resolved" {
+				return result, false, nil
+			}
+			if status == "rejected" {
+				return "", false, fmt.Errorf("promise rejected: %s", errMsg)
+			}
+		case <-timer.C:
+		}
 	}
 
 	// Simulate timeout by advancing clock.

@@ -1006,7 +1006,10 @@ func TestSendSignalAndWaitSendsAReplyAddressedEnvelope(t *testing.T) {
 	r.Register("test", func(ctx *Context) error {
 		h := ctx.H()
 
-		if _, err := h.SendSignalAndWait("target", "evt", `{"data":"x"}`, time.Second); err == nil {
+		// A short timeout: AwaitPromise really waits now
+		// (IMPROVEMENT-PLAN 3.235), and nothing replies to this signal, so
+		// the call costs whatever is passed here up to the 2s ceiling.
+		if _, err := h.SendSignalAndWait("target", "evt", `{"data":"x"}`, 50*time.Millisecond); err == nil {
 			return errors.New("expected a timeout: nothing replied")
 		}
 
@@ -1035,6 +1038,54 @@ func TestSendSignalAndWaitSendsAReplyAddressedEnvelope(t *testing.T) {
 			return fmt.Errorf("expected the reply, got %q", got)
 		}
 
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+// TestAwaitPromiseWakesOnASettlementFromAnotherGoroutine asserts that the
+// embedded runner's AwaitPromise waits for a settlement rather than reading
+// the status once and reporting a timeout (IMPROVEMENT-PLAN 3.235).
+//
+// The runner drives one workflow at a time, so this cannot happen during an
+// ordinary embedded run -- which is exactly why the defect survived here: the
+// old code was indistinguishable from correct as long as nothing else could
+// settle a promise. Nothing else could settle a promise because the API had no
+// settle call at all until §3.220 added ResolvePromise and RejectPromise.
+// Single-threaded is a property of the runner, not of the handle: the workflow
+// below hands its own HostCalls to a goroutine, which is all it takes.
+func TestEmbeddedAwaitPromiseWakesOnASettlementFromAnotherGoroutine(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+
+		promiseID, err := h.CreatePromise("awaited")
+		if err != nil {
+			return fmt.Errorf("CreatePromise: %w", err)
+		}
+
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = h.ResolvePromise(promiseID, "settled-elsewhere")
+		}()
+
+		got, timedOut, err := h.AwaitPromise(promiseID, time.Second)
+		if err != nil {
+			return fmt.Errorf("AwaitPromise: %w", err)
+		}
+		if timedOut {
+			return errors.New("AwaitPromise timed out on a promise resolved 20ms in")
+		}
+		if got != "settled-elsewhere" {
+			return fmt.Errorf("expected %q, got %q", "settled-elsewhere", got)
+		}
 		ctx.SetOutput(`{"ok":true}`)
 		return nil
 	})
