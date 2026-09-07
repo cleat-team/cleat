@@ -257,6 +257,27 @@ jobs:
       - name: Dead-export code guard
         run: scripts/check-dead-exports.sh
 
+      # Third sibling, and it closes the one shape the other two structurally
+      # cannot see. U1000 skips EXPORTED identifiers -- correct for a library,
+      # meaningless for `package main`, where nothing can import the package and
+      # "exported" carries no information. An exported, test-only function in
+      # cmd/ is therefore invisible to both guards above.
+      #
+      # Not hypothetical: #829 records StartAPIServer -- exported, package main,
+      # called only by two tests, and the sole caller of registerRoutes, which is
+      # why seven API routes were unreachable from the shipped binary. The
+      # test-only guard reported "OK" on that tree.
+      #
+      # Measured 2026-09-06 with a matched pair in cmd/cleat-worker: an
+      # unexported test-only func is caught by the guard above; the identical
+      # exported one is not, and is caught here.
+      #
+      # deadcode computes reachability from main(), so exportedness never enters
+      # into it. Baseline is 14 entries -- findings in cmd/'s OWN files only; the
+      # whole-program set is ~400 and is the other two guards' ground.
+      - name: Unreachable-from-main guard
+        run: scripts/check-unreachable-main.sh
+
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
