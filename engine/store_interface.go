@@ -50,6 +50,30 @@ type WorkflowStore interface {
 	// Like ClaimWorkflow but batches multiple claims into one query.
 	ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error)
 
+	// CountRunnableWorkflows counts rows a claim would be entitled to take, and
+	// exists so a worker can tell "nothing to run" from "everything was locked".
+	//
+	// ClaimWorkflows selects candidates with FOR UPDATE SKIP LOCKED (READPAST on
+	// SQL Server), so a locked row is REMOVED from the result set rather than
+	// blocking. A zero claim therefore has two meanings and the caller cannot
+	// distinguish them -- and cmd/cleat-worker backs off progressively on the
+	// zero, to 6x pollInterval. See IMPROVEMENT-PLAN 3.249 for the measurement.
+	//
+	// It MUST use the same predicate as this store's ClaimWorkflows, including
+	// task_queue and the tenant scoping, which differs per dialect: PostgreSQL
+	// relies on RLS inside beginTxWithRLS, MySQL and SQL Server carry an
+	// explicit tenant_id. Counting without task_queue over-reports -- rows a
+	// worker is correctly declining to claim would read as work it is missing --
+	// which was the one flaw in cleat#923 as originally filed.
+	//
+	// This is a deliberate interface addition with four implementers, made
+	// because the alternative does not achieve the goal: logging the backoff
+	// state alone cannot distinguish a stalled worker from a genuinely idle one,
+	// since both emit the same line. It has a production caller from the first
+	// commit (cmd/cleat-worker/setup.go), unlike the unwired options 3.889 is
+	// about.
+	CountRunnableWorkflows(ctx context.Context) (int, error)
+
 	// ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
 	// that are sticky to this worker. Uses idx_instances_sticky for low-contention
 	// claiming. Returns fewer than limit if not enough sticky workflows are ready.
