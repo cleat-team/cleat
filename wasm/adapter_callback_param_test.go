@@ -42,8 +42,7 @@ import (
 // it. The mention-test called that clean and, because the same commit had just
 // widened the scan to cover hostWrapperDefs, it was clean ON THE COVERED LIST
 // -- worse than being out of scope, because the list now asserted it had been
-// checked. Found by WS-3 (session_01... , reported 2026-09-07) reading the
-// merged guard, not by the guard.
+// checked. Found by WS-3 reading the merged guard, not by the guard.
 //
 // So: a parameter is REACHED if the body does anything with it other than
 // forward it into another generated function whose matching parameter is
@@ -83,9 +82,20 @@ var callbackParamsNotPassedToTheHost = map[string]string{
 }
 
 type callbackSite struct {
+	origin string // which map: the two share three names, see the collision test
 	name   string
 	params []adapterParam
 	body   string
+}
+
+// qualified is the key this analysis is indexed by. It carries the map name
+// because adapterDefs and hostWrapperDefs are separate namespaces that overlap:
+// DurableSleep, Now and AcquireLock are each defined in both, with different
+// parameters. Keyed by bare name, two different functions' parameters would
+// merge into one entry, and a forward would resolve to whichever of the two Go
+// happened to iterate last -- a guard whose answer changes between runs.
+func (s callbackSite) qualified(param string) string {
+	return s.origin + ":" + s.name + "." + param
 }
 
 func generatedCallbackSites(t *testing.T) []callbackSite {
@@ -96,13 +106,18 @@ func generatedCallbackSites(t *testing.T) []callbackSite {
 	// would have left DurableCallTypedWithHeartbeat unchecked.
 	var sites []callbackSite
 	for name, def := range adapterDefs {
-		sites = append(sites, callbackSite{name, def.Params,
+		sites = append(sites, callbackSite{"adapterDefs", name, def.Params,
 			strings.Join(append(append([]string{}, def.PreStmts...), def.ResultStmts...), "\n")})
 	}
 	for name, def := range hostWrapperDefs {
-		sites = append(sites, callbackSite{name, def.Params, strings.Join(def.Body, "\n")})
+		sites = append(sites, callbackSite{"hostWrapperDefs", name, def.Params, strings.Join(def.Body, "\n")})
 	}
-	sort.Slice(sites, func(i, j int) bool { return sites[i].name < sites[j].name })
+	sort.Slice(sites, func(i, j int) bool {
+		if sites[i].name != sites[j].name {
+			return sites[i].name < sites[j].name
+		}
+		return sites[i].origin < sites[j].origin
+	})
 	return sites
 }
 
@@ -121,21 +136,43 @@ func reachedCallbackParams(t *testing.T, sites []callbackSite) map[string]bool {
 		callee string
 		index  int
 	}
-	direct := map[string]bool{}     // "Fn.param" -> body does something else with it
-	forwards := map[string][]edge{} // "Fn.param" -> parameters it is handed to
+	direct := map[string]bool{}     // qualified key -> body does something else with it
+	forwards := map[string][]edge{} // qualified key -> parameters it is handed to
 	known := map[string]callbackSite{}
+	byName := map[string][]callbackSite{}
 	for _, s := range sites {
-		known[s.name] = s
+		known[s.origin+":"+s.name] = s
+		byName[s.name] = append(byName[s.name], s)
 	}
 
-	// The generated typed wrappers call the adapters through a "host_" prefix.
-	resolve := func(callee string) (string, bool) {
-		for _, n := range []string{callee, strings.TrimPrefix(callee, "host_")} {
-			if _, ok := known[n]; ok {
-				return n, true
-			}
+	// Resolve a called name to the site it means, or report that it is not one
+	// of ours -- which is the good case, since an import is the ABI crossing
+	// this guard exists to confirm.
+	//
+	// "host_X" is how a generated wrapper names an adapter, so that prefix
+	// picks adapterDefs specifically. A bare name that exists in both maps is
+	// genuinely ambiguous and fails rather than guessing: guessing here would
+	// resolve a forward to SOMETHING rather than nothing, and this analysis
+	// treats "forwarded somewhere unknown" as reached, so a wrong guess fails
+	// toward the flattering answer.
+	resolve := func(callee string) (callbackSite, bool) {
+		if bare := strings.TrimPrefix(callee, "host_"); bare != callee {
+			site, ok := known["adapterDefs:"+bare]
+			return site, ok
 		}
-		return "", false
+		candidates := byName[callee]
+		switch len(candidates) {
+		case 0:
+			return callbackSite{}, false
+		case 1:
+			return candidates[0], true
+		default:
+			t.Fatalf("a generated body calls %q, which is defined in both adapterDefs and "+
+				"hostWrapperDefs with different parameters. This analysis cannot tell which one "+
+				"the call means, and guessing fails toward \"reached\". Give the call the "+
+				"\"host_\" prefix if it means the adapter, or qualify it here.", callee)
+			return callbackSite{}, false
+		}
 	}
 
 	for _, site := range sites {
@@ -157,7 +194,7 @@ func reachedCallbackParams(t *testing.T, sites []callbackSite) map[string]bool {
 			if !strings.HasPrefix(p.Type, "func(") {
 				continue
 			}
-			key := site.name + "." + p.Name
+			key := site.qualified(p.Name)
 
 			// Every mention of the parameter inside the body...
 			total := 0
@@ -190,7 +227,7 @@ func reachedCallbackParams(t *testing.T, sites []callbackSite) map[string]bool {
 				for i, arg := range call.Args {
 					if id, ok := arg.(*ast.Ident); ok && id.Name == p.Name {
 						forwarded++
-						forwards[key] = append(forwards[key], edge{target, i})
+						forwards[key] = append(forwards[key], edge{target.origin + ":" + target.name, i})
 					}
 				}
 				return true
@@ -217,7 +254,7 @@ func reachedCallbackParams(t *testing.T, sites []callbackSite) map[string]bool {
 				if e.index >= len(callee.params) {
 					continue // arity mismatch: not a forward we can follow
 				}
-				if reached[e.callee+"."+callee.params[e.index].Name] {
+				if reached[callee.qualified(callee.params[e.index].Name)] {
 					reached[key] = true
 					changed = true
 					break
@@ -237,16 +274,22 @@ func TestEveryCallbackParameterReachesTheGeneratedBody(t *testing.T) {
 			if !strings.HasPrefix(p.Type, "func(") {
 				continue
 			}
+			// Two keys, deliberately. Reachability is indexed by map as well as
+			// name, because the two maps share three names. The exemption list
+			// is keyed by bare "Function.parameter" because that is what a
+			// person writes and reads -- safe only while no shared name carries
+			// a callback, which TestTheTwoMapsDoNotShareANameWithACallback is
+			// what enforces.
 			key := site.name + "." + p.Name
 			why, exempt := callbackParamsNotPassedToTheHost[key]
 
 			switch {
-			case reached[key] && exempt:
+			case reached[site.qualified(p.Name)] && exempt:
 				t.Errorf("%s DOES reach the host, but is still listed in "+
 					"callbackParamsNotPassedToTheHost.\n\nDelete the entry: an exemption that no "+
 					"longer describes a violation is a grant covering whatever is added next.\n"+
 					"Reason on file: %s", key, why)
-			case !reached[key] && !exempt:
+			case !reached[site.qualified(p.Name)] && !exempt:
 				t.Errorf("%s takes a callback parameter %q of type %s that never reaches the host, "+
 					"so a workflow that supplies one is handed a callback the engine will never "+
 					"invoke.\n\nThe body may still MENTION it -- forwarding it to another generated "+
@@ -306,17 +349,17 @@ func TestTheGuardSeesThroughOneHopOfForwarding(t *testing.T) {
 
 	sites := []callbackSite{
 		// Drops it: mentions it nowhere.
-		{"Sink", []adapterParam{{"a", "string"}, sink}, `_ = a`},
+		{"adapterDefs", "Sink", []adapterParam{{"a", "string"}, sink}, `_ = a`},
 		// Mentions it, only to hand it to the one that drops it. This is
 		// DurableCallTypedWithHeartbeat, and #856 called it clean.
-		{"Forwarder", []adapterParam{{"a", "string"}, sink}, `host_Sink(a, onProgress)`},
+		{"adapterDefs", "Forwarder", []adapterParam{{"a", "string"}, sink}, `host_Sink(a, onProgress)`},
 		// Hands it to an import: reaches the host, which is the good case.
-		{"Reacher", []adapterParam{{"a", "string"}, sink}, `cleatSomeImport(a, onProgress)`},
+		{"adapterDefs", "Reacher", []adapterParam{{"a", "string"}, sink}, `cleatSomeImport(a, onProgress)`},
 		// Calls it outright: also good.
-		{"Caller", []adapterParam{{"a", "string"}, sink}, `onProgress(a)`},
+		{"adapterDefs", "Caller", []adapterParam{{"a", "string"}, sink}, `onProgress(a)`},
 		// Names it in a comment and nowhere else. A text search reads this as
 		// a use; an AST walk does not.
-		{"Commenter", []adapterParam{{"a", "string"}, sink}, "// onProgress is deliberately not called yet\n_ = a"},
+		{"adapterDefs", "Commenter", []adapterParam{{"a", "string"}, sink}, "// onProgress is deliberately not called yet\n_ = a"},
 	}
 
 	reached := reachedCallbackParams(t, sites)
@@ -332,12 +375,53 @@ func TestTheGuardSeesThroughOneHopOfForwarding(t *testing.T) {
 		{"Caller", true, "invokes it directly"},
 		{"Commenter", false, "mentions it in a comment, which is not a use"},
 	} {
-		if got := reached[tc.site+".onProgress"]; got != tc.want {
+		if got := reached["adapterDefs:"+tc.site+".onProgress"]; got != tc.want {
 			t.Errorf("%s.onProgress: reached=%v, want %v -- %s", tc.site, got, tc.want, tc.why)
 		}
 	}
 
 	if t.Failed() {
 		t.Log(fmt.Sprintf("reached map: %v", reached))
+	}
+}
+
+// TestTheTwoMapsDoNotShareANameWithACallback protects the assumption the
+// exemption list rests on: that "Function.parameter" names one parameter.
+//
+// adapterDefs and hostWrapperDefs are separate namespaces and they DO overlap
+// -- as of 2026-09-07, DurableSleep, Now and AcquireLock are each defined in
+// both, with different parameters (43 adapters, 12 wrappers, 3 shared names).
+// So a blanket "no name appears twice" assertion would fail on a clean tree and
+// is the wrong check. What matters is narrower: the analysis keys on the map as
+// well as the name and is unaffected, but an EXEMPTION written as
+// "AcquireLock.onProgress" would be ambiguous between two real functions.
+//
+// None of the three carries a function-typed parameter today, which is why
+// #869's bare exemption keys are safe. This fails the moment that stops being
+// true, rather than silently exempting whichever of the two Go iterated last.
+//
+// Raised by WS-3 against #869: a collision makes a forward resolve to SOMETHING
+// rather than nothing, and this analysis reads "forwarded somewhere unknown" as
+// reached -- so the failure direction is the flattering one.
+func TestTheTwoMapsDoNotShareANameWithACallback(t *testing.T) {
+	hasCallback := func(params []adapterParam) bool {
+		for _, p := range params {
+			if strings.HasPrefix(p.Type, "func(") {
+				return true
+			}
+		}
+		return false
+	}
+	for name, adapter := range adapterDefs {
+		wrapper, shared := hostWrapperDefs[name]
+		if !shared {
+			continue
+		}
+		if hasCallback(adapter.Params) || hasCallback(wrapper.Params) {
+			t.Errorf("%q is defined in BOTH adapterDefs and hostWrapperDefs and now has a "+
+				"function-typed parameter.\n\nThe exemption list is keyed \"Function.parameter\", "+
+				"which no longer names one parameter for %q. Qualify the affected exemption key "+
+				"with its map, the way the analysis already keys itself.", name, name)
+		}
 	}
 }
