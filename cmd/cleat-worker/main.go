@@ -874,6 +874,7 @@ func main() {
 		compactionThreshold:              *compactionThreshold,
 		compactionInterval:               *compactionInterval,
 		pluginRegistry:                   pluginRegistry,
+		pluginStreamRegistry:             pluginStreamRegistry,
 		plugList:                         plugList,
 		tenantPools:                      tenantPools,
 		memorySampleRetention:            *memorySampleRetention,
