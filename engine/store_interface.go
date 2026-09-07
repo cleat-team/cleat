@@ -22,6 +22,23 @@ type SignalDelivery struct {
 	// Payload is the delivered body, already decoded out of the JSON wrapper
 	// the payload column requires (see decodeJSONPayload).
 	Payload string
+	// DeliveredAtMs is when the signal was stored, in Unix milliseconds, from
+	// the workflow_signals.delivered_at column.
+	//
+	// It exists so a non-blocking poll can be answered as a function of
+	// recorded state rather than of when the poll happens to run. PollSignal
+	// used to re-query live on every execution, so a poll that answered "no
+	// signal" before a suspension answered "yes, and here is the payload" after
+	// it -- carrying a payload that did not exist when that line first ran
+	// (#882). The fix compares this against the session's durable clock, which
+	// is the same derivation #847 settled on for PollChild.
+	//
+	// Zero means the store did not populate it. Every real store does; the
+	// value is NOT NULL DEFAULT now() in all three schemas. A zero therefore
+	// means a test double, and is treated as visible so that doubles keep
+	// their previous behaviour. TestEveryPollSignalSelectsDeliveredAt is what
+	// stops a real implementation joining that population silently.
+	DeliveredAtMs int64
 }
 
 type WorkflowStore interface {

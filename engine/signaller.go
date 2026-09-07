@@ -147,17 +147,60 @@ func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reason
 // waiting and does NOT consume it, so a workflow can poll in a loop without
 // draining the queue. Only the await paths consume, and only after recording
 // the event that makes the consumption replayable.
+// PollSignal is the non-blocking counterpart to DurableAwaitSignals: it answers
+// immediately rather than suspending.
+//
+// It records no event, and does not need to. The rule replay requires is not
+// "everything writes an event" -- DurableSleep is deterministic and stores
+// nothing -- but "the answer is a function of recorded state". A signal's
+// delivered_at is recorded state, and the session's durable clock is too, so
+// the answer is derived from the two. That is the same resolution #847 reached
+// for PollChild, arrived at independently and for the same reason.
+//
+// Before this, PollSignal re-queried the store live on every execution, with no
+// isReplay check at all, unlike SignalWorkflow immediately below it. So a poll
+// that answered "nothing" before a suspension answered "yes, here is the
+// payload" after the prefix re-ran -- returning a payload that did not exist
+// when that line first executed (#882).
+//
+// A sweep of all 50 host-call entry points found exactly two reading live state
+// without replay handling: PollChild and this. The family is closed.
 func (s *execSession) PollSignal(ctx context.Context, m api.Module, signalName string, payloadPtr, payloadMaxLen uint32) int64 {
 	if s.engine.signalStore != nil {
 		d, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, signalName)
-		if err == nil && found {
-
+		if err == nil && found && s.signalIsVisibleNow(d) {
 			written, _ := s.writeResult(ctx, m, payloadPtr, d.Payload, payloadMaxLen)
 			flags := uint32(0x0100) // found=true
 			return int64(uint64(written)<<32 | uint64(flags))
 		}
 	}
 	return 0 // not found
+}
+
+// signalIsVisibleNow reports whether a delivery had already arrived as of this
+// session's durable clock.
+//
+// A signal delivered AFTER that instant was not visible to the original
+// execution, so no replay may see it either -- that is the whole of #882.
+//
+// A zero DeliveredAtMs means the store did not populate it, which no real store
+// does: the column is NOT NULL DEFAULT now() in all three schemas, and
+// TestEveryPollSignalSelectsDeliveredAt holds them to it. Only a test double
+// reaches this, and it is treated as visible so doubles keep behaving as they
+// did.
+//
+// The comparison is not exact and cannot be. delivered_at is written by the
+// DATABASE clock (now()), while nowMs derives from the WORKER clock via
+// rec.TimestampMs -- measured 40-60ms apart on two machines (#804). A signal
+// delivered within that window of the poll may fall on either side. What the
+// comparison guarantees is the property that matters: the answer depends only
+// on two recorded values, so it is the same on every replay. It is
+// deterministic, not precise, and those are different claims.
+func (s *execSession) signalIsVisibleNow(d SignalDelivery) bool {
+	if d.DeliveredAtMs == 0 {
+		return true
+	}
+	return d.DeliveredAtMs <= s.nowMs
 }
 
 // SendSignalAndWait and ReplyToSignal lived here until 2026-09-06 and were

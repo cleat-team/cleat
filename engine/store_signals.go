@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
@@ -202,19 +203,24 @@ func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName s
 
 	var id int64
 	var payload string
+	var deliveredAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, payload FROM workflow_signals
+		SELECT id, payload, delivered_at FROM workflow_signals
 		WHERE workflow_id = $1 AND signal_name = $2
 		ORDER BY id
 		LIMIT 1
-	`, workflowID, signalName).Scan(&id, &payload)
+	`, workflowID, signalName).Scan(&id, &payload, &deliveredAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SignalDelivery{}, false, tx.Rollback()
 	}
 	if err != nil {
 		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", err)
 	}
-	return SignalDelivery{ID: id, Payload: decodeJSONPayload(payload)}, true, tx.Commit()
+	return SignalDelivery{
+		ID:            id,
+		Payload:       decodeJSONPayload(payload),
+		DeliveredAtMs: deliveredAt.UnixMilli(),
+	}, true, tx.Commit()
 }
 
 // PollCancellation satisfies the SignalStore interface.

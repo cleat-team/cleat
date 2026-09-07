@@ -64,18 +64,23 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
 	var id int64
 	var payload string
+	var deliveredAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT TOP 1 id, payload FROM workflow_signals
+		SELECT TOP 1 id, payload, delivered_at FROM workflow_signals
 		WHERE workflow_id = @p1 AND signal_name = @p2 AND tenant_id = @p3
 		ORDER BY id
-	`, workflowID, signalName, s.tenantID).Scan(&id, &payload)
+	`, workflowID, signalName, s.tenantID).Scan(&id, &payload, &deliveredAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SignalDelivery{}, false, nil
 	}
 	if err != nil {
 		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", err)
 	}
-	return SignalDelivery{ID: id, Payload: decodeJSONPayload(payload)}, true, nil
+	return SignalDelivery{
+		ID:            id,
+		Payload:       decodeJSONPayload(payload),
+		DeliveredAtMs: deliveredAt.UnixMilli(),
+	}, true, nil
 }
 
 func (s *MSSQLStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
