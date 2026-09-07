@@ -467,8 +467,24 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			}
 
 			// Exponential backoff using host time (not DurableSleep).
+			//
+			// `maxIntervalMs > 0` is the whole of this fix, and its absence was
+			// not a small bug: MaxInterval is an OPTIONAL field on RetryPolicy,
+			// so a policy that leaves it at its zero value had every backoff
+			// clamped to 0 and then raised to the 1ms floor below. Retries
+			// happened, immediately, and the configured InitialInterval was
+			// silently ignored. Measured: six attempts at a 2s interval
+			// completed in 384ms.
+			//
+			// retryPolicyFitsBudget, in this same file, always had the guard --
+			// `if maxInterval > 0 && interval > maxInterval`. So the budget
+			// check and the executor disagreed about what the same policy
+			// meant: the check computed the worst case from the unclamped
+			// intervals and could reject a policy as too long, while the
+			// executor would have run it in a millisecond per attempt. Zero
+			// means "no maximum" in one and "maximum of zero" in the other.
 			backoffMs := initialIntervalMs * int64(math.Pow(float64(backoffCoefficient100x)/100.0, float64(attempt-1)))
-			if backoffMs > maxIntervalMs {
+			if maxIntervalMs > 0 && backoffMs > maxIntervalMs {
 				backoffMs = maxIntervalMs
 			}
 			if backoffMs < 1 {
