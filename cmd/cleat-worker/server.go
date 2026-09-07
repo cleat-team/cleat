@@ -401,8 +401,13 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 }
 
 // handleGetTerminalRun serves GET /api/workflows/:id/terminal -- the last run
-// in this id's ContinueAsNew chain, which is the one carrying the result a
-// caller is waiting for. cleat#887.
+// in this id's ContinueAsNew chain AS OF NOW. cleat#887.
+//
+// The run it returns may still be 'running' with an empty result: "terminal"
+// names the end of the chain, not a terminal status, and while the workflow is
+// working the last recorded link is the one executing. A client must poll on
+// `status` rather than assume a 200 carries an outcome. This comment said
+// otherwise until #904, and a test believed it.
 //
 // A SEPARATE route rather than a `?follow=1` on the handler above. Both were on
 // the table; the sub-resource wins because the existing URL keeps returning

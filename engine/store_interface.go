@@ -216,13 +216,36 @@ type WorkflowStore interface {
 	GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error)
 
 	// GetTerminalRun follows a ContinueAsNew chain forward from id and returns
-	// the last run in it -- the one carrying the result the caller is waiting
-	// for. cleat#826, cleat#887.
+	// the last run in it AS OF NOW. cleat#826, cleat#887.
+	//
+	// "Terminal" names the END OF THE CHAIN, not a terminal STATUS, and the
+	// two come apart for exactly as long as the workflow is still working:
+	//
+	//	the run this returns may be 'running', with an empty result
+	//
+	// because the last link recorded so far is the one currently executing.
+	// The caller must poll on the returned run's STATUS; it must not assume
+	// that a non-nil answer carries a result. This doc comment claimed the
+	// opposite until #904 -- it said this returned "the one carrying the
+	// result the caller is waiting for", which is true only once the chain has
+	// finished, and a port-suite test believed it and dereferenced a nil
+	// result. The failure read as a shape problem and was a timing one.
+	//
+	// The trap underneath is worth stating, because it is not obvious: the
+	// FIRST run of a chain reaches a terminal status the instant it continues.
+	// So "the run I started is done" is true almost immediately and means
+	// nothing about the chain. Waiting on the id you started is not waiting
+	// for the work.
 	//
 	// A workflow that never continued is its own terminal run, so this is
 	// equivalent to GetWorkflowByID for the overwhelming majority of ids. A
 	// workflow that continued N times is reached in N hops. Returns nil, nil
 	// when id names no workflow, matching GetWorkflowByID.
+	//
+	// The name is kept rather than corrected to something like GetLatestRun:
+	// it is the end of the chain that callers ask for, and renaming an already
+	// released method to fix a doc comment trades a wrong sentence for a
+	// breaking change.
 	//
 	// COST: one indexed seek per hop, plus one full read at the end, rather
 	// than a single query. A recursive CTE would collapse that to one round
