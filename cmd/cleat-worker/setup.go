@@ -1104,7 +1104,6 @@ func (w *Worker) Run() {
 	initLoopCtx("memory_cleanup")
 	initLoopCtx("retention")
 	initLoopCtx("compaction")
-	initLoopCtx("update_dispatch")
 
 	// Background heartbeat goroutine.
 	w.registerLoopFunc("heartbeat", w.heartbeatLoop)
@@ -1142,7 +1141,22 @@ func (w *Worker) Run() {
 	w.registerLoopFunc("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays) })
 	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays) })
 
-	// Update dispatch loop (Feature 3: Update Handler).
+	// Compaction loop.
+	//
+	// This line did not exist until cleat#877, and its absence was the whole
+	// defect: compactionLoop has been defined and never started since it was
+	// written -- at 0d006730^ it was likewise defined and never called, so
+	// history compaction had NEVER run in any deployment.
+	//
+	// Everything around it was already here, which is what made it invisible:
+	// the --compaction-threshold and --compaction-interval flags, both plumbed
+	// through main.go; GetCompactionCandidates on all three dialects;
+	// CompactWorkflowHistory; extractCompactionState's fuzz test;
+	// compactionLoop's own unit tests; the health tracker's "compaction"
+	// interval; and initLoopCtx("compaction") three lines up, preparing a
+	// context for a goroutine nothing spawned.
+	w.registerLoopFunc("compaction", w.compactionLoop)
+	w.launchLoop("compaction", w.compactionLoop)
 
 	// Watchdog loop for background loop health monitoring.
 	if w.healthCheckInterval > 0 {
