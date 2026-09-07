@@ -271,6 +271,10 @@ func (m *mockStore) GetWorkflowByID(ctx context.Context, id string) (*engine.Wor
 	return nil, nil
 }
 
+func (m *mockStore) GetTerminalRun(ctx context.Context, id string) (*engine.WorkflowInstance, error) {
+	return nil, nil
+}
+
 func (m *mockStore) CreateSchedule(ctx context.Context, s engine.Schedule) error {
 	if m.createScheduleFn != nil {
 		return m.createScheduleFn(ctx, s)
