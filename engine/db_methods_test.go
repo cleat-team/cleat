@@ -5089,6 +5089,37 @@ func TestPostgresStore_LoadDAGSpec_NotFound(t *testing.T) {
 	}
 }
 
+// TestPostgresStore_LoadDAGSpec_NullSpec is the case that was missing, and the
+// one that actually happens.
+//
+// The two tests either side of this cover "no row at all" and "the query
+// failed". Neither covers a row whose dag_spec is NULL -- which is EVERY
+// workflow that is not a DAG, so it is not an edge case, it is the common one.
+//
+// Without it, PostgreSQL scanned NULL into a json.RawMessage and returned
+//
+//	sql: Scan error on column index 0, name "dag_spec": unsupported Scan,
+//	storing driver.Value type <nil> into type *jsontext.Value
+//
+// straight out of GET /api/workflows/{id}/dag, while the function's own doc
+// comment promised "or nil if none". MySQL and SQL Server both handled it.
+func TestPostgresStore_LoadDAGSpec_NullSpec(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT dag_spec", data: [][]driver.Value{{nil}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	spec, err := store.LoadDAGSpec(testCtx, "not-a-dag", 1)
+	if err != nil {
+		t.Fatalf("a NULL dag_spec must not be an error, it is the normal case for "+
+			"any workflow that is not a DAG: %v", err)
+	}
+	if spec != nil {
+		t.Errorf("expected nil spec for a NULL column, got %q", string(spec))
+	}
+}
+
 func TestPostgresStore_LoadDAGSpec_QueryError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT dag_spec", err: errors.New("db error")},
