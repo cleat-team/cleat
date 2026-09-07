@@ -130,13 +130,13 @@ try:
         fetch as _import_fetch,
     )
     from wit_world.imports.durable_handlers import (
-        durable_register_update_handler as _import_cleat_register_update_handler,
+        durable_complete_update as _import_cleat_complete_update,
     )
     from wit_world.imports.durable_handlers import (
         durable_poll_update as _import_cleat_poll_update,
     )
     from wit_world.imports.durable_handlers import (
-        durable_complete_update as _import_cleat_complete_update,
+        durable_register_update_handler as _import_cleat_register_update_handler,
     )
     from wit_world.imports.durable_identity import (
         durable_run_id as _import_cleat_run_id,
