@@ -71,6 +71,13 @@ func main() {
 		os.Exit(runVerifyBackend(os.Stdout))
 	}
 
+	// Likewise --list-plugins: a plugin is registered by an init() in a linked
+	// package, so this answers "what does this binary actually have" without a
+	// database, a config file, or reading the source. See IMPROVEMENT-PLAN 3.315.
+	if *listPlugins {
+		os.Exit(runListPlugins(os.Stdout))
+	}
+
 	// Apply CLEAT_CHILD_BINDING_OVERRIDE env var as fallback when the flag is not set.
 	applyChildBindingOverrideEnv()
 

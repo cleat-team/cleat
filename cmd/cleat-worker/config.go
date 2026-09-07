@@ -151,6 +151,7 @@ var (
 	logLevel                       = flag.String("log-level", "info", "Log level: debug, info, warn, error")
 	enableAdminAPI                 = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
 	verifyBackend                  = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
+	listPlugins                    = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
 )
 
 func applyChildBindingOverrideEnv() {
