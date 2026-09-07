@@ -185,6 +185,16 @@ type promiseState struct {
 	status   string // "pending", "resolved", "rejected"
 	result   string
 	errorMsg string
+
+	// settled is closed by settlePromise the first time this promise leaves
+	// "pending", so awaitPromiseImpl can block on it rather than reading the
+	// status once and giving up. The map holds promiseState by value, but a
+	// channel is a reference, so every copy of the struct shares this one.
+	//
+	// Nil is tolerated throughout: a promiseState built by any route other
+	// than createPromiseImpl simply never wakes an awaiter, which is the old
+	// behaviour rather than a panic.
+	settled chan struct{}
 }
 
 type pluginCallStub struct {
@@ -1082,10 +1092,17 @@ func (e *TestEnv) settlePromise(promiseID, status, result, errMsg string) bool {
 	if !ok {
 		return false
 	}
+	wasPending := ps.status == "pending"
 	ps.status = status
 	ps.result = result
 	ps.errorMsg = errMsg
 	e.promises[promiseID] = ps
+	// Only the first settlement closes the channel. A second settle of the
+	// same promise still reports true -- that is a separate question, tracked
+	// as IMPROVEMENT-PLAN 3.233 -- but closing a closed channel panics.
+	if wasPending && ps.settled != nil {
+		close(ps.settled)
+	}
 	return true
 }
 
@@ -1366,8 +1383,9 @@ func (e *TestEnv) createPromiseImpl(name string) (string, error) {
 	e.deferCounter++
 	promiseID := fmt.Sprintf("prom-%s-%d", name, e.deferCounter)
 	e.promises[promiseID] = promiseState{
-		name:   name,
-		status: "pending",
+		name:    name,
+		status:  "pending",
+		settled: make(chan struct{}),
 	}
 	return promiseID, nil
 }
@@ -1412,6 +1430,37 @@ func (e *TestEnv) DetachedRuns() []DetachedRun {
 	return out
 }
 
+// pendingAwaitCeiling bounds how long awaitPromiseImpl will really wait for a
+// pending promise, whatever timeout the workflow asked for.
+//
+// A ceiling is required rather than merely prudent: workflows pass durations
+// chosen for production, and a test that awaits with 7*24*time.Hour must not
+// hang the suite for a week. It is deliberately NOT the timeout itself.
+//
+// Two seconds, not two milliseconds. The cost is paid only on a genuine miss
+// -- a settlement wins immediately through the channel -- so the ceiling is
+// slack for a resolver goroutine that has not been scheduled yet, and slack is
+// what stops a wake-up test flaking on a loaded machine. A test that wants a
+// prompt timeout should pass a short timeout, which is exact rather than
+// merely bounded; TestSendSignalAndWaitTimeout passes 10ms and costs 10ms.
+const pendingAwaitCeiling = 2 * time.Second
+
+// awaitPromiseImpl returns a promise's settled value, waiting for one that is
+// still pending.
+//
+// It used to read the status once: resolved or rejected it returned, and
+// pending it advanced the mock clock by the whole timeout and reported a
+// timeout immediately, without ever waiting. So a promise that was pending at
+// the instant of the call could never be observed settling, no matter what any
+// other goroutine did -- and since IMPROVEMENT-PLAN 3.220 made SendSignalAndWait
+// a composite over CreatePromise + SignalWorkflow + AwaitPromise, that meant
+// SendSignalAndWait ALWAYS timed out here. The reply round trip that §3.220
+// shipped was assertable in the engine and nowhere else (IMPROVEMENT-PLAN 3.235).
+//
+// The wait is a select on the promise's settled channel, so a resolve from
+// another goroutine is observed the moment it happens rather than at the end of
+// a polling interval. Only the miss costs wall-clock time, and only up to
+// pendingAwaitCeiling.
 func (e *TestEnv) awaitPromiseImpl(promiseID string, timeout time.Duration) (string, bool, error) {
 	e.mu.Lock()
 	ps, ok := e.promises[promiseID]
@@ -1421,19 +1470,59 @@ func (e *TestEnv) awaitPromiseImpl(promiseID string, timeout time.Duration) (str
 		return "", false, fmt.Errorf("cleattest: promise %s not found", promiseID)
 	}
 
-	if ps.status == "resolved" {
-		return ps.result, false, nil
-	}
-	if ps.status == "rejected" {
-		return ps.errorMsg, false, fmt.Errorf("promise rejected: %s", ps.errorMsg)
+	if status, result, errorMsg, done := promiseOutcome(ps); done {
+		return result, false, settledErr(status, errorMsg)
 	}
 
-	// Pending -- advance time to simulate timeout.
+	// Pending. Wait for a settlement, bounded by the ceiling rather than by
+	// the timeout the workflow asked for.
+	if ps.settled != nil {
+		wait := timeout
+		if wait > pendingAwaitCeiling {
+			wait = pendingAwaitCeiling
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ps.settled:
+			e.mu.Lock()
+			ps = e.promises[promiseID]
+			e.mu.Unlock()
+			if status, result, errorMsg, done := promiseOutcome(ps); done {
+				return result, false, settledErr(status, errorMsg)
+			}
+		case <-timer.C:
+		}
+	}
+
+	// Still pending -- advance the mock clock and report the timeout.
 	e.mu.Lock()
 	e.nowMs += timeout.Milliseconds()
 	e.mu.Unlock()
 
 	return "", true, nil
+}
+
+// promiseOutcome reports whether a promise has settled and what an awaiter
+// should return for it. Shared by the two reads in awaitPromiseImpl so the
+// entry read and the post-wake read cannot drift apart.
+func promiseOutcome(ps promiseState) (status, result, errorMsg string, settled bool) {
+	switch ps.status {
+	case "resolved":
+		return ps.status, ps.result, "", true
+	case "rejected":
+		// A rejected promise returns its message as the value as well as in
+		// the error, which is what the pre-existing caller contract was.
+		return ps.status, ps.errorMsg, ps.errorMsg, true
+	}
+	return ps.status, "", "", false
+}
+
+func settledErr(status, errorMsg string) error {
+	if status == "rejected" {
+		return fmt.Errorf("promise rejected: %s", errorMsg)
+	}
+	return nil
 }
 
 func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (resp string, retErr error) {

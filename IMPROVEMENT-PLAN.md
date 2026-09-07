@@ -6389,7 +6389,7 @@ them". The list is now empty. The list-may-only-shrink property is what turned a
 a check that reported its own obsolescence, and it is the argument for writing the remedy into a
 failure message rather than into a comment.
 
-### 3.235 `cleattest`'s `AwaitPromise` cannot observe a promise anyone else resolves — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
+### 3.235 `cleattest`'s `AwaitPromise` cannot observe a promise anyone else resolves — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
 
 Found while landing §3.220, which is what makes it matter: once a reply address is a promise ID,
 "can a test see a promise resolved by someone else" and "can a test see a request/reply round
@@ -6428,6 +6428,43 @@ and a naive "block for the requested timeout" would make a suite that passes `7*
 hang. A bounded real-time wait (resolve wins immediately; a short ceiling, not the simulated
 timeout, decides the miss) is the likely shape, but the ceiling has to be chosen against a count
 of the tests that hit this path, not guessed.
+
+#### Fixed
+
+That is the shape it took. `promiseState` gained a `settled chan struct{}`, closed by
+`settlePromise` on the first settlement; the pending branch of `awaitPromiseImpl` selects on it
+against a timer set to `min(timeout, pendingAwaitCeiling)`. A settlement wins immediately, so the
+ceiling is paid only on a genuine miss. Same change in `cleat/embedded`.
+
+**The count the ceiling was chosen against.** A print in the pending branch, over every package
+whose tests import `cleattest` (1380 tests outside `engine`, and the whole of `engine`):
+
+| where | tests reaching a pending await | which |
+|---|---|---|
+| outside `engine` | **3** | `TestAwaitPromiseTimeout` (5s), `TestSendSignalAndWaitDeliversAReplyAddressAndTheOriginalPayload` (5s), `TestSendSignalAndWaitTimeout` (10ms) |
+| `engine` | **0** | — |
+
+Two of the three want a timeout, and both were changed to pass 50ms — a short timeout is exact
+where a long one is merely capped. The ceiling is therefore 2s and is reached by nothing: it is a
+backstop against the `7*24*time.Hour` case, not a routine cost. Measured after the change,
+`cleat/cleattest` went 0.813s → 0.955s.
+
+    # re-derive the count: add a print to the pending branch of awaitPromiseImpl, then
+    go test ./cleat/... ./wasm/... ./tests/plugin-harness/... -count=1 -v 2>&1 \
+      | awk '/^=== RUN/{t=$3} /CLEAT_PENDING_AWAIT/{print t}' | sort | uniq -c
+
+**A pre-existing data race came out with it, in `cleat/embedded`.** That map holds
+`*promiseState`, and `awaitPromise` read `ps.status` after releasing the lock. Nothing had ever
+settled a promise concurrently there — the embedded runner had no settle call at all until
+§3.220 added one — so the race was unobservable, and `go test -race` reported it on the first
+test that waits while another goroutine settles. Fields are now copied under the lock.
+`cleattest` does not have it: its map holds `promiseState` by value.
+
+**What is now asserted that was not.** `TestSendSignalAndWaitCompletesTheRoundTrip` — the sender
+waking with the reply, which §3.235 recorded as tested nowhere. Backing the wait out fails it
+with the symptom this section describes: `no reply to signal "ask" from workflow "target" within
+1s`. Plus a wake-on-resolve and a wake-on-reject test in each harness, because resolve and reject
+leave the wait by different branches.
 
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)

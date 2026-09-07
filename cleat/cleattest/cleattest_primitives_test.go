@@ -301,7 +301,13 @@ func TestAwaitPromiseTimeout(t *testing.T) {
 	}
 
 	// A pending promise with timeout should advance the clock and return timedOut.
-	result, timedOut, err := env.H().AwaitPromise(promiseID, 5*time.Second)
+	//
+	// The timeout is short because AwaitPromise now really waits for a
+	// settlement (IMPROVEMENT-PLAN 3.235): nothing here will ever settle this
+	// promise, so this call costs min(timeout, pendingAwaitCeiling) of real
+	// time. 50ms is exact; the 5s this used to pass would have cost the 2s
+	// ceiling for no added coverage.
+	result, timedOut, err := env.H().AwaitPromise(promiseID, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("AwaitPromise failed: %v", err)
 	}
@@ -381,14 +387,18 @@ func TestHandleUpdateWithoutHandler(t *testing.T) {
 // against behaviour no workflow could ever get in production
 // (IMPROVEMENT-PLAN 3.220).
 //
-// It cannot assert the SENDER waking, because cleattest's AwaitPromise
-// returns immediately for a pending promise instead of suspending, so a
-// resolution from another goroutine is never observed. That is a gap in the
-// test environment rather than in the protocol; see IMPROVEMENT-PLAN 3.235.
+// It does not assert the SENDER waking -- that is the round trip, and it has
+// its own test below (TestSendSignalAndWaitCompletesTheRoundTrip). Until
+// IMPROVEMENT-PLAN 3.235 it could not be asserted at all: cleattest's
+// AwaitPromise returned immediately for a pending promise instead of waiting,
+// so a resolution from another goroutine was never observed.
 func TestSendSignalAndWaitDeliversAReplyAddressAndTheOriginalPayload(t *testing.T) {
 	env := NewTestEnv()
 
-	if _, err := env.H().SendSignalAndWait("target", "sig", `{"key":"val"}`, 5*time.Second); err == nil {
+	// A short timeout for the same reason TestAwaitPromiseTimeout uses one:
+	// nothing replies to this signal, so the call really waits, and 50ms is
+	// exact where 5s would merely be capped at the 2s ceiling.
+	if _, err := env.H().SendSignalAndWait("target", "sig", `{"key":"val"}`, 50*time.Millisecond); err == nil {
 		t.Fatal("expected a timeout error: nothing replied to the signal")
 	}
 
@@ -417,6 +427,116 @@ func TestSendSignalAndWaitDeliversAReplyAddressAndTheOriginalPayload(t *testing.
 	}
 	if got != "reply-response" {
 		t.Fatalf("expected %q, got %q", "reply-response", got)
+	}
+}
+
+// TestAwaitPromiseWakesOnASettlementFromAnotherGoroutine is the narrow version
+// of what IMPROVEMENT-PLAN 3.235 was about, with no signals involved.
+//
+// awaitPromiseImpl used to read the promise's status once: pending, it
+// advanced the mock clock by the whole timeout and reported a timeout without
+// waiting. So this test's resolver could not have been observed at any delay,
+// including zero -- the await had already returned.
+//
+// The delay is deliberately non-zero. With the resolve happening before the
+// await, a status-at-entry read passes too, and the test would say nothing
+// about waiting.
+func TestAwaitPromiseWakesOnASettlementFromAnotherGoroutine(t *testing.T) {
+	env := NewTestEnv()
+
+	promiseID, err := env.H().CreatePromise("awaited")
+	if err != nil {
+		t.Fatalf("CreatePromise failed: %v", err)
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		env.ResolvePromise(promiseID, "settled-elsewhere")
+	}()
+
+	got, timedOut, err := env.H().AwaitPromise(promiseID, time.Second)
+	if err != nil {
+		t.Fatalf("AwaitPromise failed: %v", err)
+	}
+	if timedOut {
+		t.Fatal("AwaitPromise timed out on a promise that was resolved 20ms in")
+	}
+	if got != "settled-elsewhere" {
+		t.Fatalf("expected %q, got %q", "settled-elsewhere", got)
+	}
+}
+
+// TestAwaitPromiseWakesOnARejectionFromAnotherGoroutine is the same property
+// for the other settlement. Resolve and reject take different branches out of
+// the wait, and a version of the fix that handled only the resolved case would
+// report this one as a timeout.
+func TestAwaitPromiseWakesOnARejectionFromAnotherGoroutine(t *testing.T) {
+	env := NewTestEnv()
+
+	promiseID, err := env.H().CreatePromise("awaited")
+	if err != nil {
+		t.Fatalf("CreatePromise failed: %v", err)
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		env.RejectPromise(promiseID, "no thanks")
+	}()
+
+	_, timedOut, err := env.H().AwaitPromise(promiseID, time.Second)
+	if timedOut {
+		t.Fatal("AwaitPromise timed out on a promise that was rejected 20ms in")
+	}
+	if err == nil {
+		t.Fatal("expected an error for a rejected promise")
+	}
+	if err.Error() != "promise rejected: no thanks" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestSendSignalAndWaitCompletesTheRoundTrip asserts the last hop of §3.220's
+// protocol: the sender suspended on the reply promise wakes up carrying what
+// the receiver replied.
+//
+// This is the assertion IMPROVEMENT-PLAN 3.235 says exists nowhere. The
+// neighbouring test covers everything up to the reply -- the payload arrives
+// unchanged, a reply address comes with it, replying settles the promise --
+// and stops there, because until awaitPromiseImpl really waited,
+// SendSignalAndWait in cleattest ALWAYS returned a timeout.
+//
+// The responder polls rather than sleeping a fixed interval: cleattest loops a
+// sent signal back onto the same env, and the send happens inside
+// SendSignalAndWait, so there is no instant at which the responder can know
+// the signal is queued except by looking.
+func TestSendSignalAndWaitCompletesTheRoundTrip(t *testing.T) {
+	env := NewTestEnv()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sig := env.H().PollSignals([]string{"ask"})
+			if sig.TimedOut {
+				time.Sleep(time.Millisecond)
+				continue
+			}
+			if sig.ReplyTo == "" {
+				return // leave the sender to time out; asserted below
+			}
+			_ = env.H().ReplyToSignal(sig.ReplyTo, `{"answer":42}`)
+			return
+		}
+	}()
+
+	got, err := env.H().SendSignalAndWait("target", "ask", `{"q":"life"}`, time.Second)
+	<-done
+	if err != nil {
+		t.Fatalf("SendSignalAndWait: %v", err)
+	}
+	if got != `{"answer":42}` {
+		t.Fatalf("the sender must wake carrying the reply, got %q", got)
 	}
 }
 
