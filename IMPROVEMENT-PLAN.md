@@ -6803,7 +6803,8 @@ deliberately unbindable `cleat_register_query_handler`):
 | go | 6 | but only **3** are gaps — see below |
 
 **AssemblyScript, not Go, is the only SDK at full parity.** That is not what anyone would have
-guessed, and it is the reason this direction was worth checking.
+guessed, and it is the reason this direction was worth checking. It is also the one row here that
+no existing document states.
 
 **The raw count overstates Go, and saying "6" would have been the flattering-direction error this
 document keeps recording.** Three of Go's six are reached another way and adding the host call
@@ -6819,9 +6820,20 @@ would be redundant:
 Go's three real gaps are `cleat_fetch` (a durable HTTP fetch; `net/http` in a guest is neither
 durable nor replayable) and `cleat_get_scope` / `cleat_set_scope`, which nothing else exposes.
 
-The cron trio is the sharpest finding: **a shipped capability that two of five SDKs cannot reach**,
-with nothing composing it. Unlike request/reply after [§3.220](#3220), there is no combination of
-other host calls that schedules a cron.
+**The cron trio was already known, and this test did not discover it.** `tiers.yaml` holds
+`workflow-callable-cron` at **tier 2 for exactly this reason** — "rust and java SDKs declare no
+cron surface at all", with tier 1 requiring only `[go, python]` — and §3.170's coverage table
+already recorded rust at 52/55 naming the same three. Re-deriving it independently is
+corroboration, not a finding, and presenting it as new would be its own kind of inflation.
+
+What is new is that it is now **guarded**. The gap was recorded in two places that a code change
+cannot fail, so nothing stopped a third SDK from drifting the same way, or these three from
+widening to four. The baseline is shrink-only and lives next to the extractors, so the next
+regression is a red test rather than a paragraph someone has to remember to re-read.
+
+The one substantive addition to what tiers.yaml says: **nothing composes cron.** Unlike
+request/reply after [§3.220](#3220), there is no combination of other host calls that schedules
+one, so the gap cannot be worked around in-language.
 
 Held per-SDK in `sdkUnreachedBaseline`, shrink-only, each entry carrying its reason.
 
