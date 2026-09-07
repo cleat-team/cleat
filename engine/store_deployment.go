@@ -126,17 +126,33 @@ func (s *PostgresStore) LoadDAGSpec(ctx context.Context, defName string, defVers
 	}
 	defer tx.Rollback()
 
-	var spec json.RawMessage
+	// *[]byte, not json.RawMessage. dag_spec is `JSONB DEFAULT NULL`
+	// (001_schema.sql:202) and json.RawMessage does not implement sql.Scanner,
+	// so a NULL fails the scan outright:
+	//
+	//	sql: Scan error on column index 0, name "dag_spec": unsupported Scan,
+	//	storing driver.Value type <nil> into type *jsontext.Value
+	//
+	// Every workflow that is not a DAG has a NULL there, which is nearly all of
+	// them, so GET /api/workflows/{id}/dag answered with that raw driver error.
+	// The doc comment above already promised "or nil if none"; the code could
+	// not deliver it. MySQL (mysql_ops.go:683) and SQL Server
+	// (mssql_deployment.go:81) both got this right; PostgreSQL alone did not,
+	// which is the dialect nearly everyone runs.
+	var raw *[]byte
 	err = tx.QueryRowContext(ctx, `
 		SELECT dag_spec FROM workflow_defs WHERE name = $1 AND version = $2
-	`, defName, defVersion).Scan(&spec)
+	`, defName, defVersion).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load dag_spec: %w", err)
 	}
-	return spec, tx.Commit()
+	if raw == nil {
+		return nil, tx.Commit()
+	}
+	return json.RawMessage(*raw), tx.Commit()
 }
 
 // ListVersions returns all deployed versions of a workflow.
