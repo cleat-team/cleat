@@ -1011,7 +1011,27 @@ func main() {
 			// auth.Middleware's doc comment for why this is a
 			// hand-maintained list rather than something plugins declare
 			// themselves.
-			handler = auth.Middleware(store, true,
+			// The resolver is built on `db` -- the connection the DSN
+			// names -- and NOT on `store`, which is
+			// factory.OpenStore(ctx, defaultTenantID, ...) and therefore
+			// tenant-scoped.
+			//
+			// Resolving an API key is what tells you which tenant's store
+			// to open, so it cannot run through a store that already
+			// knows the tenant. On PostgreSQL and SQL Server that
+			// distinction costs nothing -- one database, isolation by RLS
+			// or session context, so either connection reaches the table.
+			// On MySQL tenant isolation IS a database boundary, so the
+			// tenant-scoped store looked in cleat_<tenant> while every
+			// writer put the key in the base database, and the API
+			// answered 401 to every request with no key that could work.
+			// cleat#866.
+			authResolver, arErr := auth.NewTenantStoreForDialect(db, *driver)
+			if arErr != nil {
+				logger.ErrorContext(context.Background(), "cannot build the API key resolver, so no request could be authenticated", "worker_id", workerID, "error", arErr)
+				os.Exit(1)
+			}
+			handler = auth.Middleware(authResolver, true,
 				"POST /ingest/{source_id}",
 				"GET /oauth/{provider}/callback",
 			)(handler)
