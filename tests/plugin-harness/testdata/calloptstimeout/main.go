@@ -74,16 +74,19 @@ func ProbeCallTimeout(h cleat.HostCalls, input string) (string, error) {
 	resp, err := h.DurableCallWithOptions(opts, "harness-service", "harness-op", `{}`)
 	out := result{Case: req.Case, Resp: resp}
 	if err != nil {
-		// fmt.Sprintf, not err.Error(): calling Error() on an error value
-		// is itself interface dispatch and the analyzer refuses it (E008).
+		// fmt.Sprintf, not err.Error(): calling Error() on an error value is
+		// interface dispatch and the analyzer refuses it (E008). fmt.Sprintf
+		// reaches the same string and is accepted.
 		out.Err = fmt.Sprintf("%v", err)
 		// The TYPE, not a substring: a message that happens to contain
 		// "timeout" is not the same claim as the SDK's own error.
 		//
-		// A direct type assertion rather than errors.As, because errors.As is
-		// a call through an interface and the analyzer refuses it in workflow
-		// code (E008). Worth knowing: inside a workflow, the SDK's own
-		// CallTimeoutError cannot be recognised with the stdlib idiom.
+		// A direct type assertion. errors.As would also work -- measured
+		// 2026-09-08 across six idioms, and only err.Error() is refused
+		// (E008, "calls through interfaces cannot be statically resolved").
+		// errors.As, errors.Is, a type assertion and sentinel equality are
+		// all accepted, so a workflow CAN recognise this error; the
+		// assertion is just the smallest thing that answers the question.
 		_, isTimeout := err.(*cleat.CallTimeoutError)
 		out.IsTimeout = isTimeout
 	}
