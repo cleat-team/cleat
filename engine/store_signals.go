@@ -308,6 +308,18 @@ var ErrWorkflowNotFound = errors.New("workflow not found")
 // tearing down a canary was told it was gone.
 var ErrRoutingRuleNotFound = errors.New("routing rule not found")
 
+// ErrScheduleExists is returned by CreateSchedule when the name is taken.
+//
+// A schedule's name is its identity -- workflow_schedules.name is the PRIMARY
+// KEY -- so a second create under one name is a caller mistake, not a store
+// fault. It exists so the HTTP layer can answer 409 without reading driver
+// text: each dialect detects its own uniqueness violation while the error is
+// still TYPED (pq SQLSTATE 23505, MySQL 1062, SQL Server 2601/2627) and wraps
+// it in this, so nothing above the store ever parses a message. See
+// engine/mssql_errors.go for what the string form costs -- it records a naive
+// "duplicate key" search matching `invalid column value at row 26270`.
+var ErrScheduleExists = errors.New("schedule already exists")
+
 // SetAllowedSignalCallers replaces the allowed_signals list for a workflow.
 //
 // The write side of GetAllowedSignalCallers above. Until this existed, nothing

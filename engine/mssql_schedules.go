@@ -16,7 +16,16 @@ func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputJSON(sch.Input), sch.Enabled, sch.NextRunAt, s.tenantID,
 		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
 		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy))
-	return err
+	if err != nil {
+		// The name is the PRIMARY KEY, so a uniqueness violation here is a
+		// caller reusing a name. Detected typed, via isMSSQLDuplicateKey, and
+		// wrapped so the HTTP layer answers 409 without reading driver text.
+		if isMSSQLDuplicateKey(err) {
+			return fmt.Errorf("%w: %s", ErrScheduleExists, sch.Name)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {

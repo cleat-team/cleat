@@ -309,6 +309,12 @@ func (s *MySQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
 		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy))
 	if err != nil {
+		// The name is the PRIMARY KEY, so a uniqueness violation here is a
+		// caller reusing a name. Detected typed, via isDuplicateKeyError, and wrapped
+		// so the HTTP layer answers 409 without reading driver text.
+		if isDuplicateKeyError(err) {
+			return fmt.Errorf("%w: %s", ErrScheduleExists, sch.Name)
+		}
 		return fmt.Errorf("CreateSchedule: %w", err)
 	}
 	return nil

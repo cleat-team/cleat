@@ -520,6 +520,13 @@ func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error 
 		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
 		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy))
 	if err != nil {
+		// 23505 is unique_violation. Detected while the error is still a
+		// *pq.Error, so nothing above the store has to read a message -- same
+		// idiom as compaction.go's 40P01 deadlock check.
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			return fmt.Errorf("%w: %s", ErrScheduleExists, sch.Name)
+		}
 		return err
 	}
 	return tx.Commit()
