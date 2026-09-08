@@ -184,8 +184,12 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 					"tenant_id:\n    %s", path, st.line, st.fn, st.excerpt)
 				continue
 			}
-			t.Errorf("%s:%d (%s) reads or writes a tenant-scoped table with no tenant_id in "+
-				"any WHERE, ON or HAVING clause:\n    %s\n\n"+
+			t.Errorf("%s:%d (%s) reads or writes a tenant-scoped table with no WHERE, ON or "+
+				"HAVING clause comparing tenant_id TO A PARAMETER:\n    %s\n\n"+
+				"Note what this does NOT say. The statement may well mention tenant_id -- a "+
+				"join condition like `d.tenant_id = w.tenant_id` does, and correlates two "+
+				"tables while restricting neither to a caller. Only a comparison against "+
+				"@pN, ? or $N carries \"the tenant asking\". See tenantComparedToAParameter.\n\n"+
 				"dbo.fn_tenant_filter is OFF for any dbo.cleat_admin connection "+
 				"(012_admin_role.sql), which is what a multi-tenant deployment must use, so "+
 				"this predicate is the whole of the isolation. If it genuinely does not need "+
@@ -282,7 +286,7 @@ func mssqlTenantStatements(src, path string, tables map[string]bool) []tenantSta
 			scoped = strings.Contains(flat, "tenant_id")
 		} else {
 			for _, w := range filterWindows(flat) {
-				if strings.Contains(w, "tenant_id") {
+				if tenantComparedToAParameter.MatchString(w) {
 					scoped = true
 					break
 				}
@@ -300,6 +304,35 @@ func mssqlTenantStatements(src, path string, tables map[string]bool) []tenantSta
 	}
 	return out
 }
+
+// tenantComparedToAParameter matches a tenant predicate that RESTRICTS, as
+// opposed to one that merely mentions the column.
+//
+// This used to be strings.Contains(window, "tenant_id"), and that is not the
+// same question. A join condition lives in an ON clause, so
+//
+//	LEFT JOIN workflow_defs d ON ... AND d.tenant_id = w.tenant_id
+//
+// satisfied the old check completely while restricting nothing: it CORRELATES
+// two tables and says nothing about which tenant is asking. Adding exactly that
+// line to GetCompactionCandidates in cleat#889 flipped this guard from failing
+// to passing, and then -- worse -- made it demand the deletion of that
+// function's scopedByCaller allowlist entry, on the grounds that the statement
+// "has no unscoped statement any more". Deleting the entry would have removed a
+// documented safety claim and replaced it with a predicate that predicates
+// nothing.
+//
+// That is the file header's own MERGE lesson one form further in: there, a
+// column LIST was mistaken for a WHERE; here, a join CONDITION is mistaken for a
+// filter. Both put tenant_id somewhere structurally plausible and neither scopes
+// a row.
+//
+// So the requirement is a comparison against a PARAMETER -- @pN, ?, or $N --
+// which is the only form that can carry "the tenant the caller is asking as".
+// A column-to-column comparison cannot, whatever it is named.
+var tenantComparedToAParameter = regexp.MustCompile(
+	`(?i)tenant_id\s*(?:=|<>|!=|\bin\b)\s*\(?\s*(?:@p\d+|\$\d+|\?)` +
+		`|(?:@p\d+|\$\d+|\?)\s*(?:=|<>|!=)\s*[\w.]*tenant_id`)
 
 // filterWindows returns the text of each WHERE, ON and HAVING clause.
 func filterWindows(flat string) []string {
@@ -465,6 +498,30 @@ func TestTheTenantPredicateScanIgnoresGoComments(t *testing.T) {
 			wantF: "g",
 			why: "if this does not fire, the stripper has eaten real code and the guard " +
 				"has become a false negative",
+		},
+		{
+			name: "a tenant_id join condition does NOT scope the statement",
+			src: "package engine\n" +
+				"func joinOnly() { _ = `SELECT w.id FROM workflow_instances w " +
+				"LEFT JOIN workflow_defs d ON d.name = w.def_name AND d.tenant_id = w.tenant_id " +
+				"WHERE w.status = @p1` }\n",
+			want:  1,
+			wantF: "joinOnly",
+			why: "cleat#889: this is the exact shape that flipped the real guard from " +
+				"failing to PASSING, and then made it demand the deletion of a " +
+				"scopedByCaller allowlist entry. tenant_id is present, in an ON clause, " +
+				"and correlates two tables while restricting neither to a caller",
+		},
+		{
+			name: "the same statement WITH a parameter comparison is scoped",
+			src: "package engine\n" +
+				"func joinPlusFilter() { _ = `SELECT w.id FROM workflow_instances w " +
+				"LEFT JOIN workflow_defs d ON d.name = w.def_name AND d.tenant_id = w.tenant_id " +
+				"WHERE w.tenant_id = @p2 AND w.status = @p1` }\n",
+			want: 0,
+			why: "the control for the case above. Same join, same correlation, plus the " +
+				"one clause that says which tenant is asking -- if this also fired, the " +
+				"matcher would reject every legitimately scoped statement in the store",
 		},
 		{
 			name: "a real literal containing // inside a SQL string is still scanned",
