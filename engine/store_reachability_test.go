@@ -122,8 +122,11 @@ func TestEveryStoreMethodIsReachableFromProduction(t *testing.T) {
 // The other six the issue did not list. That is the argument for a guard rather
 // than a sweep: the same shape, found by asking the question mechanically.
 var storeUnreachedBaseline = map[string]bool{
-	// cleat#769's original findings.
-	"DeleteDeadLetteredWorkflows": true,
+	// DeleteDeadLetteredWorkflows was cleat#769's original finding and is now
+	// REACHED: cleat#1023 added --dead-letter-retention-days and wired it into
+	// runRetentionSweep. Removed rather than left, because an entry that no
+	// longer describes anything is how a guard learns to be quiet -- which is
+	// this file's own argument for shrink-only.
 
 	// Found by this guard. Each is the same shape: a write or read path with
 	// no production caller, whose siblings are live.

@@ -33,7 +33,7 @@ func TestRetentionSweepsOnceAtStartupBeforeAnyTick(t *testing.T) {
 	w.ctx = ctx
 
 	w.wg.Add(1)
-	go w.retentionLoop(30, 0)
+	go w.retentionLoop(30, 0, 0)
 
 	select {
 	case <-swept:
@@ -73,7 +73,7 @@ func TestRetentionStaysOffWhenDisabled(t *testing.T) {
 	done := make(chan struct{})
 	w.wg.Add(1)
 	go func() {
-		w.retentionLoop(0, 0)
+		w.retentionLoop(0, 0, 0)
 		close(done)
 	}()
 
@@ -109,7 +109,7 @@ func TestOnlyTheEnabledHalfSweeps(t *testing.T) {
 	w.ctx = ctx
 
 	w.wg.Add(1)
-	go w.retentionLoop(30, 0)
+	go w.retentionLoop(30, 0, 0)
 
 	select {
 	case <-events:

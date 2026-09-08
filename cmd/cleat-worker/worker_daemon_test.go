@@ -109,6 +109,7 @@ type mockStore struct {
 	queueDepthFn                       func(ctx context.Context) (int64, error)
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
 	deleteCompletedWorkflowsFn         func(ctx context.Context, olderThan time.Time) (int64, error)
+	deleteDeadLetteredWorkflowsFn      func(ctx context.Context, olderThan time.Time) (int64, error)
 	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string, priority int) (string, error)
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
@@ -1297,7 +1298,7 @@ func TestRetentionLoop_ReturnsImmediatelyWhenBothDisabled(t *testing.T) {
 	done := make(chan struct{})
 	w.wg.Add(1)
 	go func() {
-		w.retentionLoop(0, 0)
+		w.retentionLoop(0, 0, 0)
 		close(done)
 	}()
 
@@ -1330,7 +1331,7 @@ func TestRunRetentionSweep_CallsBothWithIndependentCutoffs(t *testing.T) {
 	// rows far longer than event_history, e.g. --retention-days=7
 	// --completed-workflow-retention-days=90. The two cutoffs must not be
 	// the same computation reused for both.
-	w.runRetentionSweep(7, 90)
+	w.runRetentionSweep(7, 90, 0)
 
 	if !eventsCalled {
 		t.Fatal("DeleteExpiredEvents was not called")
@@ -1366,7 +1367,7 @@ func TestRunRetentionSweep_SkipsCompletedWorkflowsWhenDisabled(t *testing.T) {
 	// completedWorkflowRetentionDays=0: this is the shipped default. Proves
 	// the off-by-default argument in docs/operations/workflow-retention.md
 	// is actually true of the code, not just the prose.
-	w.runRetentionSweep(30, 0)
+	w.runRetentionSweep(30, 0, 0)
 }
 
 func TestRunRetentionSweep_SkipsEventsWhenDisabled(t *testing.T) {
@@ -1380,7 +1381,7 @@ func TestRunRetentionSweep_SkipsEventsWhenDisabled(t *testing.T) {
 	}
 	w := newTestWorker(ms)
 
-	w.runRetentionSweep(0, 90)
+	w.runRetentionSweep(0, 90, 0)
 }
 
 // TestCompletedWorkflowRetentionDaysDefaultsOff is the argument in
@@ -3241,6 +3242,9 @@ func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte)
 }
 func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) { return 0, nil }
 func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	if m.deleteDeadLetteredWorkflowsFn != nil {
+		return m.deleteDeadLetteredWorkflowsFn(ctx, olderThan)
+	}
 	return 0, nil
 }
 func (m *mockStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
