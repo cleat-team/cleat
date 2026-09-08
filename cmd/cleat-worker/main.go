@@ -915,6 +915,7 @@ func main() {
 		scheduleInterval:                 15 * time.Second,
 		compactionThreshold:              *compactionThreshold,
 		compactionInterval:               *compactionInterval,
+		retentionInterval:                *retentionInterval,
 		pluginRegistry:                   pluginRegistry,
 		pluginStreamRegistry:             pluginStreamRegistry,
 		plugList:                         plugList,

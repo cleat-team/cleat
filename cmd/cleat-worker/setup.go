@@ -925,6 +925,7 @@ type Worker struct {
 	Metrics             *prometheus.Metrics
 	compactionThreshold int
 	compactionInterval  time.Duration
+	retentionInterval   time.Duration
 
 	memoryController                 *MemoryController
 	maxRetries                       int
@@ -2484,10 +2485,30 @@ func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays int
 	if retentionDays <= 0 && completedWorkflowRetentionDays <= 0 {
 		return
 	}
-	interval := 24 * time.Hour
+	interval := w.retentionInterval
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
 	w.healthTracker.setInterval("retention", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	// SWEEP ONCE BEFORE THE FIRST TICK. Every other loop here is tick-first
+	// and none of them pre-runs, which is the house style and is right for
+	// them: the next-longest interval is memoryCleanupLoop's 10 minutes, so a
+	// worker that dies before its first tick has barely started.
+	//
+	// Retention's period is 24 hours -- 144x that -- and a worker restarting
+	// inside a day is ordinary rather than exceptional. Tick-first at this
+	// interval means a deploy cadence under 24h disables retention entirely,
+	// while --retention-days reports it as on and the health tracker reports
+	// the loop as running. cleat#1002.
+	//
+	// Safe to run unconditionally because the sweep is idempotent and bounded
+	// by its own cutoff: a second run within the same day deletes nothing the
+	// first did not, so the cost of an unnecessary one is a query.
+	w.healthTracker.recordRun("retention")
+	w.runRetentionSweep(retentionDays, completedWorkflowRetentionDays)
 
 	for {
 		select {

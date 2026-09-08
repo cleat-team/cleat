@@ -73,6 +73,7 @@ var (
 	taskQueuesStr         = flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
 	compactionThreshold   = flag.Int("compaction-threshold", 100, "Number of events before history compaction triggers")
 	compactionInterval    = flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
+	retentionInterval     = flag.Duration("retention-interval", 24*time.Hour, "Interval between retention sweeps")
 	shardsFile            = flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
 	pluginConfigFile      = flag.String("plugin-config", "", "path to plugin config JSON file")
 	memorySoftLimit       = flag.Float64("memory-soft-limit", 0.80, "Memory soft limit fraction 0.0-1.0 (stop claiming new work)")
