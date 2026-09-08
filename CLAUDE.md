@@ -43,12 +43,28 @@ these before believing any test outcome.
 | postgres only | 3813 | **581** | 182s, 163s |
 | all three | 4510 | **4** | 206s, 222s |
 
-All three printed `ok`. **Check the skipped count, not the clock:**
+All three printed `ok`. **Check what failed and what skipped, not the clock:**
 
     go test ./engine/ -count=1 -json > /tmp/t.json
-    grep '"Action":"skip"' /tmp/t.json | grep -c '"Test":'    # 4 means all three dialects ran
     grep '"Action":"fail"' /tmp/t.json | grep -c '"Test":'    # test failures; must be 0
     grep '"Action":"fail"' /tmp/t.json | grep -vc '"Test":'   # PACKAGE failures; must also be 0
+
+**Read the skip NAMES, not the skip count.** This line used to say `# 4 means all three
+dialects ran`, and 4 was correct on 2026-09-03. It is 7 now and rising, because the suite
+grows: a census of a growing population is guaranteed to go wrong, and the only question is
+when. Worse, a stale one inverts — a reader who sees 7 against a documented 4 concludes
+something is broken on a run that is fine.
+
+What you actually need is a predicate, and it does not drift: **no remaining skip is
+dialect-gated.** That was true at 4, is true at 7, and will be true at 12.
+
+    grep '"Action":"skip"' /tmp/t.json |
+      python3 -c 'import sys,json; [print(" ", json.loads(l)["Test"]) for l in sys.stdin if "Test" in json.loads(l)]'
+
+Every name it prints should be an environmental precondition you can point at — a toolchain
+that is not installed, a fixture that needs a binary. A name mentioning postgres, mysql,
+mssql or a dialect means a DSN did not take, whatever the count is. See cleat#986: four of
+five counts in this file had drifted when checked, and every one of them was a census.
 
 **That third line is not decoration, and this file shipped without it.** A package that does
 not compile emits a **package-level** fail event carrying no `"Test"` field, so a count keyed
@@ -138,9 +154,29 @@ used to say a CGO-less build "silently runs everything on wazero" — that stopp
 when the wazero backend was deleted, and it is the opposite of what happens now.
 
 **Use `-p 1` when running more than one database-backed package in one invocation.**
-`engine/testutil`'s `CleanupPostgresTestData` is an unqualified `DELETE FROM` across eleven
-tables. Run concurrently against one database, packages delete each other's fixtures mid-test and
-the failures look like unrelated flakes.
+`engine/testutil`'s `CleanupPostgresTestData` issues an **unqualified `DELETE FROM`** over
+`postgresCleanupTables`, and that list includes `workflow_instances`. Run concurrently against
+one database and packages delete each other's fixtures mid-test; the failures look like
+unrelated flakes.
+
+The length of the list is not the point and this used to give it as eleven, which was wrong by
+four when checked (cleat#986). What makes it dangerous is that the DELETE carries no `WHERE`
+and the list reaches the table every test depends on. Ask that, rather than counting:
+
+    python3 -c "
+    import re
+    src = open('engine/testutil/schema.go').read()
+    body = re.search(r'postgresCleanupTables\s*=\s*\[\]string\{(.*?)\n\}', src, re.S).group(1)
+    print('workflow_instances in the list:', 'workflow_instances' in body)
+    "
+
+I first published a `grep -c '\"'` here and it answered **16** against a list of **15** — a
+comment inside the block carries a quoted name. A census got the census wrong, in the
+paragraph explaining why not to publish one.
+**And `-p 1` does not help across two `go test` PROCESSES.** It serialises packages within one
+invocation, so two concurrent runs against one instance both obey it and both wipe the same
+tables. `CleanupMSSQLTestData` is the same shape. See cleat#982, where that is the leading
+explanation for four SQL Server failures that would not reproduce alone.
 
 **A skip that hides a crash is not a skip.** `t.Skipf("... crashed")` and
 `t.Skipf("... compatibility issue")` are failures wearing a skip's clothing, and they make a
@@ -420,6 +456,32 @@ already been removed; three of them concluded that a working feature was broken.
 **Any number you write down carries a date and the command that re-derives it.** If you cannot
 write the command, do not write the number. Every count in this repo's docs was wrong when
 checked — linter totals, finding counts, skip counts, branch counts, all of them.
+
+**And the ones that rot are a PREDICTABLE class, not bad luck: a count of a growing
+population is guaranteed to be wrong.** Measured across this file on 2026-09-08 (cleat#986),
+using the commands the file itself published:
+
+| claim | as written | re-derived | |
+|---|---:|---:|---|
+| tables `CleanupPostgresTestData` deletes | 11 | **15** | drifted |
+| skips when all three dialects run | 4 | **7** | drifted |
+| engine exports | 50 | **52** | drifted |
+| `IMPROVEMENT-PLAN` §3.x headings | 99 | **235** | drifted |
+| the `comm -3` difference between the two export derivations | six | **6** | **held** |
+
+Four of five wrong, and the fifth names the mechanism. The one that held is a **set
+difference** — three workflow-API names against three plugin names. It describes a
+relationship in the design, so it cannot drift as the tree grows. The four that rotted are
+censuses: tables in a list, skips in a suite, exports in a file, headings in a document. Each
+grows with ordinary work.
+
+**So a count of a growing population is a proxy for a predicate, and the predicate is what a
+reader needs.** The skip line is the clearest case: "4 means all three dialects ran" was true
+on one day, and today it makes a clean run look broken. *"No remaining skip is
+dialect-gated"* was true at 4, is true at 7, and will be true at 12. Replace the census with
+the question it stands for, keep the command, and drop the number. Three such replacements
+are in this file — the skip check, the cleanup-table warning, and the unmarked-heading scan —
+and each is written out where it is used rather than summarised here.
 
 **And when the value moves faster than a reader arrives, carry ONLY the command.** A date
 plus a command is enough for a fact that changes monthly. It is not enough for one that
@@ -754,9 +816,28 @@ Key conventions:
   closed data-loss bug as the project's top outstanding item, and a session went into
   re-deriving what the body already said. "No marker" is indistinguishable from "not started",
   so it is read as the latter. Prose in the heading (`— fixed in 9fc2a81`) counts; nothing at
-  all does not. Measured 2026-09-01: 87 of 99 headings carried a status, and re-derivable with
+  all does not.
 
-      grep -cE '^### [0-9]+\.[0-9]+ ' IMPROVEMENT-PLAN.md
+  **The predicate is "every heading carries a status", not a ratio.** This said "87 of 99" on
+  2026-09-01; it is 235 headings now, so both halves were wrong within days and the ratio told
+  a reader nothing they could act on. What is actionable is the list of headings with no status
+  at all, which is short and is the thing to fix:
+
+      python3 - <<'EOF'
+      import re
+      hs = [l.rstrip() for l in open('IMPROVEMENT-PLAN.md')
+            if re.match(r'^### [0-9]+\.[0-9]+ ', l)]
+      st = re.compile(r'[\U0001F300-\U0001FAFF✅❌⬜⚪]|—\s*(?:\*\*)?\s*'
+                      r'(?:fixed|done|open|wontfix|declined|superseded|parked|deferred|'
+                      r'partly|partially|core fixed|shipped)', re.I)
+      for l in hs:
+          if not st.search(l):
+              print(l[:110])
+      EOF
+
+  Two on 2026-09-08. Note the emoji class has to be a RANGE rather than a list: writing out
+  the markers you have seen misses the next one someone uses, and a scan that silently stops
+  matching reports zero unmarked headings — which reads exactly like success.
 
   **When a section names the files it will change, those names go stale too, and in the
   direction that fools you.** §1.1's `Files:` bullet pointed at
