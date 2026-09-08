@@ -37,6 +37,34 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 						payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
 						return packAwaitSignalsResult(written, payloadWritten, false, 0)
 					}
+					// History CONTINUES past this await with something that is
+					// not a delivery, so the original execution reached that
+					// next event without receiving a signal: the await timed
+					// out. Reproduce that, and do not look in the store.
+					//
+					// The rule is DurableAwaitUpdate's, stated in its doc:
+					// "The table is NOT consulted -- a request that arrived
+					// later must not be delivered at an earlier step." Its
+					// reason applies verbatim here, because it is a property
+					// of recordEvent rather than of updates: an event can only
+					// land at the frontier, so there is nowhere to put a
+					// delivery that belongs in the middle of a written
+					// history.
+					//
+					// Polling here did all four (cleat#947): handed the guest
+					// a signal the original run never saw, consumed the
+					// delivery so a later legitimate await could not have it,
+					// wrote a record whose Step was s.stepCount while the
+					// append landed at len(s.history) -- colliding with the
+					// event already at that step -- and left s.stepCount one
+					// past the record it should read next, so the rest of the
+					// replay ran off by one against its own history.
+					//
+					// Returning timed-out is not a new behaviour: it is what
+					// this path already did whenever the store happened to be
+					// empty, which is why an empty store was correct and a
+					// non-empty one was not.
+					return packAwaitSignalsResult(0, 0, true, 0)
 				}
 				// No signal_received in history. The signal may have
 				// arrived after suspend (stored in workflow_signals,
@@ -72,17 +100,10 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				//
 				//	verify events: workflow ...: step 2: checksum mismatch
 				//
-				// Guarded on exhaustion because reaching here with history
-				// REMAINING means the original execution moved past this
-				// await without receiving anything -- a timeout. Replay is
-				// not over in that case and must not be ended; that path is
-				// left exactly as it was. It has its own defect, filed as
-				// cleat#947 -- the poll hands the guest a signal the
-				// original run never saw, consumes it, and writes a record
-				// whose Step collides with the event already at that step.
-				if s.stepCount >= len(s.history) {
-					s.exitReplay()
-				}
+				// Unconditional: the branch above returns for every case where
+				// history continues, so reaching here means it is exhausted and
+				// the poll below is this run's first fresh act.
+				s.exitReplay()
 				if s.engine.signalStore != nil {
 					// SignalNames is a JSON array like ["agent_result"].
 					var names []string
