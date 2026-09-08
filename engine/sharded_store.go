@@ -955,14 +955,53 @@ func (s *ShardedStore) SetRoutingRule(ctx context.Context, workflowName string, 
 	return shard.Store.SetRoutingRule(ctx, workflowName, targetVersion, weight)
 }
 
-// RemoveRoutingRule deletes a routing rule by ID.
-// Delegates to the shard determined by the rule ID.
+// RemoveRoutingRule deletes a routing rule from every shard, the same fan-out
+// DeleteSchedule uses, and for the same reason: the caller has an id but not
+// the key the row was placed under.
+//
+// It used to delegate to getShard(ruleID), which is the wrong shard almost
+// every time (cleat#946). Routing rules are written and read by workflow NAME
+// -- SetRoutingRule and GetRoutingRules both use getShard(workflowName) -- and
+// getShard is sha256(key) % len(shards), so a rule id says nothing about where
+// its row lives. The id cannot help, because it is assigned by the database
+// (`id UUID PRIMARY KEY DEFAULT gen_random_uuid()`) and has no relationship to
+// the name.
+//
+// The two keys agree only by coincidence, at a rate of 1/len(shards):
+//
+//	shards   removals that reached a shard never holding the rule
+//	2        50%
+//	4        75%
+//	8        87.5%
+//
+// and the failure is silent in the worst way. No dialect checks rows-affected,
+// so a DELETE matching nothing returns nil and the API answers
+// 200 {"status":"removed"} for a rule that is still present -- and still
+// shifting live traffic, since PickVersionByRouting runs on every start.
+//
+// Fanning out is correct rather than merely safe here: rule ids are UUIDs and
+// so globally unique, so at most one shard can hold the row and deleting by id
+// on the others matches nothing. That is what makes this preferable to
+// tryEachShard, which would need each store to distinguish "deleted" from "no
+// such rule" -- an error where none exists today, changing what an unsharded
+// store does about a rule id that is simply gone.
+//
+// Cost is len(shards) statements instead of one, on an operator action that
+// happens when a canary is torn down.
+// The no-shards refusal is kept deliberately. forEachShard iterates zero
+// shards and returns nil, which would report success for a removal that could
+// not have happened -- the same silent success this change exists to remove,
+// arrived at from the other direction. TestRemoveRoutingRule_NoShard caught it.
 func (s *ShardedStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
-	shard := s.getShard(ruleID)
-	if shard == nil {
+	s.mu.RLock()
+	n := len(s.shards)
+	s.mu.RUnlock()
+	if n == 0 {
 		return fmt.Errorf("remove_routing_rule: no shard available")
 	}
-	return shard.Store.RemoveRoutingRule(ctx, ruleID)
+	return s.forEachShard(func(store WorkflowStore) error {
+		return store.RemoveRoutingRule(ctx, ruleID)
+	})
 }
 
 // GetRoutingRules returns all routing rules for a workflow.
