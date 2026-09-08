@@ -97,6 +97,7 @@ func TestATagRequiresBothANameAndAVersion(t *testing.T) {
 // resolves to, which is the one question they will have.
 func TestTagsAreListableSoAnOperatorCanSeeWhereStablePoints(t *testing.T) {
 	ms := &mockStore{
+		listWorkflowDefsFn: deployedDef("checkout"),
 		getWorkflowTagsFn: func(_ context.Context, _ string) (map[string]int, error) {
 			return map[string]int{"stable": 3, "canary": 4}, nil
 		},
@@ -120,8 +121,11 @@ func TestTagsAreListableSoAnOperatorCanSeeWhereStablePoints(t *testing.T) {
 
 // TestNoTagsIsAnObjectNotNull — most definitions have none, and a caller
 // reading the response should not have to special-case null.
+//
+// The CONTROL for cleat#942 on the tags path; see the routing one for why an
+// empty result for a DEPLOYED name must stay 200.
 func TestNoTagsIsAnObjectNotNull(t *testing.T) {
-	api := newTestAPIServer(&mockStore{})
+	api := newTestAPIServer(&mockStore{listWorkflowDefsFn: deployedDef("checkout")})
 	rec := httptest.NewRecorder()
 	api.handleWorkflows(rec, httptest.NewRequest(http.MethodGet,
 		"/api/workflows/checkout/tags", nil))

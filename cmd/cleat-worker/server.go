@@ -821,6 +821,52 @@ func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.
 	return true
 }
 
+// defExists is runExists for the name-scoped paths: it answers whether any
+// version of a definition by this name has ever been deployed to this tenant.
+//
+// It exists because the reader and the writer on the SAME path disagreed about
+// an unknown name (cleat#942). Both writers call ValidateVersion and answer
+// 409 -- "version N of X does not exist or is deprecated" -- while both readers
+// had no 404 branch at all and answered 200 with an empty collection. The
+// server already knew the name was not a definition; it just did not consult
+// that on the way out.
+//
+// This reverses the decision recorded below at handleGetQueryState, which read
+// "an empty result for an unknown name is the normal state". Two facts that
+// were not in front of that decision:
+//
+//   - The write half of the same path already refuses exactly this input, so
+//     "unknown name is normal" and "unknown name is a 409" were both in force
+//     on the same two paths, in opposite directions.
+//   - :id and :name share a path segment and are disambiguated only by the
+//     suffix, and the namespaces never overlap. So GET /{run-id}/routing --
+//     a caller building the URL from the wrong variable -- answered 200 [],
+//     byte-identical to a deployed definition with no rules. Observed in the
+//     samples-go port before it was checked here.
+//
+// EMPTY IS STILL 200 FOR A DEPLOYED NAME, and that is the control, not a
+// footnote: a definition that exists and has no routing rules or no tags must
+// keep answering 200 [] / 200 {}. TestAnEmptyRoutingTableIsAnArrayNotNull and
+// TestNoTagsIsAnObjectNotNull assert exactly that and now deploy a definition
+// first. An over-broad fix -- 404 whenever the collection is empty -- passes
+// the unknown-name test and breaks every caller polling a definition that
+// simply has no routing yet.
+//
+// ListWorkflowDefs is already on engine.WorkflowStore, so this costs no new
+// method across the 16 implementers.
+func (s *apiServer) defExists(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, name string) bool {
+	defs, err := st.ListWorkflowDefs(r.Context(), name)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return false
+	}
+	if len(defs) == 0 {
+		s.writeError(w, 404, "workflow definition not found")
+		return false
+	}
+	return true
+}
+
 // ---- A/B version routing, cleat#889 ----
 //
 // PickVersionByRouting has run on every workflow start since routing was
@@ -840,6 +886,9 @@ func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.
 func (s *apiServer) handleListRoutingRules(w http.ResponseWriter, r *http.Request, name string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if !s.defExists(w, r, st, name) {
 		return
 	}
 	rules, err := st.GetRoutingRules(r.Context(), name)
@@ -969,6 +1018,9 @@ func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Reque
 func (s *apiServer) handleListWorkflowTags(w http.ResponseWriter, r *http.Request, name string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if !s.defExists(w, r, st, name) {
 		return
 	}
 	tags, err := st.GetWorkflowTags(r.Context(), name)
@@ -1139,9 +1191,31 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 //	/api/workflows/{id}/dag         already 404'd
 //	/api/workflows/{id}/query       this change
 //
-// /api/workflows/{name}/routing and /tags are NOT in this set: they take a
-// definition NAME, so runExists does not apply and an empty result for an
-// unknown name is the normal state.
+// /api/workflows/{name}/routing and /tags take a definition NAME, so runExists
+// does not apply to them. This comment used to end there -- "an empty result
+// for an unknown name is the normal state" -- and that was reversed by
+// cleat#942. They are name-scoped, not exempt: defExists is their runExists,
+// and the reasoning is on it. What survives from the original is only the
+// narrow claim that runExists cannot serve them, which is still true.
+//
+// The full name-scoped enumeration, since an enumeration from one route switch
+// is what let /query survive #900:
+//
+//	GET    /api/workflows/{name}/routing            404 via defExists
+//	POST   /api/workflows/{name}/routing            409 via ValidateVersion
+//	GET    /api/workflows/{name}/tags               404 via defExists
+//	PUT    /api/workflows/{name}/tags               409 via ValidateVersion
+//	DELETE /api/workflows/{name}/tags/{tag}         unchecked -- see below
+//	DELETE /api/workflows/{name}/routing/{ruleID}   name UNUSED -- see below
+//
+// The two DELETEs are deliberately left alone here, for different reasons.
+// The tag delete is a no-op on the store for an unknown name, and adding a 404
+// changes DELETE idempotency semantics, which is a separate argument from the
+// reader/writer disagreement this change is about. The routing delete is a
+// different defect rather than the same one: it never reads the name at all
+// (handleRemoveRoutingRule takes parts[2], the rule id), so any name in the
+// path deletes any rule id within the tenant. Filed separately; fixing it here
+// would bundle a second concern.
 //
 // The empty value is worse here than an empty list was there, because it is
 // ALSO a legitimate answer: a key that has not been published yet reads
