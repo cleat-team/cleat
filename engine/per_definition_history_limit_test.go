@@ -6,42 +6,6 @@ import (
 	"testing"
 )
 
-// setMaxHistoryLength writes workflow_defs.max_history_length directly.
-//
-// Direct SQL because there is no other way: WorkflowDef carries no
-// MaxHistoryLength field and DeployWorkflowDef never writes the column, so an
-// operator setting a per-definition cap today does it exactly like this. That
-// gap is on the WRITE side and is deliberately not closed here; cleat#889 is
-// about LoadWorkflowConfig being read by nothing, and this test documents the
-// remaining half rather than hiding it behind a helper that does not exist.
-func setMaxHistoryLength(t *testing.T, store WorkflowStore, defName string, version, limit int) {
-	t.Helper()
-	d := dialectOf(t, store)
-	q := "UPDATE workflow_defs SET max_history_length = " + d.placeholder(1) +
-		" WHERE name = " + d.placeholder(2) + " AND version = " + d.placeholder(3)
-	if _, err := rawDBOf(t, store).Exec(q, limit, defName, version); err != nil {
-		t.Fatalf("setting max_history_length for %s v%d: %v", defName, version, err)
-	}
-
-	// Read it back rather than trusting RowsAffected. MySQL counts rows
-	// CHANGED, not matched, so setting the column to the value it already
-	// holds -- which the limit=0 case does -- reports 0 affected and is
-	// indistinguishable from "no such definition". A read-back answers the
-	// question actually being asked, on all three dialects, and verifies the
-	// write instead of the statement.
-	var got int
-	rq := "SELECT max_history_length FROM workflow_defs WHERE name = " + d.placeholder(1) +
-		" AND version = " + d.placeholder(2)
-	if err := rawDBOf(t, store).QueryRow(rq, defName, version).Scan(&got); err != nil {
-		t.Fatalf("reading back max_history_length for %s v%d (was the definition deployed?): %v",
-			defName, version, err)
-	}
-	if got != limit {
-		t.Fatalf("max_history_length for %s v%d is %d, want %d -- the write did not take, "+
-			"so this test would measure nothing", defName, version, got, limit)
-	}
-}
-
 func appendNEvents(t *testing.T, ctx context.Context, store WorkflowStore, wfID string, n int) {
 	t.Helper()
 	recs := make([]EventRecord, 0, n)
@@ -71,6 +35,17 @@ func appendNEvents(t *testing.T, ctx context.Context, store WorkflowStore, wfID 
 // Wiring only the first compacts to the wrong depth. The reachability guard
 // cannot tell: it answers "is LoadWorkflowConfig called", which the narrow
 // version satisfies.
+//
+// THE CAP IS SET THE WAY AN OPERATOR SETS IT, through the deploy payload
+// (#924). It used to be written here with a direct UPDATE, because when this
+// test was first written nothing else could write the column. That left a seam
+// no test crossed once #924 landed: #924 asserts a deployed value round-trips
+// back out of LoadWorkflowConfig, and this test asserted the two gates honour
+// a column value, and NOTHING asserted that the value a deploy writes is the
+// value the gates read. The two gates do not even reach the column the same
+// way -- GetCompactionCandidates joins workflow_defs in SQL, CompactWorkflowHistory
+// calls LoadWorkflowConfig -- so "same column, therefore same answer" was an
+// inference, not a measurement. Deploying the cap here makes it a measurement.
 func TestAPerDefinitionHistoryLimitIsBothSelectedAndHonoured(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
@@ -85,18 +60,32 @@ func TestAPerDefinitionHistoryLimitIsBothSelectedAndHonoured(t *testing.T) {
 			const global = 100
 			const events = 6
 
-			for _, name := range []string{"capped-wf", "uncapped-wf"} {
+			// capped-wf compacts at 4 events; uncapped-wf leaves the field
+			// unset, which is the column default 0 and means "use the global".
+			// The cap arrives THROUGH THE DEPLOY PAYLOAD, which is what makes
+			// this test span the seam -- see the doc comment above.
+			for name, limit := range map[string]int{"capped-wf": 4, "uncapped-wf": 0} {
 				if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
 					Name: name, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
-					ABIVersion: 1, MinVersion: 1,
+					ABIVersion: 1, MinVersion: 1, MaxHistoryLength: limit,
 				}); err != nil {
 					t.Fatalf("DeployWorkflowDef(%s): %v", name, err)
 				}
+				// Confirm the deploy actually carried the value before
+				// measuring anything with it. Without this a write half that
+				// silently dropped the column would make the capped case look
+				// exactly like the uncapped one, and the assertions below
+				// would be reporting on a cap that was never set.
+				got, err := store.LoadWorkflowConfig(ctx, name, 1)
+				if err != nil {
+					t.Fatalf("LoadWorkflowConfig(%s): %v", name, err)
+				}
+				if got != limit {
+					t.Fatalf("deploying %s with MaxHistoryLength=%d stored %d -- the deploy "+
+						"payload did not reach the column, so this test measures nothing",
+						name, limit, got)
+				}
 			}
-			// capped-wf compacts at 4 events; uncapped-wf keeps the default 0,
-			// which means "use the global".
-			setMaxHistoryLength(t, store, "capped-wf", 1, 4)
-			setMaxHistoryLength(t, store, "uncapped-wf", 1, 0)
 
 			capped, _, err := store.StartNewRun(ctx, "", "capped-wf", 1,
 				json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
