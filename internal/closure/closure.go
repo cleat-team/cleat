@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -888,4 +889,90 @@ func isWASEligible(fd *analyzer.FuncDecl, cache map[string]bool) bool {
 
 	cache[filename] = ok
 	return ok
+}
+
+// ---------------------------------------------------------------------------
+// Ordered access to diagnostics (cleat#965)
+// ---------------------------------------------------------------------------
+
+// Diagnostic is one finding paired with the function it was reported in.
+//
+// Errors and Warnings are keyed by function name, and Go randomises map
+// iteration, so every consumer that ranged over them directly produced a
+// different ordering on every run. Four output modes did: the human report, the
+// GitHub Actions annotations, the JSON output, and the summary. `cleat vet` on
+// an unchanged package could not be diffed against itself, which is the
+// property a linter is most often asked for -- no golden file, no baseline, no
+// before/after review of what an edit did to the diagnostics.
+//
+// It is also the tool whose job is rejecting non-determinism, and map iteration
+// order is one of its own error codes (E021).
+type Diagnostic struct {
+	FuncName   string
+	Code       string
+	Message    string
+	Suggestion string
+	Line       int
+}
+
+// SortedErrors returns every validation error in a stable, total order.
+//
+// Use this rather than ranging over Errors. The maps stay exported because the
+// analysis consumes them; ordering belongs to presentation.
+func (cr *Result) SortedErrors() []Diagnostic {
+	out := make([]Diagnostic, 0, len(cr.Errors))
+	for funcName, errs := range cr.Errors {
+		for _, e := range errs {
+			out = append(out, Diagnostic{
+				FuncName:   funcName,
+				Code:       e.Code,
+				Message:    e.Message,
+				Suggestion: e.Suggestion,
+				Line:       e.Line,
+			})
+		}
+	}
+	sortDiagnostics(out)
+	return out
+}
+
+// SortedWarnings returns every validation warning in a stable, total order.
+func (cr *Result) SortedWarnings() []Diagnostic {
+	out := make([]Diagnostic, 0, len(cr.Warnings))
+	for funcName, warns := range cr.Warnings {
+		for _, w := range warns {
+			out = append(out, Diagnostic{
+				FuncName:   funcName,
+				Code:       w.Code,
+				Message:    w.Message,
+				Suggestion: w.Suggestion,
+				Line:       w.Line,
+			})
+		}
+	}
+	sortDiagnostics(out)
+	return out
+}
+
+// sortDiagnostics orders by function, then line, then code, then message.
+//
+// All four keys are needed for a TOTAL order, which is the point: two findings
+// that compare equal on every key would be free to swap between runs, and the
+// ordering would be stable only by luck. One function can report the same code
+// on the same line twice -- e013_sync_mutex does, for Lock and Unlock on one
+// line -- so func+line+code alone is not enough.
+func sortDiagnostics(d []Diagnostic) {
+	sort.Slice(d, func(i, j int) bool {
+		a, b := d[i], d[j]
+		switch {
+		case a.FuncName != b.FuncName:
+			return a.FuncName < b.FuncName
+		case a.Line != b.Line:
+			return a.Line < b.Line
+		case a.Code != b.Code:
+			return a.Code < b.Code
+		default:
+			return a.Message < b.Message
+		}
+	})
 }

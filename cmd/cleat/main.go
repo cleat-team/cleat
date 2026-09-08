@@ -305,14 +305,12 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		warnCount := cr.NumWarnings()
 		if warnCount > 0 {
 			fmt.Println()
-			for funcName, warns := range cr.Warnings {
-				for _, w := range warns {
-					msg := fmt.Sprintf("  Warning: %s:%d: %s [%s]",
-						analyzer.ShortName(funcName), w.Line, w.Message, w.Code)
-					fmt.Println(msg)
-					if w.Suggestion != "" {
-						fmt.Printf("    suggestion: %s\n", w.Suggestion)
-					}
+			for _, w := range cr.SortedWarnings() {
+				msg := fmt.Sprintf("  Warning: %s:%d: %s [%s]",
+					analyzer.ShortName(w.FuncName), w.Line, w.Message, w.Code)
+				fmt.Println(msg)
+				if w.Suggestion != "" {
+					fmt.Printf("    suggestion: %s\n", w.Suggestion)
 				}
 			}
 		}
@@ -320,12 +318,10 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		errCount := cr.NumErrors()
 		if errCount > 0 {
 			fmt.Println()
-			for funcName, errs := range cr.Errors {
-				for _, e := range errs {
-					fmt.Printf("  %s: %s:%d: %s\n", e.Code, analyzer.ShortName(funcName), e.Line, e.Message)
-					if e.Suggestion != "" {
-						fmt.Printf("    → %s\n", e.Suggestion)
-					}
+			for _, e := range cr.SortedErrors() {
+				fmt.Printf("  %s: %s:%d: %s\n", e.Code, analyzer.ShortName(e.FuncName), e.Line, e.Message)
+				if e.Suggestion != "" {
+					fmt.Printf("    → %s\n", e.Suggestion)
 				}
 			}
 			os.Exit(1)
@@ -644,24 +640,20 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 			fmt.Printf("::error file=%s,line=%d,title=Threading::%s\n", f, e.Line, e.Message)
 			exitCode = 1
 		}
-		for funcName, errs := range cr.Errors {
-			f := lookupFile(result, funcName)
+		for _, e := range cr.SortedErrors() {
+			f := lookupFile(result, e.FuncName)
 			if f == "" {
 				f = "unknown"
 			}
-			for _, e := range errs {
-				fmt.Printf("::error file=%s,line=%d,title=%s::%s\n", f, e.Line, e.Code, e.Message)
-				exitCode = 1
-			}
+			fmt.Printf("::error file=%s,line=%d,title=%s::%s\n", f, e.Line, e.Code, e.Message)
+			exitCode = 1
 		}
-		for funcName, warns := range cr.Warnings {
-			f := lookupFile(result, funcName)
+		for _, w := range cr.SortedWarnings() {
+			f := lookupFile(result, w.FuncName)
 			if f == "" {
 				f = "unknown"
 			}
-			for _, w := range warns {
-				fmt.Printf("::warning file=%s,line=%d,title=%s::%s\n", f, w.Line, w.Code, w.Message)
-			}
+			fmt.Printf("::warning file=%s,line=%d,title=%s::%s\n", f, w.Line, w.Code, w.Message)
 		}
 		return exitCode
 	}
@@ -696,22 +688,18 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 		}
 		exitCode = 1
 	}
-	for funcName, errs := range cr.Errors {
-		for _, e := range errs {
-			fmt.Printf("  %s:%d: %s: %s\n", analyzer.ShortName(funcName), e.Line, e.Code, e.Message)
-			if e.Suggestion != "" {
-				fmt.Printf("    → %s\n", e.Suggestion)
-			}
-			exitCode = 1
+	for _, e := range cr.SortedErrors() {
+		fmt.Printf("  %s:%d: %s: %s\n", analyzer.ShortName(e.FuncName), e.Line, e.Code, e.Message)
+		if e.Suggestion != "" {
+			fmt.Printf("    → %s\n", e.Suggestion)
 		}
+		exitCode = 1
 	}
-	for funcName, warns := range cr.Warnings {
-		for _, w := range warns {
-			msg := fmt.Sprintf("  %s:%d: %s: %s", analyzer.ShortName(funcName), w.Line, w.Code, w.Message)
-			fmt.Println(msg)
-			if w.Suggestion != "" {
-				fmt.Printf("    suggestion: %s\n", w.Suggestion)
-			}
+	for _, w := range cr.SortedWarnings() {
+		msg := fmt.Sprintf("  %s:%d: %s: %s", analyzer.ShortName(w.FuncName), w.Line, w.Code, w.Message)
+		fmt.Println(msg)
+		if w.Suggestion != "" {
+			fmt.Printf("    suggestion: %s\n", w.Suggestion)
 		}
 	}
 
@@ -1185,31 +1173,27 @@ func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadin
 	}
 
 	// Validation errors.
-	for funcName, errs := range cr.Errors {
-		for _, e := range errs {
-			out.Errors = append(out.Errors, VetResult{
-				Code:       e.Code,
-				File:       lookupFile(result, funcName),
-				Line:       e.Line,
-				Column:     0,
-				Message:    e.Message,
-				Suggestion: e.Suggestion,
-			})
-		}
+	for _, e := range cr.SortedErrors() {
+		out.Errors = append(out.Errors, VetResult{
+			Code:       e.Code,
+			File:       lookupFile(result, e.FuncName),
+			Line:       e.Line,
+			Column:     0,
+			Message:    e.Message,
+			Suggestion: e.Suggestion,
+		})
 	}
 
 	// Warnings.
-	for funcName, warns := range cr.Warnings {
-		for _, w := range warns {
-			out.Warnings = append(out.Warnings, VetResult{
-				Code:       w.Code,
-				File:       lookupFile(result, funcName),
-				Line:       w.Line,
-				Column:     0,
-				Message:    w.Message,
-				Suggestion: w.Suggestion,
-			})
-		}
+	for _, w := range cr.SortedWarnings() {
+		out.Warnings = append(out.Warnings, VetResult{
+			Code:       w.Code,
+			File:       lookupFile(result, w.FuncName),
+			Line:       w.Line,
+			Column:     0,
+			Message:    w.Message,
+			Suggestion: w.Suggestion,
+		})
 	}
 
 	// Summary.
