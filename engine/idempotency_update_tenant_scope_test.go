@@ -79,6 +79,13 @@ type idempotencyScopeStore interface {
 	StartNewRun(ctx context.Context, workflowID, defName string, version int, input json.RawMessage, idemKey, tenantID string, priority int) (string, bool, error)
 	ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error)
 	CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
+
+	// The path the worker actually takes. cmd/cleat-worker/setup.go:1935 calls
+	// this, not CompleteWorkflow -- whose only non-test callers are in
+	// cmd/cleat-bench. On every dialect it delegates the terminal writes to the
+	// finalize_workflow_status stored procedure, so a test that drives
+	// CompleteWorkflow exercises Go code production does not run.
+	FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 }
 
 func TestIdempotencyResultUpdatesAreScopedToTenant(t *testing.T) {
@@ -298,6 +305,103 @@ func TestIdempotencyResultSurvivesANonJSONResult(t *testing.T) {
 				t.Errorf("completing with an empty result left idempotency_keys.result NULL: the " +
 					"raw value was written uncoerced, the column rejected it, and the error was " +
 					"swallowed by the best-effort WARN path -- so a retried idempotent call finds no result")
+			}
+		})
+	}
+}
+
+// TestFinalizeDoesNotWriteIdempotencyAcrossTenants is the same property as
+// TestIdempotencyResultUpdatesAreScopedToTenant, on the path production takes.
+//
+// WHY BOTH EXIST. The first drives CompleteWorkflow, a store method whose only
+// non-test callers are in cmd/cleat-bench. The worker finalizes through
+// FinalizeWorkflowSegment (cmd/cleat-worker/setup.go:1935), which delegates the
+// terminal writes to the finalize_workflow_status stored procedure -- a
+// different implementation of the same rule, in SQL, in a migration.
+//
+// cleat#1012 fixed the Go methods and left the procedure untouched, and the
+// first test passed on all three dialects throughout, including its
+// falsifications. An exhaustive check of the wrong set: three dialects felt
+// like completeness, and the axis that mattered was the call graph. Nothing in
+// a Go-level search can see the procedure's statement at all.
+//
+// So this is not redundant coverage. It is the only arm that binds the code the
+// worker runs, and it is table-driven for the same reason as its sibling: the
+// procedure is defined separately per dialect, so no dialect stands in for
+// another.
+func TestFinalizeDoesNotWriteIdempotencyAcrossTenants(t *testing.T) {
+	for _, d := range idempotencyScopeDialects() {
+		t.Run(d.name, func(t *testing.T) {
+			db := testutil.TestDB(t, d.dialect)
+			defer db.Close()
+			testutil.SetupFullSchema(t, db, d.dialect)
+			testutil.CleanupAllTestData(t, db, d.dialect)
+			defer testutil.CleanupAllTestData(t, db, d.dialect)
+
+			ctx := context.Background()
+			const tenantB = "d4d4d4d4-d4d4-4d4d-9d4d-d4d4d4d4d4d4"
+			const decoyTenant = "d5d5d5d5-d5d5-4d5d-9d5d-d5d5d5d5d5d5"
+
+			defName := fmt.Sprintf("idem-finalize-def-%s", d.name)
+			for _, tn := range []string{tenantB, decoyTenant} {
+				if err := d.newStore(db, tn).DeployWorkflowDef(ctx, &WorkflowDef{
+					Name: defName, Version: 1,
+					WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+					ABIVersion: 1, MinVersion: 1,
+				}); err != nil {
+					t.Fatalf("deploy %q for tenant %s: %v", defName, tn, err)
+				}
+			}
+
+			storeB := d.newStore(db, tenantB)
+			wfID := fmt.Sprintf("idem-finalize-wf-%s-%d", d.name, time.Now().UnixNano())
+			if _, _, err := storeB.StartNewRun(ctx, wfID, defName, 1, json.RawMessage(`{}`), "finalize-tenant-b-key", tenantB, 0); err != nil {
+				t.Fatalf("StartNewRun: %v", err)
+			}
+
+			// The decoy: another tenant's idempotency row naming the SAME
+			// workflow_id. Legitimate on the real schema, where the primary key
+			// is (key_hash, tenant_id).
+			decoyHash := sha256.Sum256([]byte("finalize-decoy-key"))
+			if _, err := db.ExecContext(ctx, d.insertDecoy, decoyHash[:], wfID, decoyTenant); err != nil {
+				t.Fatalf("insert decoy idempotency_keys row: %v", err)
+			}
+
+			claimed, err := storeB.ClaimWorkflows(ctx, "worker-finalize-test", 1)
+			if err != nil {
+				t.Fatalf("ClaimWorkflows: %v", err)
+			}
+			if len(claimed) != 1 || claimed[0].ID != wfID {
+				t.Fatalf("ClaimWorkflows: got %+v, want exactly [%s]", claimed, wfID)
+			}
+			wf := claimed[0]
+
+			// The production call. Terminal status 'done' takes the procedure's
+			// idempotency arm.
+			if err := storeB.FinalizeWorkflowSegment(ctx, wfID, wf.AssignedTo, wf.Generation,
+				nil, "done", `{"ok":true}`, "", "", nil, time.Time{}); err != nil {
+				t.Fatalf("FinalizeWorkflowSegment: %v", err)
+			}
+
+			// Control: tenant B's own row must have been written, or the
+			// cross-tenant assertion below passes for the wrong reason.
+			var bResult []byte
+			if err := db.QueryRowContext(ctx, d.selectResult, wfID, tenantB).Scan(&bResult); err != nil {
+				t.Fatalf("read tenant B's idempotency_keys row: %v", err)
+			}
+			if bResult == nil {
+				t.Errorf("tenant B's own idempotency_keys row was not written by its own " +
+					"FinalizeWorkflowSegment -- the decoy assertion below would pass vacuously")
+			}
+
+			var decoyResult []byte
+			if err := db.QueryRowContext(ctx, d.selectResult, wfID, decoyTenant).Scan(&decoyResult); err != nil {
+				t.Fatalf("read decoy idempotency_keys row: %v", err)
+			}
+			if decoyResult != nil {
+				t.Errorf("a different tenant's idempotency_keys row (same workflow_id) was "+
+					"overwritten by tenant B's FinalizeWorkflowSegment: result = %s -- "+
+					"finalize_workflow_status's UPDATE is not scoped to tenant_id", decoyResult)
 			}
 		})
 	}
