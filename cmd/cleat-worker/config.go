@@ -93,19 +93,24 @@ var (
 	// denies every signal until an operator makes a second call per workflow.
 	// It is a per-deployment decision, not yet a safe default.
 	// IMPROVEMENT-PLAN 3.15.
-	requireSignalAuth              = flag.Bool("require-signal-auth", false, "Require signal authorization: checks caller identity against target's allowed_signals (set it with PUT /api/workflows/{id}/allowed-signals). Off by default: workflows start with an empty list, so enabling this denies every signal until callers are granted")
-	generateAPIKeyFor              = flag.String("generate-api-key", "", "Generate a new API key for the given tenant UUID and exit")
-	maxBodySize                    = flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
-	httpReadTimeout                = flag.Duration("http-read-timeout", 30*time.Second, "HTTP read timeout")
-	httpWriteTimeout               = flag.Duration("http-write-timeout", 60*time.Second, "HTTP write timeout")
-	httpIdleTimeout                = flag.Duration("http-idle-timeout", 120*time.Second, "HTTP idle timeout")
-	tenantResolver                 = flag.String("tenant-resolver", "single-tenant", "Tenant resolution mode: 'single-tenant' (default), 'header:<name>' (header-based), 'api-key' (from API key)")
-	rateLimit                      = flag.Float64("rate-limit", 100, "Requests/second/IP rate limit (only when --api-addr is set)")
-	rateLimitBurst                 = flag.Int("rate-limit-burst", 200, "Rate limit burst size")
-	rateLimitPerTenant             = flag.Float64("rate-limit-per-tenant", 0, "Requests/second per tenant (0 = disabled; requires --require-auth)")
-	rateLimitPerTenantBurst        = flag.Int("rate-limit-per-tenant-burst", 0, "Burst size for per-tenant rate limit")
-	maxRetries                     = flag.Int("max-retries", 100, "Maximum retry attempts for DurableCallWithRetry")
-	retentionDays                  = flag.Int("retention-days", 30, "Days to retain completed/failed workflow event history (0 disables)")
+	requireSignalAuth       = flag.Bool("require-signal-auth", false, "Require signal authorization: checks caller identity against target's allowed_signals (set it with PUT /api/workflows/{id}/allowed-signals). Off by default: workflows start with an empty list, so enabling this denies every signal until callers are granted")
+	generateAPIKeyFor       = flag.String("generate-api-key", "", "Generate a new API key for the given tenant UUID and exit")
+	maxBodySize             = flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
+	httpReadTimeout         = flag.Duration("http-read-timeout", 30*time.Second, "HTTP read timeout")
+	httpWriteTimeout        = flag.Duration("http-write-timeout", 60*time.Second, "HTTP write timeout")
+	httpIdleTimeout         = flag.Duration("http-idle-timeout", 120*time.Second, "HTTP idle timeout")
+	tenantResolver          = flag.String("tenant-resolver", "single-tenant", "Tenant resolution mode: 'single-tenant' (default), 'header:<name>' (header-based), 'api-key' (from API key)")
+	rateLimit               = flag.Float64("rate-limit", 100, "Requests/second/IP rate limit (only when --api-addr is set)")
+	rateLimitBurst          = flag.Int("rate-limit-burst", 200, "Rate limit burst size")
+	rateLimitPerTenant      = flag.Float64("rate-limit-per-tenant", 0, "Requests/second per tenant (0 = disabled; requires --require-auth)")
+	rateLimitPerTenantBurst = flag.Int("rate-limit-per-tenant-burst", 0, "Burst size for per-tenant rate limit")
+	maxRetries              = flag.Int("max-retries", 100, "Maximum retry attempts for DurableCallWithRetry")
+	// NOTE: this sweep's event_history arm cannot match anything. See
+	// retentionLoop and PostgresStore.DeleteExpiredEvents -- the rows are
+	// already gone by the time a workflow is done or failed, deleted by the
+	// finalize_workflow_status procedure. The flag is not inert: it still
+	// clears compaction state. cleat#1016.
+	retentionDays                  = flag.Int("retention-days", 30, "Days to retain completed/failed workflow event history (0 disables). NOTE: event_history rows for done/failed workflows are already deleted at finalize time by the finalize_workflow_status procedure, so this sweep's event deletion finds nothing; what it still does is clear compaction state. See cleat#1016.")
 	completedWorkflowRetentionDays = flag.Int("completed-workflow-retention-days", 0, "Days to retain workflow_instances rows for terminal workflows (done/failed/terminated) before permanently deleting them, along with any remaining event_history. 0 (default) disables this -- unlike --retention-days, this deletes the workflow record itself (status, result, error, def_name), not just its step-by-step history, so it is opt-in rather than on by default. dead_lettered workflows are never touched by this flag.")
 	wasmCacheMaxEntries            = flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
 	wasmCacheMaxMB                 = flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
