@@ -624,6 +624,33 @@ const (
 	ParentClosePolicyRequestCancel ParentClosePolicy = "REQUEST_CANCEL" // Cancellation is requested on children
 )
 
+// Valid reports whether p is a policy the engine will accept.
+//
+// The empty value is valid and means "unset" -- ChildWorkflow sends it for
+// every caller that does not choose a policy, and the column defaults to
+// ABANDON.
+//
+// Everything else must match EXACTLY, including case. ParentClosePolicy is a
+// string type, so the constants above are easy to bypass and any literal
+// compiles; before cleat#936 a mis-cased value was written verbatim and then
+// compared against the policy arms by whichever database was underneath:
+//
+//	mysql>      SELECT 'terminate' = 'TERMINATE';   1     (utf8mb4_0900_ai_ci)
+//	postgres=#  SELECT 'terminate' = 'TERMINATE';   f
+//
+// The same workflow therefore terminated its children on one database and
+// abandoned them on the other. The engine refuses an unrecognised policy at
+// the child-start boundary; this check exists so the error arrives at the
+// call site rather than as a host-call failure, and so the mistake is visible
+// to anyone reading the SDK.
+func (p ParentClosePolicy) Valid() bool {
+	switch p {
+	case "", ParentClosePolicyAbandon, ParentClosePolicyTerminate, ParentClosePolicyRequestCancel:
+		return true
+	}
+	return false
+}
+
 // ChildWorkflowOptions carries version resolution, parent close policy, and
 // priority configuration for spawning a child workflow.
 //

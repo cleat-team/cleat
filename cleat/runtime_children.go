@@ -33,6 +33,20 @@ func (h *HostCallsImpl) ChildWorkflow(name, inputJSON string) (string, error) {
 }
 
 func (h *HostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts ChildWorkflowOptions) (string, error) {
+	// Refused here as well as in the engine (cleat#936), so the error names the
+	// call that caused it instead of arriving as a host-call failure. The
+	// engine's check is the authoritative one -- it is the boundary every
+	// language SDK crosses -- and this one is the readable one.
+	if !opts.ParentClosePolicy.Valid() {
+		return "", fmt.Errorf(
+			"durable: child workflow %q: parent close policy %q is not recognised; "+
+				"must be one of %q, %q, %q, or empty for the default. Policies are "+
+				"matched exactly: a case-insensitive database collation would accept a "+
+				"mis-cased value while a case-sensitive one silently treats it as %q",
+			name, string(opts.ParentClosePolicy),
+			ParentClosePolicyAbandon, ParentClosePolicyTerminate, ParentClosePolicyRequestCancel,
+			ParentClosePolicyAbandon)
+	}
 	if h.childWorkflowWithOptions != nil {
 		return h.childWorkflowWithOptions(name, inputJSON, opts.Version, string(opts.ParentClosePolicy), opts.Priority)
 	}
