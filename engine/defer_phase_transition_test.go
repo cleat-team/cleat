@@ -562,3 +562,115 @@ func TestDeferPhaseOwed(t *testing.T) {
 		})
 	}
 }
+
+// TestAnExpiredPhaseFencesOutTheWorkerStillHoldingIt is the race the deadline
+// sweep's safety rests on, and nothing exercised it.
+//
+// ExpireDeferPhases applies the recorded outcome to a phase that may still be
+// CLAIMED — a worker can be grinding on its defers at the moment the deadline
+// passes. What this pins is that the holder is then refused, and that its
+// refusal leaves the applied outcome intact.
+//
+// WHAT IT DOES NOT PIN, measured rather than assumed. ExpireDeferPhases' doc
+// comment says "the generation bump is what makes it safe to run against a
+// phase that is currently claimed". The bump does suffice — but so does either
+// of two other clauses in the same UPDATE, because FinalizeDeferPhase fences on
+//
+//	id = $1 AND assigned_to = $2 AND generation = $3
+//	        AND pending_terminal_status IS NOT NULL
+//
+// and the sweep nulls assigned_to and pending_terminal_status as well as
+// bumping generation. Measured on postgres by removing each clause and keeping
+// the other two: every one of the three, alone, still fences the holder out.
+// The test only fails when ALL THREE are removed.
+//
+// So this test cannot attribute the fencing to any single clause, and an
+// earlier draft of this comment said it pinned the generation bump. It does
+// not. That is the §3.112 shape again — a name crediting one mechanism while
+// something else does the work — and it was caught here by falsifying this
+// test rather than by reading it.
+//
+// The guarantee is worth pinning anyway, and is what the name now says: the
+// holder is fenced out. The redundancy is a property to know about, not a
+// defect; it means a future change to any one clause cannot silently reopen
+// the race, and equally that no single clause can be shown load-bearing by
+// this test. TestAnExpiredDeferPhaseTerminatesWithoutItsCleanup covers the
+// sweep applying the outcome and releasing resources, with a proper
+// inside-deadline control — but its workflow has no live holder, so it cannot
+// see what happens to one. The worker's half is covered hermetically in
+// cmd/cleat-worker (TestFinishDeferPhaseTreatsALostFenceAsSomebodyElsesSuccess,
+// which asserts ErrFenceLost causes no other terminal write). What was missing
+// is the store-side join: that the sweep actually invalidates the holder's
+// fence, and that the holder cannot then overwrite the outcome.
+//
+// WHY THE HOLDER IS CLAIMED BEFORE THE DEADLINE IS FORCED. Claiming after the
+// sweep would test nothing: the row it read would already carry the swept
+// state, so its finalize would fail for the wrong reason or not run at all.
+// The claim has to happen first, so what the holder holds is exactly what the
+// sweep then invalidates.
+func TestAnExpiredPhaseFencesOutTheWorkerStillHoldingIt(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			ctx := context.Background()
+			dps, ok := store.(DeferPhaseStore)
+			if !ok {
+				t.Fatalf("%T is not a DeferPhaseStore", store)
+			}
+
+			wfID := startTerminableWorkflow(t, ctx, store, "fenced-by-expiry", true)
+			if err := store.TerminateWorkflow(ctx, wfID, "terminated by test"); err != nil {
+				t.Fatalf("TerminateWorkflow: %v", err)
+			}
+
+			// The holder, claimed while the phase is still inside its deadline.
+			held := claimByID(t, ctx, store, "worker-grinding", wfID)
+			if held.PendingTerminalStatus == "" {
+				t.Fatalf("the claim carried no pending terminal status, so this is not a "+
+					"defer phase and the rest of the test is about something else: %+v", held)
+			}
+
+			// Precondition, asserted rather than assumed: the holder's fence is
+			// good BEFORE the sweep. Without this, a test that sees ErrFenceLost
+			// afterwards cannot tell "the sweep invalidated it" from "it was
+			// never valid" — and the second is satisfied by any broken claim.
+			if n, err := dps.ExpireDeferPhases(ctx); err != nil {
+				t.Fatalf("ExpireDeferPhases (inside the deadline): %v", err)
+			} else if n != 0 {
+				t.Fatalf("the sweep expired %d phase(s) still inside their deadline", n)
+			}
+
+			setDeferPhaseDeadline(t, store, wfID, 60)
+			if n, err := dps.ExpireDeferPhases(ctx); err != nil {
+				t.Fatalf("ExpireDeferPhases: %v", err)
+			} else if n != 1 {
+				t.Fatalf("the sweep expired %d phase(s), want 1", n)
+			}
+			if wf := mustGetWorkflow(t, ctx, store, wfID); wf.Status != "terminated" {
+				t.Fatalf("status = %q after the sweep, want \"terminated\"", wf.Status)
+			}
+
+			// The claim under test. The holder finishes its defers and finalizes
+			// with the generation it was given, which the sweep has moved.
+			err := dps.FinalizeDeferPhase(ctx, wfID, "worker-grinding", held.Generation, nil)
+			if !errors.Is(err, ErrFenceLost) {
+				t.Fatalf("the holder's finalize returned %v, want ErrFenceLost.\n\n"+
+					"The sweep applied this workflow's outcome and bumped its generation. "+
+					"A holder whose fence still matched could write a second terminal "+
+					"outcome over the one already applied, which is the 'exactly once' "+
+					"ExpireDeferPhases claims and the reason it is safe to sweep a "+
+					"claimed phase at all.", err)
+			}
+
+			// And the outcome is unchanged: refused, not merely reported. A
+			// fence that returns the error after writing would satisfy the
+			// assertion above and still corrupt the row.
+			if wf := mustGetWorkflow(t, ctx, store, wfID); wf.Status != "terminated" {
+				t.Fatalf("status = %q after the fenced-out finalize, want \"terminated\": "+
+					"the holder was refused and wrote anyway", wf.Status)
+			}
+		})
+	}
+}

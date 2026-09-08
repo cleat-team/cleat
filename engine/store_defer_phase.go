@@ -88,11 +88,23 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 // that traps every time it replays would otherwise be re-queued forever, and a
 // terminate that cannot run its cleanup must still terminate.
 //
-// The generation bump is what makes it safe to run against a phase that is
-// currently claimed. The holder's FinalizeDeferPhase then fails its fence and
-// returns ErrFenceLost, which the worker already treats as "another owner has
-// this now" rather than as an error -- so the outcome is applied exactly once
-// whichever of the two gets there first.
+// It is safe to run against a phase that is currently claimed, and the holder's
+// FinalizeDeferPhase then fails its fence and returns ErrFenceLost -- which the
+// worker already treats as "another owner has this now" rather than as an error
+// -- so the outcome is applied exactly once whichever of the two gets there
+// first.
+//
+// This used to credit the generation bump for that, and the bump does suffice.
+// So does each of the other two clauses this UPDATE writes, because the fence is
+//
+//	assigned_to = $2 AND generation = $3 AND pending_terminal_status IS NOT NULL
+//
+// and the sweep nulls assigned_to and pending_terminal_status as well. Measured
+// on postgres, removing each and keeping the other two: all three fence the
+// holder out alone, and the race only reopens when all three are gone
+// (TestAnExpiredPhaseFencesOutTheWorkerStillHoldingIt). Naming one of three
+// redundant mechanisms as "what makes it safe" is how §3.112 went wrong, so it
+// is stated as redundancy here rather than as a single cause.
 func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
