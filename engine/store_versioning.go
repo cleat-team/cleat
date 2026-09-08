@@ -145,11 +145,16 @@ func (s *PostgresStore) RemoveRoutingRule(ctx context.Context, ruleID string) er
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		DELETE FROM workflow_routing WHERE id = $1
 	`, ruleID)
 	if err != nil {
 		return fmt.Errorf("remove routing rule: %w", err)
+	}
+	// Rows-affected, not just "no error": a DELETE matching nothing succeeds,
+	// so without this the caller cannot tell a removal from a no-op. cleat#946.
+	if n, rErr := res.RowsAffected(); rErr == nil && n == 0 {
+		return ErrRoutingRuleNotFound
 	}
 	return tx.Commit()
 }

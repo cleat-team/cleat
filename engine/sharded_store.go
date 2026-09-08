@@ -999,9 +999,35 @@ func (s *ShardedStore) RemoveRoutingRule(ctx context.Context, ruleID string) err
 	if n == 0 {
 		return fmt.Errorf("remove_routing_rule: no shard available")
 	}
-	return s.forEachShard(func(store WorkflowStore) error {
-		return store.RemoveRoutingRule(ctx, ruleID)
-	})
+	// Every shard is asked, as #948 established -- the rule ID is not the shard
+	// key, so there is no way to know in advance which shard holds the row.
+	//
+	// What changed with cleat#946's second half: a store now returns
+	// ErrRoutingRuleNotFound when its DELETE matches nothing, and with n shards
+	// exactly n-1 of them legitimately do not hold the rule. forEachShard stops
+	// at the FIRST error, so passing that sentinel through would abort the walk
+	// at shard 0 and never reach the shard that has it -- reintroducing #948's
+	// defect by way of fixing the reporting. It is swallowed per shard and
+	// re-raised only if no shard claimed the row.
+	found := false
+	if err := s.forEachShard(func(store WorkflowStore) error {
+		rErr := store.RemoveRoutingRule(ctx, ruleID)
+		if errors.Is(rErr, ErrRoutingRuleNotFound) {
+			return nil // not this shard; keep going
+		}
+		if rErr == nil {
+			found = true
+		}
+		return rErr
+	}); err != nil {
+		return err
+	}
+	if !found {
+		// No shard held it. Reported rather than swallowed: this is the case
+		// the API answered 200 {"status":"removed"} for.
+		return ErrRoutingRuleNotFound
+	}
+	return nil
 }
 
 // GetRoutingRules returns all routing rules for a workflow.

@@ -978,6 +978,16 @@ func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := st.RemoveRoutingRule(r.Context(), ruleID); err != nil {
+		// 404, not the 200 this answered for every miss before cleat#946's
+		// second half. No store checked rows-affected, so a DELETE matching
+		// nothing returned nil and an operator tearing down a canary was told it
+		// was gone while it went on shifting live traffic. A rule ID that names
+		// nothing is a bad request path, not a server fault, so it is not a 500
+		// either.
+		if errors.Is(err, engine.ErrRoutingRuleNotFound) {
+			s.writeError(w, 404, "routing rule not found: "+ruleID)
+			return
+		}
 		s.writeError(w, 500, err.Error())
 		return
 	}

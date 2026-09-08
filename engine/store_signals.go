@@ -270,6 +270,18 @@ func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID 
 // about the same boundary.
 var ErrWorkflowNotFound = errors.New("workflow not found")
 
+// ErrRoutingRuleNotFound is returned by RemoveRoutingRule when no rule with
+// that ID exists.
+//
+// cleat#946 had two halves. #948 fixed the first -- ShardedStore routed the
+// removal by rule ID while the rows are placed by workflow name, so it deleted
+// from the wrong shard -- and this is the second: the removal reported success
+// either way, because no implementation checked rows-affected. A DELETE that
+// matches nothing succeeds, so the handler answered
+// `200 {"status":"removed"}` for a rule that never existed, and an operator
+// tearing down a canary was told it was gone.
+var ErrRoutingRuleNotFound = errors.New("routing rule not found")
+
 // SetAllowedSignalCallers replaces the allowed_signals list for a workflow.
 //
 // The write side of GetAllowedSignalCallers above. Until this existed, nothing
