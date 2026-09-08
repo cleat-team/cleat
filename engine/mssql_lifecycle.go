@@ -643,8 +643,8 @@ func (s *MSSQLStore) completeWorkflowOnce(ctx context.Context, workflowID, worke
 
 	// Record idempotency result within the transaction (best-effort).
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET result = @p2 WHERE workflow_id = @p1`,
-		workflowID, resultJSON); err != nil {
+		`UPDATE idempotency_keys SET result = @p2 WHERE workflow_id = @p1 AND tenant_id = @p3`,
+		workflowID, resultJSON, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -704,8 +704,8 @@ func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID 
 
 	// Record idempotency error within the transaction (best-effort).
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET error_msg = @p2 WHERE workflow_id = @p1`,
-		workflowID, errorMsg); err != nil {
+		`UPDATE idempotency_keys SET error_msg = @p2 WHERE workflow_id = @p1 AND tenant_id = @p3`,
+		workflowID, errorMsg, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -760,8 +760,8 @@ func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, 
 
 	// Record idempotency error within the transaction (best-effort).
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET error_msg = @p2 WHERE workflow_id = @p1`,
-		workflowID, errMsg); err != nil {
+		`UPDATE idempotency_keys SET error_msg = @p2 WHERE workflow_id = @p1 AND tenant_id = @p3`,
+		workflowID, errMsg, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
