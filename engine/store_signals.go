@@ -320,6 +320,27 @@ var ErrRoutingRuleNotFound = errors.New("routing rule not found")
 // "duplicate key" search matching `invalid column value at row 26270`.
 var ErrScheduleExists = errors.New("schedule already exists")
 
+// ErrScheduleNextRunUnset is returned by CreateSchedule when NextRunAt is the
+// zero time.
+//
+// The column is NOT NULL DEFAULT now() on all three dialects, but the default
+// is UNREACHABLE: every CreateSchedule names next_run_at in its INSERT and
+// passes the field, so a zero is written rather than defaulted. What that zero
+// then means is a three-way divergence -- PostgreSQL stores year 1, MySQL
+// rejects `0000-00-00` with a 500, SQL Server accepts it -- which is cleat#995
+// arriving three different ways from one omission.
+//
+// Rejecting it makes the contract explicit and identical everywhere: a caller
+// that forgot to set it gets the same loud error on every backend, rather than
+// a silently overdue schedule on the dialect most people develop on.
+//
+// ONLY the zero value. A NextRunAt in the past is NOT an error: that is what a
+// deliberately backdated schedule looks like, and the misfire policy exists to
+// decide what to do about the firings it missed. "The caller forgot" and "the
+// caller chose something unusual" are different bugs, and only the first has a
+// safe uniform answer.
+var ErrScheduleNextRunUnset = errors.New("schedule next_run_at is not set")
+
 // SetAllowedSignalCallers replaces the allowed_signals list for a workflow.
 //
 // The write side of GetAllowedSignalCallers above. Until this existed, nothing
