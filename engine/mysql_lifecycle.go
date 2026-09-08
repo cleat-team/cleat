@@ -457,8 +457,8 @@ func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 
 	// Record idempotency result within the transaction (best-effort).
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET result = ? WHERE workflow_id = ?`,
-		result, workflowID); err != nil {
+		`UPDATE idempotency_keys SET result = ? WHERE workflow_id = ? AND tenant_id = ?`,
+		resultJSON, workflowID, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -510,8 +510,8 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 
 	// Record idempotency error within the transaction (best-effort).
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ?`,
-		errorMsg, workflowID); err != nil {
+		`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ? AND tenant_id = ?`,
+		errorMsg, workflowID, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -898,8 +898,8 @@ func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 
 	// Record idempotency error within the transaction (best-effort).
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ?`,
-		errMsg, workflowID); err != nil {
+		`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ? AND tenant_id = ?`,
+		errMsg, workflowID, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
