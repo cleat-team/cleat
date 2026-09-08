@@ -922,6 +922,7 @@ func main() {
 		tenantPools:                      tenantPools,
 		memorySampleRetention:            *memorySampleRetention,
 		retentionDays:                    *retentionDays,
+		deadLetterRetentionDays:          *deadLetterRetentionDays,
 		completedWorkflowRetentionDays:   *completedWorkflowRetentionDays,
 		schemaName:                       *schemaName,
 		disableChecksumVerification:      disableChecksumVerification,

@@ -922,10 +922,11 @@ type Worker struct {
 	circuitOpen         atomic.Bool
 
 	// Compaction settings.
-	Metrics             *prometheus.Metrics
-	compactionThreshold int
-	compactionInterval  time.Duration
-	retentionInterval   time.Duration
+	Metrics                 *prometheus.Metrics
+	compactionThreshold     int
+	compactionInterval      time.Duration
+	retentionInterval       time.Duration
+	deadLetterRetentionDays int
 
 	memoryController                 *MemoryController
 	maxRetries                       int
@@ -1139,8 +1140,8 @@ func (w *Worker) Run() {
 	w.launchLoop("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })
 
 	// Retention loop.
-	w.registerLoopFunc("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays) })
-	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays) })
+	w.registerLoopFunc("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays, w.deadLetterRetentionDays) })
+	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays, w.deadLetterRetentionDays) })
 
 	// Compaction loop.
 	//
@@ -2480,9 +2481,9 @@ func (w *Worker) memoryReloadLoop() {
 // lifetime workflow count) but "unbounded growth" and "silently deleting
 // user-visible records by default" are different classes of problem, and
 // only one of them is safe to default on.
-func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays int) {
+func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
 	defer w.wg.Done()
-	if retentionDays <= 0 && completedWorkflowRetentionDays <= 0 {
+	if retentionDays <= 0 && completedWorkflowRetentionDays <= 0 && deadLetterRetentionDays <= 0 {
 		return
 	}
 	interval := w.retentionInterval
@@ -2508,7 +2509,7 @@ func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays int
 	// by its own cutoff: a second run within the same day deletes nothing the
 	// first did not, so the cost of an unnecessary one is a query.
 	w.healthTracker.recordRun("retention")
-	w.runRetentionSweep(retentionDays, completedWorkflowRetentionDays)
+	w.runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays)
 
 	for {
 		select {
@@ -2516,7 +2517,7 @@ func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays int
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("retention")
-			w.runRetentionSweep(retentionDays, completedWorkflowRetentionDays)
+			w.runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays)
 		}
 	}
 }
@@ -2524,7 +2525,7 @@ func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays int
 // runRetentionSweep runs one iteration of both retention sweeps. Split out
 // of retentionLoop so it is callable directly from a test without waiting on
 // the loop's 24-hour ticker.
-func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays int) {
+func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
 	if retentionDays > 0 {
 		cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
 		deleted, err := w.store.DeleteExpiredEvents(w.ctx, cutoff)
@@ -2543,6 +2544,30 @@ func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays
 		} else if deleted > 0 {
 			w.Metrics.RecordWorkflowsPurged(w.ctx, deleted)
 			w.logger.InfoContext(w.ctx, "retention: deleted completed workflow rows", "worker_id", w.id, "count", deleted)
+		}
+	}
+
+	// Dead-lettered workflows are deliberately excluded from the sweep above --
+	// DeleteCompletedWorkflows covers 'done', 'failed' and 'terminated' and
+	// says in its own doc that dead_lettered "has its own lifecycle and its own
+	// deletion path". That path is DeleteDeadLetteredWorkflows, and until
+	// cleat#1023 nothing called it: the method existed on all three stores,
+	// cascaded correctly, and had no flag and no caller. The design said these
+	// rows have their own lifecycle and then shipped no way to express one.
+	//
+	// Opt-in like its sibling, and for a stronger reason. Deleting a
+	// dead-lettered workflow destroys exactly the record an operator kept it
+	// for -- it is the run they most want to inspect -- so defaulting this on
+	// would silently reverse a documented decision on every existing
+	// deployment.
+	if deadLetterRetentionDays > 0 {
+		cutoff := time.Now().Add(-time.Duration(deadLetterRetentionDays) * 24 * time.Hour)
+		deleted, err := w.store.DeleteDeadLetteredWorkflows(w.ctx, cutoff)
+		if err != nil {
+			w.logger.ErrorContext(w.ctx, "retention: delete dead-lettered workflows", "worker_id", w.id, "error", err)
+		} else if deleted > 0 {
+			w.logger.InfoContext(w.ctx, "retention: deleted dead-lettered workflows",
+				"worker_id", w.id, "count", deleted, "older_than", cutoff)
 		}
 	}
 	w.Metrics.SetRetentionLastRunTimestamp(w.ctx, time.Now().Unix())
