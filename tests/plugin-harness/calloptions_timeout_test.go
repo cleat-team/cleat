@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -174,32 +173,26 @@ func TestCallOptionsTimeoutAtTheWasmBoundary(t *testing.T) {
 	}
 }
 
-// TestDurableCallWithOptionsAloneIsUnbound is cleat#1005. It pins the binding
-// defect, which is separate from #1006 above and strictly more severe: the
-// call does not merely ignore its options, it cannot be made.
+// TestDurableCallWithOptionsAloneIsBound is cleat#1005, FIXED. It was written
+// to pin the defect and is now inverted, which is what it asked for.
 //
-// DurableCallWithOptions has no entry in the generator's live table, so
-// `cleat build` emits no field for it and the SDK's own implementation runs.
-// That implementation delegates to h.DurableCall -- and the closure analysis
-// cannot see through it, so a workflow whose ONLY durable call is
-// DurableCallWithOptions links neither cleat_call nor a DurableCall binding.
-// Measured on this fixture, 2026-09-08:
+// A workflow whose ONLY durable call is DurableCallWithOptions must be able to
+// make it. It could not, and the cause was not where the issue first said.
 //
-//	bound fields:   CompleteUpdate DurableCallWithRetry DurableLog
-//	                DurableSleep DurableSleepMs PollUpdate
-//	cleat_ imports: cleat_call_retry cleat_complete cleat_complete_update
-//	                cleat_log cleat_poll_update cleat_poll_work cleat_sleep
+// hostFunctions is a one-to-many relation and the usage scan flattened it into
+// a map[string]string, so of the two rows naming DurableCallWithOptions --
+// {cleat_call, ...} and {cleat_call_retry, ...} -- only the last survived.
+// cleat_call was never marked used, the adapter emitted no DurableCall field,
+// and HostCallsImpl's own DurableCallWithOptions delegates to exactly that.
+// The call failed at RUN time with "the HostCalls runtime was not
+// initialized", which names the entry point and points away from the binding.
 //
-// The consequence is the part worth keeping: whether this call works depends
-// on whether the workflow happens to call DurableCall SOMEWHERE ELSE. The
-// sibling fixture calloptstimeout does, and its DurableCallWithOptions cases
-// all succeed; this one does not, and fails at runtime. Same method, same
-// service, same engine -- different module.
-//
-// THIS TEST ASSERTS THE DEFECT, not the contract. It is pinned rather than
-// left unwritten so the behaviour cannot change unobserved; when the binding
-// is fixed this test must be inverted, and its failure is the reminder.
-func TestDurableCallWithOptionsAloneIsUnbound(t *testing.T) {
+// WHY IT NEEDS ITS OWN FIXTURE PACKAGE, still. The binding is a property of the
+// whole module: any workflow that also calls h.DurableCall for its own reasons
+// marks the import used by another route and the defect disappears. The
+// sibling fixture calloptstimeout does exactly that, so it could never have
+// caught this. One package per binding state is the only way to hold both.
+func TestDurableCallWithOptionsAloneIsBound(t *testing.T) {
 	env := NewTestPluginEnvInMemory(t)
 	defer env.Close()
 
@@ -224,21 +217,17 @@ func TestDurableCallWithOptionsAloneIsUnbound(t *testing.T) {
 		t.Fatalf("undecodable fixture result %q: %v", result, err)
 	}
 
-	if got.Err == "" {
-		t.Fatalf("DurableCallWithOptions SUCCEEDED in a workflow that makes no other "+
-			"durable call (resp=%q).\n\n"+
-			"That is the correct behaviour and this test is now wrong: the binding "+
-			"defect it pins has been fixed. Invert it -- assert the call succeeds and "+
-			"returns the caller's response -- and say so on the issue.", got.Resp)
+	if got.Err != "" {
+		t.Fatalf("DurableCallWithOptions failed in a workflow that makes no other "+
+			"durable call: %s\n\n"+
+			"If the message mentions \"HostCalls runtime was not initialized\", "+
+			"cleat#1005 has regressed: check that fieldImports() in wasm/usage.go "+
+			"still returns EVERY hostFunctions row for a field rather than the "+
+			"last one. TestEveryHostFunctionRowReachesTheUsageScan covers that "+
+			"directly and should have failed first.", got.Err)
 	}
-	// The message, because the failure mode is what identifies this defect: an
-	// unbound method is reported as a workflow-context error, which reads like
-	// the workflow was called wrongly rather than like a missing binding.
-	if !strings.Contains(got.Err, "HostCalls runtime was not initialized") {
-		t.Errorf("DurableCallWithOptions failed, but not the way this defect fails.\n"+
-			"got:  %s\n"+
-			"want: a message containing \"HostCalls runtime was not initialized\"\n\n"+
-			"A different error means something else is broken and the diagnosis "+
-			"recorded here no longer explains it.", got.Err)
+	if got.Resp != "{}" {
+		t.Errorf("expected the caller's response %q, got %q -- the call was made "+
+			"but did not return the answer", "{}", got.Resp)
 	}
 }
