@@ -6838,6 +6838,56 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.257 The all-dialect plugin test asserted tables exist, not that a row can be written — 🟢 **FIXED 2026-09-08** (WS-1, 2026-09-08)
+
+cleat#963, routed by WS-3. This is why [§3.255](#3255) could happen: `TestPluginMigrations_AllDialects`
+runs every plugin's migrations on every dialect and then asserts `tableExists`. That passed
+throughout — the table *was* there. It was the INSERT that could not succeed.
+
+**"The schema was created" and "the schema is usable" are different claims**, and an existence check
+only answers the first. It is the same split as *the value round-trips* versus *the value is
+honoured*, and *the reader is live* versus *the writer exists* — and a guard that asserts existence
+passes for every one of them.
+
+**The mechanism, not the sweep.** A loose regex over `plugins/*/migrations.go` reported 13 plugins
+with per-dialect asymmetry, and the first checked precisely was already compensated. **That number
+was never a finding.** The new check asks each *real* database what it did with the DDL and reports
+**two**:
+
+    audit_events.id         mysql requires a value, mssql supplies one   (audit-log)
+    event_subscriptions.id  mysql requires a value, mssql supplies one   (event-triggers)
+
+The property asserted is not "does plugin X's INSERT work" — that needs a write path per plugin and
+only covers statements someone has already written. It is:
+
+> the three dialects must **agree** about which columns a writer must supply.
+
+If they agree, a statement that works on one works on all, which is exactly the invariant §3.255
+broke. `information_schema` is the oracle because it sees identity columns, generated columns and
+defaults that a pattern over SQL text cannot.
+
+Both current asymmetries are compensated and were **verified at source rather than taken on report**:
+audit-log supplies `uuid.NewString()` on every dialect (§3.255), and event-triggers carries a
+MySQL-specific INSERT at `queries.go:41` listing `id` where the other two omit it. The second is the
+weaker shape — the statement that must supply the value and the schema that requires it are in
+different files with nothing tying them together.
+
+**The guard read a stale schema, and falsifying it is what showed that.** Removing the MySQL default
+from `audit_events.timestamp` did *not* redden the test: `RunMigrations` records applied versions and
+skips them, and the MySQL and SQL Server backends hand back the **shared** test database whose plugin
+tables some earlier run created. So the mutated DDL never ran. That is CLAUDE.md's *"when a schema
+migration lands, recreate your test databases"* — and **a guard reporting agreement from a stale
+schema is cleat#963 one level up.** Fixed with a scratch database per dialect; the mutation then
+fails as it should.
+
+**What the baseline does not assert, said rather than implied:** it compares *schemas*, so an entry
+means "the dialects disagree and I have read the code that compensates". Deleting event-triggers'
+MySQL INSERT would not redden this test. Where that matters the compensation needs its own write
+test — audit-log has one (§3.255, which drives `recordAudit` against a real MySQL), event-triggers
+does not, and that gap is named here rather than left implicit.
+
+`./engine/` 4685 pass / 0 fail / 7 skip.
+
 ### 3.256 A workflow that makes no host call was still never determinism-checked — 🟢 **FIXED 2026-09-08** (WS-1, 2026-09-08)
 
 The half of cleat#949 that **#964 left**, and it is the issue's *first* example.
