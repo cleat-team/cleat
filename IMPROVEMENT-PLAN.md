@@ -6838,6 +6838,57 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.253 Python's `run_detached` ran the work inline and called it detached — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+`HostCalls.run_detached(fn)` took a callable and executed it with `fn(self)`. It made **no host call
+at all**, while its docstring said *"the host would ensure the detached execution continues even if
+the parent workflow is cancelled"*. The work ran inside the caller and was cancelled with it — the
+one thing the method existed to prevent.
+
+Left open by [§3.252](#3252) as a public API decision rather than a wiring change. **Breaking
+changes were authorised on 2026-09-07**, so it is now
+`run_detached(name: str, input_json: str)`, wired to `cleat_run_detached` and matching Rust's
+`run_detached(name, input_json)`.
+
+**Go was already fixed.** `cleat/runtime_workflow.go` takes `(name, inputJSON)` and returns an
+error when unwired, carrying a comment that describes the closure version as previous — and Go's
+row in [§3.241](#3241)'s parity matrix never listed `cleat_run_detached`. Checked before writing
+anything, which is why this entry is Python-only.
+
+**There is no mechanical migration, and that is the honest thing to say about it.** The old
+signature's whole point was to run *local code*; the host cannot run local code. A caller passing a
+function has to name a deployed workflow instead. The docstring says so rather than implying a
+rename.
+
+**A test asserted the defect, and passed for as long as it existed.**
+`test_run_detached_executes_fn` passed a function and checked it had been **executed** — which is
+precisely the behaviour that made the method a silent no-op. It now asserts the call is *recorded*
+and that nothing runs inline. A test can pin a defect as firmly as a feature, and this one did.
+
+**Five layers, and the guards found the two I would have missed.** WIT, regenerated bindings,
+`WitToEnvImport`, `HostCalls`, `LocalHostCalls`, plus the fixture, the README and the local-host
+test. `TestEveryImportedWitFunctionHasAnEnvMapping` and both Python baselines were the checks that
+made the set complete rather than my memory of it — the rewrite row went into
+`durable-extended-lifecycle` because that is where the WIT declares it, a distinction that cost a CI
+round trip in §3.252.
+
+Falsified in both directions: removing the `_import_` alias makes the engine-side guard report
+`cleat_run_detached` unbound; removing the rewrite row makes the harness guard report it unreached.
+
+**Python's unreached set is now `cleat_json_parse` and `cleat_json_stringify` — and neither is a
+gap.** Every real capability gap in every SDK is closed:
+
+| SDK | real gaps |
+|---|---|
+| rust | 0 |
+| java | 0 |
+| assemblyscript | 0 |
+| python | **0** |
+| go | 3 — `cleat_fetch`, `cleat_get_scope`, `cleat_set_scope` |
+
+`python-sdk` 458 pass / 1 skip; `./engine/` 4662 pass / 0 fail; `tests/plugin-harness` green;
+`./wasm/` green.
+
 ### 3.252 Two of Python's child-workflow gaps closed, and one is a product decision — 🟡 **PARTLY FIXED 2026-09-07** (WS-1, 2026-09-07)
 
 [§3.241](#3241)'s parity guard listed five host calls Python could not reach. **Two of the five

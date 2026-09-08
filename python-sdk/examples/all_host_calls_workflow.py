@@ -112,7 +112,7 @@ def _exercise_every_host_call(h: HostCalls) -> None:
     h.dispatch_updates()
     h.defer("cleanup")
     h.defer_func(lambda: None)
-    h.run_detached(lambda: None)
+    h.run_detached("detached-workflow", "{}")
 
     # ---- lifecycle ----
     h.continue_as_new({"a": 1})

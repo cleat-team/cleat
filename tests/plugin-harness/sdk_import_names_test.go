@@ -365,22 +365,6 @@ var sdkUnreachedBaseline = map[string][]string{
 	// they share, differing only on cleat_register_query_handler, which is in
 	// notWorkflowFacing above.
 	"python (wasm/component_rewrite.go WitToEnvImport)": {
-		// cleat_run_detached is blocked on a public API decision, not on the
-		// binding. The Python SDK already exports run_detached(fn) -- a CLOSURE
-		// form that calls fn(self) inline and makes no host call at all, while
-		// its docstring says "the host would ensure the detached execution
-		// continues even if the parent workflow is cancelled". It does not ask
-		// the host anything, so the work runs in the parent and is cancelled
-		// with it.
-		//
-		// That is Go's defect exactly (3.244: "Go's takes a closure, which
-		// cannot cross the ABI, so Go's method is never wired ... its unwired
-		// branch is return nil, a silent success"), and it is resolved the same
-		// way: by deciding the exported signature, which is not a change to make
-		// while wiring imports. The closure form has real callers --
-		// local_host.py, examples/all_host_calls_workflow.py, two tests and the
-		// README -- so it cannot simply be replaced.
-		"cleat_run_detached",
 
 		// The json pair. Not gaps: the
 		// `json` module is in the standard library and engine/lifecycle.go's
