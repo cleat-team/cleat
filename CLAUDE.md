@@ -449,6 +449,41 @@ that follows is "my fix does not work", and the artefact discarded is again a co
 the restore the same way you verify the revert: `git diff` against the **commit**, not against the
 index, and rebuild before believing the second result.
 
+**And the version of that with NO signal at all: `git stash` on a clean tree stashes nothing and
+exits 0.** Measured 2026-09-08, reproduced independently in a second clone:
+
+| | |
+|---|---|
+| working tree clean | yes |
+| `git stash` exit status | **0** |
+| stash entries before / after | **0 / 0** |
+
+So the `stash` → `checkout` → `checkout back` → `stash pop` sequence, used to run a test on another
+branch, pops **whatever was already on the stack**. Here that was a parked WIP from another branch:
+86 files and 1987 deletions applied onto an unrelated feature branch, with no conflict, because
+there was nothing to conflict with. The `git stash drop` that followed then dropped *that* entry,
+correctly and as documented — `stash@{0}` is exactly what it says it drops.
+
+This is the paragraph above one layer up, and **strictly worse, because the failure is silent by
+design**. A `checkout --` restore that does not restore at least leaves a tree someone may notice.
+A stash that stashed nothing leaves nothing to notice at all.
+
+**Check that the push created an ENTRY, not that the command succeeded:**
+
+    before=$(git stash list | wc -l)
+    git stash push -m "why"          # read its output: "No local changes to save"
+    [ "$(git stash list | wc -l)" -gt "$before" ] || echo "nothing was stashed"
+
+Recovery, if it has already happened: `git fsck --unreachable | grep commit`, match the stash by its
+message, and `git stash store -m "<original description>" <sha>` puts it back. Untracked files the
+stash carried reappear in the working tree — move them aside rather than deleting them, since they
+belong to whoever parked the stash.
+
+**The general rule, which this file now records three instances of: the operation reports success
+without doing the thing.** Gating on "no pending checks" rather than a check *total*; reading a
+background job's output file rather than its completion; and this. **This is the sharpest of the
+three, because success is the CORRECT report** — nothing went wrong, and nothing happened.
+
 **A probe that does not fire is a measurement, not a dead end.** Chasing the same defect, a
 temporary print in `recordEvent`'s persist branch never printed while rows were demonstrably being
 written. That was read as a failed experiment; it was in fact the strongest available signal —
