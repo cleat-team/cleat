@@ -147,6 +147,39 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 		return callSuspendSentinel
 	}
 
+	// A SECOND AWAIT IN A SESSION THAT HAS ALREADY SUSPENDED IS ALSO NEW WORK,
+	// and missing that is cleat#933.
+	//
+	// A suspending await sets s.suspendErr and returns
+	// packAwaitSignalsResult(0, 0, true, 0) -- byte-identical to a genuine
+	// timeout. The guest cannot tell the two apart, so it runs on and the next
+	// await records a second await_signals into a segment that has already
+	// ended. Measured on a fresh session with an empty store:
+	//
+	//	step 0  await_signals  ts=1788874160927
+	//	step 1  await_signals  ts=1788874160927   <- same millisecond
+	//
+	// which is the history the samples-go port dumps from a real run: two
+	// awaits recorded three seconds before the signal existed. The next replay
+	// then pairs the delivery with the SECOND await and times out the first.
+	// The replay arm reproduces that faithfully; the fault is that the history
+	// was written.
+	//
+	// SCOPED TO AWAITS DELIBERATELY. The same session will happily run a
+	// DurableCall or a SideEffect after a suspend, and widening
+	// stopBeforeNewWork to cover them looked like the general fix -- it is not,
+	// and two tests said so. At a continue-as-new boundary the GUEST drains its
+	// own defer table by returning through its wrapper, with no inDeferDrain
+	// bracket to distinguish it, so gating every call refused the cleanup
+	// (TestTheEventCapDoesNotDispatchTheCallItRefused, "the cleanup a workflow
+	// registered did not run"). A second await is unambiguous in a way a
+	// second call is not: nothing legitimate awaits a signal in a segment that
+	// has already decided to end. The broader case is filed rather than
+	// guessed at.
+	if s.suspendErr != nil && !s.inDeferDrain {
+		return callSuspendSentinel
+	}
+
 	// Fresh execution: check signal store first.
 	if s.engine.signalStore != nil {
 		names := splitSignalNames(signalNames)
