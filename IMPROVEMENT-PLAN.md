@@ -6838,6 +6838,57 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.255 Audit logging recorded nothing on MySQL, and the empty table looked like a quiet system — 🟢 **FIXED 2026-09-08** (WS-1, 2026-09-08)
+
+cleat#958, found by WS-3 running the `samples-go` port against a second and third dialect.
+
+`plugins/auditlog/middleware.go` inserted without an `id`, relying on a database-side default. Two
+of three dialects have one:
+
+| dialect | `audit_events.id` | rows after a full port run |
+|---|---|---:|
+| postgres | `UUID PRIMARY KEY DEFAULT gen_random_uuid()` | 18,657 |
+| mssql | `UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID()` | 473 |
+| **mysql** | `CHAR(36) NOT NULL`, **no default** | **0** |
+
+Reproduced directly before changing anything:
+
+    insert WITHOUT id -> Error 1364 (HY000): Field 'id' doesn't have a default value
+    insert WITH id    -> <nil>
+
+**Not "fewer rows" — the table had never held one on that dialect.** The error is logged and
+swallowed: the request succeeds, the middleware returns, the worker carries on. The only symptom is
+an empty audit table, which is indistinguishable from an audit log for a quiet system. That is the
+one failure mode audit logging exists not to have, because the absence of an entry is read as
+evidence the event did not happen.
+
+**Fixed by supplying the id, not by adding a MySQL default.** The narrower fix works; this one
+removes the class. Three databases no longer have to agree about UUID generation for one statement
+to succeed, it needs no MySQL 8.0.13+ for `DEFAULT (uuid())`, and a fourth dialect gets it right on
+day one. `github.com/google/uuid` was already imported in the same file.
+
+**The fake was the reason nothing caught it, and that is the more useful half.** The behavioural
+tests use a driver double that **invented** an id with `uuid.New()` while reading the caller's other
+arguments by ordinal. *A double that supplies what the database will not is indistinguishable from a
+database that supplies it* — so a statement MySQL rejects looked fine. It now parses the id the
+caller actually sends and refuses anything that is not a UUID, so reverting the fix reddens the
+fake-backed suite too.
+
+**And the first version of the new test was weaker than it looked.** It issued the `INSERT` itself,
+which asserts the shipped DDL accepts *a statement I wrote* — it would have passed unchanged with
+the plugin regressed. It now drives `recordAudit`, and because that logs and swallows, the assertion
+is on the **row count**, which is also the honest shape: an operator's only signal was an empty
+table. Falsified: reverting gives *"the plugin recorded 0 audit rows on MySQL, want 1"*.
+
+Two fixture problems were fixed rather than worked around: the DDL names its indexes after the
+table, so a renamed table collided (`Error 1061`), and the shared test database already held a copy
+whose shape this test would then have been asserting against. It builds a scratch **database** from
+the shipped `UpMySQL` migration.
+
+**The port suite passes on all three dialects on top of a subsystem that worked on two**, which is
+WS-3's observation and worth keeping: coverage of the engine said nothing about this, and nothing in
+either port asserts anything about audit events.
+
 ### 3.254 A routing-rule removal reported success for a rule that never existed — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
 
 cleat#946's **second half**. #948 fixed the first — `ShardedStore` routed the removal by rule ID

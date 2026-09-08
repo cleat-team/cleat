@@ -52,6 +52,7 @@ test-go/engine	2	TestAnUpdateDeliveryEventPersists/(mysql|mssql)$	dialect-gated 
 test-go/wasm	1	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
 test-go/internal	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
 test-go/plugins	1	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/plugins	1	^TestTheAuditInsertWorksOnMySQLsIDColumn$	toolchain/dialect-gated: guards on CLEAT_TEST_MYSQL, which ci.yml sets nowhere, so it skips ONCE in this job -- a single env gate, not a per-dialect or registeredBackends test. Measured by name with the variable unset: 1. It is MySQL-only by nature rather than by omission: PostgreSQL and SQL Server default audit_events.id and cannot exhibit cleat#958, so running it there would assert nothing. multi-db-ci.yml runs ./plugins/... with -run MultiBackend, which does not select it (IMPROVEMENT-PLAN 3.255)
 test-go/support	12	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
 test-go/commands	6	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
 test-go/manifests	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
