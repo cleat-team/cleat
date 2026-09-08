@@ -1113,9 +1113,46 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 	s.writeJSON(w, 200, history)
 }
 
+// handleGetQueryState answers a published query key for one run.
+//
+// The runExists check is cleat#900's, applied to the last endpoint that fix did
+// not reach. /events, /history and /promises answered 200 with an empty
+// collection for an id that did not exist; /query answered 200 with an empty
+// VALUE, which is the same defect in a different container:
+//
+//	GET /api/workflows/00000000-0000-0000-0000-000000000000/query?key=counter
+//	200 {"key":"counter","value":""}
+//
+// Found by the samples-go port, which asserted 404 here on the grounds that
+// #900 had settled the question for the other per-run reads. It had not been
+// asked of this one.
+//
+// The run-scoped reads span TWO prefixes, which is why an enumeration from one
+// route switch misses some of them:
+//
+//	/api/instances/{id}/events      #917
+//	/api/instances/{id}/state       already 404'd
+//	/api/workflows/{id}             already 404'd
+//	/api/workflows/{id}/terminal    #896
+//	/api/workflows/{id}/history     #917
+//	/api/workflows/{id}/promises    #917
+//	/api/workflows/{id}/dag         already 404'd
+//	/api/workflows/{id}/query       this change
+//
+// /api/workflows/{name}/routing and /tags are NOT in this set: they take a
+// definition NAME, so runExists does not apply and an empty result for an
+// unknown name is the normal state.
+//
+// The empty value is worse here than an empty list was there, because it is
+// ALSO a legitimate answer: a key that has not been published yet reads
+// exactly the same as a run that does not exist and a key that was published
+// as "". Three meanings, one response. The 404 separates the first two.
 func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if !s.runExists(w, r, st, id) {
 		return
 	}
 	key := r.URL.Query().Get("key")

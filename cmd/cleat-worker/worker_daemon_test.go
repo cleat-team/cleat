@@ -2725,7 +2725,11 @@ func TestAPIGetHistory_Nil(t *testing.T) {
 }
 
 func TestAPIGetQueryState(t *testing.T) {
-	ms := &mockStore{}
+	// existingWorkflow because the handler now checks the run exists before
+	// reading a key from it (cleat#900's helper, applied to /query). The bare
+	// mock returns nil for GetWorkflowByID, which is indistinguishable from
+	// "no such run" and is exactly the 404 this test would then be reporting.
+	ms := existingWorkflow(&mockStore{})
 	ms.getQueryStateFn = func(ctx context.Context, workflowID, key string) (string, error) {
 		return "state-value-42", nil
 	}
