@@ -119,6 +119,25 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		s.exitReplay()
 	}
 
+	// Refuse an unrecognised parent close policy (cleat#936).
+	//
+	// AFTER the replay block, deliberately. A run whose child_workflow event is
+	// already recorded replays out of history and never reaches here, so
+	// tightening the rule cannot retroactively fail an in-flight workflow that
+	// was started under the old one. Only a FRESH child start is refused.
+	//
+	// Before stopBeforeNewWork, also deliberately: this is a deterministic
+	// property of the arguments, not of the segment, so a defer segment should
+	// report the bad policy rather than suspend and rediscover it next time.
+	if err := ValidateParentClosePolicy(parentClosePolicy); err != nil {
+		errMsg := fmt.Sprintf("child workflow %q: %v", name, err)
+		s.engine.log().ErrorContext(ctx, errMsg,
+			"workflow_id", s.workflowID, "tenant_id", s.tenantID,
+			"parent_close_policy", parentClosePolicy)
+		errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+		return int64(uint64(errWritten)<<32 | 4)
+	}
+
 	// Past the frontier in a defer segment: starting a child workflow is new
 	// work, and unlike a durable call it leaves a row behind that outlives the
 	// segment. See IMPROVEMENT-PLAN 3.84.
