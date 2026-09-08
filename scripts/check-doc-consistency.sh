@@ -76,6 +76,52 @@ else
   fi
 fi
 
+# --- 3. The documented host-call set vs the engine's exports ---------------
+# Code: engine/imports.go  builder...Export("cleat_call")
+# Doc:  ABI.md             #### 2.1 `cleat_call`
+#
+# Added after ABI.md spent two days announcing seven entries it no longer
+# contained, and shipped a table naming two host calls by a binding name no
+# guest can import -- `cleat_plugin_call` for `plugin_call`. Checks 1 and 2
+# above are two numbers; this is the membership, which is what an SDK author
+# actually implements against.
+#
+# ANCHOR TO WHERE THE ARTIFACT LIVES. An entry is a heading. A retraction is
+# prose in a body and can never start one, so `^####` tells a host call from a
+# sentence about a removed host call -- which `grep -c <name>` cannot, and did
+# not: its count ROSE as removals were documented more thoroughly.
+#
+# Do NOT put `cleat_` in either pattern. Three exports carry no prefix
+# (plugin_call, plugin_call_streaming, set_query_state), and a prefix-anchored
+# scan drops all three while still returning a plausible total.
+# shellcheck disable=SC2016  # the backticks are literal: ABI.md wraps each
+# host call in a markdown code span, so the heading is exactly "#### 2.1 `name`".
+doc_calls="$(grep -oE '^#### 2\.[0-9]+[a-z]? `[a-z_]+`' ABI.md |
+  sed 's/.*`\(.*\)`/\1/' | sort -u)"
+code_calls="$(grep -oE '\.Export\("[^"]+"\)' engine/imports.go |
+  sed 's/.*Export("//;s/")//' | sort -u)"
+
+n_doc="$(printf '%s\n' "$doc_calls" | grep -c . || true)"
+n_code="$(printf '%s\n' "$code_calls" | grep -c . || true)"
+
+# Vacuity guard first: an extractor that matches nothing agrees with everything.
+if [ "$n_doc" -eq 0 ]; then
+  note_failure "extracted 0 host-call entries from ABI.md; has the '#### 2.N \`name\`' heading format changed?"
+elif [ "$n_code" -eq 0 ]; then
+  note_failure "extracted 0 exports from engine/imports.go; has the builder.Export(...) form changed?"
+else
+  only_doc="$(comm -23 <(printf '%s\n' "$doc_calls") <(printf '%s\n' "$code_calls"))"
+  only_code="$(comm -13 <(printf '%s\n' "$doc_calls") <(printf '%s\n' "$code_calls"))"
+  if [ -n "$only_doc" ]; then
+    note_failure "ABI.md documents host calls the engine does not export (an SDK binding one gets a module that fails to instantiate):"
+    printf '%s\n' "$only_doc" | sed 's/^/    /' >&2
+  fi
+  if [ -n "$only_code" ]; then
+    note_failure "engine/imports.go exports host calls ABI.md does not document:"
+    printf '%s\n' "$only_code" | sed 's/^/    /' >&2
+  fi
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo >&2
   echo "ABI.md is a public contract implemented by SDKs in other languages." >&2
@@ -83,4 +129,4 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: ABI.md agrees with the code (ABI version $code_abi, output buffer $code_buf bytes)."
+echo "OK: ABI.md agrees with the code (ABI version $code_abi, output buffer $code_buf bytes, $n_doc host calls)."
