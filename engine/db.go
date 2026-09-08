@@ -1060,6 +1060,40 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 // DeleteExpiredEvents deletes event history rows for completed/failed workflows
 // whose completed_at is older than the cutoff. It uses batching to avoid
 // locking the event_history table when there are millions of rows to delete.
+// DeleteExpiredEvents runs the --retention-days sweep. It does two things,
+// and only the second one can still find work.
+//
+// The first loop deletes event_history for done/failed workflows past the
+// cutoff. **It cannot match.** finalize_workflow_status already deleted those
+// rows when the workflow reached its terminal status -- see
+// migrations/postgres/049_a_burst_wakes_finalize_on_progress.sql, which ends
+// its done/failed branch with
+//
+//	DELETE FROM event_history WHERE workflow_id = p_workflow_id;
+//
+// under a comment giving the reason: replay does not need them once terminal,
+// and an unbounded event_history slows the per-step INSERTs of every running
+// workflow. That is deliberate, and the worker takes that path in production
+// (FinalizeWorkflowSegment, not CompleteWorkflow -- which purges nothing and
+// has no caller outside cmd/cleat-bench). Measured on PostgreSQL: a run with
+// one event finalized to done, and to failed, goes 1 -> 0 both times.
+//
+// So the returned count is structurally zero, and the caller feeds it to
+// cleat_compaction_events_deleted_total. An operator watching that counter is
+// watching something that cannot move. cleat#1016.
+//
+// The second loop clears compaction_state/compaction_step/compacted_at for the
+// same workflows. Those columns are on workflow_instances, which finalize does
+// not touch, so this half is live -- and its RowsAffected is deliberately NOT
+// added to the return value. Summing them would make the metric count two
+// different things in one number: deleted event_history rows and updated
+// workflow_instances rows. Reporting that work needs its own counter, which is
+// a change to an operator-facing metric rather than an arithmetic fix.
+//
+// dead_lettered is in neither loop, and finalize does not purge it either --
+// those events survive until deleteDeadLetteredWorkflowsBatch removes the
+// workflow row and fk_event_history_workflow's ON DELETE CASCADE takes them.
+// Source-level; unmeasured.
 func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {

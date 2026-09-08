@@ -12,6 +12,47 @@ turning one on says nothing about the other.
 
 See `docs/reference/worker-config.md` for the flag reference entries.
 
+## `--retention-days` has nothing to delete, and that is by design
+
+The table above describes what the flag *aims* at. What it actually finds is
+nothing, because the rows are already gone.
+
+`finalize_workflow_status` -- the stored procedure the worker finalizes
+through -- ends its `done`/`failed` branch with
+
+```sql
+-- Delete this workflow's events -- they are no longer needed
+-- for replay once the workflow has reached a terminal state.
+-- This keeps event_history bounded to active workflows only,
+-- preventing unbounded table growth that slows per-step INSERTs.
+DELETE FROM event_history WHERE workflow_id = p_workflow_id;
+```
+
+So a workflow's replay log is purged the moment it reaches `done` or `failed`,
+not `--retention-days` later. Measured on PostgreSQL: a run holding one event,
+finalized to `done`, and separately to `failed`, goes `1 -> 0` both times. The
+same `DELETE` is in the MySQL and SQL Server finalize procedures.
+
+**What this means in practice:**
+
+* Setting `--retention-days` to any value does not change how long replay
+  detail is kept. It is already zero.
+* `cleat_compaction_events_deleted_total` is fed by this sweep's event-deletion
+  count, so it stays at zero permanently. That is expected, not a broken
+  exporter.
+* The sweep is **not** inert. It also clears `compaction_state`,
+  `compaction_step` and `compacted_at` on the same workflows, and that half
+  does real work. It is not currently reflected in any metric.
+* `dead_lettered` is the exception: finalize does not purge it and neither does
+  this sweep, so those events survive until
+  `--completed-workflow-retention-days` deletes the workflow row and the
+  `ON DELETE CASCADE` on `event_history` takes them. Source-level; unmeasured.
+
+If you need replay detail to survive a workflow's completion, this is the
+thing to change, and it is a change to the procedure -- not to the flag.
+
+See cleat#1016.
+
 ## Why the defaults differ
 
 `--retention-days` deletes a workflow's *step-by-step replay log* once the
