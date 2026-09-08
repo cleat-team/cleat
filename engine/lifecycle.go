@@ -168,12 +168,19 @@ func (s *execSession) recordEvent(rec EventRecord) {
 	// A workflow computing Now().Sub(start) across its first durable call got a
 	// negative duration.
 	//
-	// CLAMPING HERE RATHER THAN AT THE READ IS WHAT KEEPS REPLAY EXACT. The
-	// adjusted value is what goes into history and into the checksum, and
-	// replay sets s.nowMs from the recorded timestamp
-	// (engine/replayer.go), so the original run and every replay see the same
-	// number. Clamping in Now() instead would leave history holding the
-	// un-clamped value and make the two executions disagree.
+	// CLAMPING HERE RATHER THAN AT THE READ IS WHAT KEEPS REPLAY EXACT, and the
+	// reason is sharper than "history would hold a different number".
+	//
+	// A read-side clamp would make the guest see a value that was never
+	// recorded. The original run and the replay would then agree only by both
+	// applying the same clamp to the same stale input -- which holds until
+	// someone changes the clamp, and nothing would fail at the moment they did.
+	// Writing the adjusted value means the recorded number IS the number: it is
+	// what the checksum covers, replay sets s.nowMs straight from it
+	// (engine/replayer.go), and there is nothing left to recompute or to keep
+	// in agreement.
+	//
+	// (That framing is rcownie-ef's, from the review of this change.)
 	//
 	// This is a floor, not a rewrite: once the worker clock passes the seed --
 	// which it does within the offset, tens of milliseconds -- the branch stops
