@@ -568,12 +568,25 @@ func (s *MySQLStore) SetAllowedSignalCallers(ctx context.Context, workflowID str
 // id is already atomic, and deleting one that is already gone is the
 // documented no-op, so there is nothing left for the lock to protect.
 func (s *MySQLStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
+	// The consumed counter, bumped in the same statement batch as the delete.
+	//
+	// finalize wakes a segment that CONSUMED something and still has rows
+	// waiting, because a segment that consumed once can consume again --
+	// progress is what separates a burst worth draining from an unrelated
+	// pending signal that would spin (cleat#953). Bumped here rather than
+	// through a new store method, because ConsumeSignal already writes.
 	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM workflow_signals
 		WHERE id = ? AND workflow_id = ? AND tenant_id = ?
 	`, id, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("consume signal: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances SET signal_consumed_seq = signal_consumed_seq + 1
+		WHERE id = ? AND tenant_id = ?
+	`, workflowID, s.tenantID); err != nil {
+		return fmt.Errorf("consume signal: bump consumed counter: %w", err)
 	}
 	return nil
 }
