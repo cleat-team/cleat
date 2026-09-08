@@ -194,6 +194,18 @@ interface durable-children {
     /// Returns the combined results JSON string.
     durable-await-all-children: func(run-ids-json: string) -> string;
 
+    /// Wait for the FIRST of several child workflows to complete.
+    /// Returns that child's result JSON string.
+    ///
+    /// Distinct from durable-await-all-children, which waits for every one:
+    /// this returns as soon as any single child finishes, which is the
+    /// primitive a race or a first-wins fan-out needs.
+    durable-await-any-child: func(run-ids-json: string) -> string;
+
+    /// Check a child workflow without waiting.
+    /// Returns the child's status JSON; does not suspend.
+    durable-poll-child: func(run-id: string) -> string;
+
     /// Start a child workflow with version, priority, and parent-close-policy options.
     /// Returns the child run ID string.
     durable-child-workflow-with-options: func(

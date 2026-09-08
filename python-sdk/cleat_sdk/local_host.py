@@ -972,6 +972,47 @@ class LocalHostCalls:
         self._record("await_all_children", result=results, run_ids=run_ids)
         return results
 
+    def await_any_child(self, run_ids: list[str]) -> ChildResult:
+        """Wait for the FIRST of several child workflows to complete.
+
+        The local host has no concurrency, so "first" means the first in
+        *run_ids* that has a recorded outcome -- which is deterministic here and
+        deliberately so: a local run that picked a different winner than the
+        replay would make every downstream step diverge.
+        """
+        if self._mode == "replay":
+            return self._replay_next("await_any_child")
+        for run_id in run_ids:
+            child = self._children.get(run_id)
+            if child is None:
+                continue
+            result = ChildResult(
+                run_id=run_id,
+                result="" if child.error else child.result,
+                error=child.error or None,
+            )
+            self._record("await_any_child", result=result, run_ids=run_ids)
+            return result
+        result = ChildResult(run_id="", result="", error="no child found")
+        self._record("await_any_child", result=result, run_ids=run_ids)
+        return result
+
+    def poll_child(self, run_id: str) -> ChildResult | None:
+        """Check a child workflow without waiting; None while it is running."""
+        if self._mode == "replay":
+            return self._replay_next("poll_child")
+        child = self._children.get(run_id)
+        if child is None:
+            self._record("poll_child", result=None, run_id=run_id)
+            return None
+        result = ChildResult(
+            run_id=run_id,
+            result="" if child.error else child.result,
+            error=child.error or None,
+        )
+        self._record("poll_child", result=result, run_id=run_id)
+        return result
+
     # ------------------------------------------------------------------
     # 28. set_query_state
     # ------------------------------------------------------------------

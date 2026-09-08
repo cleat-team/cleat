@@ -34,6 +34,22 @@ def durable_await_all_children(run_ids_json: str) -> str:
     Returns the combined results JSON string.
     """
     raise NotImplementedError
+def durable_await_any_child(run_ids_json: str) -> str:
+    """
+    Wait for the FIRST of several child workflows to complete.
+    Returns that child's result JSON string.
+    
+    Distinct from durable-await-all-children, which waits for every one:
+    this returns as soon as any single child finishes, which is the
+    primitive a race or a first-wins fan-out needs.
+    """
+    raise NotImplementedError
+def durable_poll_child(run_id: str) -> str:
+    """
+    Check a child workflow without waiting.
+    Returns the child's status JSON; does not suspend.
+    """
+    raise NotImplementedError
 def durable_child_workflow_with_options(name: str, input: str, version: int, priority: int, parent_close_policy: str) -> str:
     """
     Start a child workflow with version, priority, and parent-close-policy options.

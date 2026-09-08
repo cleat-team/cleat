@@ -6838,6 +6838,69 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.252 Two of Python's child-workflow gaps closed, and one is a product decision — 🟡 **PARTLY FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+[§3.241](#3241)'s parity guard listed five host calls Python could not reach. **Two of the five
+were never gaps**, and that correction comes first because it changes what the work is:
+`cleat_json_parse` / `cleat_json_stringify` are covered by the `json` module — `host_calls.py`
+imports it three times — and `engine/lifecycle.go`'s `JsonParse`/`JsonStringify` are **pure**
+(unmarshal, re-marshal, write; no `recordEvent`, no store), so a guest using its own JSON diverges
+from nothing. Identical reasoning to Go's, which §3.241 already applied to Go and then explicitly
+denied for Python.
+
+**That error ran the opposite way to this document's usual one.** It made the project look *worse*,
+which is exactly why nothing about it felt like it needed re-deriving. A number that flatters goes
+unchecked; so, it turns out, does one that indicts.
+
+**`cleat_await_any_child` and `cleat_poll_child` are now bound.** WIT declarations, regenerated
+componentize-py bindings, `WitToEnvImport` rows, `HostCalls` wrappers, and `LocalHostCalls`
+equivalents.
+
+**Regeneration was verified safe before being trusted.** The tree is committed and marked "not
+intended for manual editing", and it was generated with componentize-py 0.23.0 where 0.25.0 is
+installed here. Regenerating the *unmodified* WIT first produced a **byte-identical** tree — 0 of
+the interface files differed — so the two-file diff that followed is provably just the additions.
+
+**`cleat_run_detached` is NOT bound, and the reason is a product decision rather than an
+oversight.** Python already exports `run_detached(fn)`: a **closure** form that calls `fn(self)`
+inline and makes no host call at all, while its docstring says *"the host would ensure the detached
+execution continues even if the parent workflow is cancelled"*. It asks the host nothing, so the
+work runs in the parent and is cancelled with it.
+
+That is Go's defect exactly — [§3.244](#3244) records *"Go's takes a closure, which cannot cross the
+ABI, so Go's method is never wired ... its unwired branch is `return nil`, a silent success"* — and
+it is resolved the same way, by deciding the exported signature. The closure form has real callers
+(`local_host.py`, `examples/all_host_calls_workflow.py`, two tests, the README), so it cannot simply
+be replaced while wiring imports. **Backed out of every layer** rather than left half-present: no
+WIT declaration, no binding, no rewrite row, no wrapper. It stays in the baseline with that reason.
+
+**Three guards caught things during this work, and one of them caught a wrong answer of mine:**
+
+| guard | what it caught |
+|---|---|
+| §3.241's shrink-only baseline | named all three the moment the mappings landed |
+| `test_fixture_calls_every_public_host_call` (Python) | new public methods not exercised by the all-host-calls fixture |
+| `TestEveryImportedWitFunctionHasAnEnvMapping` | **the mappings were in the wrong WIT interface** |
+
+The third is the useful one. The map is keyed by the interface a function is *declared* in, and the
+rows went under `durable-handlers` rather than `durable-children` — so the guard reported both as
+unmapped while the names were plainly visible in the file. A component built that way imports a
+module the rewriter cannot translate and fails to instantiate at **runtime**. The same slip left a
+`durable-run-detached` row behind after its WIT declaration was removed, because the deletion
+matched on whitespace that had changed.
+
+**A divergence nothing would have caught.** `LocalHostCalls` is what `cleat run` and the tests use,
+and adding methods to `HostCalls` alone means a workflow that runs under WASM raises
+`AttributeError` locally. The full Python suite stayed green with that divergence present; it was
+found by asking the question directly. `test_local_host_mirrors_host_calls` now asks it every run,
+with a shrink-only baseline of the two that predate it (`defer_func`, `host_fetch`, both with
+reasons). Falsified both ways.
+
+Python's real remaining gap is **one**, and it is a decision rather than work.
+
+`python-sdk`: 458 pass / 1 skip; ruff clean on every touched file. `tests/plugin-harness`: 145 pass
+/ 0 fail / 2 skip. `./wasm/` green.
+
 ### 3.251 Rust and Java reported a bare error code where the host wrote a message — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
 
 [§3.200](#3200)'s defect in two more SDKs, and the follow-up [§3.244](#3244) named as its own
@@ -7368,7 +7431,7 @@ deliberately unbindable `cleat_register_query_handler`):
 | **assemblyscript** | **0** | full parity |
 | rust | 3 | `cleat_schedule_cron`, `cleat_list_crons`, `cleat_delete_cron` |
 | java | 3 | the same cron trio |
-| python | 5 | `cleat_await_any_child`, `cleat_poll_child`, `cleat_run_detached`, `cleat_json_parse`, `cleat_json_stringify` |
+| python | 5 | but only **3** are gaps — the same `json` caveat as Go, see below |
 | go | 6 | but only **3** are gaps — see below |
 
 **AssemblyScript, not Go, is the only SDK at full parity.** That is not what anyone would have
@@ -7380,7 +7443,21 @@ document keeps recording.** Three of Go's six are reached another way and adding
 would be redundant:
 
 - `cleat_json_parse` / `cleat_json_stringify` — `encoding/json` is in the standard library. The
-  host call exists for guests whose language has no JSON.
+  host call exists for guests whose language has no JSON. Verified pure rather than assumed:
+  `JsonParse` and `JsonStringify` in `engine/lifecycle.go` unmarshal, re-marshal and write the
+  result — no `recordEvent`, no store, nothing durable — so a guest using its own JSON diverges
+  from nothing.
+
+  **The same applies to Python, which this section originally got wrong.** It listed all five of
+  Python's as real gaps, saying "unlike Go's, none of these has a native or composed substitute".
+  Python has the `json` module — `host_calls.py` imports it three times — so two of the five are
+  the same non-gap they are in Go. Python's real count is **3**:
+  `cleat_await_any_child`, `cleat_poll_child`, `cleat_run_detached`.
+
+  The error is worth recording rather than quietly fixing, because it ran the *opposite* way to
+  this document's usual one: it made the project look worse rather than better, which is why
+  nothing about it felt like it needed re-deriving. A number that flatters goes unchecked; so, it
+  turns out, does one that indicts.
 - `cleat_uuid` — already durable as `SideEffect(func() string {...})`, and Go binds
   `cleat_side_effect`. Worth stating precisely, because the near-miss is a determinism bug: a
   native `uuid.New()` is **not** replay-safe. The host call is a convenience over the safe form,
