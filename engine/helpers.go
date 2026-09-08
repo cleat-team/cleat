@@ -2,6 +2,7 @@ package engine
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -127,6 +128,35 @@ func isDefinitelyNonRetryable(err error, nonRetryablePatterns []string) bool {
 	return false
 }
 
+// parseSignalNames reads the signal-name list the guest passed to
+// cleat_await_signals.
+//
+// Every SDK sends a JSON array -- crates/cleat-sdk/src/host_calls.rs
+// serde_json's it "matching Go's adapter.go behavior", and the AssemblyScript
+// and Python wrappers document a JSON array string -- so JSON is the format,
+// and splitSignalNames is the fallback for anything that is not.
+//
+// This exists because the two arms of DurableAwaitSignals used to disagree.
+// The replay arm did exactly this; the fresh path called splitSignalNames
+// alone, which splits on commas and nothing else, so `["a","b"]` became `["a`
+// and `"b]` and matched no signal in the store. A delivery already waiting
+// when the workflow first awaited was therefore never picked up: the workflow
+// suspended instead, with nothing left to wake it. Noted as pre-existing in
+// #974; see cleat#933.
+//
+// The fallback still matters, and not only for old data: splitSignalNames is
+// the only reader for a bare `a,b`, and a single unquoted name `a` is not
+// valid JSON either.
+func parseSignalNames(names string) []string {
+	var parsed []string
+	if err := json.Unmarshal([]byte(names), &parsed); err == nil {
+		return parsed
+	}
+	return splitSignalNames(names)
+}
+
+// splitSignalNames splits a comma-separated list. It is the FALLBACK half of
+// parseSignalNames -- call that one unless you specifically mean this.
 func splitSignalNames(names string) []string {
 	if names == "" {
 		return nil

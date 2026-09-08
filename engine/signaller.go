@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -105,11 +104,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				// the poll below is this run's first fresh act.
 				s.exitReplay()
 				if s.engine.signalStore != nil {
-					// SignalNames is a JSON array like ["agent_result"].
-					var names []string
-					if err := json.Unmarshal([]byte(rec.SignalNames), &names); err != nil {
-						names = splitSignalNames(rec.SignalNames)
-					}
+					names := parseSignalNames(rec.SignalNames)
 					for _, name := range names {
 						d, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
 						if err == nil && found {
@@ -241,7 +236,13 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 
 	// Fresh execution: check signal store first.
 	if s.engine.signalStore != nil {
-		names := splitSignalNames(signalNames)
+		// parseSignalNames, not splitSignalNames: the guest sends a JSON
+		// array, and the comma splitter turned `["a","b"]` into `["a` and
+		// `"b]`, so this poll could never match and a signal already waiting
+		// was missed. The replay arm has always parsed it as JSON -- one
+		// field read two ways was the defect, so both arms now call one
+		// helper rather than two that are meant to agree.
+		names := parseSignalNames(signalNames)
 		for _, name := range names {
 			d, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
 			if err == nil && found {
