@@ -27,3 +27,16 @@ def side_effect(value: str) -> str:
     Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError
+def durable_run_detached(name: str, input: str) -> int:
+    """
+    Start a workflow that outlives this one (fire-and-forget).
+    
+    Takes a workflow NAME and input, not a closure: a closure cannot cross
+    the ABI, which is why the SDK method that took one was never wired to
+    this call and ran inline instead (IMPROVEMENT-PLAN 3.253).
+    
+    Returns the host's packed result rather than a string: cleat_run_detached
+    has no output buffer, so there is only an error code to report. Declared
+    u64 for the same reason durable-signal-workflow is.
+    """
+    raise NotImplementedError

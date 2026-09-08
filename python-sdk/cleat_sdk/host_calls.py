@@ -130,6 +130,9 @@ try:
         continue_as_new_versioned as _import_continue_as_new_versioned,
     )
     from wit_world.imports.durable_extended_lifecycle import (
+        durable_run_detached as _import_cleat_run_detached,
+    )
+    from wit_world.imports.durable_extended_lifecycle import (
         side_effect as _import_side_effect,
     )
     from wit_world.imports.durable_fetch import (
@@ -2804,20 +2807,40 @@ class HostCalls:
     # 28. run_detached — execute detached from cancellation
     # --------------------------------------------------------------------
 
-    def run_detached(self, fn: Callable[[HostCalls], Any]) -> None:
-        """Execute a function that is detached from workflow cancellation.
+    def run_detached(self, name: str, input_json: str) -> None:
+        """Start a workflow that outlives this one (fire-and-forget).
 
-        The function receives this ``HostCalls`` instance so it can make
-        host calls.  In a full WASM runtime the host would ensure the
-        detached execution continues even if the parent workflow is
-        cancelled.
+        The started workflow is NOT a child: this workflow does not await it, is
+        not its parent, and completing or being cancelled does not affect it.
+
+        .. versionchanged:: 3.253
+           This took a callable and ran it INLINE, making no host call at all --
+           so the work it was supposed to detach ran inside the caller and was
+           cancelled with it, while the docstring promised the opposite. A
+           closure cannot cross the ABI, which is why it was never wired. The
+           signature now matches ``cleat_run_detached`` and the Rust SDK's
+           ``run_detached(name, input_json)``.
+
+           Callers passing a function must name a deployed workflow instead.
+           There is no mechanical translation: the point of the old signature
+           was to run local code, and the host cannot run local code.
 
         Parameters
         ----------
-        fn : Callable[[HostCalls], Any]
-            Function to execute in a detached context.
+        name : str
+            The workflow definition name to start.
+        input_json : str
+            The JSON input for the new workflow.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
         """
-        fn(self)
+        _check_host_result(
+            _import_cleat_run_detached(name, input_json),
+            f"run_detached(name={name!r})",
+        )
 
     # --------------------------------------------------------------------
     # 29. send — fire-and-forget

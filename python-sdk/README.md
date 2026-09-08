@@ -105,7 +105,7 @@ state that any caller can read via `GET /api/workflows/:id/query?key=X`.
 ### Lifecycle
 - `cleat_defer(description) -> str` -- register cleanup to run on exit, returns defer ID
 - `continue_as_new(input) -> None` -- start a fresh run with new input
-- `run_detached(fn) -> None` -- execute a function detached from cancellation
+- `run_detached(name, input_json) -> None` -- start a workflow that outlives this one
 
 ### Plugin Calls
 - `plugin_call(plugin_name, function_name, input) -> str` -- call a host plugin function

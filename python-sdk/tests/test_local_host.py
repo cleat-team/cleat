@@ -341,15 +341,26 @@ class TestLifecycleHelpers:
         """``extend_timeout`` does not raise."""
         host.extend_timeout(60000)  # should not raise
 
-    def test_run_detached_executes_fn(self, host: LocalHostCalls):
-        """``run_detached`` executes the provided function."""
-        captured = []
+    def test_run_detached_records_the_workflow_it_starts(self, host: LocalHostCalls):
+        """``run_detached`` records the start, and does not run anything inline.
 
-        def my_detached(h: LocalHostCalls) -> None:
-            captured.append("executed")
+        This test asserted the opposite until IMPROVEMENT-PLAN 3.253: it passed a
+        function and checked that it had been *executed*, which is exactly the
+        behaviour that made the method a silent no-op -- the work ran inside the
+        caller and was cancelled with it, while the docstring promised the host
+        would keep it alive.
 
-        host.run_detached(my_detached)
-        assert captured == ["executed"]
+        A test can pin a defect as firmly as a feature. This one did, and it
+        passed for as long as the defect existed.
+        """
+        host.run_detached("detached-workflow", '{"a": 1}')
+
+        recorded = [e for e in host._event_log if e.method == "run_detached"]
+        assert len(recorded) == 1, (
+            "run_detached must be recorded like any other host call; a call that "
+            "logs nothing cannot be replayed"
+        )
+        assert recorded[0].kwargs["name"] == "detached-workflow"
 
     def test_uuid_deterministic(self, host: LocalHostCalls):
         """``uuid`` returns a deterministic UUID for the same seed."""

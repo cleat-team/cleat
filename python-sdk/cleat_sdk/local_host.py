@@ -1360,14 +1360,22 @@ class LocalHostCalls:
     # 44. run_detached
     # ------------------------------------------------------------------
 
-    def run_detached(self, fn: Callable[[LocalHostCalls], Any]) -> None:
-        """Execute a function that is detached from workflow cancellation."""
-        saved = self._detached_context
-        self._detached_context = True
-        try:
-            fn(self)
-        finally:
-            self._detached_context = saved
+    def run_detached(self, name: str, input_json: str) -> None:
+        """Start a workflow that outlives this one (fire-and-forget).
+
+        Recorded and replayed like any other host call. The local host does not
+        actually start a second workflow -- there is no scheduler here -- so
+        this records the intent and returns, which is what every other
+        fire-and-forget call does locally.
+
+        .. versionchanged:: 3.253
+           This took a callable and executed it immediately. See
+           :meth:`cleat_sdk.host_calls.HostCalls.run_detached`.
+        """
+        if self._mode == "replay":
+            self._replay_next("run_detached")
+            return
+        self._record("run_detached", name=name, input_json=input_json)
 
     # ------------------------------------------------------------------
     # 45. send

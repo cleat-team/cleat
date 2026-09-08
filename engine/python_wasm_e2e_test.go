@@ -558,14 +558,6 @@ var pythonUnboundBaseline = []string{
 	// explicitly denied for Python.
 	"cleat_json_parse",
 	"cleat_json_stringify",
-
-	// A real gap, and the only one left. Blocked on a public API decision
-	// rather than on wiring: Python already exports run_detached(fn), a CLOSURE
-	// form that calls fn(self) inline and makes no host call, while promising
-	// the host keeps the work alive past cancellation. That is Go's defect
-	// exactly (3.244), and the closure form has real callers, so the exported
-	// signature has to be decided rather than changed in passing. See 3.252.
-	"cleat_run_detached",
 }
 
 // NOTE: this baseline and sdkUnreachedBaseline in
