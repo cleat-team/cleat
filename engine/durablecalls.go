@@ -529,6 +529,12 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 		// acted on. IMPROVEMENT-PLAN 2.35: without this the taxonomy is
 		// collapsed at write time and replay can only re-derive the bit.
 		ErrCode: recordedErrorClass(lastErr),
+		// The engine's own conclusion, recorded because nothing else carries
+		// it. `exhausted` is known here and nowhere downstream: the message
+		// goes to the GUEST as a plain string, so by the time the worker
+		// decides dead-lettering there is no classification left to read.
+		// That is what made the decision a substring match. cleat#902.
+		RetriesExhausted: exhausted,
 	}
 	s.recordEvent(rec)
 

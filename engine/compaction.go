@@ -240,6 +240,14 @@ type CompactedEvent struct {
 	// value rather than a classification -- see recordedErrorClass.
 	ErrCode string `json:"ec,omitempty"`
 
+	// RetriesExhausted mirrors EventRecord.RetriesExhausted, for the same
+	// reason the two fields above are here: a compacted region that dropped it
+	// would reconstruct an exhaustion as an ordinary failure, so compaction
+	// would silently un-dead-letter exactly the oldest history -- the history
+	// most likely to have been compacted. omitempty is safe because false is
+	// already "not recorded", never a classification.
+	RetriesExhausted bool `json:"rx,omitempty"`
+
 	// ResolvedBy mirrors EventRecord.ResolvedBy. Dropping it in compaction
 	// would erase, for the oldest history, the fact that a response was
 	// asserted by a human rather than observed from the service.
@@ -483,6 +491,7 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 			ce.DurationMs = ev.DurationMs
 			ce.ErrNonRetryable = ev.ErrNonRetryable
 			ce.ErrCode = ev.ErrCode
+			ce.RetriesExhausted = ev.RetriesExhausted
 			ce.ResolvedBy = ev.ResolvedBy
 		case EventTypeAwaitSignals:
 			ce.SignalNames = ev.SignalNames
@@ -687,6 +696,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.DurationMs = ce.DurationMs
 			rec.ErrNonRetryable = ce.ErrNonRetryable
 			rec.ErrCode = ce.ErrCode
+			rec.RetriesExhausted = ce.RetriesExhausted
 			rec.ResolvedBy = ce.ResolvedBy
 		case EventCodeAwaitSignals:
 			rec.SignalNames = ce.SignalNames

@@ -119,18 +119,71 @@ func TestRecordTerminalFailure_UsesTheWorkflowsFence(t *testing.T) {
 	}
 }
 
-// TestRecordTerminalFailure_RetriesExhaustedDeadLetters pins the routing that
-// used to live inline at each call site, so folding it into the helper did not
-// quietly change which workflows are dead-lettered.
-func TestRecordTerminalFailure_RetriesExhaustedDeadLetters(t *testing.T) {
+// TestDeadLetteringIsDecidedByARecordedFactNotAPhrase is cleat#902's other half.
+//
+// Routing used to be `strings.Contains(errMsg, "retries exhausted")` over a
+// human-readable string the guest could have written. It is now
+// EventRecord.RetriesExhausted -- set by engine/durablecalls.go where the
+// engine knows, persisted, and read back out of the segment history -- with
+// the text used only to tie the terminal error to that specific event.
+//
+// The table is the difference between those two, case by case. Cases 2 and 3
+// are the two defects; case 6 is the near-miss that makes RetriesExhausted a
+// field of its own rather than a re-reading of ErrNonRetryable.
+func TestDeadLetteringIsDecidedByARecordedFactNotAPhrase(t *testing.T) {
+	// The text engine/durablecalls.go would have recorded and handed to the guest.
+	const engineText = "retries exhausted: connection refused"
+
+	exhaustion := []engine.EventRecord{{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+		Err: engineText, RetriesExhausted: true,
+	}}
+
 	for _, tc := range []struct {
-		name       string
-		errMsg     string
-		wantDLQ    bool
-		wantFailed bool
+		name    string
+		history []engine.EventRecord
+		errMsg  string
+		wantDLQ bool
+		why     string
 	}{
-		{"retries exhausted", "step failed: retries exhausted after 5 attempts", true, false},
-		{"ordinary failure", "step failed: connection refused", false, true},
+		{
+			name: "the exhaustion that ended the workflow", history: exhaustion,
+			errMsg: engineText, wantDLQ: true,
+			why: "the case that must keep working -- a real exhaustion still reaches the DLQ",
+		},
+		{
+			name: "the guest wrapped the engine's text", history: exhaustion,
+			errMsg: "step 3: " + engineText, wantDLQ: true,
+			why: "a workflow is free to wrap what it received and still died of the exhaustion",
+		},
+		{
+			name: "the phrase, with no exhaustion behind it", history: nil,
+			errMsg: "step failed: retries exhausted after 5 attempts", wantDLQ: false,
+			why: "FALSE POSITIVE, fixed: text mentioning retry exhaustion no longer routes anything",
+		},
+		{
+			name: "an exhaustion the guest caught, then an unrelated failure", history: exhaustion,
+			errMsg: "step failed: invalid customer id", wantDLQ: false,
+			why: "REGRESSION GUARD: history holds an exhaustion, but it is not what ended this workflow",
+		},
+		{
+			name: "an ordinary failure", history: nil,
+			errMsg: "step failed: connection refused", wantDLQ: false,
+			why: "unchanged",
+		},
+		{
+			name: "a failed call that was NOT an exhaustion, same text",
+			history: []engine.EventRecord{{
+				EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+				Err: engineText, RetriesExhausted: false,
+			}},
+			errMsg: engineText, wantDLQ: false,
+			why: "the typed bit decides, not the text -- engine/callintent.go records exactly this shape",
+		},
+		{
+			name: "no history at all", history: nil, errMsg: engineText, wantDLQ: false,
+			why: "the pre-execution paths (WASM load, version check) cannot be exhaustions",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var sawDLQ, sawFail bool
@@ -145,11 +198,11 @@ func TestRecordTerminalFailure_RetriesExhaustedDeadLetters(t *testing.T) {
 			}
 			w := newTestWorker(ms)
 
-			w.recordTerminalFailure(testInstance("dlq-routing-wf"), time.Now(), tc.errMsg, "", "")
+			w.recordTerminalFailureWithHistory(testInstance("dlq-routing-wf"), time.Now(), tc.errMsg, "", "", tc.history)
 
-			if sawDLQ != tc.wantDLQ || sawFail != tc.wantFailed {
-				t.Errorf("routing for %q: dead-letter=%v fail=%v, want dead-letter=%v fail=%v",
-					tc.errMsg, sawDLQ, sawFail, tc.wantDLQ, tc.wantFailed)
+			if sawDLQ != tc.wantDLQ || sawFail == tc.wantDLQ {
+				t.Errorf("routing for %q: dead-letter=%v fail=%v, want dead-letter=%v fail=%v\n  %s",
+					tc.errMsg, sawDLQ, sawFail, tc.wantDLQ, !tc.wantDLQ, tc.why)
 			}
 		})
 	}
