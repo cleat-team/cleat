@@ -28,6 +28,13 @@ on:
       - "go.sum"
       # So a change to the filter itself is checked by the filter itself.
       - ".github/workflows/ecosystem-ci.yml"
+    # `edited` is required, not decorative: it is the activity type a BASE
+    # CHANGE fires. Without it a PR opened against a feature branch and later
+    # retargeted here never triggers this workflow at all -- not at open (the
+    # branches filter excluded it) and not at retarget (not a default type).
+    # Such a PR reports CLEAN with only the unfiltered workflows' checks.
+    # scripts/check-workflow-pr-triggers.sh guards this.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main, develop]
 
