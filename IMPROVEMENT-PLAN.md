@@ -6838,6 +6838,37 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.256 A workflow that makes no host call was still never determinism-checked — 🟢 **FIXED 2026-09-08** (WS-1, 2026-09-08)
+
+The half of cleat#949 that **#964 left**, and it is the issue's *first* example.
+
+#964 fixed the helper case correctly: the determinism rules were gated on the durable closure,
+computed **upward**, when determinism is a property of what the workflow *executes*. It seeds a
+downward walk from `DurableLeaves` and `DurableClosure` and validates everything reachable.
+
+That never reaches a workflow which makes **no host call**. Such a function is not durable, and it
+is not the callee of anything durable, so nothing enqueues it:
+
+    no host call        -> "0 in cleat closure" -> built, no diagnostic
+    + h.SetQueryState() -> "1 in cleat closure" -> two E013s, refused
+
+Measured against #964 as merged: a workflow whose only construct is a `sync.Mutex` produced `[]`.
+
+**Here the unchecked body is not a helper somewhere below the workflow — it is the workflow.**
+
+Fixed by adding `result.EntryPoints` to the seed. An entry point is by definition executed, so it
+belongs there on the same reasoning that put callees there.
+
+**This was found by duplicating #964 and then checking rather than assuming.** I was assigned #949,
+built the whole fix, and hit the conflict at rebase — the second such collision in a night. What
+made the wasted work worth something was testing *their* merged code against *my* fixture instead of
+concluding the issue was closed. It returned `[]`.
+
+**Falsified**: removing the entry-point seed returns the merged behaviour, `produced [], want E013`.
+
+**The widening re-measured with the larger set**: 13 shipped example packages, still **0** new
+diagnostics.
+
 ### 3.255 Audit logging recorded nothing on MySQL, and the empty table looked like a quiet system — 🟢 **FIXED 2026-09-08** (WS-1, 2026-09-08)
 
 cleat#958, found by WS-3 running the `samples-go` port against a second and third dialect.
