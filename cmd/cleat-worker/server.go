@@ -1761,10 +1761,48 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		OverlapPolicy:  req.Overlap,
 	}
 	if err := st.CreateSchedule(r.Context(), sch); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeScheduleError(w, r, "create", req.Name, err)
 		return
 	}
 	s.writeJSON(w, 201, map[string]string{"status": "created"})
+}
+
+// writeScheduleError classifies a schedule store failure instead of reporting
+// every one as a server fault carrying whatever the driver said.
+//
+// It was `writeError(w, 500, err.Error())`, which had three problems at once
+// (cleat#996). A caller reusing a schedule name got a 500, so a client could
+// not tell its own mistake from cleat being broken and an operator's dashboard
+// counted it as an outage. The response body carried the raw driver text --
+// `pq: duplicate key value violates unique constraint "workflow_schedules_pkey"
+// (23505)` -- leaking the schema. And that text is dialect-specific, so it was
+// not parseable either: the same condition reads differently on MySQL and SQL
+// Server, which is the one job a machine-readable error has.
+//
+// The shape is handleAdminOpError's, deliberately: typed sentinels through
+// errors.Is, a stable `detail` discriminator so a client can tell two 409s
+// apart without reading prose, and 500 reserved for the genuinely
+// unclassified. As that function's own comment puts it, an unclassified error
+// is a real server fault rather than a refusal nobody got round to labelling.
+//
+// The unclassified branch no longer echoes err.Error(). It logs the detail
+// server-side, where an operator can read it, and answers a fixed message --
+// so a driver string cannot reach a client through the default path either,
+// which is where it reached one before.
+func (s *apiServer) writeScheduleError(w http.ResponseWriter, r *http.Request, op, name string, err error) {
+	switch {
+	case errors.Is(err, engine.ErrScheduleExists):
+		s.writeJSON(w, 409, map[string]string{
+			"error":  fmt.Sprintf("a schedule named %q already exists", name),
+			"detail": "schedule_exists",
+		})
+	default:
+		// slog directly, as the concurrency-key handler above does -- apiServer
+		// carries no logger of its own.
+		slog.ErrorContext(r.Context(), "schedule operation failed",
+			"op", op, "schedule", name, "error", err)
+		s.writeError(w, 500, "schedule "+op+" failed")
+	}
 }
 
 // handleDefinitions handles GET /api/definitions
