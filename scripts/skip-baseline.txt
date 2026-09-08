@@ -120,6 +120,7 @@ migration	newMySQLScratchDB	1
 migration	newScratchDB	1
 plugin	TestDownloadWASMInvalidURL	1
 plugin	newPluginScratchDB	1
+plugins/auditlog	TestTheAuditInsertWorksOnMySQLsIDColumn	1
 plugins/scheduledbackup	TestNextRun_Feb29NonLeapYear	1
 plugins/scheduler	TestCronDSTTransition	1
 tests/cluster	TestAddRemoveWorkers	1
