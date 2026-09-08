@@ -438,9 +438,28 @@ func (s *TestWorkflowState) ChildVersion(name string) (int, bool) {
 type mockCaller struct {
 	mu    sync.Mutex
 	Calls []engine.EventRecord
+	// delay, if set, is how long Call blocks before answering. It exists so a
+	// test can outlast a guest-side CallOptions.Timeout: with an instant
+	// caller, a timeout and a working call are indistinguishable because
+	// neither ever elapses.
+	delay time.Duration
+}
+
+// SetDelay makes every subsequent Call block for d before answering.
+func (m *mockCaller) SetDelay(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.delay = d
 }
 
 func (m *mockCaller) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
+	m.mu.Lock()
+	d := m.delay
+	m.mu.Unlock()
+	if d > 0 {
+		time.Sleep(d)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
