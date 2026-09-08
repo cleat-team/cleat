@@ -65,6 +65,9 @@ type mockStore struct {
 	setRoutingRuleFn                   func(ctx context.Context, workflowName string, targetVersion int, weight float64) error
 	removeRoutingRuleFn                func(ctx context.Context, ruleID string) error
 	getRoutingRulesFn                  func(ctx context.Context, workflowName string) ([]engine.RoutingRule, error)
+	setWorkflowTagFn                   func(ctx context.Context, workflowName string, version int, tag string) error
+	removeWorkflowTagFn                func(ctx context.Context, workflowName string, tag string) error
+	getWorkflowTagsFn                  func(ctx context.Context, workflowName string) (map[string]int, error)
 	getTerminalRunFn                   func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
 	createScheduleFn                   func(ctx context.Context, s engine.Schedule) error
 	listSchedulesFn                    func(ctx context.Context) ([]engine.Schedule, error)
@@ -3289,15 +3292,24 @@ func (m *mockStore) GetAllowedSignalCallers(ctx context.Context, workflowID stri
 }
 
 func (m *mockStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	if m.setWorkflowTagFn != nil {
+		return m.setWorkflowTagFn(ctx, workflowName, version, tag)
+	}
 	return nil
 }
 func (m *mockStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	if m.removeWorkflowTagFn != nil {
+		return m.removeWorkflowTagFn(ctx, workflowName, tag)
+	}
 	return nil
 }
 func (m *mockStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	return 0, nil
 }
 func (m *mockStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	if m.getWorkflowTagsFn != nil {
+		return m.getWorkflowTagsFn(ctx, workflowName)
+	}
 	return nil, nil
 }
 func (m *mockStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
