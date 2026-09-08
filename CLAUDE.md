@@ -627,31 +627,52 @@ wasmtime. `engine/hostabi_runtime_parity_test.go` does. It found a real defect o
 promises could not link on the worker at all (§3.55). **Note what a name-only comparison would
 have said** — both sides register the same names, and did then too.
 
-**But read that sentence carefully, because it is narrower than it looks.** The test filters both
-sides on the `cleat_` prefix (`engine/hostabi_runtime_parity_test.go:114` and `:332`), so what it
-compares is **55 `cleat_`-prefixed names**. Three more are registered on both sides and **never
-compared**: `plugin_call`, `plugin_call_streaming`, `set_query_state`. The §3.55 defect this test
-caught — a host function registered on wasmtime with a parameter no guest passed, so durable
-promises could not link on the worker — would be invisible today if it happened to any of those
-three.
+**This paragraph described a gap that no longer exists, and that is the more expensive kind of
+error than a stale number.** It read: the test filters both sides on the `cleat_` prefix
+(citing `engine/hostabi_runtime_parity_test.go:114` and `:332`), so it compares 55 names while
+`plugin_call`, `plugin_call_streaming` and `set_query_state` are *never compared*.
 
-The number here read **56** until 2026-09-05 and carried no date, so it is corrected rather than
-preserved — this file's header says *"If you find one without a date that turns out to be wrong,
-fix it in the same PR."* It was right when written: 56 `cleat_` names on 2026-09-01, and
-`cleat_child_workflow_in_schema` was removed the next day (#582, 2026-09-02), so 56 − 1 = 55. The
-same stale 56 is in the test's own doc comment at `:33` and in its vacuous-pass control at `:362`.
+All of that was true, and stopped being true on 2026-09-05 when the filter was removed. `:114`
+is now a blank line and `:332` an unrelated `switch`. A session reading this would go to close a
+hole that is closed — and the paragraph was persuasive precisely because it was specific.
 
-**And do not conflate the two counts, because they answer different questions.** The engine
-exports **50** names (measured 2026-09-06, after §3.220's removal); the parity test compares the
-`cleat_`-prefixed subset.
+The textual check is not what settles it, and that is worth noting here because it is this
+file's own trap: `grep -c 'strings.HasPrefix(name, "cleat_")'` over that test returns **2**,
+which reads like a live filter and is two comments *describing* the removed one. What settles
+it is behavioural — adding a real filter makes the test fail, so a filter cannot already be
+there.
+
+**What replaced it is a test, which is why this is worth reading as a pattern rather than a
+correction.** `TestParityCoversEveryRegisteredHostFunction` fails if the filter returns in any
+form. Verified 2026-09-08 by putting a `strings.HasPrefix(name, "cleat_")` back:
+
+    the runtime parity check does not compare 3 of 52 registered host functions:
+    plugin_call, plugin_call_streaming, set_query_state
+
+A prose warning about a guard's blind spot rots the moment someone fixes it, and rots *silently*,
+because nothing re-reads the prose. A test that asserts the blind spot is absent cannot: it goes
+red when the blind spot returns, and it stays green — saying nothing, correctly — when it does
+not. **Prefer converting a gap into a failing test over describing it here.**
+
+**The two counts still answer different questions**, and that part survives: the engine exports
+52, of which 49 carry the `cleat_` prefix and three do not. The parity test now compares all 52 —
+it no longer compares a subset, which is what the deleted paragraph got wrong.
 
 **This paragraph said 58 and 55 until 2026-09-06, and it is the sharpest example of its own
 rule.** The section exists to warn that a count in prose rots, and its count rotted: six exports
 went with the durable-state family (§3.216), and two more with the inert signal calls (§3.220) a
-few hours after this very paragraph was corrected to 52. Nothing failed either time, because
-**no test asserts these numbers**. `ABI.md` stayed correct over the same period —
+few hours after this very paragraph was corrected to 52. It then rotted a third time, upward:
+`cleat_poll_update` and `cleat_complete_update` arrived with workflow updates (#868), so the run
+is 58 → 52 (#767) → 50 (#843) → **52** (#868) — four values in three days, every one correct when
+written, and the section above still said 50 on 2026-09-08. Note the direction: the first two
+were removals and the third an addition, so "the number only goes down" is not available as a
+sanity check either. Nothing failed any of the three times, because **no test asserts these
+numbers**. `ABI.md` stayed correct over the same period —
 it and `engine/imports.go` agree on all 52 with an empty set difference — so the drift was in this
-file alone. Re-derive before quoting, including from here.
+file alone. That is no longer luck: since #952, `scripts/check-doc-consistency.sh` compares the
+two SETS on every CI run and fails on either difference, which is the same "convert it into a
+failing test" move as the parity filter above. Nothing yet checks the numbers in *this* file, so
+re-derive before quoting, including from here.
 
     grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u | grep -c .
 
