@@ -126,41 +126,55 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 // ---------------------------------------------------------------------------
 
 func (c *fakeConn) execInsertAuditEvent(args []driver.NamedValue) (driver.Result, error) {
-	tenantID, err := argString(args, 1)
+	// $1 is the id, which recordAudit generates rather than leaving to a
+	// column default -- MySQL's audit_events.id has none, so an insert that
+	// omitted it failed there on every event (cleat#958). Read and stored
+	// here rather than regenerated, so this fake would notice the column
+	// going missing again: a real database rejects that on one dialect out of
+	// three, and this fake is the only place it is exercised without one.
+	idStr, err := argString(args, 1)
 	if err != nil {
 		return nil, err
 	}
-	method, err := argString(args, 2)
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return nil, fmt.Errorf("arg 1 (audit_events.id): %w", err)
+	}
+	tenantID, err := argString(args, 2)
 	if err != nil {
 		return nil, err
 	}
-	path, err := argString(args, 3)
+	method, err := argString(args, 3)
 	if err != nil {
 		return nil, err
 	}
-	statusCode, err := argInt64(args, 4)
+	path, err := argString(args, 4)
 	if err != nil {
 		return nil, err
 	}
-	userID, err := argString(args, 5)
+	statusCode, err := argInt64(args, 5)
 	if err != nil {
 		return nil, err
 	}
-	ipAddress, err := argString(args, 6)
+	userID, err := argString(args, 6)
 	if err != nil {
 		return nil, err
 	}
-	userAgent, err := argString(args, 7)
+	ipAddress, err := argString(args, 7)
 	if err != nil {
 		return nil, err
 	}
-	durationMs, err := argInt64(args, 8)
+	userAgent, err := argString(args, 8)
+	if err != nil {
+		return nil, err
+	}
+	durationMs, err := argInt64(args, 9)
 	if err != nil {
 		return nil, err
 	}
 
 	c.store.events = append(c.store.events, auditEventRow{
-		id:         uuid.New(),
+		id:         id,
 		tenantID:   uuid.MustParse(tenantID),
 		timestamp:  time.Now(),
 		method:     method,
