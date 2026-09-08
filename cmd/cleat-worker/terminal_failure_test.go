@@ -155,6 +155,63 @@ func TestRecordTerminalFailure_RetriesExhaustedDeadLetters(t *testing.T) {
 	}
 }
 
+// TestAPanicIsNeverDeadLettered is cleat#902's unambiguous half.
+//
+// releaseOrFail has exactly one caller -- executeWorkflow's panic recovery,
+// `w.releaseOrFail(wf, fmt.Sprintf("panic: %v", r))` -- so every message that
+// reaches it is a recovered panic value. Until eligibleForDLQ existed, whether
+// one was dead-lettered was decided by whether that VALUE happened to contain
+// the words "retries exhausted".
+//
+// Both cases here are the same panic as far as the system is concerned. The
+// first is the one that used to be routed to the dead-letter queue, and the
+// only thing that put it there was a substring in text the guest chose.
+func TestAPanicIsNeverDeadLettered(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		panicV string
+	}{
+		{"panic whose text happens to say retries exhausted",
+			"panic: sending on closed channel: retries exhausted after 5 attempts"},
+		{"ordinary panic", "panic: runtime error: index out of range [3] with length 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sawDLQ, sawFail bool
+			var gotCode, gotOp string
+			ms := &mockStore{}
+			ms.moveToDeadLetterQueueFn = func(_ context.Context, _, _ string, _ int64, _, _, _ string) error {
+				sawDLQ = true
+				return nil
+			}
+			ms.failWorkflowFn = func(_ context.Context, _, _ string, _ int64, _, errorCode, errorOp string, _ map[string]string) error {
+				sawFail, gotCode, gotOp = true, errorCode, errorOp
+				return nil
+			}
+			w := newTestWorker(ms)
+
+			w.releaseOrFail(testInstance("panic-routing-wf"), tc.panicV)
+
+			if sawDLQ {
+				t.Errorf("a recovered panic was dead-lettered. The dead-letter queue is for "+
+					"work that exhausted its retries and can be reprocessed; a panic is a "+
+					"crash, and it landed there only because its text contained a phrase: %q",
+					tc.panicV)
+			}
+			if !sawFail {
+				t.Fatal("the panic was neither dead-lettered nor failed, so nothing recorded it")
+			}
+			// The old call passed "", "" -- so every panicked workflow was
+			// stored with a blank classification, indistinguishable in the
+			// error_code column from a failure nobody had classified.
+			if gotCode != engine.ErrUnknown.String() || gotOp != "panic" {
+				t.Errorf("a panicked workflow was recorded with error_code=%q error_op=%q, "+
+					"want %q/%q -- a blank code cannot be told from an unclassified failure",
+					gotCode, gotOp, engine.ErrUnknown.String(), "panic")
+			}
+		})
+	}
+}
+
 // TestReleaseWorkflow_FenceLostIsNotAnError covers the release path: losing
 // the fence there means there is nothing to release, which is not a failure.
 func TestReleaseWorkflow_FenceLostIsNotAnError(t *testing.T) {

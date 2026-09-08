@@ -2730,7 +2730,15 @@ func (w *Worker) failStrandedUpdates(wf *engine.WorkflowInstance, terminalStatus
 		"worker_id", w.id, "workflow_id", wf.ID, "terminal_status", terminalStatus, "count", len(updates))
 }
 
-func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string) (applied, deadLettered bool) {
+// writeTerminalFailure writes a workflow's terminal failure, to the dead-letter
+// queue or to 'failed'.
+//
+// eligibleForDLQ is the CALLER's answer to "could this failure be a retry
+// exhaustion at all", and it is a parameter rather than something decided here
+// because the two callers differ on it absolutely rather than by degree. The
+// panic path cannot be one: a recovered panic is a crash, not a call that ran
+// out of attempts.
+func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string, eligibleForDLQ bool) (applied, deadLettered bool) {
 	st := w.storeFor(wf)
 	ctx := context.Background()
 
@@ -2758,7 +2766,21 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 		return false, false
 	}
 
-	deadLettered = strings.Contains(errMsg, "retries exhausted")
+	// The substring is not a shortcut past the typed classification -- it is
+	// the ONLY channel that classification has. engine/durablecalls.go knows
+	// retries were exhausted (it has the `exhausted` bool) and records it as
+	// this prefix, then hands the error to the GUEST, which returns a plain
+	// string out of its entry point. By the time executeWorkflow runs
+	// errors.As(err, &ce) there is no typed error left, so errorCode is
+	// ErrUnknown here for every real exhaustion.
+	//
+	// Switching this to errorCode == engine.ErrRetriesExhausted.String()
+	// therefore does NOT tighten it -- NewRetriesExhaustedError has no
+	// production callers, nothing ever writes "retries_exhausted" to the
+	// column, and the test would be constantly false. The dead-letter queue
+	// would silently stop receiving anything. See cleat#902, where making the
+	// classification survive the guest boundary is tracked as the real fix.
+	deadLettered = eligibleForDLQ && strings.Contains(errMsg, "retries exhausted")
 	var err error
 	if deadLettered {
 		err = st.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
@@ -2782,7 +2804,7 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 // recordTerminalFailure is writeTerminalFailure plus the failure metrics the
 // dispatch paths record, emitted only when the write applied.
 func (w *Worker) recordTerminalFailure(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string) {
-	applied, deadLettered := w.writeTerminalFailure(wf, errMsg, errorCode, errorOp)
+	applied, deadLettered := w.writeTerminalFailure(wf, errMsg, errorCode, errorOp, true)
 	if !applied {
 		return
 	}
@@ -2901,7 +2923,15 @@ func (w *Worker) releaseOrFail(wf *engine.WorkflowInstance, errMsg string) {
 	// failed/duration pair, and it has no start time to report a duration
 	// from. Only the dead-letter counter, as before -- now conditional on the
 	// write applying.
-	if applied, deadLettered := w.writeTerminalFailure(wf, errMsg, "", ""); applied && deadLettered {
+	//
+	// eligibleForDLQ is false and the code is no longer blank. The only caller
+	// is the panic recovery in executeWorkflow, so errMsg here is always
+	// "panic: <value>" -- and a panic is not a retry exhaustion. Until this
+	// argument existed the routing was decided by whether the panic VALUE
+	// happened to contain the words "retries exhausted", which is an accident
+	// either way it lands.
+	if applied, deadLettered := w.writeTerminalFailure(wf, errMsg,
+		engine.ErrUnknown.String(), "panic", false); applied && deadLettered {
 		w.Metrics.RecordWorkflowsDeadLettered(context.Background())
 	}
 }
