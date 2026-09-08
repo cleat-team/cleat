@@ -618,3 +618,63 @@ func TestVetChecksInitFunction(t *testing.T) {
 		t.Errorf("expected E020 (init durable call), got errors: %v", listErrorCodes(cr))
 	}
 }
+
+// TestDeterminismChecksReachHelpersThatMakeNoHostCall is cleat#949.
+//
+// The determinism rules were gated on membership of the cleat CLOSURE -- the
+// set of functions that reach a host call, computed upward. That is the right
+// set for deciding which host functions to import, and the wrong one for
+// determinism: replay re-runs the workflow and constrains only the RESULTS of
+// host calls, so local computation is re-executed. A helper is therefore
+// exactly as non-deterministic whether or not it happens to call out.
+//
+// The fixture is the case that matters: an entry point that DOES call the host,
+// calling a helper that does not. Six violations across three codes, and the
+// build reported none of them.
+func TestDeterminismChecksReachHelpersThatMakeNoHostCall(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages(
+		"github.com/cleat-team/cleat/testdata/vet-checks/go/e949_helper_escape", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+
+	for _, code := range []string{"E001", "E002", "E013"} {
+		if !hasErrorCode(cr, code) {
+			t.Errorf("expected %s from the helper, got: %v\n\n"+
+				"The helper makes no host call, so it is Pure by the closure's reckoning and "+
+				"was never validated. It runs on every replay all the same.",
+				code, listErrorCodes(cr))
+		}
+	}
+}
+
+// TestDeterminismChecksReachAnEntryPointWithNoHostCall is the simplest form of
+// the same defect: a workflow that uses a mutex and calls nothing.
+//
+// Before cleat#949 this built clean at "0 in cleat closure", while the same
+// function with one h.SetQueryState added was refused with two E013s.
+func TestDeterminismChecksReachAnEntryPointWithNoHostCall(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages(
+		"github.com/cleat-team/cleat/testdata/vet-checks/go/e949_no_host_call", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+
+	if !hasErrorCode(cr, "E013") {
+		t.Errorf("expected E013 from a workflow whose only construct is a mutex, got: %v\n\n"+
+			"A mutex is non-deterministic across replays whether or not the function also "+
+			"makes a host call.", listErrorCodes(cr))
+	}
+}

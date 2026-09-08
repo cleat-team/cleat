@@ -85,25 +85,95 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 	result.NumDurableClosure = len(cr.DurableClosure)
 	result.NumPure = len(cr.Pure)
 
-	// Validate supported constructs in all cleat functions.
+	// Validate supported constructs in everything the workflow EXECUTES.
+	//
 	// Functions defined in files that would be excluded for the WASM target
 	// (GOOS=wasip1 GOARCH=wasm) are skipped — they won't appear in the
 	// compiled WASM module and may legitimately use non-deterministic
 	// platform APIs.
+	//
+	// # Why this is not the cleat closure (cleat#949)
+	//
+	// It used to be `DurabilityTag == "DurableLeaf" || == "DurableClosure"`,
+	// which is the set of functions that REACH A HOST CALL. That set is
+	// computed upward — a function is in it because something it calls calls
+	// the host — and it is exactly right for the question closure analysis
+	// exists to answer: which host functions must be imported.
+	//
+	// The determinism rules were attached to the same traversal and are asking
+	// a different question. Replay re-runs the workflow function and constrains
+	// only the RESULTS OF HOST CALLS; local computation is re-executed. So
+	// determinism is a property of everything the workflow executes, not of
+	// everything that calls out — and a helper that touches a mutex, a
+	// goroutine or a channel is exactly as non-deterministic whether or not it
+	// happens to make a host call.
+	//
+	// Measured before the fix: three builds of the same sync.Mutex, differing
+	// by one line.
+	//
+	//	no host call        -> "0 in cleat closure" -> built, no diagnostic
+	//	+ h.SetQueryState() -> "1 in cleat closure" -> two E013s, refused
+	//
+	// And the case that matters is a helper: an entry point that DOES call the
+	// host, calling one that does not. Six violations across three codes — E001
+	// goroutines, E002 channels, E013 mutex and WaitGroup — and the build
+	// reported none of them, while the analyzer's own summary said
+	// "2 functions, 1 in cleat closure": it counted the helper without checking
+	// it.
+	//
+	// The set is therefore everything reachable DOWNWARD from an entry point,
+	// unioned with the durable set. The union matters: a durable function is
+	// not always reachable from an entry point in this package — it may be
+	// exported for another one — and dropping it would trade one silent gap for
+	// another.
+	executed := reachableFromEntryPoints(result, cg)
 	wasmCache := make(map[string]bool)
-	for _, fd := range result.Funcs {
-		if fd.DurabilityTag == "DurableLeaf" || fd.DurabilityTag == "DurableClosure" {
-			if !isWASEligible(fd, wasmCache) {
-				continue
-			}
-			validateConstructs(fd, cr)
+	for name, fd := range result.Funcs {
+		durable := fd.DurabilityTag == "DurableLeaf" || fd.DurabilityTag == "DurableClosure"
+		if !durable && !executed[name] {
+			continue
 		}
+		if !isWASEligible(fd, wasmCache) {
+			continue
+		}
+		validateConstructs(fd, cr)
 	}
 
 	// Validate that init() functions do not call durable functions.
 	validateInitFunctions(result, cr)
 
 	return cr
+}
+
+// reachableFromEntryPoints returns every function reachable from a workflow
+// entry point by following call edges FORWARD.
+//
+// This is the opposite direction from the durable closure, which asks who calls
+// the host. Determinism asks what runs, and what runs is whatever an entry
+// point can reach — a helper three levels down is re-executed on every replay
+// just as the entry point is. See the comment at the call site (cleat#949).
+//
+// Cycles terminate because a name is only enqueued when first marked.
+func reachableFromEntryPoints(result *analyzer.AnalysisResult, cg *callgraph.Graph) map[string]bool {
+	seen := make(map[string]bool, len(result.Funcs))
+	queue := make([]string, 0, len(result.EntryPoints))
+	for _, name := range result.EntryPoints {
+		if !seen[name] {
+			seen[name] = true
+			queue = append(queue, name)
+		}
+	}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		for callee := range cg.Calls[name] {
+			if !seen[callee] {
+				seen[callee] = true
+				queue = append(queue, callee)
+			}
+		}
+	}
+	return seen
 }
 
 // Result holds the results of closure computation and validation.

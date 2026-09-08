@@ -6838,6 +6838,52 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.256 Determinism checks skipped every function that made no host call — 🟢 **FIXED 2026-09-08** (WS-1, 2026-09-08)
+
+cleat#949, found by the `samples-go` port. **The analyzer's rules were right; the set they were
+applied to was wrong.**
+
+`internal/closure/closure.go` ran `validateConstructs` only for functions tagged `DurableLeaf` or
+`DurableClosure` — the cleat closure, computed **upward**: a function is in it because something it
+calls calls the host. That is exactly the right set for the question closure analysis exists to
+answer, *which host functions must be imported*.
+
+The determinism checks were attached to the same traversal and are asking a different question.
+**Replay re-runs the workflow and constrains only the RESULTS of host calls; local computation is
+re-executed.** So determinism is a property of everything the workflow *executes*, not of everything
+that *calls out* — and a mutex is exactly as non-deterministic whether or not the function around it
+happens to make a host call.
+
+Three builds of the same `sync.Mutex`, differing by one line:
+
+    no host call        -> "0 in cleat closure" -> built, no diagnostic
+    + h.SetQueryState() -> "1 in cleat closure" -> two E013s, refused
+
+**The case that matters is a helper**, and it is silent: an entry point that *does* call the host,
+calling one that does not. Six violations across three codes — E001 goroutines, E002 channel
+send/receive/`close`, E013 `sync.Mutex` and `sync.WaitGroup` — and the build reported none, while
+the analyzer's own summary read `2 functions, 1 in cleat closure`. **It counted the helper without
+checking it.**
+
+**Fixed by validating everything reachable DOWNWARD from an entry point**, unioned with the durable
+set. The union is not decoration: a durable function is not always reachable from an entry point in
+its own package — it may be exported for another — and dropping it would trade one silent gap for
+another.
+
+**Falsified**: restoring the gate makes both new tests report `got: []` — not a weaker diagnostic,
+*none at all*, which is the defect exactly.
+
+**The control matters more than usual here**, and it is WS-3's point: without evidence the rules
+fire when they *do* apply, every "it built clean" observation is equally explained by the checks not
+existing. `TestVetChecksForbidden*` is that control and passes unchanged.
+
+**The widening was measured, not assumed.** Applying determinism rules to more functions can refuse
+builds that legitimately worked, so all 13 shipped example packages were scanned: **0 new
+diagnostics**. Fixtures were excluded from that scan deliberately — they are *supposed* to have
+violations, and counting them would have hidden a real regression among expected noise.
+
+`./internal/...`, `./wasm/`, `./cmd/cleat/` green; gofmt and the lint guards clean.
+
 ### 3.255 Audit logging recorded nothing on MySQL, and the empty table looked like a quiet system — 🟢 **FIXED 2026-09-08** (WS-1, 2026-09-08)
 
 cleat#958, found by WS-3 running the `samples-go` port against a second and third dialect.
