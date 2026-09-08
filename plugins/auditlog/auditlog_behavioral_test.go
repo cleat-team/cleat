@@ -126,41 +126,61 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 // ---------------------------------------------------------------------------
 
 func (c *fakeConn) execInsertAuditEvent(args []driver.NamedValue) (driver.Result, error) {
-	tenantID, err := argString(args, 1)
+	// The id is arg 1 and every other argument shifted by one when cleat#958
+	// made the caller supply it. Before that this fake INVENTED an id with
+	// uuid.New(), which is the shape that hid the defect: the double had an
+	// opinion the database did not share, so a statement MySQL rejected --
+	// `Field 'id' doesn't have a default value` -- looked fine here.
+	//
+	// It now reads what the caller actually sent and rejects anything that is
+	// not a UUID, so a regression to omitting the id fails rather than being
+	// papered over.
+	idStr, err := argString(args, 1)
 	if err != nil {
 		return nil, err
 	}
-	method, err := argString(args, 2)
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return nil, fmt.Errorf("audit insert supplied %q as the id, which is not a UUID: %w\n\n"+
+			"The caller must supply the id: MySQL's audit_events.id is CHAR(36) with no default, "+
+			"so an insert that omits it fails there while succeeding on PostgreSQL and SQL Server "+
+			"(cleat#958)", idStr, err)
+	}
+	tenantID, err := argString(args, 2)
 	if err != nil {
 		return nil, err
 	}
-	path, err := argString(args, 3)
+	method, err := argString(args, 3)
 	if err != nil {
 		return nil, err
 	}
-	statusCode, err := argInt64(args, 4)
+	path, err := argString(args, 4)
 	if err != nil {
 		return nil, err
 	}
-	userID, err := argString(args, 5)
+	statusCode, err := argInt64(args, 5)
 	if err != nil {
 		return nil, err
 	}
-	ipAddress, err := argString(args, 6)
+	userID, err := argString(args, 6)
 	if err != nil {
 		return nil, err
 	}
-	userAgent, err := argString(args, 7)
+	ipAddress, err := argString(args, 7)
 	if err != nil {
 		return nil, err
 	}
-	durationMs, err := argInt64(args, 8)
+	userAgent, err := argString(args, 8)
+	if err != nil {
+		return nil, err
+	}
+	durationMs, err := argInt64(args, 9)
 	if err != nil {
 		return nil, err
 	}
 
 	c.store.events = append(c.store.events, auditEventRow{
-		id:         uuid.New(),
+		id:         id,
 		tenantID:   uuid.MustParse(tenantID),
 		timestamp:  time.Now(),
 		method:     method,
