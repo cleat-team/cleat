@@ -25,7 +25,7 @@ import (
 //	                            WIRED 2026-09-07 (#889): POST/GET/DELETE
 //	                            /api/workflows/{name}/routing. The read path was
 //	                            already correct; only the way in was missing.
-//	SetWorkflowTag              nothing consults tags                 -> tag family inert both ways
+//	SetWorkflowTag              children.go resolves tags on start    -> the "stable" channel was empty
 //	DeleteDeadLetteredWorkflows n/a                                   -> dead-letter table only grows
 //	ValidateVersion             ListVersions has no deprecated filter -> deprecation unenforced
 //	                            WIRED 2026-09-07 (#889): the HTTP start path now
@@ -124,13 +124,13 @@ func TestEveryStoreMethodIsReachableFromProduction(t *testing.T) {
 var storeUnreachedBaseline = map[string]bool{
 	// cleat#769's original findings.
 	"DeleteDeadLetteredWorkflows": true,
-	"SetWorkflowTag":              true,
 
 	// Found by this guard. Each is the same shape: a write or read path with
 	// no production caller, whose siblings are live.
+	// GetWorkflowTag (singular) stays: the tag API lists all of a definition's
+	// tags in one call, and children.go resolves through ResolveVersionByTag,
+	// so nothing in production asks for exactly one tag by name.
 	"GetWorkflowTag":     true,
-	"GetWorkflowTags":    true,
-	"RemoveWorkflowTag":  true,
 	"StreamEventHistory": true,
 }
 

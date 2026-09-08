@@ -366,6 +366,15 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 3 && parts[1] == "routing" && r.Method == http.MethodDelete:
 		// DELETE /api/workflows/:name/routing/:ruleID
 		s.handleRemoveRoutingRule(w, r, parts[2])
+	case len(parts) == 2 && parts[1] == "tags" && r.Method == http.MethodGet:
+		// GET /api/workflows/:name/tags
+		s.handleListWorkflowTags(w, r, id)
+	case len(parts) == 2 && parts[1] == "tags" && r.Method == http.MethodPut:
+		// PUT /api/workflows/:name/tags
+		s.handleSetWorkflowTag(w, r, id)
+	case len(parts) == 3 && parts[1] == "tags" && r.Method == http.MethodDelete:
+		// DELETE /api/workflows/:name/tags/:tag
+		s.handleRemoveWorkflowTag(w, r, id, parts[2])
 	case len(parts) == 2 && parts[1] == "allowed-signals" && r.Method == http.MethodGet:
 		// GET /api/workflows/:id/allowed-signals
 		s.handleGetAllowedSignals(w, r, id)
@@ -920,6 +929,145 @@ func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := st.RemoveRoutingRule(r.Context(), ruleID); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"status": "removed"})
+}
+
+// ---- Deployment channel tags, cleat#889 ----
+//
+// A tag maps (workflow_name, tag) -> version: "stable" or "canary" pointing at
+// a deployed version. They are NOT labels on runs -- workflow_tags is keyed by
+// definition, and /api/workflows lists instances.
+//
+// THE READER IS ALREADY LIVE, which is what makes this a writer and not a
+// feature. engine/children.go resolves a tag to a version inside
+// resolveChildVersion -- a runtime "tag:" override, the "stable" policy branch,
+// and an explicit "tag:" policy from metadata. So a child asking for a tag
+// resolves it today, and always missed, because SetWorkflowTag had no
+// production caller and no tag could ever be created.
+//
+// How live is the "stable" branch? Not unconditional: it fires only when
+// child_binding_policy is explicitly "stable", and an empty policy falls back
+// to frozen or latest. But the policy is chosen for the author one level up --
+// cmd/cleat/main.go:134 stamps "stable" whenever --db or CLEAT_DATABASE_URL is
+// set. So the reader is live for every workflow built with a database, and
+// inert for one built without. Anyone debugging an unhonoured tag needs to
+// know which of the two they have.
+//
+// That is #889's A/B routing shape exactly: a live read path with no way in.
+// The issue described tags as "inert in both directions ... no live reader
+// implying a live writer", which is wrong on the reader, and this comment
+// exists so the next person does not inherit that description.
+//
+// Deliberately NOT wired into the HTTP start path. Three things would then be
+// choosing a version there -- A/B routing, the deprecation check, and a tag --
+// and their precedence is its own decision rather than a side effect of adding
+// a setter.
+
+func (s *apiServer) handleListWorkflowTags(w http.ResponseWriter, r *http.Request, name string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	tags, err := st.GetWorkflowTags(r.Context(), name)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	// An object, never null: no tags is the normal state for most definitions.
+	if tags == nil {
+		tags = map[string]int{}
+	}
+	s.writeJSON(w, 200, tags)
+}
+
+func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request, name string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Tag     string `json:"tag"`
+		Version int    `json:"version"`
+	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, 400, "invalid JSON: "+err.Error())
+			return
+		}
+	}
+	if req.Tag == "" {
+		s.writeError(w, 400, "tag is required")
+		return
+	}
+	if req.Version <= 0 {
+		s.writeError(w, 400, "version is required and must be positive")
+		return
+	}
+
+	// Refuse a tag pointing at a version that does not exist or is deprecated.
+	//
+	// The table's foreign key on (workflow_name, version) catches a missing
+	// version, but as a 500 from a constraint violation rather than an answer,
+	// and it cannot see deprecation at all. Pointing "stable" at a version an
+	// operator has just deprecated is the mistake this refusal exists for --
+	// and it matters more here than it does for a routing rule.
+	//
+	// The reason is which runs get redirected. A routing rule only affects
+	// starts that match it. A tag affects children of any workflow whose
+	// binding policy is "stable" -- and nobody has to have asked for that
+	// policy, because `cleat build` selects it on their behalf:
+	//
+	//	cmd/cleat/main.go:134
+	//	if buildChannel == "" {
+	//	    if dbConnStr != "" || os.Getenv("CLEAT_DATABASE_URL") != "" {
+	//	        buildChannel = "stable"
+	//	    } else {
+	//	        buildChannel = "latest"
+	//	    }
+	//	}
+	//
+	// So every workflow built with --db or CLEAT_DATABASE_URL set carries
+	// child_binding_policy: "stable" in its metadata, and children.go:73
+	// resolves the tag for it. Not "every child start" -- a workflow built
+	// without a database gets "latest" and never reaches the tag branch --
+	// but the operator who picks the wrong version here did not choose the
+	// policy that spreads it.
+	valid, vErr := st.ValidateVersion(r.Context(), name, req.Version)
+	if vErr != nil {
+		s.writeError(w, 500, vErr.Error())
+		return
+	}
+	if !valid {
+		s.writeError(w, 409, fmt.Sprintf(
+			"version %d of %q does not exist or is deprecated, so %q cannot point at it",
+			req.Version, name, req.Tag))
+		return
+	}
+
+	// PUT, not POST: (workflow_name, tag) is the primary key, so setting a tag
+	// that already exists MOVES it rather than creating a second one. The store
+	// upserts; the verb should say so.
+	if err := st.SetWorkflowTag(r.Context(), name, req.Version, req.Tag); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]any{
+		"workflow_name": name,
+		"tag":           req.Tag,
+		"version":       req.Version,
+	})
+}
+
+func (s *apiServer) handleRemoveWorkflowTag(w http.ResponseWriter, r *http.Request, name, tag string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	if err := st.RemoveWorkflowTag(r.Context(), name, tag); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
