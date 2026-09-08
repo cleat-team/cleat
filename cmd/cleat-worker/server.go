@@ -1734,6 +1734,49 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, 400, "catch_up_limit must not be negative")
 		return
 	}
+	// NextRunAt has to be computed HERE, and leaving it zero is not a cosmetic
+	// omission (cleat#995). The zero time.Time is year 1, so:
+	//
+	//   PostgreSQL  accepts it -- 201, and the listing shows a healthy,
+	//               enabled schedule whose next run is 0001-01-01. Nothing
+	//               surfaces it. The first scheduler tick then treats it as
+	//               overdue, and scheduleAdvance loops `for count <=
+	//               catchUpLimit && probe.Before(now)` -- so with the default
+	//               catch_up policy and limit of 60, a schedule created once
+	//               fires up to sixty times.
+	//   MySQL       rejects it -- 500, "Incorrect datetime value: '0000-00-00'
+	//               for column 'next_run_at'". The endpoint does not work at
+	//               all on that dialect.
+	//
+	// The other two creation paths already do this: engine/schedules.go's
+	// ScheduleCron host call and cmd/cleat's CLI both call NextCronTimeIn with
+	// a location from LoadScheduleLocation. This was the only one of the three
+	// that did not, which is why it went unnoticed -- the feature works when
+	// exercised any other way.
+	// The second return is "fell back to UTC", not "ok" -- and reaching it
+	// here means something other than caller error, because ValidateTimezone
+	// above has already loaded this zone successfully. A fallback at this
+	// point means the zoneinfo database disagrees with itself. Refused rather
+	// than silently scheduled in UTC, for ScheduleCron's reason: a caller who
+	// names a zone and gets a different one has no way to find out.
+	//
+	// The req.Timezone != "" guard is not belt-and-braces: an OMITTED timezone
+	// is legitimate and means UTC, and LoadScheduleLocation reports the
+	// fallback for it too. Without the guard every schedule created without a
+	// timezone -- the common case -- gets a 400. TestAPISchedulesCreate caught
+	// exactly that, which is the existing suite doing its job on a change that
+	// looked obviously safe.
+	//
+	// NOT COVERED BY A TEST, and saying so rather than implying otherwise: for
+	// a NAMED zone, ValidateTimezone above has already rejected anything that
+	// will not load, so this branch is unreachable by any request. It mirrors
+	// the identical branch in engine/schedules.go, which is equally
+	// unreachable and equally kept.
+	loc, fellBack := engine.LoadScheduleLocation(req.Timezone)
+	if fellBack && req.Timezone != "" {
+		s.writeError(w, 400, "timezone "+req.Timezone+" could not be loaded")
+		return
+	}
 	sch := engine.Schedule{
 		Name:           req.Name,
 		DefName:        req.DefName,
@@ -1741,6 +1784,7 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		CronExpression: req.Cron,
 		Input:          req.Input,
 		Enabled:        true,
+		NextRunAt:      engine.NextCronTimeIn(req.Cron, time.Now(), loc),
 		Timezone:       req.Timezone,
 		MisfirePolicy:  req.Misfire,
 		CatchUpLimit:   req.CatchUp,
