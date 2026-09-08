@@ -1734,6 +1734,19 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, 400, "catch_up_limit must not be negative")
 		return
 	}
+	// NextRunAt has to be computed here, the way `cleat schedule create`
+	// computes it. The column is `NOT NULL DEFAULT now()`, but CreateSchedule
+	// names it in the INSERT, so a zero time.Time is bound as year 1 rather
+	// than falling back to the default -- and the scheduler selects on
+	// `next_run_at <= now()`, which year 1 satisfies forever. A schedule
+	// created through this handler therefore fired on the next scheduler tick
+	// no matter what its cron expression said, and logged "schedule was too
+	// far behind to catch up" with a backlog measured in centuries.
+	//
+	// The timezone is already validated above, so the ok result is not
+	// actionable: LoadScheduleLocation falls back to UTC, which is what
+	// scheduleTimezoneOrDefault would have stored anyway.
+	loc, _ := engine.LoadScheduleLocation(req.Timezone)
 	sch := engine.Schedule{
 		Name:           req.Name,
 		DefName:        req.DefName,
@@ -1741,6 +1754,7 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		CronExpression: req.Cron,
 		Input:          req.Input,
 		Enabled:        true,
+		NextRunAt:      engine.NextCronTimeIn(req.Cron, time.Now(), loc),
 		Timezone:       req.Timezone,
 		MisfirePolicy:  req.Misfire,
 		CatchUpLimit:   req.CatchUp,
