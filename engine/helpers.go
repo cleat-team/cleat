@@ -2,6 +2,7 @@ package engine
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -125,6 +126,41 @@ func isDefinitelyNonRetryable(err error, nonRetryablePatterns []string) bool {
 	}
 
 	return false
+}
+
+// parseSignalNames turns the guest's signal-name argument into a list of names.
+//
+// A guest sends a JSON array -- `["a","b"]` -- which is what the recorded
+// await_signals event carries and what the port's event_history dump shows.
+// splitSignalNames splits on commas and nothing else, so on that input it
+// returns `["a` and `"b]`, neither of which is a signal name, and every store
+// lookup misses.
+//
+// THE TWO AWAIT PATHS PARSED THIS DIFFERENTLY UNTIL cleat#975, and the
+// asymmetry was invisible because it produced a correct result. The replay arm
+// tried JSON with splitSignalNames as a fallback; the fresh path used
+// splitSignalNames alone, so a delivery already sitting in the store when a
+// fresh await ran was never matched. The await suspended and the SAME delivery
+// was found one segment later by the replay arm, which parses correctly -- so
+// the workflow got the right signal and nothing reported anything.
+//
+// The cost was not the extra round trip. It was that the delivery-found branch
+// of the fresh path could not execute with the input a guest actually sends:
+// every test that believed it covered "a signal already waiting when the await
+// runs" was exercising the replay arm instead, and passing. A branch the tests
+// believe they exercise and do not, with no observable symptom on either side.
+//
+// One function rather than the same two lines twice, so agreement between the
+// paths is structural instead of a coincidence that has already failed once.
+func parseSignalNames(names string) []string {
+	var parsed []string
+	if err := json.Unmarshal([]byte(names), &parsed); err == nil {
+		return parsed
+	}
+	// Not JSON: a bare or comma-separated list. Kept as a fallback because
+	// callers inside the engine pass that form, and because it is what the
+	// replay arm already tolerated.
+	return splitSignalNames(names)
 }
 
 func splitSignalNames(names string) []string {
