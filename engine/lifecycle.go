@@ -149,6 +149,47 @@ func (s *execSession) recordEvent(rec EventRecord) {
 	if rec.TimestampMs == 0 {
 		rec.TimestampMs = time.Now().UnixMilli()
 	}
+	// The durable clock must not go backwards (cleat#944).
+	//
+	// Two clock domains feed Now(). Before any event is recorded it is the
+	// seed -- the workflow row's created_at, which is the DATABASE's clock
+	// (see Engine.seedNowMs, and note why created_at has to stay the seed: it
+	// is the only value identical on the original run and the replay). The
+	// first recorded event's timestamp is the WORKER's time.Now(). Nothing
+	// reconciled them, so the step between them was the offset between two
+	// machines' clocks, in whichever direction they happened to differ.
+	//
+	// Measured on the samples-go port: PostgreSQL 6 of 8 runs backwards, worst
+	// -26ms; MySQL 4 of 5, worst -118ms. Both databases were containers against
+	// a host worker. The magnitude tracks the DEPLOYMENT, not the dialect --
+	// two clocks on one laptop are close, a worker and a database in different
+	// availability zones have no such bound.
+	//
+	// A workflow computing Now().Sub(start) across its first durable call got a
+	// negative duration.
+	//
+	// CLAMPING HERE RATHER THAN AT THE READ IS WHAT KEEPS REPLAY EXACT, and the
+	// reason is sharper than "history would hold a different number".
+	//
+	// A read-side clamp would make the guest see a value that was never
+	// recorded. The original run and the replay would then agree only by both
+	// applying the same clamp to the same stale input -- which holds until
+	// someone changes the clamp, and nothing would fail at the moment they did.
+	// Writing the adjusted value means the recorded number IS the number: it is
+	// what the checksum covers, replay sets s.nowMs straight from it
+	// (engine/replayer.go), and there is nothing left to recompute or to keep
+	// in agreement.
+	//
+	// (That framing is rcownie-ef's, from the review of this change.)
+	//
+	// This is a floor, not a rewrite: once the worker clock passes the seed --
+	// which it does within the offset, tens of milliseconds -- the branch stops
+	// firing and every later timestamp is the worker's own. DurableSleep is
+	// unaffected either way, because it sets TimestampMs to anchor+duration,
+	// which is already >= s.nowMs.
+	if rec.TimestampMs < s.nowMs {
+		rec.TimestampMs = s.nowMs
+	}
 	s.nowMs = rec.TimestampMs
 	s.history = append(s.history, rec)
 	s.stepCount++
