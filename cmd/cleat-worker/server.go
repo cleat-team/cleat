@@ -357,6 +357,15 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.writeError(w, 404, "not found")
 		}
+	case len(parts) == 2 && parts[1] == "routing" && r.Method == http.MethodGet:
+		// GET /api/workflows/:name/routing
+		s.handleListRoutingRules(w, r, id)
+	case len(parts) == 2 && parts[1] == "routing" && r.Method == http.MethodPost:
+		// POST /api/workflows/:name/routing
+		s.handleSetRoutingRule(w, r, id)
+	case len(parts) == 3 && parts[1] == "routing" && r.Method == http.MethodDelete:
+		// DELETE /api/workflows/:name/routing/:ruleID
+		s.handleRemoveRoutingRule(w, r, parts[2])
 	case len(parts) == 2 && parts[1] == "allowed-signals" && r.Method == http.MethodGet:
 		// GET /api/workflows/:id/allowed-signals
 		s.handleGetAllowedSignals(w, r, id)
@@ -801,6 +810,120 @@ func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.
 		return false
 	}
 	return true
+}
+
+// ---- A/B version routing, cleat#889 ----
+//
+// PickVersionByRouting has run on every workflow start since routing was
+// added, and logs "A/B routing applied" when a rule fires. There was no way to
+// create a rule, so it always returned 0, the branch was dead and that log
+// line was unreachable. The store had the whole surface -- SetRoutingRule,
+// GetRoutingRules, RemoveRoutingRule -- and nothing reached any of it.
+//
+// The read path is unchanged by these handlers. That is the point: the feature
+// was complete except for the way in.
+//
+// Keyed by workflow NAME, not by run id, because a routing rule is a property
+// of the definition. The path is under /api/workflows/{name}/routing for that
+// reason, and it is why these live beside the definition endpoints rather than
+// under /api/admin/instances/.
+
+func (s *apiServer) handleListRoutingRules(w http.ResponseWriter, r *http.Request, name string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	rules, err := st.GetRoutingRules(r.Context(), name)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	// A list, never null: an empty routing table is the normal state, and a
+	// caller iterating the response should not have to special-case it.
+	out := make([]map[string]any, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, map[string]any{
+			"id":             rule.ID,
+			"workflow_name":  rule.WorkflowName,
+			"target_version": rule.TargetVersion,
+			"weight":         rule.Weight,
+		})
+	}
+	s.writeJSON(w, 200, out)
+}
+
+func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request, name string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		TargetVersion int      `json:"target_version"`
+		Weight        *float64 `json:"weight"`
+	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, 400, "invalid JSON: "+err.Error())
+			return
+		}
+	}
+	if req.TargetVersion <= 0 {
+		s.writeError(w, 400, "target_version is required and must be positive")
+		return
+	}
+	// Weight is a pointer so that an omitted weight is distinguishable from an
+	// explicit 0. Omitted means 1.0 -- send all matching traffic to this
+	// version -- while an explicit 0 means "never pick this", which is a
+	// legitimate way to park a rule without deleting it.
+	weight := 1.0
+	if req.Weight != nil {
+		weight = *req.Weight
+	}
+	if weight < 0 || weight > 1 {
+		s.writeError(w, 400, "weight must be between 0 and 1")
+		return
+	}
+
+	// Refuse a rule pointing at a version that does not exist or is
+	// deprecated. The table has a foreign key on (name, version) so a missing
+	// version would fail anyway, but as a 500 from a constraint violation
+	// rather than as an answer. Deprecation the FK cannot see at all -- and
+	// routing a share of live traffic to a version an operator has just
+	// deprecated is precisely the mistake worth refusing.
+	valid, vErr := st.ValidateVersion(r.Context(), name, req.TargetVersion)
+	if vErr != nil {
+		s.writeError(w, 500, vErr.Error())
+		return
+	}
+	if !valid {
+		s.writeError(w, 409, fmt.Sprintf(
+			"version %d of %q does not exist or is deprecated, so traffic cannot be routed to it",
+			req.TargetVersion, name))
+		return
+	}
+
+	if err := st.SetRoutingRule(r.Context(), name, req.TargetVersion, weight); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 201, map[string]any{
+		"workflow_name":  name,
+		"target_version": req.TargetVersion,
+		"weight":         weight,
+	})
+}
+
+func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Request, ruleID string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	if err := st.RemoveRoutingRule(r.Context(), ruleID); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"status": "removed"})
 }
 
 func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id string) {

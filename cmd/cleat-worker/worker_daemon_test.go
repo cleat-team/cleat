@@ -62,6 +62,9 @@ type mockStore struct {
 	listWorkflowsFn                    func(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error)
 	getWorkflowByIDFn                  func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
 	validateVersionFn                  func(ctx context.Context, defName string, defVersion int) (bool, error)
+	setRoutingRuleFn                   func(ctx context.Context, workflowName string, targetVersion int, weight float64) error
+	removeRoutingRuleFn                func(ctx context.Context, ruleID string) error
+	getRoutingRulesFn                  func(ctx context.Context, workflowName string) ([]engine.RoutingRule, error)
 	getTerminalRunFn                   func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
 	createScheduleFn                   func(ctx context.Context, s engine.Schedule) error
 	listSchedulesFn                    func(ctx context.Context) ([]engine.Schedule, error)
@@ -3298,10 +3301,21 @@ func (m *mockStore) GetWorkflowTags(ctx context.Context, workflowName string) (m
 	return nil, nil
 }
 func (m *mockStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	if m.setRoutingRuleFn != nil {
+		return m.setRoutingRuleFn(ctx, workflowName, targetVersion, weight)
+	}
 	return nil
 }
-func (m *mockStore) RemoveRoutingRule(ctx context.Context, ruleID string) error { return nil }
+func (m *mockStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+	if m.removeRoutingRuleFn != nil {
+		return m.removeRoutingRuleFn(ctx, ruleID)
+	}
+	return nil
+}
 func (m *mockStore) GetRoutingRules(ctx context.Context, workflowName string) ([]engine.RoutingRule, error) {
+	if m.getRoutingRulesFn != nil {
+		return m.getRoutingRulesFn(ctx, workflowName)
+	}
 	return nil, nil
 }
 func (m *mockStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
