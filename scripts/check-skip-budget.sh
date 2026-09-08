@@ -113,6 +113,16 @@ while IFS=$'\t' read -r _job count pattern why; do
     if [ "$got" -lt "$count" ]; then
       echo "  Fewer than declared: the test stopped skipping, or was renamed. A line" >&2
       echo "  that matches nothing is a grant covering something that is not there." >&2
+      echo >&2
+      echo "  RUNNING THIS LOCALLY? A ledger line describes the CI environment, and" >&2
+      echo "  a laptop is not one. A toolchain-gated line reads 'got 0' wherever the" >&2
+      echo "  toolchain IS installed -- TestRustAllHostCallsCompiles expects a skip" >&2
+      echo "  for absent cargo and runs on a machine that has it. Same for a" >&2
+      echo "  dialect-gated line when your DSNs differ from the job's." >&2
+      echo >&2
+      echo "  So a local run can confirm a line you just ADDED does not error; it" >&2
+      echo "  cannot vouch for the file. Check the failing line against your own" >&2
+      echo "  environment before changing it -- the file is CI's answer, not yours." >&2
     else
       echo "  More than declared: something new is skipping under a reason written" >&2
       echo "  for something else. Give it its own line." >&2
