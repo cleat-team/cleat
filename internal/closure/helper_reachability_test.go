@@ -163,3 +163,39 @@ func TestTheHelperEscapeFixtureStillHasViolations(t *testing.T) {
 		}
 	}
 }
+
+// TestAPureEntryPointIsChecked is the half of cleat#949 that #964 left.
+//
+// #964 seeded the downward walk from the durable sets, which reaches a helper
+// below a durable workflow. It does not reach a workflow that makes NO host
+// call: that function is not durable, and it is not the callee of anything
+// durable, so nothing enqueues it.
+//
+// That is the issue's first example, and the asymmetry it names:
+//
+//	no host call        -> "0 in cleat closure" -> built, no diagnostic
+//	+ h.SetQueryState() -> "1 in cleat closure" -> two E013s, refused
+//
+// Here the unchecked body is not a helper somewhere below the workflow -- it is
+// the workflow.
+func TestAPureEntryPointIsChecked(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages(
+		"github.com/cleat-team/cleat/testdata/vet-checks/go/e949_no_host_call", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+
+	if !hasErrorCode(cr, "E013") {
+		t.Errorf("a workflow entry point whose only construct is a sync.Mutex produced %v, "+
+			"want E013.\n\n"+
+			"It makes no host call, so it is neither durable nor the callee of anything "+
+			"durable -- seeding the walk from the durable sets alone never reaches it. An "+
+			"entry point is by definition executed.", listErrorCodes(cr))
+	}
+}

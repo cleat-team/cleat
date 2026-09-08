@@ -165,6 +165,25 @@ func durableReachable(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *
 	for name := range cr.DurableClosure {
 		push(name)
 	}
+	// Entry points too, and this is the half cleat#949 kept after #964.
+	//
+	// Seeding from the durable sets alone misses a workflow that makes NO host
+	// call: it is not durable, and it is not the callee of anything durable, so
+	// the walk never reaches it. That is the FIRST example in the issue --
+	//
+	//	Found 1 functions, 1 entry point(s), 0 in cleat closure.
+	//	Wrote handle_sync_mutex.wasm            <- no E013, builds, deploys
+	//
+	// -- while the same function with one h.SetQueryState added was refused
+	// with two E013s. A mutex is exactly as non-deterministic either way, and
+	// here the unchecked body is not a helper somewhere below the workflow: it
+	// IS the workflow.
+	//
+	// An entry point is by definition executed, so it belongs in the seed on
+	// the same reasoning that put callees there.
+	for _, name := range result.EntryPoints {
+		push(name)
+	}
 
 	for len(queue) > 0 {
 		cur := queue[len(queue)-1]
