@@ -122,6 +122,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		UPDATE workflow_instances
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
+		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
 		    generation = generation + 1
@@ -221,6 +222,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		UPDATE workflow_instances
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
+		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
 		    generation = generation + 1
@@ -361,6 +363,7 @@ func (s *MySQLStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID s
 		UPDATE workflow_instances
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
+		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
 		    generation = generation + 1

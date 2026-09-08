@@ -74,10 +74,23 @@ func (s *PostgresStore) ConsumeSignal(ctx context.Context, workflowID string, id
 		return err
 	}
 
+	// The consumed counter, bumped in the same statement batch as the delete.
+	//
+	// finalize wakes a segment that CONSUMED something and still has rows
+	// waiting, because a segment that consumed once can consume again --
+	// progress is what separates a burst worth draining from an unrelated
+	// pending signal that would spin (cleat#953). Bumped here rather than
+	// through a new store method, because ConsumeSignal already writes.
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM workflow_signals WHERE id = $1 AND workflow_id = $2
 	`, id, workflowID); err != nil {
 		return fmt.Errorf("consume signal: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances SET signal_consumed_seq = signal_consumed_seq + 1
+		WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("consume signal: bump consumed counter: %w", err)
 	}
 	return tx.Commit()
 }

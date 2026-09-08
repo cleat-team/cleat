@@ -177,10 +177,23 @@ func (s *MSSQLStore) setAllowedSignalCallersOnce(ctx context.Context, workflowID
 
 func (s *MSSQLStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
 	return mssqlRetry(ctx, "consume signal", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		_, err := s.db.ExecContext(ctx, `
+		// The consumed counter, bumped in the same statement batch as the delete.
+		//
+		// finalize wakes a segment that CONSUMED something and still has rows
+		// waiting, because a segment that consumed once can consume again --
+		// progress is what separates a burst worth draining from an unrelated
+		// pending signal that would spin (cleat#953). Bumped here rather than
+		// through a new store method, because ConsumeSignal already writes.
+		if _, err := s.db.ExecContext(ctx, `
 			DELETE FROM workflow_signals
 			WHERE id = @p1 AND workflow_id = @p2 AND tenant_id = @p3
-		`, id, workflowID, s.tenantID)
+		`, id, workflowID, s.tenantID); err != nil {
+			return err
+		}
+		_, err := s.db.ExecContext(ctx, `
+			UPDATE workflow_instances SET signal_consumed_seq = signal_consumed_seq + 1
+			WHERE id = @p1 AND tenant_id = @p2
+		`, workflowID, s.tenantID)
 		return err
 	})
 }
