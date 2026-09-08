@@ -41,6 +41,48 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				// No signal_received in history. The signal may have
 				// arrived after suspend (stored in workflow_signals,
 				// not event_history). Check the signal store.
+				//
+				// REPLAY ENDS HERE, and saying so is load-bearing rather
+				// than tidy. History is exhausted at this await, so polling
+				// the store and consuming a delivery is new work, not
+				// reproduction of old work -- and recordEvent behaves
+				// differently on the two sides of that line:
+				//
+				//	if s.engine.db != nil && !s.isReplay {   // lifecycle.go
+				//		... flush ...
+				//		s.lastChecksum = checksum
+				//	}
+				//
+				// Recording the signal_received with isReplay still true
+				// therefore skipped BOTH halves, and only one of them came
+				// back. The ROW did: the worker persists everything
+				// appended past the loaded history at segment end
+				// (cmd/cleat-worker/setup.go, "newEvents =
+				// resultHistory[len(history):]"), so it lands one segment
+				// late -- durable eventually, but not at the moment
+				// consumeDelivered deletes the delivery, which is the
+				// window that comment's ordering argument exists to close.
+				//
+				// s.lastChecksum did NOT come back, and that is what fails
+				// the run. The next event -- the second await, flushed
+				// immediately -- was chained from the await BEFORE the
+				// signal. Verification recomputes the chain over what is
+				// stored, including the row finalize wrote, and the two
+				// disagree at exactly the step cleat#933 reports:
+				//
+				//	verify events: workflow ...: step 2: checksum mismatch
+				//
+				// Guarded on exhaustion because reaching here with history
+				// REMAINING means the original execution moved past this
+				// await without receiving anything -- a timeout. Replay is
+				// not over in that case and must not be ended; that path is
+				// left exactly as it was. It has its own defect, filed as
+				// cleat#947 -- the poll hands the guest a signal the
+				// original run never saw, consumes it, and writes a record
+				// whose Step collides with the event already at that step.
+				if s.stepCount >= len(s.history) {
+					s.exitReplay()
+				}
 				if s.engine.signalStore != nil {
 					// SignalNames is a JSON array like ["agent_result"].
 					var names []string
