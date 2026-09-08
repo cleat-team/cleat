@@ -105,7 +105,7 @@ var WitToEnvImport = map[string]map[string]string{
 		// IMPROVEMENT-PLAN 3.253. In durable-extended-lifecycle, where the WIT
 		// declares it -- this map is keyed by declaring interface, and getting
 		// that wrong reports the name as unmapped while it is visibly present.
-		"durable-run-detached":      "cleat_run_detached",
+		"durable-run-detached": "cleat_run_detached",
 	},
 	"cleat:host-calls/durable-fetch": {
 		"fetch": "cleat_fetch",
