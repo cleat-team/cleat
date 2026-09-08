@@ -2770,32 +2770,21 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 		return false, false
 	}
 
-	// Dead-lettering is decided by a fact the ENGINE recorded, not by looking
-	// for a phrase in a human-readable string.
+	// Dead-lettering is decided by facts the ENGINE recorded -- what the last
+	// durable act was, and how the engine classified it -- with no reading of
+	// the error text at all.
 	//
-	// It used to be `strings.Contains(errMsg, "retries exhausted")`, and that
-	// was not laziness -- it was the only channel the classification had.
-	// engine/durablecalls.go knows retries were exhausted (it has the
-	// `exhausted` bool), but it hands the error to the GUEST, which returns a
-	// plain string out of its entry point, so by the time we get here there is
-	// no typed error left and errorCode is ErrUnknown for every real
-	// exhaustion. cleat#902 has the measurements.
+	// It was `strings.Contains(errMsg, "retries exhausted")` until cleat#902,
+	// which was not laziness: engine/durablecalls.go knows retries were
+	// exhausted but hands the error to the GUEST, which returns a plain string
+	// out of its entry point, so no typed error survives to here.
+	// EventRecord.RetriesExhausted is the channel that does survive.
 	//
-	// EventRecord.RetriesExhausted is that channel. The engine sets it where it
-	// knows, it is persisted, it survives compaction, and it arrives here in
-	// the segment history without passing through the guest at all.
-	//
-	// The string is still read, but it no longer CLASSIFIES -- it associates.
-	// An exhaustion in history does not mean the workflow failed of it: the
-	// common case is a guest that catches the call error and carries on, and
-	// dead-lettering those would be a far worse regression than the false
-	// positive this replaces. So the terminal error must contain the exact text
-	// the engine recorded for a call it itself classified as exhausted.
-	// Matching against a recorded value rather than a hardcoded phrase is what
-	// fixes both defects at once: unrelated prose mentioning retry exhaustion
-	// no longer matches, and rewording the prefix in durablecalls.go no longer
-	// silently stops dead-lettering.
-	deadLettered = eligibleForDLQ && terminatedByRetryExhaustion(errMsg, history)
+	// #902 still compared the terminal text against the recorded event to tie
+	// the failure to a specific call. cleat#979 is why that had to go: it made
+	// retention depend on the workflow author wrapping with %w. See
+	// endedOnAnExhaustedCall for what replaced it and what it cannot tell.
+	deadLettered = eligibleForDLQ && endedOnAnExhaustedCall(history)
 	var err error
 	if deadLettered {
 		err = st.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
@@ -2818,33 +2807,42 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 
 // recordTerminalFailure is writeTerminalFailure plus the failure metrics the
 // dispatch paths record, emitted only when the write applied.
-// terminatedByRetryExhaustion reports whether errMsg is the error of a durable
-// call that the ENGINE classified as having exhausted its retries.
+// endedOnAnExhaustedCall reports whether the last durable thing this workflow
+// did was a call the ENGINE classified as having exhausted its retries.
 //
-// Two conditions, and both are load-bearing. RetriesExhausted is the typed
-// half: only engine/durablecalls.go sets it, and only where its `exhausted`
-// bool is true, so no other kind of call failure can satisfy it. The text
-// comparison is the association half: history can hold an exhaustion the guest
-// caught and recovered from, and a workflow that later failed for an unrelated
-// reason must not be dead-lettered for it.
+// RetriesExhausted is the typed half: only engine/durablecalls.go sets it, and
+// only where its `exhausted` bool is true, so no other kind of call failure can
+// satisfy it.
 //
-// It is Contains rather than equality because a guest is free to wrap what it
-// received before returning it -- "step 3: <engine text>" is still a workflow
-// that died of that exhaustion. What it is NOT is a search for a phrase: the
-// needle is the exact string the engine recorded for this specific call,
-// underlying error and all, so unrelated text that happens to mention retry
-// exhaustion cannot match, and changing the wording in durablecalls.go cannot
-// break it. See cleat#902.
-func terminatedByRetryExhaustion(errMsg string, history []engine.EventRecord) bool {
-	if errMsg == "" {
+// POSITION IS THE OTHER HALF, and it used to be a text comparison against the
+// terminal error. That is cleat#979: the engine's error reaches the workflow as
+// a plain string, so requiring the terminal message to contain it required the
+// GUEST to relay it -- `fmt.Errorf("...: %w", err)` was dead-lettered and
+// `fmt.Errorf("could not reach the billing provider")` was not, for two
+// workflows differing by one line. Reporting a failure in domain terms is what
+// good error handling looks like, so the workflows written most carefully were
+// the ones losing retention, and nothing on any side showed why.
+//
+// What actually separates "died of the exhaustion" from "caught it, recovered,
+// and failed later for an unrelated reason" is not phrasing -- it is whether
+// the workflow WENT ON TO DO MORE DURABLE WORK. If it did, there is a later
+// event and the exhausted call is not the last thing that happened. If it did
+// not, the run's last durable act was a call that ran out of attempts, which is
+// exactly what an operator would want to redrive.
+//
+// THE LIMIT, STATED RATHER THAN LEFT TO BE FOUND. A workflow that catches the
+// exhaustion, does no further durable work, and then fails on pure computation
+// for a genuinely unrelated reason is indistinguishable from one that died of
+// the exhaustion -- there is no third signal, and reading the guest's words is
+// the thing being removed. So it is decided rather than detected, and it is
+// decided toward RETENTION: a workflow wrongly held for redrive costs an
+// operator one dismissal; one wrongly dropped costs the work.
+// TestTheLimitOfWhatPositionCanTell asserts that choice on purpose.
+func endedOnAnExhaustedCall(history []engine.EventRecord) bool {
+	if len(history) == 0 {
 		return false
 	}
-	for _, ev := range history {
-		if ev.RetriesExhausted && ev.Err != "" && strings.Contains(errMsg, ev.Err) {
-			return true
-		}
-	}
-	return false
+	return history[len(history)-1].RetriesExhausted
 }
 
 // recordTerminalFailure is the no-history form, for the failure paths that run

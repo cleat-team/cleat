@@ -119,25 +119,31 @@ func TestRecordTerminalFailure_UsesTheWorkflowsFence(t *testing.T) {
 	}
 }
 
-// TestDeadLetteringIsDecidedByARecordedFactNotAPhrase is cleat#902's other half.
+// TestDeadLetteringDoesNotDependOnTheGuestsWording is cleat#902 as amended by
+// cleat#979.
 //
-// Routing used to be `strings.Contains(errMsg, "retries exhausted")` over a
-// human-readable string the guest could have written. It is now
-// EventRecord.RetriesExhausted -- set by engine/durablecalls.go where the
-// engine knows, persisted, and read back out of the segment history -- with
-// the text used only to tie the terminal error to that specific event.
+// #902 replaced a substring match on the terminal error with
+// EventRecord.RetriesExhausted -- a fact the engine records -- plus a text
+// comparison tying that event to the terminal error. #979 found the residue:
+// the comparison required the GUEST to relay the engine's text, so
 //
-// The table is the difference between those two, case by case. Cases 2 and 3
-// are the two defects; case 6 is the near-miss that makes RetriesExhausted a
-// field of its own rather than a re-reading of ErrNonRetryable.
-func TestDeadLetteringIsDecidedByARecordedFactNotAPhrase(t *testing.T) {
-	// The text engine/durablecalls.go would have recorded and handed to the guest.
+//	fmt.Errorf("the call never succeeded: %w", err)   -> dead_lettered
+//	fmt.Errorf("could not reach the billing provider") -> failed
+//
+// for two workflows differing by one line. The tie is now POSITION -- was the
+// exhausted call the last durable thing that happened -- which no wording can
+// change. Cases 2 and 3 are the pair from #979 and must now agree.
+func TestDeadLetteringDoesNotDependOnTheGuestsWording(t *testing.T) {
 	const engineText = "retries exhausted: connection refused"
 
-	exhaustion := []engine.EventRecord{{
+	exhausted := engine.EventRecord{
 		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
 		Err: engineText, RetriesExhausted: true,
-	}}
+	}
+	ordinaryCall := engine.EventRecord{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op2",
+		Response: `{"ok":true}`,
+	}
 
 	for _, tc := range []struct {
 		name    string
@@ -147,42 +153,49 @@ func TestDeadLetteringIsDecidedByARecordedFactNotAPhrase(t *testing.T) {
 		why     string
 	}{
 		{
-			name: "the exhaustion that ended the workflow", history: exhaustion,
+			name: "the exhaustion ended the run", history: []engine.EventRecord{exhausted},
 			errMsg: engineText, wantDLQ: true,
-			why: "the case that must keep working -- a real exhaustion still reaches the DLQ",
+			why: "a real exhaustion still reaches the DLQ",
 		},
 		{
-			name: "the guest wrapped the engine's text", history: exhaustion,
-			errMsg: "step 3: " + engineText, wantDLQ: true,
-			why: "a workflow is free to wrap what it received and still died of the exhaustion",
+			name: "the guest relayed the engine's text", history: []engine.EventRecord{exhausted},
+			errMsg: "the call never succeeded: " + engineText, wantDLQ: true,
+			why: "cleat#979 fixture A -- wrapped with %w",
 		},
 		{
-			name: "the phrase, with no exhaustion behind it", history: nil,
+			name: "the guest reported in its own terms", history: []engine.EventRecord{exhausted},
+			errMsg: "could not reach the billing provider", wantDLQ: true,
+			why: "cleat#979 fixture B -- THE DEFECT: differs from A by one line and must not differ here",
+		},
+		{
+			name:    "recovered, then did more work, then failed",
+			history: []engine.EventRecord{exhausted, ordinaryCall},
+			errMsg:  "invalid customer id", wantDLQ: false,
+			why: "REGRESSION GUARD: a later event means the exhaustion is not what ended the run",
+		},
+		{
+			name:    "recovered, did more work, and the text still mentions the old error",
+			history: []engine.EventRecord{exhausted, ordinaryCall},
+			errMsg:  "later step failed after " + engineText, wantDLQ: false,
+			why: "position decides, so relayed text cannot drag a recovered run into the DLQ either",
+		},
+		{
+			name: "no exhaustion, but the phrase is in the message", history: nil,
 			errMsg: "step failed: retries exhausted after 5 attempts", wantDLQ: false,
-			why: "FALSE POSITIVE, fixed: text mentioning retry exhaustion no longer routes anything",
+			why: "the pre-#902 false positive stays fixed",
 		},
 		{
-			name: "an exhaustion the guest caught, then an unrelated failure", history: exhaustion,
-			errMsg: "step failed: invalid customer id", wantDLQ: false,
-			why: "REGRESSION GUARD: history holds an exhaustion, but it is not what ended this workflow",
-		},
-		{
-			name: "an ordinary failure", history: nil,
-			errMsg: "step failed: connection refused", wantDLQ: false,
-			why: "unchanged",
-		},
-		{
-			name: "a failed call that was NOT an exhaustion, same text",
+			name: "a failed call that was NOT an exhaustion",
 			history: []engine.EventRecord{{
 				EventType: engine.EventTypeCall, Service: "svc", Op: "op",
 				Err: engineText, RetriesExhausted: false,
 			}},
 			errMsg: engineText, wantDLQ: false,
-			why: "the typed bit decides, not the text -- engine/callintent.go records exactly this shape",
+			why: "the typed bit decides; engine/callintent.go records exactly this shape",
 		},
 		{
 			name: "no history at all", history: nil, errMsg: engineText, wantDLQ: false,
-			why: "the pre-execution paths (WASM load, version check) cannot be exhaustions",
+			why: "pre-execution paths (WASM load, version check) cannot be exhaustions",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -205,6 +218,94 @@ func TestDeadLetteringIsDecidedByARecordedFactNotAPhrase(t *testing.T) {
 					tc.errMsg, sawDLQ, sawFail, tc.wantDLQ, !tc.wantDLQ, tc.why)
 			}
 		})
+	}
+}
+
+// TestTheSameHistoryRoutesTheSameWayWhateverTheGuestSaid is cleat#979 stated as
+// the property rather than as two cases: for ONE history, no terminal message
+// changes the outcome. A table can be satisfied by luck in the cases it lists;
+// this fails for any wording that moves the decision.
+func TestTheSameHistoryRoutesTheSameWayWhateverTheGuestSaid(t *testing.T) {
+	history := []engine.EventRecord{{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+		Err: "retries exhausted: connection refused", RetriesExhausted: true,
+	}}
+
+	messages := []string{
+		"retries exhausted: connection refused",
+		"the call never succeeded: retries exhausted: connection refused",
+		"could not reach the billing provider",
+		"",
+		"unrelated words entirely",
+	}
+
+	var first bool
+	for i, msg := range messages {
+		var sawDLQ bool
+		ms := &mockStore{}
+		ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string) error {
+			sawDLQ = true
+			return nil
+		}
+		ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+			return nil
+		}
+		w := newTestWorker(ms)
+		w.recordTerminalFailureWithHistory(testInstance("wording-wf"), time.Now(), msg, "", "", history)
+
+		if i == 0 {
+			first = sawDLQ
+			continue
+		}
+		if sawDLQ != first {
+			t.Errorf("wording changed the routing: %q gave dead-letter=%v, but %q gave %v.\n"+
+				"Whether work is retained must not depend on how the author phrased the error.",
+				messages[0], first, msg, sawDLQ)
+		}
+	}
+	if !first {
+		t.Error("the exhaustion history did not dead-letter at all, so this test compares two nothings")
+	}
+}
+
+// TestTheLimitOfWhatPositionCanTell asserts the case position CANNOT decide, so
+// the choice is recorded rather than rediscovered.
+//
+// A workflow that catches an exhaustion, does no further durable work, and then
+// fails on pure computation for an unrelated reason leaves exactly the history
+// of one that died of the exhaustion. There is no third signal -- the only
+// thing that ever separated them was the guest's wording, which is what #979
+// established cannot be trusted.
+//
+// So it is decided, toward RETENTION: a workflow wrongly held for redrive costs
+// an operator one dismissal, one wrongly dropped costs the work. If a signal
+// for guest-side recovery ever exists, this is the test to change, and it says
+// why it read this way.
+func TestTheLimitOfWhatPositionCanTell(t *testing.T) {
+	history := []engine.EventRecord{{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+		Err: "retries exhausted: connection refused", RetriesExhausted: true,
+	}}
+
+	var sawDLQ bool
+	ms := &mockStore{}
+	ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string) error {
+		sawDLQ = true
+		return nil
+	}
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+		return nil
+	}
+	w := newTestWorker(ms)
+
+	// The guest caught the exhaustion and failed on its own logic instead.
+	w.recordTerminalFailureWithHistory(testInstance("caught-then-failed"), time.Now(),
+		"validation failed: customer id must be numeric", "", "", history)
+
+	if !sawDLQ {
+		t.Error("this case is dead-lettered ON PURPOSE. It is indistinguishable from a run " +
+			"that died of the exhaustion, and the tie is broken toward retention. If that " +
+			"is being changed deliberately, change this test and say what new signal exists.")
 	}
 }
 
