@@ -156,6 +156,14 @@ func CleanupPostgresTestData(t *testing.T, db *sql.DB) {
 // in §2.71's residual).
 //
 // So the check is not "did the statement error" but "is the table empty now".
+//
+// Note what that question can and cannot tell you, because the failure message
+// used to overstate it. "Not empty now" is the OBSERVATION; "the delete removed
+// nothing" is one INFERENCE from it, and a concurrent writer inserting after a
+// delete that worked perfectly produces the same observation. The message names
+// both and gives the discriminator, because sending a reader to row-level
+// security -- the deepest subsystem here -- for a missing `-p 1` is the more
+// expensive of the two wrong turns. cleat#1013.
 // One round trip for all of them, because this runs on the order of a hundred
 // times per suite.
 //
@@ -168,13 +176,29 @@ func assertTablesEmpty(t *testing.T, db *sql.DB, tables []string, quote func(str
 		t.Fatalf("cleanup: verifying tables are empty: %v", err)
 	}
 	if len(leftover) > 0 {
-		t.Fatalf("cleanup deleted nothing from %s, and reported no error.\n\n"+
-			"A DELETE that removes no rows without failing means the rows are "+
-			"not visible to this connection -- a row-level security policy or "+
-			"security predicate is filtering them. Cleanup then believes it ran, "+
-			"and the rows surface later as a duplicate key in an unrelated test. "+
-			"Use a connection that can see every tenant's rows. See "+
-			"IMPROVEMENT-PLAN 3.37 and 2.60d.", strings.Join(leftover, ", "))
+		t.Fatalf("after cleanup, %s still holds rows.\n\n"+
+			"TWO causes produce this, and they need different fixes:\n\n"+
+			"1. The DELETE removed nothing and reported no error, because the "+
+			"rows are not visible to this connection -- PostgreSQL row-level "+
+			"security filters the delete to the caller's tenant, and SQL Server "+
+			"applies its security policy to every principal including sysadmin. "+
+			"Fix: use a connection that can see every tenant's rows. See "+
+			"IMPROVEMENT-PLAN 3.37 and 2.60d.\n\n"+
+			"2. The DELETE worked and ANOTHER PACKAGE wrote these rows "+
+			"afterwards. Two database-backed packages in one `go test` "+
+			"invocation run concurrently by default, against one database, and "+
+			"this cleanup is unqualified -- so they interleave. Fix: `-p 1`.\n\n"+
+			"WHICH ONE: cause 1 is deterministic and cause 2 is not, so re-run "+
+			"the same command with `-p 1`. If it passes, it was cause 2 and no "+
+			"security policy is involved. Note that `-p 1` does NOT help across "+
+			"two concurrent `go test` PROCESSES, which is cause 2 wearing a "+
+			"disguise it cannot fix.\n\n"+
+			"This message named cause 1 alone until cleat#1013, where cause 2 "+
+			"was what happened: `go test ./engine/ ./cmd/cleat-worker/` without "+
+			"`-p 1` produced exactly this, and `-p 1` removed it. A reader sent "+
+			"to investigate row-level security for a missing flag loses hours to "+
+			"the deepest subsystem here for a problem in the command line.",
+			strings.Join(leftover, ", "))
 	}
 }
 
