@@ -216,6 +216,39 @@ not a count.** `gh pr merge` refuses while required checks are outstanding, and
 2026-08-31 that refusal was the only thing that caught a watcher reporting green over six
 pending checks.
 
+**Both halves of that were observed live on 2026-09-08, in one run, and the second is the
+direction this file did not have.**
+
+The first: a watcher on `cleat-ports#50` sampled `total` at **4**, repeatedly, and later at
+**5**. The fifth check registered mid-run, so the total a watcher reads is not stable *within a
+single run* — the table above was measured across *settled* PRs and describes that hazard
+without ever catching it moving.
+
+**State what was and was not observed, because the difference is this section's whole subject.**
+Observed: `total=4` on samples 1-3 and `total=5` at settle. NOT observed: a four-of-four-passing
+sample. `pending` was 2 while the total read 4, so the dangerous state — a complete-looking set
+that is merely the registered subset — did not occur on this run. The floor was never actually
+fooled here; what was demonstrated is that the quantity it gates on moves underneath it.
+
+The second, and it is the mirror image: **a floor tuned to one repo is not a floor in another.**
+That watcher was carried over from this repo with its 40 hardcoded, and `cleat-ports` runs
+**five** checks (`gh pr checks <pr> --repo cleat-team/cleat-ports | grep -c .`). A floor of 40
+in a five-check repo can never be satisfied, so the loop cannot report a false green — it runs
+to timeout reporting nothing at all.
+
+**That one was caught by reading before arming, not by observation, and the distinction is
+recorded rather than smoothed over.** The floor was lowered to 4 before the watcher was started,
+so the timeout never happened; what is measured is the check count, and the consequence follows
+from the loop's exit condition rather than from a run. A prediction and a measurement are not
+the same evidence, and this file is the wrong place to blur them.
+
+That failure is nastier than the one above, because **a watcher that never finishes looks like
+patience rather than a bug.** A false green is at least an answer someone can check; a loop still
+sampling at attempt 200 invites "CI must be slow tonight". Same root cause — a count treated as a
+constant when it is a property of the repo and the path — and it is the reason the floor should be
+a sanity bound rather than the gate. Gate on `mergeStateStatus == CLEAN`, held across two
+consecutive samples; keep the floor only to catch a total of zero.
+
 **And parse that output with `awk -F'\t'`, because check names contain spaces.** The total-count
 guard above is necessary but not sufficient: it does not help if the *pending* count is itself
 silently zero. `gh pr checks` is tab-delimited with names like `Tier 1 Gate` and
