@@ -51,6 +51,7 @@ var postgresProcedureMigrations = []string{
 	"044_child_does_not_rewrite_parent_event.sql",
 	"047_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
 	"049_a_burst_wakes_finalize_on_progress.sql",
+	"050_the_idempotency_write_needs_the_tenant.sql",
 }
 
 var mysqlProcedureMigrations = []string{
@@ -60,6 +61,7 @@ var mysqlProcedureMigrations = []string{
 	"043_child_does_not_rewrite_parent_event.sql",
 	"046_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
 	"048_a_burst_wakes_finalize_on_progress.sql",
+	"049_the_idempotency_write_needs_the_tenant.sql",
 }
 
 var mssqlProcedureMigrations = []string{
@@ -69,6 +71,7 @@ var mssqlProcedureMigrations = []string{
 	"047_child_does_not_rewrite_parent_event.sql",
 	"050_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
 	"052_a_burst_wakes_finalize_on_progress.sql",
+	"053_the_idempotency_write_needs_the_tenant.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup
