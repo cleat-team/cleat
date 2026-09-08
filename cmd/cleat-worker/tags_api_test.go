@@ -156,3 +156,71 @@ func TestATagCanBeRemoved(t *testing.T) {
 			removedName, removedTag)
 	}
 }
+
+// TestDeletingATagOnAnUnknownDefinitionAnswers200 pins the one path cleat#942's
+// enumeration named and cleat#945 deliberately did not change.
+//
+//	DELETE /api/workflows/<never-deployed>/tags/stable  ->  200
+//
+// THIS TEST DECIDES NOTHING. It records which convention is in force so that
+// changing it is a decision someone makes rather than one that happens.
+//
+// The case FOR leaving it: DELETE is conventionally idempotent, and removing a
+// tag that is not there is a no-op success. A 404 changes that.
+//
+// The case AGAINST: the thing that does not exist is the DEFINITION, not the
+// tag. "The tag was removed" and "there is no such workflow" share one
+// response, so a caller who typos the workflow name is told the deletion
+// succeeded. #945 has already decided that an unknown definition is a 404 on
+// the name-scoped reads, and the writes answer 409. This is the last path where
+// an unknown definition is silently fine.
+//
+// WHY IT LIVES HERE AND NOT ONLY IN THE PORT. cleat-ports pins this too, in
+// ports/samples-go/tests/identifier_test.go, and that pin is where the question
+// was first written down. But the port does not gate merges in this repo --
+// docs/promotion-checklist.md is explicit that a finding is protected only once
+// it is a hermetic test in cleat-team/cleat. Without this, someone finishing
+// #945's job for consistency changes handleRemoveWorkflowTag, every test here
+// passes, and the port tells them later and elsewhere. That is a live risk
+// rather than a hypothetical one: making the reads 404 is exactly the change
+// that invites making this one 404 too.
+//
+// It FAILS on 404 rather than accepting either answer. A test that passed on
+// both would pin nothing -- it could not fail, which is the shape this repo
+// keeps finding. If you are reading this because it went red, the convention
+// has been decided the other way: assert 404 here, update the port's pin, and
+// record the decision in that repo's ports/samples-go/ISSUES.md #8.
+func TestDeletingATagOnAnUnknownDefinitionAnswers200(t *testing.T) {
+	var asked bool
+	ms := &mockStore{
+		listWorkflowDefsFn: deployedDef("checkout"), // "unknown" is any other name
+		removeWorkflowTagFn: func(_ context.Context, name, tag string) error {
+			asked = true
+			return nil
+		},
+	}
+	api := newTestAPIServer(ms)
+	rec := httptest.NewRecorder()
+	api.handleWorkflows(rec, httptest.NewRequest(http.MethodDelete,
+		"/api/workflows/never-deployed/tags/stable", nil))
+
+	switch rec.Code {
+	case 200:
+		// Current behaviour. The store was still asked, which is the part that
+		// makes this idempotent rather than merely quiet.
+		if !asked {
+			t.Error("answered 200 without asking the store to remove anything, so the " +
+				"idempotency is a short-circuit rather than a real no-op delete")
+		}
+	case 404:
+		t.Errorf("DELETE on an unknown definition now answers 404, so the idempotency " +
+			"question has been decided the other way.\n\n" +
+			"That may well be right -- see the two cases above. Update this test to " +
+			"assert 404, update the pin in cleat-ports " +
+			"(ports/samples-go/tests/identifier_test.go), and record the decision in " +
+			"that repo's ports/samples-go/ISSUES.md #8.")
+	default:
+		t.Errorf("DELETE on an unknown definition answered %d: %s -- neither convention",
+			rec.Code, rec.Body.String())
+	}
+}
