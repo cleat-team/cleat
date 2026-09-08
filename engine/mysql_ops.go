@@ -1516,11 +1516,15 @@ func (s *MySQLStore) SetRoutingRule(ctx context.Context, workflowName string, ta
 
 // RemoveRoutingRule deletes a routing rule by ID.
 func (s *MySQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM workflow_routing WHERE id = ? AND tenant_id = ?
 	`, ruleID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("RemoveRoutingRule: %w", err)
+	}
+	// See the PostgreSQL implementation for why rows-affected is checked.
+	if n, rErr := res.RowsAffected(); rErr == nil && n == 0 {
+		return ErrRoutingRuleNotFound
 	}
 	return nil
 }

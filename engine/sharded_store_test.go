@@ -19,7 +19,10 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockShardStore struct {
-	name string
+	// heldRoutingRules, when non-nil, is the set of routing-rule IDs this
+	// shard actually holds. See RemoveRoutingRule below.
+	heldRoutingRules map[string]bool
+	name             string
 
 	// Default error for all methods (if fn override is nil)
 	err error
@@ -882,7 +885,19 @@ func (m *mockShardStore) RemoveRoutingRule(ctx context.Context, ruleID string) e
 	if m.err != nil {
 		return m.err
 	}
-	return nil
+	// A shard with no rule set claims everything, which is what every test
+	// written before cleat#946's second half assumed. Once heldRoutingRules is
+	// set the mock answers honestly -- claiming what it holds and reporting the
+	// rest as not found, which is what a real store does now that all three
+	// check rows-affected.
+	if m.heldRoutingRules == nil {
+		return nil
+	}
+	if m.heldRoutingRules[ruleID] {
+		delete(m.heldRoutingRules, ruleID)
+		return nil
+	}
+	return ErrRoutingRuleNotFound
 }
 
 func (m *mockShardStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {

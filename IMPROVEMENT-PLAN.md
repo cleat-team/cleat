@@ -6838,6 +6838,40 @@ on a rate decision and consumes no shared auth header, `auditlog` never rejects.
 activated 19 sets of assumptions that had never been tested against each other. Three separate
 problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
 and this — and none of them is a defect in the plugin that carries it.
+### 3.254 A routing-rule removal reported success for a rule that never existed — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+cleat#946's **second half**. #948 fixed the first — `ShardedStore` routed the removal by rule ID
+while rows are placed by workflow name, so it deleted from the wrong shard — and left this: **the
+removal reported success either way.**
+
+No implementation checked rows-affected. A `DELETE` matching nothing succeeds, so the store returned
+nil and `handleRemoveRoutingRule` answered `200 {"status":"removed"}` for a rule that never existed.
+`PickVersionByRouting` runs on every workflow start, so an operator tearing down a canary was told
+it was gone while it went on shifting live traffic.
+
+**I duplicated #948 before noticing it.** The issue was unassigned, I self-assigned and built the
+whole fix — including a `tryEachShard` rewrite — and found the merge conflict only at rebase. The
+sharding half is theirs; this entry is what their fix did not cover, rebuilt on top of it rather
+than forced over it.
+
+**The two halves interact, and that is the part worth a test.** #948 has `ShardedStore` ask **every**
+shard, and `forEachShard` **returns on the first error**. The moment a store starts returning
+`ErrRoutingRuleNotFound` — which n−1 shards legitimately do — a naive pass-through aborts the walk
+at shard 0 and never reaches the holder, **reintroducing #948's defect by way of fixing the
+reporting**. The sentinel is swallowed per shard and re-raised only if no shard claimed the row.
+
+`TestTheNotFoundSentinelDoesNotAbortTheShardWalk` puts the rule on the **last** shard on purpose, so
+a pass-through fails deterministically rather than depending on where the rule happens to sit.
+Falsified: passing it through fails with *"the walk stopped early"*.
+
+**The reporting half needed real databases.** Every mock in the suite returns nil, which is why
+nothing saw this — a Go nil has no opinion about how many rows were touched. Neutering the check
+makes all three dialects go silent again.
+
+The handler now answers **404**: a rule ID naming nothing is a bad request path, not a server fault.
+
+`./engine/` 4674 pass / 0 fail; `cmd/cleat-worker` green; gofmt clean.
+
 ### 3.253 Python's `run_detached` ran the work inline and called it detached — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
 
 `HostCalls.run_detached(fn)` took a callable and executed it with `fn(self)`. It made **no host call

@@ -632,11 +632,15 @@ func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error
 	if err != nil {
 		return fmt.Errorf("remove routing rule: invalid rule id %q: %w", ruleID, err)
 	}
-	_, err = s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM workflow_routing WHERE id = @p1 AND tenant_id = @p2
 	`, id, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("remove routing rule: %w", err)
+	}
+	// See the PostgreSQL implementation for why rows-affected is checked.
+	if n, rErr := res.RowsAffected(); rErr == nil && n == 0 {
+		return ErrRoutingRuleNotFound
 	}
 	return nil
 }
