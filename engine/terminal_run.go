@@ -55,26 +55,44 @@ func walkToTerminalRun(
 		return nil, nil
 	}
 
-	cur := id
-	for hops := 0; ; hops++ {
-		if hops >= maxContinueAsNewChainWalk {
-			return nil, fmt.Errorf("%w: gave up at %s after %d hops",
-				ErrContinueAsNewChainTooLong, cur, hops)
-		}
-		next, err := successorOf(ctx, cur)
-		if err != nil {
-			return nil, err
-		}
-		if next == "" {
-			break
-		}
-		cur = next
+	cur, err := terminalRunID(ctx, id, successorOf)
+	if err != nil {
+		return nil, err
 	}
 
 	if cur == id {
 		return head, nil
 	}
 	return get(ctx, cur)
+}
+
+// terminalRunID walks a ContinueAsNew chain forward and returns the id of its
+// last run, without reading any row but the ones it hops through.
+//
+// Split out of walkToTerminalRun for GetChildResult, which needs the id rather
+// than the instance: it has its own per-dialect SELECT with result compaction
+// and status handling, and re-pointing that at the terminal id changes WHICH
+// row it reads without changing anything about how it reads it.
+func terminalRunID(
+	ctx context.Context,
+	id string,
+	successorOf func(context.Context, string) (string, error),
+) (string, error) {
+	cur := id
+	for hops := 0; ; hops++ {
+		if hops >= maxContinueAsNewChainWalk {
+			return "", fmt.Errorf("%w: gave up at %s after %d hops",
+				ErrContinueAsNewChainTooLong, cur, hops)
+		}
+		next, err := successorOf(ctx, cur)
+		if err != nil {
+			return "", err
+		}
+		if next == "" {
+			return cur, nil
+		}
+		cur = next
+	}
 }
 
 // successorScan turns the one-row-or-none result of a successor lookup into

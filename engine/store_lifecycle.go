@@ -245,10 +245,20 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	// Use the store's tenant scope to preserve tenant isolation.
 	var newRunID string
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, continued_from)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, continued_from, parent_workflow_id, parent_close_policy)
+		-- parent_workflow_id and parent_close_policy are INHERITED from the run
+		-- being continued, not left NULL. A child that continues as new is
+		-- still its parent's child: enforceParentClosePolicy selects on
+		-- parent_workflow_id and NULL matches nothing, so a TERMINATE parent
+		-- left every continued iteration running while reporting that it had
+		-- stopped its child (cleat#955). Measured against a plain sibling
+		-- child as a control -- that one WAS stopped by the same call, so the
+		-- policy was working and only the link was missing.
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $4), 'default'),
-			$4, $5, now() - INTERVAL '1 millisecond', $6)
+			$4, $5, now() - INTERVAL '1 millisecond', $6,
+			(SELECT parent_workflow_id FROM workflow_instances WHERE id = $6),
+			(SELECT parent_close_policy FROM workflow_instances WHERE id = $6))
 		RETURNING id
 		`, defName, defVersion, newInput, s.tenantID, priority, currentRunID).Scan(&newRunID)
 	if err != nil {
