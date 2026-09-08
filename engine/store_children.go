@@ -133,6 +133,21 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 // GetChildResult checks whether a child workflow has completed (status 'done' or 'failed').
 
 func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+	// Resolve the chain first: the run the parent STARTED is not necessarily
+	// the run that holds the answer. A child that continues as new leaves its
+	// first run at status 'done' with an empty result -- 'done' because it was
+	// superseded, not because it finished -- and reading that row returned {}
+	// while the real result sat on the last run in the chain (cleat#955).
+	//
+	// Nothing distinguishes "done because it continued" from "done because it
+	// finished" on the row itself. The successor lookup does: a run with no
+	// successor is the terminal one. Only WHICH row is read changes here;
+	// everything below -- the status test, the result compaction -- is
+	// untouched.
+	runID, err := terminalRunID(ctx, runID, s.successorOfRun)
+	if err != nil {
+		return "", false, err
+	}
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return "", false, fmt.Errorf("get child result: begin: %w", err)

@@ -876,10 +876,19 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 	// Create the new workflow run with a Go-generated UUID.
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, continued_from)
-		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS VARCHAR(MAX)),
-		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
-		        @p5, @p6, @p7)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, continued_from, parent_workflow_id, parent_close_policy)
+		-- parent_workflow_id and parent_close_policy are INHERITED from the run
+		-- being continued, not left NULL. A child that continues as new is
+		-- still its parent's child: enforceParentClosePolicy selects on
+		-- parent_workflow_id and NULL matches nothing, so a TERMINATE parent
+		-- left every continued iteration running while reporting that it had
+		-- stopped its child (cleat#955). Measured against a plain sibling
+		-- child as a control -- that one WAS stopped by the same call, so the
+		-- policy was working and only the link was missing.
+		SELECT @p1, @p2, @p3, 'ready', CAST(@p4 AS VARCHAR(MAX)),
+		       ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
+		       @p5, @p6, @p7, p.parent_workflow_id, p.parent_close_policy
+		FROM workflow_instances p WHERE p.id = @p7
 	`, newRunID, defName, defVersion, newInput, s.tenantID, priority, currentRunID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)

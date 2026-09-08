@@ -688,11 +688,20 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	// Use the store's tenant scope to preserve tenant isolation.
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, continued_from)
-		VALUES (?, ?, ?, 'ready', ?,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-		        ?, ?, ?)
-	`, newRunID, defName, defVersion, newInput, defName, defVersion, s.tenantID, s.tenantID, priority, currentRunID)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, continued_from, parent_workflow_id, parent_close_policy)
+		-- parent_workflow_id and parent_close_policy are INHERITED from the run
+		-- being continued, not left NULL. A child that continues as new is
+		-- still its parent's child: enforceParentClosePolicy selects on
+		-- parent_workflow_id and NULL matches nothing, so a TERMINATE parent
+		-- left every continued iteration running while reporting that it had
+		-- stopped its child (cleat#955). Measured against a plain sibling
+		-- child as a control -- that one WAS stopped by the same call, so the
+		-- policy was working and only the link was missing.
+		SELECT ?, ?, ?, 'ready', ?,
+		       COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
+		       ?, ?, ?, p.parent_workflow_id, p.parent_close_policy
+		FROM workflow_instances p WHERE p.id = ?
+	`, newRunID, defName, defVersion, newInput, defName, defVersion, s.tenantID, s.tenantID, priority, currentRunID, currentRunID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}

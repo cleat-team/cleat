@@ -388,9 +388,16 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 
 // GetChildResult checks whether a child workflow has completed and returns its result.
 func (s *MySQLStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+	// Resolve the chain first -- see PostgresStore.GetChildResult for why: a
+	// child that continued as new leaves its first run 'done' with an empty
+	// result, and that is the run the parent holds the id of (cleat#955).
+	runID, err := terminalRunID(ctx, runID, s.successorOfRun)
+	if err != nil {
+		return "", false, err
+	}
 	var result string
 	var status string
-	err := s.db.QueryRowContext(ctx, `
+	err = s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(result, '{}'), status FROM workflow_instances WHERE id = ? AND tenant_id = ?
 	`, runID, s.tenantID).Scan(&result, &status)
 	if errors.Is(err, sql.ErrNoRows) {

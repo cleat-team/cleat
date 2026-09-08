@@ -565,11 +565,23 @@ func (s *ShardedStore) StartChildWorkflowAtomic(ctx context.Context, childID, pa
 
 // GetChildResult routes by child run ID.
 func (s *ShardedStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
-	shard := s.getShard(runID)
+	// Resolve the chain ACROSS shards before routing, not after. The concrete
+	// stores resolve it too (cleat#955), but only within themselves -- and a
+	// continue-as-new chain crosses shards routinely, because every
+	// continuation gets a fresh id and getShard hashes the id. Routing on the
+	// id the parent holds sends the question to the shard with run 1, whose
+	// local walk sees no successor and answers with run 1's empty result: the
+	// original defect, reappearing on exactly the deployment the per-store fix
+	// looks like it covers.
+	terminal, err := terminalRunID(ctx, runID, s.successorAcrossShards)
+	if err != nil {
+		return "", false, err
+	}
+	shard := s.getShard(terminal)
 	if shard == nil {
 		return "", false, fmt.Errorf("get_child_result: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.GetChildResult(ctx, runID)
+	return shard.Store.GetChildResult(ctx, terminal)
 }
 
 // ReapStaleInstances runs on every shard and returns the total reclaimed count.
@@ -678,31 +690,39 @@ func (s *ShardedStore) GetWorkflowByID(ctx context.Context, id string) (*Workflo
 // TestShardedGetTerminalRunCrossesAShardBoundary is written against mocks that
 // answer only for ids they hold.
 func (s *ShardedStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
-	return walkToTerminalRun(ctx, id, func(ctx context.Context, cur string) (string, error) {
-		s.mu.RLock()
-		shards := s.shards
-		s.mu.RUnlock()
-		for _, sh := range shards {
-			finder, ok := sh.Store.(runSuccessorFinder)
-			if !ok {
-				// Loudly, not silently. A shard that cannot answer the
-				// successor question makes every chain crossing into it
-				// invisible, and the symptom is a plausible id rather than an
-				// error -- the failure mode this whole method is about.
-				return "", fmt.Errorf("sharded terminal run: shard %q (%T) cannot look up "+
-					"continue-as-new successors, so a chain crossing it would silently "+
-					"appear to end", sh.Config.Name, sh.Store)
-			}
-			next, err := finder.successorOfRun(ctx, cur)
-			if err != nil {
-				return "", err
-			}
-			if next != "" {
-				return next, nil
-			}
+	return walkToTerminalRun(ctx, id, s.successorAcrossShards, s.GetWorkflowByID)
+}
+
+// successorAcrossShards asks every shard which run continued from cur.
+//
+// A chain is not shard-local: every continuation gets a fresh id and getShard
+// hashes the id, so run N and run N+1 routinely live on different shards. Only
+// one shard can hold the successor, and which one is not predictable from cur,
+// so this asks all of them.
+func (s *ShardedStore) successorAcrossShards(ctx context.Context, cur string) (string, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, sh := range shards {
+		finder, ok := sh.Store.(runSuccessorFinder)
+		if !ok {
+			// Loudly, not silently. A shard that cannot answer the successor
+			// question makes every chain crossing into it invisible, and the
+			// symptom is a plausible id rather than an error -- the failure
+			// mode this whole mechanism is about.
+			return "", fmt.Errorf("sharded chain walk: shard %q (%T) cannot look up "+
+				"continue-as-new successors, so a chain crossing it would silently "+
+				"appear to end", sh.Config.Name, sh.Store)
 		}
-		return "", nil
-	}, s.GetWorkflowByID)
+		next, err := finder.successorOfRun(ctx, cur)
+		if err != nil {
+			return "", err
+		}
+		if next != "" {
+			return next, nil
+		}
+	}
+	return "", nil
 }
 
 // CreateSchedule registers a schedule on every shard.
