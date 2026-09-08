@@ -163,15 +163,66 @@ workflow is over"; it means "this call must not happen".
 **The same bit, on every host call that can start fresh work.** It is not specific to
 `cleat_call`:
 
-| host call | result layout |
-|---|---|
-| `cleat_call`, `cleat_call_retry` | `responseLen` 40-63, `callErrorCode` 8-39, `errCode` 0-7 |
-| `cleat_plugin_call`, `cleat_plugin_call_streaming` | as `cleat_call` |
-| `cleat_child_workflow`, `cleat_child_workflow_with_options` | `runIDLen` 32-63, `errCode` 0-31 |
-| `cleat_await_signals` | `sigNameLen` 48-63, `payloadLen` 32-47, `timedOut` 16-31, `errCode` 0-15 |
+**Eighteen host calls can return it, in six result layouts.** The last column is the one an SDK
+acts on: it names the field bit 31 lands inside, which is the field a decoder misreads if it
+fills its fields before testing the sentinel.
+
+| host call | result layout | bit 31 lands in |
+|---|---|---|
+| `cleat_call`, `cleat_call_retry`, `cleat_call_heartbeat`, `plugin_call`, `plugin_call_streaming` | `responseLen` 40-63, `callErrorCode` 8-39, `errCode` 0-7 | `callErrorCode` |
+| `cleat_child_workflow`, `cleat_child_workflow_with_options`, `cleat_side_effect`, `cleat_fetch`, `cleat_schedule_cron` | upper field 32-63, `errCode` 0-31 | `errCode` (top bit) |
+| `cleat_await_signals` | `sigNameLen` 48-63, `payloadLen` 32-47, `timedOut` 16-31, `errCode` 0-15 | `timedOut` |
+| `cleat_send`, `cleat_schedule_invoke`, `cleat_signal_workflow`, `cleat_run_detached`, `cleat_complete_update` | `errCode` 0-31 | `errCode` (top bit) |
+| `cleat_poll_update` | `written` 32-63, `found` bit 8, `errCode` 0-7 | no field |
+| `cleat_acquire_lock` | `acquired` bit 8, `errCode` 0-7 | no field |
+
+Four of the six layouts put bit 31 inside a live field, so "check the sentinel first" is load
+bearing for sixteen of the eighteen calls, not just for `cleat_await_signals`.
+
+The two `no field` rows are not exceptions to the rule. Bit 31 being unoccupied there is a
+property of today's layouts, not a guarantee to decode against — and both calls still return the
+sentinel, so a guest that skips the check runs on past a stop regardless of which field it read.
 
 `cleat_sleep` is deliberately absent. Its 56-bit duration field covers bit 31, and it needs no
-sentinel: a sleeping guest already suspends through its status byte before any fresh call.
+sentinel: a sleeping guest already suspends through its status byte before any fresh call. That
+is the seventh layout, and `engine/memory.go` states the window over the other six for exactly
+this reason.
+
+**Re-derive the call list rather than trusting this table** — it is a property of the engine, and
+this table is a copy of it. The rows above were reconstructed this way on 2026-09-07, when the
+table listed seven calls in four layouts and named two of them by a binding name no guest can
+import (see the changelog row for this date):
+
+    # every host call that can return the sentinel, by WASM import name -> 18
+    python3 - <<'EOF'
+    import re, glob
+    bodies = {}
+    for f in glob.glob('engine/*.go'):
+        if f.endswith('_test.go'): continue
+        t = open(f).read()
+        for m in re.finditer(r'^func \(s \*execSession\) ([A-Za-z_]\w*)\(', t, re.M):
+            nxt = re.search(r'^func ', t[m.end():], re.M)
+            bodies[m.group(1)] = t[m.start(): m.end() + (nxt.start() if nxt else len(t))]
+    # Transitive, and that is not a refinement -- it is the difference between
+    # 18 and 16. cleat_child_workflow and cleat_child_workflow_with_options
+    # return the sentinel only through childWorkflowWithVersion, so a scan that
+    # reads one level of body misses both and reports a clean 16.
+    sites = {n for n, b in bodies.items() if 'callSuspendSentinel' in b}
+    changed = True
+    while changed:
+        changed = False
+        for n, b in bodies.items():
+            if n not in sites and set(re.findall(r's\.([A-Za-z_]\w*)\(', b)) & sites:
+                sites.add(n); changed = True
+    src = open('engine/imports.go').read()
+    for b in src.split('NewFunctionBuilder()')[1:]:
+        e = re.search(r'\.Export\("([^"]+)"\)', b)
+        if e and set(re.findall(r'\.([A-Za-z_]\w*)\(', b[:e.start()])) & sites:
+            print(e.group(1))
+    EOF
+
+`cleat_sleep` is the negative control and must not appear; `cleat_call_heartbeat` is the
+known-positive, and deleting the sentinel from `DurableCallWithHeartbeat` must drop it to 17.
 
 **Check the sentinel before reading any field, not after.** This is a hard ordering requirement,
 not a style preference. In the `cleat_await_signals` layout bit 31 falls inside the timed-out
@@ -1382,17 +1433,40 @@ Host-only extension for streaming plugin function calls. Same signature as `plug
 > coincidence because it is the kind that reads as corroboration: a number
 > that matches a remembered one is the number least likely to be re-derived.
 >
-> **Seven entries in this document describe host calls that no longer exist**
-> — the six `cleat_*_state` calls and `cleat_child_workflow_in_schema`
-> (`grep -c cleat_set_state ABI.md engine/imports.go` → 2 and 0). They are left
-> in place here rather than removed in a docs sweep about something else; an
-> SDK that binds one gets a module that fails to instantiate, which is the
-> §3.312 failure mode, so this is tracked as its own item.
+> **That is no longer true, and the sentence it replaces is a worked example of
+> its own subject.** It read "Seven entries in this document describe host calls
+> that no longer exist — the six `cleat_*_state` calls and
+> `cleat_child_workflow_in_schema`", and it was correct when written. The
+> entries went with #767 and #582; the sentence announcing them did not, so it
+> outlived its referent by two days and was repeated to a user as an open
+> defect on 2026-09-07.
 >
-> The two commands read two different registrations — `engine/imports.go` is
-> the wazero `engine.Runtime` used by CLI and test tooling, the other is the
-> wasmtime backend a worker runs — and they must agree;
-> `engine/hostabi_runtime_parity_test.go` enforces it. Until 2026-09-06 this
+> **Its evidence could not have caught that**, which is the part worth keeping.
+> The citation was `grep -c cleat_set_state ABI.md engine/imports.go` → 2 and 0,
+> and `grep -c` counts lines containing a name. Every remaining occurrence in
+> this file is a *retraction* — a changelog row recording the removal, and the
+> sentence above — so the count it returns rises as the entries are more
+> thoroughly documented as gone. It reads 3 today, with zero entries left. That
+> is the "a text search cannot tell a thing from a sentence about the thing"
+> trap in CLAUDE.md §Build, and the fix there applies unchanged: **anchor to
+> where the artifact lives.** An entry is a heading; a retraction is prose in a
+> body and can never start one.
+>
+>     # documented entries vs engine exports -- both differences must be empty
+>     comm -3 <(grep -oE '^#### 2\.[0-9]+[a-z]? `[a-z_]+`' ABI.md \
+>                 | sed 's/.*`\(.*\)`/\1/' | sort -u) \
+>             <(grep -oE '\.Export\("[^"]+"\)' engine/imports.go \
+>                 | sed 's/.*Export("//;s/")//' | sort -u)
+>
+> Measured 2026-09-07: 52 documented, 52 exported, both differences empty. Run
+> it before quoting either number — this note has now been wrong in both
+> directions.
+>
+> The two commands at the top of this note — not the `comm` above, which
+> compares this document against the engine — read two different
+> registrations, and they must agree. `engine/imports.go` is the wazero
+> `engine.Runtime` used by CLI and test tooling; the other is the wasmtime
+> backend a worker runs. `engine/hostabi_runtime_parity_test.go` enforces it. Until 2026-09-06 this
 > note called them "both backends". There is only one backend: the wazero one
 > was deleted in #459 (2026-08-10). What is importable does not differ between
 > them; how it is fenced does (see `docs/explanation/security-model.md`). The seven functions below existed in
@@ -1614,6 +1688,7 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
+| — | 2026-09-07 | **Corrected the stop-sentinel table in §2, which was wrong in both directions.** It named `cleat_plugin_call` and `cleat_plugin_call_streaming` — neither is a WASM import name. The imports are `plugin_call` and `plugin_call_streaming`, unprefixed, as §2.49 and §2.50 have always said; the `cleat_`-prefixed forms are the *Rust* function names in `crates/cleat-sdk/src/host_calls.rs`, which carry `#[link_name = "plugin_call"]`. A binding written from that table alone fails to instantiate. This is the prefix assumption CLAUDE.md §Build warns about, reaching a document whose own headings had it right. And the table was incomplete: **18** host calls return the sentinel across **six** result layouts, not the 7 across 4 that were listed. The eleven missing were `cleat_call_heartbeat`, `cleat_send`, `cleat_schedule_invoke`, `cleat_run_detached`, `cleat_poll_update`, `cleat_complete_update`, `cleat_side_effect`, `cleat_fetch`, `cleat_acquire_lock`, `cleat_schedule_cron` and `cleat_signal_workflow` — and bit 31 falls inside a live field for all but two of the eighteen, so the "check the sentinel first" ordering requirement applied to sixteen calls while being stated for one. Six layouts independently matches `engine/memory.go`, which states the free window over "all six layouts that can start fresh work" with `packSleepResult` as the seventh. §2 now carries the query that regenerates the list, with a negative control (`cleat_sleep`) and a known-positive (deleting the sentinel from `DurableCallWithHeartbeat` must drop 18 to 17); the first draft of that query read one level of function body and returned **16**, silently missing both child-workflow calls, whose sentinel is reached only through `childWorkflowWithVersion`. Also retired the note claiming seven entries describe removed host calls — true when written, false since #767 and #582, and cited by a `grep -c` that counts retractions. |
 | — | 2026-09-05 | **Removed the durable-state family** — `cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`, `cleat_list_state` (was §2.28-§2.33) — together with the `cleat:host-calls/durable-stream-state` component interface. Neither Temporal nor DBOS has state scoped beyond a single workflow; only Restate does, and cleat's was run-scoped, so it looked like Restate's and behaved like a local variable. Within a run the API was exactly equivalent to one, because replay re-executes the workflow and rebuilds either. Documented count 58 → **52 exports total**, of which **49 are `cleat_`-prefixed**. Both numbers are true and they will be quoted interchangeably unless a doc says which it means: `plugin_call`, `plugin_call_streaming` and `set_query_state` carry no prefix, so a `grep 'cleat_'` over this surface undercounts by three and any table driven off that prefix silently omits them. Count with `grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sort -u | grep -c .` **§2.28-§2.33 are left vacant rather than renumbering**, per the §2.21 precedent. `set_query_state` is unaffected and remains the queryable-state mechanism (the DBOS `setEvent` equivalent), as does the `set_scope`/`get_scope` family, which acquires a concurrency key and is not a state feature. `EventCodeStateMutation = 16` is RETIRED, not reused: the compaction decoder has no default case, so reusing the number would make pre-existing histories decode silently into empty records. See IMPROVEMENT-PLAN §3.216. |
 | — | 2026-09-02 | **Removed `cleat_child_workflow_in_schema`** (was §2.21) and the `cleat:host-calls/durable-extended-children` component interface that wrapped it. It wrote a child workflow row directly into another PostgreSQL schema, which made the other deployment's schema part of this one's API and had no settled answer for whose tenant the child belonged to. Cross-pool work goes through the other pool's API instead. Documented count 59 → 58 on both backends. No `CurrentABIVersion` bump: nothing that remains changed shape, and there are no deployed guests importing it. **§2.21 is left vacant rather than renumbering §2.22-§2.59**, because the numbers are referenced from commit messages and IMPROVEMENT-PLAN entries; a gap is cheaper to read than a shift. See IMPROVEMENT-PLAN §3.78. |
 | — | 2026-08-09 | Documentation-only: added §2.53-2.59 for seven host functions (`cleat_await_any_child`, `cleat_poll_child`, `cleat_schedule_cron`, `cleat_delete_cron`, `cleat_list_crons`, `cleat_poll_work`, `cleat_complete`) that were registered in `engine/imports.go` and the wasmtime backend with no ABI entry at all. Updated documentation count from 52 to 59. As with the version-number note at the top of this file: no `CurrentABIVersion` bump, because nothing about the wire contract changed -- only what this document said about it. |
