@@ -950,11 +950,15 @@ func runDeploy(args []string) {
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
 	nameFlag := fs.String("name", "", "workflow name (derived from filename if not set)")
 	taskQueueFlag := fs.String("task-queue", "default", "task queue for this workflow (e.g. default, gpu, high-memory)")
+	// 0 keeps the column default, which means "use the global threshold". Set
+	// per definition rather than per instance because the column is keyed
+	// (tenant_id, name, version) -- see WorkflowDef.MaxHistoryLength and #889.
+	maxHistoryLengthFlag := fs.Int("max-history-length", 0, "cap this definition's event history before compaction, overriding the global threshold (0 = use the global)")
 	fs.Parse(args)
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--name <name>] [--task-queue <queue>] [--max-history-length <n>] <wasm-file>\n")
 		os.Exit(1)
 	}
 	wasmPath := remainder[0]
@@ -1049,16 +1053,17 @@ func runDeploy(args []string) {
 	}
 
 	_, err = db.Exec(
-		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue)
-		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue, max_history_length)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
 		 ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 		   wasm_bytes = EXCLUDED.wasm_bytes,
 		   abi_version = EXCLUDED.abi_version,
 		   plugin_deps = EXCLUDED.plugin_deps,
 		   min_version = EXCLUDED.min_version,
 		   entry_points = EXCLUDED.entry_points,
-		   task_queue = EXCLUDED.task_queue`,
-		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, *taskQueueFlag,
+		   task_queue = EXCLUDED.task_queue,
+		   max_history_length = EXCLUDED.max_history_length`,
+		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, *taskQueueFlag, *maxHistoryLengthFlag,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error inserting workflow definition: %v\n", err)

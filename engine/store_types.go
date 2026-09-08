@@ -14,6 +14,18 @@ type WorkflowDef struct {
 	PluginDeps map[string]string `json:"plugin_deps,omitempty"`
 	CreatedAt  time.Time         `json:"created_at"`
 	Deprecated bool              `json:"deprecated"`
+
+	// MaxHistoryLength caps this definition's event history before compaction,
+	// overriding the global threshold. 0 means "use the global", which is the
+	// column default, so a deploy that does not set it changes nothing.
+	//
+	// It lives on the deploy payload rather than behind an admin endpoint
+	// because the column is keyed (tenant_id, name, version): the value is
+	// already a per-VERSION property, so setting it out of band would create a
+	// value whose lifecycle does not match its key -- roll the code back and an
+	// endpoint-set cap would stay, silently mis-tuning the version it was not
+	// chosen for. See cleat#889.
+	MaxHistoryLength int `json:"max_history_length,omitempty"`
 }
 
 // WorkflowInstance is a row from workflow_instances.
