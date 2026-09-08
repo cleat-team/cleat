@@ -106,8 +106,20 @@ func TestTheAuditInsertWorksOnMySQLsIDColumn(t *testing.T) {
 	// leaves those colliding with the real ones -- Error 1061, duplicate key
 	// name, which reads as a test failure rather than as the fixture problem it
 	// is.
-	if _, err := db.ExecContext(context.Background(), ddl); err != nil {
-		t.Fatalf("creating %s from the shipped migration: %v", table, err)
+	// One statement at a time. The migration is a CREATE TABLE followed by
+	// CREATE INDEXes, and whether a driver accepts several in one Exec depends
+	// on the DSN: my local CLEAT_TEST_MYSQL carries multiStatements=true and CI's
+	// does not, so this passed here and failed there with
+	// `Error 1064 ... near 'CREATE INDEX idx_audit_events_tenant_ts'`.
+	// Splitting needs no DSN parameter and so cannot differ between the two.
+	for _, stmt := range strings.Split(ddl, ";") {
+		if strings.TrimSpace(stmt) == "" {
+			continue
+		}
+		if _, err := db.ExecContext(context.Background(), stmt); err != nil {
+			t.Fatalf("creating %s from the shipped migration: %v\n\nstatement: %s",
+				table, err, strings.TrimSpace(stmt))
+		}
 	}
 
 	// Drive the PLUGIN, not a copy of its statement.
