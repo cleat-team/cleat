@@ -10,7 +10,7 @@ import (
 )
 
 func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
-	if err := sch.Validate(); err != nil {
+	if err := sch.ValidateForCreate(); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `

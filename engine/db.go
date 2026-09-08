@@ -507,7 +507,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 // ---- Schedule methods ----
 
 func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error {
-	if err := sch.Validate(); err != nil {
+	if err := sch.ValidateForCreate(); err != nil {
 		return err
 	}
 	tx, err := s.beginTxWithRLS(ctx)
