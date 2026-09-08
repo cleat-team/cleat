@@ -225,12 +225,24 @@ load under `cleat/wasmtest` and on a worker.
 //go:wasmimport env cleat_child_workflow
 //go:wasmimport env cleat_await_child
 //go:wasmimport env cleat_await_signals
-//go:wasmimport env cleat_set_query_state
-//go:wasmimport env cleat_plugin_call
+//go:wasmimport env set_query_state
+//go:wasmimport env plugin_call
 //go:wasmimport env cleat_create_promise
 //go:wasmimport env cleat_await_promise
 //go:wasmimport env cleat_register_update_handler
 ```
+
+Two of those carry no `cleat_` prefix, and it is not a typo: `set_query_state`
+and `plugin_call` are registered unprefixed, as is `plugin_call_streaming`.
+This block said `cleat_set_query_state` and `cleat_plugin_call` until
+2026-09-07; both would fail to bind. Check a name before writing it against
+this list rather than inferring the prefix:
+
+    grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u
+
+This is a partial list -- the engine exports more than appears here. The set
+difference in the other direction is what `scripts/check-doc-consistency.sh`
+enforces, for `ABI.md` only.
 
 ### Host Handler Interface (from the host side)
 
