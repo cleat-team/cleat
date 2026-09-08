@@ -85,25 +85,95 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 	result.NumDurableClosure = len(cr.DurableClosure)
 	result.NumPure = len(cr.Pure)
 
-	// Validate supported constructs in all cleat functions.
+	wasmCache := make(map[string]bool)
+
+	// Validate supported constructs in every function the workflow executes.
 	// Functions defined in files that would be excluded for the WASM target
 	// (GOOS=wasip1 GOARCH=wasm) are skipped — they won't appear in the
 	// compiled WASM module and may legitimately use non-deterministic
 	// platform APIs.
-	wasmCache := make(map[string]bool)
-	for _, fd := range result.Funcs {
-		if fd.DurabilityTag == "DurableLeaf" || fd.DurabilityTag == "DurableClosure" {
-			if !isWASEligible(fd, wasmCache) {
-				continue
-			}
-			validateConstructs(fd, cr)
+	//
+	// The set validated here is NOT the durable closure, and conflating the two
+	// is cleat#949. Closure analysis asks "which functions reach a host call",
+	// because that decides which host functions to import. Determinism asks
+	// "what does this workflow EXECUTE", and replay re-runs the whole workflow
+	// body -- it constrains the results of host calls, not local computation.
+	// A helper that makes no host call is Pure by the first question and fully
+	// in scope for the second.
+	//
+	// The two traversals run in opposite directions. DurableClosure is upward:
+	// callers of anything durable. What determinism needs is downward: callees
+	// of anything durable. nonDeterministicHelper in
+	// testdata/vet-checks/go/helper_escape is Pure, is called by a durable
+	// entry point, carries six violations across E001/E002/E013, and was
+	// counted by the analyzer without being checked by it.
+	//
+	// Tagging is deliberately left alone. Pure still means "reaches no host
+	// call", which is the right answer to the import question and what codegen
+	// consumes; only the validation set is widened.
+	for name := range durableReachable(result, cg, cr) {
+		fd, ok := result.Funcs[name]
+		if !ok {
+			// Not a function this analysis loaded -- stdlib or a dependency.
+			// Nothing to inspect, and its determinism is not ours to police
+			// here; the forbidden-call checks above cover the ones that matter.
+			continue
 		}
+		// Files excluded for the WASM target (GOOS=wasip1 GOARCH=wasm) do not
+		// appear in the compiled module and may legitimately use
+		// non-deterministic platform APIs.
+		if !isWASEligible(fd, wasmCache) {
+			continue
+		}
+		validateConstructs(fd, cr)
 	}
 
 	// Validate that init() functions do not call durable functions.
 	validateInitFunctions(result, cr)
 
 	return cr
+}
+
+// durableReachable returns every function the workflow can execute: the
+// durable ones, plus everything reachable downward from them through the call
+// graph.
+//
+// This is the determinism scope, and it is strictly larger than the durable
+// closure. See the comment at its call site in Compute for why the two differ
+// (cleat#949).
+//
+// Cycles are ordinary in workflow code -- mutual recursion between helpers --
+// so this is a worklist with a visited set rather than recursion. A function
+// name that is not in result.Funcs is still traversed FROM, because the call
+// graph may know edges for a name whose declaration this analysis did not
+// load; the caller decides what to do about a name it cannot inspect.
+func durableReachable(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *Result) map[string]bool {
+	seen := make(map[string]bool, len(result.Funcs))
+	var queue []string
+
+	push := func(name string) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		queue = append(queue, name)
+	}
+
+	for name := range cr.DurableLeaves {
+		push(name)
+	}
+	for name := range cr.DurableClosure {
+		push(name)
+	}
+
+	for len(queue) > 0 {
+		cur := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		for callee := range cg.Calls[cur] {
+			push(callee)
+		}
+	}
+	return seen
 }
 
 // Result holds the results of closure computation and validation.
