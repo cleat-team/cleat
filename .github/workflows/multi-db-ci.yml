@@ -72,6 +72,13 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+    # `edited` is required, not decorative: it is the activity type a BASE
+    # CHANGE fires. Without it a PR opened against a feature branch and later
+    # retargeted here never triggers this workflow at all -- not at open (the
+    # branches filter excluded it) and not at retarget (not a default type).
+    # Such a PR reports CLEAN with only the unfiltered workflows' checks.
+    # scripts/check-workflow-pr-triggers.sh guards this.
+    types: [opened, synchronize, reopened, edited]
 
 concurrency:
   # Every push gets its own group; PR runs share one per ref and supersede.

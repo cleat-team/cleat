@@ -37,6 +37,13 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+    # `edited` is required, not decorative: it is the activity type a BASE
+    # CHANGE fires. Without it a PR opened against a feature branch and later
+    # retargeted here never triggers this workflow at all -- not at open (the
+    # branches filter excluded it) and not at retarget (not a default type).
+    # Such a PR reports CLEAN with only the unfiltered workflows' checks.
+    # scripts/check-workflow-pr-triggers.sh guards this.
+    types: [opened, synchronize, reopened, edited]
 
 concurrency:
   # Every push gets its own group; PR runs share one per ref and supersede.
@@ -223,6 +230,15 @@ jobs:
       # merge -- see scripts/check-workflow-concurrency.sh for the measurement.
       - name: Workflow concurrency guard
         run: scripts/check-workflow-concurrency.sh
+
+      # The concurrency guard above keeps a run from being DISCARDED. This one
+      # keeps a run from never being CREATED: a workflow that filters
+      # pull_request by branch and does not trigger on `edited` never runs for a
+      # PR retargeted onto that branch, and such a PR reports CLEAN with only
+      # the unfiltered workflows' checks. Checks that never registered are not
+      # pending, so no downstream count can see it.
+      - name: Workflow PR-trigger guard
+        run: scripts/check-workflow-pr-triggers.sh
 
       - name: Setup Go
         uses: actions/setup-go@v7
