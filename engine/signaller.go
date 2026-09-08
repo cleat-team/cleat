@@ -130,9 +130,68 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 						}
 					}
 				}
-				// No signal found. This is a replay of a wait that has not
-				// resolved. Should not happen (we only wake when signal
-				// arrives), but handle gracefully.
+				// No signal found, and the await it belongs to has NOT
+				// resolved. It must suspend, exactly as the fresh path does --
+				// not report a timeout that has not happened (cleat#933).
+				//
+				// This returned packAwaitSignalsResult(..., timedOut=true)
+				// under the comment "Should not happen (we only wake when
+				// signal arrives), but handle gracefully". It does happen, on
+				// any replay that reaches the await before the signal arrives,
+				// and it is the ordinary case rather than an edge one.
+				//
+				// THE TWO PATHS RETURN THE SAME WORD AND DIFFER IN WHETHER THE
+				// RUN SUSPENDS, which is what made this survive: the fresh path
+				// below also returns timedOut=true, but it sets suspendErr
+				// first, so the segment ends and the guest never observes the
+				// value. Here nothing suspended, so the guest read it as a real
+				// timeout and ran on to its next await.
+				//
+				// That is what wrote the corrupt history cleat#933 reports.
+				// Measured, two straight-line awaits and one signal:
+				//
+				//	step 0  await_signals ["a","b"]
+				//	step 1  await_signals ["a","b"]     <- the second await,
+				//	step 2  signal_received a              recorded because the
+				//	                                       first falsely returned
+				//
+				// Replaying that pairs the delivery with the SECOND await and
+				// times out the first -- the misattribution reported against
+				// the real system, faithfully reproduced from a history that
+				// should never have been written. The replay arm was innocent;
+				// the fault is one segment earlier, here.
+				//
+				// The deadline comes from the RECORDED await, not from now.
+				// Deriving it from the current clock would push the timeout
+				// further out on every replay and the await would never expire.
+				// A deadline already passed is a genuine timeout, and reporting
+				// it is then correct -- the same virtual-versus-real comparison
+				// DurableSleep makes before deciding to suspend.
+				// A record with no timestamp cannot yield a deadline, and
+				// rec.TimestampMs + rec.TimeoutMs would then be a few seconds
+				// past the epoch -- already elapsed, so it would report a
+				// timeout instantly and rebuild the exact defect above. Every
+				// event recordEvent writes carries a timestamp and every row
+				// loaded from a store carries created_at, so this is a guard
+				// rather than a live case; it is here because the failure mode
+				// it prevents is the one being removed. Found by a fixture that
+				// omitted TimestampMs, which is how the shape reached me.
+				deadline := rec.TimestampMs + rec.TimeoutMs
+				expired := rec.TimestampMs > 0 && rec.TimeoutMs > 0 &&
+					s.engine.realNowMs() >= deadline
+				if expired {
+					return packAwaitSignalsResult(0, 0, true, 0)
+				}
+				if rec.TimestampMs == 0 || rec.TimeoutMs <= 0 {
+					// No usable deadline: suspend without one and let the
+					// worker's own scheduling decide when to look again.
+					deadline = s.engine.realNowMs() + rec.TimeoutMs
+				}
+				s.suspendErr = &SuspendError{
+					Reason: fmt.Sprintf("await_signals(%s, %dms) [replayed]",
+						rec.SignalNames, rec.TimeoutMs),
+					Until: time.UnixMilli(deadline),
+				}
 				return packAwaitSignalsResult(0, 0, true, 0)
 			}
 		}
