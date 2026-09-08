@@ -143,6 +143,26 @@ type EventRecord struct {
 	// CleatError. Nothing downstream requires it to be set.
 	ErrCode string `json:"err_code,omitempty"`
 
+	// RetriesExhausted records that this call failed because its retry budget
+	// ran out, as opposed to failing once.
+	//
+	// It exists because that fact had NO durable channel, and the two fields
+	// above are not it. ErrCode holds the class the *caller* supplied, and
+	// exhaustion is the engine's own conclusion, not the caller's. And
+	// ErrNonRetryable is the near-miss worth naming: durablecalls.go sets it
+	// as `!exhausted`, so on that one path `!ErrNonRetryable` does mean
+	// "exhausted" -- but the field means "retryable OR unclassified" across
+	// the codebase as a whole, and callintent.go leaves it unset on a plain
+	// failed call ON PURPOSE, so reading exhaustion out of it would classify
+	// an ordinary write-ahead-intent failure as one. See cleat#902.
+	//
+	// Zero value is the pre-existing behaviour: an event written before this
+	// field existed carries no such key and reads back false, which is what
+	// every such event was -- unclassified, and therefore not dead-lettered.
+	// Written only when true, so an ordinary failure's payload stays
+	// byte-identical and its checksum does not move.
+	RetriesExhausted bool `json:"retries_exhausted,omitempty"`
+
 	// ResolvedBy names the operator who supplied this event's outcome, when it
 	// did not come from the service. It is set only by admin step-resolution
 	// (IMPROVEMENT-PLAN 1.4 phase F): a call left pending by a crash, whose real

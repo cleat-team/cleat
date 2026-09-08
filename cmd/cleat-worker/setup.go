@@ -1864,7 +1864,11 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			errorOp = ce.Op
 		}
 		errMsg := err.Error()
-		w.recordTerminalFailure(wf, workflowStartTime, errMsg, errorCode, errorOp)
+		// resultHistory, not history: the exhaustion that ended this workflow
+		// was recorded by the segment that just ran, so it is only in the
+		// post-execution history. Passing the pre-execution `history` here
+		// would look correct and dead-letter nothing on a first failure.
+		w.recordTerminalFailureWithHistory(wf, workflowStartTime, errMsg, errorCode, errorOp, resultHistory)
 		return
 	}
 
@@ -2738,7 +2742,7 @@ func (w *Worker) failStrandedUpdates(wf *engine.WorkflowInstance, terminalStatus
 // because the two callers differ on it absolutely rather than by degree. The
 // panic path cannot be one: a recovered panic is a crash, not a call that ran
 // out of attempts.
-func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string, eligibleForDLQ bool) (applied, deadLettered bool) {
+func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string, eligibleForDLQ bool, history []engine.EventRecord) (applied, deadLettered bool) {
 	st := w.storeFor(wf)
 	ctx := context.Background()
 
@@ -2766,21 +2770,32 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 		return false, false
 	}
 
-	// The substring is not a shortcut past the typed classification -- it is
-	// the ONLY channel that classification has. engine/durablecalls.go knows
-	// retries were exhausted (it has the `exhausted` bool) and records it as
-	// this prefix, then hands the error to the GUEST, which returns a plain
-	// string out of its entry point. By the time executeWorkflow runs
-	// errors.As(err, &ce) there is no typed error left, so errorCode is
-	// ErrUnknown here for every real exhaustion.
+	// Dead-lettering is decided by a fact the ENGINE recorded, not by looking
+	// for a phrase in a human-readable string.
 	//
-	// Switching this to errorCode == engine.ErrRetriesExhausted.String()
-	// therefore does NOT tighten it -- NewRetriesExhaustedError has no
-	// production callers, nothing ever writes "retries_exhausted" to the
-	// column, and the test would be constantly false. The dead-letter queue
-	// would silently stop receiving anything. See cleat#902, where making the
-	// classification survive the guest boundary is tracked as the real fix.
-	deadLettered = eligibleForDLQ && strings.Contains(errMsg, "retries exhausted")
+	// It used to be `strings.Contains(errMsg, "retries exhausted")`, and that
+	// was not laziness -- it was the only channel the classification had.
+	// engine/durablecalls.go knows retries were exhausted (it has the
+	// `exhausted` bool), but it hands the error to the GUEST, which returns a
+	// plain string out of its entry point, so by the time we get here there is
+	// no typed error left and errorCode is ErrUnknown for every real
+	// exhaustion. cleat#902 has the measurements.
+	//
+	// EventRecord.RetriesExhausted is that channel. The engine sets it where it
+	// knows, it is persisted, it survives compaction, and it arrives here in
+	// the segment history without passing through the guest at all.
+	//
+	// The string is still read, but it no longer CLASSIFIES -- it associates.
+	// An exhaustion in history does not mean the workflow failed of it: the
+	// common case is a guest that catches the call error and carries on, and
+	// dead-lettering those would be a far worse regression than the false
+	// positive this replaces. So the terminal error must contain the exact text
+	// the engine recorded for a call it itself classified as exhausted.
+	// Matching against a recorded value rather than a hardcoded phrase is what
+	// fixes both defects at once: unrelated prose mentioning retry exhaustion
+	// no longer matches, and rewording the prefix in durablecalls.go no longer
+	// silently stops dead-lettering.
+	deadLettered = eligibleForDLQ && terminatedByRetryExhaustion(errMsg, history)
 	var err error
 	if deadLettered {
 		err = st.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
@@ -2803,8 +2818,49 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 
 // recordTerminalFailure is writeTerminalFailure plus the failure metrics the
 // dispatch paths record, emitted only when the write applied.
+// terminatedByRetryExhaustion reports whether errMsg is the error of a durable
+// call that the ENGINE classified as having exhausted its retries.
+//
+// Two conditions, and both are load-bearing. RetriesExhausted is the typed
+// half: only engine/durablecalls.go sets it, and only where its `exhausted`
+// bool is true, so no other kind of call failure can satisfy it. The text
+// comparison is the association half: history can hold an exhaustion the guest
+// caught and recovered from, and a workflow that later failed for an unrelated
+// reason must not be dead-lettered for it.
+//
+// It is Contains rather than equality because a guest is free to wrap what it
+// received before returning it -- "step 3: <engine text>" is still a workflow
+// that died of that exhaustion. What it is NOT is a search for a phrase: the
+// needle is the exact string the engine recorded for this specific call,
+// underlying error and all, so unrelated text that happens to mention retry
+// exhaustion cannot match, and changing the wording in durablecalls.go cannot
+// break it. See cleat#902.
+func terminatedByRetryExhaustion(errMsg string, history []engine.EventRecord) bool {
+	if errMsg == "" {
+		return false
+	}
+	for _, ev := range history {
+		if ev.RetriesExhausted && ev.Err != "" && strings.Contains(errMsg, ev.Err) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordTerminalFailure is the no-history form, for the failure paths that run
+// BEFORE any segment does -- no store for the tenant, history that would not
+// load, WASM that would not load, a version check. None of them can be a retry
+// exhaustion, because none of them ran a durable call, so passing no history
+// says exactly that rather than losing information.
 func (w *Worker) recordTerminalFailure(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string) {
-	applied, deadLettered := w.writeTerminalFailure(wf, errMsg, errorCode, errorOp, true)
+	w.recordTerminalFailureWithHistory(wf, startedAt, errMsg, errorCode, errorOp, nil)
+}
+
+// recordTerminalFailureWithHistory is the form used where a segment actually
+// executed, so its history can answer whether a retry exhaustion is what ended
+// the workflow.
+func (w *Worker) recordTerminalFailureWithHistory(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string, history []engine.EventRecord) {
+	applied, deadLettered := w.writeTerminalFailure(wf, errMsg, errorCode, errorOp, true, history)
 	if !applied {
 		return
 	}
@@ -2931,7 +2987,7 @@ func (w *Worker) releaseOrFail(wf *engine.WorkflowInstance, errMsg string) {
 	// happened to contain the words "retries exhausted", which is an accident
 	// either way it lands.
 	if applied, deadLettered := w.writeTerminalFailure(wf, errMsg,
-		engine.ErrUnknown.String(), "panic", false); applied && deadLettered {
+		engine.ErrUnknown.String(), "panic", false, nil); applied && deadLettered {
 		w.Metrics.RecordWorkflowsDeadLettered(context.Background())
 	}
 }

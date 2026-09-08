@@ -192,6 +192,12 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.ErrCode != "" {
 			payload["error_code"] = rec.ErrCode
 		}
+		// Only when true, same convention as error_non_retryable above: an
+		// ordinary failure's payload stays byte-identical, so its checksum is
+		// unchanged and no existing history reverifies differently.
+		if rec.RetriesExhausted {
+			payload["retries_exhausted"] = true
+		}
 		// Only when an operator asserted the outcome, so an ordinary call's
 		// payload is byte-identical to what it always was.
 		if rec.ResolvedBy != "" {
@@ -626,6 +632,13 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		// never a class -- so nothing downstream can mistake it for one.
 		if v, ok := m["error_code"].(string); ok {
 			rec.ErrCode = v
+		}
+		// Absent on every event written before cleat#902, which reads back
+		// false -- the classification those events actually had, which is
+		// none. A workflow already in flight across the upgrade therefore
+		// keeps the dead-lettering behaviour it started with.
+		if v, ok := m["retries_exhausted"].(bool); ok {
+			rec.RetriesExhausted = v
 		}
 		if v, ok := m["resolved_by"].(string); ok {
 			rec.ResolvedBy = v
