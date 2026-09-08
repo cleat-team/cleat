@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -490,4 +491,23 @@ func CatchUpLimitOrDefault(n int) int {
 		return DefaultCatchUpLimit
 	}
 	return n
+}
+
+// scheduleInputOrDefault is the same normalisation for a schedule's input.
+//
+// workflow_schedules.input is `NOT NULL DEFAULT '{}'` in all three shipped
+// schemas, and a column default applies only when the INSERT omits the column.
+// CreateSchedule names every column explicitly, so an absent input is bound as
+// SQL NULL and the constraint rejects the row -- the default is never reached.
+// An empty json.RawMessage is worse than NULL rather than better: it is a
+// non-NULL value that is not valid JSON, which a JSON column rejects on its own
+// terms (Postgres: `invalid input syntax for type json`).
+//
+// Both are reachable from POST /api/schedules, which requires name, cron and
+// def_name and treats input as optional.
+func scheduleInputOrDefault(input json.RawMessage) json.RawMessage {
+	if len(input) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return input
 }

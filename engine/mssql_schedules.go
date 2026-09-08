@@ -528,13 +528,14 @@ func (s *MSSQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan tim
 // MSSQL schema declares no CHECK constraint, so the malformed value went in
 // and every test passed. IMPROVEMENT-PLAN 3.16.
 //
-// An empty input becomes "{}": the column is NOT NULL with a '{}' default in
-// the shipped schema, and an empty string is not valid JSON either.
+// The empty-input handling this used to do inline now lives in
+// scheduleInputOrDefault, which every dialect's CreateSchedule calls: the
+// reason it gives is a property of the shipped schemas rather than of SQL
+// Server, and Postgres and MySQL went without it until then. What stays here
+// is the rendering -- go-mssqldb needs a string for the NVARCHAR cast, which
+// is what made this file the one that noticed.
 func scheduleInputJSON(input json.RawMessage) string {
-	if len(input) == 0 {
-		return "{}"
-	}
-	return string(input)
+	return string(scheduleInputOrDefault(input))
 }
 
 // ClaimDueSchedule advances a schedule's next_run_at, but only if it still
