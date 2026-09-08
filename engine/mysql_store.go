@@ -457,8 +457,9 @@ func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET next_wake_at = NOW(6)
-		WHERE id = ? AND status = 'ready' AND tenant_id = ?
+		SET signal_seq = signal_seq + 1,
+		    next_wake_at = CASE WHEN status = 'ready' THEN NOW(6) ELSE next_wake_at END
+		WHERE id = ? AND tenant_id = ?
 	`, workflowID, s.tenantID)
 	if err != nil {
 		return err

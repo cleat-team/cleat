@@ -59,6 +59,25 @@ type WorkflowInstance struct {
 	// every claim sets status = 'running' and returns the new value.
 	PendingTerminalStatus string `json:"pending_terminal_status,omitempty"`
 
+	// SignalSeq is the workflow's delivery counter AS OF THIS CLAIM, and it
+	// exists to close a window that next_wake_at cannot see.
+	//
+	// DeliverSignal pulls next_wake_at forward only for a workflow that is
+	// already suspended -- a claimed one is status 'running', and its row is
+	// about to be overwritten by finalize anyway. So a signal arriving while
+	// the workflow is AWAKE scheduled nothing, the workflow re-suspended with
+	// its own timeout deadline, and the delivery sat in workflow_signals until
+	// that timeout expired: AwaitSignals reported a timeout with the signal it
+	// was waiting for already in the table (cleat#953).
+	//
+	// The worker carries this value from claim to finalize, which compares it
+	// against the stored one inside the same transaction. Different means a
+	// delivery landed mid-segment, and the workflow wakes now rather than at
+	// its deadline. A COUNTER rather than "are there rows in workflow_signals"
+	// because the latter spins: a workflow awaiting {a} with an unrelated {z}
+	// pending would wake, poll, find nothing it wants and re-suspend, forever.
+	SignalSeq int64 `json:"signal_seq,omitempty"`
+
 	// ContinuedFrom is the run that continued into this one -- the id of the
 	// predecessor in a ContinueAsNew chain, or "" for the overwhelming
 	// majority of rows, which are not continuations. cleat#826, cleat#887.

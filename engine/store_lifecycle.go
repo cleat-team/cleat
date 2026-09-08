@@ -112,6 +112,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		)
 		UPDATE workflow_instances w
 		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
 		    generation = generation + 1
@@ -166,6 +167,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		)
 		UPDATE workflow_instances w
 		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
 		    generation = generation + 1

@@ -165,10 +165,23 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 		return err
 	}
 
+	// Two writes, two different windows, and neither replaces the other.
+	//
+	// next_wake_at wakes a workflow that is ALREADY suspended, and its
+	// status filter is why: 'running' is deliberately excluded, because a
+	// claimed workflow's row is about to be overwritten by finalize anyway.
+	//
+	// signal_seq covers the window that leaves -- a delivery arriving while
+	// the workflow is awake. The worker captured this value when it claimed;
+	// finalize compares and schedules an immediate wake if it moved. Bumped
+	// unconditionally, in this transaction, so the counter and the delivery
+	// become visible together: a reader that can see the row can see the
+	// bump (cleat#953).
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET next_wake_at = now()
-		WHERE id = $1 AND status IN ('ready', 'suspended')
+		SET signal_seq = signal_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
+		WHERE id = $1
 	`, workflowID)
 	if err != nil {
 		return err
