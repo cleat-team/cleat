@@ -2875,7 +2875,13 @@ func TestPostgresStore_CreateSchedule_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.CreateSchedule(testCtx, Schedule{Name: "daily", DefName: "wf"})
+	// NextRunAt is set so the schedule passes Schedule.Validate and this test
+	// reaches the path it is named for. Without it CreateSchedule refuses
+	// before opening a transaction, and the assertion below would pass or fail
+	// on the validation error rather than on the begin failure.
+	err := store.CreateSchedule(testCtx, Schedule{
+		Name: "daily", DefName: "wf", NextRunAt: time.Now().Add(time.Hour),
+	})
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}

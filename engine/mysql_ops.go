@@ -302,6 +302,9 @@ func (s *MySQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, err
 
 // CreateSchedule inserts a new cron schedule.
 func (s *MySQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
+	if err := sch.Validate(); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
