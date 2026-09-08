@@ -411,7 +411,17 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 	if s.engine.fetcher != nil {
 		response, fetchErr = s.engine.fetcher.Fetch(ctx, method, url, headersJSON, body)
 	} else {
-		fetchErr = fmt.Errorf("no fetcher configured: workflow %s attempted %s %s", s.engine.workflowID, method, url)
+		// NOT a misconfiguration an operator can fix, and the old text --
+		// "no fetcher configured" -- read like one. cleat ships no default
+		// Fetcher and cleat-worker sets none, so this branch is taken on
+		// EVERY cleat_fetch from a stock worker (IMPROVEMENT-PLAN 3.317).
+		// Say who can supply one, so the reader stops looking for a flag.
+		fetchErr = fmt.Errorf(
+			"cleat_fetch is unavailable: this engine has no Fetcher, and cleat "+
+				"ships no default one. cleat_fetch works only when the engine is "+
+				"embedded and the host supplies engine.WithFetcher(...); a stock "+
+				"cleat-worker cannot serve it. Workflow %s attempted %s %s",
+			s.engine.workflowID, method, url)
 	}
 
 	rec := EventRecord{

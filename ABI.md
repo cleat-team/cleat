@@ -1268,6 +1268,26 @@ Schedule a delayed one-shot invocation of an external service operation.
 
 #### 2.48 `cleat_fetch`
 
+> **Embedder-only. A stock `cleat-worker` cannot serve this call and never could.**
+> cleat ships no default `Fetcher` and `cmd/cleat-worker` sets none, so every
+> `cleat_fetch` from a worker takes the failure branch in `engine/lifecycle.go`.
+> It works only when the engine is embedded as a library and the host supplies
+> one:
+>
+>     eng := engine.New(..., engine.WithFetcher(myFetcher))
+>
+> Re-derive — the only reference outside test files is the declaration itself:
+>
+>     git ls-files '*.go' | xargs grep -n 'WithFetcher(' | grep -v _test.go
+>
+> This entry described the call without qualification until 2026-09-08, so an
+> SDK author had every reason to bind it and expect it to work. Whether a stock
+> worker should get a default fetcher is open (IMPROVEMENT-PLAN 3.317): it would
+> grant every workflow arbitrary outbound HTTP from the worker, which is a
+> capability decision rather than a missing line of wiring. Documenting the
+> present behaviour does not settle that question — it stops the document
+> claiming the opposite of what happens.
+
 Perform an HTTP fetch request. The method, URL, headers (JSON), and body are all configurable.
 
 ```

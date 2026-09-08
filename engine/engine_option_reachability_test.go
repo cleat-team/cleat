@@ -49,16 +49,29 @@ var engineOptionsNotWired = map[string]string{
 	//
 	// One real gap was found: WithFetcher. See IMPROVEMENT-PLAN.md 3.317.
 
-	// REAL GAP. ABI.md 2.48 documents cleat_fetch as "Perform an HTTP fetch
-	// request", with no caveat. Nothing anywhere sets a fetcher -- the only
-	// reference to WithFetcher outside tests is its own declaration -- so
-	// engine/lifecycle.go takes the else branch and every fetch from a real
-	// worker returns "no fetcher configured: workflow %s attempted %s %s".
-	// This is #879's shape exactly: a complete, documented read path behind a
-	// write path nobody wired. Kept baselined because wiring it is a product
-	// decision (a default fetcher gives every workflow arbitrary outbound
-	// HTTP), not because it is acceptable. 3.317 carries the decision.
-	"WithFetcher": "cleat#878 REAL GAP: cleat_fetch always fails in a real worker -- see 3.317",
+	// REAL GAP, now documented rather than silent. Nothing sets a fetcher --
+	// the only reference to WithFetcher outside tests is its own declaration
+	// -- so engine/lifecycle.go takes the else branch and every cleat_fetch
+	// from a real worker fails. This is #879's shape exactly: a complete,
+	// documented read path behind a write path nobody wired.
+	//
+	// Still baselined, because wiring it is a product decision (a default
+	// fetcher gives every workflow arbitrary outbound HTTP from the worker),
+	// not because it is acceptable. 3.317 carries that decision.
+	//
+	// What changed 2026-09-08 is the half that needed no decision: ABI.md 2.48
+	// described the call with no caveat, and the runtime error read "no fetcher
+	// configured", which sounds like a flag an operator forgot. Both now say
+	// embedder-only.
+	//
+	// THIS ENTRY IS THE INTERLOCK. If someone wires a fetcher, the switch below
+	// fires on `wired && baselined` and prints the reason string -- which is
+	// where the instruction to un-qualify ABI.md lives, because a doc caveat
+	// with nothing asserting it is exactly what rots.
+	"WithFetcher": "cleat#878 REAL GAP: cleat_fetch always fails in a real worker (3.317). " +
+		"If you are seeing this because you WIRED a fetcher: also delete the embedder-only " +
+		"caveat from ABI.md 2.48 and the explanation above the error in engine/lifecycle.go, " +
+		"which both currently tell readers a stock worker cannot serve cleat_fetch.",
 
 	// ALTERNATE PATH. The worker enforces this limit itself:
 	// --wasm-cumulative-allocation-max-mb feeds w.wasmCumulativeAllocationMaxBytes
