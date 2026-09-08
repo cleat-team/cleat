@@ -347,22 +347,49 @@ var sdkUnreachedBaseline = map[string][]string{
 		"cleat_uuid",
 	},
 
-	// Python: five real gaps. Unlike Go's, none of these has a native or
-	// composed substitute -- await_any_child and poll_child are child-workflow
-	// control flow, run_detached is a lifecycle primitive, and the json pair is
-	// genuinely needed by a guest whose host-side rewrite table decides its
-	// imports.
+	// Python: five unreached, but only THREE are gaps.
+	//
+	// The first version of this comment said all five were real, "unlike Go's,
+	// none of these has a native or composed substitute". That was wrong about
+	// the json pair for exactly the reason it is wrong for Go: Python has the
+	// `json` module -- host_calls.py imports it three times -- and
+	// engine/lifecycle.go's JsonParse/JsonStringify are pure (unmarshal,
+	// re-marshal, write; no recordEvent, no store), so a guest using its own
+	// JSON diverges from nothing.
+	//
+	// Real gaps: await_any_child and poll_child are child-workflow control
+	// flow, run_detached is a lifecycle primitive. Nothing composes those.
 	//
 	// Note this is the WIT rewrite table (host-side), not python-sdk's own
 	// bindings. The two were compared on 2026-09-07 and agree on all 44 names
 	// they share, differing only on cleat_register_query_handler, which is in
 	// notWorkflowFacing above.
 	"python (wasm/component_rewrite.go WitToEnvImport)": {
-		"cleat_await_any_child",
+		// cleat_run_detached is blocked on a public API decision, not on the
+		// binding. The Python SDK already exports run_detached(fn) -- a CLOSURE
+		// form that calls fn(self) inline and makes no host call at all, while
+		// its docstring says "the host would ensure the detached execution
+		// continues even if the parent workflow is cancelled". It does not ask
+		// the host anything, so the work runs in the parent and is cancelled
+		// with it.
+		//
+		// That is Go's defect exactly (3.244: "Go's takes a closure, which
+		// cannot cross the ABI, so Go's method is never wired ... its unwired
+		// branch is return nil, a silent success"), and it is resolved the same
+		// way: by deciding the exported signature, which is not a change to make
+		// while wiring imports. The closure form has real callers --
+		// local_host.py, examples/all_host_calls_workflow.py, two tests and the
+		// README -- so it cannot simply be replaced.
+		"cleat_run_detached",
+
+		// The json pair. Not gaps: the
+		// `json` module is in the standard library and engine/lifecycle.go's
+		// JsonParse/JsonStringify are pure -- unmarshal, re-marshal, write; no
+		// recordEvent, no store -- so a guest using its own JSON diverges from
+		// nothing. Same reasoning as Go's two, which sit in no baseline at all
+		// because Go's row here does not exist.
 		"cleat_json_parse",
 		"cleat_json_stringify",
-		"cleat_poll_child",
-		"cleat_run_detached",
 	},
 
 	// assemblyscript: deliberately absent. It reaches every workflow-facing

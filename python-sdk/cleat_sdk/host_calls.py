@@ -103,6 +103,9 @@ try:
         durable_await_all_children as _import_cleat_await_all_children,
     )
     from wit_world.imports.durable_children import (
+        durable_await_any_child as _import_cleat_await_any_child,
+    )
+    from wit_world.imports.durable_children import (
         durable_await_child as _import_cleat_await_child,
     )
     from wit_world.imports.durable_children import (
@@ -110,6 +113,9 @@ try:
     )
     from wit_world.imports.durable_children import (
         durable_child_workflow_with_options as _import_cleat_child_workflow_with_options,
+    )
+    from wit_world.imports.durable_children import (
+        durable_poll_child as _import_cleat_poll_child,
     )
     from wit_world.imports.durable_cron import (
         durable_delete_cron as _import_cleat_delete_cron,
@@ -2149,6 +2155,64 @@ class HostCalls:
 
         results_data = json.loads(results_json)
         return [ChildResult(**item) for item in results_data]
+
+    def await_any_child(self, run_ids: list[str]) -> ChildResult:
+        """Wait for the FIRST of several child workflows to complete.
+
+        Distinct from :meth:`await_all_children`, which waits for every one:
+        this returns as soon as any single child finishes, which is the
+        primitive a race or a first-wins fan-out needs.
+
+        Parameters
+        ----------
+        run_ids : list[str]
+            Child workflow run IDs to race.
+
+        Returns
+        -------
+        ChildResult
+            The first child to complete.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        result_json = _import_cleat_await_any_child(json.dumps(run_ids))
+        if not result_json:
+            raise RuntimeError(
+                f"await_any_child(run_ids={run_ids!r}) returned nothing. "
+                "The host writes the winning child's result here, so an empty "
+                "response means no child was awaited rather than that none won."
+            )
+        return ChildResult(**json.loads(result_json))
+
+    def poll_child(self, run_id: str) -> ChildResult | None:
+        """Check a child workflow without waiting.
+
+        Non-blocking: unlike :meth:`await_child` this never suspends the
+        workflow. Returns ``None`` while the child is still running.
+
+        Parameters
+        ----------
+        run_id : str
+            The child workflow run ID.
+
+        Returns
+        -------
+        ChildResult | None
+            The child's result once it has completed, otherwise ``None``.
+        """
+        result_json = _import_cleat_poll_child(run_id)
+        if not result_json:
+            return None
+        data = json.loads(result_json)
+        # The host reports a still-running child as a status document rather
+        # than by writing nothing, so "not finished" has to be read out of the
+        # payload rather than inferred from an empty string.
+        if data.get("status") == "running":
+            return None
+        return ChildResult(**data)
 
     # --------------------------------------------------------------------
     # 18. set_query_state — set queryable key-value state

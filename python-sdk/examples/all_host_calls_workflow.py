@@ -87,6 +87,8 @@ def _exercise_every_host_call(h: HostCalls) -> None:
     h.child_workflow_with_options("child", {"a": 1}, ChildWorkflowOptions())
     h.await_child("run-1")
     h.await_all_children(["run-1"])
+    h.await_any_child(["run-1"])
+    h.poll_child("run-1")
 
     # ---- state ----
     h.set_query_state("k", "v")

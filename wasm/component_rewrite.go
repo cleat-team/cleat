@@ -47,6 +47,17 @@ var WitToEnvImport = map[string]map[string]string{
 		"durable-signal-workflow": "cleat_signal_workflow",
 	},
 	"cleat:host-calls/durable-children": {
+		// IMPROVEMENT-PLAN 3.252: two host calls the Python SDK could not reach.
+		// Without a row here the WIT import resolves to no env name and the
+		// component fails to link -- the table, not the WIT, is what decides a
+		// Python guest's import names.
+		//
+		// In THIS interface, not durable-handlers: the map is keyed by the WIT
+		// interface the function is declared in, and putting them under handlers
+		// left TestEveryImportedWitFunctionHasAnEnvMapping reporting both as
+		// unmapped while the names were visibly present in the file.
+		"durable-await-any-child":             "cleat_await_any_child",
+		"durable-poll-child":                  "cleat_poll_child",
 		"durable-child-workflow":              "cleat_child_workflow",
 		"durable-await-child":                 "cleat_await_child",
 		"durable-await-all-children":          "cleat_await_all_children",

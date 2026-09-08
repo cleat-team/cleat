@@ -549,14 +549,32 @@ var pythonUnboundBaseline = []string{
 	// to it. Every SDK carries a comment saying it is absent on purpose.
 	"cleat_register_query_handler",
 
-	// Real gaps in the Python SDK, in the sense that a Go workflow can do these
-	// and a Python one cannot.
-	"cleat_await_any_child",
+	// Not a gap either, and this took a correction to see. cleat_json_parse and
+	// cleat_json_stringify are covered by the `json` module -- host_calls.py
+	// imports it three times -- and engine/lifecycle.go's JsonParse and
+	// JsonStringify are pure: unmarshal, re-marshal, write, with no recordEvent
+	// and no store. A guest using its own JSON diverges from nothing. Identical
+	// reasoning to Go's two, which IMPROVEMENT-PLAN 3.241 applied to Go and then
+	// explicitly denied for Python.
 	"cleat_json_parse",
 	"cleat_json_stringify",
-	"cleat_poll_child",
+
+	// A real gap, and the only one left. Blocked on a public API decision
+	// rather than on wiring: Python already exports run_detached(fn), a CLOSURE
+	// form that calls fn(self) inline and makes no host call, while promising
+	// the host keeps the work alive past cancellation. That is Go's defect
+	// exactly (3.244), and the closure form has real callers, so the exported
+	// signature has to be decided rather than changed in passing. See 3.252.
 	"cleat_run_detached",
 }
+
+// NOTE: this baseline and sdkUnreachedBaseline in
+// tests/plugin-harness/sdk_import_names_test.go record the same fact from two
+// different sources -- this one from python-sdk/cleat_sdk/host_calls.py, that
+// one from wasm/component_rewrite.go's WitToEnvImport. THEY MOVE TOGETHER.
+// 3.252 updated the harness one and not this one, and CI caught it; the same
+// shape as the skip ledger's test-go/engine and cluster pair, which cost a
+// round trip on #919 for the same reason.
 
 // pythonSDKHostImports returns the host function names the Python SDK binds,
 // read out of python-sdk/cleat_sdk/host_calls.py.
