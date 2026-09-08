@@ -59,24 +59,23 @@ type WorkflowInstance struct {
 	// every claim sets status = 'running' and returns the new value.
 	PendingTerminalStatus string `json:"pending_terminal_status,omitempty"`
 
-	// SignalSeq is the workflow's delivery counter AS OF THIS CLAIM, and it
-	// exists to close a window that next_wake_at cannot see.
+	// The signal counters live on the ROW and are never read into Go, which
+	// is why there is no field for them here.
 	//
-	// DeliverSignal pulls next_wake_at forward only for a workflow that is
-	// already suspended -- a claimed one is status 'running', and its row is
-	// about to be overwritten by finalize anyway. So a signal arriving while
-	// the workflow is AWAKE scheduled nothing, the workflow re-suspended with
-	// its own timeout deadline, and the delivery sat in workflow_signals until
-	// that timeout expired: AwaitSignals reported a timeout with the signal it
-	// was waiting for already in the table (cleat#953).
+	// signal_seq (bumped by DeliverSignal), signal_seq_at_claim (stamped by
+	// every claim), signal_consumed_seq (bumped by ConsumeSignal) and
+	// signal_consumed_at_claim are compared by finalize_workflow_status inside
+	// its own transaction. Nothing carries a value between them, which is the
+	// whole point of the shape: the alternative was a parameter through
+	// FinalizeWorkflowSegment and its nine implementations (cleat#953).
 	//
-	// The worker carries this value from claim to finalize, which compares it
-	// against the stored one inside the same transaction. Different means a
-	// delivery landed mid-segment, and the workflow wakes now rather than at
-	// its deadline. A COUNTER rather than "are there rows in workflow_signals"
-	// because the latter spins: a workflow awaiting {a} with an unrelated {z}
-	// pending would wake, poll, find nothing it wants and re-suspend, forever.
-	SignalSeq int64 `json:"signal_seq,omitempty"`
+	// A `SignalSeq int64` field was added here by #981 and removed in the
+	// follow-up: nothing ever read or wrote it. It shipped describing a
+	// mechanism that does not exist -- "the worker carries this value from
+	// claim to finalize" -- which is the design that was proposed and then
+	// replaced by the on-row capture before the PR was written. A struct
+	// field with a confident comment and no reader is worse than no field:
+	// the next person to touch this reads it as the mechanism.
 
 	// ContinuedFrom is the run that continued into this one -- the id of the
 	// predecessor in a ContinueAsNew chain, or "" for the overwhelming

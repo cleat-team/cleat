@@ -56,7 +56,14 @@ func TestASignalDeliveredWhileTheWorkflowIsAwakeStillWakesIt(t *testing.T) {
 			// tune, and nothing that gets flaky under load.
 			const deadline = 60 * time.Second
 
-			runSegment := func(label string, deliver bool) time.Duration {
+			// wokenEarly reports whether finalize pulled next_wake_at BEFORE the
+			// deadline it was handed. Comparing two stored timestamps rather
+			// than measuring elapsed time: CLAUDE.md's rule is to remove the
+			// timing rather than widen it, and a midpoint margin is a widened
+			// threshold -- it passes for the right reason today and would go
+			// flaky on a slow box, which is the shape of test that gets its
+			// threshold loosened until it cannot separate the hypotheses.
+			runSegment := func(label string, deliver bool) bool {
 				t.Helper()
 				id := fmt.Sprintf("mid-segment-%s-%d", label, time.Now().UnixNano())
 				if _, _, err := store.StartNewRun(ctx, id, "intent-workflow", 1,
@@ -74,9 +81,10 @@ func TestASignalDeliveredWhileTheWorkflowIsAwakeStillWakesIt(t *testing.T) {
 						t.Fatalf("DeliverSignal: %v", err)
 					}
 				}
+				handed := time.Now().Add(deadline)
 				if err := store.FinalizeWorkflowSegment(ctx, id, "worker-mid-segment",
 					wf.Generation, nil, "ready", "", "", "",
-					map[string]string{}, time.Now().Add(deadline)); err != nil {
+					map[string]string{}, handed); err != nil {
 					t.Fatalf("FinalizeWorkflowSegment: %v", err)
 				}
 				var wake time.Time
@@ -84,28 +92,28 @@ func TestASignalDeliveredWhileTheWorkflowIsAwakeStillWakesIt(t *testing.T) {
 				if err := db.QueryRow(q, id).Scan(&wake); err != nil {
 					t.Fatalf("reading next_wake_at: %v", err)
 				}
-				return time.Until(wake)
+				// Exact: either finalize wrote the deadline it was given, or it
+				// wrote something earlier. No tolerance, no clock reading.
+				return wake.Before(handed.Add(-time.Second))
 			}
 
-			if got := runSegment("delivered", true); got > deadline/2 {
-				t.Errorf("a signal delivered while the workflow was RUNNING left it sleeping "+
-					"for %v, its own %v timeout.\n\n"+
-					"The delivery is durable in workflow_signals and the workflow is waiting "+
-					"for exactly it, so AwaitSignals will report a timeout with the signal "+
-					"already in the table. DeliverSignal's next_wake_at update cannot see a "+
-					"'running' row, and finalize overwrites next_wake_at with the deadline -- "+
-					"signal_seq differing from signal_seq_at_claim is what closes that.",
-					got.Round(time.Second), deadline)
+			if woken := runSegment("delivered", true); !woken {
+				t.Error("a signal delivered while the workflow was RUNNING left next_wake_at at " +
+					"the deadline finalize was handed.\n\n" +
+					"The delivery is durable in workflow_signals and the workflow is waiting " +
+					"for exactly it, so AwaitSignals will report a timeout with the signal " +
+					"already in the table. DeliverSignal's next_wake_at update cannot see a " +
+					"'running' row, and finalize overwrites next_wake_at with the deadline -- " +
+					"signal_seq differing from signal_seq_at_claim is what closes that.")
 			}
 
 			// CONTROL: no delivery, so nothing should have moved the deadline.
-			if got := runSegment("CONTROL-no-delivery", false); got <= deadline/2 {
-				t.Errorf("CONTROL FAILED: a workflow with NO delivery woke after %v instead of "+
-					"sleeping to its %v deadline.\n\n"+
-					"That is the spin the counter exists to avoid: an implementation that "+
-					"wakes whenever workflow_signals is non-empty, or one that always wakes, "+
-					"passes the assertion above and burns a core here.",
-					got.Round(time.Second), deadline)
+			if woken := runSegment("CONTROL-no-delivery", false); woken {
+				t.Error("CONTROL FAILED: a workflow with NO delivery had next_wake_at pulled " +
+					"BEFORE the deadline finalize was handed.\n\n" +
+					"That is the spin the counter exists to avoid: an implementation that " +
+					"wakes whenever workflow_signals is non-empty, or one that always wakes, " +
+					"passes the assertion above and burns a core here.")
 			}
 		})
 	}
@@ -160,13 +168,20 @@ func TestABurstOfSignalsIsDrainedRatherThanSleptThrough(t *testing.T) {
 				json.RawMessage(`{}`), "", DefaultTenantUUID, 0); err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
-			wakeIn := func() time.Duration {
+			// handed is the deadline the LAST finalize was given. wokenEarly
+			// compares two stored timestamps rather than measuring elapsed
+			// time -- CLAUDE.md's rule is to remove the timing rather than
+			// widen it, and a midpoint margin is a widened threshold: right
+			// today, flaky on a slow box, and the kind of assertion that gets
+			// loosened until it can no longer separate the hypotheses.
+			var handed time.Time
+			wokenEarly := func() bool {
 				var w time.Time
 				q := "SELECT next_wake_at FROM workflow_instances WHERE id = " + d.placeholder(1)
 				if err := db.QueryRow(q, id).Scan(&w); err != nil {
 					t.Fatalf("reading next_wake_at: %v", err)
 				}
-				return time.Until(w)
+				return w.Before(handed.Add(-time.Second))
 			}
 			pending := func() int {
 				var n int
@@ -190,9 +205,9 @@ func TestABurstOfSignalsIsDrainedRatherThanSleptThrough(t *testing.T) {
 						}
 					}
 				}
+				handed = time.Now().Add(deadline)
 				if err := store.FinalizeWorkflowSegment(ctx, id, "worker-burst", wf.Generation,
-					nil, "ready", "", "", "", map[string]string{},
-					time.Now().Add(deadline)); err != nil {
+					nil, "ready", "", "", "", map[string]string{}, handed); err != nil {
 					t.Fatalf("FinalizeWorkflowSegment: %v", err)
 				}
 			}
@@ -207,8 +222,9 @@ func TestABurstOfSignalsIsDrainedRatherThanSleptThrough(t *testing.T) {
 					t.Fatalf("DeliverSignal %d: %v", i, err)
 				}
 			}
+			handed = time.Now().Add(deadline)
 			if err := store.FinalizeWorkflowSegment(ctx, id, "worker-burst", wf.Generation, nil,
-				"ready", "", "", "", map[string]string{}, time.Now().Add(deadline)); err != nil {
+				"ready", "", "", "", map[string]string{}, handed); err != nil {
 				t.Fatalf("FinalizeWorkflowSegment: %v", err)
 			}
 
@@ -220,14 +236,14 @@ func TestABurstOfSignalsIsDrainedRatherThanSleptThrough(t *testing.T) {
 				if left := pending(); left == 0 {
 					t.Fatalf("segment %d drained the whole queue; the fixture is not testing a burst", i)
 				}
-				if got := wakeIn(); got > deadline/2 {
-					t.Fatalf("after consuming %d of %d, %d signal(s) still pending and the "+
-						"workflow is asleep for %v.\n\n"+
+				if !wokenEarly() {
+					t.Fatalf("after consuming %d of %d, %d signal(s) still pending and "+
+						"next_wake_at is the deadline finalize was handed.\n\n"+
 						"A burst arrives BEFORE the claim, so signal_seq_at_claim is stamped "+
 						"at the already-moved value and no delivery lands DURING the segment. "+
 						"What must wake it is that this segment consumed something and more "+
 						"remains: a segment that consumed once can consume again.",
-						i, burst, pending(), got.Round(time.Second))
+						i, burst, pending())
 				}
 			}
 
@@ -240,12 +256,12 @@ func TestABurstOfSignalsIsDrainedRatherThanSleptThrough(t *testing.T) {
 				t.Fatalf("queue not drained after %d segments: %d left", burst, left)
 			}
 			segment(false) // the one wasted wake: consumes nothing
-			if got := wakeIn(); got <= deadline/2 {
-				t.Errorf("a segment that consumed NOTHING with an empty queue was woken again "+
-					"after %v instead of sleeping to its %v deadline.\n\n"+
-					"That is the spin this design exists to avoid: waking on progress "+
-					"terminates because each wake consumes one, but only if a segment that "+
-					"made no progress stops the chain.", got.Round(time.Second), deadline)
+			if wokenEarly() {
+				t.Error("a segment that consumed NOTHING with an empty queue had next_wake_at " +
+					"pulled BEFORE the deadline finalize was handed.\n\n" +
+					"That is the spin this design exists to avoid: waking on progress " +
+					"terminates because each wake consumes one, but only if a segment that " +
+					"made no progress stops the chain.")
 			}
 		})
 	}
