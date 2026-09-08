@@ -121,6 +121,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE workflow_instances
 		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
 		    generation = generation + 1
@@ -219,6 +220,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE workflow_instances
 		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
 		    generation = generation + 1
@@ -358,6 +360,7 @@ func (s *MySQLStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID s
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE workflow_instances
 		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
 		    generation = generation + 1

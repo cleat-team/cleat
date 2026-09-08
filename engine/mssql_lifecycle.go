@@ -106,6 +106,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
 		    assigned_to = @p1,
 		    heartbeat_at = SYSUTCDATETIME(),
 		    generation = generation + 1
@@ -230,6 +231,7 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
 		    assigned_to = @p1,
 		    heartbeat_at = SYSUTCDATETIME(),
 		    generation = generation + 1
@@ -436,6 +438,7 @@ func (s *MSSQLStore) claimWorkflowsAcrossTenantsOnce(ctx context.Context, worker
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
 		    assigned_to = @p1,
 		    heartbeat_at = SYSUTCDATETIME(),
 		    generation = generation + 1

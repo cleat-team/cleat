@@ -49,6 +49,7 @@ var postgresProcedureMigrations = []string{
 	"004_fix_finalize_workflow_status_fence.sql",
 	"043_query_state_on_suspension.sql",
 	"044_child_does_not_rewrite_parent_event.sql",
+	"047_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
 }
 
 var mysqlProcedureMigrations = []string{
@@ -56,6 +57,7 @@ var mysqlProcedureMigrations = []string{
 	"004_fix_finalize_workflow_status_fence.sql",
 	"042_query_state_on_suspension.sql",
 	"043_child_does_not_rewrite_parent_event.sql",
+	"046_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
 }
 
 var mssqlProcedureMigrations = []string{
@@ -63,6 +65,7 @@ var mssqlProcedureMigrations = []string{
 	"004_fix_finalize_workflow_status_fence.sql",
 	"046_query_state_on_suspension.sql",
 	"047_child_does_not_rewrite_parent_event.sql",
+	"050_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup

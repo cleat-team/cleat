@@ -49,8 +49,9 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	// signal to an id belonging to another tenant woke that tenant's workflow.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET next_wake_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND status IN ('ready', 'suspended') AND tenant_id = @p2
+		SET signal_seq = signal_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN SYSUTCDATETIME() ELSE next_wake_at END
+		WHERE id = @p1 AND tenant_id = @p2
 	`, workflowID, s.tenantID)
 	if err != nil {
 		return err
