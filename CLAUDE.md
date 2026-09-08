@@ -428,6 +428,33 @@ red, put it back. This catches a test that *cannot* fail; it does not catch one 
 it. Twice this has caught a test passing for the wrong reason, which is why "it went red" is not
 enough on its own — check that it went red *for the reason you expect*.
 
+**And before either of those: check it went red AT ALL, because a falsification that prints
+nothing is not a falsification that passed.** Measured 2026-09-08 while proving a regression test
+for cleat#995. The mutation removed a struct field, which left a local variable unused, so the
+package did not compile:
+
+    cmd/cleat-worker/server.go:1756:2: declared and not used: loc
+    FAIL    github.com/cleat-team/cleat/cmd/cleat-worker [build failed]
+
+The output was filtered with `grep -E '_test.go:[0-9]+:|^---'`, which matches **test** failures.
+A build failure produces neither, so the command printed nothing and was read as "the test still
+passes" — the conclusion being that the fix was unnecessary.
+
+This is the `-json` trap in *Is this result real?* arriving through the plainest possible door.
+There it is a package-level fail event carrying no `"Test"` field, invisible to a count keyed on
+`'"Test":'`. Here it is a compile error invisible to a grep keyed on `_test.go:`. **A filter that
+can only see one kind of failure reports the other kind as success**, and silence is the most
+convincing form that report takes.
+
+The cheap discipline: on a falsification, read the last few lines unfiltered, and satisfy yourself
+the test **ran**. `go test` prints `ok` for a pass and `[build failed]` for a mutation that did not
+compile, and those are the two cases a filter is most likely to render identically.
+
+A mutation that does not compile is also telling you something: the thing you removed was load
+bearing enough that the surrounding code stopped making sense without it. Rewrite the mutation to
+keep the tree compiling — assign the zero value rather than deleting the line — and the
+falsification becomes possible again.
+
 **And the mirror of that: "it stayed red" is not enough either.** A fix that does not change the
 symptom has not been shown to be unnecessary; it has been shown not to be *sufficient*. Before
 concluding a change is inert, check whether the failing step **moved** — not just whether it still
