@@ -9589,7 +9589,7 @@ tier 1 on all three dialects without qualifying it.
 
 The event-routing design does not wait for this: D4 pins a binary collation on its own key
 slots explicitly, which is correct regardless of what is decided here.
-### 3.317 `cleat_fetch` fails in every real worker — nothing sets a fetcher — 🔴 **OPEN** (WS-2, 2026-09-07)
+### 3.317 `cleat_fetch` fails in every real worker — nothing sets a fetcher — 🟡 **OPTION 3 SHIPPED 2026-09-08, OPTIONS 1/2 STILL OPEN** (WS-2, 2026-09-07)
 
 Found triaging #878's ten unwired `EngineOption` constructors. Nine were test seams,
 embedder API, or alternate paths. This one is a gap.
@@ -9635,8 +9635,34 @@ call. **Whichever is chosen, the current state — documented as working, failin
 runtime with a message that reads like misconfiguration — is the one option that should
 not persist.**
 
+**Option 3 shipped 2026-09-08.** The state this item called "the one option that should not
+persist" no longer does; the product question is untouched.
+
+- `ABI.md` §2.48 now opens with an embedder-only caveat and the command that re-derives it.
+- The runtime error no longer reads `no fetcher configured`, which named a condition and
+  implied a fix that does not exist. It now says cleat ships no default `Fetcher`, that a
+  stock `cleat-worker` cannot serve the call, and that `engine.WithFetcher` is the only way
+  to supply one — so a reader stops looking for a flag.
+- **The caveat is interlocked rather than merely written.** `engineOptionsNotWired["WithFetcher"]`
+  in `engine/engine_option_reachability_test.go` fires on `wired && baselined`, and its reason
+  string now carries the instruction to delete the ABI.md caveat. Verified 2026-09-08 by wiring
+  `engine.WithFetcher(nil)` into `cmd/cleat-worker`:
+
+      WithFetcher IS called by production code now (cmd/cleat-worker/list_plugins.go),
+      but is still listed in engineOptionsNotWired.
+
+  A doc caveat with nothing asserting it is exactly what rots — see CLAUDE.md, *"prefer
+  converting a gap into a failing test over describing it here"*. So whoever implements
+  option 1 or 2 is told, by a red test, which two places now lie.
+
+**Still open, and unchanged by the above:** whether a stock worker should get a default
+fetcher (option 1) or a flag-gated one (option 2). That is a capability decision — it grants
+every workflow arbitrary outbound HTTP from the worker — and documenting present behaviour
+does not settle it.
+
 Re-derive:
 
     grep -n 'e.fetcher' engine/lifecycle.go
+    git ls-files '*.go' | xargs grep -n 'WithFetcher(' | grep -v _test.go
     git ls-files '*.go' | xargs grep -n 'WithFetcher(' | grep -v _test.go
     grep -c 'cleat_fetch' ABI.md engine/imports.go
