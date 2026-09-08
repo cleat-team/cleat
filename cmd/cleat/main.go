@@ -830,13 +830,35 @@ func runVetPython(dir string, jsonOut bool) int {
 			cmd.Env = append(os.Environ(), "PYTHONPATH="+sdkDir)
 		}
 
-		if err := cmd.Run(); err != nil {
-			// Exit code 1 = errors found (normal for vet). Only fail on >1.
-			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() > 1 {
+		runErr := cmd.Run()
+		if runErr != nil {
+			// EXIT CODE 1 IS OVERLOADED, and that is the whole reason for the
+			// stdout check below.
+			//
+			// cleat_sdk.vet exits 1 when it finds violations, which is normal
+			// and must not be reported as a failure. But python3 ALSO exits 1
+			// when the module cannot be imported at all -- and this branch used
+			// to treat that as "violations found", discard the traceback, and
+			// fall through to print an empty stdout. `cleat vet --lang python`
+			// then exited non-zero having said nothing on either stream, which
+			// left every caller to invent a reason for the failure. TestVetPython's
+			// message named one cause and hedged the rest, and two different
+			// machines with two different interpreters got the same sentence.
+			//
+			// The discriminator is stdout. A run that got as far as inspecting
+			// the file produces output -- JSON under --json, a report otherwise
+			// -- whether or not it found anything. Nothing on stdout means the
+			// module never ran.
+			exitErr, isExit := runErr.(*exec.ExitError)
+			toolingFailure := !isExit || exitErr.ExitCode() > 1 || stdout.Len() == 0
+			if toolingFailure {
 				if stderr.Len() > 0 {
 					fmt.Fprint(os.Stderr, stderr.String())
 				}
-				fmt.Fprintf(os.Stderr, "Python vet failed for %s: %v\n", pyFile, err)
+				fmt.Fprintf(os.Stderr, "Python vet failed for %s: %v\n", pyFile, runErr)
+				if hint := pythonVetFailureHint(stderr.String()); hint != "" {
+					fmt.Fprint(os.Stderr, hint)
+				}
 				exitCode = 1
 				continue
 			}

@@ -582,6 +582,23 @@ func TestVetPython(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not installed")
 	}
+	// An interpreter that is present but too old is the same KIND of condition
+	// as one that is absent, and the distinction that matters is whether the
+	// test can remedy it.
+	//
+	// The comment above records removing a false skip for an unset PYTHONPATH.
+	// That was right: the test can set PYTHONPATH, and does, so skipping for it
+	// was skipping for a condition of its own making. It cannot install a
+	// Python interpreter.
+	//
+	// Without this, every contributor on a machine where python3 is the system
+	// 3.9 sees a red test for a reason that is not about the code -- and a red
+	// that is routinely wrong is a red people learn to scroll past. CI pins
+	// 3.12, so nothing is lost there.
+	if v, ok := pythonAtLeast(pythonSDKMinVersion); !ok {
+		t.Skipf("python3 is %s; the Python SDK requires >= %s (PEP 604 unions are a "+
+			"TypeError at import time on older interpreters)", v, pythonSDKMinVersion)
+	}
 	if testing.Short() {
 		t.Skip("Skipping vet test in short mode")
 	}
