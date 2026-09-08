@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,6 +127,7 @@ func TestRoutingToADeprecatedVersionIsRefused(t *testing.T) {
 // returns one -- so without this, a rule once created could never be deleted.
 func TestRoutingRulesAreListableSoTheyCanBeRemoved(t *testing.T) {
 	ms := &mockStore{
+		listWorkflowDefsFn: deployedDef("checkout"),
 		getRoutingRulesFn: func(_ context.Context, name string) ([]engine.RoutingRule, error) {
 			return []engine.RoutingRule{
 				{ID: "rule-1", WorkflowName: name, TargetVersion: 2, Weight: 0.25},
@@ -152,8 +154,15 @@ func TestRoutingRulesAreListableSoTheyCanBeRemoved(t *testing.T) {
 
 // TestAnEmptyRoutingTableIsAnArrayNotNull — the normal state is no rules, and a
 // caller iterating the response should not have to special-case null.
+//
+// This is the CONTROL for cleat#942, not an incidental shape assertion. An
+// unknown name now answers 404, and the over-broad version of that change --
+// 404 whenever the collection is empty -- passes the unknown-name test and
+// breaks every caller polling a definition that simply has no routing yet.
+// The definition is deployed here so the empty result means "deployed, no
+// rules" and nothing else.
 func TestAnEmptyRoutingTableIsAnArrayNotNull(t *testing.T) {
-	api := newTestAPIServer(&mockStore{})
+	api := newTestAPIServer(&mockStore{listWorkflowDefsFn: deployedDef("checkout")})
 	rec := httptest.NewRecorder()
 	api.handleWorkflows(rec, httptest.NewRequest(http.MethodGet,
 		"/api/workflows/checkout/routing", nil))
@@ -181,5 +190,111 @@ func TestARoutingRuleCanBeRemovedByID(t *testing.T) {
 	}
 	if removed != "rule-1" {
 		t.Errorf("store was asked to remove %q, want rule-1", removed)
+	}
+}
+
+// ---- cleat#942: the name-scoped reads and the writes on the same path
+// disagreed about an unknown definition name ----
+
+// deployedDef makes ListWorkflowDefs answer as though one version of name has
+// been deployed, and nothing for any other name. The name is checked rather
+// than ignored, because the whole defect is a handler not checking it: a stub
+// that answers "exists" for every input would make defExists untestable and
+// every test below vacuous.
+func deployedDef(name string) func(context.Context, string) ([]engine.WorkflowDef, error) {
+	return func(_ context.Context, got string) ([]engine.WorkflowDef, error) {
+		if got != name {
+			return nil, nil
+		}
+		return []engine.WorkflowDef{{Name: name, Version: 1}}, nil
+	}
+}
+
+func TestListingRoutingForANameThatWasNeverDeployedIs404(t *testing.T) {
+	api := newTestAPIServer(&mockStore{listWorkflowDefsFn: deployedDef("checkout")})
+	rec := httptest.NewRecorder()
+	api.handleWorkflows(rec, httptest.NewRequest(http.MethodGet,
+		"/api/workflows/never-deployed/routing", nil))
+
+	if rec.Code != 404 {
+		t.Fatalf("listing routing for an undeployed name answered %d, want 404: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+func TestListingTagsForANameThatWasNeverDeployedIs404(t *testing.T) {
+	api := newTestAPIServer(&mockStore{listWorkflowDefsFn: deployedDef("checkout")})
+	rec := httptest.NewRecorder()
+	api.handleWorkflows(rec, httptest.NewRequest(http.MethodGet,
+		"/api/workflows/never-deployed/tags", nil))
+
+	if rec.Code != 404 {
+		t.Fatalf("listing tags for an undeployed name answered %d, want 404: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestARunIDInTheNamePositionIsNotFound is the case the samples-go port
+// tripped over, and the reason this is worth a status code rather than a
+// documentation note.
+//
+// /api/workflows/{id}/... and /api/workflows/{name}/... share a path segment
+// and are told apart only by the suffix. The two namespaces never overlap, so
+// a caller that builds the URL from the wrong variable is always wrong -- and
+// used to get 200 with an empty collection, byte-identical to a deployed
+// definition with no rules.
+func TestARunIDInTheNamePositionIsNotFound(t *testing.T) {
+	const runID = "00000000-0000-0000-0000-000000000000"
+	api := newTestAPIServer(&mockStore{listWorkflowDefsFn: deployedDef("checkout")})
+
+	for _, suffix := range []string{"routing", "tags"} {
+		rec := httptest.NewRecorder()
+		api.handleWorkflows(rec, httptest.NewRequest(http.MethodGet,
+			"/api/workflows/"+runID+"/"+suffix, nil))
+		if rec.Code != 404 {
+			t.Errorf("GET /%s/%s answered %d, want 404: %s",
+				runID, suffix, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestTheNameScopedReadsAndWritesAgreeOnAnUnknownName is the point of the
+// change: before it, the write refused the input the read accepted.
+//
+// The codes differ on purpose and that is not an inconsistency left behind.
+// The writers answer 409 because they are refusing a (name, version) pair --
+// ValidateVersion cannot distinguish "no such name" from "that version is
+// deprecated", and both are conflicts with deployment state. The readers name
+// no version, so the only thing they can be refusing is the name itself, and
+// 404 is what the rest of this API says for an identifier that resolves to
+// nothing. What matters is that neither answers success.
+func TestTheNameScopedReadsAndWritesAgreeOnAnUnknownName(t *testing.T) {
+	ms := &mockStore{
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn: func(_ context.Context, name string, _ int) (bool, error) {
+			return name == "checkout", nil
+		},
+	}
+	api := newTestAPIServer(ms)
+
+	cases := []struct {
+		method, path, body string
+	}{
+		{http.MethodGet, "/api/workflows/never-deployed/routing", ""},
+		{http.MethodGet, "/api/workflows/never-deployed/tags", ""},
+		{http.MethodPost, "/api/workflows/never-deployed/routing", `{"target_version":1}`},
+		{http.MethodPut, "/api/workflows/never-deployed/tags", `{"version":1,"tag":"stable"}`},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		var body io.Reader
+		if c.body != "" {
+			body = strings.NewReader(c.body)
+		}
+		api.handleWorkflows(rec, httptest.NewRequest(c.method, c.path, body))
+		if rec.Code < 400 {
+			t.Errorf("%s %s answered %d, want a refusal: %s",
+				c.method, c.path, rec.Code, rec.Body.String())
+		}
 	}
 }
