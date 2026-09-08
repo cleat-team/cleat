@@ -345,16 +345,40 @@ func collectRequirements(result *analyzer.AnalysisResult, info *UsageInfo) {
 
 // collectHostCallsCalls walks a function body and records which HostCalls
 // methods are called.
+// fieldImports is the FieldName -> imports lookup the usage scan runs on.
+//
+// Package-level so a test can exercise the real lookup rather than a rebuilt
+// copy of it: a test that constructs its own map and then checks the map
+// contains what it just put there cannot fail, which is what the first version
+// of TestEveryHostFunctionRowReachesTheUsageScan did.
+func fieldImports() map[string][]string {
+	m := make(map[string][]string, len(hostFunctions))
+	for _, hf := range hostFunctions {
+		m[hf.FieldName] = append(m[hf.FieldName], hf.ImportName)
+	}
+	return m
+}
+
 func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 	if fd.Ast.Body == nil || fd.Pkg.Info == nil {
 		return
 	}
 
-	// Build a map from field name to import name for quick lookup.
-	fieldToImport := make(map[string]string)
-	for _, hf := range hostFunctions {
-		fieldToImport[hf.FieldName] = hf.ImportName
-	}
+	// Field name to imports. A SLICE, because the relation is one-to-many and a
+	// map[string]string silently keeps only the last row.
+	//
+	// DurableCallWithOptions and DurableCallJSONWithOptions each have two rows
+	// -- {cleat_call, ...} and {cleat_call_retry, ...} -- and cleat_call is
+	// declared first, so the flattened map dropped it. A workflow whose only
+	// durable call was h.DurableCallWithOptions then linked no cleat_call and
+	// emitted no DurableCall field, and HostCallsImpl's own implementation
+	// delegates to h.DurableCall -- which was nil. The call failed at RUN time
+	// with "the HostCalls runtime was not initialized", a message that names
+	// the entry point and points away from the binding. cleat#1005.
+	//
+	// It was invisible in any workflow that also called h.DurableCall for its
+	// own reasons, because that marked the import used by another route.
+	fieldToImport := fieldImports()
 
 	ast.Inspect(fd.Ast.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -378,8 +402,10 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 			return true
 		}
 		fieldName := selExpr.Sel.Name
-		if importName, ok := fieldToImport[fieldName]; ok && importName != "" {
-			info.Used[importName] = true
+		for _, importName := range fieldToImport[fieldName] {
+			if importName != "" {
+				info.Used[importName] = true
+			}
 		}
 		// Wrappers implemented over another host call. See compositeRequires.
 		for _, importName := range compositeRequires[fieldName] {
