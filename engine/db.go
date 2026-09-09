@@ -501,6 +501,9 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
 	}
+	if completedAt.Valid {
+		wf.CompletedAt = &completedAt.Time
+	}
 	return &wf, tx.Commit()
 }
 
