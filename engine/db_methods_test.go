@@ -638,6 +638,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	heartbeatAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	completedAt := time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC)
+	startedAt := time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC)
 
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
@@ -652,6 +653,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 				heartbeatAt,                // heartbeat_at
 				nextWakeAt,                 // next_wake_at
 				completedAt,                // completed_at
+				startedAt,                  // started_at (cleat#1090)
 				`{"result":"ok"}`,          // result::text
 				"",                         // error_msg
 				nil,                        // error_code
@@ -680,6 +682,14 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 	// green while GetWorkflowByID silently returned "" for every chain.
 	if wf.ContinuedFrom != "wf-0" {
 		t.Errorf("ContinuedFrom = %q, want %q", wf.ContinuedFrom, "wf-0")
+	}
+	// cleat#1090, same idiom as the line above: supplied by the fake row, so
+	// it must reach the struct. A nil here is the scan dropping it, which is
+	// exactly how completed_at went unnoticed (cleat#1091).
+	if wf.StartedAt == nil {
+		t.Errorf("StartedAt is nil, want %v -- the fake row supplies it", startedAt)
+	} else if !wf.StartedAt.Equal(startedAt) {
+		t.Errorf("StartedAt = %v, want %v", *wf.StartedAt, startedAt)
 	}
 	// cleat#1008, and the same hazard: the fake row supplies 7, so a scan that
 	// dropped the column would return 0 -- which is also the honest answer for
@@ -1897,6 +1907,7 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 				nil,               // heartbeat_at (NULL)
 				nil,               // next_wake_at (NULL)
 				nil,               // completed_at (NULL)
+				nil,               // started_at (NULL: never claimed)
 				nil,               // result::text (NULL)
 				nil,               // error_msg (NULL)
 				nil,               // error_code (NULL)

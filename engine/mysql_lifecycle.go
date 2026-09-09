@@ -125,6 +125,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
+		    started_at = COALESCE(started_at, NOW(6)),
 		    generation = generation + 1
 		WHERE id IN (%s)
 	`, idClause), updateArgs...)
@@ -225,6 +226,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
+		    started_at = COALESCE(started_at, NOW(6)),
 		    generation = generation + 1
 		WHERE id IN (%s)
 	`, idClause), updateArgs...)
@@ -366,6 +368,7 @@ func (s *MySQLStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID s
 		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
+		    started_at = COALESCE(started_at, NOW(6)),
 		    generation = generation + 1
 		WHERE id IN (%s)
 	`, idClause), updateArgs...)

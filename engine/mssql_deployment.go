@@ -221,7 +221,7 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 // GetWorkflowByID returns a single workflow instance by ID.
 func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
 	var wf WorkflowInstance
-	var nextWakeAt, heartbeatAt, completedAt sql.NullTime
+	var nextWakeAt, heartbeatAt, completedAt, startedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
 	var result sql.NullString
 	var inputRaw string
@@ -230,7 +230,7 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op,
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, started_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
 		       COALESCE(trace_id, ''),
 		       -- CONVERT, not the raw column: go-mssqldb scans UNIQUEIDENTIFIER
@@ -241,7 +241,7 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       continued_from, reclaim_count
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
 		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -262,6 +262,9 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	}
 	if completedAt.Valid {
 		wf.CompletedAt = &completedAt.Time
+	}
+	if startedAt.Valid {
+		wf.StartedAt = &startedAt.Time
 	}
 	return &wf, nil
 }

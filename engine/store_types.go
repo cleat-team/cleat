@@ -59,9 +59,22 @@ type WorkflowInstance struct {
 	// (cleat#1091). CreatedAt above keeps its non-pointer shape: a row cannot
 	// exist without one.
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	Generation  int64      `json:"generation"`
-	Priority    int        `json:"priority"`
-	TraceID     string     `json:"trace_id,omitempty"`
+
+	// StartedAt is when a worker FIRST began executing this run, or nil for a
+	// run that has never been claimed -- and for every run claimed before
+	// migration 055, which is not backfilled because such a run has no knowable
+	// start (cleat#1090).
+	//
+	// First claim, not latest: the claim stamps it with COALESCE, so a reclaim
+	// does not move it. That makes started_at - created_at the queue latency and
+	// completed_at - started_at the elapsed execution, which are the two
+	// quantities completed_at - created_at could not be separated into.
+	//
+	// A pointer for the same reason as CompletedAt above.
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	Generation int64      `json:"generation"`
+	Priority   int        `json:"priority"`
+	TraceID    string     `json:"trace_id,omitempty"`
 
 	// PendingTerminalStatus is the outcome a two-phase terminal transition
 	// has already decided and has not yet applied: "" for the overwhelming

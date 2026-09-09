@@ -110,6 +110,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = @p1,
 		    heartbeat_at = SYSUTCDATETIME(),
+		    started_at = COALESCE(started_at, SYSUTCDATETIME()),
 		    generation = generation + 1
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
@@ -236,6 +237,7 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = @p1,
 		    heartbeat_at = SYSUTCDATETIME(),
+		    started_at = COALESCE(started_at, SYSUTCDATETIME()),
 		    generation = generation + 1
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
@@ -444,6 +446,7 @@ func (s *MSSQLStore) claimWorkflowsAcrossTenantsOnce(ctx context.Context, worker
 		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = @p1,
 		    heartbeat_at = SYSUTCDATETIME(),
+		    started_at = COALESCE(started_at, SYSUTCDATETIME()),
 		    generation = generation + 1
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
