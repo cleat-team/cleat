@@ -473,12 +473,12 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 		SELECT id, def_name, def_version, status, input,
 		       assigned_to, heartbeat_at, next_wake_at, completed_at, result #>> '{}', error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
-		       COALESCE(trace_id, ''), tenant_id, continued_from
+		       COALESCE(trace_id, ''), tenant_id, continued_from, reclaim_count
 		FROM workflow_instances WHERE id = $1
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
-		&wf.TraceID, &wf.TenantID, &continuedFrom)
+		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}

@@ -38,7 +38,8 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
-		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
 		WHERE status = 'running'
 		  AND heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME())
 		  AND tenant_id = @p2

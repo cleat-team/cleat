@@ -92,6 +92,34 @@ type WorkflowInstance struct {
 	// field that is populated on one path and empty on another is exactly the
 	// shape that reads as data.
 	ContinuedFrom string `json:"continued_from,omitempty"`
+
+	// ReclaimCount is how many times ReapStaleInstances has taken this
+	// workflow back from a worker that stopped heartbeating. cleat#1008.
+	//
+	// It is NOT a bound and nothing compares it to a limit. Every cause of
+	// repeated reclaim that survives the worker's own default limits is
+	// infrastructure rather than workload -- a runaway guest is interrupted by
+	// --wasm-instance-timeout, --wasm-wall-clock-ceiling or --wasm-memory-max-mb
+	// and becomes a terminal workflow failure, not a worker death -- so what
+	// reaches this counter is host OOM, node failure, deploy and SIGKILL.
+	// Dead-lettering past a threshold would turn a node being redeployed into
+	// permanent failure of a workflow that did nothing wrong. The count is
+	// recorded so an operator can SEE a reclaim loop; whether anything should
+	// act on it is a separate decision that now has something to read.
+	//
+	// Generation cannot answer this question, which is why the column exists:
+	// it counts claims, and the ordinary suspend/resume path drives it. A
+	// workflow that completed successfully without ever being reclaimed has
+	// been measured at generation 12. See
+	// engine/generation_is_not_a_reclaim_count_test.go.
+	//
+	// POPULATED ON THE READ PATH ONLY, for the same reason as ContinuedFrom
+	// above: GetWorkflowByID sets it and nothing else does. The claim queries
+	// share one scanner and the dispatch loop has no use for the value, so
+	// widening the hottest query in the system to carry it would buy nothing.
+	// So 0 means either "never reclaimed" OR "you did not get this from
+	// GetWorkflowByID".
+	ReclaimCount int64 `json:"reclaim_count"`
 }
 
 // Schedule is a row from workflow_schedules.

@@ -1,0 +1,52 @@
+-- cleat migration 051 (postgres): a reclaim is counted on the row it happened to
+--
+-- cleat#1008. A workflow whose worker dies mid-segment is reclaimed by
+-- ReapStaleInstances and runs again, and nothing has ever recorded that it
+-- happened. Fleet-wide the reaper is visible -- cleat_reaper_instances_claimed_total
+-- counts every row it takes -- but that counter cannot be attributed: a
+-- thousand reclaims of one wedged workflow and one reclaim each of a thousand
+-- healthy ones produce the same number. An operator asking "has THIS workflow
+-- been reclaimed twenty times" has had no way to ask it.
+--
+-- Why not `generation`, which already increments on reclaim. Because it also
+-- increments on every ordinary claim: ClaimWorkflows, ClaimStickyWorkflows,
+-- enforceParentClosePolicy, ReapStaleInstances, TerminateWorkflow and
+-- AdminReReplay all bump it, and the first two are the suspend/resume path
+-- every workflow takes. Measured on a database from a full port-suite run:
+--
+--     status         min gen   max gen   mean   rows
+--     done                 1        12    1.8    365
+--     dead_lettered        1         1    1.0      8
+--     terminated           1         2    1.5      4
+--     failed               2         2    2.0      2
+--
+-- 365 workflows that completed successfully, none of them ever reclaimed, and
+-- one of them at generation 12. A healthy workflow at 12 and a twice-reclaimed
+-- one at 3 are indistinguishable, so the reclaim count is not recoverable from
+-- that column after the fact -- not merely inconvenient to read off it.
+-- engine/generation_is_not_a_reclaim_count_test.go pins that property.
+--
+-- NOT A BOUND, deliberately, and this column must not become one without a
+-- separate decision. Every cause of repeated reclaim that survives the worker's
+-- own default limits is infrastructure rather than workload: a runaway guest is
+-- interrupted by --wasm-instance-timeout (30s), --wasm-wall-clock-ceiling (5m)
+-- or --wasm-memory-max-mb (32) and becomes a terminal workflow FAILURE, not a
+-- worker death. What is left is host OOM, node failure, deploy and SIGKILL. A
+-- threshold that dead-letters past N reclaims would turn a node being
+-- redeployed into permanent failure of a workflow that did nothing wrong and
+-- that no human can fix by looking at it. So the count is recorded and
+-- reported; whether anything should ever act on it stays open, and now has
+-- something to read if it is answered yes.
+--
+-- Nothing is backfilled. Rows written before this migration start at 0 with
+-- whatever reclaim history they already have unrecorded; that population is
+-- finite and stops growing here.
+
+ALTER TABLE workflow_instances
+    ADD COLUMN IF NOT EXISTS reclaim_count BIGINT NOT NULL DEFAULT 0;
+
+-- No index. Nothing in the engine queries on this column -- it is written by
+-- the reaper and read back by id with the rest of the row -- and an index on a
+-- value that is 0 for the overwhelming majority of rows would earn nothing.
+-- The operator query it would serve ("which workflows have been reclaimed more
+-- than N times") does not exist yet; add the index with the query, not before.

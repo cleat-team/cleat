@@ -92,6 +92,7 @@ CREATE TABLE workflow_instances (
     sticky_worker_id TEXT,
     trace_id TEXT,
     continued_from TEXT,
+    reclaim_count BIGINT NOT NULL DEFAULT 0,
     FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
 );
 ```
@@ -116,6 +117,7 @@ CREATE TABLE workflow_instances (
 | `sticky_worker_id` | TEXT | Preferred worker for cache locality |
 | `trace_id` | TEXT | OpenTelemetry trace ID for observability |
 | `continued_from` | TEXT | Exposed as `continued_from` on the API's workflow object, and followed by `GET /api/workflows/:id/terminal`. The run that continued into this one. `NULL` unless `ContinueAsNew` created this row, and `NULL` on every row written before migration 045. **Not** `parent_workflow_id`: a continuation is not a child, and `GetChildCount` and `enforceParentClosePolicy` both key off that column — see cleat#826 and the migration header. |
+| `reclaim_count` | BIGINT | Exposed as `reclaim_count` on the API's workflow object. How many times `ReapStaleInstances` has taken this workflow back from a worker that stopped heartbeating. **Not a bound** — nothing compares it to a limit, deliberately: what reaches it is infrastructure (host OOM, node failure, deploy, SIGKILL) rather than workload, since a runaway guest is interrupted by the worker's own limits and fails terminally instead. **Not `generation`**, which counts *claims* — the ordinary suspend/resume path drives that column, and a workflow that completed successfully without ever being reclaimed has been measured at generation 12. `0` on every row written before migration 051; nothing is backfilled. See cleat#1008. |
 
 **Indexes**:
 
