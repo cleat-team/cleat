@@ -117,7 +117,17 @@ jobs:
       #
       # Pure text, no Go needed, so it belongs here rather than in a test job.
       - name: Migration version-number guard
-        run: python3 scripts/check_migration_numbers.py
+        # --self-test FIRST, and it is not ceremony. On a clean tree with no
+        # exemptions, "no new collisions" is the same output a check that does
+        # nothing would print, so passing proves only that the guard did not
+        # false-alarm. The self-test builds a doctored tree and requires the
+        # guard to REPORT a duplicate, pass a clean fixture, and ignore an
+        # untracked worktree copy -- the three properties it would otherwise
+        # only have claimed in a PR description, about a tree that no longer
+        # exists.
+        run: |
+          python3 scripts/check_migration_numbers.py --self-test
+          python3 scripts/check_migration_numbers.py
 
       # Required-context guard. Distinct from the package-coverage guard above,
       # which checks the test-go matrix against the FILESYSTEM: this one checks

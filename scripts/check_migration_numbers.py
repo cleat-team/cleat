@@ -106,7 +106,80 @@ def collisions(migrations: Path) -> dict[str, dict[str, list[str]]]:
     return found
 
 
+def self_test() -> int:
+    """Prove the guard can still say NO.
+
+    Necessary because of what this check looks like when it passes. With
+    KNOWN_COLLISIONS empty -- the intended end state once #1073 lands -- the
+    "an entry stopped colliding" direction has no entries to exercise, so the
+    only live direction is "a new collision appeared". And on a clean tree,
+    `no new collisions` is the same output a check that does nothing would
+    print. Passing proves the guard did not false-alarm; it does not prove the
+    guard is capable of firing.
+
+    Running this in CI rather than by hand during development is the whole
+    point: a known-positive that lives in a PR description is a claim about a
+    tree that no longer exists.
+    """
+    import shutil
+    import tempfile
+
+    failures = []
+
+    def build(tmp: Path) -> Path:
+        """A minimal two-dialect migrations tree, tracked by git."""
+        mig = tmp / "migrations"
+        for dialect in ("postgres", "mysql"):
+            (mig / dialect).mkdir(parents=True)
+            for name in ("001_first.sql", "002_second.sql"):
+                (mig / dialect / name).write_text("-- fixture\n")
+        subprocess.run(["git", "init", "-q"], cwd=mig, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=mig, check=True,
+                       capture_output=True)
+        return mig
+
+    # 1. A clean fixture must pass. Without this, a guard that reported
+    #    everything as a collision would satisfy case 2 and look correct.
+    with tempfile.TemporaryDirectory() as d:
+        mig = build(Path(d))
+        if collisions(mig):
+            failures.append("a clean fixture reported collisions")
+
+    # 2. THE ONE THAT MATTERS: a duplicate prefix must be reported.
+    with tempfile.TemporaryDirectory() as d:
+        mig = build(Path(d))
+        shutil.copy(mig / "postgres" / "001_first.sql",
+                    mig / "postgres" / "001_duplicate.sql")
+        subprocess.run(["git", "add", "-A"], cwd=mig, check=True,
+                       capture_output=True)
+        found = collisions(mig)
+        names = found.get("postgres", {}).get("001", [])
+        if sorted(names) != ["001_duplicate.sql", "001_first.sql"]:
+            failures.append(f"a duplicate prefix was not reported: {found!r}")
+
+    # 3. An untracked copy must be ignored -- the git-ls-files property. A
+    #    filesystem walk would report this as a collision.
+    with tempfile.TemporaryDirectory() as d:
+        mig = build(Path(d))
+        scratch = mig / ".claude" / "worktrees" / "other" / "postgres"
+        scratch.mkdir(parents=True)
+        shutil.copy(mig / "postgres" / "001_first.sql", scratch / "001_other.sql")
+        if collisions(mig):
+            failures.append("an untracked worktree copy was counted")
+
+    for f in failures:
+        print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
+    if failures:
+        return 1
+    print("self-test: clean tree passes, a duplicate is reported, "
+          "an untracked copy is ignored")
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv[1:]:
+        return self_test()
+
     root = repo_root()
     migrations = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "migrations"
 
