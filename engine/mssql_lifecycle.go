@@ -1134,11 +1134,19 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 			// Key was inserted concurrently — rollback and return the existing one.
 			tx.Rollback()
 			err := s.db.QueryRowContext(ctx,
-				`SELECT workflow_id FROM idempotency_keys
+				`SELECT workflow_id, def_name FROM idempotency_keys
 				 WHERE key_hash = @p1 AND tenant_id = @p2 AND expires_at > SYSUTCDATETIME()`,
-				keyHash[:], tenantID).Scan(&existingWfID)
+				keyHash[:], tenantID).Scan(&existingWfID, &existingDef)
 			if err != nil {
 				return "", false, err
+			}
+			// The concurrent winner must also be for THIS definition. Without
+			// this the race path returns the other workflow's id even though
+			// the lookup above refuses it -- the same defect, reachable only
+			// under contention, which is where it would be hardest to see.
+			if existingDef.Valid && existingDef.String != defName {
+				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
+					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
 			}
 			return existingWfID, true, nil
 		}

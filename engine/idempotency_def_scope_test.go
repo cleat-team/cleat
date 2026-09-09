@@ -35,7 +35,7 @@ func TestEveryDialectRefusesAnIdempotencyKeyReusedForAnotherDefinition(t *testin
 		"mssql_lifecycle.go", // SQL Server
 	} {
 		t.Run(f, func(t *testing.T) {
-			src := readSourceForTest(t, f)
+			src := stripGoComments(readSourceForTest(t, f))
 
 			if !strings.Contains(src, "ErrIdempotencyKeyDefMismatch") {
 				t.Errorf("%s does not refuse a definition mismatch.\n\n"+
@@ -44,11 +44,25 @@ func TestEveryDialectRefusesAnIdempotencyKeyReusedForAnotherDefinition(t *testin
 					"store needs the check; one left out is cleat#1012's shape.", f)
 			}
 
-			if !regexp.MustCompile(`SELECT workflow_id, def_name FROM idempotency_keys`).MatchString(src) {
-				t.Errorf("%s does not SELECT def_name on the idempotency lookup.\n\n"+
-					"Without it the mismatch check above has nothing to compare and can "+
-					"never fire, so the store passes the refusal assertion while behaving "+
-					"exactly as it did before the fix.", f)
+			// BOTH paths, counted rather than matched once. There are two
+			// lookups per store -- the ordinary one, and the re-SELECT after
+			// ON CONFLICT DO NOTHING when another request won the race. CI
+			// caught the first version of cleat#1047 covering only the first:
+			// the race path returned the other workflow's id even though the
+			// ordinary lookup refused it, which is the same defect reachable
+			// only under contention, where it is hardest to see.
+			sel := len(regexp.MustCompile(`SELECT workflow_id, def_name FROM idempotency_keys`).FindAllString(src, -1))
+			bare := len(regexp.MustCompile(`SELECT workflow_id FROM idempotency_keys`).FindAllString(src, -1))
+			if sel < 2 || bare != 0 {
+				t.Errorf("%s reads def_name on %d idempotency lookup(s) and still has %d "+
+					"that do not.\n\nBoth the ordinary lookup and the post-collision "+
+					"re-SELECT must read it. A path that does not cannot see a mismatch, "+
+					"so it passes the refusal assertion while behaving exactly as before.",
+					f, sel, bare)
+			}
+			if n := strings.Count(src, "ErrIdempotencyKeyDefMismatch"); n < 2 {
+				t.Errorf("%s refuses on %d path(s), want both the ordinary lookup and the "+
+					"post-collision re-SELECT.", f, n)
 			}
 
 			if !regexp.MustCompile(`INTO idempotency_keys \(key_hash, workflow_id, expires_at, tenant_id, def_name\)`).MatchString(src) {
@@ -86,4 +100,75 @@ func readSourceForTest(t *testing.T, name string) string {
 			"means this test is no longer checking what it names", name, err)
 	}
 	return string(b)
+}
+
+// stripGoComments removes // and /* */ comments so the assertions above match
+// code rather than prose.
+//
+// Demonstrated rather than assumed to be needed. Take mssql_lifecycle.go,
+// remove the check the way a refactor would, and leave the note this codebase
+// would naturally write:
+//
+//	// Historical note (cleat#1047): this store used to run
+//	//   SELECT workflow_id, def_name FROM idempotency_keys
+//	// and return ErrIdempotencyKeyDefMismatch on a mismatch.
+//
+// Both assertions then pass on a store that has stopped doing the thing --
+// reached by an ordinary act, and the surviving comment is exactly the one
+// someone writes WHILE removing the code.
+//
+// This is the trap CLAUDE.md records twice: a grep that a retraction satisfies,
+// and a scan that read "there is no import_cleat_register_query_handler here"
+// as evidence the binding existed. A source assertion is still the right tool
+// here -- the alternative needs three databases -- which is precisely why it
+// has to read code and not commentary.
+//
+// String literals are left alone: the SQL this file looks for lives in raw
+// string literals, and stripping those would remove the subject.
+func stripGoComments(src string) string {
+	var out strings.Builder
+	inBlock, inLine, inRaw, inStr := false, false, false, false
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		switch {
+		case inLine:
+			if c == '\n' {
+				inLine = false
+				out.WriteByte(c)
+			}
+		case inBlock:
+			if c == '*' && i+1 < len(src) && src[i+1] == '/' {
+				inBlock = false
+				i++
+			}
+		case inRaw:
+			out.WriteByte(c)
+			if c == '`' {
+				inRaw = false
+			}
+		case inStr:
+			out.WriteByte(c)
+			if c == '\\' && i+1 < len(src) {
+				i++
+				out.WriteByte(src[i])
+			} else if c == '"' {
+				inStr = false
+			}
+		case c == '`':
+			inRaw = true
+			out.WriteByte(c)
+		case c == '"':
+			inStr = true
+			out.WriteByte(c)
+		case c == '/' && i+1 < len(src) && src[i+1] == '/':
+			inLine = true
+			i++
+		case c == '/' && i+1 < len(src) && src[i+1] == '*':
+			inBlock = true
+			i++
+		default:
+			out.WriteByte(c)
+		}
+	}
+	return out.String()
 }
