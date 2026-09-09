@@ -106,6 +106,19 @@ jobs:
       - name: CI package-coverage guard
         run: scripts/check-ci-package-coverage.sh
 
+      # Two migrations sharing a version number are ONE row in
+      # schema_migrations, because migration/runner.go takes the version from
+      # the filename prefix. Both apply to a fresh database -- so CI is green
+      # and stays green -- but a database that already recorded that version
+      # never receives the other file, and the failures look exactly like the
+      # stale-test-database case CLAUDE.md tells you to expect after a
+      # migration lands. Three landed at once across three dialects (cleat#1071)
+      # because everyone numbers against the develop they can see.
+      #
+      # Pure text, no Go needed, so it belongs here rather than in a test job.
+      - name: Migration version-number guard
+        run: python3 scripts/check_migration_numbers.py
+
       # Required-context guard. Distinct from the package-coverage guard above,
       # which checks the test-go matrix against the FILESYSTEM: this one checks
       # the required-status-context list against tiers.yaml, so it catches a
