@@ -237,21 +237,21 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildJava(pattern, outDir, channel)
+		runBuildJava(pattern, outDir, channel, workflowVersion)
 		return
 	}
 	if target == "assemblyscript" {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildAssemblyScript(pattern, outDir, channel)
+		runBuildAssemblyScript(pattern, outDir, channel, workflowVersion)
 		return
 	}
 	if target == "rust" {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildRust(pattern, outDir, channel)
+		runBuildRust(pattern, outDir, channel, workflowVersion)
 		return
 	}
 	if target == wasm.PythonTarget {

@@ -1358,7 +1358,7 @@ func TestRunBuild_JavaTarget_NoBuildFile(t *testing.T) {
 	if os.Getenv("TEST_BUILD_JAVA") == "1" {
 		// Empty dir — no build.gradle.kts or build.gradle
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildJava(dir, ".", "latest")
+		runBuildJava(dir, ".", "latest", 1)
 		return
 	}
 	emptyDir := t.TempDir()
@@ -1379,7 +1379,7 @@ func TestRunBuild_JavaTarget_NoBuildFile(t *testing.T) {
 func TestRunBuild_RustTarget_NoCargoToml(t *testing.T) {
 	if os.Getenv("TEST_BUILD_RUST") == "1" {
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildRust(dir, ".", "latest")
+		runBuildRust(dir, ".", "latest", 1)
 		return
 	}
 	emptyDir := t.TempDir()
@@ -1400,7 +1400,7 @@ func TestRunBuild_RustTarget_NoCargoToml(t *testing.T) {
 func TestRunBuild_ASTarget_NoPackageJSON(t *testing.T) {
 	if os.Getenv("TEST_BUILD_AS") == "1" {
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildAssemblyScript(dir, ".", "latest")
+		runBuildAssemblyScript(dir, ".", "latest", 1)
 		return
 	}
 	emptyDir := t.TempDir()

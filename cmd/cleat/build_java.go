@@ -11,7 +11,7 @@ import (
 )
 
 // runBuildJava compiles a Java workflow to WASM using Gradle and the TeaVM plugin.
-func runBuildJava(pattern, outDir, channel string) {
+func runBuildJava(pattern, outDir, channel string, workflowVersion int) {
 	javaDir := pattern
 	if javaDir == "" {
 		javaDir = "."
@@ -90,15 +90,18 @@ func runBuildJava(pattern, outDir, channel string) {
 		os.Exit(1)
 	}
 
-	// Inject cleat.metadata so the engine can detect the source language.
-	if enriched, metaErr := wasm.WriteMetadata(input, &wasm.Metadata{Language: "java"}); metaErr == nil {
-		input = enriched
-	}
-
-	// Use workflow name from directory name.
+	// Use workflow name from directory name. Derived BEFORE the metadata is
+	// written, because the metadata needs it -- see nonGoMetadata.
 	absDir, _ := filepath.Abs(javaDir)
 	name := filepath.Base(absDir)
 	name = strings.ReplaceAll(name, "-", "_")
+
+	// Inject cleat.metadata. Must pass wasm.Metadata.Validate(), which
+	// `cleat deploy` runs and exits 1 on; see cleat#1077.
+	if enriched, metaErr := wasm.WriteMetadata(input,
+		nonGoMetadata("java", name, workflowVersion)); metaErr == nil {
+		input = enriched
+	}
 
 	dstWasm := filepath.Join(outDir, name+".wasm")
 	if err := os.WriteFile(dstWasm, input, 0644); err != nil {
