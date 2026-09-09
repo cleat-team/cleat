@@ -101,7 +101,7 @@ jobs:
       # .goreleaser.yml, shipping workers that exited 1 before reading a flag --
       # survived precisely because nothing ever executed the artifact.
       - name: Set up QEMU for cross-architecture verification
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
