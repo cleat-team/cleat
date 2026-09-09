@@ -361,19 +361,22 @@ var sdkUnreachedBaseline = map[string][]string{
 	//                               interception is in the ServiceCaller, above the
 	//                               registry.
 	//
-	// REAL gaps -- no native or composed substitute:
-	//   cleat_get_scope, cleat_set_scope   workflow scope; nothing else exposes it.
-	//                               Confirmed by compilation in IMPROVEMENT-PLAN
-	//                               3.223, not just by these tables: a Go workflow
-	//                               whose body is h.SetScope(...) produces a binary
-	//                               with cleat_set_scope absent entirely. Go is the
-	//                               only SDK without a binding.
+	// cleat_get_scope / cleat_set_scope were the LAST real gap and are now
+	// bound (cleat#984, 2026-09-09). They are gone from this list rather than
+	// re-labelled, which is what shrink-only means. Settled the same way
+	// IMPROVEMENT-PLAN 3.223 established the gap -- by building a Go workflow
+	// and reading the binary, not by consulting the tables a fix edits:
+	// TestACompiledGoWorkflowImportsTheScopeCalls compiles the fixture and
+	// finds both imports, and
+	// TestACompiledGoWorkflowActuallyReachesTheHostForScope asserts the
+	// EventTypeScopeAcquired records only engine/scope.go can write.
+	//
+	// Go therefore has NO real gap left; the four below are all reachable
+	// another way.
 	"go (wasm/usage.go hostFunctions)": {
 		"cleat_fetch",
-		"cleat_get_scope",
 		"cleat_json_parse",
 		"cleat_json_stringify",
-		"cleat_set_scope",
 		"cleat_uuid",
 	},
 
