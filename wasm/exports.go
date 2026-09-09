@@ -715,18 +715,13 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 					fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
 					fmt.Fprintf(buf, "\t\tif __raw := extractJSONRaw(string(argsJSON), %q); __raw != \"\" {\n", f.JSONTag)
 					fmt.Fprintf(buf, "\t\t\tif err := json.Unmarshal([]byte(__raw), &%s); err != nil {\n", f.GoName)
-					fmt.Fprintf(buf, "\t\t\t\treturn []byte(`{\"error\":` + encodeJSONString(\"unmarshal %s: \" + err.Error()) + `}`)\n", f.JSONTag)
+					emitDispatchBindFailure(buf, "\t\t\t\t", f.JSONTag)
 					buf.WriteString("\t\t\t}\n\t\t}\n")
 				default:
 					// Complex type: use json.Unmarshal.
 					fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
 					fmt.Fprintf(buf, "\t\tif err := json.Unmarshal([]byte(extractJSONRaw(string(argsJSON), %q)), &%s); err != nil {\n", f.JSONTag, f.GoName)
-					// encodeJSONString, not concatenation: a json.Unmarshal
-					// error routinely contains quotes (`invalid character '"'`),
-					// and an unescaped one here makes the result unstorable --
-					// FinalizeWorkflowSegment then replaces it with {} and the
-					// reason the call failed is gone. Same class as 3.22.
-					fmt.Fprintf(buf, "\t\t\treturn []byte(`{\"error\":` + encodeJSONString(\"unmarshal %s: \" + err.Error()) + `}`)\n", f.JSONTag)
+					emitDispatchBindFailure(buf, "\t\t\t", f.JSONTag)
 					buf.WriteString("\t\t}\n")
 				}
 			}
@@ -870,3 +865,38 @@ func __cleat_run_deferred() (ran int64) {
 	return ran
 }
 `
+
+// emitDispatchBindFailure writes the error exit shared by every
+// parameter-binding branch in cleatDispatch.
+//
+// It is one function because the two branches drifted apart the moment they
+// were two: cleat#1057 split the binding switch to give ints back their
+// absent-binds-zero behaviour, and a fix applied to the `default` arm alone
+// silently left the `int` arm reporting success. The regression test caught
+// that, which is the only reason this is a helper rather than a second copy
+// waiting to go stale.
+//
+// Two things happen here and BOTH are load-bearing:
+//
+//   - cleat_complete(1, msg) reports the failure on the ERROR channel. Without
+//     it the generated main() re-reports the returned body with
+//     cleat_complete(0, ...), and the host records status='done' with the error
+//     text sitting in the result column as though it were the workflow's
+//     answer. That is IMPROVEMENT-PLAN 3.22, in the branch neither 3.22 nor
+//     3.70 reached: a bind failure happens BEFORE the entry point runs, so
+//     there is no returned error to prefer and no panic to recover, and both
+//     earlier fixes worked on machinery this path never reaches.
+//
+//   - encodeJSONString, not concatenation: a json.Unmarshal error routinely
+//     contains quotes (`invalid character '"'`), and an unescaped one makes the
+//     result unstorable -- FinalizeWorkflowSegment then replaces it with {} and
+//     the reason the call failed is gone.
+//
+// The message is encoded once and used for both, so the error channel and the
+// returned body can never disagree about what went wrong.
+func emitDispatchBindFailure(buf *bytes.Buffer, indent, jsonTag string) {
+	fmt.Fprintf(buf, "%s__bindMsg := encodeJSONString(\"unmarshal %s: \" + err.Error())\n", indent, jsonTag)
+	fmt.Fprintf(buf, "%s__bindPtr, __bindLen := stringPtr(__bindMsg)\n", indent)
+	fmt.Fprintf(buf, "%scleatCompleteImport(1, __bindPtr, __bindLen)\n", indent)
+	fmt.Fprintf(buf, "%sreturn []byte(`{\"error\":` + __bindMsg + `}`)\n", indent)
+}
