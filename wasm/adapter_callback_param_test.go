@@ -40,7 +40,7 @@ import (
 //
 // which mentions onProgress while handing it to the one function known to drop
 // it. The mention-test called that clean and, because the same commit had just
-// widened the scan to cover hostWrapperDefs, it was clean ON THE COVERED LIST
+// widened the scan to cover a second table, it was clean ON THE COVERED LIST
 // -- worse than being out of scope, because the list now asserted it had been
 // checked. Found by WS-3 reading the merged guard, not by the guard.
 //
@@ -80,10 +80,13 @@ type callbackSite struct {
 	body   string
 }
 
-// qualified is the key this analysis is indexed by. It carries the map name
-// because adapterDefs and hostWrapperDefs are separate namespaces that overlap:
-// DurableSleep, Now and AcquireLock are each defined in both, with different
-// parameters. Keyed by bare name, two different functions' parameters would
+// qualified is the key this analysis is indexed by. It carries the map name,
+// which is now redundant -- adapterDefs is the only table since cleat#1003 --
+// and is kept because it costs nothing and the synthetic sites in
+// TestTheGuardRefusesAnAmbiguousForward still rely on two origins existing.
+// It mattered when there were two overlapping namespaces: DurableSleep, Now
+// and AcquireLock were each defined in both with different parameters, and
+// keyed by bare name two different functions' parameters would
 // merge into one entry, and a forward would resolve to whichever of the two Go
 // happened to iterate last -- a guard whose answer changes between runs.
 func (s callbackSite) qualified(param string) string {
@@ -92,17 +95,18 @@ func (s callbackSite) qualified(param string) string {
 
 func generatedCallbackSites(t *testing.T) []callbackSite {
 	t.Helper()
-	// BOTH maps. adapterDefs holds the closures that call an import directly;
-	// hostWrapperDefs holds the typed wrappers that call those. They are
-	// separate types with separate body fields, and scanning only the first
-	// would have left DurableCallTypedWithHeartbeat unchecked.
+	// adapterDefs is now the only table a build reads. There was a second,
+	// hostWrapperDefs, and this scan covered both -- deliberately, because
+	// scanning only adapterDefs would have left DurableCallTypedWithHeartbeat
+	// unchecked. That table and its emitters were deleted (cleat#1003) once it
+	// was established that nothing generated a host_ call, the transformer did
+	// not rewrite to one, and OutputFiles had no field such a file could be
+	// written into. The wrapper-only entries went with it, so there is nothing
+	// left for a second loop to find.
 	var sites []callbackSite
 	for name, def := range adapterDefs {
 		sites = append(sites, callbackSite{"adapterDefs", name, def.Params,
 			strings.Join(append(append([]string{}, def.PreStmts...), def.ResultStmts...), "\n")})
-	}
-	for name, def := range hostWrapperDefs {
-		sites = append(sites, callbackSite{"hostWrapperDefs", name, def.Params, strings.Join(def.Body, "\n")})
 	}
 	sort.Slice(sites, func(i, j int) bool {
 		if sites[i].name != sites[j].name {
@@ -165,8 +169,8 @@ func reachedCallbackParams(sites []callbackSite) (map[string]bool, error) {
 			return candidates[0], true
 		default:
 			if ambiguous == nil {
-				ambiguous = fmt.Errorf("a generated body calls %q, which is defined in both "+
-					"adapterDefs and hostWrapperDefs with different parameters. This analysis "+
+				ambiguous = fmt.Errorf("a generated body calls %q, which is defined in two "+
+					"tables with different parameters. This analysis "+
 					"cannot tell which one the call means, and guessing fails toward "+
 					"\"reached\". Give the call the \"host_\" prefix if it means the adapter, "+
 					"or qualify it here.", callee)
@@ -323,12 +327,6 @@ func TestTheCallbackExemptionsNameRealAdapters(t *testing.T) {
 		var params []adapterParam
 		if def, ok := adapterDefs[fn]; ok {
 			params = def.Params
-		} else if def, ok := hostWrapperDefs[fn]; ok {
-			params = def.Params
-		} else {
-			t.Errorf("callbackParamsNotPassedToTheHost names %q, which is in neither "+
-				"adapterDefs nor hostWrapperDefs. Delete the entry.", key)
-			continue
 		}
 		found := false
 		for _, p := range params {
@@ -394,64 +392,15 @@ func TestTheGuardSeesThroughOneHopOfForwarding(t *testing.T) {
 	}
 }
 
-// TestTheTwoMapsDoNotShareANameWithACallback protects the assumption the
-// exemption list rests on: that "Function.parameter" names one parameter.
-//
-// adapterDefs and hostWrapperDefs are separate namespaces and they DO overlap
-// -- as of 2026-09-07, DurableSleep, Now and AcquireLock are each defined in
-// both, with different parameters (43 adapters, 12 wrappers, 3 shared names).
-// So a blanket "no name appears twice" assertion would fail on a clean tree and
-// is the wrong check. What matters is narrower: the analysis keys on the map as
-// well as the name and is unaffected, but an EXEMPTION written as
-// "AcquireLock.onProgress" would be ambiguous between two real functions.
-//
-// None of the three carries a function-typed parameter today, which is why
-// #869's bare exemption keys are safe. This fails the moment that stops being
-// true, rather than silently exempting whichever of the two Go iterated last.
-//
-// Raised by WS-3 against #869: a collision makes a forward resolve to SOMETHING
-// rather than nothing, and this analysis reads "forwarded somewhere unknown" as
-// reached -- so the failure direction is the flattering one.
-//
-// One note for whoever checks a guard like this out of a pull request and runs
-// it, because it is silent when it goes wrong. A test file checked out from a
-// PR still reads adapter_metadata.go from wherever the working tree's HEAD
-// happens to be. Reviewing #869 that way produced "37 adapters, 3 collisions"
-// against a tree six adapters behind, and reported it as a property of the PR.
-// The conclusion survived -- same three names, still none func-typed -- but by
-// luck: any of the six unseen adapters could have carried a fourth collision.
-// The tell was two counts of the same set in the same conversation, 49 and 55,
-// read as two numbers rather than as a contradiction. Run a guard against the
-// tree it is guarding.
-func TestTheTwoMapsDoNotShareANameWithACallback(t *testing.T) {
-	hasCallback := func(params []adapterParam) bool {
-		for _, p := range params {
-			if strings.HasPrefix(p.Type, "func(") {
-				return true
-			}
-		}
-		return false
-	}
-	for name, adapter := range adapterDefs {
-		wrapper, shared := hostWrapperDefs[name]
-		if !shared {
-			continue
-		}
-		if hasCallback(adapter.Params) || hasCallback(wrapper.Params) {
-			t.Errorf("%q is defined in BOTH adapterDefs and hostWrapperDefs and now has a "+
-				"function-typed parameter.\n\nThe exemption list is keyed \"Function.parameter\", "+
-				"which no longer names one parameter for %q. Qualify the affected exemption key "+
-				"with its map, the way the analysis already keys itself.", name, name)
-		}
-	}
-}
-
 // TestTheGuardRefusesAnAmbiguousForward is the known-positive for resolve()'s
 // ambiguity branch, which no real body exercises today.
 //
-// adapterDefs and hostWrapperDefs share three names -- AcquireLock, DurableSleep
-// and Now -- with DIFFERENT parameter lists on each side. Nothing currently
-// forwards a callback into one of them, so the branch that refuses to guess has
+// This branch guarded a real overlap until cleat#1003: adapterDefs and
+// hostWrapperDefs shared AcquireLock, DurableSleep and Now with DIFFERENT
+// parameter lists on each side. One table remains, so the overlap cannot occur
+// today and the synthetic sites below are the only thing exercising it. Kept
+// rather than deleted because a second table is a plausible future and the
+// branch that refuses to guess has
 // never run. A guard path that has never executed is a claim, not a check, and
 // this file's whole subject is the difference.
 //
@@ -474,8 +423,8 @@ func TestTheGuardRefusesAnAmbiguousForward(t *testing.T) {
 	// is what makes a guess actively wrong rather than merely unprincipled.
 	sites := []callbackSite{
 		{"adapterDefs", "Shared", []adapterParam{{"a", "string"}, sink}, `_ = a`},
-		{"hostWrapperDefs", "Shared", []adapterParam{sink}, `_ = onProgress`},
-		{"hostWrapperDefs", "Forwarder", []adapterParam{{"a", "string"}, sink}, `Shared(a, onProgress)`},
+		{"syntheticDefs", "Shared", []adapterParam{sink}, `_ = onProgress`},
+		{"syntheticDefs", "Forwarder", []adapterParam{{"a", "string"}, sink}, `Shared(a, onProgress)`},
 	}
 
 	_, err := reachedCallbackParams(sites)
@@ -498,7 +447,7 @@ func TestTheGuardRefusesAnAmbiguousForward(t *testing.T) {
 	if err != nil {
 		t.Fatalf("host_-qualified forward should resolve, not refuse: %v", err)
 	}
-	if reached["hostWrapperDefs:Forwarder.onProgress"] {
+	if reached["syntheticDefs:Forwarder.onProgress"] {
 		t.Error("Forwarder.onProgress forwards only into adapterDefs:Shared, which drops it, " +
 			"so it must not be reported as reaching the host.")
 	}

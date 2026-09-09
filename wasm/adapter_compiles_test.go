@@ -14,7 +14,7 @@ import (
 )
 
 // TestEveryAdapterDefCompiles emits an adapter containing EVERY adapterDefs
-// and hostWrapperDefs entry and compiles it for wasip1.
+// entry and compiles it for wasip1.
 //
 // Nothing did this. The generator's own tests assert on the emitted TEXT --
 // `strings.Contains(code, "func parseChildResultArray")` and friends -- and
@@ -100,7 +100,7 @@ func TestEveryAdapterDefCompiles(t *testing.T) {
 	build.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("the generated adapter does not compile.\n%s\n\n"+
-			"Every adapterDefs and hostWrapperDefs entry is emitted here, so this is a defect in one "+
+			"Every adapterDefs entry is emitted here, so this is a defect in one "+
 			"of them -- most likely a closure parameter the body never reads, or a package referenced "+
 			"without an import. The error above names the file and line in %s.", out, outDir)
 	}
@@ -145,9 +145,6 @@ func usageCoveringEveryAdapterDef(t *testing.T) *UsageInfo {
 	}
 
 	for field := range adapterDefs {
-		add(field)
-	}
-	for field := range hostWrapperDefs {
 		add(field)
 	}
 
