@@ -1,4 +1,12 @@
--- cleat migration 054 (mssql): a reclaim is counted on the row it happened to
+-- cleat migration 055 (mssql): a reclaim is counted on the row it happened to
+--
+-- RENUMBERED from 054 to 055. It shipped as 054 in #1055 and another
+-- file already held that number on develop -- the runner parses the numeric
+-- prefix into an int and keys schema_migrations on it, so the two collapsed to
+-- one version. A database that had already recorded 054 from the other file
+-- skipped this one FOREVER, silently, with the run reporting ok. Safe to apply
+-- twice: every statement below is guarded, so a database that did get this as
+-- 054 re-applies it as 055 and changes nothing.
 --
 -- cleat#1008. See migrations/postgres/051 for the full reasoning: why
 -- `generation` cannot serve (it counts claims, not reclaims, and a healthy
