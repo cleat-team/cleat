@@ -7680,8 +7680,31 @@ would be redundant:
   native `uuid.New()` is **not** replay-safe. The host call is a convenience over the safe form,
   not the only safe form.
 
-Go's three real gaps are `cleat_fetch` (a durable HTTP fetch; `net/http` in a guest is neither
-durable nor replayable) and `cleat_get_scope` / `cleat_set_scope`, which nothing else exposes.
+Go's real gaps are **two**: `cleat_get_scope` / `cleat_set_scope`, which nothing else exposes
+(confirmed by compilation in [§3.223](#3223) — a Go workflow whose body is `h.SetScope(...)`
+produces a binary with `cleat_set_scope` absent entirely).
+
+**This said "three real gaps", counting `cleat_fetch`, until 2026-09-08. Go reaches durable HTTP.**
+`DurableFetch`, `DurableFetchJSON`, `FetchGet` and `FetchGetJSON` all map to `cleat_call`
+(`wasm/usage.go:119-123`, whose own comment says "all map to durable_call import"), issuing
+`DurableCall("http", "fetch")`. **Both** `ServiceCaller` implementations intercept that pair
+*before* any plugin lookup — `cmd/cleat-worker/setup.go:155`, the production worker, with
+idempotency-key support, and `cleat/embedded/runner.go:394` — and
+`cmd/cleat-worker/service_caller_errors_test.go` drives it against a live `httptest` server. It is
+durable and replayable through the `cleat_call` event rather than `EventTypeFetch`.
+
+The reason it survived is the one this section already names, in its third form. The parenthetical
+*"`net/http` in a guest is neither durable nor replayable"* is **true**, and answers whether a
+**native** substitute exists. It sat under a heading asserting no **composed** one does either —
+a different claim, never separately checked. Worse, the tree offers false corroboration: there is
+no `http` plugin in `plugins/` and nothing registers that name, so the obvious check agrees with
+the wrong answer. The interception lives in the `ServiceCaller`, above the registry, where a
+search for a plugin cannot find it.
+
+So the sentence above about a number that indicts going unchecked has a companion: **a true
+sentence filed under the wrong question is not checked either**, because re-deriving it confirms
+it. What settles this one is not a better grep but a different question — not "is there an http
+plugin" but "what handles `cleat_call` before the registry".
 
 **The cron trio was already known, and this test did not discover it.** `tiers.yaml` holds
 `workflow-callable-cron` at **tier 2 for exactly this reason** — "rust and java SDKs declare no

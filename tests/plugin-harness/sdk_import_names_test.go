@@ -334,10 +334,40 @@ var sdkUnreachedBaseline = map[string][]string{
 	//                                           convenience over the safe form,
 	//                                           not the only safe form.
 	//
+	//   cleat_fetch                 Go DOES reach durable HTTP, by a different
+	//                               route: DurableFetch/DurableFetchJSON/FetchGet/
+	//                               FetchGetJSON all map to cleat_call
+	//                               (wasm/usage.go:119-123, "all map to
+	//                               durable_call import"), issuing
+	//                               DurableCall("http", "fetch"). Both
+	//                               ServiceCaller implementations intercept that
+	//                               pair before any plugin lookup --
+	//                               cmd/cleat-worker/setup.go:155 (the production
+	//                               worker, with idempotency-key support) and
+	//                               cleat/embedded/runner.go:394 -- and
+	//                               cmd/cleat-worker/service_caller_errors_test.go
+	//                               exercises it against a live httptest server.
+	//                               So it is durable and replayable via the
+	//                               cleat_call event, not the EventTypeFetch one.
+	//
+	//                               This entry read "a durable HTTP fetch. net/http
+	//                               in a guest is not durable and not replayable"
+	//                               until 2026-09-08. That sentence is true and was
+	//                               the wrong question: it argues no NATIVE
+	//                               substitute exists, which is right, and was filed
+	//                               under a heading claiming no COMPOSED one does
+	//                               either. Absence of an http plugin in plugins/
+	//                               looks like confirmation and is not -- the
+	//                               interception is in the ServiceCaller, above the
+	//                               registry.
+	//
 	// REAL gaps -- no native or composed substitute:
-	//   cleat_fetch                 a durable HTTP fetch. net/http in a guest is
-	//                               not durable and not replayable.
 	//   cleat_get_scope, cleat_set_scope   workflow scope; nothing else exposes it.
+	//                               Confirmed by compilation in IMPROVEMENT-PLAN
+	//                               3.223, not just by these tables: a Go workflow
+	//                               whose body is h.SetScope(...) produces a binary
+	//                               with cleat_set_scope absent entirely. Go is the
+	//                               only SDK without a binding.
 	"go (wasm/usage.go hostFunctions)": {
 		"cleat_fetch",
 		"cleat_get_scope",
