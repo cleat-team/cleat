@@ -97,15 +97,19 @@ jobs:
       - name: Already checked on the pull request
         if: github.event_name == 'merge_group'
         run: echo "validated when the pull request was opened"
-      - if: github.event_name != 'merge_group'
-        name: CLA Assistant
+      - name: CLA Assistant
         # Only two things should wake this job: a pull_request_target event, or
         # a comment that is one of the two magic strings. Without this guard it
         # would re-run on every comment on every issue in the repository.
+        # The merge_group clause is first and is the reason this job has a
+        # short-circuit step above: a queued batch carries no pull_request and
+        # no comment, so without excluding it this condition is false and the
+        # job would contribute nothing while still being required.
         if: >-
+          github.event_name != 'merge_group' && (
           github.event_name == 'pull_request_target' ||
           github.event.comment.body == 'recheck' ||
-          github.event.comment.body == 'I have read the cleat Contributor License Agreement and I hereby sign the CLA'
+          github.event.comment.body == 'I have read the cleat Contributor License Agreement and I hereby sign the CLA')
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
