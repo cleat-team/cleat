@@ -222,8 +222,9 @@ def self_test() -> int:
         print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
     if failures:
         return 1
-    print("self-test: clean tree passes, a duplicate is reported, an untracked "
-          "copy is ignored, a stale baseline entry is reported")
+    print("self-test (5 cases): clean tree passes; a duplicate is reported; an "
+          "untracked copy is ignored; a stale baseline entry is reported; an "
+          "entry that still collides is not")
     return 0
 
 
