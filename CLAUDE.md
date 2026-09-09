@@ -393,6 +393,44 @@ retraction is prose in a body and can never sit at a declaration site; a changel
 removal cannot start a heading line. That one move covers every row above — and it is applicable
 to a file you have never seen, which "write a real parser" is not.
 
+**The unifying question, and it is the one to ask before recording any confirmation: could this
+check have disagreed?** Every trap above is a check that was going to say yes whatever the truth
+was. Two ways that happens, both measured on 2026-09-08, and neither looks like a weak check at
+the time:
+
+**1. A documented failure mode absorbs every instance of its symptom, including the ones it does
+not explain.** `401 invalid or revoked API key` from the port harness has *four* causes — a stale
+key file, another session rewriting that file, your worker stopped by a stranger's `worker.sh
+ensure`, and your tests reaching a stranger's worker on a shared default port. The Makefile
+documents the first one completely and correctly. So the first one is what every 401 gets read as.
+
+I had the disconfirming evidence in hand and did not use it: the key file's mtime had no
+corresponding row of that age in my own database, which only another writer explains. I ran that
+query, read "no matching row" as staleness, and stopped. **A sufficient explanation terminates
+the search** — and a documented hazard is worse than an undocumented one here, because it supplies
+a ready, plausible, locally-correct story at exactly the moment you are confused enough to take
+it.
+
+So a documented failure mode needs **a stated way to tell it apart from its neighbours**, not just
+a description of itself. cleat-ports#69 does that: one discriminator for all four —
+*does the process serving my API port have my DSN?* — answered by `pgrep -fl cleat-worker`.
+
+**2. Corroboration from a shared scope is one derivation run twice.** cleat#1009 reported that the
+engine's `error_code` is never returned to any client. Two sessions checked independently: every
+JSON tag in `cmd/cleat-worker/` enumerated, `map[string]any` responses separately ruled out, and
+only three tags mentioning error or code — `error_code` and `error_message`, both fields of the
+ForceFail *request*, and a bare `error`. Careful work, and both agreed.
+
+Both were wrong. `handleGetWorkflow` builds no response struct — it serialises
+`engine.WorkflowInstance` whole, and that type's `error_code` tag lives in `engine/`, one package
+away from where both scans looked. The field is returned; a live HTTP response shows it.
+
+The agreement proved nothing because **both derivations had the same denominator**. This file
+already records that trap for *numbers* — two export counts agreeing at 55 while differing on six
+members — and it works identically on conclusions. **"Independent" has to mean differently scoped,
+not separately performed.** When a second party confirms, ask what they *searched*, not whether
+they agreed.
+
 **A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
 head*, which contains your commit — not your own SHA.
@@ -670,6 +708,16 @@ everywhere. A guard that greps for something exotic should not be a shell script
 This surfaced as a script reporting 1627 citations where the identical pipeline pasted into the
 terminal reported 546 — and neither was right. A survey in Python found 2354, because the pattern
 missed four of the six forms a citation actually takes. Three tools, three answers, one command.
+
+**Search the tracker before writing a fix for a defect you found by reading code.** Not before
+starting to look — before starting to *build*. On 2026-09-08 I found the API-created-schedule
+`next_run_at` bug by reading `handleCreateSchedule`, fixed it, and merged it as #998. It was
+already cleat#995, filed 30 minutes earlier by another session that had a verified fix in hand and
+claimed it three minutes after my merge landed. One `gh issue list` would have caught it.
+
+Claiming on the issue is the other half and it only works if the next person reads it first, so the
+order is: search, claim, then build. **Claim outright or not at all** — "I might pick this up
+later" has produced duplicate work here more than once.
 
 **One PR, one thing.** Every PR that bundled a second concern was harder to review than the two
 would have been apart.
