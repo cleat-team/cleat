@@ -827,8 +827,9 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 			time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC),
 			time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC), // started_at (cleat#1090)
 			`{"result":"ok"}`, "", nil, nil, int64(0), int64(0), "", "tenant-1",
-			"wf-0",   // continued_from (cleat#887)
-			int64(5), // reclaim_count (cleat#1008)
+			"wf-0",      // continued_from (cleat#887)
+			int64(5),    // reclaim_count (cleat#1008)
+			"wf-parent", // parent_workflow_id (cleat#1103)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")
@@ -850,6 +851,13 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 		t.Errorf("StartedAt is nil, want %v -- the fake row supplies it", time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC))
 	} else if !wf.StartedAt.Equal(time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC)) {
 		t.Errorf("StartedAt = %v, want %v", *wf.StartedAt, time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC))
+	}
+	// cleat#1103, same idiom as the two lines above: supplied by the fake row,
+	// so it must reach the struct. A nil here is the scan dropping it.
+	if wf != nil && wf.ParentWorkflowID == nil {
+		t.Errorf("ParentWorkflowID is nil, want %q -- the fake row supplies it", "wf-parent")
+	} else if *wf.ParentWorkflowID != "wf-parent" {
+		t.Errorf("ParentWorkflowID = %q, want %q", *wf.ParentWorkflowID, "wf-parent")
 	}
 }
 
@@ -1505,6 +1513,7 @@ func TestMySQLStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 			int64(0), int64(0), "", "tenant-1",
 			nil,      // continued_from (NULL: not a continuation)
 			int64(0), // reclaim_count (never reclaimed)
+			nil,      // parent_workflow_id (NULL: top-level run)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")

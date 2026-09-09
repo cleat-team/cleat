@@ -71,10 +71,26 @@ type WorkflowInstance struct {
 	// quantities completed_at - created_at could not be separated into.
 	//
 	// A pointer for the same reason as CompletedAt above.
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	Generation int64      `json:"generation"`
-	Priority   int        `json:"priority"`
-	TraceID    string     `json:"trace_id,omitempty"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+
+	// ParentWorkflowID is the run that spawned this one, or nil for a run
+	// nobody spawned. cleat#1103.
+	//
+	// The column has been written since children existed and was selected by
+	// nothing: unlike completed_at (cleat#1091), which reached Go and was
+	// dropped, this never left the row. "Is a field returned" and "is a field
+	// read" are separate questions, and a column can fail either one alone.
+	//
+	// A pointer because absence is the answer for every top-level run, which is
+	// the common case -- same reasoning as CompletedAt and StartedAt.
+	//
+	// NOT ContinuedFrom, which is already exposed and names the opposite
+	// relation: a continuation is not a child, and GetChildCount and
+	// enforceParentClosePolicy key off THIS column rather than that one.
+	ParentWorkflowID *string `json:"parent_workflow_id,omitempty"`
+	Generation       int64   `json:"generation"`
+	Priority         int     `json:"priority"`
+	TraceID          string  `json:"trace_id,omitempty"`
 
 	// PendingTerminalStatus is the outcome a two-phase terminal transition
 	// has already decided and has not yet applied: "" for the overwhelming

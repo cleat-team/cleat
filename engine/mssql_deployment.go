@@ -226,7 +226,7 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	var result sql.NullString
 	var inputRaw string
 	var errorCode, errorOp sql.NullString
-	var continuedFrom sql.NullString
+	var continuedFrom, parentWorkflowID sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
@@ -238,12 +238,12 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       -- the claim queries, and TestMSSQLUUIDColumnsAreConvertedInProjections
 		       -- fails the build without it.
 		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id,
-		       continued_from, reclaim_count
+		       continued_from, reclaim_count, parent_workflow_id
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
-		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount)
+		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -265,6 +265,9 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	}
 	if startedAt.Valid {
 		wf.StartedAt = &startedAt.Time
+	}
+	if parentWorkflowID.Valid {
+		wf.ParentWorkflowID = &parentWorkflowID.String
 	}
 	return &wf, nil
 }
