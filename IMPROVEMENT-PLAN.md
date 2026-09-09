@@ -10119,3 +10119,54 @@ for its own reason — one mutation moves only the tests that are about it:
 
 The fourth is the mirror the other three need: a guard that exempts nothing passes every test about
 over-exemption.
+
+---
+
+### 3.410 Terminating a workflow reaches its children and stops there — 🔷 **MEASURED 2026-09-09, decision needed** (cleat#1108)
+
+`TestTerminateWorkflowEnforcesParentClosePolicy` proves the close-policy cascade fires at **one**
+level. Nothing addressed the level below — no test, no doc, no issue.
+
+It stops at one. Root → child → grandchild, every edge `parent_close_policy = TERMINATE`, terminate
+the root:
+
+| | postgres | mysql | mssql |
+|---|---|---|---|
+| root | `terminated` | `terminated` | `terminated` |
+| child | `failed` | `failed` | `failed` |
+| **grandchild** | **untouched** | **untouched** | **untouched** |
+
+#### The mechanism
+
+`enforceParentClosePolicy`'s TERMINATE arm sets `status = 'failed'` with a direct `UPDATE`. That
+does not go through `FailWorkflow`, and `FailWorkflow` is one of the four callers of
+`enforceParentClosePolicy` — so closing a child by cascade never triggers the cascade for *its*
+children.
+
+#### Why this is `MEASURED` and not `FOUND`
+
+Whether one level is *wrong* is a product question, for the reasons ports ISSUES 29 gives about the
+neighbouring `cancel` case: a subtree terminate is a recursive `UPDATE` per dialect, and a detached
+child must not inherit it. A comparable engine treats it as a choice — `durabletask-go` has
+`WithRecursiveTerminate(bool)` and tests both branches over a three-level tree. cleat already has
+the vocabulary (`parent_close_policy` is per child, so `TERMINATE` everywhere is `recurse=true` and
+`ABANDON` is `recurse=false`); what it lacks is the depth.
+
+#### A second reading, deliberately NOT measured
+
+The defer-phase arm sets `status = 'terminating'` rather than failing outright, and those children
+are finalised later through a path that **can** cascade again. If so, depth depends on whether an
+intermediate workflow happened to owe defers. **The fixture's children owe no defers**, so they take
+the direct arm and the test says nothing about it. Flagged in the test's own comment as a reading.
+
+#### Falsification — three mutations, each moving a different assertion
+
+| mutation | what went red |
+|---|---|
+| the grandchild is parented to the **root** instead of the child | the fixture control: "the tree is not three levels" |
+| `enforceParentClosePolicy` recurses into each terminated child (3 lines) | the depth assertion: "the grandchild WAS reached" |
+| `enforceParentClosePolicy` returns immediately | the cascade control: "the cascade did not fire at all and this test cannot say anything about depth" |
+
+The third is the one that matters. Without it, an engine whose cascade was broken outright would
+leave the grandchild untouched too, and the test would report "one level" while measuring zero —
+the same vacuity as a retry test whose budget is one attempt.
