@@ -92,6 +92,7 @@ var wasmAPIAllowedInLongRunning = map[string]string{
 	"Metadata":               "the metadata struct type",
 	"HasWasiImports":         "inspects a module's import section in memory",
 	"WitToEnvImport":         "string mapping, no I/O",
+	"CurrentABIVersion":      "an untyped integer constant; nothing to pass a path to (cleat#1054)",
 }
 
 // longRunningDirs are the components that run unattended and see
