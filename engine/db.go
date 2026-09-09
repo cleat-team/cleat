@@ -948,20 +948,20 @@ func (s *PostgresStore) RecordWorkflowMemorySample(ctx context.Context, defName 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO workflow_memory_samples (def_name, sample_bytes) VALUES ($1, $2)`,
-		defName, sampleBytes)
+		`INSERT INTO workflow_memory_samples (def_name, sample_bytes, tenant_id) VALUES ($1, $2, $3)`,
+		defName, sampleBytes, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("record memory sample: insert sample: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_memory_stats (def_name, mean_bytes, sample_count, updated_at)
-		VALUES ($1, $2, 1, now())
-		ON CONFLICT (def_name) DO UPDATE SET
+		INSERT INTO workflow_memory_stats (def_name, mean_bytes, sample_count, updated_at, tenant_id)
+		VALUES ($1, $2, 1, now(), $3)
+		ON CONFLICT (tenant_id, def_name) DO UPDATE SET
 			mean_bytes   = (workflow_memory_stats.alpha * $2 + (1 - workflow_memory_stats.alpha) * workflow_memory_stats.mean_bytes),
 			sample_count = workflow_memory_stats.sample_count + 1,
 			updated_at   = now()
-	`, defName, float64(sampleBytes))
+	`, defName, float64(sampleBytes), s.tenantID)
 	if err != nil {
 		return fmt.Errorf("record memory sample: upsert stats: %w", err)
 	}
@@ -972,7 +972,7 @@ func (s *PostgresStore) RecordWorkflowMemorySample(ctx context.Context, defName 
 // LoadMemoryEstimates returns EWMA mean bytes for all def_names.
 func (s *PostgresStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT def_name, mean_bytes FROM workflow_memory_stats`)
+		`SELECT def_name, mean_bytes FROM workflow_memory_stats WHERE tenant_id = $1`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("load memory estimates: %w", err)
 	}
@@ -1005,9 +1005,10 @@ func (s *PostgresStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemorySt
 		       COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY sample_bytes)::BIGINT, 0),
 		       COUNT(*)::INTEGER
 		FROM workflow_memory_samples
+		WHERE tenant_id = $1
 		GROUP BY def_name
 		ORDER BY def_name
-	`)
+	`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("load memory stats: %w", err)
 	}
@@ -1046,7 +1047,7 @@ func (s *PostgresStore) QueueDepth(ctx context.Context) (int64, error) {
 // CleanupMemorySamples deletes samples beyond maxSamplesPerDef per def_name.
 func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
 	defRows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT def_name FROM workflow_memory_samples`)
+		`SELECT DISTINCT def_name FROM workflow_memory_samples WHERE tenant_id = $1`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("cleanup memory samples: list defs: %w", err)
 	}
@@ -1069,13 +1070,15 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 		result, err := s.db.ExecContext(ctx, `
 			DELETE FROM workflow_memory_samples
 			WHERE def_name = $1
+			  AND tenant_id = $3
 			  AND id NOT IN (
 			      SELECT id FROM workflow_memory_samples
 			      WHERE def_name = $1
+			        AND tenant_id = $3
 			      ORDER BY recorded_at DESC
 			      LIMIT $2
 			  )
-		`, defName, maxSamplesPerDef)
+		`, defName, maxSamplesPerDef, s.tenantID)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("cleanup memory samples: delete %s: %w", defName, err)
 		}

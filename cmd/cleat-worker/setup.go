@@ -1424,7 +1424,22 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		if afterMem > beforeMem {
 			delta := afterMem - beforeMem
 			if delta > 0 {
-				w.memoryController.RecordWorkflowMemory(context.Background(), wf.DefName, delta)
+				// Persist through the workflow's OWN tenant store, not the
+				// controller's. The controller holds the worker's single
+				// store; this worker runs workflows for any tenant it can
+				// claim. Resolved here rather than captured from execStore
+				// below because this defer is registered before that
+				// assignment and must also record for a workflow whose
+				// execution failed. storeForTenant caches, so the repeat
+				// lookup is a map read. See cleat#1040.
+				memStore, memStoreErr := w.storeForTenant(wf.TenantID)
+				if memStoreErr != nil {
+					// Recording a sample is not worth failing anything over,
+					// and the execution path above has already reported this
+					// tenant's store as unavailable with more context.
+					memStore = nil
+				}
+				w.memoryController.RecordWorkflowMemory(context.Background(), memStore, wf.DefName, delta)
 			}
 		}
 	}()

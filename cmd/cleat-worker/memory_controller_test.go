@@ -97,11 +97,11 @@ func TestController_Recovery(t *testing.T) {
 
 func TestController_RecordWorkflowMemory(t *testing.T) {
 	mc := newTestController(newTestMonitor(), 10, 0.80, 0.95)
-	mc.RecordWorkflowMemory(context.Background(), "wf-a", 50*1024*1024)
+	mc.RecordWorkflowMemory(context.Background(), nil, "wf-a", 50*1024*1024)
 	if mc.WorkflowMemoryEstimate("wf-a") != 50*1024*1024 {
 		t.Errorf("expected 50MB first estimate")
 	}
-	mc.RecordWorkflowMemory(context.Background(), "wf-a", 100*1024*1024)
+	mc.RecordWorkflowMemory(context.Background(), nil, "wf-a", 100*1024*1024)
 	expected := uint64(0.3*100*1024*1024 + 0.7*50*1024*1024)
 	if mc.WorkflowMemoryEstimate("wf-a") != expected {
 		t.Errorf("expected EWMA=%d, got %d", expected, mc.WorkflowMemoryEstimate("wf-a"))

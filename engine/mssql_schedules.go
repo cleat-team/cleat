@@ -248,23 +248,23 @@ func (s *MSSQLStore) recordWorkflowMemorySampleOnce(ctx context.Context, defName
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO workflow_memory_samples (def_name, sample_bytes) VALUES (@p1, @p2)`,
-		defName, sampleBytes)
+		`INSERT INTO workflow_memory_samples (def_name, sample_bytes, tenant_id) VALUES (@p1, @p2, @p3)`,
+		defName, sampleBytes, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("record memory sample: insert sample: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
 		MERGE workflow_memory_stats AS target
-		USING (SELECT @p1 AS def_name, @p2 AS mean_bytes) AS source
-		ON target.def_name = source.def_name
+		USING (SELECT @p1 AS def_name, @p2 AS mean_bytes, @p3 AS tenant_id) AS source
+		ON target.def_name = source.def_name AND target.tenant_id = @p3
 		WHEN MATCHED THEN UPDATE SET
 			mean_bytes  = target.alpha * @p2 + (1 - target.alpha) * target.mean_bytes,
 			sample_count = target.sample_count + 1,
 			updated_at  = SYSUTCDATETIME()
-		WHEN NOT MATCHED THEN INSERT (def_name, mean_bytes, sample_count, updated_at)
-			VALUES (@p1, @p2, 1, SYSUTCDATETIME());
-	`, defName, float64(sampleBytes))
+		WHEN NOT MATCHED THEN INSERT (def_name, mean_bytes, sample_count, updated_at, tenant_id)
+			VALUES (@p1, @p2, 1, SYSUTCDATETIME(), @p3);
+	`, defName, float64(sampleBytes), s.tenantID)
 	if err != nil {
 		return fmt.Errorf("record memory sample: upsert stats: %w", err)
 	}
@@ -274,8 +274,8 @@ func (s *MSSQLStore) recordWorkflowMemorySampleOnce(ctx context.Context, defName
 
 func (s *MSSQLStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT def_name, mean_bytes FROM workflow_memory_stats
-	`)
+		SELECT def_name, mean_bytes FROM workflow_memory_stats WHERE tenant_id = @p1
+	`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("load memory estimates: %w", err)
 	}
@@ -307,8 +307,9 @@ func (s *MSSQLStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats
 			CAST(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name) AS BIGINT),
 			COUNT(*) OVER (PARTITION BY def_name)
 		FROM workflow_memory_samples
+		WHERE tenant_id = @p1
 		ORDER BY def_name
-	`)
+	`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("load memory stats: %w", err)
 	}
@@ -328,7 +329,7 @@ func (s *MSSQLStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats
 
 func (s *MSSQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
 	defRows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT def_name FROM workflow_memory_samples`)
+		`SELECT DISTINCT def_name FROM workflow_memory_samples WHERE tenant_id = @p1`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("cleanup memory samples: list defs: %w", err)
 	}
@@ -351,15 +352,17 @@ func (s *MSSQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef 
 		result, err := s.db.ExecContext(ctx, `
 			DELETE FROM workflow_memory_samples
 			WHERE def_name = @p1
+			  AND tenant_id = @p3
 			  AND id NOT IN (
 			      SELECT id FROM (
 				  SELECT id, ROW_NUMBER() OVER (ORDER BY recorded_at DESC) AS rn
 				  FROM workflow_memory_samples
 				  WHERE def_name = @p1
+				    AND tenant_id = @p3
 			      ) AS ranked
 			      WHERE ranked.rn <= @p2
 			  )
-		`, defName, maxSamplesPerDef)
+		`, defName, maxSamplesPerDef, s.tenantID)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("cleanup memory samples: delete %s: %w", defName, err)
 		}
