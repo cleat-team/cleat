@@ -12,6 +12,13 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+  # The merge queue tests the required checks against the PROJECTED tip on a
+  # temporary `gh-readonly-queue/...` ref, which fires `merge_group` and not
+  # `pull_request`. Without this trigger the check never starts in queue
+  # context, the queue waits for a status that cannot arrive, and NOTHING
+  # MERGES -- with no check going red. There are 32 required contexts on
+  # develop and every one of them has to report here.
+  merge_group:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -24,7 +31,24 @@ jobs:
     name: Validate branch name
     runs-on: ubuntu-latest
     steps:
+      # In the merge queue this check is both impossible and pointless.
+      #
+      # Impossible - a merge_group event carries no pull_request payload, so
+      # every `github.event.pull_request.*` reference below is null.
+      #
+      # Pointless - whatever it would examine was examined on the pull request
+      # and cannot change between there and here.
+      #
+      # It REPORTS rather than being skipped. A skipped job satisfies a
+      # required check, but a job that fails to start does not, and the queue
+      # cannot tell that from a check which has not finished yet - so it waits
+      # forever and nothing merges. With 32 required contexts on develop that
+      # is 32 chances to deadlock the repository silently.
+      - name: Already checked on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "validated when the pull request was opened"
       - name: Check branch naming convention
+        if: github.event_name != 'merge_group'
         uses: actions/github-script@v9
         with:
           script: |
