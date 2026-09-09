@@ -664,6 +664,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 				DefaultTenantUUID,          // tenant_id (3.99)
 				"wf-0",                     // continued_from (cleat#887)
 				int64(7),                   // reclaim_count (cleat#1008)
+				"wf-parent",                // parent_workflow_id (cleat#1103)
 			}},
 		},
 	}, nil)
@@ -690,6 +691,13 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 		t.Errorf("StartedAt is nil, want %v -- the fake row supplies it", startedAt)
 	} else if !wf.StartedAt.Equal(startedAt) {
 		t.Errorf("StartedAt = %v, want %v", *wf.StartedAt, startedAt)
+	}
+	// cleat#1103, same idiom as the two lines above: supplied by the fake row,
+	// so it must reach the struct. A nil here is the scan dropping it.
+	if wf.ParentWorkflowID == nil {
+		t.Errorf("ParentWorkflowID is nil, want %q -- the fake row supplies it", "wf-parent")
+	} else if *wf.ParentWorkflowID != "wf-parent" {
+		t.Errorf("ParentWorkflowID = %q, want %q", *wf.ParentWorkflowID, "wf-parent")
 	}
 	// cleat#1008, and the same hazard: the fake row supplies 7, so a scan that
 	// dropped the column would return 0 -- which is also the honest answer for
@@ -1918,6 +1926,7 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 				DefaultTenantUUID, // tenant_id (3.99)
 				nil,               // continued_from (NULL: not a continuation)
 				int64(0),          // reclaim_count (never reclaimed)
+				nil,               // parent_workflow_id (NULL: top-level run)
 			}},
 		},
 	}, nil)

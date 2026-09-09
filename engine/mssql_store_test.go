@@ -1475,8 +1475,9 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 			now, // started_at (cleat#1090)
 			nil, nil, nil, nil,
 			int64(3), int64(0), "", DefaultTenantUUID, // tenant_id (3.99)
-			"wf-0",   // continued_from (cleat#887)
-			int64(5), // reclaim_count (cleat#1008)
+			"wf-0",      // continued_from (cleat#887)
+			int64(5),    // reclaim_count (cleat#1008)
+			"wf-parent", // parent_workflow_id (cleat#1103)
 		}}},
 	}, nil)
 	defer db.Close()
@@ -1507,6 +1508,13 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 		t.Errorf("StartedAt is nil, want %v -- the fake row supplies it", now)
 	} else if !wf.StartedAt.Equal(now) {
 		t.Errorf("StartedAt = %v, want %v", *wf.StartedAt, now)
+	}
+	// cleat#1103, same idiom as the two lines above: supplied by the fake row,
+	// so it must reach the struct. A nil here is the scan dropping it.
+	if wf.ParentWorkflowID == nil {
+		t.Errorf("ParentWorkflowID is nil, want %q -- the fake row supplies it", "wf-parent")
+	} else if *wf.ParentWorkflowID != "wf-parent" {
+		t.Errorf("ParentWorkflowID = %q, want %q", *wf.ParentWorkflowID, "wf-parent")
 	}
 }
 
