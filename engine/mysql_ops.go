@@ -623,6 +623,9 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
 	}
+	if completedAt.Valid {
+		wf.CompletedAt = &completedAt.Time
+	}
 	return &wf, nil
 }
 

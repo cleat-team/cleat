@@ -44,9 +44,24 @@ type WorkflowInstance struct {
 	NextWakeAt time.Time       `json:"next_wake_at"`
 	TenantID   string          `json:"tenant_id,omitempty"`
 	CreatedAt  time.Time       `json:"created_at,omitempty"`
-	Generation int64           `json:"generation"`
-	Priority   int             `json:"priority"`
-	TraceID    string          `json:"trace_id,omitempty"`
+
+	// CompletedAt is when the run reached a terminal status, or nil while it
+	// has not. A POINTER because its absence is the meaningful case: a plain
+	// time.Time is not omitted by `omitempty`, so a running workflow would
+	// serialise completed_at as "0001-01-01T00:00:00Z" -- a timestamp a client
+	// can parse and compare, reporting every in-flight run as having finished
+	// in the year 1. Nil is the only spelling of "not finished" that a JSON
+	// consumer cannot mistake for a value.
+	//
+	// The column has existed since the first schema and every dialect's
+	// GetWorkflowByID has always SELECTed it; all three scanned it into a local
+	// and never assigned it, so no client could read when a run finished
+	// (cleat#1091). CreatedAt above keeps its non-pointer shape: a row cannot
+	// exist without one.
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	Generation  int64      `json:"generation"`
+	Priority    int        `json:"priority"`
+	TraceID     string     `json:"trace_id,omitempty"`
 
 	// PendingTerminalStatus is the outcome a two-phase terminal transition
 	// has already decided and has not yet applied: "" for the overwhelming

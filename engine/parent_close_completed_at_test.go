@@ -43,10 +43,17 @@ import (
 //
 // # This test reads the column directly
 //
-// completed_at is not a field of WorkflowInstance, so GetWorkflowByID cannot
-// see it and a test written through the store API would assert nothing about
-// the thing that was broken. It goes to the raw handle instead, which is also
-// why it carries its own placeholder switch.
+// This reads the COLUMN through the raw handle, deliberately.
+//
+// The original reason was that completed_at was not a field of
+// WorkflowInstance at all, so GetWorkflowByID could not see it. That stopped
+// being true with cleat#1091, which added CompletedAt -- but the raw read is
+// still the right choice, and now for a better reason: what was broken here is
+// what the terminal-status PROCEDURE writes to the column. Reading through
+// GetWorkflowByID would put the Go scan in the path, so a defect in the scan
+// and a defect in the procedure would produce the same red. Going to the row
+// keeps this test pointed at one layer. It is also why it carries its own
+// placeholder switch.
 func TestAPolicyTerminatedChildRecordsWhenItCompleted(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
@@ -115,8 +122,11 @@ func TestAPolicyTerminatedChildRecordsWhenItCompleted(t *testing.T) {
 }
 
 // statusAndCompletedAt reads the two columns straight from the row.
-// completed_at is not exposed on WorkflowInstance, so there is no store method
-// that could answer this.
+//
+// Since cleat#1091 there IS a store method that could answer this --
+// GetWorkflowByID returns CompletedAt -- and this helper still does not use it,
+// for the reason given on the test above: the assertion is about what the
+// procedure wrote, and the raw read keeps the Go scan out of the path.
 func statusAndCompletedAt(t *testing.T, store WorkflowStore, workflowID string) (string, *time.Time) {
 	t.Helper()
 	db := rawDBOf(t, store)
