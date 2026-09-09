@@ -146,9 +146,9 @@ func (s *MySQLStore) ListPromises(ctx context.Context, workflowID string) ([]Pro
 // CreateUpdateRequest registers an incoming update request for a workflow.
 func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT IGNORE INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status)
-		VALUES (?, ?, ?, ?, 'pending')
-	`, workflowID, updateName, encodeJSONPayload(payload), promiseID)
+		INSERT IGNORE INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
+		VALUES (?, ?, ?, ?, 'pending', ?)
+	`, workflowID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -162,8 +162,8 @@ func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET next_wake_at = NOW(6)
-		WHERE id = ? AND status IN ('ready', 'suspended')
-	`, workflowID)
+		WHERE id = ? AND tenant_id = ? AND status IN ('ready', 'suspended')
+	`, workflowID, s.tenantID)
 	return err
 }
 
@@ -177,9 +177,9 @@ func (s *MySQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 		       COALESCE(error_msg, ''),
 		       created_at
 		FROM workflow_update_requests
-		WHERE workflow_id = ? AND status = 'pending'
+		WHERE workflow_id = ? AND status = 'pending' AND tenant_id = ?
 		ORDER BY created_at
-	`, workflowID)
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -209,8 +209,8 @@ func (s *MySQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, upda
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = ?, error_msg = ?, completed_at = NOW(6)
-		WHERE workflow_id = ? AND update_name = ? AND status = 'pending'
-	`, jsonOrNull(result), errMsg, workflowID, updateName)
+		WHERE workflow_id = ? AND update_name = ? AND status = 'pending' AND tenant_id = ?
+	`, jsonOrNull(result), errMsg, workflowID, updateName, s.tenantID)
 	return err
 }
 
