@@ -224,6 +224,22 @@ jobs:
           scripts/check-section-numbers.sh --self-test
           scripts/check-section-numbers.sh
 
+      # Two migration files in one dialect must not share a version number.
+      # The runner keys schema_migrations on the filename's numeric prefix, so
+      # they collapse to one row: a fresh database applies both (which is why
+      # every other job here stays green), and a database that already recorded
+      # that version never receives the other file -- silently, exit 0. See
+      # cleat#1071 and the measurements in the script.
+      #
+      # Self-test first and not optional, for the reason the section-number
+      # guard states: on a clean tree "no duplicates found" and "the check does
+      # not work" are the same output, so this needs a KNOWN-POSITIVE rather
+      # than only a negative control.
+      - name: Migration version guard
+        run: |
+          scripts/check-migration-versions.sh --self-test
+          scripts/check-migration-versions.sh
+
       # The guard above can only ever run against a pre-merge base, so the
       # post-merge run on develop is the only place a merge-created collision
       # is visible. This one keeps that run from being cancelled by the next
