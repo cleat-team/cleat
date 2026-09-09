@@ -1,6 +1,6 @@
--- cleat migration 055 (mysql): scope the workflow memory profile to a tenant
+-- cleat migration 056 (mysql): scope the workflow memory profile to a tenant
 --
--- See migrations/postgres/055_the_memory_profile_is_scoped_to_a_tenant.sql for
+-- See migrations/postgres/056_the_memory_profile_is_scoped_to_a_tenant.sql for
 -- the full finding (cleat#1040). In short: workflow_memory_stats and
 -- workflow_memory_samples were keyed by def_name alone while workflow_defs is
 -- keyed (tenant_id, name, version), so the EWMA blended the memory profile of

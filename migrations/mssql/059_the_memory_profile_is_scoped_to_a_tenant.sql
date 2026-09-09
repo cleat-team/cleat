@@ -1,6 +1,6 @@
--- cleat migration 058 (mssql): scope the workflow memory profile to a tenant
+-- cleat migration 059 (mssql): scope the workflow memory profile to a tenant
 --
--- See migrations/postgres/055_the_memory_profile_is_scoped_to_a_tenant.sql for
+-- See migrations/postgres/056_the_memory_profile_is_scoped_to_a_tenant.sql for
 -- the full finding (cleat#1040).
 --
 -- This file carries the part that is worth more than the fix: both tables are

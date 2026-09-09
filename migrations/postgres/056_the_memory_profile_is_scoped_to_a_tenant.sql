@@ -1,4 +1,4 @@
--- cleat migration 055 (postgres): scope the workflow memory profile to a tenant
+-- cleat migration 056 (postgres): scope the workflow memory profile to a tenant
 --
 -- Bug (cleat#1040): workflow_memory_stats and workflow_memory_samples were
 -- keyed by def_name alone --
