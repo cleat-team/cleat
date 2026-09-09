@@ -63,6 +63,13 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+  # The merge queue tests the required checks against the PROJECTED tip on a
+  # temporary `gh-readonly-queue/...` ref, which fires `merge_group` and not
+  # `pull_request`. Without this trigger the check never starts in queue
+  # context, the queue waits for a status that cannot arrive, and NOTHING
+  # MERGES -- with no check going red. There are 32 required contexts on
+  # develop and every one of them has to report here.
+  merge_group:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -100,15 +107,30 @@ jobs:
     #
     #   gh api repos/cleat-team/cleat/branches/main/protection \
     #     --jq .required_status_checks.contexts     # -> ["Build","Lint"]
-    if: github.event.pull_request.base.ref != 'main'
+    # On merge_group there is no pull_request payload, so
+    # `github.event.pull_request.base.ref` is null and `null != 'main'` is
+    # TRUE -- the job would run and then read empty BASE/HEAD shas. The
+    # merge_group clause keeps the job running (it must, it is required) and
+    # the step below short-circuits instead.
+    if: github.event_name == 'merge_group' || github.event.pull_request.base.ref != 'main'
 
     steps:
-      - uses: actions/checkout@v7
+      # REPORTS rather than skipping. A job that fails to start is
+      # indistinguishable to the queue from one that has not finished, and it
+      # waits forever. The sign-off was already checked on the pull request and
+      # a commit's trailers cannot change between there and here.
+      - name: Already checked on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "sign-off validated when the pull request was opened"
+
+      - if: github.event_name != 'merge_group'
+        uses: actions/checkout@v7
         with:
           # The full history: base..head is not reachable from a shallow clone.
           fetch-depth: 0
 
       - name: Check DCO
+        if: github.event_name != 'merge_group'
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}

@@ -37,6 +37,13 @@ on:
     # scripts/check-workflow-pr-triggers.sh guards this.
     types: [opened, synchronize, reopened, edited]
 
+  # The merge queue tests the required checks against the PROJECTED tip on a
+  # temporary `gh-readonly-queue/...` ref, which fires `merge_group` and not
+  # `pull_request`. Without this trigger the check never starts in queue
+  # context, the queue waits for a status that cannot arrive, and NOTHING
+  # MERGES -- with no check going red. There are 32 required contexts on
+  # develop and every one of them has to report here.
+  merge_group:
 concurrency:
   # Every push gets its own group; PR runs share one per ref and supersede.
   #
