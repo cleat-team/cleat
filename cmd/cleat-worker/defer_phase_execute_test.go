@@ -74,8 +74,7 @@ func TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt(t *testing.T) {
 	*benchSvcURL = svc.URL
 	defer func() { *benchSvcURL = oldSvcURL }()
 
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	db := testutil.SuiteTestDB(t, "cleat_worker")
 	store := engine.NewPostgresStore(db)
 
 	wasmBytes := buildDeferFixture(t)
