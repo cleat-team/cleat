@@ -1062,9 +1062,19 @@ func runDeploy(args []string) {
 		}
 	}
 
+	// The tenant this deploy belongs to, resolved the way `cleat lock` already
+	// resolves it: flag, then environment, then the single-tenant default.
+	//
+	// Until cleat#1038 this INSERT did not list tenant_id at all, so the column
+	// took its schema DEFAULT and every deploy landed on the default tenant
+	// whatever the configuration said. That is not merely misattribution: the
+	// conflict target below is (tenant_id, name, version), so a second tenant
+	// deploying the same name and version OVERWROTE the first one's binary.
+	deployTenantID := resolveDeployTenant(buildTenantID, os.Getenv("CLEAT_TENANT_ID"))
+
 	_, err = db.Exec(
-		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue, max_history_length)
-		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
+		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue, max_history_length, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
 		 ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 		   wasm_bytes = EXCLUDED.wasm_bytes,
 		   abi_version = EXCLUDED.abi_version,
@@ -1074,6 +1084,7 @@ func runDeploy(args []string) {
 		   task_queue = EXCLUDED.task_queue,
 		   max_history_length = EXCLUDED.max_history_length`,
 		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, *taskQueueFlag, *maxHistoryLengthFlag,
+		deployTenantID,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error inserting workflow definition: %v\n", err)
@@ -1086,6 +1097,22 @@ func runDeploy(args []string) {
 			meta.WorkflowName, meta.WorkflowVersion,
 			meta.ABIVersion, meta.MinCompatibleVersion, meta.PluginDeps)
 	}
+}
+
+// resolveDeployTenant picks the tenant a deploy is written under: the --tenant
+// flag, then CLEAT_TENANT_ID, then the single-tenant default.
+//
+// Same order `cleat lock` already uses. Extracted so the order is testable
+// without a database -- the deploy itself needs one, and the ordering is the
+// part that decides which tenant owns the row.
+func resolveDeployTenant(flagValue, envValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if envValue != "" {
+		return envValue
+	}
+	return engine.DefaultTenantUUID
 }
 
 func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {
