@@ -922,8 +922,8 @@ func (s *MySQLStore) RetryWorkflow(ctx context.Context, workflowID string) error
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
 		    error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = NOW(6)
-		WHERE id = ? AND status = 'dead_lettered'
-	`, workflowID)
+		WHERE id = ? AND status = 'dead_lettered' AND tenant_id = ?
+	`, workflowID, s.tenantID)
 	return err
 }
 
@@ -999,8 +999,9 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
+		  AND tenant_id = ?
 		  AND NOT `+deferPhaseOwedSQL+`
-	`, parentWorkflowID); err != nil {
+	`, parentWorkflowID, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "enforceParentClosePolicy: TERMINATE children not failed",
 			"parent_workflow_id", parentWorkflowID, "error", err)
 		return
@@ -1019,8 +1020,9 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
+		  AND tenant_id = ?
 		  AND `+deferPhaseOwedSQL+`
-	`, parentWorkflowID); err != nil {
+	`, parentWorkflowID, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "enforceParentClosePolicy: TERMINATE children with defers not moved to their defer phase",
 			"parent_workflow_id", parentWorkflowID, "error", err)
 		return
@@ -1033,7 +1035,8 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed')
-	`, parentWorkflowID); err != nil {
+		  AND tenant_id = ?
+	`, parentWorkflowID, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "enforceParentClosePolicy: REQUEST_CANCEL children not flagged",
 			"parent_workflow_id", parentWorkflowID, "error", err)
 		return
@@ -1058,8 +1061,9 @@ func (s *MySQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkfl
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
+		  AND tenant_id = ?
 		  AND NOT `+deferPhaseOwedSQL+`
-	`, parentWorkflowID)
+	`, parentWorkflowID, s.tenantID)
 	if err != nil {
 		return nil, err
 	}

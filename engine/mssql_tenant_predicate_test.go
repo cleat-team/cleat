@@ -249,7 +249,17 @@ var filterClauseEnd = regexp.MustCompile(`(?i)\b(order\s+by|group\s+by|option\s*
 
 // mssqlTenantStatements returns every SQL literal in src that touches a
 // tenant-scoped table without naming the tenant in a position that scopes it.
+// mssqlTenantStatements is the SQL Server binding of tenantStatementsFor.
+//
+// The scan is dialect-agnostic -- only "is this statement this dialect's" and
+// the table set differ -- so MySQL's guard shares it rather than copying it.
+// Two copies of one rule is the shape of defect this file exists to catch, and
+// a second copy would drift the first time either dialect learned something.
 func mssqlTenantStatements(src, path string, tables map[string]bool) []tenantStatement {
+	return tenantStatementsFor(src, path, tables, looksLikeMSSQL)
+}
+
+func tenantStatementsFor(src, path string, tables map[string]bool, isDialect func(string, string) bool) []tenantStatement {
 	var out []tenantStatement
 	for _, lit := range sqlLiteralRe.FindAllStringSubmatchIndex(src, -1) {
 		// Comments first, and not as tidiness: the claim queries carry a long
@@ -262,7 +272,7 @@ func mssqlTenantStatements(src, path string, tables map[string]bool) []tenantSta
 		if !regexp.MustCompile(`\b(select|insert|update|delete|merge)\b`).MatchString(flat) {
 			continue
 		}
-		if !looksLikeMSSQL(path, sql) {
+		if !isDialect(path, sql) {
 			continue
 		}
 		var touches bool
