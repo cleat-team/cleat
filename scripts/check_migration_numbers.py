@@ -7,9 +7,18 @@ THAT VERSION. Two files with the same prefix are one version and one row.
 
 On a fresh database both apply, so CI is green and stays green. On a database
 that already recorded that version, the other file NEVER APPLIES -- it is
-pending forever, and the failures look like ordinary missing-column errors,
-which is indistinguishable from the stale-test-database case CLAUDE.md tells
-you to expect after a migration lands. See cleat#1071.
+pending forever, and the failures are ordinary missing-column errors.
+
+THE REASON IT SURVIVES IS THAT THE DOCUMENTED REMEDY FOR ITS SYMPTOM WORKS.
+A developer sees `column "reclaim_count" does not exist`, applies CLAUDE.md's
+"when a schema migration lands, recreate your test databases" -- and the
+failures go away, because a fresh database applies both files. The correct
+routine fix is EFFECTIVE, so it closes the investigation rather than merely
+failing to open one. That is strictly worse than a remedy that is only
+plausible: nothing about the outcome invites a second look.
+
+Only the deployment upgrading an existing database sees it, and that is the
+one place nobody is running the suite. See cleat#1071.
 
 Three collisions landed simultaneously across three dialects because everyone
 picks a number against the develop they can see and nothing rejected a
