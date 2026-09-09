@@ -1,6 +1,7 @@
 package dag
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -46,7 +47,10 @@ func ParseSpec(r io.Reader) (*DAGSpec, error) {
 		return nil, fmt.Errorf("dag: decode spec: invalid JSON")
 	}
 
-	spec := parseDAGSpec(j)
+	spec, err := parseDAGSpec(j)
+	if err != nil {
+		return nil, err
+	}
 
 	if len(spec.Tasks) == 0 {
 		return nil, fmt.Errorf("dag: spec has no tasks")
@@ -74,18 +78,27 @@ func ParseSpec(r io.Reader) (*DAGSpec, error) {
 }
 
 // parseDAGSpec parses a JSON DAG spec string into a DAGSpec.
-func parseDAGSpec(j string) DAGSpec {
+func parseDAGSpec(j string) (DAGSpec, error) {
+	tasks, err := parseTaskSpecs(j)
+	if err != nil {
+		return DAGSpec{}, err
+	}
 	return DAGSpec{
 		Name:  ExtractJSONString(j, "name"),
-		Tasks: parseTaskSpecs(j),
-	}
+		Tasks: tasks,
+	}, nil
 }
 
 // parseTaskSpecs extracts the "tasks" array and parses each element.
-func parseTaskSpecs(j string) []TaskSpec {
+//
+// Returns an error rather than a best effort, because a spec field that is
+// present and malformed is a validation failure and this is reached from
+// `cleat dag validate`. Before cleat#1051 a bad `priority` bound 0 and the
+// command printed "DAG spec is valid."
+func parseTaskSpecs(j string) ([]TaskSpec, error) {
 	arrContent := extractJSONArray(j, "tasks")
 	if arrContent == "" {
-		return nil
+		return nil, nil
 	}
 
 	// Strip outer brackets before splitting objects.
@@ -100,16 +113,21 @@ func parseTaskSpecs(j string) []TaskSpec {
 		if parentsRaw != "" && len(parentsRaw) > 0 && parentsRaw[0] == '[' {
 			parents = splitJSONStringArray(parentsRaw)
 		}
+		name := ExtractJSONString(obj, "name")
+		priority, err := ExtractJSONInt(obj, "priority")
+		if err != nil {
+			return nil, fmt.Errorf("dag: task %q: %w", name, err)
+		}
 		specs = append(specs, TaskSpec{
-			Name:        ExtractJSONString(obj, "name"),
+			Name:        name,
 			Fn:          ExtractJSONString(obj, "fn"),
 			Parents:     parents,
-			Priority:    ExtractJSONInt(obj, "priority"),
+			Priority:    priority,
 			Description: ExtractJSONString(obj, "description"),
 			Contract:    ExtractJSONString(obj, "contract"),
 		})
 	}
-	return specs
+	return specs, nil
 }
 
 // ExtractJSONString extracts a quoted string value from a JSON object field.
@@ -157,21 +175,48 @@ func extractJSONArray(j, key string) string {
 	return ""
 }
 
-// extractJSONInt extracts an integer value from a JSON object field.
-func ExtractJSONInt(j, key string) int {
+// ExtractJSONInt extracts an integer value from a JSON object field.
+//
+// An absent field is 0 with no error, which is the documented default for
+// `priority`. A field that is PRESENT and not an integer is an error.
+//
+// cleat#1051: this was a hand-rolled digit scanner --
+//
+//	for _, c := range val {
+//	    if c >= '0' && c <= '9' { n = n*10 + int(c-'0') } else { break }
+//	}
+//
+// -- with no sign handling, no error return and no bounds check. It stopped at
+// the first non-digit, so a leading `-` broke the loop immediately and the
+// field bound 0 having consumed nothing. Measured on a real spec through
+// `cleat dag validate`:
+//
+//	"priority": -5     -> 0     the defect
+//	"priority": 10     -> 10
+//	"priority": 7.9    -> 7     truncated silently
+//	"priority": "3"    -> 0     quoted, silently zeroed
+//
+// and the command printed "DAG spec is valid." in every case.
+//
+// A negative priority is meaningful rather than malformed: the column is
+// `priority INTEGER NOT NULL DEFAULT 0` with no CHECK and dispatch orders by
+// `priority ASC`, so negative is how you put a task ahead of normal work
+// without renumbering everything already at 0. The scanner made that
+// unexpressible, and silently -- `Priority` is consumed as the child's real
+// dispatch priority (dagrun.go) and for ordering within the DAG.
+//
+// Twin of the WASM-codegen defect fixed in cleat#1036, same function body in a
+// different package.
+func ExtractJSONInt(j, key string) (int, error) {
 	val := extractJSONValue(j, key)
 	if val == "" {
-		return 0
+		return 0, nil
 	}
-	n := 0
-	for _, c := range val {
-		if c >= '0' && c <= '9' {
-			n = n*10 + int(c-'0')
-		} else {
-			break
-		}
+	var n int
+	if err := json.Unmarshal([]byte(val), &n); err != nil {
+		return 0, fmt.Errorf("field %q: %w", key, err)
 	}
-	return n
+	return n, nil
 }
 
 // extractJSONValue extracts the raw value of a field from a JSON object.
