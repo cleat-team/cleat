@@ -24,11 +24,21 @@ Three collisions landed simultaneously across three dialects because everyone
 picks a number against the develop they can see and nothing rejected a
 duplicate.
 
-BASELINE: the three known collisions are listed below and must SHRINK. They are
-recorded, not blessed -- renumbering them touches migrations owned by other
-sessions and is tracked in #1071. A NEW collision fails immediately, and an
-entry that stops colliding also fails, so the list cannot rot in either
-direction.
+BASELINE: empty, and it should stay that way. cleat#1073 renumbered the three
+collisions that existed when this guard was written, so nothing is exempt.
+
+An entry here would mean "this collision is known and tolerated", which is
+almost never the right answer -- the whole point is that a collision is
+invisible until it reaches a deployment. The mechanism is kept because the
+alternative is that someone facing a red build deletes the check instead of
+recording the exception, and because it fails in BOTH directions: a new
+collision, and an entry that has stopped colliding. A one-way allowlist rots
+silently.
+
+Note what an empty baseline does to this file's own testability: the
+"stopped colliding" direction has no entries to exercise, and on a clean tree
+"no new collisions" is the same output a check that does nothing would print.
+--self-test is what keeps both directions honest.
 
 Usage:
     scripts/check_migration_numbers.py [migrations-dir]
@@ -46,11 +56,7 @@ from collections import defaultdict
 from pathlib import Path
 
 # dialect -> {version: [filenames]}, every entry tracked by cleat#1071.
-KNOWN_COLLISIONS = {
-    "postgres": {"051"},
-    "mysql": {"050"},
-    "mssql": {"054"},
-}
+KNOWN_COLLISIONS: dict[str, set[str]] = {}
 
 
 def repo_root() -> Path:
@@ -104,6 +110,21 @@ def collisions(migrations: Path) -> dict[str, dict[str, list[str]]]:
         if dup:
             found[dialect] = dup
     return found
+
+
+def stale_entries(found: dict, baseline: dict) -> list[tuple[str, str]]:
+    """Baseline entries that no longer describe a real collision.
+
+    Extracted so --self-test can exercise it. With the baseline empty this
+    direction is inert on the real tree -- there are no entries to go stale --
+    so the fixture is the only thing keeping it honest.
+    """
+    out = []
+    for dialect, known in sorted(baseline.items()):
+        actual = set(found.get(dialect, {}))
+        for version in sorted(known - actual):
+            out.append((dialect, version))
+    return out
 
 
 def self_test() -> int:
@@ -167,12 +188,42 @@ def self_test() -> int:
         if collisions(mig):
             failures.append("an untracked worktree copy was counted")
 
+    # 4. A baseline entry that no longer collides must be reported. With
+    #    KNOWN_COLLISIONS empty this direction cannot be exercised by the real
+    #    tree at all, so without this case it is dead code that nobody would
+    #    notice had stopped working.
+    with tempfile.TemporaryDirectory() as d:
+        mig = build(Path(d))
+        found = collisions(mig)                      # clean: no collisions
+        stale = stale_entries(found, {"postgres": {"001"}})
+        if stale != [("postgres", "001")]:
+            failures.append(f"a stale baseline entry was not reported: {stale!r}")
+        if stale_entries(found, {}):
+            failures.append("an empty baseline reported a stale entry")
+
+    # 5. The control for case 4, and it is not redundant: with a collision-free
+    #    fixture, `known - actual` and `known` are the same expression, so case
+    #    4 alone passes an implementation that reports EVERY baseline entry as
+    #    stale. Measured -- that mutation survived case 4 and is caught here.
+    #    An entry that still describes a real collision must NOT be reported.
+    with tempfile.TemporaryDirectory() as d:
+        mig = build(Path(d))
+        shutil.copy(mig / "postgres" / "001_first.sql",
+                    mig / "postgres" / "001_duplicate.sql")
+        subprocess.run(["git", "add", "-A"], cwd=mig, check=True,
+                       capture_output=True)
+        found = collisions(mig)                      # 001 IS colliding here
+        stale = stale_entries(found, {"postgres": {"001"}})
+        if stale:
+            failures.append(f"an entry that still collides was reported as "
+                            f"stale: {stale!r}")
+
     for f in failures:
         print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
     if failures:
         return 1
-    print("self-test: clean tree passes, a duplicate is reported, "
-          "an untracked copy is ignored")
+    print("self-test: clean tree passes, a duplicate is reported, an untracked "
+          "copy is ignored, a stale baseline entry is reported")
     return 0
 
 
@@ -208,17 +259,15 @@ def main() -> int:
     # The other direction: an entry that no longer collides has been fixed, and
     # leaving it listed means the next real collision at that version is
     # silently exempt.
-    for dialect, known in sorted(KNOWN_COLLISIONS.items()):
-        actual = set(found.get(dialect, {}))
-        for version in sorted(known - actual):
-            rc = 1
-            print(f"\nFAIL: KNOWN_COLLISIONS lists {dialect}/{version}, which no "
-                  f"longer collides. Remove the entry -- a stale exemption would "
-                  f"let the next collision at that version through unreported.")
+    for dialect, version in stale_entries(found, KNOWN_COLLISIONS):
+        rc = 1
+        print(f"\nFAIL: KNOWN_COLLISIONS lists {dialect}/{version}, which no "
+              f"longer collides. Remove the entry -- a stale exemption would "
+              f"let the next collision at that version through unreported.")
 
     if rc == 0:
         n = sum(len(v) for v in KNOWN_COLLISIONS.values())
-        print(f"no new collisions ({n} known, tracked in cleat#1071)")
+        print("no collisions" if n == 0 else f"no new collisions ({n} exempt)")
     else:
         print("\nmigration/runner.go keys schema_migrations by the filename's "
               "numeric prefix, so two files at one version are one row: a "
