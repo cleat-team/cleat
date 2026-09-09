@@ -1,9 +1,16 @@
 package engine
 
-// TestIdempotencyResultUpdatesAreScopedToTenant is the regression test for
+// TestIdempotencyOutcomeUpdatesAreScopedToTenant is the regression test for
 // the Finding S1 residual: CompleteWorkflow, FailWorkflow, and
-// MoveToDeadLetterQueue each write a best-effort UPDATE to idempotency_keys
+// MoveToDeadLetterQueue each wrote a best-effort UPDATE to idempotency_keys
 // filtered on workflow_id alone, with no tenant_id predicate at all.
+//
+// Two of those three sites remain. cleat#1049 dropped idempotency_keys.result
+// -- the column CompleteWorkflow's write filled and nothing read -- so the
+// success path no longer touches this table and there is no third statement
+// left to scope. FailWorkflow and MoveToDeadLetterQueue still write
+// error_msg, and this test now drives that arm. Same UPDATE shape, same
+// predicate, same three dialects; only the column changed.
 //
 // workflow_instances.id is a bare TEXT PRIMARY KEY with no tenant component,
 // so two tenants cannot simultaneously hold a workflow with the same id --
@@ -15,9 +22,9 @@ package engine
 // naming a workflow_id that a *different* tenant later reuses -- a real risk
 // once ids are freed by deletion, and trivially reproducible directly, since
 // nothing enforces global uniqueness of idempotency_keys.workflow_id itself
-// -- is exactly the case an unscoped UPDATE corrupts: tenant B completing
-// its own workflow silently overwrites tenant A's already-recorded
-// idempotency result.
+// -- is exactly the case an unscoped UPDATE corrupts: tenant B failing its
+// own workflow silently overwrites tenant A's already-recorded idempotency
+// outcome.
 //
 // This test does not go through DeleteDeadLetteredWorkflows to manufacture
 // that state; it inserts the colliding row directly, which isolates the
@@ -67,8 +74,15 @@ type idempotencyScopeDialect struct {
 	// expiring an hour out.
 	insertDecoy string
 
-	// selectResult reads idempotency_keys.result for (wfID, tenant).
-	selectResult string
+	// selectOutcome reads idempotency_keys.error_msg for (wfID, tenant).
+	//
+	// error_msg, not result: cleat#1049 dropped idempotency_keys.result,
+	// which every write site filled and no reader ever selected. The
+	// property under test is unchanged -- error_msg is written by the same
+	// UPDATE shape, under the same `AND tenant_id` predicate, from the other
+	// branch of the same IF -- and it is the branch two of the three sites
+	// named above (FailWorkflow, MoveToDeadLetterQueue) always took.
+	selectOutcome string
 }
 
 // idempotencyScopeStore is the slice of each store this test drives. All
@@ -78,7 +92,7 @@ type idempotencyScopeStore interface {
 	DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error
 	StartNewRun(ctx context.Context, workflowID, defName string, version int, input json.RawMessage, idemKey, tenantID string, priority int) (string, bool, error)
 	ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error)
-	CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
+	FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error
 
 	// The path the worker actually takes. cmd/cleat-worker/setup.go:1935 calls
 	// this, not CompleteWorkflow -- whose only non-test callers are in
@@ -88,7 +102,7 @@ type idempotencyScopeStore interface {
 	FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 }
 
-func TestIdempotencyResultUpdatesAreScopedToTenant(t *testing.T) {
+func TestIdempotencyOutcomeUpdatesAreScopedToTenant(t *testing.T) {
 	for _, d := range idempotencyScopeDialects() {
 		t.Run(d.name, func(t *testing.T) {
 			runIdempotencyTenantScopeCase(t, d)
@@ -148,8 +162,9 @@ func runIdempotencyTenantScopeCase(t *testing.T, d idempotencyScopeDialect) {
 		t.Fatalf("insert decoy idempotency_keys row: %v", err)
 	}
 
-	// Claim and complete as tenant B -- the real path CompleteWorkflow is
-	// reached from.
+	// Claim and fail as tenant B. The failure arm, not the success arm:
+	// since #1049 dropped idempotency_keys.result, a completed run writes
+	// nothing to this table and there would be nothing to scope.
 	claimed, err := storeB.ClaimWorkflows(ctx, "worker-scope-test", 1)
 	if err != nil {
 		t.Fatalf("ClaimWorkflows: %v", err)
@@ -159,39 +174,35 @@ func runIdempotencyTenantScopeCase(t *testing.T, d idempotencyScopeDialect) {
 	}
 	wf := claimed[0]
 
-	if err := storeB.CompleteWorkflow(ctx, wfID, wf.AssignedTo, wf.Generation, `{"ok":true}`, nil); err != nil {
-		t.Fatalf("CompleteWorkflow: %v", err)
+	if err := storeB.FailWorkflow(ctx, wfID, wf.AssignedTo, wf.Generation,
+		`{"error":"tenant B's own failure"}`, "", "", nil); err != nil {
+		t.Fatalf("FailWorkflow: %v", err)
 	}
 
 	// Tenant B's own row must have been updated -- the control. Without it a
 	// store that updated nothing at all would pass the cross-tenant half
 	// trivially.
 	//
-	// Note what this does NOT catch: the MySQL coercion defect fixed
-	// alongside the scoping. `{"ok":true}` is valid JSON either way, so raw
-	// and coerced are identical here and reverting the coercion leaves this
-	// green. TestIdempotencyResultSurvivesANonJSONResult below is the one
-	// that catches it; measured, not assumed.
-	var bResult []byte
-	if err := db.QueryRowContext(ctx, d.selectResult, wfID, tenantB).Scan(&bResult); err != nil {
+	var bErrMsg []byte
+	if err := db.QueryRowContext(ctx, d.selectOutcome, wfID, tenantB).Scan(&bErrMsg); err != nil {
 		t.Fatalf("read tenant B's idempotency_keys row: %v", err)
 	}
-	if bResult == nil {
-		t.Errorf("tenant B's own idempotency_keys row was not updated by its own CompleteWorkflow")
+	if bErrMsg == nil {
+		t.Errorf("tenant B's own idempotency_keys row was not updated by its own FailWorkflow")
 	}
 
 	// The point of the test: the decoy row, which names the same
 	// workflow_id but belongs to a different tenant, must be untouched.
 	// Against the unfixed UPDATE (WHERE workflow_id = ?, no tenant_id
 	// predicate) this row is also matched and overwritten with tenant B's
-	// result -- a cross-tenant write to data tenant B never owned.
-	var decoyResult []byte
-	if err := db.QueryRowContext(ctx, d.selectResult, wfID, decoyTenant).Scan(&decoyResult); err != nil {
+	// error -- a cross-tenant write to data tenant B never owned.
+	var decoyErrMsg []byte
+	if err := db.QueryRowContext(ctx, d.selectOutcome, wfID, decoyTenant).Scan(&decoyErrMsg); err != nil {
 		t.Fatalf("read decoy idempotency_keys row: %v", err)
 	}
-	if decoyResult != nil {
+	if decoyErrMsg != nil {
 		t.Errorf("a different tenant's idempotency_keys row (same workflow_id) was overwritten by "+
-			"tenant B's CompleteWorkflow: result = %s -- the UPDATE is not scoped to tenant_id", decoyResult)
+			"tenant B's FailWorkflow: error_msg = %s -- the UPDATE is not scoped to tenant_id", decoyErrMsg)
 	}
 }
 
@@ -209,7 +220,7 @@ func idempotencyScopeDialects() []idempotencyScopeDialect {
 			},
 			insertDecoy: `INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
 			              VALUES ($1, $2, now() + INTERVAL '1 hour', $3)`,
-			selectResult: `SELECT result FROM idempotency_keys WHERE workflow_id = $1 AND tenant_id = $2`,
+			selectOutcome: `SELECT error_msg FROM idempotency_keys WHERE workflow_id = $1 AND tenant_id = $2`,
 		},
 		{
 			name:    "mysql",
@@ -219,7 +230,7 @@ func idempotencyScopeDialects() []idempotencyScopeDialect {
 			},
 			insertDecoy: `INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
 			              VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL 1 HOUR), ?)`,
-			selectResult: `SELECT result FROM idempotency_keys WHERE workflow_id = ? AND tenant_id = ?`,
+			selectOutcome: `SELECT error_msg FROM idempotency_keys WHERE workflow_id = ? AND tenant_id = ?`,
 		},
 		{
 			name:    "mssql",
@@ -229,89 +240,13 @@ func idempotencyScopeDialects() []idempotencyScopeDialect {
 			},
 			insertDecoy: `INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
 			              VALUES (@p1, @p2, DATEADD(hour, 1, SYSUTCDATETIME()), @p3)`,
-			selectResult: `SELECT result FROM idempotency_keys WHERE workflow_id = @p1 AND tenant_id = @p2`,
+			selectOutcome: `SELECT error_msg FROM idempotency_keys WHERE workflow_id = @p1 AND tenant_id = @p2`,
 		},
 	}
 }
 
-// TestIdempotencyResultSurvivesANonJSONResult guards the second half of the
-// MySQL defect: that store wrote the raw result string rather than the
-// coerced JSON into idempotency_keys.result, which is a JSON column on
-// MySQL and JSONB on PostgreSQL.
-//
-// It matters because the write is best-effort -- its error is logged at WARN
-// and swallowed -- so an invalid value does not fail the workflow. It fails
-// nothing at all, and the idempotency result is silently never recorded. A
-// retried idempotent call then finds a row with no result.
-//
-// A workflow that continues-as-new never returns a value, so `result` is the
-// empty string, which is not valid JSON. That is the reachable case, and it
-// is the same one coerceResultJSON was written for: the comment above the
-// coercion in each store records that writing it raw failed the whole run on
-// PostgreSQL with `invalid input syntax for type json (22P02)`, and that
-// coerceResultJSON "was called from one path out of three".
-//
-// This runs on the same three dialects as the test above, for the same
-// reason: the coercion was applied per-store, so only a per-store assertion
-// can say it holds everywhere.
-func TestIdempotencyResultSurvivesANonJSONResult(t *testing.T) {
-	for _, d := range idempotencyScopeDialects() {
-		t.Run(d.name, func(t *testing.T) {
-			db := testutil.TestDB(t, d.dialect)
-			defer db.Close()
-			testutil.SetupFullSchema(t, db, d.dialect)
-			testutil.CleanupAllTestData(t, db, d.dialect)
-			defer testutil.CleanupAllTestData(t, db, d.dialect)
-
-			ctx := context.Background()
-			const tenant = "d3d3d3d3-d3d3-4d3d-9d3d-d3d3d3d3d3d3"
-
-			defName := fmt.Sprintf("idem-nonjson-def-%s", d.name)
-			store := d.newStore(db, tenant)
-			if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
-				Name: defName, Version: 1,
-				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
-				ABIVersion: 1, MinVersion: 1,
-			}); err != nil {
-				t.Fatalf("deploy %q: %v", defName, err)
-			}
-
-			wfID := fmt.Sprintf("idem-nonjson-wf-%s-%d", d.name, time.Now().UnixNano())
-			if _, _, err := store.StartNewRun(ctx, wfID, defName, 1, json.RawMessage(`{}`), "nonjson-key", tenant, 0); err != nil {
-				t.Fatalf("StartNewRun: %v", err)
-			}
-
-			claimed, err := store.ClaimWorkflows(ctx, "worker-nonjson-test", 1)
-			if err != nil {
-				t.Fatalf("ClaimWorkflows: %v", err)
-			}
-			if len(claimed) != 1 || claimed[0].ID != wfID {
-				t.Fatalf("ClaimWorkflows: got %+v, want exactly [%s]", claimed, wfID)
-			}
-			wf := claimed[0]
-
-			// The empty result is the continue-as-new shape: no value was
-			// returned. Every store must coerce it to something its result
-			// column accepts.
-			if err := store.CompleteWorkflow(ctx, wfID, wf.AssignedTo, wf.Generation, "", nil); err != nil {
-				t.Fatalf("CompleteWorkflow with an empty result: %v", err)
-			}
-
-			var result []byte
-			if err := db.QueryRowContext(ctx, d.selectResult, wfID, tenant).Scan(&result); err != nil {
-				t.Fatalf("read idempotency_keys row: %v", err)
-			}
-			if result == nil {
-				t.Errorf("completing with an empty result left idempotency_keys.result NULL: the " +
-					"raw value was written uncoerced, the column rejected it, and the error was " +
-					"swallowed by the best-effort WARN path -- so a retried idempotent call finds no result")
-			}
-		})
-	}
-}
-
 // TestFinalizeDoesNotWriteIdempotencyAcrossTenants is the same property as
-// TestIdempotencyResultUpdatesAreScopedToTenant, on the path production takes.
+// TestIdempotencyOutcomeUpdatesAreScopedToTenant, on the path production takes.
 //
 // WHY BOTH EXIST. The first drives CompleteWorkflow, a store method whose only
 // non-test callers are in cmd/cleat-bench. The worker finalizes through
@@ -376,32 +311,40 @@ func TestFinalizeDoesNotWriteIdempotencyAcrossTenants(t *testing.T) {
 			}
 			wf := claimed[0]
 
-			// The production call. Terminal status 'done' takes the procedure's
-			// idempotency arm.
+			// The production call. Terminal status 'failed' takes the
+			// procedure's idempotency arm -- since #1049 the 'done' arm
+			// writes no idempotency row at all.
+			//
+			// A JSON object, not a bare sentence, because FinalizeWorkflowSegment
+			// runs `result` through coerceResultJSON regardless of finalStatus
+			// and a non-JSON value is replaced by `{}` before the procedure sees
+			// it. Production passes a JSON error payload here, so this matches
+			// what the worker sends; a plain string would still exercise the
+			// scoping but every assertion message would read `error_msg = {}`.
 			if err := storeB.FinalizeWorkflowSegment(ctx, wfID, wf.AssignedTo, wf.Generation,
-				nil, "done", `{"ok":true}`, "", "", nil, time.Time{}); err != nil {
+				nil, "failed", `{"error":"tenant B's own failure"}`, "", "", nil, time.Time{}); err != nil {
 				t.Fatalf("FinalizeWorkflowSegment: %v", err)
 			}
 
 			// Control: tenant B's own row must have been written, or the
 			// cross-tenant assertion below passes for the wrong reason.
-			var bResult []byte
-			if err := db.QueryRowContext(ctx, d.selectResult, wfID, tenantB).Scan(&bResult); err != nil {
+			var bErrMsg []byte
+			if err := db.QueryRowContext(ctx, d.selectOutcome, wfID, tenantB).Scan(&bErrMsg); err != nil {
 				t.Fatalf("read tenant B's idempotency_keys row: %v", err)
 			}
-			if bResult == nil {
+			if bErrMsg == nil {
 				t.Errorf("tenant B's own idempotency_keys row was not written by its own " +
 					"FinalizeWorkflowSegment -- the decoy assertion below would pass vacuously")
 			}
 
-			var decoyResult []byte
-			if err := db.QueryRowContext(ctx, d.selectResult, wfID, decoyTenant).Scan(&decoyResult); err != nil {
+			var decoyErrMsg []byte
+			if err := db.QueryRowContext(ctx, d.selectOutcome, wfID, decoyTenant).Scan(&decoyErrMsg); err != nil {
 				t.Fatalf("read decoy idempotency_keys row: %v", err)
 			}
-			if decoyResult != nil {
+			if decoyErrMsg != nil {
 				t.Errorf("a different tenant's idempotency_keys row (same workflow_id) was "+
-					"overwritten by tenant B's FinalizeWorkflowSegment: result = %s -- "+
-					"finalize_workflow_status's UPDATE is not scoped to tenant_id", decoyResult)
+					"overwritten by tenant B's FinalizeWorkflowSegment: error_msg = %s -- "+
+					"finalize_workflow_status's UPDATE is not scoped to tenant_id", decoyErrMsg)
 			}
 		})
 	}

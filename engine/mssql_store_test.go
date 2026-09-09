@@ -1133,7 +1133,6 @@ func TestMSSQLStore_CompleteWorkflow_SuccessMock(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
 		{match: "SET status = 'done'", affected: 1},
-		{match: "idempotency_keys SET result"},
 	})
 	defer db.Close()
 

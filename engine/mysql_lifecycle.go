@@ -450,17 +450,17 @@ func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 	}
 	if n == 0 {
 		// Another worker now owns this workflow. Roll back rather than
-		// commit: the idempotency-key write and post-commit cleanup below
-		// are not safe to run on the new owner's behalf.
+		// commit: the post-commit cleanup below is not safe to run on the
+		// new owner's behalf.
 		return ErrFenceLost
 	}
 
-	// Record idempotency result within the transaction (best-effort).
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET result = ? WHERE workflow_id = ? AND tenant_id = ?`,
-		resultJSON, workflowID, s.tenantID); err != nil {
-		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
-	}
+	// No idempotency write on the success path. idempotency_keys.result was
+	// written here and read nowhere, so cleat#1049 dropped the column; a
+	// completed run now records nothing on that table. The failure path is
+	// unchanged -- FailWorkflow and MoveToDeadLetterQueue still write
+	// error_msg, still filtered `AND tenant_id`, which is where the Finding
+	// S1 tenant-scope guard now lives.
 
 	if err := tx.Commit(); err != nil {
 		return err

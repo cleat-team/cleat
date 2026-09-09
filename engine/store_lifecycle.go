@@ -413,29 +413,17 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	}
 	if n == 0 {
 		// Another worker now owns this workflow. Roll back rather than
-		// commit: the idempotency-key write and post-commit cleanup below
-		// are not safe to run on the new owner's behalf.
+		// commit: the post-commit cleanup below is not safe to run on the
+		// new owner's behalf.
 		return ErrFenceLost
 	}
 
-	// Record idempotency result within the transaction (best-effort).
-	//
-	// AND tenant_id = $3, not workflow_id alone: this UPDATE ran unscoped by
-	// tenant, so it matched any row across every tenant whose workflow_id
-	// happened to equal this one. workflow_id is generated per call
-	// (uuid.New() when the caller supplies none) so a same-tenant collision
-	// is astronomically unlikely, but a caller-supplied runID is not
-	// guaranteed unique *across* tenants the way it is guaranteed unique
-	// *within* one (StartNewRun's idempotency_keys primary key is now
-	// (key_hash, tenant_id), migrations/postgres/010). s.tenantID is set
-	// on this tx already -- beginTxWithRLS calls setRLSOnTx before any
-	// caller reaches here -- so this is a Go-level filter matching the RLS
-	// policy's own scope, not a new source of truth for it.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1 AND tenant_id = $3`,
-		workflowID, resultJSON, s.tenantID); err != nil {
-		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
-	}
+	// No idempotency write on the success path. idempotency_keys.result was
+	// written here and read nowhere, so cleat#1049 dropped the column; a
+	// completed run now records nothing on that table. The failure path is
+	// unchanged -- FailWorkflow and MoveToDeadLetterQueue still write
+	// error_msg, still filtered `AND tenant_id`, which is where the Finding
+	// S1 tenant-scope guard now lives.
 
 	if err := tx.Commit(); err != nil {
 		return err
