@@ -113,7 +113,11 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select step, checksum from event_history where workflow_id = @p1 order by step",
 		Reason: scopedByCaller,
 	},
-	"mssql_lifecycle.go:claimWorkflowsAcrossTenantsOnce#c73d2d0f2d8b": {
+	// Moved from c73d2d0f2d8b when cleat#1090 added started_at to the claim's
+	// SET list (#1094). Re-made rather than swapped: the addition changes no
+	// WHERE clause and no row selection, so "deliberately cross-tenant" still
+	// describes this statement for the same reason it did before.
+	"mssql_lifecycle.go:claimWorkflowsAcrossTenantsOnce#44368f5b6261": {
 		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
 		Reason: deliberatelyCrossTenant,
 	},
