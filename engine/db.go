@@ -882,8 +882,10 @@ func (s *PostgresStore) UpdateStickyWorker(ctx context.Context, workflowID, work
 	defer tx.Rollback()
 
 	// No `AND tenant_id` here, and that is not the omission it looks like.
+	// This applies to BOTH sticky-worker statements -- the update below and the
+	// NULL-out in ClearStickyWorker -- on all three dialects.
 	//
-	// MySQL's UpdateStickyWorker carries the predicate and this one does not,
+	// MySQL's copies carry the predicate and Postgres's do not,
 	// which is cleat#1012's exact shape -- a statement tenant-scoped on one
 	// dialect of three -- and it has been half-filed as a defect at least once.
 	// It is not one. workflow_instances has
@@ -917,6 +919,8 @@ func (s *PostgresStore) ClearStickyWorker(ctx context.Context, workflowID string
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
+		-- No AND tenant_id, deliberately: RLS bounds this. See the note on
+		-- UpdateStickyWorker above.
 		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = $1
 	`, workflowID)
 	if err != nil {

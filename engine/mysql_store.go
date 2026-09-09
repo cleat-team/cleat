@@ -614,6 +614,9 @@ func (s *MySQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerI
 // ClearStickyWorker removes the sticky worker assignment.
 func (s *MySQLStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
 	_, err := s.db.ExecContext(ctx, `
+		-- The AND tenant_id is the tenant boundary on MySQL, which has no RLS.
+		-- Postgres and SQL Server omit it on purpose; see the note on
+		-- PostgresStore.UpdateStickyWorker.
 		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = ? AND tenant_id = ?
 	`, workflowID, s.tenantID)
 	if err != nil {
