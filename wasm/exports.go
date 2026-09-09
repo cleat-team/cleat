@@ -77,28 +77,6 @@ func GenerateExports(pkgName string, result *analyzer.AnalysisResult, target str
 
 `)
 
-	// Helper: extract an integer value for a given key.
-	buf.WriteString(`func extractJSONInt(raw, key string) int {
-	search := "\"" + key + "\":"
-	idx := strings.Index(raw, search)
-	if idx < 0 {
-		return 0
-	}
-	rest := raw[idx+len(search):]
-	rest = strings.TrimLeft(rest, " \t\n\r")
-	n := 0
-	for _, c := range rest {
-		if c >= '0' && c <= '9' {
-			n = n*10 + int(c-'0')
-		} else {
-			break
-		}
-	}
-	return n
-}
-
-`)
-
 	if needsJSON {
 		// extractJSONRaw extracts the raw JSON text for a key, handling
 		// objects, arrays, strings, numbers, and literals. Used as input
@@ -498,8 +476,6 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 			switch f.GoType {
 			case "string":
 				fmt.Fprintf(buf, "\t%s := extractJSONString(argsJSON, %q)\n", f.GoName, f.JSONTag)
-			case "int", "int64", "int32":
-				fmt.Fprintf(buf, "\t%s := extractJSONInt(argsJSON, %q)\n", f.GoName, f.JSONTag)
 			default:
 				fmt.Fprintf(buf, "\tvar %s %s\n", f.GoName, f.GoType)
 				fmt.Fprintf(buf, "\tif err := json.Unmarshal([]byte(extractJSONRaw(argsJSON, %q)), &%s); err != nil {\n", f.JSONTag, f.GoName)
@@ -572,8 +548,16 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 	buf.WriteString("}\n\n")
 }
 
-// hasComplexParams returns true if any entry point has parameters that are
-// not simple primitives (string, int, int32, int64).
+// hasComplexParams returns true if any entry point has a parameter that needs
+// the JSON decoder -- which is everything except a plain string.
+//
+// int, int32 and int64 counted as "simple" until cleat#1036, because they were
+// bound by extractJSONInt: a hand-rolled digit scanner that could not express a
+// sign, returned no error, and silently produced 0 for any value it could not
+// read. Deleting that scanner moves ints onto json.Unmarshal, so they need the
+// same import and the same extractJSONRaw helper the other types do. A guest
+// whose only non-string parameter is an int otherwise fails to compile with
+// "undefined: json".
 func hasComplexParams(result *analyzer.AnalysisResult) bool {
 	for _, epName := range result.EntryPoints {
 		fd := result.Funcs[epName]
@@ -592,7 +576,7 @@ func hasComplexParams(result *analyzer.AnalysisResult) bool {
 		for i := startIdx; i < params.Len(); i++ {
 			typeName := types.TypeString(params.At(i).Type(), types.RelativeTo(result.TargetPkg.Types))
 			switch typeName {
-			case "string", "int", "int32", "int64":
+			case "string":
 				continue
 			default:
 				return true
@@ -700,8 +684,6 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 				switch f.GoType {
 				case "string":
 					fmt.Fprintf(buf, "\t\t%s := extractJSONString(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
-				case "int", "int64", "int32":
-					fmt.Fprintf(buf, "\t\t%s := extractJSONInt(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
 				default:
 					// Complex type: use json.Unmarshal.
 					fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
