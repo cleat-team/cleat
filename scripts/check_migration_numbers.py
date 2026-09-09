@@ -50,18 +50,50 @@ def repo_root() -> Path:
     return Path(out.stdout.strip())
 
 
+def tracked_sql(migrations: Path) -> list[str]:
+    """Migration paths, from git rather than from a filesystem walk.
+
+    A walk descends into .claude/worktrees/ and any other scratch checkout,
+    which hold whole second copies of migrations/ -- so a file belonging to
+    another session's worktree gets attributed to this repo, and the error gets
+    MORE likely as the working tree gets messier. CLAUDE.md records that as the
+    third of three bugs in one guard, and the only one that was a scope mistake
+    rather than a parsing mistake.
+
+    The directory argument is resolved through `git -C`, so a doctored tree
+    passed for a known-positive must be a git repo. That is deliberate: it
+    keeps the tested path and the production path identical, rather than
+    exercising a walk in the test and git in CI.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(migrations), "ls-files", "*/*.sql"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        print(f"FAIL: `git ls-files` failed in {migrations}: {out.stderr.strip()}",
+              file=sys.stderr)
+        sys.exit(2)
+    return [l for l in out.stdout.split("\n") if l.endswith(".sql")]
+
+
 def collisions(migrations: Path) -> dict[str, dict[str, list[str]]]:
     found: dict[str, dict[str, list[str]]] = {}
-    for dialect_dir in sorted(p for p in migrations.iterdir() if p.is_dir()):
+    by_dialect: dict[str, list[str]] = defaultdict(list)
+    for rel in tracked_sql(migrations):
+        parts = rel.split("/")
+        if len(parts) < 2:
+            continue
+        by_dialect[parts[-2]].append(parts[-1])
+    for dialect, names in by_dialect.items():
         by_version: dict[str, list[str]] = defaultdict(list)
-        for sql in sorted(dialect_dir.glob("*.sql")):
-            m = re.match(r"^(\d+)_", sql.name)
+        for name in sorted(names):
+            m = re.match(r"^(\d+)_", name)
             if not m:
                 continue
-            by_version[m.group(1)].append(sql.name)
-        dup = {v: names for v, names in by_version.items() if len(names) > 1}
+            by_version[m.group(1)].append(name)
+        dup = {v: n for v, n in by_version.items() if len(n) > 1}
         if dup:
-            found[dialect_dir.name] = dup
+            found[dialect] = dup
     return found
 
 
@@ -69,19 +101,16 @@ def main() -> int:
     root = repo_root()
     migrations = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "migrations"
 
-    dialects = [p for p in migrations.iterdir() if p.is_dir()]
-    if not dialects:
-        print(f"FAIL: no dialect directories under {migrations}. The scan is "
-              f"broken and would report no collisions however many there are.",
-              file=sys.stderr)
-        return 2
-    total = sum(len(list(d.glob('*.sql'))) for d in dialects)
-    if total == 0:
-        print(f"FAIL: no .sql files under {migrations}.", file=sys.stderr)
+    tracked = tracked_sql(migrations)
+    if not tracked:
+        print(f"FAIL: `git ls-files` returned no migrations under {migrations}. "
+              f"The scan is broken and would report no collisions however many "
+              f"there are.", file=sys.stderr)
         return 2
 
     found = collisions(migrations)
-    print(f"migrations: {total} files across {len(dialects)} dialect(s)")
+    dialects = {rel.split("/")[-2] for rel in tracked if "/" in rel}
+    print(f"migrations: {len(tracked)} tracked files across {len(dialects)} dialect(s)")
 
     rc = 0
     for dialect, dup in sorted(found.items()):
