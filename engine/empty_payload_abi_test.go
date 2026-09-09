@@ -112,12 +112,12 @@ func TestABISetScopeReportsPreviousScopeLength(t *testing.T) {
 	}
 
 	// This is the half that did not: the guest has no way to learn how many.
-	gotLen := uint32(uint64(got) >> 32)
+	gotLen := uint32(got >> 32)
 	if gotLen != uint32(len(want)) {
 		t.Errorf("cleat_set_scope returned previous-scope length %d, want %d "+
 			"(raw result %#x). The host wrote %q into the buffer and reported no "+
 			"length, so every SDK that decodes it -- rust, java, assemblyscript -- "+
 			"reads an empty previous scope no matter what was there.",
-			gotLen, len(want), uint64(got), want)
+			gotLen, len(want), got, want)
 	}
 }
