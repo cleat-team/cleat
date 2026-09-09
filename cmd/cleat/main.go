@@ -43,7 +43,16 @@ var buildTenantID string
 
 func main() {
 	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
-	flag.StringVar(&buildTenantID, "tenant", "", "tenant UUID for build-time resolution (default: zero UUID for single-tenant)")
+	// Global, not per-subcommand, so it must precede the subcommand:
+	// `cleat --tenant X deploy foo.wasm`, never `cleat deploy --tenant X`.
+	// flag.Parse() stops at the first non-flag argument and each subcommand
+	// builds its own ExitOnError FlagSet, so the trailing form exits 2 with
+	// "flag provided but not defined: -tenant".
+	//
+	// That was inert until cleat#1038 -- `--tenant` did nothing on `deploy` in
+	// either position, so the position did not matter. It does now, which is
+	// why it is named in Usage below rather than left to be discovered.
+	flag.StringVar(&buildTenantID, "tenant", "", "tenant UUID for build-time child-version resolution and for `deploy` (default: zero UUID for single-tenant)")
 	flag.StringVar(&dbCredProviderName, "db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
 	flag.StringVar(&dbCredPath, "db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 	flag.Usage = func() {
@@ -65,6 +74,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  cleat version\n")
 		fmt.Fprintf(os.Stderr, "Common flags:\n")
 		fmt.Fprintf(os.Stderr, "  --db <connstr>  PostgreSQL connection string\n")
+		fmt.Fprintf(os.Stderr, "  --tenant <uuid> tenant for deploy and build-time resolution;\n")
+		fmt.Fprintf(os.Stderr, "                  must come BEFORE the subcommand\n")
 		fmt.Fprintf(os.Stderr, "Example: cleat build -o ./out ./testdata/basic/\n")
 	}
 	flag.Parse()
