@@ -703,7 +703,10 @@ class CleatEntryTransformer {
         {
           let importLine = 'import { HostCalls, Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended, runDeferred';
           if (needsJsonImport) {
-            importLine += ', JsonParser, JsonVal';
+            // TYPE_* accompany JsonParser: the generated multi-parameter
+            // binder compares typeOf() against them by NAME rather than by
+            // literal, so they must be in scope wherever JsonParser is.
+            importLine += ', JsonParser, JsonVal, TYPE_STRING, TYPE_NUMBER, TYPE_BOOL';
           }
           importLine += ' } from "@cleat/sdk";\n';
           parser.parseFile(
@@ -1006,24 +1009,65 @@ class CleatEntryTransformer {
   // Generate deserialization code for a single parameter based on type
   // Used by the multi-parameter branch to select the correct JSON getter
   // ---------------------------------------------------------------
+  // The JsonVal type a parameter of `ptype` must have when present. Throws for
+  // anything _getDeserializeCode cannot bind, so the two lists cannot drift.
+  _expectedJsonType(ptype, pname, funcName) {
+    if (ptype === "string" || ptype === "String") return "TYPE_STRING";
+    if (ptype === "bool" || ptype === "boolean") return "TYPE_BOOL";
+    if (["i32", "u32", "i64", "u64", "f64", "f32"].indexOf(ptype) !== -1) return "TYPE_NUMBER";
+    throw new Error(
+      "[@cleat/transform] Unsupported type '" + ptype +
+      "' for parameter '" + pname + "' in function '" + funcName +
+      "'. Supported types: string, i32, u32, i64, u64, f64, f32, bool"
+    );
+  }
+
+  // Refuse a WRONG-TYPED argument; an ABSENT one still binds zero. cleat#1067.
+  //
+  // The getters collapse both into a zero value: getString returns "" for a
+  // missing key AND for {"note": 42}, so a caller who sent the wrong type was
+  // indistinguishable from one who sent nothing, and the workflow ran on the
+  // zero value either way. Measured 2026-09-09 -- present "hi" gave length 2,
+  // absent gave 0, and {"note": 42} also gave 0.
+  //
+  // Only the wrong-typed half changes. Absent must keep binding zero: it is how
+  // an AS workflow expresses an optional parameter, since AS has no
+  // Python-style defaults and this transform rejects composite types at compile
+  // time. That matches the Go contract pinned by cleat#1061, and Go, Rust and
+  // Java already refuse a wrong-typed argument -- AS was alone in accepting one.
+  //
+  // typeOf() returns -1 for an absent key, so `!= -1` is the present test and
+  // the next comparison is the type check. Named constants rather than the
+  // literals 1/2/3, so renumbering them in json.ts cannot silently invert it.
+  _typeGuard(pname, ptype, funcName) {
+    const expect = this._expectedJsonType(ptype, pname, funcName);
+    return (
+      `  const _t_${pname}: i32 = _parser.typeOf(_parsed, "${pname}");\n` +
+      `  if (_t_${pname} != -1 && _t_${pname} != ${expect}) {\n` +
+      this._makeErrorReturn(`parameter ${pname} has the wrong JSON type`) +
+      `  }\n`
+    );
+  }
+
   _getDeserializeCode(pname, ptype, funcName) {
     // Map AS types to the correct JsonParser getter
+    const g = this._typeGuard(pname, ptype, funcName);
     if (ptype === "string" || ptype === "String") {
-      return `  let ${pname}: string = _parser.getString(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: string = _parser.getString(_parsed, "${pname}");\n`;
     } else if (ptype === "i32") {
-      return `  let ${pname}: i32 = <i32>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: i32 = <i32>_parser.getNumber(_parsed, "${pname}");\n`;
     } else if (ptype === "u32") {
-      return `  let ${pname}: u32 = <u32>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: u32 = <u32>_parser.getNumber(_parsed, "${pname}");\n`;
     } else if (ptype === "i64") {
-      return `  let ${pname}: i64 = <i64>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: i64 = <i64>_parser.getNumber(_parsed, "${pname}");\n`;
     } else if (ptype === "u64") {
-      return `  let ${pname}: u64 = <u64>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: u64 = <u64>_parser.getNumber(_parsed, "${pname}");\n`;
     } else if (ptype === "f64") {
-      return `  let ${pname}: f64 = _parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: f64 = _parser.getNumber(_parsed, "${pname}");\n`;
     } else if (ptype === "f32") {
-      return `  let ${pname}: f32 = <f32>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: f32 = <f32>_parser.getNumber(_parsed, "${pname}");\n`;
     } else if (ptype === "bool" || ptype === "boolean") {
-      return `  let ${pname}: bool = _parser.getBool(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: bool = _parser.getBool(_parsed, "${pname}");\n`;
     } else {
       // Unknown type — throw a compile-time error from the transformer
       throw new Error(

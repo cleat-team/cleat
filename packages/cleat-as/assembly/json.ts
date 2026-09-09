@@ -243,8 +243,8 @@ class Lexer {
 // ═══════════════════════════════════════════════
 
 const TYPE_NULL: i32 = 0;
-const TYPE_BOOL: i32 = 1;
-const TYPE_NUMBER: i32 = 2;
+export const TYPE_BOOL: i32 = 1;
+export const TYPE_NUMBER: i32 = 2;
 export const TYPE_STRING: i32 = 3;
 const TYPE_ARRAY: i32 = 4;
 // Exported so signal-envelope.ts can check a parsed value's shape rather
@@ -329,6 +329,31 @@ export class JsonParser {
    * Get a string field from a JSON object by key.
    * Returns "" if the key is not found or the value is not a string.
    */
+  /**
+   * The JSON type of `key` in `obj`, or -1 if the key is absent.
+   *
+   * The four getters below deliberately collapse "absent" and "present but the
+   * wrong type" into a zero value -- see the note above getString. That is a
+   * reasonable convenience for reading a document, and it is NOT good enough
+   * for binding an entry point's parameters, where `{"n": "abc"}` for an i32
+   * is a caller error and `{}` is an optional parameter the guest may omit.
+   *
+   * This is the accessor that distinguishes them. Returns TYPE_NULL/TYPE_BOOL/
+   * TYPE_NUMBER/TYPE_STRING/TYPE_ARRAY/TYPE_OBJECT for a present key, and -1
+   * for an absent one. The transform's generated entry-point wrapper uses it to
+   * refuse a wrong-typed argument while still letting an absent one bind its
+   * zero value. See cleat#1067.
+   */
+  typeOf(obj: JsonVal, key: string): i32 {
+    if (obj.type != TYPE_OBJECT) return -1;
+    for (let i: i32 = 0; i < obj.objKeys.length; i++) {
+      if (obj.objKeys[i] == key) {
+        return obj.objValues[i].type;
+      }
+    }
+    return -1;
+  }
+
   getString(obj: JsonVal, key: string): string {
     if (obj.type != TYPE_OBJECT) return "";
     for (let i: i32 = 0; i < obj.objKeys.length; i++) {
