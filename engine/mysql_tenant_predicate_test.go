@@ -63,7 +63,22 @@ import (
 // method at all -- a reason that is true of the code and irrelevant to its
 // safety expires silently the day someone wires it up.
 var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
-	"mysql_lifecycle.go:ClaimWorkflows#be91052efe90": {
+	// The three claim entries below moved from digest be91052efe90 to
+	// e468197bcf08 when cleat#1090 added `started_at = COALESCE(started_at,
+	// NOW(6))` to the claim's SET list (#1094).
+	//
+	// RE-MAKING THE CLAIM, which is what this mechanism exists to force rather
+	// than a digest swap: the addition is one more assignment in a SET list. It
+	// introduces no WHERE clause, references no other table, and does not change
+	// which rows the statement touches -- the candidate query above it still
+	// decides that, and it is still the thing doing the scoping. So the reason
+	// on each entry is unchanged and still describes why the statement is safe.
+	//
+	// Worth recording HOW this was found, because CI could not see it. #1095
+	// keyed this allowlist on the statement digest and #1094 edited the
+	// statement; each was green against its own base, and the pair was red the
+	// moment both were on develop. Neither PR's checks could have caught it.
+	"mysql_lifecycle.go:ClaimWorkflows#e468197bcf08": {
 		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
 		Reason: mysqlScopedByCandidateQuery,
 	},
@@ -71,7 +86,7 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
 		Reason: mysqlScopedByCandidateQuery,
 	},
-	"mysql_lifecycle.go:ClaimStickyWorkflows#be91052efe90": {
+	"mysql_lifecycle.go:ClaimStickyWorkflows#e468197bcf08": {
 		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
 		Reason: mysqlScopedByCandidateQuery,
 	},
@@ -83,7 +98,7 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select id from workflow_instances where status in ('ready', 'terminating') and",
 		Reason: mysqlDeliberatelyCrossTenant,
 	},
-	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants#be91052efe90": {
+	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants#e468197bcf08": {
 		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
 		Reason: mysqlDeliberatelyCrossTenant,
 	},
