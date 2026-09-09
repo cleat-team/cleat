@@ -37,16 +37,28 @@ same `DELETE` is in the MySQL and SQL Server finalize procedures.
 
 * Setting `--retention-days` to any value does not change how long replay
   detail is kept. It is already zero.
-* `cleat_compaction_events_deleted_total` is fed by this sweep's event-deletion
-  count, so it stays at zero permanently. That is expected, not a broken
-  exporter.
+* `cleat_events_deleted_total` is fed by this sweep's event-deletion count, so
+  it stays at zero permanently. That is expected, not a broken exporter.
+* `cleat_compaction_events_deleted_total` is a **different** counter, fed by
+  compaction (`engine/compaction.go`), not by this sweep. Zero there means
+  compaction is not running, which is a real signal and should not be
+  dismissed. An earlier version of this page named that counter here, which
+  told an operator to ignore the one metric of the two that still carries
+  information.
 * The sweep is **not** inert. It also clears `compaction_state`,
   `compaction_step` and `compacted_at` on the same workflows, and that half
   does real work. It is not currently reflected in any metric.
 * `dead_lettered` is the exception: finalize does not purge it and neither does
-  this sweep, so those events survive until
-  `--completed-workflow-retention-days` deletes the workflow row and the
-  `ON DELETE CASCADE` on `event_history` takes them. Source-level; unmeasured.
+  this sweep, so those events survive. **`--completed-workflow-retention-days`
+  does not collect them either** -- its predicate covers `done`, `failed` and
+  `terminated` and excludes `dead_lettered` deliberately, which
+  `engine/store_interface.go` and `engine/db.go` both state at the predicate.
+  Until cleat#1023 nothing collected them at all.
+* `--dead-letter-retention-days` (cleat#1023) is the knob for them, and it is
+  **off by default**. That is deliberate rather than an oversight: a
+  dead-lettered run is the one an operator most wants to inspect, so deleting
+  it destroys exactly the record it was kept for. Set it only when you have
+  decided how long you need those runs.
 
 If you need replay detail to survive a workflow's completion, this is the
 thing to change, and it is a change to the procedure -- not to the flag.
