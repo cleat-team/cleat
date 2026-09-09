@@ -291,7 +291,7 @@ jobs:
           # and -list is what shows it; -run answers only by implication and is
           # silent when the answer is "less than you think".
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestASBindingContract' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
