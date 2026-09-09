@@ -10170,3 +10170,50 @@ the direct arm and the test says nothing about it. Flagged in the test's own com
 The third is the one that matters. Without it, an engine whose cascade was broken outright would
 leave the grandchild untouched too, and the test would report "one level" while measuring zero —
 the same vacuity as a retry test whose budget is one attempt.
+
+---
+
+### 3.411 A terminate reaches a grandchild only when the child in the middle owed a defer phase — 🔶 **MEASURED 2026-09-09, worse than 3.410** (cleat#1108)
+
+§3.410 measured the plain case: terminate a root, its `TERMINATE` child is failed, the grandchild is
+untouched. It recorded a **reading** that the defer arm might behave differently and said someone
+should build the fixture. Built, and the reading holds — on all three dialects.
+
+Identical tree, identical policies, identical terminate. **One `defer` row in the middle** is the
+only difference:
+
+| the child in the middle | the grandchild |
+|---|---|
+| owes no defers | **untouched** — orphaned (§3.410) |
+| owes a defer phase | **`failed`** |
+
+#### Why, and it is one asymmetry
+
+`enforceParentClosePolicy` has two arms and they close a child by different mechanisms.
+
+- **Plain arm:** `UPDATE ... SET status = 'failed' WHERE parent_workflow_id = $1`. A bulk write. It
+  does not go through `FailWorkflow`, and `FailWorkflow` is one of the calls that *fires* the
+  cascade — so the recursion point is bypassed by the mechanism doing the closing.
+- **Defer arm:** `SET status = 'terminating'` with the outcome recorded. The child is claimed again,
+  runs its defers, and is finalised by `FinalizeDeferPhase` — which **does** call
+  `enforceParentClosePolicy` (`engine/store_defer_phase.go:78`; `ExpireDeferPhases` at `:142` too).
+
+So one arm terminates the subtree and the other terminates one level.
+
+#### Why this is worse than a flat one level
+
+One level is a contract. This is not: **the depth of a terminate is a property of whether a
+workflow in the middle happened to have deferred work** — its own code, invisible to whoever pressed
+terminate, and changing when that workflow gains or loses a `defer`. An operator cannot predict how
+much of a tree a terminate will close, and the same tree answers differently on different runs.
+
+The attribution is pinned rather than assumed: the test asserts the grandchild is **still untouched**
+after the terminate and before the defer phase completes, so the reach cannot be a two-level cascade
+being credited to the wrong mechanism.
+
+#### What this does not say
+
+Which arm is *right*. The defer arm's behaviour is arguably the intended one and the plain arm the
+defect; §3.410's framing — that a subtree terminate is a recursive `UPDATE` per dialect, and a
+detached child must not inherit it — is unchanged. What is settled is that they **disagree**, and
+that neither the code nor any document said so.
