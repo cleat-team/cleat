@@ -341,6 +341,9 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_events_deleted_total",
 		metric.WithDescription("Number of expired event history rows deleted by the retention policy"),
 	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_events_deleted_total: %w", err)
+	}
 
 	// Separate from cleat_events_deleted_total because it counts a different
 	// thing: workflow_instances rows whose compaction bookkeeping was cleared,
@@ -355,9 +358,6 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_compaction_state_cleared_total: %w", err)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("cleat_events_deleted_total: %w", err)
 	}
 
 	m.workflowsPurged, err = meter.Int64Counter(
