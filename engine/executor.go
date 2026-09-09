@@ -73,6 +73,7 @@ func (e *Engine) backendForWasm(wasmBytes []byte) WasmBackend {
 // [go, python], tier 2 adds rust, java, assemblyscript), so failing closed here
 // can only reject what was never claimed to work.
 func (e *Engine) resolveBackend(wasmBytes []byte) (WasmBackend, error) {
+	e.warnIfModuleWantsANewerABI(wasmBytes)
 	if backend := e.backendForWasm(wasmBytes); backend != nil {
 		return backend, nil
 	}
@@ -84,6 +85,50 @@ func (e *Engine) resolveBackend(wasmBytes []byte) (WasmBackend, error) {
 			"the language comes from the module's own cleat.metadata section and is "+
 			"not a supported guest language",
 		wasm.DetectLanguage(wasmBytes), e.registeredLanguages())
+}
+
+// warnIfModuleWantsANewerABI reports a module built against a host ABI this
+// worker does not implement. cleat#1054.
+//
+// WARNS, AND DELIBERATELY DOES NOT REFUSE. #1054 proposed refusing such a
+// definition, and refusing is the wrong shape while CurrentABIVersion is 1: no
+// module can currently declare a higher version, so a rejection path would ship
+// having never run. A warning exercises the comparison on every execution and
+// cannot break a guest that works.
+//
+// The value is the module's own claim about itself -- the abi_version field of
+// its cleat.metadata section, the same section DetectLanguage reads to choose a
+// backend -- so this costs one parse the caller was making anyway and no query.
+// A guest can therefore lie about it; that is acceptable for a warning and is
+// exactly why this must not become a refusal without more thought than the
+// comparison itself needs.
+//
+// This is checked HERE, at the worker, rather than at deployment, because the
+// failure #1054 describes is a property of a PAIR -- "a definition built
+// against ABI 2 claimed by an ABI 1 worker" -- and only the worker knows its
+// own side. A deploy-time check would pass on a fleet where half the workers
+// cannot run what it accepted.
+//
+// A module whose metadata cannot be read at all is not this function's business
+// and is silent here: DetectLanguage already turns an unreadable section into a
+// routing failure with a better message than a version warning would give.
+func (e *Engine) warnIfModuleWantsANewerABI(wasmBytes []byte) {
+	meta, err := wasm.ReadMetadata(wasmBytes)
+	if err != nil || meta == nil {
+		return
+	}
+	if meta.ABIVersion <= wasm.CurrentABIVersion {
+		return
+	}
+	e.log().Warn(
+		"this module was built against a newer host ABI than this worker implements; "+
+			"it is being executed anyway, and a host call it expects may be missing",
+		"module_abi_version", meta.ABIVersion,
+		"worker_abi_version", wasm.CurrentABIVersion,
+		"workflow_name", meta.WorkflowName,
+		"workflow_version", meta.WorkflowVersion,
+		"language", meta.Language,
+	)
 }
 
 // registeredLanguages returns the routed languages in sorted order, for error
