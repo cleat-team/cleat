@@ -5633,7 +5633,10 @@ with a five-second retry. The SDK method is
 
 No error return. So wiring it as-is would silently swallow a store failure, and the "held by
 another workflow" case is the *normal* one for a mutual-exclusion primitive — it is what the
-feature is for. Also a signature change, and it needs deciding alongside §3.223's question of what
+feature is for. **The store-failure half of that is closed by §3.407** — not by changing the
+signature, but by having the host suspend, as it already did for contention, so the swallowed
+errCode no longer decides anything. The signature question remains open and is now only about
+whether a guest should be *told*. Also a signature change, and it needs deciding alongside §3.223's question of what
 scope means in this SDK at all.
 
 **`SendSignalAndWait` / `ReplyToSignal` — blocked on §3.220.** Both are inert engine-side too, so
@@ -9848,3 +9851,74 @@ Re-derive:
     git ls-files '*.go' | xargs grep -n 'WithFetcher(' | grep -v _test.go
     git ls-files '*.go' | xargs grep -n 'WithFetcher(' | grep -v _test.go
     grep -c 'cleat_fetch' ABI.md engine/imports.go
+
+### 3.407 A failed scope acquisition was reported to the guest through a field no SDK decodes — ✅ **FIXED 2026-09-09** (cleat#1062)
+
+`freshSetScope` (`engine/scope.go`) returned `packSimpleResult(1, 0)` when `AcquireConcurrencyKey`
+returned an error. That errCode is decoded by nobody. Verified at the call sites, not by name
+search:
+
+| SDK | what it does with the result |
+|---|---|
+| Rust | `let (prev_len, _err_code) = memory::decode_simple_result(result);` — discarded by name |
+| AssemblyScript | reads `decoded.extra` for the length, never `decoded.errCode` |
+| Java | ignores `result` entirely and returns its own `_scopePrefix` mirror |
+| Python | `_import_set_scope` is a stub raising `NotImplementedError` |
+| Go | discards it deliberately (#1060), to match Rust rather than diverge alone |
+
+So a concurrency-key store failure returned to every guest as an ordinary success and the workflow
+continued believing it held the key — a mutual-exclusion violation of the one guarantee scope
+exists to provide.
+
+**The fix is not to report it better. It is to stop reporting it as the mechanism.** Three things
+already in the tree say so:
+
+  * **The contention branch, ten lines below, enforces host-side and tells the guest nothing.**
+    `!acquired` returns errCode **zero** — apparent success — and arms `s.suspendErr`. So
+    `freshSetScope` already contained a working answer to "this workflow must not proceed believing
+    it holds the scope", and the branch two lines above did not use it.
+  * **`replaySetScope` was already written for the retry that nothing produced.** On a replayed
+    `EventTypeScopeAcquired` carrying `Err` it declines to set the scope fields, calls
+    `exitReplay()` and re-enters `freshSetScope` — commented *"switch to fresh to retry
+    acquisition"*. Close to unreachable before this: the fresh path returned errCode 1, the guest
+    ignored it and ran to completion, so there was no suspension and no replay to arrive there. The
+    retry machinery was terminated at both ends with no wire between.
+  * **The sibling caller of the same store method puts the failure where guests already look.**
+    `freshAcquireLock` (`engine/locking.go`) returns `packAcquireLockResult(false, 1)` on a store
+    error — `acquired=false` **and** errCode 1. A guest checking `!acquired`, which is the entire
+    point of that API, is correct without reading the error code at all. `cleat_set_scope` has no
+    `acquired` field; its only "did I get it" channel was the errCode, which is why the same
+    oversight is a defect there and not in `acquire_lock`.
+
+So the store-failure branch now arms `suspendErr`, matching its neighbour. **No SDK signature
+changes and `ABI.md` is unchanged** — errCode 1 stays on the wire for anyone who later decides to
+read it. Reporting through the return value could not have fixed this on its own: it makes mutual
+exclusion contingent on five SDKs each choosing to check, and the host is the only party that can
+refuse. Same asymmetry as §3.223's *"the engine is where the mechanism is legible"*.
+
+The `Reason` deliberately names the store error and the scope key, because contention suspends too
+and a suspend reason was otherwise the only thing an operator would see — a documented failure mode
+needs a stated way to tell it apart from its neighbours (CLAUDE.md).
+
+## The test named for this path tested the happy path, and said so
+
+`TestSetScopeAcquisitionFailure` (`engine/host_dispatch_test.go`) set up `mockConcurrencyKeyStore`,
+which always returns `(true, nil)`, and carried the comment *"The mock always returns
+acquired=true, so this tests the happy path. For the failure path we'd need a different mock."* So
+the one test bearing the defect's name never entered the branch, and the defect survived under a
+green test that appeared to cover it. This is CLAUDE.md's *"the sharpest form is a test whose NAME
+asserts the mechanism"*, in its cheapest possible form: the test even documented the gap.
+
+Renamed to `TestSetScopeAcquisitionSucceeds` rather than deleted — a success control is worth
+keeping beside the failure tests — and the four in `engine/scope_acquire_failure_test.go` cover the
+branch it named. Both stores those tests need already existed in `locking_test.go`
+(`acquireErrorStore`, `acquireNotAcquiredStore`), which is the finding in miniature: the two callers
+of `AcquireConcurrencyKey` were given opposite treatments of the same two outcomes, and only one of
+them had been tested for either.
+
+**Falsification.** Removing the `suspendErr` assignment fails `TestSetScopeStoreFailureSuspends` at
+the intended line with the intended message, and leaves all three controls green — including the
+contention control, which confirms the mutation is specific to the branch changed rather than to
+non-acquisition generally. `TestSetScopeReplayOfRecordedFailureRetriesAcquisition` passes under the
+mutation too, and is reported as what it is: a characterisation of the pre-existing replay retry
+that this change makes reachable, not a regression test for the change.

@@ -92,6 +92,40 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 				Err:       err.Error(),
 			}
 			s.recordEvent(rec)
+
+			// Suspend, exactly as the contention branch below does.
+			//
+			// The errCode this returns is decoded by no SDK -- Rust names it
+			// `_err_code`, AssemblyScript reads only `decoded.extra`, Java
+			// ignores the result and returns its own `_scopePrefix`, Python's
+			// import is a stub, and Go discards it to match Rust (cleat#1062).
+			// So until this line, a store failure returned to the guest as an
+			// ordinary success and the workflow ran on believing it held the
+			// key -- a mutual-exclusion violation of the one guarantee scope
+			// exists to provide.
+			//
+			// Reporting it through the return value cannot fix that on its
+			// own: it makes the guarantee contingent on five SDKs each
+			// choosing to check. The host is the only party that can refuse,
+			// and it already refuses for the neighbouring case -- `!acquired`
+			// below returns errCode ZERO and stops the run through
+			// s.suspendErr. This is the same condition ("we do not hold this
+			// key") and now takes the same exit.
+			//
+			// The retry side already existed: replaySetScope's `rec.Err != ""`
+			// branch declines to set the scope fields and re-enters
+			// freshSetScope to reacquire. Nothing reached it, because nothing
+			// suspended. errCode 1 stays on the wire for any SDK that later
+			// decides to read it; ABI.md is unchanged.
+			//
+			// The Reason is deliberately distinguishable from contention's:
+			// both suspend the workflow, and an operator reading a suspend
+			// reason has no other way to tell a busy virtual object from a
+			// broken concurrency-key store.
+			s.suspendErr = &SuspendError{
+				Reason: fmt.Sprintf("virtual object scope %s could not be acquired: %v", scopeKey, err),
+				Until:  time.UnixMilli(s.nowMs).Add(5 * time.Second),
+			}
 			return packSimpleResult(1, 0)
 		}
 		if !acquired {
