@@ -40,13 +40,23 @@ CREATE TABLE workflow_defs (
     wasm_bytes BYTEA NOT NULL,
     entry_points TEXT[] NOT NULL DEFAULT '{}',
     min_version INTEGER NOT NULL DEFAULT 0,
-    max_history_length INTEGER NOT NULL DEFAULT 0,
-    namespace TEXT NOT NULL DEFAULT 'default',
-    dag_spec JSONB DEFAULT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (name, version)
+    max_history_length INTEGER NOT NULL DEFAULT 0,
+    dag_spec JSONB,
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    task_queue TEXT NOT NULL DEFAULT 'default',
+    abi_version INTEGER NOT NULL DEFAULT 1,
+    plugin_deps JSONB NOT NULL DEFAULT '{}',
+    deprecated BOOLEAN NOT NULL DEFAULT false,
+    PRIMARY KEY (tenant_id, name, version)
 );
 ```
+
+**Selected columns.** The `CREATE TABLE` block above is the complete list and is
+checked against a live database by `TestTheSchemaDocDescribesTheDatabaseWeShip`
+(cleat#1093). This table is a curated subset: it exists for the per-column prose,
+which cannot be generated, and a column's absence here means nobody has written
+that prose yet — not that the column does not exist.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -56,7 +66,6 @@ CREATE TABLE workflow_defs (
 | `entry_points` | TEXT[] | Exported entry point names (e.g., `{"place_order","cancel_order"}`) |
 | `min_version` | INTEGER | Minimum compatible version for replay |
 | `max_history_length` | INTEGER | Max events before compaction triggers (0 = default) |
-| `namespace` | TEXT | Namespace for multi-tenant isolation |
 | `dag_spec` | JSONB | DAG structure for visualization (optional) |
 | `created_at` | TIMESTAMPTZ | Deployment timestamp |
 
@@ -72,7 +81,7 @@ work queue.
 
 ```sql
 CREATE TABLE workflow_instances (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     def_name TEXT NOT NULL,
     def_version INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'ready',
@@ -82,20 +91,46 @@ CREATE TABLE workflow_instances (
     next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ,
-    result JSONB,
-    error_msg TEXT,
     cancellation_requested BOOLEAN NOT NULL DEFAULT false,
     cancellation_reason TEXT,
-    namespace TEXT NOT NULL DEFAULT 'default',
+    result JSONB,
+    error_msg TEXT,
+    error_code TEXT,
+    error_op TEXT,
     parent_workflow_id TEXT,
+    parent_close_policy TEXT DEFAULT 'ABANDON',
     query_state JSONB DEFAULT '{}',
-    sticky_worker_id TEXT,
     trace_id TEXT,
+    sticky_worker_id TEXT,
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    task_queue TEXT NOT NULL DEFAULT 'default',
+    compaction_state JSONB,
+    compacted_at TIMESTAMPTZ,
+    compaction_step INTEGER,
+    plugin_vers JSONB NOT NULL DEFAULT '{}',
+    event_count BIGINT NOT NULL DEFAULT 0,
+    allowed_signals JSONB,
+    priority INTEGER NOT NULL DEFAULT 0,
+    generation BIGINT NOT NULL DEFAULT 0,
+    pending_terminal_status TEXT,
+    defer_phase_deadline TIMESTAMPTZ,
     continued_from TEXT,
+    signal_seq BIGINT NOT NULL DEFAULT 0,
+    signal_seq_at_claim BIGINT NOT NULL DEFAULT 0,
+    signal_consumed_seq BIGINT NOT NULL DEFAULT 0,
+    signal_consumed_at_claim BIGINT NOT NULL DEFAULT 0,
     reclaim_count BIGINT NOT NULL DEFAULT 0,
-    FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
+    started_at TIMESTAMPTZ,
+    PRIMARY KEY (id),
+    FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs(tenant_id, name, version)
 );
 ```
+
+**Selected columns.** The `CREATE TABLE` block above is the complete list and is
+checked against a live database by `TestTheSchemaDocDescribesTheDatabaseWeShip`
+(cleat#1093). This table is a curated subset: it exists for the per-column prose,
+which cannot be generated, and a column's absence here means nobody has written
+that prose yet — not that the column does not exist.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -111,9 +146,9 @@ CREATE TABLE workflow_instances (
 | `error_msg` | TEXT | Error message (if failed) |
 | `cancellation_requested` | BOOLEAN | Whether cancellation has been requested |
 | `cancellation_reason` | TEXT | Reason for cancellation |
-| `namespace` | TEXT | Namespace for multi-tenant routing |
 | `parent_workflow_id` | TEXT | Parent workflow for child workflows |
 | `query_state` | JSONB | Queryable workflow state |
+| `tenant_id` | UUID | The owning tenant. **This is how tenancy is stored** — there is no `namespace` column and never has been; the doc claimed one until cleat#1093. Row-level security policies key off this, and it is part of the foreign key into `workflow_defs`. |
 | `sticky_worker_id` | TEXT | Preferred worker for cache locality |
 | `trace_id` | TEXT | OpenTelemetry trace ID for observability |
 | `continued_from` | TEXT | Exposed as `continued_from` on the API's workflow object, and followed by `GET /api/workflows/:id/terminal`. The run that continued into this one. `NULL` unless `ContinueAsNew` created this row, and `NULL` on every row written before migration 045. **Not** `parent_workflow_id`: a continuation is not a child, and `GetChildCount` and `enforceParentClosePolicy` both key off that column — see cleat#826 and the migration header. |
@@ -132,8 +167,6 @@ CREATE TABLE workflow_instances (
   `status = 'running'` -- enables monitoring and stale-assignment detection.
 - `idx_instances_stale` on `(status, heartbeat_at)` WHERE `status = 'running'` --
   used by the reaper to reclaim instances with stale heartbeats.
-- `idx_instances_namespace_ready` on `(namespace, status, next_wake_at)` WHERE
-  `status = 'ready'` -- namespace-filtered claim lookups.
 - `idx_instances_sticky` on `(sticky_worker_id)` WHERE `sticky_worker_id IS NOT
   NULL` -- sticky worker fast path.
 
@@ -144,35 +177,42 @@ event. This is the core of the replay mechanism.
 
 ```sql
 CREATE TABLE event_history (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     step INTEGER NOT NULL,
-    event_type TEXT NOT NULL DEFAULT 'call',
     service TEXT,
     operation TEXT,
-    request JSONB,
-    response JSONB,
+    request TEXT,
+    response TEXT,
     error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    event_type TEXT NOT NULL DEFAULT 'call',
     duration_ms BIGINT,
     signal_names TEXT,
     timeout_ms BIGINT,
     signal_name TEXT,
-    signal_payload JSONB,
+    signal_payload TEXT,
     defer_description TEXT,
     defer_id TEXT,
     child_name TEXT,
-    child_input JSONB,
+    child_input TEXT,
     run_id TEXT,
-    new_input JSONB,
+    new_input TEXT,
     plugin_name TEXT,
     plugin_func TEXT,
-    plugin_input JSONB,
-    plugin_output JSONB,
+    plugin_input TEXT,
+    plugin_output TEXT,
     plugin_error TEXT,
     promise_name TEXT,
     promise_id TEXT,
     promise_result TEXT,
     promise_error TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    payload JSONB,
+    checksum TEXT,
+    thread_id TEXT NOT NULL DEFAULT 'main',
+    local_step INTEGER NOT NULL DEFAULT 0,
+    global_seq BIGINT NOT NULL DEFAULT 0,
+    intent_at TIMESTAMPTZ,
     PRIMARY KEY (workflow_id, step)
 );
 ```
@@ -193,11 +233,14 @@ External signals delivered to running workflows.
 
 ```sql
 CREATE TABLE workflow_signals (
-    id BIGSERIAL PRIMARY KEY,
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     signal_name TEXT NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}',
-    delivered_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    id BIGSERIAL,
+    PRIMARY KEY (id),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_workflow_signals_queue
@@ -233,7 +276,7 @@ the REST API.
 
 ```sql
 CREATE TABLE workflow_schedules (
-    name TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
     def_name TEXT NOT NULL,
     entry_point TEXT NOT NULL DEFAULT '',
     cron_expression TEXT NOT NULL,
@@ -241,7 +284,14 @@ CREATE TABLE workflow_schedules (
     enabled BOOLEAN NOT NULL DEFAULT true,
     next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_run_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    misfire_policy TEXT NOT NULL DEFAULT 'catch_up',
+    catch_up_limit INTEGER NOT NULL DEFAULT 60,
+    overlap_policy TEXT NOT NULL DEFAULT 'allow',
+    last_run_id TEXT,
+    PRIMARY KEY (tenant_id, name)
 );
 ```
 
@@ -251,15 +301,18 @@ Inter-workflow promise coordination (for cross-workflow data passing).
 
 ```sql
 CREATE TABLE workflow_promises (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     promise_id TEXT NOT NULL,
     promise_name TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     result JSONB,
     error_msg TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     resolved_at TIMESTAMPTZ,
-    PRIMARY KEY (workflow_id, promise_id)
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    PRIMARY KEY (workflow_id, promise_id),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 );
 ```
 
@@ -270,11 +323,14 @@ a time.
 
 ```sql
 CREATE TABLE concurrency_keys (
-    key_hash BYTEA PRIMARY KEY,
+    key_hash BYTEA NOT NULL,
     key_text TEXT NOT NULL,
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL
+    expires_at TIMESTAMPTZ NOT NULL,
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    PRIMARY KEY (key_hash),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 );
 ```
 
@@ -284,8 +340,10 @@ Update handler requests (in-flight workflow mutations).
 
 ```sql
 CREATE TABLE workflow_update_requests (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     update_name TEXT NOT NULL,
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    priority INTEGER NOT NULL DEFAULT 0,
     payload JSONB NOT NULL DEFAULT '{}',
     promise_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -293,7 +351,8 @@ CREATE TABLE workflow_update_requests (
     error_msg TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ,
-    PRIMARY KEY (workflow_id, update_name)
+    PRIMARY KEY (workflow_id, update_name),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 );
 ```
 
@@ -302,7 +361,6 @@ CREATE TABLE workflow_update_requests (
 | Index | Table | Purpose | Uniqueness |
 |-------|-------|---------|------------|
 | `idx_instances_claimable` | `workflow_instances` | Worker poll loop: find runnable instances (`ready` and `terminating`) | Non-unique, partial |
-| `idx_instances_namespace_ready` | `workflow_instances` | Namespace-scoped poll loop | Non-unique, partial |
 | `idx_instances_heartbeat` | `workflow_instances` | Heartbeat monitoring | Non-unique, partial |
 | `idx_instances_stale` | `workflow_instances` | Reaper: stale heartbeat detection | Non-unique, partial |
 | `idx_instances_sticky` | `workflow_instances` | Sticky worker fast path | Non-unique, partial |
