@@ -881,6 +881,24 @@ func (s *PostgresStore) UpdateStickyWorker(ctx context.Context, workflowID, work
 	}
 	defer tx.Rollback()
 
+	// No `AND tenant_id` here, and that is not the omission it looks like.
+	//
+	// MySQL's UpdateStickyWorker carries the predicate and this one does not,
+	// which is cleat#1012's exact shape -- a statement tenant-scoped on one
+	// dialect of three -- and it has been half-filed as a defect at least once.
+	// It is not one. workflow_instances has
+	//
+	//   CREATE POLICY tenant_isolation_instances ON workflow_instances
+	//       FOR ALL USING (tenant_id = cleat.assert_tenant_set());
+	//
+	// and FOR ALL covers UPDATE, so the row this statement can reach is already
+	// bounded to the session's tenant. SQL Server has session-context policies
+	// doing the same job. MySQL has no row-level security, which is precisely
+	// why its copy states the predicate in SQL.
+	//
+	// The asymmetry IS the design. Before filing one of these, check which
+	// layer holds the property up: the answer is in the migration, not in the
+	// Go, and `FOR ALL` is the word that decides it.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET sticky_worker_id = $2 WHERE id = $1
 	`, workflowID, workerID)

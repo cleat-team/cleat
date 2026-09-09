@@ -597,6 +597,11 @@ func (s *MySQLStore) ConsumeSignal(ctx context.Context, workflowID string, id in
 
 // UpdateStickyWorker sets the sticky worker for a workflow.
 func (s *MySQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
+	// The `AND tenant_id` is load-bearing HERE and absent on the other two
+	// dialects on purpose: MySQL has no row-level security, so this statement
+	// is the tenant boundary. Postgres enforces it with a FOR ALL RLS policy
+	// and SQL Server with session-context policies -- see the note on
+	// PostgresStore.UpdateStickyWorker before concluding the others have a gap.
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET sticky_worker_id = ? WHERE id = ? AND tenant_id = ?
 	`, workerID, workflowID, s.tenantID)
