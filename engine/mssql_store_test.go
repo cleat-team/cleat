@@ -1478,6 +1478,8 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 			"wf-0",      // continued_from (cleat#887)
 			int64(5),    // reclaim_count (cleat#1008)
 			"wf-parent", // parent_workflow_id (cleat#1103)
+			now,         // created_at (cleat#1105)
+			"failed",    // pending_terminal_status (cleat#1105)
 		}}},
 	}, nil)
 	defer db.Close()
