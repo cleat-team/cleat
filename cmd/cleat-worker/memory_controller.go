@@ -174,8 +174,24 @@ func (c *MemoryController) CanAcceptAPIWorkflows() bool {
 
 // RecordWorkflowMemory updates the in-memory EWMA estimate for defName
 // with the observed deltaBytes and asynchronously persists the sample
-// to the workflow store.
-func (c *MemoryController) RecordWorkflowMemory(ctx context.Context, defName string, deltaBytes uint64) {
+// through persistStore.
+//
+// persistStore is the TENANT-SCOPED store for the workflow that produced the
+// sample, not the controller's own. The controller holds exactly one store --
+// the worker's, opened as storeTenantID -- while a worker executes workflows
+// for any tenant it can claim, so persisting through c.store would attribute
+// every tenant's sample to the worker's own tenant.
+//
+// That distinction is invisible to a store-level test: engine's
+// TestTheMemoryProfileIsScopedToTenant drives two per-tenant stores directly
+// and passes whether or not this parameter exists. It is the "watch which
+// layer is holding the test up" case from CLAUDE.md -- the scoping the test
+// observes is the store's, and the routing that decides WHICH store is here.
+// See cleat#1040.
+//
+// A nil persistStore falls back to c.store, which is correct for the
+// single-tenant case and for callers that have no workflow in hand.
+func (c *MemoryController) RecordWorkflowMemory(ctx context.Context, persistStore engine.WorkflowStore, defName string, deltaBytes uint64) {
 	c.mu.Lock()
 	prev, exists := c.defEstimates[defName]
 	if !exists {
@@ -185,11 +201,16 @@ func (c *MemoryController) RecordWorkflowMemory(ctx context.Context, defName str
 	}
 	c.mu.Unlock()
 
+	target := persistStore
+	if target == nil {
+		target = c.store
+	}
+
 	// Async persist to DB; don't fail the workflow if stats recording fails.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := c.store.RecordWorkflowMemorySample(ctx, defName, int64(deltaBytes)); err != nil {
+		if err := target.RecordWorkflowMemorySample(ctx, defName, int64(deltaBytes)); err != nil {
 			c.log().WarnContext(context.Background(), "record memory sample failed", "worker_id", c.workerID, "workflow", defName, "error", err)
 		}
 	}()

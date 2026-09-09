@@ -962,20 +962,20 @@ func (s *MySQLStore) RecordWorkflowMemorySample(ctx context.Context, defName str
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO workflow_memory_samples (def_name, sample_bytes) VALUES (?, ?)`,
-		defName, sampleBytes)
+		`INSERT INTO workflow_memory_samples (def_name, sample_bytes, tenant_id) VALUES (?, ?, ?)`,
+		defName, sampleBytes, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("RecordWorkflowMemorySample: insert: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_memory_stats (def_name, mean_bytes, sample_count, updated_at)
-		VALUES (?, ?, 1, NOW(6))
+		INSERT INTO workflow_memory_stats (def_name, mean_bytes, sample_count, updated_at, tenant_id)
+		VALUES (?, ?, 1, NOW(6), ?)
 		ON DUPLICATE KEY UPDATE
 			mean_bytes   = (alpha * VALUES(mean_bytes) + (1 - alpha) * mean_bytes),
 			sample_count = sample_count + 1,
 			updated_at   = NOW(6)
-	`, defName, float64(sampleBytes))
+	`, defName, float64(sampleBytes), s.tenantID)
 	if err != nil {
 		return fmt.Errorf("RecordWorkflowMemorySample: upsert: %w", err)
 	}
@@ -986,7 +986,7 @@ func (s *MySQLStore) RecordWorkflowMemorySample(ctx context.Context, defName str
 // LoadMemoryEstimates returns EWMA mean bytes for all def_names.
 func (s *MySQLStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT def_name, mean_bytes FROM workflow_memory_stats`)
+		`SELECT def_name, mean_bytes FROM workflow_memory_stats WHERE tenant_id = ?`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("LoadMemoryEstimates: %w", err)
 	}
@@ -1010,8 +1010,9 @@ func (s *MySQLStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT def_name, sample_bytes
 		FROM workflow_memory_samples
+		WHERE tenant_id = ?
 		ORDER BY def_name, sample_bytes
-	`)
+	`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("LoadMemoryStats: %w", err)
 	}
@@ -1110,7 +1111,7 @@ func (s *MySQLStore) QueueDepth(ctx context.Context) (int64, error) {
 // CleanupMemorySamples deletes samples beyond maxSamplesPerDef per def_name.
 func (s *MySQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
 	defRows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT def_name FROM workflow_memory_samples`)
+		`SELECT DISTINCT def_name FROM workflow_memory_samples WHERE tenant_id = ?`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("CleanupMemorySamples: list: %w", err)
 	}
@@ -1133,15 +1134,17 @@ func (s *MySQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef 
 		result, err := s.db.ExecContext(ctx, `
 			DELETE FROM workflow_memory_samples
 			WHERE def_name = ?
+			  AND tenant_id = ?
 			  AND id NOT IN (
 			      SELECT id FROM (
 			          SELECT id FROM workflow_memory_samples
 			          WHERE def_name = ?
+			            AND tenant_id = ?
 			          ORDER BY recorded_at DESC
 			          LIMIT ?
 			      ) AS keep
 			  )
-		`, defName, defName, maxSamplesPerDef)
+		`, defName, s.tenantID, defName, s.tenantID, maxSamplesPerDef)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("CleanupMemorySamples: delete %s: %w", defName, err)
 		}
