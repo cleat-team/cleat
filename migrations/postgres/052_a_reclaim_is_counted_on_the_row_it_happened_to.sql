@@ -1,4 +1,12 @@
--- cleat migration 051 (postgres): a reclaim is counted on the row it happened to
+-- cleat migration 052 (postgres): a reclaim is counted on the row it happened to
+--
+-- RENUMBERED from 051 to 052. It shipped as 051 in #1055 and another
+-- file already held that number on develop -- the runner parses the numeric
+-- prefix into an int and keys schema_migrations on it, so the two collapsed to
+-- one version. A database that had already recorded 051 from the other file
+-- skipped this one FOREVER, silently, with the run reporting ok. Safe to apply
+-- twice: every statement below is guarded, so a database that did get this as
+-- 051 re-applies it as 052 and changes nothing.
 --
 -- cleat#1008. A workflow whose worker dies mid-segment is reclaimed by
 -- ReapStaleInstances and runs again, and nothing has ever recorded that it
