@@ -1086,11 +1086,20 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 		// migrations/mssql/010_idempotency_keys_tenant_id.sql,
 		// IMPROVEMENT-PLAN 3.10.
 		var existingWfID string
+		var existingDef sql.NullString
 		err := s.db.QueryRowContext(ctx,
-			`SELECT workflow_id FROM idempotency_keys
+			`SELECT workflow_id, def_name FROM idempotency_keys
 			 WHERE key_hash = @p1 AND tenant_id = @p2 AND expires_at > SYSUTCDATETIME()`,
-			keyHash[:], tenantID).Scan(&existingWfID)
+			keyHash[:], tenantID).Scan(&existingWfID, &existingDef)
 		if err == nil {
+			// A hit must be for the SAME definition. NULL means the row predates
+			// cleat#1047's backfill or its workflow has been purged -- unknown
+			// rather than mismatched, so it is allowed through, which is exactly
+			// today's behaviour for those rows.
+			if existingDef.Valid && existingDef.String != defName {
+				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
+					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+			}
 			return existingWfID, true, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -1109,13 +1118,13 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 		// race where two requests arrive with the same key simultaneously.
 		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		result, err := tx.ExecContext(ctx,
-			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
-			 SELECT @p1, @p2, DATEADD(SECOND, @p3, SYSUTCDATETIME()), @p4
+			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name)
+			 SELECT @p1, @p2, DATEADD(SECOND, @p3, SYSUTCDATETIME()), @p4, @p5
 			 WHERE NOT EXISTS (
 			     SELECT 1 FROM idempotency_keys
 			     WHERE key_hash = @p1 AND tenant_id = @p4
 			 )`,
-			keyHash[:], runID, ttlSeconds, tenantID)
+			keyHash[:], runID, ttlSeconds, tenantID, defName)
 		if err != nil {
 			return "", false, err
 		}

@@ -583,11 +583,20 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		// migrations/mysql/010_idempotency_keys_tenant_id.sql,
 		// IMPROVEMENT-PLAN 3.10.
 		var existingWfID string
+		var existingDef sql.NullString
 		err := s.db.QueryRowContext(ctx,
-			`SELECT workflow_id FROM idempotency_keys
+			`SELECT workflow_id, def_name FROM idempotency_keys
 			 WHERE key_hash = ? AND tenant_id = ? AND expires_at > NOW(6)`,
-			keyHash[:], tenantID).Scan(&existingWfID)
+			keyHash[:], tenantID).Scan(&existingWfID, &existingDef)
 		if err == nil {
+			// A hit must be for the SAME definition. NULL means the row predates
+			// cleat#1047's backfill or its workflow has been purged -- unknown
+			// rather than mismatched, so it is allowed through, which is exactly
+			// today's behaviour for those rows.
+			if existingDef.Valid && existingDef.String != defName {
+				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
+					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+			}
 			return existingWfID, true, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -604,9 +613,9 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		// two requests arrive with the same key simultaneously.
 		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		res, err := tx.ExecContext(ctx,
-			`INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
-			 VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?)`,
-			keyHash[:], runID, ttlSeconds, tenantID)
+			`INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name)
+			 VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?, ?)`,
+			keyHash[:], runID, ttlSeconds, tenantID, defName)
 		if err != nil {
 			return "", false, err
 		}

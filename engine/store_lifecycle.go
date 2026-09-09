@@ -777,11 +777,20 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 		// migrations/*/010_idempotency_keys_tenant_id.sql, IMPROVEMENT-PLAN
 		// 3.10.
 		var existingWfID string
+		var existingDef sql.NullString
 		err := s.db.QueryRowContext(ctx,
-			`SELECT workflow_id FROM idempotency_keys
+			`SELECT workflow_id, def_name FROM idempotency_keys
 			 WHERE key_hash = $1 AND tenant_id = $2 AND expires_at > now()`,
-			keyHash[:], tenantID).Scan(&existingWfID)
+			keyHash[:], tenantID).Scan(&existingWfID, &existingDef)
 		if err == nil {
+			// A hit must be for the SAME definition. NULL means the row predates
+			// cleat#1047's backfill or its workflow has been purged -- unknown
+			// rather than mismatched, so it is allowed through, which is exactly
+			// today's behaviour for those rows.
+			if existingDef.Valid && existingDef.String != defName {
+				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
+					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+			}
 			return existingWfID, true, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -800,10 +809,10 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 		// race where two requests arrive with the same key simultaneously.
 		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
-			 VALUES ($1, $2, now() + ($3 * INTERVAL '1 second'), $4)
+			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name)
+			 VALUES ($1, $2, now() + ($3 * INTERVAL '1 second'), $4, $5)
 			 ON CONFLICT (key_hash, tenant_id) DO NOTHING`,
-			keyHash[:], runID, ttlSeconds, tenantID)
+			keyHash[:], runID, ttlSeconds, tenantID, defName)
 		if err != nil {
 			return "", false, err
 		}
