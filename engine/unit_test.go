@@ -1588,6 +1588,10 @@ func (s *stubWorkflowStore) CleanupMemorySamples(ctx context.Context, maxSamples
 func (s *stubWorkflowStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
+
+func (s *stubWorkflowStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
 func (s *stubWorkflowStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
 	return nil, nil
 }

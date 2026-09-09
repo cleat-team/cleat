@@ -743,6 +743,10 @@ func (m *mockShardStore) DeleteExpiredEvents(ctx context.Context, olderThan time
 	return 0, nil
 }
 
+func (m *mockShardStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockShardStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	m.recordCall("DeleteDeadLetteredWorkflows")
 	if m.deleteDeadLetteredFn != nil {

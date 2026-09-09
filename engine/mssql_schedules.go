@@ -416,11 +416,43 @@ func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Also batch cleanup compaction states.
+	return totalDeleted, nil
+}
+
+// ClearExpiredCompactionState clears compaction bookkeeping -- compaction_state,
+// compaction_step, compacted_at -- on terminal workflows older than the cutoff.
+//
+// SPLIT OUT OF DeleteExpiredEvents, and the reason is a metric rather than
+// tidiness. It used to be a second loop inside that function whose RowsAffected
+// was discarded, so the sweep reported "deleted 0 rows" on runs where it had
+// done real work: the first loop can never match (finalize_workflow_status
+// already purged those events, cleat#1016) while this one clears up to 10000
+// workflow_instances rows a batch.
+//
+// Summing the two into one return was the obvious fix and the wrong one. They
+// are different tables, different operations and different units -- deleted
+// event_history rows against updated workflow_instances rows -- under a counter
+// documented as "expired event history rows deleted". cleat#1024.
+func (s *MSSQLStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	var out int64
+	err := withRollbackGuaranteedRetry(ctx, "clear expired compaction state", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		out, err = s.clearExpiredCompactionStateOnce(ctx, olderThan)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return out, nil
+}
+
+func (s *MSSQLStore) clearExpiredCompactionStateOnce(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalCleared int64
+	// Batched, so a large backlog does not hold one transaction open.
 	for {
 		tx, err := s.beginTxWithContext(ctx)
 		if err != nil {
-			return totalDeleted, fmt.Errorf("delete expired events: begin compaction: %w", err)
+			return totalCleared, fmt.Errorf("delete expired events: begin compaction: %w", err)
 		}
 		result, err := tx.ExecContext(ctx, `
 			UPDATE workflow_instances
@@ -431,10 +463,11 @@ func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time
 				  AND completed_at IS NOT NULL
 				  AND completed_at < @p1
 				  AND compaction_state IS NOT NULL
+				  AND tenant_id = @p2
 				ORDER BY id
 				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
 			)
-		`, olderThan)
+		`, olderThan, s.tenantID)
 		if err != nil {
 			tx.Rollback()
 			break
@@ -443,13 +476,13 @@ func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time
 			break
 		}
 		n, _ := result.RowsAffected()
+		totalCleared += n
 		if n == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-
-	return totalDeleted, nil
+	return totalCleared, nil
 }
 
 func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {

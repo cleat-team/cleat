@@ -73,6 +73,7 @@ type Metrics struct {
 	wasmCacheHits           metric.Int64Counter
 	wasmCacheMisses         metric.Int64Counter
 	eventsDeleted           metric.Int64Counter
+	compactionStateCleared  metric.Int64Counter
 	workflowsPurged         metric.Int64Counter
 	backgroundLoops         metric.Int64Counter
 	backgroundLoopRestarts  metric.Int64Counter
@@ -340,6 +341,21 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_events_deleted_total",
 		metric.WithDescription("Number of expired event history rows deleted by the retention policy"),
 	)
+
+	// Separate from cleat_events_deleted_total because it counts a different
+	// thing: workflow_instances rows whose compaction bookkeeping was cleared,
+	// not event_history rows deleted. The retention sweep does both, and its
+	// event half can never match (cleat#1016) -- so before this counter existed
+	// the sweep reported zero on runs where it had cleared thousands of rows.
+	// Summing them would have fixed the zero by making the other number mean
+	// two things. cleat#1024.
+	m.compactionStateCleared, err = meter.Int64Counter(
+		"cleat_compaction_state_cleared_total",
+		metric.WithDescription("Number of workflow rows whose compaction state the retention policy cleared"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_compaction_state_cleared_total: %w", err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cleat_events_deleted_total: %w", err)
 	}
@@ -907,6 +923,12 @@ func (m *Metrics) RecordWasmCacheHit(ctx context.Context, extraAttrs ...attribut
 func (m *Metrics) RecordWasmCacheMiss(ctx context.Context, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.wasmCacheMisses.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordCompactionStateCleared adds to the compaction-state-cleared counter.
+func (m *Metrics) RecordCompactionStateCleared(ctx context.Context, count int64, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.compactionStateCleared.Add(ctx, count, metric.WithAttributes(attrs...))
 }
 
 // RecordEventsDeleted adds to the events-deleted counter.

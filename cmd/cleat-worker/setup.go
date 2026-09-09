@@ -2526,8 +2526,14 @@ func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays, de
 // of retentionLoop so it is callable directly from a test without waiting on
 // the loop's 24-hour ticker.
 func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
+	// ONE clock reading for the whole sweep. Each arm used to call time.Now()
+	// itself, so the three cutoffs differed by microseconds -- harmless in
+	// effect, but they describe one retention window and a test asserting they
+	// agree should not have to tolerate a gap. Reading the clock once removes
+	// the question rather than widening an assertion around it.
+	sweptAt := time.Now()
 	if retentionDays > 0 {
-		cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+		cutoff := sweptAt.Add(-time.Duration(retentionDays) * 24 * time.Hour)
 		deleted, err := w.store.DeleteExpiredEvents(w.ctx, cutoff)
 		if err != nil {
 			w.logger.ErrorContext(w.ctx, "retention: error deleting expired events", "worker_id", w.id, "error", err)
@@ -2536,8 +2542,28 @@ func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays
 			w.logger.InfoContext(w.ctx, "retention: deleted expired event rows", "worker_id", w.id, "count", deleted)
 		}
 	}
+
+	// The compaction-state half of the same cutoff, reported separately.
+	//
+	// It used to live inside DeleteExpiredEvents and its row count was thrown
+	// away, so the sweep logged "deleted 0" on runs where it had cleared
+	// thousands of workflow_instances rows -- the event half can never match
+	// (cleat#1016) and this half does the work. They are counted apart rather
+	// than summed because they are different tables and different operations;
+	// one counter reporting both would be a number that means two things.
+	if retentionDays > 0 {
+		cutoff := sweptAt.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+		cleared, err := w.store.ClearExpiredCompactionState(w.ctx, cutoff)
+		if err != nil {
+			w.logger.ErrorContext(w.ctx, "retention: clear expired compaction state", "worker_id", w.id, "error", err)
+		} else if cleared > 0 {
+			w.Metrics.RecordCompactionStateCleared(w.ctx, cleared)
+			w.logger.InfoContext(w.ctx, "retention: cleared compaction state",
+				"worker_id", w.id, "count", cleared, "older_than", cutoff)
+		}
+	}
 	if completedWorkflowRetentionDays > 0 {
-		cutoff := time.Now().Add(-time.Duration(completedWorkflowRetentionDays) * 24 * time.Hour)
+		cutoff := sweptAt.Add(-time.Duration(completedWorkflowRetentionDays) * 24 * time.Hour)
 		deleted, err := w.store.DeleteCompletedWorkflows(w.ctx, cutoff)
 		if err != nil {
 			w.logger.ErrorContext(w.ctx, "retention: error deleting completed workflows", "worker_id", w.id, "error", err)
@@ -2561,7 +2587,7 @@ func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays
 	// would silently reverse a documented decision on every existing
 	// deployment.
 	if deadLetterRetentionDays > 0 {
-		cutoff := time.Now().Add(-time.Duration(deadLetterRetentionDays) * 24 * time.Hour)
+		cutoff := sweptAt.Add(-time.Duration(deadLetterRetentionDays) * 24 * time.Hour)
 		deleted, err := w.store.DeleteDeadLetteredWorkflows(w.ctx, cutoff)
 		if err != nil {
 			w.logger.ErrorContext(w.ctx, "retention: delete dead-lettered workflows", "worker_id", w.id, "error", err)

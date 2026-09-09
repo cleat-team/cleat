@@ -98,7 +98,6 @@ var tenantPredicateAllowlist = map[string]string{
 	"mssql_operations.go:updateStickyWorkerOnce":         scopedByCaller,
 	"mssql_schedules.go:LoadCompactionState":             scopedByCaller,
 	"mssql_schedules.go:compactHistoryOnce":              scopedByCaller,
-	"mssql_schedules.go:deleteExpiredEventsOnce":         scopedByCaller,
 	"mssql_signals_promises.go:GetChildCount":            scopedByCaller,
 	"mssql_signals_promises.go:GetChildResult":           scopedByCaller,
 

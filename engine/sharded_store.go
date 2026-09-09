@@ -1460,6 +1460,26 @@ func (s *ShardedStore) DeleteExpiredEvents(ctx context.Context, olderThan time.T
 	return total, nil
 }
 
+func (s *ShardedStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	var total int64
+	var errs []string
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		n, err := shard.Store.ClearExpiredCompactionState(ctx, olderThan)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("shard %q: %v", shard.Config.Name, err))
+			continue
+		}
+		total += n
+	}
+	if len(errs) > 0 {
+		return total, fmt.Errorf("ClearExpiredCompactionState errors: %s", strings.Join(errs, "; "))
+	}
+	return total, nil
+}
+
 // TerminateWorkflow routes by workflow ID.
 func (s *ShardedStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	shard := s.getShard(workflowID)

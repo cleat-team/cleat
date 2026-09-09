@@ -110,6 +110,7 @@ type mockStore struct {
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
 	deleteCompletedWorkflowsFn         func(ctx context.Context, olderThan time.Time) (int64, error)
 	deleteDeadLetteredWorkflowsFn      func(ctx context.Context, olderThan time.Time) (int64, error)
+	clearExpiredCompactionStateFn      func(ctx context.Context, olderThan time.Time) (int64, error)
 	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string, priority int) (string, error)
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
@@ -591,6 +592,13 @@ func (m *mockStore) QueueDepth(ctx context.Context) (int64, error) {
 func (m *mockStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	if m.deleteExpiredEventsFn != nil {
 		return m.deleteExpiredEventsFn(ctx, olderThan)
+	}
+	return 0, nil
+}
+
+func (m *mockStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	if m.clearExpiredCompactionStateFn != nil {
+		return m.clearExpiredCompactionStateFn(ctx, olderThan)
 	}
 	return 0, nil
 }

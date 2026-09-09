@@ -548,6 +548,10 @@ func (m *mockStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time
 	return 0, nil
 }
 
+func (m *mockStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
 // ---------------------------------------------------------------------------
 // mock driver for deploy plugin tests
 // ---------------------------------------------------------------------------
