@@ -705,6 +705,19 @@ func (f *MySQLStoreFactory) WithLogger(l *slog.Logger) *MySQLStoreFactory {
 	return f
 }
 
+// log returns the configured logger, or slog.Default() when none was set.
+//
+// Mirrors wasmtimeBackend.log(). The nil case is slog.Default() rather than a
+// discard because the caller that most needs these records -- cmd/cleat-worker
+// at startup -- is also the one most likely to reach here before a logger has
+// been attached.
+func (f *MySQLStoreFactory) log() *slog.Logger {
+	if f.logger != nil {
+		return f.logger
+	}
+	return slog.Default()
+}
+
 // WithTenantPoolMaxConns sets the max open connections per tenant pool.
 func (f *MySQLStoreFactory) WithTenantPoolMaxConns(n int) *MySQLStoreFactory {
 	if n > 0 {
@@ -746,6 +759,19 @@ func (f *MySQLStoreFactory) CreateTenantDatabase(ctx context.Context, tenantID s
 		return existing, nil
 	}
 
+	// Creating the database and opening its pool is the longest unlogged
+	// stretch of a MySQL worker's startup, and MySQL is the only dialect that
+	// reaches it -- cmd/cleat-worker runs the whole migration set a second
+	// time against the tenant database (main.go, `if *driver == "mysql"`).
+	//
+	// Measured 2026-09-09 over four cold starts: each migration pass was a
+	// steady 2s, while THIS region ranged 1s to 9s with nothing written in
+	// between. Anything watching log output to decide whether a starting
+	// worker is alive -- cleat-ports' scripts/worker.sh does exactly that --
+	// sees a healthy worker as a hung one. cleat#1084.
+	f.log().InfoContext(ctx, "creating tenant database", "tenant_id", tenantID, "database", dbName)
+	started := time.Now()
+
 	// Create the database via the master connection.
 	_, err := f.masterDB.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+dbName+"`")
 	if err != nil {
@@ -771,6 +797,11 @@ func (f *MySQLStoreFactory) CreateTenantDatabase(ctx context.Context, tenantID s
 	}
 
 	f.tenantDBs[tenantID] = tenantDB
+	// Duration rather than a bare "done": how long this took is the fact that
+	// had to be reconstructed by hand from migration timestamps when it was
+	// slow, and it is free to report here.
+	f.log().InfoContext(ctx, "tenant database ready", "tenant_id", tenantID, "database", dbName,
+		"duration_ms", time.Since(started).Milliseconds())
 	return tenantDB, nil
 }
 
