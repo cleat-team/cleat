@@ -134,6 +134,10 @@ func (s *MSSQLStore) updateStickyWorkerOnce(ctx context.Context, workflowID, wor
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
+		-- No AND tenant_id, and not an omission: SQL Server bounds this with a
+		-- session-context security policy, as Postgres does with FOR ALL RLS.
+		-- MySQL has neither and states the predicate in SQL. See the note on
+		-- PostgresStore.UpdateStickyWorker before filing the asymmetry.
 		UPDATE workflow_instances SET sticky_worker_id = @p2 WHERE id = @p1
 	`, workflowID, workerID)
 	if err != nil {
@@ -156,6 +160,7 @@ func (s *MSSQLStore) clearStickyWorkerOnce(ctx context.Context, workflowID strin
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
+		-- No AND tenant_id, for the same reason as updateStickyWorkerOnce above.
 		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = @p1
 	`, workflowID)
 	if err != nil {
