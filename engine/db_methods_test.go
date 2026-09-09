@@ -1623,8 +1623,11 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_AlreadyExists(t *testing.T
 	existingID := "existing-run-id"
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT workflow_id FROM idempotency_keys",
-			data:  [][]driver.Value{{existingID}},
+			// Two columns since cleat#1047. A NULL def_name reads as
+			// "unknown, allow", which is the pre-backfill row's case and
+			// preserves the dedup this test was written for.
+			match: "SELECT workflow_id, def_name FROM idempotency_keys",
+			data:  [][]driver.Value{{existingID, nil}},
 		},
 	}, nil)
 	defer db.Close()
@@ -1650,14 +1653,18 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_Collision(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			// First SELECT: no active key found (expired or missing).
-			match:   "SELECT workflow_id FROM idempotency_keys",
+			match:   "SELECT workflow_id, def_name FROM idempotency_keys",
 			data:    nil,
 			consume: true,
 		},
 		{
 			// Second SELECT after collision: return the concurrently-inserted key.
-			match: "SELECT workflow_id FROM idempotency_keys",
-			data:  [][]driver.Value{{collidedID}},
+			// Two columns now: cleat#1047 made the collision path check that
+			// the concurrent winner is for the SAME definition. A NULL
+			// def_name is "unknown, allow", which is this mock's case and
+			// preserves the behaviour this test was written for.
+			match: "SELECT workflow_id, def_name FROM idempotency_keys",
+			data:  [][]driver.Value{{collidedID, nil}},
 		},
 	}, []mockExecResult{
 		// INSERT ON CONFLICT DO NOTHING: RowsAffected=0 means collision.
