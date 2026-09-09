@@ -960,7 +960,8 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
-		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
 		WHERE status = 'running'
 		  AND heartbeat_at < NOW(6) - INTERVAL ? SECOND
 		  AND tenant_id = ?

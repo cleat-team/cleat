@@ -661,6 +661,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 				"",                         // trace_id
 				DefaultTenantUUID,          // tenant_id (3.99)
 				"wf-0",                     // continued_from (cleat#887)
+				int64(7),                   // reclaim_count (cleat#1008)
 			}},
 		},
 	}, nil)
@@ -679,6 +680,13 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 	// green while GetWorkflowByID silently returned "" for every chain.
 	if wf.ContinuedFrom != "wf-0" {
 		t.Errorf("ContinuedFrom = %q, want %q", wf.ContinuedFrom, "wf-0")
+	}
+	// cleat#1008, and the same hazard: the fake row supplies 7, so a scan that
+	// dropped the column would return 0 -- which is also the honest answer for
+	// the overwhelming majority of real rows, and therefore the one value a
+	// broken read path can hide behind.
+	if wf.ReclaimCount != 7 {
+		t.Errorf("ReclaimCount = %d, want 7", wf.ReclaimCount)
 	}
 	if wf.ID != "wf-1" || wf.Status != "done" || wf.AssignedTo != "worker-1" {
 		t.Errorf("unexpected workflow fields: %+v", wf)
@@ -1916,6 +1924,7 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 				"",                // trace_id (COALESCE)
 				DefaultTenantUUID, // tenant_id (3.99)
 				nil,               // continued_from (NULL: not a continuation)
+				int64(0),          // reclaim_count (never reclaimed)
 			}},
 		},
 	}, nil)

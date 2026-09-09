@@ -901,7 +901,8 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
-		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
 		WHERE status = 'running'
 		  AND heartbeat_at < now() - $1::interval
 	`, fmt.Sprintf("%d seconds", int(timeout.Seconds())))
