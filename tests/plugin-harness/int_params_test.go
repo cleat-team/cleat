@@ -81,7 +81,18 @@ func TestAnIntParameterIsDecodedRatherThanScanned(t *testing.T) {
 		defer cancel()
 		result, _, suspended, _, _, err := wenv.H().Execute(ctx, wasmBytes, "report_int", []byte(input))
 		if err != nil {
-			t.Fatalf("engine refused the fixture for %s: %v", input, err)
+			// A REFUSAL, not a broken harness. This was t.Fatalf until
+			// 2026-09-09, which was right when the helper was written and wrong
+			// from #1059 onwards: that PR fixed #1056, so a bind failure now
+			// surfaces as an engine-level error instead of a `done` workflow
+			// carrying the error in its result. The refusal this test asserts
+			// began arriving through the other channel and the helper read it as
+			// infrastructure breakage.
+			//
+			// Both shapes are accepted deliberately -- the result-carried form
+			// below is still how a workflow-level error arrives -- so this does
+			// not re-encode either as the only possibility.
+			return intProbeResult{}, err.Error()
 		}
 		if suspended != nil {
 			t.Fatalf("workflow suspended (%s); this fixture does not suspend", suspended.Reason)
