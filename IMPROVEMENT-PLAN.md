@@ -5361,7 +5361,7 @@ normal case for a fan-in that polls after a wait. Resolving it needs a completio
 can report and replay can reproduce; `workflow_instances` has no completed-at ordering that is
 currently read for this.
 
-### 3.223 The Go SDK's `Scoper` never reaches the host, so it takes no lock — 🟡 **DOCUMENTED 2026-09-05, GAP OPEN** (WS-1, 2026-09-05)
+### 3.223 The Go SDK's `Scoper` never reaches the host, so it takes no lock — ✅ **FIXED 2026-09-09** (WS-1; documented 2026-09-05, closed by cleat#984)
 
 Started as a stale-comment cleanup and turned into a parity gap. **The first version of this
 section was wrong in the flattering direction and is corrected below rather than preserved.**
@@ -5405,6 +5405,33 @@ it cannot be wired, and the binary shows it was not.
 | AssemblyScript | `@external("env", "cleat_set_scope")` (`packages/cleat-as/assembly/host-calls.ts:582`), called at `:2053`, `:2117` |
 | Python | a stub only (`python-sdk/cleat_sdk/host_calls.py:3275`) — **not verified as wired** |
 | **Go** | **nothing** |
+
+**Fixed 2026-09-09.** `wasm/generator.go` gained `importDefs` entries for both calls,
+`wasm/usage.go` the three `hostFunctions` rows (`SetScope`, `ClearScope`, `GetScope` —
+`ClearScope` maps to `cleat_set_scope`, since clearing *is* the empty pair),
+`wasm/adapter_metadata.go` the two `adapterDefs`, and `cleat/runtime.go` the
+`HostCallsOptions` fields. `HostCallsImpl` now calls through when wired.
+
+**Verified with the same instrument that established the gap.** This section concluded
+from a compiled binary, not from tables — which matters, because the tables are exactly
+what a fix edits, so a table-reading test would pass on a tree where the generator still
+emitted nothing. `TestACompiledGoWorkflowImportsTheScopeCalls` builds the fixture and
+reads its import section: both `cleat_set_scope` and `cleat_get_scope` are present.
+
+**The obvious behavioural test was vacuous, and it was measured to be so rather than
+reasoned about.** Running the fixture and checking `SetScope`/`GetScope`/`ClearScope`
+return sensible values passes *with the wiring removed* — `HostCallsImpl` still keeps a
+local mirror, so the mirror answers every assertion. That version was written first and
+went green on an unwired tree, which is this section's own defect reappearing inside its
+fix: local fields standing in for a host call that was never made.
+`TestACompiledGoWorkflowActuallyReachesTheHostForScope` asserts the
+`EventTypeScopeAcquired` records instead, which only `freshSetScope` can write after it
+takes the concurrency key, and that one does go red when unwired.
+
+One thing deliberately **not** changed: `SetScope` still cannot report a host error, so a
+concurrency-store failure leaves the local mirror untouched and returns the previous scope.
+Rust is identical — `set_scope(...) -> String`, discarding `_err_code` — and diverging in
+one SDK would be worse than the shared gap. Tracked separately.
 
 So virtual-object mutual exclusion works from three SDKs and silently does not from the one this
 repo's own examples are written in.
@@ -7680,9 +7707,9 @@ would be redundant:
   native `uuid.New()` is **not** replay-safe. The host call is a convenience over the safe form,
   not the only safe form.
 
-Go's real gaps are **two**: `cleat_get_scope` / `cleat_set_scope`, which nothing else exposes
-(confirmed by compilation in [§3.223](#3223) — a Go workflow whose body is `h.SetScope(...)`
-produces a binary with `cleat_set_scope` absent entirely).
+Go has **no real gaps left**. `cleat_get_scope` / `cleat_set_scope` were the last two and were
+bound on 2026-09-09 ([§3.223](#3223), cleat#984); the `sdkUnreachedBaseline` entry shrank
+accordingly rather than being re-labelled.
 
 **This said "three real gaps", counting `cleat_fetch`, until 2026-09-08. Go reaches durable HTTP.**
 `DurableFetch`, `DurableFetchJSON`, `FetchGet` and `FetchGetJSON` all map to `cleat_call`

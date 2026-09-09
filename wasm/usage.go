@@ -114,6 +114,15 @@ var hostFunctions = []HostFunction{
 	{"cleat_register_update_handler", "RegisterUpdateHandler"},
 	{"cleat_poll_update", "PollUpdate"},
 	{"cleat_complete_update", "CompleteUpdate"},
+	// Virtual object scope. Absent from this table until 2026-09-09, which is
+	// exactly why the Go SDK took no lock: HostCallsImpl.SetScope set three
+	// local fields against a host call that was never generated, so
+	// cleat_set_scope was not in the binary at all (IMPROVEMENT-PLAN 3.223,
+	// #984). ClearScope shares the set_scope import -- clearing is the
+	// documented empty-pair call, not a separate export.
+	{"cleat_set_scope", "SetScope"},
+	{"cleat_set_scope", "ClearScope"},
+	{"cleat_get_scope", "GetScope"},
 	{"plugin_call", "PluginCall"},
 	{"plugin_call_streaming", "PluginCallStreaming"},
 	// Fetch / HTTP methods (all map to durable_call import)

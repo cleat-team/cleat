@@ -115,6 +115,42 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&signalNameBuf[0], int(signalNameLen)), unsafe.String(&payloadBuf[0], int(payloadLen)), timedOut, nil",
 		),
 	},
+	// The scope pair. ClearScope deliberately has NO entry here: it is
+	// SetScope("", "") -- the documented empty-pair call -- so it is a Go-side
+	// wrapper like DurableFetch over DurableCall, and its hostFunctions row
+	// records which import it ultimately reaches rather than asking for an
+	// adapter of its own.
+	//
+	// cleat_set_scope packs prevLen in the high 32 bits (packSimpleResult) and
+	// errCode in the low bits. That length was returned as a bare 0 on every
+	// success path until #1043, so an adapter written against the old encoding
+	// would have compiled, run, and handed back "" forever.
+	"SetScope": {
+		FieldName:  "SetScope",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"objectType", "string"},
+			{"instanceKey", "string"},
+		},
+		ResultStmts: []string{
+			"prevLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result & 0xFFFF)",
+			"if errCode != 0 {",
+			`	return "", fmt.Errorf("cleat_set_scope: %s", hostErrMessage(prevScopeBuf[:], prevLen))`,
+			"}",
+			"return unsafe.String(&prevScopeBuf[0], int(prevLen)), nil",
+		},
+	},
+	"GetScope": {
+		FieldName:  "GetScope",
+		ReturnType: "(string, string, error)",
+		ResultStmts: []string{
+			"objTypeLen := uint32(uint64(result) >> 32)",
+			"instKeyLen := uint32(result)",
+			"return unsafe.String(&objectTypeBuf[0], int(objTypeLen)), " +
+				"unsafe.String(&instanceKeyBuf[0], int(instKeyLen)), nil",
+		},
+	},
 	"DurableDefer": {
 		FieldName:  "DurableDefer",
 		ReturnType: "(string, error)",

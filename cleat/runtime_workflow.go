@@ -151,6 +151,25 @@ func (h *HostCallsImpl) SetScope(objectType, instanceKey string) (previousScope 
 	if h.scopeSet {
 		previousScope = h.scopePrefix
 	}
+
+	// The host is authoritative: it is the only party that can take the
+	// concurrency key, and until 2026-09-09 nothing here asked it to.
+	if h.setScope != nil {
+		hostPrev, err := h.setScope(objectType, instanceKey)
+		if err != nil {
+			// The host did not change the scope, so neither does the local
+			// mirror -- GetScope keeps reporting what is actually held rather
+			// than what was requested. The signature cannot report this, which
+			// matches Rust's `set_scope(...) -> String` discarding its
+			// err_code; diverging in one SDK would be worse than the shared
+			// gap. Tracked separately.
+			return previousScope
+		}
+		if hostPrev != "" {
+			previousScope = hostPrev
+		}
+	}
+
 	if objectType == "" && instanceKey == "" {
 		h.scopeSet = false
 		h.scopePrefix = ""
@@ -168,6 +187,12 @@ func (h *HostCallsImpl) SetScope(objectType, instanceKey string) (previousScope 
 // GetScope returns the current (objectType, instanceKey) or ("", "")
 // if no scope is set.
 func (h *HostCallsImpl) GetScope() (objectType, instanceKey string) {
+	if h.getScope != nil {
+		objType, instKey, err := h.getScope()
+		if err == nil {
+			return objType, instKey
+		}
+	}
 	if !h.scopeSet {
 		return "", ""
 	}
@@ -176,15 +201,12 @@ func (h *HostCallsImpl) GetScope() (objectType, instanceKey string) {
 
 // ClearScope removes the current scope and returns the previous scope
 // prefix (empty string if none was set).
+//
+// No host call of its own: clearing IS SetScope("", ""), the empty pair that
+// engine/scope.go freshSetScope documents, which is also why ClearScope has no
+// adapterDefs entry.
 func (h *HostCallsImpl) ClearScope() (previousScope string) {
-	if h.scopeSet {
-		previousScope = h.scopePrefix
-	}
-	h.scopeSet = false
-	h.scopePrefix = ""
-	h.scopeObjType = ""
-	h.scopeInstKey = ""
-	return
+	return h.SetScope("", "")
 }
 
 // UUID returns a deterministic UUID scoped to the current workflow

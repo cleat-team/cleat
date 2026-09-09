@@ -32,13 +32,11 @@ var notDeclaredForGo = map[string]string{
 	// Routed to a different import rather than unimplemented.
 	"cleat_fetch": "the Go SDK's Fetch* methods map to cleat_call (wasm/usage.go, \"Fetch / HTTP methods\")",
 
-	// THE OPEN GAP, machine-checked rather than described in prose.
-	// IMPROVEMENT-PLAN 3.223 / cleat#984: HostCallsImpl.SetScope sets three
-	// local fields and returns, so a Go guest takes no lock where Rust,
-	// AssemblyScript and Python serialise. Delete these two entries when it is
-	// fixed -- this test fails if they become stale, which is the point.
-	"cleat_set_scope": "GAP: IMPROVEMENT-PLAN 3.223 / cleat#984 -- Go guest emits no call, takes no lock",
-	"cleat_get_scope": "GAP: IMPROVEMENT-PLAN 3.223 / cleat#984 -- Go guest emits no call",
+	// The scope pair lived here as THE OPEN GAP (IMPROVEMENT-PLAN 3.223 /
+	// cleat#984) until 2026-09-09, with the instruction "delete these two
+	// entries when it is fixed -- this test fails if they become stale, which
+	// is the point." It did exactly that: adding the wasm/usage.go rows turned
+	// this test red naming both, rather than leaving a stale exemption behind.
 }
 
 // TestHostFunctionsDeclaresEveryRegisteredHostCall closes the gap that let

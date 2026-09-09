@@ -125,6 +125,26 @@ var importDefs = map[string]importDef{
 			{"payload", kindOutString},
 		},
 	},
+	// The scope pair. cleat_set_scope takes both strings and hands back the
+	// PREVIOUS scope prefix; passing two empty strings is the documented
+	// "clear" call (engine/scope.go freshSetScope), so both inputs are
+	// legitimately empty and the host reads them with
+	// readOptionalServiceName rather than rejecting a zero length.
+	"cleat_set_scope": {
+		ImportName: "cleat_set_scope",
+		Params: []paramSpec{
+			{"objectType", kindInString},
+			{"instanceKey", kindInString},
+			{"prevScope", kindOutString},
+		},
+	},
+	"cleat_get_scope": {
+		ImportName: "cleat_get_scope",
+		Params: []paramSpec{
+			{"objectType", kindOutString},
+			{"instanceKey", kindOutString},
+		},
+	},
 	"cleat_defer": {
 		ImportName: "cleat_defer",
 		Params: []paramSpec{

@@ -797,6 +797,11 @@ type HostCallsImpl struct {
 	scopeObjType string // current object type in scope
 	scopeInstKey string // current instance key in scope
 	scopeSet     bool   // true when scope is active
+	// The host calls behind the three scope methods. Nil under localdev and
+	// cleattest, which populate the impl directly; non-nil in a compiled
+	// workflow, where the generated adapter supplies them.
+	setScope func(objectType, instanceKey string) (string, error)
+	getScope func() (string, string, error)
 }
 
 // NewHostCalls creates a HostCalls from a set of function implementations.
@@ -820,6 +825,8 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		workflowID:                    opts.WorkflowID,
 		workflowRunID:                 opts.RunID,
 		durableLog:                    opts.DurableLog,
+		setScope:                      opts.SetScope,
+		getScope:                      opts.GetScope,
 		pollCancellation:              opts.PollCancellation,
 		pollSignal:                    opts.PollSignal,
 		continueAsNew:                 opts.ContinueAsNew,
@@ -887,24 +894,32 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 //
 // See individual method docs on hostCallsImpl for details.
 type HostCallsOptions struct {
-	DurableCall                   func(service, operation, requestJSON string) (string, error)
-	DurableCallTyped              func(service, operation string, request, result interface{}) error
-	DurableCallTypedWithOptions   func(opts CallOptions, service, operation string, request, result interface{}) error
-	DurableCallWithOptions        func(opts CallOptions, service, operation, requestJSON string) (string, error)
-	DurableCallJSONWithOptions    func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
-	DurableCallWithHeartbeat      func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error)
-	DurableSleep                  func(ms int64)
-	DurableSleepMs                func(ms int64)
-	DurableAwaitSignals           func(signalNames []string, timeoutMs int64) (string, string, bool, error)
-	CreatePromise                 func(name string) (promiseID string, err error)
-	AwaitPromise                  func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
-	ResolvePromise                func(id, value string) error
-	RejectPromise                 func(id, errMsg string) error
-	DurableDefer                  func(description string) (string, error)
-	DurableDeferFunc              func(fn func()) (string, error)
-	WorkflowID                    func() string
-	RunID                         func() string
-	DurableLog                    func(message string)
+	DurableCall                 func(service, operation, requestJSON string) (string, error)
+	DurableCallTyped            func(service, operation string, request, result interface{}) error
+	DurableCallTypedWithOptions func(opts CallOptions, service, operation string, request, result interface{}) error
+	DurableCallWithOptions      func(opts CallOptions, service, operation, requestJSON string) (string, error)
+	DurableCallJSONWithOptions  func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
+	DurableCallWithHeartbeat    func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error)
+	DurableSleep                func(ms int64)
+	DurableSleepMs              func(ms int64)
+	DurableAwaitSignals         func(signalNames []string, timeoutMs int64) (string, string, bool, error)
+	CreatePromise               func(name string) (promiseID string, err error)
+	AwaitPromise                func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
+	ResolvePromise              func(id, value string) error
+	RejectPromise               func(id, errMsg string) error
+	DurableDefer                func(description string) (string, error)
+	DurableDeferFunc            func(fn func()) (string, error)
+	WorkflowID                  func() string
+	RunID                       func() string
+	DurableLog                  func(message string)
+	// SetScope/GetScope reach cleat_set_scope / cleat_get_scope. Wired
+	// 2026-09-09 (cleat#984): before that HostCallsImpl.SetScope set three
+	// local fields against a host call that was never generated, so a Go
+	// guest took no lock where every other SDK serialises. ClearScope has no
+	// field here because it is SetScope("", "") -- the empty pair is the
+	// documented clear.
+	SetScope                      func(objectType, instanceKey string) (previousScope string, err error)
+	GetScope                      func() (objectType, instanceKey string, err error)
 	PollCancellation              func() (bool, string)
 	PollSignal                    func(signalName string) (string, bool, error)
 	ContinueAsNew                 func(newInputJSON string) error

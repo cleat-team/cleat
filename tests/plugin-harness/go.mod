@@ -22,6 +22,7 @@ require (
 	github.com/cleat-team/cleat v0.0.0
 	github.com/cleat-team/cleat/cleat v0.0.0
 	github.com/minio/minio-go/v7 v7.1.0
+	github.com/tetratelabs/wazero v1.11.1-0.20260508161934-e6dd6c0c144f
 )
 
 require (
@@ -48,7 +49,6 @@ require (
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	github.com/tetratelabs/wazero v1.11.1-0.20260508161934-e6dd6c0c144f // indirect
 	github.com/tinylib/msgp v1.6.1 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

@@ -280,22 +280,28 @@ func (e *TestEnv) ChildWorkflowCallHistory() []ChildWorkflowCallRecord {
 // Use NewTestEnv to create one, then wire up stubs with OnCall
 // and drive the workflow via the HostCalls returned by H().
 type TestEnv struct {
-	mu               sync.Mutex
-	h                cleat.HostCalls
-	nowMs            int64
-	versionVal       int
-	minVersionVal    int
-	queryState       map[string]string
-	callHistory      []CallRecord
-	callStubs        []*callStub
-	pendingSignals   []scheduledSignal
-	detachedRuns     []DetachedRun
-	sleepRecs        []sleepRecord
-	signalWaiters    []signalWaiter
-	randomSeq        []int64
-	randomIdx        int
-	deferCounter     int
-	promises         map[string]promiseState // keyed by promiseID
+	mu             sync.Mutex
+	h              cleat.HostCalls
+	nowMs          int64
+	versionVal     int
+	minVersionVal  int
+	queryState     map[string]string
+	callHistory    []CallRecord
+	callStubs      []*callStub
+	pendingSignals []scheduledSignal
+	detachedRuns   []DetachedRun
+	sleepRecs      []sleepRecord
+	signalWaiters  []signalWaiter
+	randomSeq      []int64
+	randomIdx      int
+	deferCounter   int
+	promises       map[string]promiseState // keyed by promiseID
+	// Virtual object scope. Modelled here because HostCallsImpl no longer
+	// keeps it locally when the host hooks are wired (cleat#984): a test
+	// double that left these nil would make GetScope fall back to the
+	// mirror and pass for the wrong reason.
+	scopeObjType     string
+	scopeInstKey     string
 	pendingUpdates   []PendingUpdate
 	completedUpdates []UpdateOutcome
 	updateCounter    int
@@ -400,6 +406,8 @@ func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
 		DurableAwaitSignals:           e.durableAwaitSignalsImpl,
 		DurableDefer:                  e.durableDeferImpl,
 		DurableLog:                    e.durableLogImpl,
+		SetScope:                      e.setScopeImpl,
+		GetScope:                      e.getScopeImpl,
 		PollCancellation:              e.pollCancellationImpl,
 		PollSignal:                    e.pollSignalImpl,
 		ContinueAsNew:                 e.continueAsNewImpl,
@@ -952,6 +960,30 @@ func (e *TestEnv) durableDeferImpl(description string) (resp string, retErr erro
 	e.deferCounter++
 	resp = fmt.Sprintf("defer-%d", e.deferCounter)
 	return
+}
+
+// setScopeImpl mirrors engine/scope.go's contract: the empty pair clears, and
+// the PREVIOUS scope prefix comes back. There is no lock to contend for -- a
+// TestEnv runs one workflow -- so acquisition always succeeds here. That is
+// honest for this harness rather than a stub that cannot fail: the engine's
+// error path is a concurrency-store failure, which a single in-memory env has
+// no analogue for.
+func (e *TestEnv) setScopeImpl(objectType, instanceKey string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	prev := ""
+	if e.scopeObjType != "" || e.scopeInstKey != "" {
+		prev = "vo:" + e.scopeObjType + ":" + e.scopeInstKey + ":"
+	}
+	e.scopeObjType = objectType
+	e.scopeInstKey = instanceKey
+	return prev, nil
+}
+
+func (e *TestEnv) getScopeImpl() (string, string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.scopeObjType, e.scopeInstKey, nil
 }
 
 func (e *TestEnv) durableLogImpl(message string) {
