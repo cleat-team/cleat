@@ -476,6 +476,30 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 			switch f.GoType {
 			case "string":
 				fmt.Fprintf(buf, "\t%s := extractJSONString(argsJSON, %q)\n", f.GoName, f.JSONTag)
+			case "int", "int64", "int32":
+				// An ABSENT int binds its zero value; a PRESENT one that will not
+				// decode is an error.
+				//
+				// cleat#1046 removed the hand-rolled digit scanner so ints reach
+				// json.Unmarshal, which is what made a negative expressible. It
+				// also moved absence: extractJSONRaw returns "" for a missing key
+				// and json.Unmarshal("") fails, so an omitted int parameter went
+				// from binding 0 to a hard error that stopped the workflow body
+				// running at all. That broke every caller relying on the documented
+				// zero-value default -- eight cases across three modules in the
+				// ports suite, and the reason this guard exists.
+				//
+				// A string parameter has always bound "" when absent, so this
+				// restores ints to the same contract rather than inventing one. A
+				// struct still errors on absence, which is pre-existing and a
+				// separate question: absence is NOT uniform across types here, and
+				// making it so is a design decision that should be taken on its own
+				// rather than folded into a regression fix.
+				fmt.Fprintf(buf, "\tvar %s %s\n", f.GoName, f.GoType)
+				fmt.Fprintf(buf, "\tif __raw := extractJSONRaw(argsJSON, %q); __raw != \"\" {\n", f.JSONTag)
+				fmt.Fprintf(buf, "\t\tif err := json.Unmarshal([]byte(__raw), &%s); err != nil {\n", f.GoName)
+				fmt.Fprintf(buf, "\t\t\treturn writeErrorOut(outPtr, maxOutLen, fmt.Errorf(\"unmarshal %s: %%w\", err))\n", f.JSONTag)
+				buf.WriteString("\t\t}\n\t}\n")
 			default:
 				fmt.Fprintf(buf, "\tvar %s %s\n", f.GoName, f.GoType)
 				fmt.Fprintf(buf, "\tif err := json.Unmarshal([]byte(extractJSONRaw(argsJSON, %q)), &%s); err != nil {\n", f.JSONTag, f.GoName)
@@ -684,6 +708,15 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 				switch f.GoType {
 				case "string":
 					fmt.Fprintf(buf, "\t\t%s := extractJSONString(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
+				case "int", "int64", "int32":
+					// Absent binds zero; present-and-undecodable is an error.
+					// See the note on the sibling site above -- cleat#1046
+					// moved absence for ints and this restores it.
+					fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
+					fmt.Fprintf(buf, "\t\tif __raw := extractJSONRaw(string(argsJSON), %q); __raw != \"\" {\n", f.JSONTag)
+					fmt.Fprintf(buf, "\t\t\tif err := json.Unmarshal([]byte(__raw), &%s); err != nil {\n", f.GoName)
+					fmt.Fprintf(buf, "\t\t\t\treturn []byte(`{\"error\":` + encodeJSONString(\"unmarshal %s: \" + err.Error()) + `}`)\n", f.JSONTag)
+					buf.WriteString("\t\t\t}\n\t\t}\n")
 				default:
 					// Complex type: use json.Unmarshal.
 					fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)

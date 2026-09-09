@@ -134,6 +134,30 @@ func TestAnIntParameterIsDecodedRatherThanScanned(t *testing.T) {
 		}
 	})
 
+	t.Run("an ABSENT int binds zero rather than erroring", func(t *testing.T) {
+		// cleat#1046 removed the digit scanner so ints reach json.Unmarshal.
+		// That also moved ABSENCE: extractJSONRaw returns "" for a missing key
+		// and json.Unmarshal("") fails, so an omitted int went from binding 0
+		// to a hard error that stopped the body running at all -- eight cases
+		// across three modules of the ports suite, found by its CI going red.
+		//
+		// A string parameter has always bound "" when absent. This asserts ints
+		// match, which is the contract callers already relied on.
+		got, raw := run(t, `{"note":"no-amount"}`)
+		if raw != "" {
+			t.Fatalf("an omitted int parameter was refused: %s\n\n"+
+				"Absent is not malformed. The zero value is the documented default "+
+				"and the body must still run.", raw)
+		}
+		if got.Note != "no-amount" {
+			t.Fatalf("the run did not bind its string either (note=%q); the body may "+
+				"not have executed at all", got.Note)
+		}
+		if got.AmountCents != 0 {
+			t.Errorf("an omitted amountCents bound %d, want 0", got.AmountCents)
+		}
+	})
+
 	t.Run("a quoted number is refused rather than silently zeroed", func(t *testing.T) {
 		got, raw := run(t, `{"amountCents":"4200","note":"quoted"}`)
 		if raw == "" {
