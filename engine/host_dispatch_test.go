@@ -907,17 +907,27 @@ func TestClearScopeReleasesHeldScope(t *testing.T) {
 	}
 }
 
-func TestSetScopeAcquisitionFailure(t *testing.T) {
-	// Create a store that returns not-acquired.
+// TestSetScopeAcquisitionSucceeds is the happy-path control for
+// TestSetScopeStoreFailureSuspends (engine/scope_acquire_failure_test.go).
+//
+// It was called TestSetScopeAcquisitionFailure until cleat#1062 and tested no
+// failure of any kind: its own comment read "The mock always returns
+// acquired=true, so this tests the happy path. For the failure path we'd need
+// a different mock." So the one test named for the store-failure branch never
+// entered it, and the defect that branch carried -- a failed acquisition
+// reported to the guest as success -- survived under a green test bearing its
+// name. Renamed rather than deleted, because a success control is worth having
+// next to the failure tests; the name now says which one it is.
+func TestSetScopeAcquisitionSucceeds(t *testing.T) {
 	store := &mockConcurrencyKeyStore{}
 	s := newTestExecSession()
 	s.engine.concurrencyKeyStore = store
 
-	// The mock always returns acquired=true, so this tests the happy path.
-	// For the failure path we'd need a different mock.
-	// Test that scope is set correctly.
 	s.SetScope(context.Background(), nil, "account", "acct-123", 0, 0)
 	if !s.scopeSet {
 		t.Error("expected scopeSet=true after acquisition")
+	}
+	if s.suspendErr != nil {
+		t.Errorf("a successful acquisition must not suspend, got %v", s.suspendErr)
 	}
 }
