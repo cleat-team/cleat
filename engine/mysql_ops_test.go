@@ -830,6 +830,8 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 			"wf-0",      // continued_from (cleat#887)
 			int64(5),    // reclaim_count (cleat#1008)
 			"wf-parent", // parent_workflow_id (cleat#1103)
+			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), // created_at (cleat#1105)
+			"failed", // pending_terminal_status (cleat#1105)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")
@@ -1514,6 +1516,8 @@ func TestMySQLStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 			nil,      // continued_from (NULL: not a continuation)
 			int64(0), // reclaim_count (never reclaimed)
 			nil,      // parent_workflow_id (NULL: top-level run)
+			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), // created_at (NOT NULL in the schema)
+			"", // pending_terminal_status (none pending)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")

@@ -639,6 +639,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 	heartbeatAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	completedAt := time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC)
 	startedAt := time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC)
+	createdAt := time.Date(2024, 12, 31, 23, 0, 0, 0, time.UTC)
 
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
@@ -665,6 +666,8 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 				"wf-0",                     // continued_from (cleat#887)
 				int64(7),                   // reclaim_count (cleat#1008)
 				"wf-parent",                // parent_workflow_id (cleat#1103)
+				createdAt,                  // created_at (cleat#1105)
+				"failed",                   // pending_terminal_status (cleat#1105)
 			}},
 		},
 	}, nil)
@@ -1902,6 +1905,7 @@ func TestPostgresStore_PollCancellation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
+	createdAtNull := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			match: "SELECT id, def_name, def_version",
@@ -1927,6 +1931,8 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 				nil,               // continued_from (NULL: not a continuation)
 				int64(0),          // reclaim_count (never reclaimed)
 				nil,               // parent_workflow_id (NULL: top-level run)
+				createdAtNull,     // created_at (NOT NULL in the schema, so a real value)
+				"",                // pending_terminal_status (no two-phase terminal pending)
 			}},
 		},
 	}, nil)

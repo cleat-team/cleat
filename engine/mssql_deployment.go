@@ -238,12 +238,14 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       -- the claim queries, and TestMSSQLUUIDColumnsAreConvertedInProjections
 		       -- fails the build without it.
 		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id,
-		       continued_from, reclaim_count, parent_workflow_id
+		       continued_from, reclaim_count, parent_workflow_id,
+		       created_at, COALESCE(pending_terminal_status, '')
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
-		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID)
+		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
+		&wf.CreatedAt, &wf.PendingTerminalStatus)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
