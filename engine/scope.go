@@ -50,15 +50,23 @@ func (s *execSession) ClearScope(ctx context.Context) {
 func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
 
 	// Save previous scope prefix to output buffer.
+	//
+	// The length is part of the contract, not bookkeeping: the guest has no
+	// other way to know how many of those bytes are its previous scope. This
+	// discarded it and returned a bare 0 until 2026-09-08, so every SDK that
+	// binds cleat_set_scope decoded a zero length and read an empty previous
+	// scope however much the host had written. See
+	// TestABISetScopeReportsPreviousScopeLength.
 	prevScope := ""
+	var prevLen uint32
 	if s.scopeSet && s.scopePrefix != "" {
 		prevScope = s.scopePrefix
-		_, _ = s.writeResult(ctx, m, prevScopePtr, prevScope, prevScopeMaxLen)
+		prevLen, _ = s.writeResult(ctx, m, prevScopePtr, prevScope, prevScopeMaxLen)
 	}
 
 	if objectType == "" && instanceKey == "" {
 		s.ClearScope(ctx)
-		return 0
+		return packSimpleResult(0, prevLen)
 	}
 
 	// If switching from an existing scope, release the old key first.
@@ -98,7 +106,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 				Reason: fmt.Sprintf("virtual object scope %s held by another workflow", scopeKey),
 				Until:  time.UnixMilli(s.nowMs).Add(5 * time.Second),
 			}
-			return 0
+			return packSimpleResult(0, prevLen)
 		}
 		s.heldScopes = append(s.heldScopes, scopeKey)
 	}
@@ -115,16 +123,20 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 	s.scopeObjType = objectType
 	s.scopeInstKey = instanceKey
 	s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
-	return 0
+	return packSimpleResult(0, prevLen)
 }
 
 func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
 
-	// Save previous scope prefix to output buffer (reconstructed from replayed scope state).
+	// Save previous scope prefix to output buffer (reconstructed from replayed
+	// scope state). The length is returned for the same reason as in
+	// freshSetScope: replay must hand the guest the same result the fresh path
+	// did, or a workflow that reads its previous scope diverges on replay.
 	prevScope := ""
+	var prevLen uint32
 	if s.scopeSet && s.scopePrefix != "" {
 		prevScope = s.scopePrefix
-		_, _ = s.writeResult(ctx, m, prevScopePtr, prevScope, prevScopeMaxLen)
+		prevLen, _ = s.writeResult(ctx, m, prevScopePtr, prevScope, prevScopeMaxLen)
 	}
 
 	if objectType == "" && instanceKey == "" {
@@ -142,7 +154,7 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 		s.scopePrefix = ""
 		s.scopeObjType = ""
 		s.scopeInstKey = ""
-		return 0
+		return packSimpleResult(0, prevLen)
 	}
 
 	if s.stepCount < len(s.history) {
@@ -180,7 +192,7 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 		s.scopeInstKey = instanceKey
 		s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
 		s.heldScopes = append(s.heldScopes, "vo:"+objectType+":"+instanceKey)
-		return 0
+		return packSimpleResult(0, prevLen)
 	}
 
 	// Past recorded history -- switch to fresh execution.

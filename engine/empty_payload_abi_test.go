@@ -61,3 +61,63 @@ func TestReadOptionalServiceNameAllowsEmptyOnly(t *testing.T) {
 		t.Error("readOptionalServiceName accepted a name with a space in it")
 	}
 }
+
+// TestABISetScopeReportsPreviousScopeLength pins the half of cleat_set_scope's
+// contract that had no test: the guest must be able to READ the previous scope,
+// not merely have it written somewhere.
+//
+// freshSetScope writes prevScope into the guest buffer and discards the length
+// (`_, _ = s.writeResult(...)`), then returns 0 on every success path. The
+// bytes land in guest memory and nothing reports how many. Every SDK that binds
+// this call decodes the length out of the high 32 bits -- Rust's clear_scope
+// does `let (prev_len, _err) = memory::decode_simple_result(result)` and
+// returns String::new() whenever prev_len is 0, which is always.
+//
+// So the call succeeds, the memory is correct, and the documented return value
+// is unreachable. TestABISetScopeEmptyPairClearsScope already passed a real
+// 256-byte buffer at 2048 with a scope set, and asserted nothing about either
+// the length or the contents -- the write was exercised and never read back.
+func TestABISetScopeReportsPreviousScopeLength(t *testing.T) {
+	s := newTestExecSession()
+	s.scopeSet = true
+	s.scopePrefix = "vo:cart:c1:"
+	s.scopeObjType = "cart"
+	s.scopeInstKey = "c1"
+
+	h := newTestHostFuncHarness(t, "cleat_set_scope",
+		[]byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, s)
+
+	const objTypePtr, instKeyPtr, prevPtr, prevMax = 1024, 1100, 2048, 256
+	if !h.mem.Write(objTypePtr, []byte("order")) || !h.mem.Write(instKeyPtr, []byte("o1")) {
+		t.Fatal("could not stage the input strings in guest memory")
+	}
+
+	got, err := h.call(objTypePtr, 5, instKeyPtr, 2, prevPtr, prevMax)
+	if err != nil {
+		t.Fatalf("call cleat_set_scope: %v", err)
+	}
+	if errCode := uint32(got & 0xFFFF); errCode != 0 {
+		t.Fatalf("cleat_set_scope reported error code %d; the replacement should succeed", errCode)
+	}
+
+	want := "vo:cart:c1:"
+
+	// The bytes are there -- this half already worked.
+	buf, ok := h.mem.Read(prevPtr, uint32(len(want)))
+	if !ok {
+		t.Fatal("could not read the previous-scope buffer")
+	}
+	if string(buf) != want {
+		t.Errorf("previous scope bytes = %q, want %q", string(buf), want)
+	}
+
+	// This is the half that did not: the guest has no way to learn how many.
+	gotLen := uint32(got >> 32)
+	if gotLen != uint32(len(want)) {
+		t.Errorf("cleat_set_scope returned previous-scope length %d, want %d "+
+			"(raw result %#x). The host wrote %q into the buffer and reported no "+
+			"length, so every SDK that decodes it -- rust, java, assemblyscript -- "+
+			"reads an empty previous scope no matter what was there.",
+			gotLen, len(want), got, want)
+	}
+}
