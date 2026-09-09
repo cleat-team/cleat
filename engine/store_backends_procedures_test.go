@@ -52,6 +52,7 @@ var postgresProcedureMigrations = []string{
 	"047_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
 	"049_a_burst_wakes_finalize_on_progress.sql",
 	"050_the_idempotency_write_needs_the_tenant.sql",
+	"053_the_finalize_procedure_stops_writing_the_result_column.sql",
 }
 
 var mysqlProcedureMigrations = []string{
@@ -62,6 +63,7 @@ var mysqlProcedureMigrations = []string{
 	"046_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
 	"048_a_burst_wakes_finalize_on_progress.sql",
 	"049_the_idempotency_write_needs_the_tenant.sql",
+	"053_the_finalize_procedure_stops_writing_the_result_column.sql",
 }
 
 var mssqlProcedureMigrations = []string{
@@ -72,6 +74,7 @@ var mssqlProcedureMigrations = []string{
 	"050_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
 	"052_a_burst_wakes_finalize_on_progress.sql",
 	"053_the_idempotency_write_needs_the_tenant.sql",
+	"056_the_finalize_procedure_stops_writing_the_result_column.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup
@@ -169,10 +172,39 @@ func applyMySQLProcedures(t *testing.T, db *sql.DB) {
 // As with applyPostgresProcedures, this only actually runs once per test
 // binary (see postgresProceduresOnce doc comment) since every caller shares
 // one CLEAT_TEST_MSSQL database and 004 is not safe to replay atop itself.
+// SQL Server replays only the LAST entry, where PostgreSQL and MySQL replay
+// the whole list.
+//
+// SQL Server binds column names when it compiles a procedure body; PostgreSQL
+// and MySQL do not. So a superseded definition stops being replayable the
+// moment a column it names is dropped, even though it was correct against the
+// schema of its own day. cleat#1049 dropped idempotency_keys.result and
+// 003_procedures.sql went from redundant to fatal:
+//
+//	apply migration ../migrations/mssql/003_procedures.sql:
+//	mssql: Invalid column name 'result'.
+//
+// Applying only the last entry is not a shortcut around that error, it is what
+// this function was always for: the list is ordered, every entry redefines
+// finalize_workflow_status in full, and only the last one decides what the
+// database ends up with. On SQL Server every listed file defines that one
+// routine and nothing else, so nothing is lost by skipping the rest -- which is
+// NOT true of PostgreSQL, whose 003 also defines flush_event_step and
+// batch_flush_events. That asymmetry is why this is a per-dialect change rather
+// than the same edit in three places.
+//
+// TestProcedureMigrationListsAreComplete still guards the list itself, so a new
+// procedure migration that is not listed is still caught -- and it is now the
+// only thing standing between a new definition and a suite that silently tests
+// the previous one.
 func applyMSSQLProcedures(t *testing.T, db *sql.DB) {
 	t.Helper()
 	mssqlProceduresOnce.Do(func() {
-		for _, f := range mssqlProcedureMigrations {
+		if len(mssqlProcedureMigrations) == 0 {
+			mssqlProceduresErr = fmt.Errorf("mssqlProcedureMigrations is empty")
+			return
+		}
+		for _, f := range mssqlProcedureMigrations[len(mssqlProcedureMigrations)-1:] {
 			path := filepath.Join("..", "migrations", "mssql", f)
 			data, err := os.ReadFile(path)
 			if err != nil {

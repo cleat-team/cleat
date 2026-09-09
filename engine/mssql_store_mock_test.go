@@ -140,8 +140,6 @@ func TestMSSQLStore_CompleteWorkflow_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
 		{match: "SET status = 'done'", affected: 1},
-		// Idempotency update is best-effort — may succeed.
-		{match: "UPDATE idempotency_keys SET result", affected: 1},
 	})
 	defer db.Close()
 
@@ -177,23 +175,6 @@ func TestMSSQLStore_CompleteWorkflow_BeginError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "complete workflow: begin") {
 		t.Errorf("expected error to contain 'complete workflow: begin', got: %v", err)
-	}
-}
-
-func TestMSSQLStore_CompleteWorkflow_IdempotencyUpdateFails(t *testing.T) {
-	// Idempotency UPDATE is best-effort. When it fails, the error is logged
-	// but CompleteWorkflow still succeeds.
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "sp_set_session_context"},
-		{match: "SET status = 'done'", affected: 1},
-		{match: "UPDATE idempotency_keys SET result", err: errors.New("idempotency failed")},
-	})
-	defer db.Close()
-
-	store := NewMSSQLStore(db)
-	err := store.CompleteWorkflow(testCtxMSSQL, "wf-1", "worker-1", 0, `{"result":"ok"}`, nil)
-	if err != nil {
-		t.Fatalf("CompleteWorkflow should succeed when idempotency update fails: %v", err)
 	}
 }
 

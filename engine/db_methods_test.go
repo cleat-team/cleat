@@ -1747,24 +1747,6 @@ func TestPostgresStore_ConsumeSignal_AlreadyGone(t *testing.T) {
 // CompleteWorkflow and FailWorkflow (complex, with best-effort cleanup)
 // ---------------------------------------------------------------------------
 
-func TestPostgresStore_CompleteWorkflow_IdempotencyUpdateFails(t *testing.T) {
-	// Idempotency UPDATE is best-effort. When it fails, the error is logged
-	// but CompleteWorkflow still succeeds.
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		// Main workflow status update succeeds (fence held).
-		{match: "SET status = 'done'", affected: 1},
-		// Idempotency update fails — logged but non-fatal.
-		{match: "UPDATE idempotency_keys SET result =", err: sql.ErrConnDone},
-	})
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", 0, `{"result":"ok"}`, map[string]string{"key": "val"})
-	if err != nil {
-		t.Fatalf("CompleteWorkflow should succeed even when idempotency update fails: %v", err)
-	}
-}
-
 func TestPostgresStore_FailWorkflow_IdempotencyUpdateFails(t *testing.T) {
 	// Idempotency error UPDATE is best-effort. When it fails, the error is
 	// logged but FailWorkflow still succeeds.
@@ -5380,14 +5362,14 @@ func TestPostgresStore_Heartbeat_MultipleRows(t *testing.T) {
 func TestPostgresStore_CompleteWorkflow_ZeroRowsAffected(t *testing.T) {
 	// CLEAT-1.2: when the fenced status UPDATE affects zero rows (another
 	// worker now owns this workflow, e.g. after reaping), CompleteWorkflow
-	// must report ErrFenceLost and must NOT run the idempotency-key write.
-	// If the idempotency mock below were matched, its zero-value result
-	// would silently succeed, so a regression back to the old
-	// "always continue" behavior would only be caught by the RowsAffected
-	// assertions here -- not by an error from that statement.
+	// must report ErrFenceLost.
+	//
+	// This used to also assert that the idempotency-key write did not run.
+	// cleat#1049 dropped idempotency_keys.result and with it that write, so
+	// the success path issues no such statement to suppress; ErrFenceLost is
+	// the whole of the claim now.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "SET status = 'done'", affected: 0},
-		{match: "UPDATE idempotency_keys SET result =", affected: 0},
 	})
 	defer db.Close()
 
