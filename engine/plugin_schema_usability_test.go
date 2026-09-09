@@ -133,71 +133,192 @@ func TestEveryDialectAgreesWhichColumnsAWriterMustSupply(t *testing.T) {
 		t.Skipf("only %d dialect(s) configured; agreement needs at least two", len(got))
 	}
 
-	// Compare, per plugin table, across every configured dialect.
-	var names []string
-	for n := range got {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	base := names[0]
-
-	var disagreements, missing []string
-	for pluginName, tables := range tablesOf {
-		for _, table := range tables {
-			lt := strings.ToLower(table)
-			for _, other := range names[1:] {
-				// Only compare a table both dialects actually have. A missing
-				// table is the OTHER test's business (TestPluginMigrations_
-				// AllDialects asserts existence) and reporting it here as N
-				// column asymmetries would bury the real ones.
-				if !got[base].tables[lt] || !got[other].tables[lt] {
-					missing = append(missing, fmt.Sprintf(
-						"  %s: present on %v, absent on %v (plugin %s)",
-						table, presentOn(got, lt, true), presentOn(got, lt, false), pluginName))
-					continue
-				}
-				a := got[base].required[lt]
-				b := got[other].required[lt]
-				for col := range union(a, b) {
-					if a[col] == b[col] {
-						continue
-					}
-					needs, doesNot := base, other
-					if b[col] {
-						needs, doesNot = other, base
-					}
-					disagreements = append(disagreements, fmt.Sprintf(
-						"  %s.%s: %s requires a value, %s supplies one (plugin %s)",
-						table, col, needs, doesNot, pluginName))
-				}
-			}
-		}
-	}
-	sort.Strings(disagreements)
-	sort.Strings(missing)
+	disagreements, stale, missing := compareRequiredColumns(got, tablesOf, knownColumnAsymmetries)
 
 	// Absence is reported, not silently skipped -- but as its own finding.
 	if len(missing) > 0 {
 		t.Logf("tables not present on every configured dialect, not compared here:\n%s",
-			strings.Join(uniq(missing), "\n"))
+			strings.Join(missing, "\n"))
 	}
 
-	if extra := notIn(disagreements, knownColumnAsymmetries); len(extra) > 0 {
+	if len(disagreements) > 0 {
 		t.Errorf("dialects disagree about which columns a writer must supply:\n%s\n\n"+
 			"A statement that omits such a column succeeds on the dialect that defaults it and "+
 			"fails on the one that does not -- silently, if the caller logs and swallows, which "+
 			"is cleat#958: zero audit events had ever been recorded on MySQL while the "+
 			"table-existence test passed.\n\n"+
 			"Fix the schema so the dialects agree, or -- if the plugin's own code already "+
-			"supplies the value on the dialect that needs it -- add the line to "+
+			"supplies the value on the dialect that needs it -- add the entry to "+
 			"knownColumnAsymmetries with that reason.",
-			strings.Join(extra, "\n"))
+			strings.Join(renderAsymmetries(disagreements), "\n"))
 	}
-	if closed := notIn(knownColumnAsymmetries, disagreements); len(closed) > 0 {
+	if len(stale) > 0 {
 		t.Errorf("knownColumnAsymmetries records %d asymmetr(ies) that no longer exist:\n%s\n\n"+
-			"Good news, and the list must shrink to match or it stops measuring anything.",
-			len(closed), strings.Join(closed, "\n"))
+			"Good news, and the list must shrink to match or it stops measuring anything.\n\n"+
+			"Only entries whose dialect was actually compared on this run are reported here. "+
+			"An entry naming an unconfigured dialect is left alone, because this run has no "+
+			"evidence either way about it.",
+			len(stale), strings.Join(renderAsymmetries(stale), "\n"))
 	}
+}
+
+// columnAsymmetry is one dialect's requirement, not a comparison between two.
+//
+// cleat#1087. This used to be the RENDERED string "<table>.<col>: X requires a
+// value, Y supplies one", compared against a baseline of the same strings --
+// and the comparison picked Y by `sort.Strings(names); base := names[0]`. So
+// the baseline was keyed on whichever configured dialect happened to sort
+// first. With all three up that is mssql; with SQL Server unconfigured it is
+// mysql, and every string changed.
+//
+// A two-dialect run therefore reported the SAME two asymmetries in both
+// directions at once: as new disagreements (against a counterpart that had
+// moved) and as baseline entries that "no longer exist". The second is the
+// expensive half -- its message reads "Good news, and the list must shrink to
+// match", so the invited repair is to delete two entirely correct entries and
+// go green, permanently retiring the guard.
+//
+// The fact is about ONE dialect: MySQL requires a value for audit_events.id.
+// Which other dialects supply it is derivable from whatever is configured, and
+// belongs in the rendering rather than the key. Both original entries already
+// said as much in their comments -- one noted "where Default and MSSQL omit it"
+// while the string could only name one of the two.
+type columnAsymmetry struct {
+	Table   string // as declared by the plugin, not lowercased
+	Column  string
+	Dialect string // the dialect that REQUIRES a value
+	Plugin  string
+}
+
+func (c columnAsymmetry) String() string {
+	return fmt.Sprintf("  %s.%s: %s requires a value (plugin %s)",
+		c.Table, c.Column, c.Dialect, c.Plugin)
+}
+
+func renderAsymmetries(in []columnAsymmetry) []string {
+	out := make([]string, 0, len(in))
+	for _, a := range in {
+		out = append(out, a.String())
+	}
+	return out
+}
+
+// compareRequiredColumns is the whole comparison, lifted out of the
+// database-backed test so it can be exercised against synthetic facts.
+//
+// Returns, in order: asymmetries not excused by the baseline; baseline entries
+// that were compared on this run and no longer hold; and tables absent from at
+// least one configured dialect.
+//
+// The stale check is scoped to dialects present in `got`, and that is load
+// bearing rather than tidiness. A run that did not configure a dialect gathered
+// no evidence about it, so calling its baseline entry "no longer exists" is a
+// claim about something unmeasured -- the same defect as the pair-keying, one
+// size smaller. Narrowed, NOT removed: an entry whose dialect WAS compared and
+// whose asymmetry is gone must still be reported, or the list stops shrinking
+// and stops measuring anything.
+func compareRequiredColumns(
+	got map[string]schemaFacts,
+	tablesOf map[string][]string,
+	baseline []columnAsymmetry,
+) (disagreements, stale []columnAsymmetry, missing []string) {
+
+	var names []string
+	for n := range got {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	var found []columnAsymmetry
+	var missingLines []string
+	compared := map[string]bool{}
+	for pluginName, tables := range tablesOf {
+		for _, table := range tables {
+			lt := strings.ToLower(table)
+
+			// Only compare a table every configured dialect actually has. A
+			// missing table is the OTHER test's business (TestPluginMigrations_
+			// AllDialects asserts existence) and reporting it here as N column
+			// asymmetries would bury the real ones.
+			everywhere := true
+			for _, n := range names {
+				if !got[n].tables[lt] {
+					everywhere = false
+				}
+			}
+			if !everywhere {
+				missingLines = append(missingLines, fmt.Sprintf(
+					"  %s: present on %v, absent on %v (plugin %s)",
+					table, presentOn(got, lt, true), presentOn(got, lt, false), pluginName))
+				continue
+			}
+			compared[lt] = true
+
+			cols := map[string]bool{}
+			for _, n := range names {
+				for col := range got[n].required[lt] {
+					cols[col] = true
+				}
+			}
+			for col := range cols {
+				var requiring, supplying []string
+				for _, n := range names {
+					if got[n].required[lt][col] {
+						requiring = append(requiring, n)
+					} else {
+						supplying = append(supplying, n)
+					}
+				}
+				// A disagreement needs both sides. Every configured dialect
+				// requiring the column is agreement, and so is none of them.
+				if len(requiring) == 0 || len(supplying) == 0 {
+					continue
+				}
+				for _, d := range requiring {
+					found = append(found, columnAsymmetry{
+						Table: table, Column: col, Dialect: d, Plugin: pluginName,
+					})
+				}
+			}
+		}
+	}
+
+	key := func(a columnAsymmetry) string {
+		return strings.ToLower(a.Table) + "\x00" + a.Column + "\x00" + a.Dialect + "\x00" + a.Plugin
+	}
+	excused := map[string]bool{}
+	for _, a := range baseline {
+		excused[key(a)] = true
+	}
+	seen := map[string]bool{}
+	for _, a := range found {
+		seen[key(a)] = true
+		if !excused[key(a)] {
+			disagreements = append(disagreements, a)
+		}
+	}
+	configured := map[string]bool{}
+	for _, n := range names {
+		configured[n] = true
+	}
+	for _, a := range baseline {
+		// Two conditions, one reason: report an entry as gone only if this run
+		// had the evidence to say so. Its dialect must have been configured,
+		// and its table must have been compared rather than skipped as absent
+		// from some dialect -- a skipped table produces no `found` entry, which
+		// is indistinguishable from a closed asymmetry unless asked separately.
+		if configured[a.Dialect] && compared[strings.ToLower(a.Table)] && !seen[key(a)] {
+			stale = append(stale, a)
+		}
+	}
+
+	byString := func(in []columnAsymmetry) {
+		sort.Slice(in, func(i, j int) bool { return in[i].String() < in[j].String() })
+	}
+	byString(disagreements)
+	byString(stale)
+	sort.Strings(missingLines)
+	return disagreements, stale, uniq(missingLines)
 }
 
 // knownColumnAsymmetries are dialect disagreements that exist and are
@@ -215,21 +336,21 @@ func TestEveryDialectAgreesWhichColumnsAWriterMustSupply(t *testing.T) {
 // (IMPROVEMENT-PLAN 3.255, which drives recordAudit against a real MySQL and
 // asserts the row lands), and event-triggers does not. That is a real gap and
 // is named rather than implied.
-var knownColumnAsymmetries = []string{
+var knownColumnAsymmetries = []columnAsymmetry{
 	// Compensated dialect-independently: plugins/auditlog/middleware.go supplies
 	// uuid.NewString() on every dialect, so no statement depends on a default.
 	// This was cleat#958 -- zero audit events had ever been recorded on MySQL --
 	// and the fix deliberately did not add a MySQL default, because supplying
 	// the id removes the class instead of moving it (and needs no MySQL 8.0.13+
 	// for DEFAULT (uuid())).
-	"  audit_events.id: mysql requires a value, mssql supplies one (plugin audit-log)",
+	{Table: "audit_events", Column: "id", Dialect: "mysql", Plugin: "audit-log"},
 
 	// Compensated per-dialect: plugins/eventtriggers/queries.go carries a
 	// MySQL-specific INSERT listing `id` where Default and MSSQL omit it.
 	// Verified at queries.go:41. This is the weaker shape of the two -- the
 	// statement that must supply the value and the schema that requires it are
 	// in different files, with nothing tying them together.
-	"  event_subscriptions.id: mysql requires a value, mssql supplies one (plugin event-triggers)",
+	{Table: "event_subscriptions", Column: "id", Dialect: "mysql", Plugin: "event-triggers"},
 }
 
 // presentOn lists the dialects that do (or do not) have a table.

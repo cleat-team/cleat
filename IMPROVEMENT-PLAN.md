@@ -9922,3 +9922,92 @@ contention control, which confirms the mutation is specific to the branch change
 non-acquisition generally. `TestSetScopeReplayOfRecordedFailureRetriesAcquisition` passes under the
 mutation too, and is reported as what it is: a characterisation of the pre-existing replay retry
 that this change makes reachable, not a regression test for the change.
+
+### 3.408 A guard keyed its baseline on a dialect PAIR, so a two-dialect run reported the same asymmetries as both new and closed — ✅ **FIXED 2026-09-09** (cleat#1087)
+
+`TestEveryDialectAgreesWhichColumnsAWriterMustSupply` compared dialects against a base picked by
+sort order — `sort.Strings(names); base := names[0]` — and rendered each finding as
+`"<table>.<col>: X requires a value, Y supplies one"`, naming **both**. `knownColumnAsymmetries`
+stored those rendered strings verbatim, so the baseline was keyed on whichever configured dialect
+sorted first: `mssql` with all three up, `mysql` without SQL Server.
+
+Measured 2026-09-09 in one environment, all three dialects available, varying only `CLEAT_TEST_MSSQL`:
+
+| | two dialects (pg + mysql) | three dialects |
+|---|---|---|
+| before | **FAIL** | pass |
+| after | pass | pass |
+
+The two-dialect failure reported the **same two asymmetries in both directions at once**:
+
+    dialects disagree about which columns a writer must supply:
+      audit_events.id: mysql requires a value, postgres supplies one (plugin audit-log)
+      event_subscriptions.id: mysql requires a value, postgres supplies one (plugin event-triggers)
+
+    knownColumnAsymmetries records 2 asymmetr(ies) that no longer exist:
+      audit_events.id: mysql requires a value, mssql supplies one (plugin audit-log)
+      event_subscriptions.id: mysql requires a value, mssql supplies one (plugin event-triggers)
+
+MySQL requires `audit_events.id`; PostgreSQL and SQL Server both supply it. That fact did not
+change. Only the counterpart named in the string did, and the baseline matched on the string.
+
+**The under-reporting half is the finding, and it is the one that would have been missed.** The
+over-report costs an hour. The stale report says *"Good news, and the list must shrink to match"*
+while pointing at two entirely correct entries — so the invited repair is to delete them, go green,
+and permanently retire a guard that exists because cleat#958 recorded zero audit events on MySQL
+for as long as it went unnoticed. The failing half looks like work to do; the passing half looks
+like progress. Same selection effect as the flattering-number class in CLAUDE.md.
+
+## Two changes, and the second is not cosmetic
+
+**Key on the requiring dialect, one entry per dialect that requires the value.** `columnAsymmetry`
+replaces the rendered string; which dialects *supply* it is derivable from what is configured and
+belongs in the rendering. Both original entries already said so in their own comments — one noted
+*"where Default and MSSQL omit it"* while the string could only name one of the two.
+
+**Scope the stale check to what this run actually measured.** Keying alone does not fix it. A run
+that did not configure a dialect gathered no evidence about it, so calling its baseline entry "no
+longer exists" is a claim about something unmeasured — the same defect one size smaller. Narrowed,
+**not removed**: an entry whose dialect *was* compared and whose asymmetry is gone must still be
+reported, or the list stops shrinking.
+
+The same question has a second axis, found by re-reading the fix rather than from any failure: a
+table **absent from some configured dialect is skipped whole**, so it produces no finding — which
+is indistinguishable from a closed asymmetry unless asked separately. The `missing` path is not
+hypothetical (its own comment records a 20-line false report in CI), so a baseline entry on such a
+table would have been called stale on the strength of a comparison that never ran. Both conditions
+now gate the stale check, for one reason: **report an entry as gone only where this run had the
+evidence to say so.** The general form is that the check was answering *"did we find this?"* when
+the question is *"did we look?"*
+
+## The skip that would have been the wrong fix
+
+Worth recording because it was proposed and is the natural reading of the failure output. The test
+already refuses it, in its own source, above the line:
+
+> Every configured dialect must be reachable: a skip here would compare two dialects and call it
+> agreement, which is the failure mode the whole test is about.
+
+A two-dialect comparison is a real comparison. This was a baseline-keying bug, not a
+skip-condition bug. **The error message is what misleads**: both assertions are written in the
+imperative and neither can express "the comparison ran under a configuration the baseline was not
+written for", so every reading of the output points away from the cause.
+
+## Three falsifications, because one direction is not enough
+
+The comparison is lifted into `compareRequiredColumns`, a pure function over
+`map[string]schemaFacts`, and tested with synthetic facts and no database — the only way to assert
+the two-dialect and three-dialect cases in the same run, on any machine.
+
+A stale check that reports **nothing ever** also removes the false positive, and it passes a green
+tree and a negative control identically. So each mutation is recorded with the tests it fails:
+
+| mutation | fails |
+|---|---|
+| put the counterpart back in the key (the original defect) | the two configuration-independence tests, plus three more |
+| drop the `configured[]` guard on the stale check | `…EntryForAnUnconfiguredDialectIsNotReportedStale`, and only that |
+| `if false &&` on the stale check — **the overshoot** | `…ClosedEntryIsStillReportedStale` |
+| drop the `compared[]` guard (the table axis) | `…SkippedTableIsNotEvidenceTheEntryClosed`, and only that |
+
+Each of the last three fails a **different** test, which is what shows the suite separates "too
+narrow" from "too broad" rather than merely noticing that something moved.
