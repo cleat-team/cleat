@@ -35,6 +35,24 @@
 -- harness would re-apply the previous definition on top of this one and
 -- restore the write to a column that no longer exists.
 
+-- SET search_path = public, and it is load-bearing rather than tidy.
+--
+-- CREATE FUNCTION *creates* in the first schema of search_path; it does not
+-- resolve an existing one the way ALTER TABLE does. The cluster's database
+-- user is `cleat` and 001_schema.sql creates a schema of that name, so
+-- search_path is "$user", public and an unqualified CREATE OR REPLACE lands
+-- in `cleat` -- leaving the real function in `public` untouched and adding a
+-- SECOND function with an identical argument list. Callers keep resolving the
+-- old one. Every earlier migration that defines this function opens with this
+-- same line; 051 and 052 do not, and are right not to, because ALTER TABLE on
+-- an unqualified name falls through to public.
+--
+-- It cost a red Cluster Integration job to find, and it could not fail
+-- anywhere else: engine tests connect as `postgres`, no schema of that name
+-- exists, so "$user" resolves to nothing and the function lands in public
+-- either way. The bug needed a database whose user owns a schema.
+SET search_path = public;
+
 CREATE OR REPLACE FUNCTION finalize_workflow_status(
     p_workflow_id      TEXT,
     p_worker_id        TEXT,
