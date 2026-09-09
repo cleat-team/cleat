@@ -57,8 +57,7 @@ func newSignalAuthStore(t *testing.T) (engine.WorkflowStore, string) {
 	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping signal authorization test")
 	}
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	db := testutil.SuiteTestDB(t, "cleat_worker")
 	store := engine.NewPostgresStore(db)
 
 	ctx := context.Background()
@@ -151,7 +150,7 @@ func TestRequireSignalAuthDefaultsOff(t *testing.T) {
 // with each other about something the database does not hold.
 func TestSignalAuthStillEnforcesAConfiguredList(t *testing.T) {
 	store, runID := newSignalAuthStore(t)
-	db := testutil.TestDB(t, testutil.DialectPostgres)
+	db := testutil.SuiteTestDB(t, "cleat_worker")
 	check := signalAuthCheckFor(store)
 	ctx := context.Background()
 

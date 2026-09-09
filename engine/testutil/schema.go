@@ -623,7 +623,31 @@ func PostgresRLSDSN(superuserDSN string) (string, error) {
 func OpenPostgresRLSTestDB(t *testing.T, superuserDB *sql.DB) *sql.DB {
 	t.Helper()
 	SetupPostgresRLSRole(t, superuserDB)
-	dsn, err := PostgresRLSDSN(PostgresTestDSN())
+
+	// Connect to the database superuserDB is actually on, not to whatever
+	// PostgresTestDSN names.
+	//
+	// Those were the same database until SuiteTestDB existed, so deriving the
+	// DSN from the environment worked by coincidence. It is wrong in two ways
+	// once a caller is on a per-suite database: the returned connection lands
+	// in a DIFFERENT database from the one SetupPostgresRLSRole just granted
+	// on -- PostgreSQL grants are per-database, the role is only cluster-wide
+	// -- and every write through it goes to the shared database, which is the
+	// cross-package interference the per-suite databases exist to remove.
+	//
+	// Measured: after cmd/cleat-worker moved to SuiteTestDB, its
+	// TestTenantIsolationOverHTTP_Postgres kept failing in concurrent runs
+	// because this function was still pointing it at the shared database.
+	// cleat#1013.
+	var dbName string
+	if err := superuserDB.QueryRow(`SELECT current_database()`).Scan(&dbName); err != nil {
+		t.Fatalf("reading the database superuserDB is connected to: %v", err)
+	}
+	base, err := swapDatabaseName(PostgresTestDSN(), dbName)
+	if err != nil {
+		t.Fatalf("building a DSN for %s: %v", dbName, err)
+	}
+	dsn, err := PostgresRLSDSN(base)
 	if err != nil {
 		t.Fatalf("derive RLS test role DSN: %v", err)
 	}

@@ -38,8 +38,7 @@ func TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP(t *testing.T) {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed deploy ownership test")
 	}
 
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	db := testutil.SuiteTestDB(t, "cleat_worker")
 
 	// Non-superuser, for the reason spelled out in
 	// TestTenantIsolationOverHTTP_Postgres: on a superuser connection RLS is
