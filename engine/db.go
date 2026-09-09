@@ -1126,11 +1126,32 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Also batch cleanup compaction states for those workflows.
+	return totalDeleted, nil
+}
+
+// ClearExpiredCompactionState clears compaction bookkeeping -- compaction_state,
+// compaction_step, compacted_at -- on terminal workflows older than the cutoff.
+//
+// SPLIT OUT OF DeleteExpiredEvents, and the reason is a metric rather than
+// tidiness. It used to be a second loop inside that function whose RowsAffected
+// was discarded, so the sweep reported "deleted 0 rows" on runs where it had
+// done real work: the first loop can never match (finalize_workflow_status
+// already purged those events, cleat#1016) while this one clears up to 10000
+// workflow_instances rows a batch.
+//
+// Summing the two into one return was the obvious fix and the wrong one. They
+// are different tables, different operations and different units -- deleted
+// event_history rows against updated workflow_instances rows -- under a counter
+// documented as "expired event history rows deleted". A counter that silently
+// changes meaning is worse than one stuck at zero, because the zero is at least
+// honest. cleat#1024.
+func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalCleared int64
+	// Batched, so a large backlog does not hold one transaction open.
 	for {
 		tx, err := s.beginTxWithRLS(ctx)
 		if err != nil {
-			return totalDeleted, fmt.Errorf("delete expired events: begin compaction: %w", err)
+			return totalCleared, fmt.Errorf("delete expired events: begin compaction: %w", err)
 		}
 		result, err := tx.ExecContext(ctx, `
 			UPDATE workflow_instances
@@ -1152,13 +1173,13 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 			break
 		}
 		n, _ := result.RowsAffected()
+		totalCleared += n
 		if n == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-
-	return totalDeleted, nil
+	return totalCleared, nil
 }
 
 // TerminateWorkflow force-terminates a workflow.

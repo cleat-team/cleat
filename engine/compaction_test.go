@@ -634,6 +634,10 @@ func (m *mockCompactStore) CleanupMemorySamples(ctx context.Context, maxSamplesP
 func (m *mockCompactStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
+
+func (m *mockCompactStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
 func (m *mockCompactStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
 	return "", nil
 }

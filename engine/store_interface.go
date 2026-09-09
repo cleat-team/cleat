@@ -445,6 +445,19 @@ type WorkflowStore interface {
 	// Returns the number of event rows deleted.
 	DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error)
 
+	// ClearExpiredCompactionState clears compaction bookkeeping --
+	// compaction_state, compaction_step, compacted_at -- on terminal workflows
+	// older than the cutoff, and returns how many rows it cleared.
+	//
+	// Separate from DeleteExpiredEvents on purpose, though the two run
+	// together. That function deletes event_history rows and can never match
+	// (finalize_workflow_status purges them first, cleat#1016); this one
+	// updates workflow_instances and does real work. Returning both through one
+	// int64 would put deleted rows and updated rows, on different tables, under
+	// a single counter documented as "expired event history rows deleted" --
+	// so each half reports its own number under its own metric. cleat#1024.
+	ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error)
+
 	// ResolveTenantFromAPIKey looks up a tenant UUID by API key hash.
 	// Returns uuid.Nil if the key is not found or revoked.
 	ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error)
