@@ -992,6 +992,12 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 // Both are fixed here. The function stays void: the contract with callers has
 // not changed, only whether a failure is observable.
 func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
+	s.enforceParentClosePolicyAt(ctx, parentWorkflowID, 0)
+}
+
+// enforceParentClosePolicyAt is enforceParentClosePolicy with the recursion
+// depth carried explicitly. See cascadeIntoClosedChildren.
+func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkflowID string, depth int) {
 	// Collected before the transaction: see releaseTerminatedChildren.
 	terminated, err := s.childrenClosedByTerminate(ctx, parentWorkflowID)
 	if err != nil {
@@ -1070,6 +1076,9 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 	}
 
 	releaseTerminatedChildren(s.log(), s, terminated)
+	cascadeIntoClosedChildren(s.log(), depth, terminated, func(id string, d int) {
+		s.enforceParentClosePolicyAt(ctx, id, d)
+	})
 }
 
 // terminateChildrenQuery selects the children the TERMINATE arm is about to

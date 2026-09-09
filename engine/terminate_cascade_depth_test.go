@@ -8,43 +8,35 @@ import (
 	"time"
 )
 
-// How far down does terminating a parent reach?
+// Terminating a parent reaches its whole subtree, not just its children.
 //
-// TestTerminateWorkflowEnforcesParentClosePolicy proves the cascade fires at ONE
-// level: a TERMINATE child of a terminated parent is failed. It says nothing
-// about the level below, and the question is not idle -- upstream engines treat
-// recursion as a choice and test both branches (microsoft/durabletask-go's
-// Test_TerminateOrchestration_Recursive builds Root -> 5x L1 -> L2 and asserts
-// the L2 activity runs iff recursion is off).
+// IT DID NOT, AND THE HISTORY IS THE POINT. enforceParentClosePolicy's plain arm
+// closes a TERMINATE child with a bulk
+// `UPDATE ... SET status='failed' WHERE parent_workflow_id = $1`. That never goes
+// through FailWorkflow -- and FailWorkflow's post-commit is what enforces the
+// close policy on the closed workflow's OWN children. So the recursion point was
+// bypassed by the mechanism doing the closing, and a grandchild of a terminated
+// root kept running with no parent (IMPROVEMENT-PLAN 3.410, cleat#1108).
 //
-// THIS TEST EXISTS BECAUSE READING THE CODE GAVE AN ANSWER AND READING IS NOT
-// ENOUGH. enforceParentClosePolicy's TERMINATE arm sets `status = 'failed'` on
-// the child with a direct UPDATE. That does not go through FailWorkflow, and
-// FailWorkflow is what calls enforceParentClosePolicy for the next level down.
-// So the reading predicts the cascade stops at one level. MEASURED, IT DOES, on
-// all three dialects -- which is what this test now pins.
+// The defer arm never had the bug, which is what exposed it: a child owing a
+// defer phase is finalised by FinalizeDeferPhase, which DOES enforce the policy.
+// So the depth of a terminate depended on whether a workflow in the middle
+// happened to have deferred work -- invisible to whoever pressed terminate, and
+// changing the day that workflow gained or lost a defer (3.411). Two arms of one
+// policy disagreeing, with nothing comparing them.
 //
-// THE READING ALSO PREDICTED AN EXCEPTION THAT IS NOT TESTED HERE, and it is
-// flagged rather than quietly carried: the defer-phase arm sets
-// `status = 'terminating'` instead of failing the child outright, and those
-// children are finalised later through a path that can cascade again. If that
-// is right, depth depends on whether an intermediate workflow happened to owe
-// defers, which is not a property anyone would choose. The children in this
-// fixture owe no defers, so they take the direct arm and this test says nothing
-// about it. Someone should build the variant; until then it is a reading, not a
-// result.
+// The rule the fix encodes: CLOSING A WORKFLOW MUST DO WHAT FailWorkflow DOES
+// AFTER ITS COMMIT -- release its resources, then enforce its close policy. The
+// bulk UPDATE cannot BE FailWorkflow (that fences on `assigned_to` and
+// `generation`, and the cascade deliberately closes children it does not own and
+// breaks their fence so the holder cannot overwrite the termination), so the
+// post-commit half is applied to each child instead. See
+// cascadeIntoClosedChildren.
 //
-// A prediction of exactly that shape -- three correct file:line citations, a
-// chain with no branch in it -- was published in this repo's port work-lists
-// about blank Idempotency-Key values and was wrong, because the chain had a hop
-// nobody knew to look for (Go trims header values). So this asserts what the
-// tree actually does rather than what the code appears to say.
-//
-// It is deliberately written to record the behaviour rather than to demand a
-// particular one. Whether one-level is CORRECT is a product question: a subtree
-// terminate is a recursive UPDATE per dialect, and a detached child must not
-// inherit it. What is not defensible is nobody knowing which it is.
-func TestTerminateCascadeDepthIsOneLevel(t *testing.T) {
+// This file previously asserted the one-level behaviour and said, in its own
+// failure message, to invert it rather than delete it if the grandchild was ever
+// reached. That is what happened.
+func TestTerminateCascadeReachesEveryDescendant(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
@@ -146,21 +138,22 @@ func TestTerminateCascadeDepthIsOneLevel(t *testing.T) {
 					child.Status)
 			}
 
-			// THE MEASUREMENT. Recorded, not demanded: the assertion is that the
-			// grandchild is untouched, which is what one-level means. If this
-			// goes red because the grandchild WAS reached, the cascade is deeper
-			// than one level and this test should be inverted -- not deleted.
+			// THE MEASUREMENT. The grandchild must be closed too: it is a
+			// TERMINATE child of a workflow that was just terminated, and
+			// nothing about it differs from the level above.
 			grandFlagged, _, err := store.PollCancellation(ctx, grandID)
 			if err != nil {
 				t.Fatalf("PollCancellation(grandchild): %v", err)
 			}
-			if grand.Status == "failed" || grand.Status == statusTerminating || grandFlagged {
-				t.Errorf("the grandchild WAS reached: status=%q cancellation_requested=%v.\n\n"+
-					"The cascade is deeper than one level, which is better than this test "+
-					"assumed and means enforceParentClosePolicy runs again for each child "+
-					"it closes. Invert this test and say so at the site -- do not delete "+
-					"it, because the depth is the thing worth pinning either way.",
-					grand.Status, grandFlagged)
+			if grand.Status != "failed" && grand.Status != statusTerminating && !grandFlagged {
+				t.Errorf("the grandchild is %q and unflagged: the cascade stopped at one "+
+					"level and it is running with no parent.\n\n"+
+					"Closing a workflow has to do what FailWorkflow does after its commit -- "+
+					"release its resources AND enforce its close policy on its own children. "+
+					"A bulk UPDATE that only does the first leaves the recursion point "+
+					"bypassed by the mechanism doing the closing. See "+
+					"cascadeIntoClosedChildren and cleat#1108.",
+					grand.Status)
 			}
 		})
 	}

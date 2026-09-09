@@ -103,6 +103,56 @@ func releaseTerminatedChildren(log *slog.Logger, s workflowResourceReleaser, chi
 	}
 }
 
+// maxParentCloseDepth bounds the recursion in cascadeIntoClosedChildren.
+//
+// The graph cannot cycle: parent_workflow_id is only ever written at INSERT, to
+// a row that already exists, so it is built in creation order and a workflow
+// cannot become its own ancestor. Continue-as-new INHERITS its predecessor's
+// parent rather than pointing at it.
+//
+// That is a reading of the schema, and a terminal path is the wrong place to
+// find out it was wrong -- an unbounded recursion here would be a worse defect
+// than the one this cascade exists to fix. The bound costs one comparison and
+// removes the possibility. 64 is far past any real nesting; a tree that deep has
+// a design problem the engine should not be papering over silently, which is why
+// hitting the bound is an ERROR and names what is left running.
+const maxParentCloseDepth = 64
+
+// cascadeIntoClosedChildren finishes what closing a child started: each one that
+// the close policy just terminated must enforce ITS OWN close policy, exactly as
+// FailWorkflow does after its commit.
+//
+// WHY THIS EXISTS. FailWorkflow's post-commit is two calls -- release the
+// workflow's resources, then enforce its close policy on its children -- and a
+// child closed by the cascade got only the first. The cascade closes children
+// with a bulk UPDATE that never goes through FailWorkflow, so the recursion
+// point was bypassed by the mechanism doing the closing, and a grandchild of a
+// terminated root kept running (IMPROVEMENT-PLAN 3.410, cleat#1108).
+//
+// The defer arm never had this problem, which is what made it visible: a child
+// that owes a defer phase is finalised by FinalizeDeferPhase, which DOES enforce
+// the policy, so the depth of a terminate depended on whether a workflow in the
+// middle happened to have deferred work (3.411). Two arms of one policy
+// disagreeing, and neither the code nor any document said so.
+//
+// Only the plain arm's children are passed here. A defer-owing child is excluded
+// from childrenClosedByTerminate by construction and reaches its own children
+// later, through the phase -- so this cannot cascade into one twice.
+func cascadeIntoClosedChildren(log *slog.Logger, depth int, childIDs []string, enforce func(childID string, depth int)) {
+	if len(childIDs) == 0 {
+		return
+	}
+	if depth >= maxParentCloseDepth {
+		log.Error("parent close policy stopped at the depth limit; these workflows and "+
+			"anything below them keep running with no parent",
+			"depth", depth, "limit", maxParentCloseDepth, "abandoned", childIDs)
+		return
+	}
+	for _, id := range childIDs {
+		enforce(id, depth+1)
+	}
+}
+
 // scanWorkflowIDs collects a single-column id result set. One copy so the three
 // dialects' close-policy queries differ only in their placeholders.
 func scanWorkflowIDs(rows *sql.Rows) ([]string, error) {

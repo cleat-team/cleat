@@ -1286,6 +1286,12 @@ var mssqlParentCloseDeferPhase = fmt.Sprintf(`
 	`, deferPhaseDeadlineMSSQL, deferPhaseOwedSQL)
 
 func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
+	s.enforceParentClosePolicyAt(ctx, parentWorkflowID, 0)
+}
+
+// enforceParentClosePolicyAt is enforceParentClosePolicy with the recursion
+// depth carried explicitly. See cascadeIntoClosedChildren.
+func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkflowID string, depth int) {
 	steps := []struct {
 		policy string
 		query  string
@@ -1345,6 +1351,9 @@ func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 	}
 
 	releaseTerminatedChildren(s.log(), s, terminated)
+	cascadeIntoClosedChildren(s.log(), depth, terminated, func(id string, d int) {
+		s.enforceParentClosePolicyAt(ctx, id, d)
+	})
 }
 
 // terminateChildrenQuery selects the children the TERMINATE arm is about to
