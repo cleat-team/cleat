@@ -1474,7 +1474,8 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 			"wf-1", "test-wf", int64(1), "running", `{"key":"val"}`,
 			"worker-1", now, now, nil, nil, nil, nil, nil,
 			int64(3), int64(0), "", DefaultTenantUUID, // tenant_id (3.99)
-			"wf-0", // continued_from (cleat#887)
+			"wf-0",   // continued_from (cleat#887)
+			int64(5), // reclaim_count (cleat#1008)
 		}}},
 	}, nil)
 	defer db.Close()

@@ -826,7 +826,8 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC),
 			`{"result":"ok"}`, "", nil, nil, int64(0), int64(0), "", "tenant-1",
-			"wf-0", // continued_from (cleat#887)
+			"wf-0",   // continued_from (cleat#887)
+			int64(5), // reclaim_count (cleat#1008)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")
@@ -1492,7 +1493,8 @@ func TestMySQLStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 			nil, nil, nil, nil,
 			nil, nil, nil, nil,
 			int64(0), int64(0), "", "tenant-1",
-			nil, // continued_from (NULL: not a continuation)
+			nil,      // continued_from (NULL: not a continuation)
+			int64(0), // reclaim_count (never reclaimed)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")
