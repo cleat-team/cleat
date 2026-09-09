@@ -1382,7 +1382,7 @@ jobs:
       # Without this step it fails with "Exec format error" -- which is the
       # intended behaviour, not a reason to add a skip.
       - name: Set up QEMU for cross-architecture verification
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
