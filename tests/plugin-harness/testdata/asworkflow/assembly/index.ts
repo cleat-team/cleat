@@ -117,3 +117,30 @@ export function call_all_plugins(h: HostCalls, _input: string): string {
   let result: string = "{" + parts.join("") + "}";
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// A MULTI-PARAMETER entry point, with a non-string parameter.
+//
+// This exists to be COMPILED. Until it was added, every @cleatEntry in the
+// repository took a single string parameter, so the transform's
+// multi-parameter binding branch was emitted by nothing and checked by
+// nothing -- and it was broken: it read a property that does not exist on an
+// AssemblyScript type node, silently treated every parameter as a string, and
+// so failed to compile for any other type. See cleat#1067.
+//
+// Keep at least one non-string parameter here. An all-string version compiles
+// even with that defect present, so it would not have caught it.
+//
+// It echoes what it bound, so a caller can observe the binding itself rather
+// than only the workflow's logic.
+// ---------------------------------------------------------------------------
+@cleatEntry("BindMultipleParams")
+export function bind_multiple_params(
+  h: HostCalls,
+  note: string,
+  count: i32,
+  flag: bool,
+): string {
+  return '{"note":"' + escapeJson(note) + '","count":' + count.toString() +
+    ',"flag":' + (flag ? "true" : "false") + '}';
+}

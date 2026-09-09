@@ -199,7 +199,40 @@ class CleatEntryTransformer {
 
     for (const p of userParams) {
       const pName = p.name && p.name.text ? p.name.text : "_";
-      const pType = p.type && p.type.text ? p.type.text : "string";
+      // The declared type. `name.identifier.text` first, `.text` second --
+      // the same order this file already uses for type names at the
+      // _typeName helper below.
+      //
+      // This site read `.text` ALONE: `p.type && p.type.text ? ... : "string"`.
+      // An AssemblyScript type node has no `text` property -- its keys are
+      // kind/range/isNullable/currentlyResolving/name/typeArguments -- so the
+      // condition was always false and every parameter silently became
+      // "string". Measured 2026-09-09 by dumping the node during a real build:
+      // p.type.text was undefined and p.type.name.identifier.text was
+      // "string", "string", "i32".
+      //
+      // Effect: a multi-parameter entry point failed to compile for any
+      // non-string parameter, because the wrapper bound it with getString --
+      //   ERROR TS2322: Type '~lib/string/String' is not assignable to 'i32'
+      // -- and _getDeserializeCode's i32/u32/i64/u64/f64/f32/bool branches
+      // were unreachable, including its own "Unsupported type" throw. The
+      // fallback answered first, every time.
+      //
+      // Throw rather than default to a type. No default can be correct for a
+      // parameter whose type could not be read, and picking one is exactly
+      // what hid this: a wrong answer that compiles for the common case.
+      const pTypeNode = p.type;
+      const pType =
+        (pTypeNode && pTypeNode.name && pTypeNode.name.identifier &&
+          pTypeNode.name.identifier.text) ||
+        (pTypeNode && pTypeNode.text);
+      if (!pType) {
+        throw new Error(
+          "[@cleat/transform] could not read the declared type of parameter '" +
+          pName + "' in '" + funcName + "'. This is a transform bug, not a " +
+          "problem with your workflow -- please report it."
+        );
+      }
 
       paramNames.push(pName);
       paramTypes.push(pType);
