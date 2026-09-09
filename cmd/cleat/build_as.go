@@ -10,7 +10,7 @@ import (
 )
 
 // runBuildAssemblyScript compiles an AssemblyScript project to WASM using asc.
-func runBuildAssemblyScript(pattern, outDir, channel string) {
+func runBuildAssemblyScript(pattern, outDir, channel string, workflowVersion int) {
 	asDir := pattern
 	if asDir == "" {
 		asDir = "."
@@ -103,14 +103,17 @@ func runBuildAssemblyScript(pattern, outDir, channel string) {
 		os.Exit(1)
 	}
 
-	// Inject cleat.metadata so the engine can detect the source language.
-	if enriched, metaErr := wasm.WriteMetadata(input, &wasm.Metadata{Language: "assemblyscript"}); metaErr == nil {
-		input = enriched
-	}
-
-	// Use directory name as workflow name.
+	// Use directory name as workflow name. Derived BEFORE the metadata is
+	// written, because the metadata needs it -- see nonGoMetadata.
 	absDir, _ := filepath.Abs(asDir)
 	name := filepath.Base(absDir)
+
+	// Inject cleat.metadata. Must pass wasm.Metadata.Validate(), which
+	// `cleat deploy` runs and exits 1 on; see cleat#1077.
+	if enriched, metaErr := wasm.WriteMetadata(input,
+		nonGoMetadata("assemblyscript", name, workflowVersion)); metaErr == nil {
+		input = enriched
+	}
 	dstWasm := filepath.Join(outDir, name+".wasm")
 	if err := os.WriteFile(dstWasm, input, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: writing WASM output to %s: %v\n", dstWasm, err)

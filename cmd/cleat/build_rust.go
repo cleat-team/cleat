@@ -13,7 +13,7 @@ import (
 // runBuildRust compiles a Rust workflow crate to WASM using cargo.
 // Uses wasm32-unknown-unknown (no WASI) to avoid non-deterministic
 // WASI imports (environ_get etc.) that break replay determinism.
-func runBuildRust(pattern, outDir, channel string) {
+func runBuildRust(pattern, outDir, channel string, workflowVersion int) {
 	cargoDir := pattern
 
 	// Validate Cargo.toml exists.
@@ -70,8 +70,10 @@ func runBuildRust(pattern, outDir, channel string) {
 		os.Exit(1)
 	}
 
-	// Inject cleat.metadata so the engine can detect the source language.
-	if enriched, metaErr := wasm.WriteMetadata(input, &wasm.Metadata{Language: "rust"}); metaErr == nil {
+	// Inject cleat.metadata. Must pass wasm.Metadata.Validate(), which
+	// `cleat deploy` runs and exits 1 on; see cleat#1077.
+	if enriched, metaErr := wasm.WriteMetadata(input,
+		nonGoMetadata("rust", crateName, workflowVersion)); metaErr == nil {
 		input = enriched
 	}
 
