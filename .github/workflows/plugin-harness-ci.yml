@@ -111,6 +111,22 @@ jobs:
       # contain that substring (PluginCalls_ vs PluginCallStreaming_). A name
       # that looks like it is already matched is exactly how this stayed
       # invisible.
+      # Every job targeting this module selects with -run, so a test no
+      # pattern matches does not run and NOTHING SAYS SO: the job is green and
+      # scripts/check-ci-package-coverage.sh reports the package as covered,
+      # because it guards matrix drift and exempts `tests` as "driven by their
+      # own dedicated CI jobs". The selection is where the coverage lives.
+      #
+      # Three instances before this guard existed, all found by hand:
+      # TestHostCallTableCoversEveryWave1Call, TestEverySDKImportIsAHostExport,
+      # and five at once in #1066 -- two of which were a PR's own
+      # compiled-binary evidence, passing locally and never run here.
+      #
+      # Runs here rather than in Lint because it needs `go test -list`, and
+      # this is the cheapest job that already has Go and this module.
+      - name: CI test-selection guard
+        run: python3 scripts/check_ci_test_selection.py
+
       - run: go test -count=1 -timeout=120s ./... -run 'TestPluginCalls_Cleattest|TestPluginCallStreaming_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
         working-directory: tests/plugin-harness
         env:
