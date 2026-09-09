@@ -116,6 +116,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
+		    started_at = COALESCE(started_at, now()),
 		    generation = generation + 1
 		FROM candidates c
 		WHERE w.id = c.id
@@ -172,6 +173,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
+		    started_at = COALESCE(started_at, now()),
 		    generation = generation + 1
 		FROM candidates c
 		WHERE w.id = c.id

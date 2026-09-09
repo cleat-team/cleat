@@ -1471,7 +1471,9 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_instances WHERE id", data: [][]driver.Value{{
 			"wf-1", "test-wf", int64(1), "running", `{"key":"val"}`,
-			"worker-1", now, now, nil, nil, nil, nil, nil,
+			"worker-1", now, now, nil,
+			now, // started_at (cleat#1090)
+			nil, nil, nil, nil,
 			int64(3), int64(0), "", DefaultTenantUUID, // tenant_id (3.99)
 			"wf-0",   // continued_from (cleat#887)
 			int64(5), // reclaim_count (cleat#1008)
@@ -1497,6 +1499,14 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 	// row, so it must reach the struct rather than being scanned and dropped.
 	if wf.ContinuedFrom != "wf-0" {
 		t.Errorf("ContinuedFrom = %q, want %q", wf.ContinuedFrom, "wf-0")
+	}
+	// cleat#1090, same idiom as the line above: supplied by the fake row, so
+	// it must reach the struct. A nil here is the scan dropping it, which is
+	// exactly how completed_at went unnoticed (cleat#1091).
+	if wf.StartedAt == nil {
+		t.Errorf("StartedAt is nil, want %v -- the fake row supplies it", now)
+	} else if !wf.StartedAt.Equal(now) {
+		t.Errorf("StartedAt = %v, want %v", *wf.StartedAt, now)
 	}
 }
 

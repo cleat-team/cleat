@@ -462,7 +462,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	defer tx.Rollback()
 
 	var wf WorkflowInstance
-	var nextWakeAt, heartbeatAt, completedAt sql.NullTime
+	var nextWakeAt, heartbeatAt, completedAt, startedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
 	var result sql.NullString
 	var errorCode, errorOp sql.NullString
@@ -471,12 +471,12 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, result #>> '{}', error_msg, error_code, error_op,
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, started_at, result #>> '{}', error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
 		       COALESCE(trace_id, ''), tenant_id, continued_from, reclaim_count
 		FROM workflow_instances WHERE id = $1
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
 		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -503,6 +503,9 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	}
 	if completedAt.Valid {
 		wf.CompletedAt = &completedAt.Time
+	}
+	if startedAt.Valid {
+		wf.StartedAt = &startedAt.Time
 	}
 	return &wf, tx.Commit()
 }

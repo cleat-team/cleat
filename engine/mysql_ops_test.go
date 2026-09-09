@@ -825,6 +825,7 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 			"worker-1", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC),
+			time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC), // started_at (cleat#1090)
 			`{"result":"ok"}`, "", nil, nil, int64(0), int64(0), "", "tenant-1",
 			"wf-0",   // continued_from (cleat#887)
 			int64(5), // reclaim_count (cleat#1008)
@@ -841,6 +842,14 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 	// must reach the struct rather than being scanned and dropped.
 	if wf != nil && wf.ContinuedFrom != "wf-0" {
 		t.Errorf("ContinuedFrom = %q, want %q", wf.ContinuedFrom, "wf-0")
+	}
+	// cleat#1090, same idiom as the line above: supplied by the fake row, so
+	// it must reach the struct. A nil here is the scan dropping it, which is
+	// exactly how completed_at went unnoticed (cleat#1091).
+	if wf != nil && wf.StartedAt == nil {
+		t.Errorf("StartedAt is nil, want %v -- the fake row supplies it", time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC))
+	} else if !wf.StartedAt.Equal(time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC)) {
+		t.Errorf("StartedAt = %v, want %v", *wf.StartedAt, time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC))
 	}
 }
 
@@ -1491,6 +1500,7 @@ func TestMySQLStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 		queryRowOk("SELECT id, def_name, def_version, status, input",
 			"wf-1", "test-wf", int64(1), "running", []byte(`{}`),
 			nil, nil, nil, nil,
+			nil, // started_at (NULL: never claimed)
 			nil, nil, nil, nil,
 			int64(0), int64(0), "", "tenant-1",
 			nil,      // continued_from (NULL: not a continuation)
