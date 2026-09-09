@@ -45,9 +45,16 @@ import (
 	"testing"
 )
 
-// mysqlTenantPredicateAllowlist is keyed "<file base>:<enclosing Go function>",
-// and its reasons carry the same three distinct claims the SQL Server guard
-// documents -- they are not interchangeable.
+// mysqlTenantPredicateAllowlist is keyed by stmtKey -- "<file base>:<enclosing
+// Go function>#<digest of the normalised SQL>" -- and its reasons carry the
+// same three distinct claims the SQL Server guard documents; they are not
+// interchangeable.
+//
+// It was keyed by function until cleat#1032. Five entries covered NINE
+// statements, so four statements here were exempt by inheritance from a reason
+// written about a different one -- a denser instance of the shape than SQL
+// Server's, on the dialect with no row-level security behind it. See
+// stmtExemption.
 //
 // A fourth rule, learned from reading all six MSSQL entries (cleat#1031): a
 // reason must describe why the statement is SAFE, not merely state something
@@ -55,26 +62,43 @@ import (
 // "scopedByCaller" and is in fact safe because nothing in production calls the
 // method at all -- a reason that is true of the code and irrelevant to its
 // safety expires silently the day someone wires it up.
-var mysqlTenantPredicateAllowlist = map[string]string{
-	// The claim queries select their candidates under `AND tenant_id = ?` in
-	// the SAME function, then act on those ids. The follow-up UPDATE and SELECT
-	// carry `WHERE id IN (...)` with ids that cannot name another tenant's row,
-	// because the only query that produced them was scoped. Safe by
-	// construction, and the construction is visible in one function rather than
-	// two hops away.
-	"mysql_lifecycle.go:ClaimWorkflows":       mysqlScopedByCandidateQuery,
-	"mysql_lifecycle.go:ClaimStickyWorkflows": mysqlScopedByCandidateQuery,
-
-	// Verified rather than assumed, which is this allowlist's own rule: both
-	// return ErrCrossTenantClaimUnsupported unless the store is the admin one,
-	// so the Go-level gate named in the reason actually exists.
-	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants": mysqlDeliberatelyCrossTenant,
-	"mysql_ops.go:GetDueSchedulesAcrossTenants":      mysqlDeliberatelyCrossTenant,
-
-	// `SELECT tenant_id FROM tenant_api_keys WHERE key_hash = ?` is how a
-	// request LEARNS its tenant. Scoping it to a tenant would be circular:
-	// there is no tenant to scope to until this returns.
-	"mysql_store.go:ResolveTenantFromAPIKey": mysqlMustNotScope,
+var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
+	"mysql_lifecycle.go:ClaimWorkflows#be91052efe90": {
+		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
+		Reason: mysqlScopedByCandidateQuery,
+	},
+	"mysql_lifecycle.go:ClaimWorkflows#df24f728e6ed": {
+		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
+		Reason: mysqlScopedByCandidateQuery,
+	},
+	"mysql_lifecycle.go:ClaimStickyWorkflows#be91052efe90": {
+		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
+		Reason: mysqlScopedByCandidateQuery,
+	},
+	"mysql_lifecycle.go:ClaimStickyWorkflows#df24f728e6ed": {
+		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
+		Reason: mysqlScopedByCandidateQuery,
+	},
+	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants#08db9d12c05e": {
+		SQL:    "select id from workflow_instances where status in ('ready', 'terminating') and",
+		Reason: mysqlDeliberatelyCrossTenant,
+	},
+	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants#be91052efe90": {
+		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
+		Reason: mysqlDeliberatelyCrossTenant,
+	},
+	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants#df24f728e6ed": {
+		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
+		Reason: mysqlDeliberatelyCrossTenant,
+	},
+	"mysql_ops.go:GetDueSchedulesAcrossTenants#145bfdc4ffef": {
+		SQL:    "select name, def_name, entry_point, cron_expression, input, enabled, next_run_",
+		Reason: mysqlDeliberatelyCrossTenant,
+	},
+	"mysql_store.go:ResolveTenantFromAPIKey#66c48155fa04": {
+		SQL:    "select tenant_id from tenant_api_keys where key_hash = ? and revoked_at is nul",
+		Reason: mysqlMustNotScope,
+	},
 }
 
 const (
@@ -122,9 +146,13 @@ func TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 		for _, st := range tenantStatementsFor(
 			joinConcatenatedSQL(string(blankGoComments(t, src, path))), path, tables, looksLikeMySQL) {
 			scanned++
-			key := filepath.Base(path) + ":" + st.fn
-			if _, ok := mysqlTenantPredicateAllowlist[key]; ok {
+			key, ex, ok := exemptionFor(mysqlTenantPredicateAllowlist, filepath.Base(path), st)
+			if ok {
 				used[key] = true
+				if !strings.HasPrefix(st.norm, ex.SQL) {
+					t.Errorf("%s:%d (%s): allowlist entry %q carries SQL: %q, which is not a "+
+						"prefix of the statement it exempts:\n\t%s", path, st.line, st.fn, key, ex.SQL, st.excerpt)
+				}
 				continue
 			}
 			t.Errorf("%s:%d (%s) reads or writes a tenant-scoped table with no WHERE, ON "+
@@ -136,10 +164,13 @@ func TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 				"a join condition like `d.tenant_id = w.tenant_id` does, and correlates "+
 				"two tables while restricting neither to a caller. Only a comparison "+
 				"against ? carries \"the tenant asking\".\n\n"+
-				"If it genuinely does not need one, add %q to "+
-				"mysqlTenantPredicateAllowlist WITH A REASON THAT DESCRIBES WHY IT IS "+
-				"SAFE -- not merely something true about it. See the note at the top.",
-				filepath.Base(path), st.line, st.fn, st.excerpt, key)
+				"If it genuinely does not need one, add\n\n    %q: {\n        SQL:    %q,\n"+
+				"        Reason: <one of the constants at the top>,\n    },\n\n"+
+				"to mysqlTenantPredicateAllowlist WITH A REASON THAT DESCRIBES WHY IT IS "+
+				"SAFE -- not merely something true about it. The key digests this "+
+				"statement's SQL, so the exemption covers THIS statement and nothing the "+
+				"function grows later. See the note at the top and stmtExemption.",
+				filepath.Base(path), st.line, st.fn, st.excerpt, key, firstN(st.norm, 78))
 		}
 	}
 
@@ -154,9 +185,9 @@ func TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 
 	for key := range mysqlTenantPredicateAllowlist {
 		if !used[key] {
-			t.Errorf("mysqlTenantPredicateAllowlist has an entry for %q but that function "+
-				"has no unscoped statement any more -- delete the entry rather than "+
-				"leaving it to cover something else later", key)
+			t.Errorf("mysqlTenantPredicateAllowlist has an entry for %q but no statement "+
+				"in the tree digests to it any more -- it was scoped (delete the entry) "+
+				"or its SQL was edited (make the claim again about the new text)", key)
 		}
 	}
 }

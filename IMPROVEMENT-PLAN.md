@@ -10011,3 +10011,111 @@ tree and a negative control identically. So each mutation is recorded with the t
 
 Each of the last three fails a **different** test, which is what shows the suite separates "too
 narrow" from "too broad" rather than merely noticing that something moved.
+
+---
+
+### 3.409 A tenant-predicate exemption named a FUNCTION, so it covered statements nobody wrote a reason for — ✅ **FIXED 2026-09-09** (cleat#1032 residual)
+
+`engine/mssql_tenant_predicate_test.go` and `engine/mysql_tenant_predicate_test.go` fail the build
+when SQL touching a tenant-scoped table does not say which tenant is asking. Both carried an
+allowlist keyed `"<file base>:<enclosing Go function>"`. **A function is not a statement**, so an
+exemption written about one statement silently covered every other statement in that function, and
+every statement the function later grew.
+
+That is how cleat#1030 happened. `deleteExpiredEventsOnce` held one `scopedByCaller` entry over two
+statements: the event delete really was scoped, and the compaction-state clear never had been, on
+the two dialects with no row-level security behind them. It surfaced only because #1024 moved the
+statement into its own function for an unrelated reason.
+
+#### The known-positive, which is what made this worth fixing rather than noting
+
+"It passes when the tree is fine" is satisfied by every broken version of a guard. So the property
+was measured on a tree already known to be wrong. One unscoped statement,
+
+    DELETE FROM event_history WHERE workflow_id = @p1
+
+placed in two different functions, nothing else changed:
+
+| where it sits | guard |
+|---|---|
+| `zzNotAllowlistedProbe` — no exemption | **FAIL**, correctly |
+| `updateStickyWorkerOnce` — an exemption for an unrelated sticky-worker UPDATE | **`ok`** |
+
+Only the enclosing function differed. A statement that deletes another tenant's event history with
+no predicate was waved through because of a reason written about a different statement.
+
+#### The fix
+
+The key is now `stmtKey` — `"<file>:<function>#<12 hex of sha256 of the normalised SQL>"` — and the
+value is a `stmtExemption{SQL, Reason}` whose `SQL` field is checked to be a real prefix of the
+statement it exempts, so the readable half cannot be transcribed wrongly and sit there looking
+authoritative.
+
+Two properties follow, and both are tested:
+
+* **A statement added to an allowlisted function inherits nothing.** No digest, no entry, guard
+  fails.
+* **Editing an exempted statement invalidates its exemption.** A reason is a claim about particular
+  SQL; change the SQL and the claim has to be made again. The stale-entry check already in both
+  guards reports it.
+
+`excerpt()` was deliberately *not* reused as the key. It truncates at 120 characters, and 11 of the
+26 statements in allowlisted functions are longer than that — two sharing a prefix would share a
+key, which is this same defect one level down.
+
+#### What it turned up: 6 statements were exempt with no reason of their own
+
+| | function entries before | statement entries after |
+|---|---:|---:|
+| `tenantPredicateAllowlist` (SQL Server) | 21 | **23** |
+| `mysqlTenantPredicateAllowlist` | 5 | **9** |
+
+The function sets are identical before and after — empty set difference both ways, checked as sets
+rather than as counts. The six extra are statements that had been exempt by inheritance. **MySQL
+was the denser case**: five entries covering nine statements, on the dialect with no row-level
+security at all.
+
+None is a leak. The point is that nobody had written a reason for them, and nothing could have
+asked.
+
+#### One reason was wrong about its mechanism, and could not previously have said so
+
+`compactHistoryOnce`'s three statements carried `scopedByCaller`, whose second clause is *"and the
+store is re-scoped per instance by `cmd/cleat-worker/setup.go:storeFor`"*. **Nothing on that path
+calls `storeFor`.** What actually protects it: `compactionLoop` reads candidates via
+`GetCompactionCandidates`, which restricts on `WHERE w.tenant_id = @p3` from `s.tenantID`, then
+passes each id to `CompactWorkflowHistory` on the **same** store — verified as the only production
+caller. One store, one `tenantID`.
+
+Right conclusion, wrong mechanism, and the mechanism is what the next reader checks. It now carries
+`scopedByCompactionSweep`. Under a function key this could not be stated: one string covered three
+statements and described none of them accurately.
+
+`LoadCompactionState` and `TraceWorkflow` were checked the same way and keep `scopedByCaller` —
+`execStore` there really is `storeForTenant(wf.TenantID)`.
+
+#### The count in cleat#1032 is not reproducible, and the fix does not depend on it
+
+The issue's table reported 6 of 21 entries covering more than one statement, at `4,4,3,3,2,2`.
+Three independent derivations — the guard's own AST scan, a backtick-literal count, and a
+semicolon split — agree with each other on **4 entries** at `2,2,3,2`, and disagree with it.
+
+This is not drift: the same scan run in a worktree at `2d0c453d`, the commit the table cites, gives
+a result identical to `HEAD`. The methods differ, and the issue does not state its method. What
+made the finding usable anyway is that it **named its rows**, so each could be checked by name.
+A count nobody can reconcile is worth less than the list it was derived from.
+
+#### Falsification
+
+Five tests in `engine/tenant_predicate_granularity_test.go`, each mutated separately and each red
+for its own reason — one mutation moves only the tests that are about it:
+
+| mutation | what went red |
+|---|---|
+| `stmtKey` drops the digest (the pre-fix state) | `…DoesNotExtendToTheNextStatement`, `…EditingAnExemptedStatement`, **and both real guards** |
+| one literal key hand-edited to drop its `#digest` | `…BothAllowlistsAreKeyedByStatement` |
+| `stmtKey` ignores the function name | `…TheSameSQLInTwoFunctionsNeedsTwoExemptions` |
+| `exemptionFor` never matches | `…StillCoversTheStatementItNames` |
+
+The fourth is the mirror the other three need: a guard that exempts nothing passes every test about
+over-exemption.

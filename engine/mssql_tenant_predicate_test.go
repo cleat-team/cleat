@@ -56,6 +56,8 @@ package engine
 // than sit there granting permission nobody is using.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -76,30 +78,121 @@ const (
 	// here only so the ratchet holds while it is fixed, and it must name where
 	// it is tracked.
 	openFinding = "OPEN FINDING, not a grant: IMPROVEMENT-PLAN 3.92"
+	// The compaction sweep, and NOT scopedByCaller -- whose second clause names
+	// storeFor, which nothing on this path calls.
+	//
+	// cmd/cleat-worker/setup.go:compactionLoop reads candidates with
+	// GetCompactionCandidates, which restricts on `WHERE w.tenant_id = @p3`
+	// from s.tenantID, then passes each id to CompactWorkflowHistory on THE
+	// SAME store -- w.store, whose tenant is w.storeTenantID. One store, one
+	// tenantID, so an id from the read cannot name another tenant's row on the
+	// write. Verified as the only production caller of CompactWorkflowHistory.
+	//
+	// Written as its own reason because the conclusion being right does not
+	// make the mechanism right, and the mechanism is what the next reader
+	// checks. Under a function-granularity key this could not be said at all:
+	// one string covered three statements and described none of them.
+	scopedByCompactionSweep = "scoped by the sweep that produced the id: GetCompactionCandidates " +
+		"restricts on s.tenantID and compactionLoop compacts on the same store"
 )
 
-// tenantPredicateAllowlist is keyed by "<file base>:<enclosing Go function>".
-var tenantPredicateAllowlist = map[string]string{
-	"mssql_deployment.go:TraceWorkflow":                  scopedByCaller,
-	"mssql_events.go:VerifyWorkflowEvents":               scopedByCaller,
-	"mssql_events.go:appendEventsInTxOpts":               scopedByCaller,
-	"mssql_lifecycle.go:BatchHeartbeat":                  mustNotScope,
-	"mssql_lifecycle.go:CheckCancellation":               scopedByCaller,
-	"mssql_lifecycle.go:completeWorkflowOnce":            scopedByCaller,
-	"mssql_lifecycle.go:continueAsNewOnce":               scopedByCaller,
-	"mssql_lifecycle.go:failWorkflowOnce":                scopedByCaller,
-	"mssql_lifecycle.go:heartbeatOnce":                   scopedByCaller,
-	"mssql_lifecycle.go:moveToDeadLetterQueueOnce":       scopedByCaller,
-	"mssql_lifecycle.go:releaseWorkflowOnce":             scopedByCaller,
-	"mssql_lifecycle.go:claimWorkflowsAcrossTenantsOnce": deliberatelyCrossTenant,
-	"mssql_schedules.go:GetDueSchedulesAcrossTenants":    deliberatelyCrossTenant,
-	"mssql_operations.go:clearStickyWorkerOnce":          scopedByCaller,
-	"mssql_operations.go:getEventCountOnce":              scopedByCaller,
-	"mssql_operations.go:updateStickyWorkerOnce":         scopedByCaller,
-	"mssql_schedules.go:LoadCompactionState":             scopedByCaller,
-	"mssql_schedules.go:compactHistoryOnce":              scopedByCaller,
-	"mssql_signals_promises.go:GetChildCount":            scopedByCaller,
-	"mssql_signals_promises.go:GetChildResult":           scopedByCaller,
+// tenantPredicateAllowlist is keyed by stmtKey -- "<file base>:<enclosing Go
+// function>#<digest of the normalised SQL>" -- so a reason is attached to the
+// statement it is true of, and a statement ADDED to a function inherits
+// nothing. See stmtExemption for what that changed.
+var tenantPredicateAllowlist = map[string]stmtExemption{
+	"mssql_deployment.go:TraceWorkflow#22bb6cd8c42c": {
+		SQL:    "update workflow_instances set trace_id = @p2 where id = @p1",
+		Reason: scopedByCaller,
+	},
+	"mssql_events.go:appendEventsInTxOpts#d455f79e06bf": {
+		SQL:    "update workflow_instances set event_count = event_count + @p1 where id = @p2",
+		Reason: scopedByCaller,
+	},
+	"mssql_events.go:VerifyWorkflowEvents#63b72d6f4db8": {
+		SQL:    "select step, checksum from event_history where workflow_id = @p1 order by step",
+		Reason: scopedByCaller,
+	},
+	"mssql_lifecycle.go:claimWorkflowsAcrossTenantsOnce#c73d2d0f2d8b": {
+		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
+		Reason: deliberatelyCrossTenant,
+	},
+	"mssql_lifecycle.go:heartbeatOnce#06ee287986f2": {
+		SQL:    "update workflow_instances set heartbeat_at = sysutcdatetime() where id = @p1 a",
+		Reason: scopedByCaller,
+	},
+	"mssql_lifecycle.go:BatchHeartbeat#5b436bc44f80": {
+		SQL:    "update workflow_instances set heartbeat_at = sysutcdatetime() where assigned_t",
+		Reason: mustNotScope,
+	},
+	"mssql_lifecycle.go:completeWorkflowOnce#40fe6875c0a5": {
+		SQL:    "update workflow_instances set status = 'done', result = @p3, completed_at = sy",
+		Reason: scopedByCaller,
+	},
+	"mssql_lifecycle.go:failWorkflowOnce#23334c4367a9": {
+		SQL:    "update workflow_instances set status = 'failed', error_msg = @p3, error_code =",
+		Reason: scopedByCaller,
+	},
+	"mssql_lifecycle.go:moveToDeadLetterQueueOnce#2062ae416fbb": {
+		SQL:    "update workflow_instances set status = 'dead_lettered', error_msg = @p3, error",
+		Reason: scopedByCaller,
+	},
+	"mssql_lifecycle.go:releaseWorkflowOnce#2128999583d9": {
+		SQL:    "update workflow_instances set status = case when pending_terminal_status is no",
+		Reason: scopedByCaller,
+	},
+	"mssql_lifecycle.go:continueAsNewOnce#40fe6875c0a5": {
+		SQL:    "update workflow_instances set status = 'done', result = @p3, completed_at = sy",
+		Reason: scopedByCaller,
+	},
+	"mssql_lifecycle.go:CheckCancellation#38fdc18e0760": {
+		SQL:    "select cancellation_requested, cancellation_reason from workflow_instances whe",
+		Reason: scopedByCaller,
+	},
+	"mssql_operations.go:getEventCountOnce#5ded51260a20": {
+		SQL:    "select event_count from workflow_instances where id = @p1",
+		Reason: scopedByCaller,
+	},
+	"mssql_operations.go:updateStickyWorkerOnce#356de68709fc": {
+		SQL:    "update workflow_instances set sticky_worker_id = @p2 where id = @p1",
+		Reason: scopedByCaller,
+	},
+	"mssql_operations.go:clearStickyWorkerOnce#bbe04876e48a": {
+		SQL:    "update workflow_instances set sticky_worker_id = null where id = @p1",
+		Reason: scopedByCaller,
+	},
+	"mssql_schedules.go:LoadCompactionState#a8f6b0ea440d": {
+		SQL:    "select cast(compaction_state as nvarchar(max)) from workflow_instances where i",
+		Reason: scopedByCaller,
+	},
+	"mssql_schedules.go:compactHistoryOnce#8f47157eee66": {
+		SQL:    "select generation from workflow_instances where id = @p1",
+		Reason: scopedByCompactionSweep,
+	},
+	"mssql_schedules.go:compactHistoryOnce#cae7f5825d20": {
+		SQL:    "delete from event_history where workflow_id = @p1 and step < @p2",
+		Reason: scopedByCompactionSweep,
+	},
+	"mssql_schedules.go:compactHistoryOnce#a78ab9d633bc": {
+		SQL:    "update workflow_instances set compaction_state = @p2, compaction_step = @p3, c",
+		Reason: scopedByCompactionSweep,
+	},
+	"mssql_schedules.go:GetDueSchedulesAcrossTenants#c2202324fa79": {
+		SQL:    "select name, def_name, entry_point, cron_expression, input, enabled, next_run_",
+		Reason: deliberatelyCrossTenant,
+	},
+	"mssql_signals_promises.go:GetChildResult#521eed12da63": {
+		SQL:    "select isnull(result, '{}'), status from workflow_instances where id = @p1",
+		Reason: scopedByCaller,
+	},
+	"mssql_signals_promises.go:GetChildCount#7e68d2d025fd": {
+		SQL:    "select count(*) from workflow_instances where parent_workflow_id = @p1 and sta",
+		Reason: scopedByCaller,
+	},
+	"store_admin.go:adminAppendAudit#64dbbbf6d7c3": {
+		SQL:    "select event_type, operation from event_history where workflow_id = @p1 and st",
+		Reason: scopedByCaller,
+	},
 
 	// WHAT THIS GUARD TURNED UP BEFORE IT LANDED. Note that only the first came
 	// from the scan finding something nobody had looked at; the rest came from
@@ -127,7 +220,7 @@ var tenantPredicateAllowlist = map[string]string{
 	//    workflow id has already been refused with adminNotFound. Written down
 	//    as scopedByCaller after checking all four call sites, not assumed --
 	//    the first draft of this entry said openFinding.
-	"store_admin.go:adminAppendAudit": scopedByCaller,
+
 }
 
 func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
@@ -173,14 +266,24 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 					"function that issues it, or scope it.", path, st.line, st.excerpt)
 				continue
 			}
-			key := filepath.Base(path) + ":" + st.fn
-			if _, ok := tenantPredicateAllowlist[key]; ok {
+			key, ex, ok := exemptionFor(tenantPredicateAllowlist, filepath.Base(path), st)
+			if ok {
 				used[key] = true
+				// The readable half of the entry, checked rather than trusted.
+				// An entry whose SQL: line describes a different statement
+				// reads as authoritative and is not, which is the failure this
+				// whole file is about one level up.
+				if !strings.HasPrefix(st.norm, ex.SQL) {
+					t.Errorf("%s:%d (%s): allowlist entry %q carries SQL: %q, which is not a "+
+						"prefix of the statement it exempts:\n    %s\n\nFix the SQL: field. "+
+						"It is there so the entry says what it covers.", path, st.line, st.fn, key, ex.SQL, st.excerpt)
+				}
 				continue
 			}
 			if st.isInsert {
 				t.Errorf("%s:%d (%s) INSERTs into a tenant-scoped table without writing "+
-					"tenant_id:\n    %s", path, st.line, st.fn, st.excerpt)
+					"tenant_id:\n    %s\n\nIf it genuinely must not, the key is %q.",
+					path, st.line, st.fn, st.excerpt, key)
 				continue
 			}
 			t.Errorf("%s:%d (%s) reads or writes a tenant-scoped table with no WHERE, ON or "+
@@ -192,9 +295,11 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 				"dbo.fn_tenant_filter is OFF for any dbo.cleat_admin connection "+
 				"(012_admin_role.sql), which is what a multi-tenant deployment must use, so "+
 				"this predicate is the whole of the isolation. If it genuinely does not need "+
-				"one, add %q to tenantPredicateAllowlist WITH THE REASON THAT IS ACTUALLY "+
-				"TRUE -- see the constants at the top.",
-				path, st.line, st.fn, st.excerpt, key)
+				"one, add\n\n    %q: {\n        SQL:    %q,\n        Reason: <one of the constants at the top>,\n    },\n\n"+
+				"to tenantPredicateAllowlist WITH THE REASON THAT IS ACTUALLY TRUE. The key "+
+				"digests this statement's SQL, so an exemption covers THIS statement and not "+
+				"whatever else the function grows -- see stmtExemption.",
+				path, st.line, st.fn, st.excerpt, key, firstN(st.norm, 78))
 		}
 	}
 	// A floor rather than an exact count: the set grows as the repo does. It
@@ -206,9 +311,10 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 	// A grant nobody uses is a grant that outlived its statement.
 	for key := range tenantPredicateAllowlist {
 		if !used[key] {
-			t.Errorf("tenantPredicateAllowlist has an entry for %q but that function has no "+
-				"unscoped statement any more -- delete the entry rather than leaving it to "+
-				"cover something else later", key)
+			t.Errorf("tenantPredicateAllowlist has an entry for %q but no statement in the "+
+				"tree digests to it any more. Either the statement was scoped -- delete the "+
+				"entry -- or its SQL was EDITED, in which case the reason is a claim about "+
+				"SQL that no longer exists and has to be made again about the new text.", key)
 		}
 	}
 }
@@ -241,6 +347,58 @@ type tenantStatement struct {
 	line     int
 	isInsert bool
 	excerpt  string
+	// norm is the whole normalised statement -- comments stripped, whitespace
+	// collapsed, lowercased. excerpt is norm truncated for a message and MUST
+	// NOT be used as an identity: 11 of the 26 statements in allowlisted
+	// functions exceed excerpt's 120 characters, so two of them sharing a
+	// prefix would share a key. That is the defect this file is fixing, one
+	// level down.
+	norm string
+}
+
+// stmtExemption is one STATEMENT's exemption, not one function's.
+//
+// WHY THE KEY IS A DIGEST OF THE SQL. An exemption keyed by function cannot
+// express a per-statement fact, and silently extends to whatever else that
+// function grows. cleat#1032: deleteExpiredEventsOnce carried one
+// scopedByCaller entry over two statements; the event delete really was scoped
+// and the compaction-state clear never had been, on both dialects with no
+// row-level security behind them. Nothing was wrong with how the entry was
+// written -- the mechanism could not represent what it needed to say.
+//
+// Measured on this tree before the change, and this is the property that
+// matters rather than the story: an unscoped
+// `DELETE FROM event_history WHERE workflow_id = @p1` added to
+// updateStickyWorkerOnce -- a function whose exemption covers an unrelated
+// sticky-worker UPDATE -- left this guard reporting `ok`. The same statement in
+// a function with no entry failed it. Only the enclosing function differed.
+//
+// Digesting the SQL also means EDITING a statement invalidates its exemption.
+// A reason is a claim about particular SQL; change the SQL and the claim has to
+// be made again.
+type stmtExemption struct {
+	// SQL is a prefix of the normalised statement, so the entry says what it
+	// covers instead of being twelve hex characters. The guard checks it IS a
+	// prefix -- a description nothing verifies is how this surface got here.
+	SQL string
+	// Reason is why this statement needs no tenant predicate. The constants
+	// above are not interchangeable; see the header.
+	Reason string
+}
+
+// stmtKey is "<file base>:<enclosing function>#<digest>". The function part is
+// there for a reader and for the error message; the digest is the identity.
+func stmtKey(file, fn, norm string) string {
+	sum := sha256.Sum256([]byte(norm))
+	return file + ":" + fn + "#" + hex.EncodeToString(sum[:])[:12]
+}
+
+// exemptionFor looks st up in allow. It returns the key it looked for, so a
+// failure can print the line to paste rather than describing it.
+func exemptionFor(allow map[string]stmtExemption, file string, st tenantStatement) (string, stmtExemption, bool) {
+	key := stmtKey(file, st.fn, st.norm)
+	e, ok := allow[key]
+	return key, e, ok
 }
 
 // filterClauseEnd terminates a WHERE/ON/HAVING window. WHEN is in the list for
@@ -309,6 +467,7 @@ func tenantStatementsFor(src, path string, tables map[string]bool, isDialect fun
 			line:     strings.Count(src[:lit[2]], "\n") + 1,
 			isInsert: isInsert,
 			excerpt:  excerpt(flat),
+			norm:     flat,
 		})
 	}
 	return out
@@ -582,4 +741,12 @@ func TestAPackageLevelStatementIsNotAttributedToAFunction(t *testing.T) {
 			"There is no enclosing function. Naming the preceding declaration invites the "+
 			"reader to allowlist it, and %q writes workflow_instances.", got[0].fn, got[0].fn)
 	}
+}
+
+// firstN is the SQL: prefix a fresh allowlist entry should carry.
+func firstN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
