@@ -10996,6 +10996,70 @@ it ships no `UpMySQL`/`UpMSSQL` migration arms, so its tables never exist elsewh
 queries fail on a missing table either way. That the declaration is recorded and then never read
 is cleat#1157.
 
+### 3.421 A guard anchored on where SQL is executed, not where a dialect table is declared — ✅ **DONE 2026-09-10** (cleat#1133)
+
+**cleat#1133, part 3 of 4** — written last, because a guard is worth more once the tree it
+guards is clean. §3.418 made the rewriter safe, §3.419 applied it at the adapter, §3.420 fixed
+the seven statements it deliberately does not rewrite. This stops the class returning.
+
+**THE EXISTING GUARD WAS NECESSARY AND NOT SUFFICIENT, AND THE GAP HAS A PRICE ATTACHED.**
+`plugin/dialect_sql_test.go` (§3.414) checks that each **arm** of a `plugin.Query` is valid for
+the dialect it names. `jobqueue`'s `pollPending` is a raw literal carrying `LIMIT 10`, sitting
+**eight lines above** a `plugin.Query` that §3.414 and §3.415 both edited. Neither touched it,
+because neither was looking at call sites — so after two rounds of fixing, the reaper was
+correct and had nothing to reap on SQL Server, because no job could reach `running` there.
+
+    plugin.Query was never the boundary of the defect, only the boundary of the fix.
+
+So the unit here is the **execution site**: every string literal handed to `db.Query`, `db.Exec`
+or `db.QueryRow`. 135 of them.
+
+**WHAT IT CHECKS, AND WHY EACH IS NOT THE ADAPTER'S JOB.** `plugin.Rebind` handles `$N`, `now()`
+and boolean *literals* centrally. These change the *shape* of a statement rather than a token in
+it: `LIMIT`, `ON CONFLICT`, `RETURNING`, `INTERVAL '…'`, `ILIKE`, and a bare boolean *column*
+(`NOT processed`). The last is a **binding** error in T-SQL (Msg 4145), not a syntax error, so
+`SET PARSEONLY ON` reports it clean — a parse-based sweep cannot substitute for this.
+
+**THE EXEMPTION IS DERIVED, NOT LISTED**, which is the part worth reusing. A plugin that declares
+migrations and ships no `UpMySQL`/`UpMSSQL` arm has already said it is PostgreSQL-only —
+`plugin/migration.go`'s own doc names `pgvector` as the case. Its tables never exist elsewhere,
+so its SQL is only required to be valid PostgreSQL. That predicate lives in the code, so it
+cannot go stale: add a MySQL arm to `pgvector` and this guard begins requiring portable SQL of
+it on the same commit. One package is exempt today, and the guard prints which.
+
+An allowlist of names would have needed a hand-written reason per entry, and a reason nobody can
+falsify reads as review having happened.
+
+**THREE DEFECTS IN THE GUARD ITSELF, ALL FOUND BEFORE IT SHIPPED, ALL PERMISSIVE:**
+
+  * **RE2 has no lookahead.** `NOT\s+(?!EXISTS|IN|…)` does not compile, and `regexp.MustCompile`
+    *panics* rather than failing a vet — `go vet` passed on it. Rewritten as a match plus an
+    explicit operator set.
+  * **The dialect keys live in the ELEMENT literals.** `[]plugin.Migration{{Up: …}}` — the inner
+    literals carry no type, so `lit.Type` is nil for them and a scan keyed on the type name never
+    sees them. Every plugin therefore looked PostgreSQL-only and every package was skipped.
+  * That was caught **only** by the guard's own `checked == 0` assertion, which refuses to report
+    a pass when the scan matched nothing. Without it, the guard would have shipped green,
+    exempting the entire tree, and looked exactly like this one does.
+
+**A COUNT I PUBLISHED AND RETRACTED, IN THE INFLATING DIRECTION.** I reported **5** bare-boolean
+sites for §3.420; it was **3**. The scan flagged every `NOT <col>` without asking which dialect
+arm it sat in — and `NOT processed` in a `Default` or `MySQL` arm is *correct for that dialect*
+— and it counted `WHEN NOT MATCHED` from `MERGE`, which is not a boolean at all.
+
+    A construct is only a defect if it can REACH a dialect that rejects it.
+
+For a `plugin.Query` that means asking which arm, **including the fallback**: `Query.For` returns
+`Default` for MSSQL when no MSSQL arm exists, so a `Default` arm is not automatically
+PostgreSQL-only. Both mistakes are now in the guard's own control.
+
+**Controls, both directions.** `TestTheReachabilityGuardSeesEachConstruct` asserts each construct
+*is* flagged, and that nine lookalikes are *not* — `NOT EXISTS`, `NOT IN`, `NOT LIKE`,
+`IS NOT NULL`, `WHEN NOT MATCHED`, MySQL's unquoted `INTERVAL 10 SECOND`, `SELECT TOP`,
+`OFFSET…FETCH`, and `processed = 0`. It runs on synthetic strings, so it keeps working once the
+tree is clean, when a real-site mutation no longer exists to perform. **Also verified with a
+known-positive on a real site**: putting a raw `LIMIT` literal back into
+`notifications/background.go` makes the guard fail naming that file and line.
 ### 3.422 A TTL assertion that a slow runner fails, in the test written to remove timing dependence — ✅ **FIXED 2026-09-10**
 
 `TestConcurrencyKeyTTLKeepsSubSecondPrecision/mssql/500ms` went red on `Test SQL Server`:
