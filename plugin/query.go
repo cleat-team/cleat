@@ -11,22 +11,142 @@ import (
 
 var dollarRE = regexp.MustCompile(`\$(\d+)`)
 var nowRE = regexp.MustCompile(`(?i)\bnow\s*\(\s*\)`)
+var boolRE = regexp.MustCompile(`(?i)\b(true|false)\b`)
 
-// Rebind translates PostgreSQL $N parameter placeholders to the
-// dialect-appropriate form. It also replaces now() with SYSUTCDATETIME()
-// for MSSQL. PostgreSQL placeholders ($1, $2, ...) are left as-is.
+// Rebind translates a statement written in the primary dialect (PostgreSQL)
+// into the spelling the target dialect accepts:
+//
+//	$N        -> ?    (MySQL)      @pN   (SQL Server)
+//	now()     ->                   SYSUTCDATETIME()
+//	TRUE/FALSE ->                  1 / 0
+//
+// PostgreSQL is the source dialect, so Rebind is the identity there.
+//
+// MySQL needs no boolean rewrite: TRUE and FALSE are documented aliases for 1
+// and 0. T-SQL has no boolean type at all, which is why a bare `enabled = true`
+// there is not a syntax error but a COLUMN BINDING error -- `Invalid column
+// name 'true'` -- and why `SET PARSEONLY ON` accepts it. That is 22 of the
+// sites in cleat#1133 and the reason a parse-only sweep reported them clean.
+//
+// WHY THIS SCANS RATHER THAN SUBSTITUTING, WHICH IS THE WHOLE POINT.
+// The previous implementation ran each regex over the entire statement, and a
+// regex cannot tell SQL from a string that appears inside SQL. Measured before
+// this change:
+//
+//	Rebind(`SELECT * FROM t WHERE label = 'costs $100' AND id = $1`, MSSQL)
+//	  -> SELECT * FROM t WHERE label = 'costs @p100' AND id = @p1
+//	                                            ^^^^ corrupted user-visible data
+//
+// No shipped plugin has a $N inside a string literal today, so the defect was
+// latent rather than live. It does not stay latent: this rewrite is about to be
+// applied at the adapter to every plugin statement rather than at the 166 call
+// sites that opt in, and adding TRUE/FALSE makes a far commoner token
+// rewritable -- `WHERE note = 'set this to true'` is an ordinary thing to
+// write.
+//
+// So the substitutions are applied only to the parts of the statement that are
+// SQL. Quoted regions are copied through untouched, in all four spellings the
+// three dialects use, plus both comment forms:
+//
+//	'...'   string literal, '' escapes     -- all dialects
+//	"..."   identifier (PG, T-SQL) or string (MySQL); skipped either way
+//	`...`   identifier                     -- MySQL
+//	[...]   identifier, ]] escapes         -- T-SQL
+//	-- ...  line comment
+//	/* */   block comment
+//
+// Rebind is idempotent: @p1 contains no $N, SYSUTCDATETIME() does not match
+// now(), and 1 does not match TRUE. That matters because the adapter applies it
+// to statements that may already have been rebound by their call site, and it
+// is asserted by TestRebindIsIdempotent rather than left as a claim.
 func Rebind(query string, d Dialect) string {
-	q := query
+	if d != DialectMySQL && d != DialectMSSQL {
+		return query
+	}
+	var b strings.Builder
+	b.Grow(len(query) + 16)
+	i, plain := 0, 0
+	flush := func(upto int) {
+		if upto > plain {
+			b.WriteString(rebindSQL(query[plain:upto], d))
+		}
+	}
+	for i < len(query) {
+		var end int
+		switch {
+		case query[i] == '\'':
+			end = skipDelimited(query, i, '\'', '\'')
+		case query[i] == '"':
+			end = skipDelimited(query, i, '"', '"')
+		case query[i] == '`':
+			end = skipDelimited(query, i, '`', '`')
+		case query[i] == '[' && d == DialectMSSQL:
+			end = skipDelimited(query, i, '[', ']')
+		case strings.HasPrefix(query[i:], "--"):
+			end = strings.IndexByte(query[i:], '\n')
+			if end < 0 {
+				end = len(query)
+			} else {
+				end += i + 1
+			}
+		case strings.HasPrefix(query[i:], "/*"):
+			end = strings.Index(query[i+2:], "*/")
+			if end < 0 {
+				end = len(query)
+			} else {
+				end += i + 4
+			}
+		default:
+			i++
+			continue
+		}
+		flush(i)
+		b.WriteString(query[i:end])
+		i, plain = end, end
+	}
+	flush(len(query))
+	return b.String()
+}
+
+// skipDelimited returns the index just past the region opened at start, where
+// the closing delimiter may be escaped by doubling it (” or ]]). An unclosed
+// region runs to the end of the statement -- the database will reject it, and
+// rewriting its tail would only change which error it reports.
+func skipDelimited(s string, start int, open, close byte) int {
+	for i := start + 1; i < len(s); i++ {
+		if s[i] != close {
+			continue
+		}
+		if i+1 < len(s) && s[i+1] == close && open == close {
+			i++
+			continue
+		}
+		if i+1 < len(s) && s[i+1] == close && open == '[' {
+			i++
+			continue
+		}
+		return i + 1
+	}
+	return len(s)
+}
+
+// rebindSQL applies the substitutions to one span known to be outside every
+// quoted region and comment.
+func rebindSQL(s string, d Dialect) string {
 	switch d {
 	case DialectMySQL:
-		q = dollarRE.ReplaceAllString(q, "?")
+		return dollarRE.ReplaceAllString(s, "?")
 	case DialectMSSQL:
-		q = dollarRE.ReplaceAllString(q, "@p$1")
+		s = dollarRE.ReplaceAllString(s, "@p$1")
+		s = nowRE.ReplaceAllString(s, "SYSUTCDATETIME()")
+		return boolRE.ReplaceAllStringFunc(s, func(m string) string {
+			if strings.EqualFold(m, "true") {
+				return "1"
+			}
+			return "0"
+		})
 	}
-	if d == DialectMSSQL {
-		q = nowRE.ReplaceAllString(q, "SYSUTCDATETIME()")
-	}
-	return q
+	return s
 }
 
 // Query holds dialect-specific variants of a runtime SQL query.
