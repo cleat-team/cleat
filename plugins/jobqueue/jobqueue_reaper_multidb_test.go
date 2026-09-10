@@ -96,7 +96,7 @@ func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
 	}
 }
 
-// TestReaperTouchesNothingItShouldNot is the negative control the test above
+// TestReaperTouchesNothingItShouldNot_MultiBackend is the negative control the test above
 // does not have, and the gap is not hypothetical: with one stuck job and one
 // assertion that it moved, this passes
 //
@@ -112,7 +112,7 @@ func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
 // here exist to fail if the WHERE clause is wrong rather than absent: a
 // `running` job younger than the threshold, and rows in the two states the
 // reaper has no business rewriting.
-func TestReaperTouchesNothingItShouldNot(t *testing.T) {
+func TestReaperTouchesNothingItShouldNot_MultiBackend(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		t.Run(be.Name, func(t *testing.T) {
 			defer be.Cleanup()
