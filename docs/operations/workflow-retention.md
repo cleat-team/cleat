@@ -114,10 +114,39 @@ knowing before planning around it. The worker's dead-letter branch is a substrin
 *host-side* retry loop behind the `cleat_call_retry` import. Which retry policies reach that loop
 is a threshold, not a given:
 
-| policy's worst-case total backoff | path | dead-letterable |
-|---|---|---|
-| within `cleat.hostRetryBudget` (60s) | host loop, one segment, worker held | **yes** |
-| beyond it | SDK loop, one segment per backoff, suspends between | no |
+| policy's worst-case total backoff | path | dead-letterable | backoff survives a worker loss |
+|---|---|---|---|
+| within `cleat.hostRetryBudget` (60s) | host loop, one segment, worker held | **yes** | **no** |
+| beyond it | SDK loop, one segment per backoff, suspends between | no | yes |
+
+**That last column is a decision, taken 2026-09-10 (cleat#1111), and not a consequence anyone
+should plan around changing.** A retry backoff on the host path is **worker-local state**: it is a
+`time.After` in the worker's memory, so a worker lost mid-backoff discards the remaining wait and
+the reclaimed run retries as soon as the reaper releases it. Measured on the port harness with a
+20s policy: an uninterrupted gap between attempts is 19.6s, and the same gap across a worker kill
+is 11.4s — which is the reaper's latency, not the policy's interval.
+
+The alternative was to make the wait durable on both paths, and it was declined. Re-waiting the
+full interval would make a crash cost the run more than the outage that caused it: the reclaim
+delay is already unplanned latency the policy never asked for, and adding the untaken remainder on
+top compounds it. A backoff spaces attempts against a dependency; it is not a guarantee about
+elapsed time, and the host path does not offer one.
+
+**What this means for `--host-retry-budget`, and it is the part worth carrying:** that flag is
+documented as a worker-slot economics control — how much backoff may be spent holding a slot — and
+it is *also* the boundary at which this property changes. An operator lowering it to free slots
+sooner moves policies onto the SDK path, where the wait becomes durable; raising it moves them onto
+the host path, where a crash discards it. Neither direction is wrong, and neither is announced.
+
+Two tests pin which path a policy takes — `TestAShortRetryPolicyRunsOnTheHostInOneSegment` and
+`TestALongRetryPolicySuspendsInsteadOfHoldingTheWorker` in `engine/retry_backoff_test.go`. Neither
+asserts the crash behaviour, which needs a killed worker; that is covered on the port side.
+
+**A separate defect lives on this same path and is NOT covered by the decision above:** the host
+loop records no event for a failed attempt, so a reclaimed run restarts the policy from attempt one
+and re-spends `MaxAttempts`. Measured: a 3-attempt policy made **4** calls across a crash, against
+3 for the same policy uninterrupted. Losing the *wait* was chosen; exceeding the caller's attempt
+bound was not. See cleat#1145.
 
 So a workflow retrying three times a few seconds apart can be dead-lettered; the same workflow
 retrying three times an hour apart cannot, because its terminal error carries the SDK loop's own
