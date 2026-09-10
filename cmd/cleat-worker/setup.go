@@ -2540,6 +2540,91 @@ func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays, de
 // runRetentionSweep runs one iteration of both retention sweeps. Split out
 // of retentionLoop so it is callable directly from a test without waiting on
 // the loop's 24-hour ticker.
+// retentionSweepResult reports what one sweep did, per arm.
+//
+// Per arm and never summed. The four arms delete from different tables under
+// different flags that default differently -- --retention-days is on at 30,
+// the other two are off at 0 -- so one total would be a number that means four
+// things, and an operator could not tell "nothing was old enough" from "that
+// arm is disabled". runRetentionSweep's own comment already refuses to sum two
+// of them for the same reason; this carries that out to the API.
+type retentionSweepResult struct {
+	EventsDeleted          int64 `json:"events_deleted"`
+	CompactionStateCleared int64 `json:"compaction_state_cleared"`
+	CompletedWorkflows     int64 `json:"completed_workflows_deleted"`
+	DeadLetteredWorkflows  int64 `json:"dead_lettered_workflows_deleted"`
+
+	// Skipped names the arms that did not run because their flag is 0, so a
+	// zero count is never ambiguous between "disabled" and "found nothing".
+	Skipped []string `json:"skipped,omitempty"`
+	// Errors names arms that failed. The sweep is best-effort per arm -- one
+	// failing must not stop the others -- so an empty result with no errors
+	// and no skips means the sweep ran and found nothing.
+	Errors []string `json:"errors,omitempty"`
+}
+
+// runRetentionSweepWindow is runRetentionSweep with the window supplied rather
+// than derived from the day-granularity flags.
+//
+// WHY A WINDOW OVERRIDE EXISTS AT ALL, because a trigger without one would be
+// inert. The flags are integer DAYS and 0 disables, so the smallest window the
+// configuration can express is 24 hours -- and the sweep predicate is
+// `completed_at < cutoff`. An endpoint that ran the configured sweep on demand
+// would therefore match nothing for any run completed today, on every call,
+// and report success while doing so. That is the shape this repository has
+// spent a lot of effort on elsewhere: the operation reports success without
+// doing the thing, and the report is the CORRECT report.
+//
+// The override does NOT enable a disabled arm. A flag at 0 is a deliberate
+// decision -- --completed-workflow-retention-days deletes the workflow record
+// itself and is off by default for that reason -- and a request body is not
+// the place to reverse it. Those arms are named in Skipped instead.
+func (w *Worker) runRetentionSweepWindow(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int, window time.Duration) retentionSweepResult {
+	var res retentionSweepResult
+	sweptAt := time.Now()
+	at := func(days int) time.Time {
+		if window > 0 {
+			return sweptAt.Add(-window)
+		}
+		return sweptAt.Add(-time.Duration(days) * 24 * time.Hour)
+	}
+	if retentionDays > 0 {
+		cutoff := at(retentionDays)
+		if n, err := w.store.DeleteExpiredEvents(w.ctx, cutoff); err != nil {
+			res.Errors = append(res.Errors, "events: "+err.Error())
+		} else {
+			res.EventsDeleted = n
+		}
+		if n, err := w.store.ClearExpiredCompactionState(w.ctx, cutoff); err != nil {
+			res.Errors = append(res.Errors, "compaction_state: "+err.Error())
+		} else {
+			res.CompactionStateCleared = n
+		}
+	} else {
+		res.Skipped = append(res.Skipped, "events and compaction_state (--retention-days is 0)")
+	}
+	if completedWorkflowRetentionDays > 0 {
+		if n, err := w.store.DeleteCompletedWorkflows(w.ctx, at(completedWorkflowRetentionDays)); err != nil {
+			res.Errors = append(res.Errors, "completed_workflows: "+err.Error())
+		} else {
+			res.CompletedWorkflows = n
+		}
+	} else {
+		res.Skipped = append(res.Skipped, "completed_workflows (--completed-workflow-retention-days is 0)")
+	}
+	if deadLetterRetentionDays > 0 {
+		if n, err := w.store.DeleteDeadLetteredWorkflows(w.ctx, at(deadLetterRetentionDays)); err != nil {
+			res.Errors = append(res.Errors, "dead_lettered: "+err.Error())
+		} else {
+			res.DeadLetteredWorkflows = n
+		}
+	} else {
+		res.Skipped = append(res.Skipped, "dead_lettered (--dead-letter-retention-days is 0)")
+	}
+	w.Metrics.SetRetentionLastRunTimestamp(w.ctx, time.Now().Unix())
+	return res
+}
+
 func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
 	// ONE clock reading for the whole sweep. Each arm used to call time.Now()
 	// itself, so the three cutoffs differed by microseconds -- harmless in
