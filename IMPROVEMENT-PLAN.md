@@ -10563,3 +10563,102 @@ the mutation is now checked to have changed the file before the outcome is read.
 `TestScanRowIsTheThingThatCorrects` is the control: it asserts a **direct** `uuid.UUID` scan of the
 same bytes produces the *wrong* id, so the fixture is known to reproduce the defect rather than
 being satisfied by any implementation.
+
+---
+
+### 3.318 A quorum counted deliveries in every SDK, and nothing compared them — 🔶 **PARTLY FIXED 2026-09-10 — Rust and Python done, Java and AssemblyScript open** (cleat#1136)
+
+`await_signals_with_quorum` passed the **full** name set to `await_signals_ms` on every iteration,
+so three deliveries of one name satisfied a quorum of three with the other two never sent. Fixed in
+Go by #1135 (cleat#1132) and still wrong in the other four, which is the part worth writing down:
+**the fix did not travel, because nothing in the tree could notice that it had not.**
+
+#### Rust is the one an auditor would have skipped
+
+`crates/cleat-sdk/src/host_calls.rs` carried, above the line that collects the names:
+
+    // Gather signal names not yet received as a &[&str].
+    let remaining_names: Vec<&str> = signal_names.iter().map(|s| s.as_str()).collect();
+
+The comment describes a `.filter()` that is not in the code. CLAUDE.md records the trap where a
+`grep` is satisfied by a *retraction* — a sentence denying the thing it records. This is the mirror:
+**an affirmation that nothing implements.** A reader auditing Rust for this defect reads that
+comment and moves on, and the more careful the reader, the more reliably it works.
+
+#### The mechanism, which is the point of the change
+
+Five copies of one algorithm cannot share an implementation, so the fix is unavoidably a sweep. But
+the reason it went wrong five times identically and stayed wrong is a mechanism: **no test compared
+SDK-level composite host calls across languages.** `hostabi_runtime_parity_test.go` compares the two
+host ABI *registrations* and has nothing to say here — every SDK binds `await_signals_ms` correctly.
+What differs is the logic each layers on top of it.
+
+`tests/conformance/quorum_cases.json` is that comparison: six behavioural cases, consumed by each
+SDK's own test runner. It carries **no message text** — the SDKs word their errors differently and
+always will — so each case names a semantic `error_kind` and each consumer maps that to its own
+wording in one place.
+
+Two properties it needs, and both were arrived at the hard way:
+
+* **It asserts what the loop ASKED FOR, not only what it returned.** `awaited_sets` is the exact
+  sequence of name sets handed to each await. Checking the outcome alone passes against an
+  implementation that fails for an unrelated reason — which is how the polite/impolite distinction
+  below stays honest.
+* **Two host modes.** A *polite* host delivers a queued name only while that name is still awaited,
+  which is what the engine does; it exercises the **narrowing**. An *impolite* host delivers
+  whatever is queued; it exercises the **out-of-set guard**. A fix resting on only the polite case
+  is a fix resting on the host's manners.
+
+#### Why Go runs the table too, when Go was already fixed
+
+`cleat/quorum_conformance_test.go` adds nothing to Go's own coverage — `quorum_counts_voters_test.go`
+already pins the behaviour. It is there to test **the table**. A table written by the same session
+that writes the ports encodes that session's understanding, and two ports agreeing with it proves
+only that they were built from it. Go is the implementation that was reviewed and merged
+independently, so it is the one that could have disagreed. It did not, on all six cases including
+every `awaited_sets` sequence.
+
+#### The loop had to be extracted before it could be tested at all
+
+Every method on Rust's `HostCalls` calls an `extern "C"` import that exists only inside a cleat WASM
+runtime — the stop-bit tests in that same file say so, and are held from the Go side for exactly
+that reason. That is survivable for a bit-decoding helper. It was not survivable here: **cleat#1132
+is a logic defect in this loop, and no test in any language could reach the logic to fail on it.**
+So `HostCalls::quorum_over` (Rust) and `_quorum_over` (Python) take the await as a parameter. The
+remaining-time function is injected for the same reason and is not a clock abstraction — tests hand
+it a constant so the deadline never fires, leaving the host's own `timed_out` as the only source of
+a timeout.
+
+#### Falsification
+
+Each of the three parts was reverted **alone**, because reverting a multi-part fix together goes red
+and reads as confirmation of the whole thing (CLAUDE.md, and #1138 is where that was learned):
+
+| reverted, alone | Rust | Python |
+|---|---|---|
+| the narrowing | `expected an error, got ["alpha","alpha","alpha"]` | 5 of 6 cases red |
+| the unsatisfiable guard | kind `timeout`, want `unsatisfiable` | same, 1 case |
+| the out-of-set guard | `expected an error, got ["alpha","alpha","alpha"]` | 2 cases |
+
+And the **known-positive**, which is the check the table itself needs: one `awaited_sets` entry was
+edited to say the wrong thing, and Go and Rust both went red naming that field. A consumer that
+cannot fail on a wrong table is not comparing anything.
+
+Note the rejection case, which is a discriminator rather than an assertion: `max_rejections` is 1 and
+`alpha` rejects twice, so an implementation that does **not** narrow counts two rejections and fails
+with kind `rejections`, while one that narrows never asks for `alpha` again and refuses the second
+delivery as `out_of_set`. Both are errors; only the *kind* separates them.
+
+#### What is not done
+
+Java and AssemblyScript are unfixed and do not consume the table. That is a toolchain limit, not a
+judgement: `crates/cleat-java` has neither `gradlew` nor a `gradle` on this machine, and neither
+change could have been falsified locally. Shipping four SDK edits with two of them unverified would
+have been worse than shipping two. `packages/cleat-as` additionally needs the loop extracted the same
+way, since `awaitSignalsWithQuorumMs` takes `namesJson: string` and narrowing means parsing and
+re-serialising a JSON array.
+
+    # the two SDKs that do not yet consume the shared table:
+    for d in crates/cleat-java packages/cleat-as; do
+      printf '%-24s %s\n' "$d" "$(git grep -l quorum_cases.json -- "$d" | wc -l | tr -d ' ')"
+    done
