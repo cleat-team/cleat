@@ -103,11 +103,27 @@ func (h *HostCallsImpl) AwaitSignalsWithQuorum(signalNames []string, minCount in
 		}
 		return results, err
 	}
+	// A quorum of N over a set of M names is unsatisfiable when N > M, and it
+	// used to spin to the timeout and report "got k/N signals" -- a message
+	// that describes a slow sender rather than a caller asking for something
+	// arithmetic forbids. Once names narrow it is guaranteed to fail, so it is
+	// refused here as the programming error it is.
+	if minCount > len(signalNames) {
+		return nil, fmt.Errorf(
+			"durable: AwaitSignalsWithQuorum: quorum of %d over %d name(s) %v is unsatisfiable; "+
+				"a quorum counts DISTINCT names, so it cannot exceed the size of the set",
+			minCount, len(signalNames), signalNames)
+	}
+
 	// Fallback: poll-based loop using DurableAwaitSignals.
 	deadline := time.Now().Add(timeout)
 	var results []SignalResult
 	rejectionCount := 0
-	remaining := signalNames
+
+	// COPIED, not aliased. remaining is narrowed below, and signalNames belongs
+	// to the caller -- narrowing it in place would edit a slice the workflow may
+	// still be holding.
+	remaining := append([]string(nil), signalNames...)
 
 	for len(results) < minCount {
 		remainingTime := time.Until(deadline)
@@ -121,7 +137,35 @@ func (h *HostCallsImpl) AwaitSignalsWithQuorum(signalNames []string, minCount in
 		if result.Err != nil {
 			return results, fmt.Errorf("durable: quorum signal error: %w", result.Err)
 		}
+		// A name outside the requested set has not been asked for, and counting
+		// it would reinstate the defect through the other door: narrowing what
+		// we ASK for is only half the fix if we accept whatever arrives.
+		//
+		// A well-behaved host returns one of the names it was given, so this is
+		// unreachable through the engine's own DurableAwaitSignals. It is here
+		// because the fix must not rest on that politeness -- the invariant the
+		// quorum depends on is "each result is a distinct member of the set",
+		// and this is the only place that can enforce it.
+		if !containsName(remaining, result.Name) {
+			return results, fmt.Errorf(
+				"durable: AwaitSignalsWithQuorum: awaited %v and received %q, which is "+
+					"not among them; a quorum counts distinct names and cannot count this one",
+				remaining, result.Name)
+		}
+
 		results = append(results, result)
+
+		// Narrow the set: this name has voted, and a quorum counts VOTERS.
+		//
+		// Without this, `remaining` was assigned once and passed unchanged to
+		// every await, so three deliveries of one name satisfied a quorum of
+		// three with the other two never sent (cleat#1132). The variable was
+		// already named for a narrowing that had never landed.
+		//
+		// A rejection narrows too. A voter that votes no has voted, and leaving
+		// it in the set would let one rejector trip maxRejections alone -- which
+		// is the same defect wearing the other outcome.
+		remaining = withoutName(remaining, result.Name)
 
 		// Check for rejection if maxRejections >= 0.
 		if maxRejections >= 0 {
@@ -137,6 +181,33 @@ func (h *HostCallsImpl) AwaitSignalsWithQuorum(signalNames []string, minCount in
 		}
 	}
 	return results, nil
+}
+
+func containsName(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutName returns names with the first occurrence of name removed.
+//
+// Returns a new slice rather than compacting in place: the caller's signalNames
+// is copied once at the top of the quorum loop, and keeping this non-mutating
+// means a future caller that passes a shared slice cannot be surprised.
+func withoutName(names []string, name string) []string {
+	out := make([]string, 0, len(names))
+	dropped := false
+	for _, n := range names {
+		if !dropped && n == name {
+			dropped = true
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 func (h *HostCallsImpl) SignalWorkflow(targetRunID, signalName, payload string) error {
