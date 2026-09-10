@@ -86,7 +86,7 @@ func TestSelectorTimerFiresWhenNowPassesDeadline(t *testing.T) {
 	sel.AddTimer(1*time.Second, &fired)
 
 	// Force timer deadline to be in the past by recreating with a past deadline.
-	sel.timer.deadline = start.Add(-1 * time.Second)
+	sel.timers[0].deadline = start.Add(-1 * time.Second)
 
 	winner := sel.Select()
 	if winner != SelectorTimer {
@@ -151,7 +151,7 @@ func TestSelectorTimerOnly(t *testing.T) {
 	sel := NewSelector(h)
 	var fired bool
 	sel.AddTimer(0, &fired)
-	sel.timer.deadline = time.Unix(0, 0) // way in the past
+	sel.timers[0].deadline = time.Unix(0, 0) // way in the past
 
 	winner := sel.Select()
 	if winner != SelectorTimer {
@@ -537,5 +537,153 @@ func TestSelectorSignalDuringReplay(t *testing.T) {
 	}
 	if replayPayload != signalPayload {
 		t.Errorf("replay expected payload %q, got %q", signalPayload, replayPayload)
+	}
+}
+
+// cleat#1129. AddTimer assigned rather than appended, so a second call
+// silently discarded the first — no error, no log, nothing at build time.
+// AddSignal and AddChildWorkflow both accumulate; only this one did not, and
+// the asymmetry was unannounced.
+//
+// The neighbouring limitation is what makes the silence expensive:
+// AddChildWorkflow's restriction is documented ten lines above AddTimer AND
+// fails loudly through Select. A caller who read that comment learned the
+// package announces its limitations, which is exactly the wrong lesson to
+// carry to the call below it.
+func TestSelectorRacesTwoTimersInsteadOfDiscardingOne(t *testing.T) {
+	now := int64(1000)
+	slept := []int64{}
+	h := NewHostCalls(HostCallsOptions{
+		DurableSleep: func(ms int64) { slept = append(slept, ms); now += ms },
+		PollSignal:   func(name string) (string, bool, error) { return "", false, nil },
+		Now:          func() int64 { return now },
+	})
+
+	sel := NewSelector(h)
+	var soft, hard bool
+	sel.AddTimer(30*time.Second, &soft) // the earlier deadline
+	sel.AddTimer(5*time.Minute, &hard)  // must not discard the one above
+
+	winner := sel.Select()
+
+	if winner != SelectorTimer {
+		t.Fatalf("Select returned %q, want %q", winner, SelectorTimer)
+	}
+	if !soft {
+		t.Error("the 30s timer never fired.\n\n" +
+			"Two timers were added and the earlier one is the one that should " +
+			"win a race. Before cleat#1129 the second AddTimer overwrote the " +
+			"first, so `soft` could never be set and the workflow waited five " +
+			"minutes for a deadline it had asked to be thirty seconds.")
+	}
+	if hard {
+		t.Error("the 5m timer fired too; only the winning deadline should be " +
+			"marked, or a caller cannot tell which deadline it was woken for")
+	}
+	// The sleep must be to the EARLIEST deadline, not the last one added.
+	if len(slept) != 1 || slept[0] != 30_000 {
+		t.Errorf("slept %v ms, want exactly [30000]. Sleeping to the later "+
+			"deadline is the same defect wearing a different symptom: the "+
+			"earlier timer eventually fires, four and a half minutes late.", slept)
+	}
+}
+
+// The ordering must not depend on the order the timers were added: a caller
+// racing a long deadline against a short one writes them in whichever order
+// reads best, and the earliest is still the one that fires.
+func TestSelectorEarliestTimerWinsRegardlessOfAddOrder(t *testing.T) {
+	now := int64(1000)
+	h := NewHostCalls(HostCallsOptions{
+		DurableSleep: func(ms int64) { now += ms },
+		PollSignal:   func(name string) (string, bool, error) { return "", false, nil },
+		Now:          func() int64 { return now },
+	})
+
+	sel := NewSelector(h)
+	var late, early bool
+	sel.AddTimer(5*time.Minute, &late)   // added first
+	sel.AddTimer(30*time.Second, &early) // earlier deadline, added second
+
+	if winner := sel.Select(); winner != SelectorTimer {
+		t.Fatalf("Select returned %q, want %q", winner, SelectorTimer)
+	}
+	if !early {
+		t.Error("the 30s timer did not fire though it has the earliest deadline")
+	}
+	if late {
+		t.Error("the 5m timer fired; add order decided the race rather than the deadline")
+	}
+}
+
+// A single AddTimer must behave exactly as before. This is the compatibility
+// half: the fix is only safe because nobody can depend on the discard, and
+// every existing caller in the tree passes one timer.
+func TestSelectorSingleTimerIsUnchanged(t *testing.T) {
+	now := int64(1000)
+	h := NewHostCalls(HostCallsOptions{
+		DurableSleep: func(ms int64) { now += ms },
+		PollSignal:   func(name string) (string, bool, error) { return "", false, nil },
+		Now:          func() int64 { return now },
+	})
+
+	sel := NewSelector(h)
+	var fired bool
+	sel.AddTimer(0, &fired)
+
+	if winner := sel.Select(); winner != SelectorTimer {
+		t.Fatalf("Select returned %q, want %q", winner, SelectorTimer)
+	}
+	if !fired {
+		t.Error("a lone immediate timer did not fire")
+	}
+}
+
+// The third site cleat#1129 touched, and the one my first pass left unguarded.
+//
+// When signals are present, Select does not sleep — it calls AwaitSignals with
+// a timeout capped at the nearest deadline. That computation reads the timer
+// list too, and it is invisible to the tests above because none of them adds a
+// signal. Mutating it to use the last-added timer left the whole selector
+// suite green, which is how this test came to exist: falsify each changed site
+// separately, because "the change is covered" is not a per-site claim.
+func TestSelectorAwaitSignalsTimeoutIsTheEarliestDeadline(t *testing.T) {
+	now := int64(1000)
+	var gotTimeouts []int64
+	h := NewHostCalls(HostCallsOptions{
+		DurableSleep: func(ms int64) { now += ms },
+		PollSignal:   func(name string) (string, bool, error) { return "", false, nil },
+		DurableAwaitSignals: func(names []string, timeoutMs int64) (string, string, bool, error) {
+			gotTimeouts = append(gotTimeouts, timeoutMs)
+			now += timeoutMs // the wait actually elapses, so the loop terminates
+			return "", "", true, nil
+		},
+		Now: func() int64 { return now },
+	})
+
+	sel := NewSelector(h)
+	var payload string
+	var soft, hard bool
+	sel.AddSignal("sig_a", &payload)
+	sel.AddTimer(30*time.Second, &soft)
+	sel.AddTimer(5*time.Minute, &hard)
+
+	if winner := sel.Select(); winner != SelectorTimer {
+		t.Fatalf("Select returned %q, want %q", winner, SelectorTimer)
+	}
+	if len(gotTimeouts) == 0 {
+		t.Fatal("AwaitSignals was never called; this test asserts nothing about " +
+			"the timeout computation it exists to cover")
+	}
+	if gotTimeouts[0] != 30_000 {
+		t.Errorf("AwaitSignals was given a %d ms timeout, want 30000.\n\n"+
+			"With two deadlines pending the wait must be capped at the EARLIEST, "+
+			"or the signal wait outlives the deadline it was supposed to race "+
+			"and the 30s timer fires four and a half minutes late.", gotTimeouts[0])
+	}
+	if !soft {
+		t.Error("the 30s timer did not fire")
+	}
+	if hard {
+		t.Error("the 5m timer fired; the earlier deadline should have won")
 	}
 }

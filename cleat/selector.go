@@ -37,7 +37,7 @@ type Selector struct {
 	h            HostCalls
 	signals      []signalFuture
 	children     []childFuture
-	timer        *timerFuture
+	timers       []timerFuture
 	pollInterval time.Duration
 	err          error
 }
@@ -85,11 +85,39 @@ func (s *Selector) AddChildWorkflow(runID string, dest *string) {
 
 // AddTimer adds a timer future. When the timeout elapses before Select
 // returns, *fired is set to true and Select returns SelectorTimer.
+//
+// Timers ACCUMULATE, like signals and child workflows. Racing two deadlines
+// is the point of having more than one:
+//
+//	sel.AddTimer(30*time.Second, &soft)
+//	sel.AddTimer(5*time.Minute, &hard)
+//
+// The earliest deadline wins regardless of the order they were added, and
+// only the winner's *fired is set — so a caller can tell which deadline woke
+// it. Select still returns SelectorTimer for any of them.
+//
+// Until cleat#1129 this assigned rather than appended, so the second call
+// silently discarded the first: no error, no log, nothing at build time, and
+// a deadline that simply never fired.
 func (s *Selector) AddTimer(timeout time.Duration, fired *bool) {
-	s.timer = &timerFuture{
+	s.timers = append(s.timers, timerFuture{
 		deadline: s.h.Now().Add(timeout),
 		fired:    fired,
+	})
+}
+
+// earliestTimer returns the index of the timer with the earliest deadline, or
+// -1 when none has been added. Ties go to the first added, which keeps Select
+// deterministic -- a workflow replaying the same history must take the same
+// branch, so "whichever the map iteration reached first" is not available here.
+func (s *Selector) earliestTimer() int {
+	best := -1
+	for i := range s.timers {
+		if best == -1 || s.timers[i].deadline.Before(s.timers[best].deadline) {
+			best = i
+		}
 	}
+	return best
 }
 
 // Err returns the error from the last Select call, if any.
@@ -133,11 +161,12 @@ func (s *Selector) Select() string {
 			}
 		}
 
-		// Check timer.
-		if s.timer != nil {
-			if !s.h.Now().Before(s.timer.deadline) {
-				if s.timer.fired != nil {
-					*s.timer.fired = true
+		// Check timers. The earliest deadline wins, so a caller racing a
+		// short deadline against a long one is woken by the short one.
+		if i := s.earliestTimer(); i >= 0 {
+			if !s.h.Now().Before(s.timers[i].deadline) {
+				if s.timers[i].fired != nil {
+					*s.timers[i].fired = true
 				}
 				return SelectorTimer
 			}
@@ -152,8 +181,8 @@ func (s *Selector) Select() string {
 			}
 
 			timeout := 24 * time.Hour // effectively no timeout
-			if s.timer != nil {
-				remaining := s.timer.deadline.Sub(s.h.Now())
+			if i := s.earliestTimer(); i >= 0 {
+				remaining := s.timers[i].deadline.Sub(s.h.Now())
 				if remaining < timeout {
 					timeout = remaining
 				}
@@ -181,14 +210,16 @@ func (s *Selector) Select() string {
 			continue
 		}
 
-		// No signals to wait for — just sleep until the timer fires.
-		if s.timer != nil {
-			remaining := s.timer.deadline.Sub(s.h.Now())
+		// No signals to wait for -- sleep until the EARLIEST deadline.
+		// Sleeping to the last-added one instead is the same defect as the
+		// discard it replaced, arriving late rather than never.
+		if i := s.earliestTimer(); i >= 0 {
+			remaining := s.timers[i].deadline.Sub(s.h.Now())
 			if remaining > 0 {
 				s.h.DurableSleep(remaining)
 			}
-			if s.timer.fired != nil {
-				*s.timer.fired = true
+			if s.timers[i].fired != nil {
+				*s.timers[i].fired = true
 			}
 			return SelectorTimer
 		}
