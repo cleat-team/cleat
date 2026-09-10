@@ -71,15 +71,9 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		receivedAt time.Time
 	)
 
-	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
-		SELECT id, event_type, event_data, received_at
-		FROM ingested_events
-		WHERE tenant_id = $1
-		  AND event_type = $2
-		  AND NOT processed
-		ORDER BY received_at DESC
-		LIMIT 1
-	`, p.dialect), cc.TenantID, input.EventType), &eventID, &eventType, &eventData, &receivedAt)
+	err := plugin.ScanRow(p.db.QueryRow(ctx,
+		queryLatestUnprocessedEvent.For(p.dialect),
+		cc.TenantID, input.EventType), &eventID, &eventType, &eventData, &receivedAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		// No matching event found -- register as an awaiter so the publish
