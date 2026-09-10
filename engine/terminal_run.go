@@ -128,9 +128,40 @@ type runSuccessorFinder interface {
 	successorOfRun(ctx context.Context, id string) (string, error)
 }
 
+// successorOfRun on PostgreSQL needs BOTH the transaction and the predicate,
+// and it had neither. cleat#1177.
+//
+// `s.db` is a plain *sql.DB, so this statement ran outside any transaction --
+// and workflow_instances has RLS ENABLED and FORCED with a fail-closed policy,
+// `USING (tenant_id = cleat.assert_tenant_set())`, where assert_tenant_set
+// RAISEs when the setting is missing. The tenant is established with
+// set_config(..., true) -- is_local -- so it exists only inside
+// beginTxWithRLS. Outside one, every candidate row raises:
+//
+//	ERROR: cleat.tenant_id is not set
+//
+// WHY THAT SAT HERE UNNOTICED. A policy's USING is evaluated PER ROW, so a run
+// that never continued as new has no candidate row, the assert is never
+// reached, and the statement returns ("", nil) -- which is the right answer for
+// that run. It fails only when there IS a successor to find, which is the only
+// case this function exists to serve, on the chains cleat#826 is about.
+//
+// The MySQL and MSSQL arms below are correct BECAUSE they carry
+// `AND tenant_id = ?`; neither depends on RLS. This one was written to lean on
+// RLS and then handed a statement that never opens the transaction RLS needs.
+// Both are added here rather than one: the predicate alone would work, and
+// would leave the only PostgreSQL read of this table that is not tenant-scoped
+// by the database as well as by the query.
 func (s *PostgresStore) successorOfRun(ctx context.Context, id string) (string, error) {
-	return successorScan(s.db.QueryRowContext(ctx,
-		`SELECT id FROM workflow_instances WHERE continued_from = $1`, id))
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return "", fmt.Errorf("continue-as-new successor lookup: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	return successorScan(tx.QueryRowContext(ctx,
+		`SELECT id FROM workflow_instances WHERE continued_from = $1 AND tenant_id = $2`,
+		id, s.tenantID))
 }
 
 func (s *MySQLStore) successorOfRun(ctx context.Context, id string) (string, error) {
