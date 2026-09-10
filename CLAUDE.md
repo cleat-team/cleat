@@ -514,6 +514,63 @@ that follows is "my fix does not work", and the artefact discarded is again a co
 the restore the same way you verify the revert: `git diff` against the **commit**, not against the
 index, and rebuild before believing the second result.
 
+**And the version with no signal at all is a TIMEOUT, which skips the restore entirely.** Measured
+2026-09-10, falsifying the scheduler fixes in cleat#1138. The falsification ran as one command —
+mutate, `go build`, `go test`, `cp <backup> <file>` — and the `go test` leg exceeded the harness's
+two-minute limit. SIGTERM, so the `cp` never ran and the tree kept the mutation. Nothing announced
+it: the output ended with the falsification's evidence, which is exactly what a *successful*
+falsification looks like.
+
+**And the failure that ran alongside it taught the larger lesson, by fooling me twice.** A full
+suite was running against that tree, and reported a **package-level `engine` failure with zero
+test failures**. I read that as the mutation's doing — the signature matches, and `engine_test`
+imports every plugin, so a plugin that does not build takes `engine` down with it. That mechanism
+is real; I reproduced it deliberately in a separate worktree, appending one non-compiling function
+to `plugins/scheduler/background.go` and running a match-nothing `-run` in `engine/`:
+
+| | |
+|---|---|
+| fail events **with** a `"Test"` field | **0** |
+| fail events **without** one | **1** — `github.com/cleat-team/cleat/engine` |
+
+**It was not what happened.** Re-run on a clean tree with no mutation anywhere, `engine` failed
+the same way again, and the run's own output says why:
+
+    panic: test timed out after 25m0s
+    FAIL    github.com/cleat-team/cleat/engine      1500.883s
+
+Both suite runs were **timeouts**, and `grep -c 'build failed'` over either one returns **0**. The
+mutation was innocent, and the reproduction I had performed corroborated a conclusion it did not
+support — a mechanism that *can* produce a signature is not evidence that it *did*.
+
+**So the rule this file already gives is necessary and not sufficient.** "PACKAGE failures must
+also be 0" is right, and a package-level failure with zero test failures has **at least two**
+causes that the count cannot separate:
+
+| cause | what it means | what to do |
+|---|---|---|
+| the package did not build | a real breakage, possibly in another package | fix the code |
+| the package ran out of time | says nothing about correctness | raise `-timeout`, or split the run |
+
+They are indistinguishable in the three numbers, and the suite grows, so the second gets more
+likely over time on a `-p 1` run over several packages. **Read the package's own output before
+concluding anything** — one names `build failed`, the other `panic: test timed out`:
+
+    grep -c 'build failed' /tmp/t.json          # non-zero: something did not compile
+    grep -o 'panic: test timed out after [0-9a-z]*' /tmp/t.json | head -1
+
+Both were checked against a known case of each, which is the only way to know a discriminator
+discriminates: on the timed-out run, `build failed` is 0 and the timeout line is present; on the
+deliberately-broken-build run, `build failed` is 1 and the timeout line is empty.
+
+Two rules follow. **Check the restore by CONTENT, as its own step** — never as the last clause of
+a long command:
+
+    diff -q <backup> <file> && echo restored || cp <backup> <file>
+
+And **do not run a suite and a falsification against one working tree at the same time.** Use a
+`git worktree` for whichever is the longer of the two.
+
 **And the version of that with NO signal at all: `git stash` on a clean tree stashes nothing and
 exits 0.** Measured 2026-09-08, reproduced independently in a second clone:
 
@@ -580,6 +637,28 @@ stops a `status = NULL` write over a running workflow. Once that case was writte
 falsification failed — with a NOT NULL violation where `ErrFenceLost` was expected, which is a
 refusal by database constraint rather than by the code under test. **A falsification that stays
 green is telling you which case you did not write, not which line to remove.**
+
+**There is a second reading of a green falsification, and it costs you a change rather than a
+test: the fix was never needed.** Measured 2026-09-10 on cleat#1138. Reverting a
+`now()` → `SYSUTCDATETIME()` "fix" in a plugin left every test green. The first suspicion was that
+the mutation had not applied — it had. `plugin.Rebind` already rewrites `now()` for MSSQL, so the
+fix was redundant and the causal story written around it was wrong.
+
+The rule above sends you looking for a case you did not write. That is right when the reverted line
+is load-bearing and wrong when it is not, and **the green alone cannot tell those apart.** Ask
+both: *which case have I not written*, and *what already handles this*.
+
+The second is answered by reverting **one part of a multi-part fix at a time**. Reverting only the
+`now()` passed; reverting only the `enabled = true` failed. That pair identified a single real
+defect inside what had been committed as two, and no whole-fix revert could have — reverting both
+together goes red, which reads as confirmation of the whole thing.
+
+**The cause of that one generalises past SQL: a scan of source text cannot see a rewrite applied at
+runtime.** The defect list came from grepping SQL literals for non-portable constructs, and 80 of
+them were `now()` — every one already rewritten by `Rebind` before reaching a database. The literal
+is not the artifact; the string that is *executed* is. Same shape as the "tool applied to a format
+it does not model" table below, with the twist that the format was read correctly and the wrong
+**pipeline stage** was measured. Where a rewrite layer exists, run the check on its output.
 
 **When you fix something, fix the prose that describes it — not just the status marker.** A ✅ on
 a heading over a stale body is worse than no marker at all, because it stops the next reader from
