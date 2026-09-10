@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
@@ -307,4 +309,80 @@ func (s *apiServer) handleAdminOpError(w http.ResponseWriter, err error) {
 	default:
 		s.writeError(w, 500, msg)
 	}
+}
+
+// handleRetentionSweep handles POST /api/admin/retention/sweep.
+//
+// cleat#1130. Retention was unobservable from outside the engine: the window is
+// integer DAYS with 0 meaning disabled, the predicate is `completed_at <
+// cutoff`, and nothing on the HTTP surface started a sweep. An out-of-process
+// observer could not produce a swept row without waiting a day or ageing
+// `completed_at` in the database directly. It also left operators with no way
+// to see a configuration change take effect for up to --retention-interval.
+//
+// THE WINDOW OVERRIDE IS WHAT MAKES THIS MORE THAN A BUTTON. `{"older_than":
+// "5s"}` supplies the cutoff the flags cannot express. Without it, a trigger
+// running the configured sweep would match nothing for any run completed today,
+// on every call, and report success -- an endpoint that ships as a working
+// feature and is provably inert.
+//
+// It does NOT enable a disabled arm. A flag at 0 is a decision --
+// --completed-workflow-retention-days deletes the workflow record itself and is
+// off by default for exactly that reason -- and a request body is not where
+// that gets reversed. Disabled arms come back in `skipped`, so a zero count is
+// never ambiguous between "disabled" and "found nothing".
+//
+// Gated on *enableAdminAPI like the other destructive admin routes, so it
+// inherits that exposure decision rather than making a new one.
+func (s *apiServer) handleRetentionSweep(w http.ResponseWriter, r *http.Request) {
+	if !*enableAdminAPI {
+		s.writeError(w, 404, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		s.writeError(w, 405, "method not allowed")
+		return
+	}
+
+	var req struct {
+		OlderThan string `json:"older_than"`
+	}
+	if r.Body != nil {
+		// An absent or empty body means "use the configured windows", which is
+		// the operator-facing case: apply my config change now.
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil && err != io.EOF {
+			s.writeError(w, 400, "invalid JSON body")
+			return
+		}
+	}
+
+	var window time.Duration
+	if req.OlderThan != "" {
+		d, err := time.ParseDuration(req.OlderThan)
+		if err != nil {
+			s.writeError(w, 400, "older_than must be a Go duration such as \"5s\" or \"48h\": "+err.Error())
+			return
+		}
+		if d <= 0 {
+			// A non-positive window would make the cutoff now-or-later and
+			// sweep live work. The flags cannot express it and neither can
+			// this.
+			s.writeError(w, 400, "older_than must be positive")
+			return
+		}
+		window = d
+	}
+
+	res := s.worker.runRetentionSweepWindow(
+		*retentionDays, *completedWorkflowRetentionDays, *deadLetterRetentionDays, window)
+
+	status := 200
+	if len(res.Errors) > 0 {
+		// Partial failure is reported as such rather than as success: the arms
+		// are independent and one failing does not stop the others, so the
+		// counts above it are real.
+		status = 207
+	}
+	s.writeJSON(w, status, res)
 }

@@ -10459,6 +10459,63 @@ SQL Server does not accept a row constructor in `IN`. MySQL's arm was correct th
 the statement rather than the harness.
 ---
 
+### 3.416 A retention sweep an operator can trigger, with the window override that stops it being inert — ✅ **DONE 2026-09-10** (cleat#1130)
+
+Retention was unobservable from outside the engine. The window is integer **days** with `0` meaning
+disabled, the predicate is `completed_at < cutoff`, and nothing on the HTTP surface started a sweep —
+so an out-of-process observer could not produce a swept row without waiting a day or ageing
+`completed_at` in the database. Operators had the same problem from the other side: no way to see a
+configuration change take effect for up to `--retention-interval`.
+
+`POST /api/admin/retention/sweep`, beside `/api/admin/drain`, gated on `--enable-admin-api` so it
+inherits that exposure decision rather than making a new one.
+
+#### The override is the feature; the trigger alone would be inert
+
+`{"older_than": "5s"}` supplies a cutoff the flags cannot express. **Without it, an endpoint that
+ran the configured sweep would match nothing for any run completed today, on every call, and report
+success** — a feature that ships working and is provably inert. That is the sharpest form of the
+pattern this file has recorded all night: the operation reports success without doing the thing, and
+the report is the *correct* report.
+
+Proven rather than argued, against a real database, in one test with two halves:
+
+| request | a run completed moments ago |
+|---|---|
+| no override (configured 30-day window) | **survives** |
+| `{"older_than":"1ns"}` | **deleted** |
+
+The first half is not a formality. If both deleted, the configured window would be reaching live
+work; if neither did, the endpoint would be the button.
+
+#### What an override may not do
+
+**Enable an arm the configuration disabled.** `--completed-workflow-retention-days` deletes the
+`workflow_instances` row itself — status, result, error, def_name, not just step history — and is
+off by default for that reason; its own flag help calls it materially more destructive. A request
+body is not where a deployment's decision to leave it off gets reversed. Disabled arms are named in
+`skipped`.
+
+**That constraint was untested until a mutation found it.** Flipping the guard to
+`completedWorkflowRetentionDays > 0 || window > 0` was caught by nothing;
+`TestAnOverrideDoesNotEnableADisabledArm` now catches it.
+
+#### Counts are per arm and never summed
+
+Four arms — events, compaction state, completed workflows, dead-lettered — across three flags that
+default differently (30 on, 0, 0). One total would be a number meaning four things, and an operator
+could not tell *"nothing was old enough"* from *"that arm is off"*. `runRetentionSweep`'s own comment
+already refuses to sum two of them; this carries that to the API. Partial failure answers **207**,
+not 200, because the arms are independent and the counts beside a failure are real.
+
+#### Verification
+
+- End-to-end on live PostgreSQL, both halves.
+- Falsified: ignoring the override reddens *"the run survived a sweep with older_than=1ns"*; letting
+  the override enable a disabled arm reddens the new constraint test.
+- **0 skips added under CI's own `CLEAT_TEST_DB`**, checked rather than assumed.
+---
+
 ### 3.417 Every UUID read from SQL Server was a different UUID, and nothing errored — ✅ **FIXED 2026-09-10** (cleat#1137)
 
 SQL Server returns `UNIQUEIDENTIFIER` in mixed-endian byte order. `uuid.UUID`'s `Scan` accepts those

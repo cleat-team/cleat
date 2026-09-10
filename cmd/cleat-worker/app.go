@@ -28,6 +28,7 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	mux.HandleFunc("/healthz", api.handleHealthz)
 	mux.HandleFunc("/metrics", handleMetrics)
 	mux.HandleFunc("/api/admin/drain", api.handleDrain)
+	mux.HandleFunc("/api/admin/retention/sweep", api.handleRetentionSweep)
 	// Schedule routes before workflow routes so /api/schedules is not caught
 	// by /api/workflows/.
 	mux.HandleFunc("/api/schedules/", api.handleSchedules)
