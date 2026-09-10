@@ -574,7 +574,7 @@ func main() {
 	}
 
 	pluginEnv := &plugin.Environment{
-		DB:      getPluginDB(db, pluginDB),
+		DB:      getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect())),
 		Mux:     plugMux,
 		Config:  rawPluginConfig,
 		Logger:  slog.Default(),
@@ -692,9 +692,9 @@ func main() {
 		case plugin.DatabaseAccessNone:
 			envCopy.DB = nil
 		case plugin.DatabaseAccessReadOnly:
-			envCopy.DB = getPluginReadOnlyDB(db, pluginDB)
+			envCopy.DB = getPluginReadOnlyDB(db, pluginDB, plugin.Dialect(factory.Dialect()))
 		default: // DatabaseAccessReadWrite or empty (backward compat)
-			envCopy.DB = getPluginDB(db, pluginDB)
+			envCopy.DB = getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect()))
 		}
 		// Wrap SignalWorkflow with signal authorization.
 		// The plugin name is the caller identity checked against allowed_signals.

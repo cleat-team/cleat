@@ -47,7 +47,14 @@ func NewTestPluginEnv(t *testing.T, ctx context.Context, db *sql.DB, dialect plu
 	t.Helper()
 
 	// Wrap the raw *sql.DB in a PluginDB adapter.
-	pluginDB := &engine.SQLDBAdapter{DB: db}
+	//
+	// The Dialect is what makes the adapter rewrite $N, now() and boolean
+	// literals for the target backend. It was omitted here while sitting in
+	// this function's own signature, so the harness ran every plugin against
+	// MySQL and SQL Server with no rewrite at all -- which is to say the
+	// harness could not have detected the class of defect it exists to catch
+	// (cleat#1133).
+	pluginDB := &engine.SQLDBAdapter{DB: db, Dialect: dialect}
 
 	// In-memory (no connection managed by us) — we just use the provided db.
 	env := &TestPluginEnv{
