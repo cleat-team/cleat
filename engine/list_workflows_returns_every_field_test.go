@@ -47,12 +47,20 @@ func TestListWorkflowsReturnsEveryFieldTheRowCanHold(t *testing.T) {
 		"min_version": "not a column of workflow_instances -- it belongs to " +
 			"workflow_defs and describes the DEFINITION's compatibility floor",
 
+		// `error` is deliberately NOT exempt, and this comment is here because
+		// it was, briefly. I assumed the list dropped it, reasoning from the
+		// column name (`error_msg`) not matching the json tag (`error`). The
+		// list scans error_msg into a local and assigns it, so the field is
+		// carried -- proven by removing the exemption and watching the test
+		// stay green on all three dialects while tenant_id, removed in the
+		// same run, went red.
+		//
+		// An exemption is never checked. Exempting a field that works removes
+		// it from the guard's denominator, which is the exact defect this file
+		// exists to answer, committed inside the answer.
 		"result": "not selected by the list path. Defensible: a result can be " +
 			"large and a list returns many rows, so carrying it multiplies the " +
 			"payload by the page size. cleat#1123",
-		"error": "not selected by the list path, same size argument as result. " +
-			"error_code and error_op ARE carried, so a caller can still tell " +
-			"WHY a run failed without the message. cleat#1123",
 		"tenant_id": "not selected by the list path. Every row a caller can see " +
 			"is already scoped to its tenant, so the field is constant across " +
 			"the page. cleat#1123",
