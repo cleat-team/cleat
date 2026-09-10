@@ -497,7 +497,8 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
 		SELECT @p1, @p2, @p3, DATEADD(MICROSECOND, @p6, DATEADD(SECOND, @p4, SYSUTCDATETIME())), @p5
 		WHERE NOT EXISTS (
-			SELECT 1 FROM concurrency_keys WHERE key_hash = @p1 AND expires_at > SYSUTCDATETIME()
+			SELECT 1 FROM concurrency_keys
+			 WHERE key_hash = @p1 AND tenant_id = @p5 AND expires_at > SYSUTCDATETIME()
 		)
 	`, keyHash[:], key, workflowID, int(ttl/time.Second), s.tenantID,
 		int((ttl % time.Second).Microseconds()))
