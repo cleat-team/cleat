@@ -11169,10 +11169,21 @@ So they are excluded, by name and with that command recorded, rather than exempt
 them would add nine allowances for no safety. The live count is one, and it agrees with the
 issue.
 
-**Exemptions are required to stay LIVE.** An allowlist that may only shrink is the usual goal;
-one that *cannot outlive its cause* is the enforceable form. Each entry must still match a real
-statement, so when cleat#1179 lands and `terminal_run.go:132` stops being a fault, the guard
-fails on the stale exemption rather than carrying it quietly.
+**Exemptions are required to stay LIVE, and that fired within minutes of being written.**
+An allowlist that may only shrink is the usual goal; one that *cannot outlive its cause* is the
+enforceable form. cleat#1179 merged while this branch was open, and the guard said so itself:
+
+    the exemption for terminal_run.go:132 no longer matches any statement. It has
+    been fixed or moved -- delete the entry rather than leaving an allowance whose
+    cause is gone
+
+Nobody had to remember. **A stale allowance is not inert**: `terminal_run.go:132` is now an
+ordinary line, and an exemption still naming it would silently cover whatever statement arrives
+there next.
+
+The entry is deleted, and the known-positive moved with it — re-breaking `successorOfRun` back
+to `s.db.QueryRowContext` now makes the guard report `terminal_run.go:156`. That is the stronger
+control: it shows the guard **protects the fix**, not merely that it once described the bug.
 
 **The RLS table list is read from `migrations/postgres/`, not written here.** Eleven today; a
 literal silently stops covering the twelfth. Comments are stripped first, or a header quoting

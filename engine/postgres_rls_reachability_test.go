@@ -206,8 +206,19 @@ type rlsFault struct{ pos, table, why string }
 
 // knownRLSFaults are the two instances censused in cleat#1178. Each must still
 // match a real statement -- see the staleness check above.
+// The entry for terminal_run.go:132 (cleat#1177, successorOfRun) was deleted
+// when cleat#1179 landed -- and it was this guard's own liveness check that
+// said so, minutes after that merge, rather than anyone remembering:
+//
+//	the exemption for terminal_run.go:132 no longer matches any statement.
+//	It has been fixed or moved -- delete the entry rather than leaving an
+//	allowance whose cause is gone
+//
+// That is the whole argument for requiring exemptions to stay live. A stale
+// allowance is not inert: terminal_run.go:132 is now a perfectly ordinary line,
+// and an exemption still naming it would silently cover whatever statement
+// arrives there next.
 var knownRLSFaults = map[string]string{
-	"terminal_run.go:132": "cleat#1177, successorOfRun -- fix in flight as cleat#1179",
 	"store_event_stream.go:144": "cleat#1178, StreamEventHistory reads event_history " +
 		"outside a transaction; latent because no shipped caller reaches it with RLS enforced",
 }
