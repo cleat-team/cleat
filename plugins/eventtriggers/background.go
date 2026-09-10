@@ -59,7 +59,7 @@ func (p *Plugin) processBatch(parentCtx context.Context) {
 			eventData  []byte
 			retryCount int
 		)
-		if err := rows.Scan(&eventID, &tenantID, &eventType, &eventData, &retryCount); err != nil {
+		if err := plugin.ScanRow(rows, &eventID, &tenantID, &eventType, &eventData, &retryCount); err != nil {
 			p.logger.Error("event-triggers: scan event", "error", err)
 			continue
 		}

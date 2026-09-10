@@ -184,7 +184,7 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			startedAt   sql.NullTime
 			completedAt sql.NullTime
 		)
-		if err := rows.Scan(
+		if err := plugin.ScanRow(rows,
 			&j.JobID, &j.QueueName, &j.Status,
 			&payloadRaw, &j.CreatedAt,
 			&startedAt, &completedAt,
@@ -235,11 +235,11 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	var payloadRaw []byte
 	var startedAt, completedAt sql.NullTime
 
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
 			FROM task_queue
 			WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3
-		`, p.dialect), tid, queueName, jobID).Scan(
+		`, p.dialect), tid, queueName, jobID),
 		&j.JobID, &j.QueueName, &j.Status,
 		&payloadRaw, &j.CreatedAt,
 		&startedAt, &completedAt,

@@ -191,7 +191,7 @@ func (p *Plugin) exportMetrics(ctx context.Context) error {
 	var configs []ddConfigRow
 	for rows.Next() {
 		var cfg ddConfigRow
-		if err := rows.Scan(&cfg.ID, &cfg.TenantID, &cfg.APIKey, &cfg.Site, &cfg.MetricsPrefix); err != nil {
+		if err := plugin.ScanRow(rows, &cfg.ID, &cfg.TenantID, &cfg.APIKey, &cfg.Site, &cfg.MetricsPrefix); err != nil {
 			p.logger.Error("datadog-export: scan config row", "error", err)
 			continue
 		}

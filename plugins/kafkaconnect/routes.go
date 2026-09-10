@@ -162,7 +162,7 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 	var configs []kafkaConfigJSON
 	for rows.Next() {
 		var c kafkaConfigJSON
-		if err := rows.Scan(&c.ID, &c.Name, &c.Brokers, &c.Topic, &c.ConsumerGroup, &c.EventType, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.Name, &c.Brokers, &c.Topic, &c.ConsumerGroup, &c.EventType, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			p.logger.Error("kafka-connect: scan config", "error", err)
 			continue
 		}

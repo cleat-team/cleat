@@ -94,7 +94,7 @@ func (p *Plugin) processDeliveries(ctx context.Context) (int, int, int, error) {
 
 	for rows.Next() {
 		var d deliveryRow
-		if err := rows.Scan(&d.ID, &d.WebhookID, &d.EventType, &d.Payload, &d.AttemptCount); err != nil {
+		if err := plugin.ScanRow(rows, &d.ID, &d.WebhookID, &d.EventType, &d.Payload, &d.AttemptCount); err != nil {
 			p.logger.Error("notifications: scan delivery row", "error", err)
 			continue
 		}

@@ -179,7 +179,7 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 			c         webhookConfigJSON
 			eventsRaw []byte
 		)
-		if err := rows.Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			p.logger.Error("notifications: scan webhook", "error", err)
 			continue
 		}
@@ -215,11 +215,11 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 		c         webhookConfigJSON
 		eventsRaw []byte
 	)
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, url, secret, events, enabled, created_at, updated_at
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "webhook not found")
 		return
@@ -328,11 +328,11 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		c         webhookConfigJSON
 		eventsRaw []byte
 	)
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, url, secret, events, enabled, created_at, updated_at
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("notifications: re-fetch webhook", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated webhook")
@@ -449,7 +449,7 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 			responseCode  sql.NullInt64
 			responseBody  sql.NullString
 		)
-		if err := rows.Scan(
+		if err := plugin.ScanRow(rows,
 			&d.ID, &d.WebhookID, &d.EventType, &payloadRaw,
 			&d.Status, &d.AttemptCount,
 			&lastAttemptAt, &nextAttemptAt, &deliveredAt,

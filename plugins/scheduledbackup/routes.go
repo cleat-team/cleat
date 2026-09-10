@@ -195,7 +195,7 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 	configs := make([]backupConfig, 0)
 	for rows.Next() {
 		var c backupConfig
-		err := rows.Scan(
+		err := plugin.ScanRow(rows,
 			&c.ID, &c.Name, &c.Cron, &c.S3Bucket, &c.S3Prefix,
 			&c.RetentionDays, &c.Enabled, &c.LastRunAt, &c.NextRunAt,
 			&c.CreatedAt, &c.UpdatedAt,
@@ -227,11 +227,11 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var c backupConfig
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT id, name, cron, s3_bucket, s3_prefix, retention_days, enabled, last_run_at, next_run_at, created_at, updated_at
 		FROM backup_config
 		WHERE id = $1 AND tenant_id = $2
-	`, p.dialect), id, tid).Scan(
+	`, p.dialect), id, tid),
 		&c.ID, &c.Name, &c.Cron, &c.S3Bucket, &c.S3Prefix,
 		&c.RetentionDays, &c.Enabled, &c.LastRunAt, &c.NextRunAt,
 		&c.CreatedAt, &c.UpdatedAt,
@@ -452,7 +452,7 @@ func (p *Plugin) handleListHistory(w http.ResponseWriter, r *http.Request) {
 		var completedAt sql.NullTime
 		var errorMsg sql.NullString
 
-		err := rows.Scan(
+		err := plugin.ScanRow(rows,
 			&h.ID, &h.ConfigID, &h.Filename, &sizeBytes, &h.Status,
 			&h.StartedAt, &completedAt, &errorMsg, &h.CreatedAt,
 		)

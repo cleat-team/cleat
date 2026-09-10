@@ -144,7 +144,7 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 			defName   *string
 			input     json.RawMessage
 		)
-		if err := rows.Scan(&tenantID, &queueName, &jobID, &payload, &defName, &input); err != nil {
+		if err := plugin.ScanRow(rows, &tenantID, &queueName, &jobID, &payload, &defName, &input); err != nil {
 			p.logger.Error("jobqueue: scan job", "error", err)
 			continue
 		}
