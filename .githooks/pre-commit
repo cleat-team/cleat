@@ -71,6 +71,40 @@ heads_of() { grep -oE '^### [0-9]+\.[0-9]+ ' | sed 's/^### //; s/ $//' | sort -u
 staged="$(git show ":$PLAN" 2>/dev/null | heads_of)"
 current="$(git show "HEAD:$PLAN" 2>/dev/null | heads_of)"
 
+# DURING A MERGE, HEAD IS ONLY THE FIRST PARENT, so every section the second
+# parent brings looks new and the hook refuses a merge that authored nothing.
+# Observed on a conflicted merge of develop into a feature branch: refused for
+# a section belonging to another stream, which arrived through the merge and
+# which no commit on the branch wrote.
+#
+# It only bites on a CONFLICTED merge, which is why it is easy to miss: git
+# runs no pre-commit hook for a merge that resolves automatically, so the same
+# merge is silently fine until the day it conflicts.
+#
+# The fix widens `current` rather than skipping the check. Skipping during a
+# merge would also stop looking at sections in NEITHER parent -- genuinely new
+# ones introduced by the merge commit itself, which is exactly where a stray
+# section is easiest to add by accident. A section present in any parent is not
+# new; one present in none still is.
+#
+# `git rev-parse --git-path` rather than a literal ".git/MERGE_HEAD": in a
+# WORKTREE `.git` is a file and the real path is
+# .git/worktrees/<name>/MERGE_HEAD, so the literal test reports "no merge in
+# progress" during a merge -- passing in a normal clone and doing nothing in a
+# worktree, silently, which is the worse of the two failures.
+#
+# Reading the FILE rather than `git rev-parse -q --verify MERGE_HEAD` because
+# --verify demands exactly one object and fails on an octopus merge, leaving
+# those refused for the original reason. The file carries one line per parent.
+merge_heads="$(git rev-parse --git-path MERGE_HEAD)"
+if [ -f "$merge_heads" ]; then
+    while IFS= read -r parent; do
+        [ -n "$parent" ] || continue
+        current="$(printf '%s\n%s\n' "$current" \
+            "$(git show "$parent:$PLAN" 2>/dev/null | heads_of)" | sort -u)"
+    done < "$merge_heads"
+fi
+
 # A first commit of the file has no HEAD side; everything in it is new, which is
 # the correct reading.
 added="$(comm -23 <(printf '%s\n' "$staged") <(printf '%s\n' "$current"))"
