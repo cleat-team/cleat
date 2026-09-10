@@ -432,7 +432,7 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		var nextWakeAt, createdAt sql.NullTime
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID, &wf.ReclaimCount); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		if nextWakeAt.Valid {

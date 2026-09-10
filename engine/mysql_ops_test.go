@@ -730,12 +730,18 @@ func TestMySQLStore_CompactHistory_BeginError(t *testing.T) {
 // ListWorkflows
 // ---------------------------------------------------------------------------
 
-// testWorkflowRow returns a mock row for ListWorkflows/GetWorkflowByID.
+// testWorkflowRow returns a mock row shaped like DialectMySQL.workflowInstanceColumns(),
+// which is the SELECT list of ListWorkflows. GetWorkflowByID reads a much longer
+// list and does not use this helper.
+//
+// reclaim_count is deliberately non-zero: it was added to the list by cleat#1123,
+// and a 0 here would be indistinguishable from the scanner dropping the column,
+// which is the whole defect #1123 reports.
 func testWorkflowRow(id, name string, version int64, status string, assignedTo string) [][]driver.Value {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	return [][]driver.Value{{
 		id, name, version, status, []byte(`{"in":1}`), assignedTo,
-		nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "",
+		nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", int64(4),
 	}}
 }
 
@@ -749,6 +755,14 @@ func TestMySQLStore_ListWorkflows_All(t *testing.T) {
 	}
 	if len(wfs) != 1 || wfs[0].ID != "wf-1" {
 		t.Errorf("unexpected: %+v", wfs)
+	}
+	// reclaim_count is the field cleat#1123 was about: it is a plain int64 with
+	// no omitempty, so before the fix the list serialised a confident 0 for every
+	// run -- "never reclaimed" and "this path does not read the column" looked the
+	// same to a caller. This is the only place the MySQL list scan is exercised
+	// without a live server.
+	if wfs[0].ReclaimCount != 4 {
+		t.Errorf("ReclaimCount = %d, want 4 (cleat#1123)", wfs[0].ReclaimCount)
 	}
 }
 

@@ -1142,7 +1142,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), ""},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", int64(4)},
 			},
 		},
 	}, nil)
@@ -1159,6 +1159,14 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 	if wfs[0].ID != "wf-1" || wfs[0].Status != "running" {
 		t.Errorf("unexpected workflow: %+v", wfs[0])
 	}
+	// reclaim_count is the field cleat#1123 was about: it is a plain int64 with
+	// no omitempty, so before the fix the list serialised a confident 0 for every
+	// run -- "never reclaimed" and "this path does not read the column" looked the
+	// same to a caller. This is the only place the Postgres list scan is exercised
+	// without a live server.
+	if wfs[0].ReclaimCount != 4 {
+		t.Errorf("ReclaimCount = %d, want 4 (cleat#1123)", wfs[0].ReclaimCount)
+	}
 }
 
 func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
@@ -1166,7 +1174,7 @@ func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0), int64(0), ""},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0), int64(0), "", int64(4)},
 			},
 		},
 	}, nil)
@@ -4685,7 +4693,7 @@ func TestPostgresStore_ListWorkflows_EmptyResult(t *testing.T) {
 func TestPostgresStore_ListWorkflows_StatusFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "status =", data: [][]driver.Value{
-			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "worker-1", nil, "", "", nil, nil, int64(0), int64(0), ""},
+			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "worker-1", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4)},
 		}},
 	}, nil)
 	defer db.Close()
@@ -4706,7 +4714,7 @@ func TestPostgresStore_ListWorkflows_StatusFilter(t *testing.T) {
 func TestPostgresStore_ListWorkflows_SearchFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "OR", data: [][]driver.Value{
-			{"wf-2", "my-wf", int64(1), "done", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), ""},
+			{"wf-2", "my-wf", int64(1), "done", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4)},
 		}},
 	}, nil)
 	defer db.Close()
@@ -4724,7 +4732,7 @@ func TestPostgresStore_ListWorkflows_SearchFilter(t *testing.T) {
 func TestPostgresStore_ListWorkflows_InputContainsFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "ILIKE", data: [][]driver.Value{
-			{"wf-3", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), ""},
+			{"wf-3", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4)},
 		}},
 	}, nil)
 	defer db.Close()
@@ -5211,7 +5219,7 @@ func TestBeginTxWithRLS_SetConfigError(t *testing.T) {
 func TestPostgresStore_ListWorkflows_ErrorContainsFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "error_msg", data: [][]driver.Value{
-			{"wf-1", "my-wf", int64(1), "failed", []byte(`{}`), "worker-1", nil, "ERR001", "some-op", "something failed", nil, int64(0), int64(0), ""},
+			{"wf-1", "my-wf", int64(1), "failed", []byte(`{}`), "worker-1", nil, "ERR001", "some-op", "something failed", nil, int64(0), int64(0), "", int64(4)},
 		}},
 	}, nil)
 	defer db.Close()
@@ -5232,7 +5240,7 @@ func TestPostgresStore_ListWorkflows_ErrorContainsFilter(t *testing.T) {
 func TestPostgresStore_ListWorkflows_WithOffset(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "OFFSET", data: [][]driver.Value{
-			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), ""},
+			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4)},
 		}},
 	}, nil)
 	defer db.Close()
