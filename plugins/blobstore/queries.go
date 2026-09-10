@@ -179,3 +179,32 @@ WHERE bc.ref_count <= 0 AND r.sha256 IS NULL`,
 LEFT JOIN workflow_blob_refs r ON bc.sha256 = r.sha256
 WHERE bc.ref_count <= 0 AND r.sha256 IS NULL`,
 }
+
+// Record a workflow's reference to a blob, ignoring a duplicate.
+//
+// "Insert unless it is already there" is spelled three different ways and none
+// of them is portable (cleat#1133):
+//
+//	PostgreSQL  INSERT ... ON CONFLICT DO NOTHING
+//	MySQL       INSERT IGNORE
+//	T-SQL       no equivalent -- an explicit NOT EXISTS guard
+//
+// The T-SQL arm uses `INSERT ... SELECT ... WHERE NOT EXISTS` rather than
+// MERGE. MERGE is the textbook answer and is the wrong one here: it is a
+// heavier statement with documented concurrency caveats, and this is a
+// best-effort reference count whose failure is already only logged.
+//
+// This is the class the adapter deliberately does not rewrite. It is not one
+// token mapping to another -- the three statements have different SHAPES, and
+// the T-SQL one names the table twice.
+var insertBlobRefIfAbsent = plugin.Query{
+	Default: `INSERT INTO workflow_blob_refs (workflow_id, sha256)
+VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+	MySQL: `INSERT IGNORE INTO workflow_blob_refs (workflow_id, sha256)
+VALUES ($1, $2)`,
+	MSSQL: `INSERT INTO workflow_blob_refs (workflow_id, sha256)
+SELECT $1, $2
+WHERE NOT EXISTS (
+    SELECT 1 FROM workflow_blob_refs WHERE workflow_id = $1 AND sha256 = $2
+)`,
+}

@@ -210,10 +210,8 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 	// while this workflow is still in-flight.
 	wfID := cc.WorkflowID
 	if wfID != "" {
-		if _, err := p.db.Exec(ctx, `
-			INSERT INTO workflow_blob_refs (workflow_id, sha256)
-			VALUES ($1, $2) ON CONFLICT DO NOTHING
-		`, wfID, sha256Bytes); err != nil {
+		if _, err := p.db.Exec(ctx, insertBlobRefIfAbsent.For(p.dialect),
+			wfID, sha256Bytes); err != nil {
 			p.logger.Warn("blobstore: record blob ref", "workflow_id", wfID, "sha256", sha256Hex, "error", err)
 		}
 	}

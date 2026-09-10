@@ -166,13 +166,8 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
-		SELECT sequence, event, created_at
-		FROM event_stream
-		WHERE tenant_id = $1 AND stream_id = $2 AND sequence > $3
-		ORDER BY sequence ASC
-		LIMIT $4
-	`, p.dialect), tid, streamID, fromSeq, limit)
+	rows, err := p.db.Query(r.Context(), queryStreamPage.For(p.dialect),
+		tid, streamID, fromSeq, limit)
 	if err != nil {
 		p.logger.Error("eventstore: read", "stream", streamID, "error", err)
 		p.writeError(w, 500, "failed to read events")

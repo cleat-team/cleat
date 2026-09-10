@@ -28,45 +28,15 @@
 package webhookingest
 
 import (
-	"context"
 	"testing"
 
-	"github.com/cleat-team/cleat/engine/testutil"
-	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 func TestTheBatchQueryRunsOnEveryDialect(t *testing.T) {
-	for _, be := range testutil.NewPluginTestBackends(t) {
-		t.Run(be.Name, func(t *testing.T) {
-			defer be.Cleanup()
-			ctx := context.Background()
-			dialect := plugin.Dialect(be.Dialect)
-			p := &Plugin{dialect: dialect}
-
-			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
-				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
-				t.Fatalf("webhookingest migrations on %s: %v", be.Name, err)
-			}
-
-			sqlText := plugin.Rebind(queryUnprocessedWebhookEvents.For(dialect), dialect)
-			rows, err := be.DB.QueryContext(ctx, sqlText)
-			if err != nil {
-				t.Fatalf("the batch query was rejected by a real %s server:\n  %v\n  %s",
-					be.Name, err, sqlText)
-			}
-			defer rows.Close()
-
-			// The statement is valid. Confirm it also SELECTS what the caller
-			// scans -- a valid statement returning the wrong shape fails later,
-			// at Scan, in the same silent background loop.
-			cols, err := rows.Columns()
-			if err != nil {
-				t.Fatalf("columns on %s: %v", be.Name, err)
-			}
-			if len(cols) != 8 {
-				t.Errorf("on %s the batch query returns %d columns, and processBatch "+
-					"scans 8: %v", be.Name, len(cols), cols)
-			}
-		})
-	}
+	plugintest.RunEveryArm(t, &Plugin{}, []plugintest.Arm{
+		// WantCols guards the second failure mode: a valid statement returning
+		// the wrong shape fails at Scan, later, in the same silent loop.
+		{Name: "queryUnprocessedWebhookEvents", Q: queryUnprocessedWebhookEvents, WantCols: 8},
+	})
 }

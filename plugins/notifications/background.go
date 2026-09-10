@@ -77,14 +77,7 @@ type webhookConfigRow struct {
 // time has elapsed, and attempts HTTP POST delivery for each.
 // Returns (attempted, succeeded, failed, error).
 func (p *Plugin) processDeliveries(ctx context.Context) (int, int, int, error) {
-	rows, err := p.db.Query(ctx, `
-			SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
-			FROM webhook_delivery d
-			WHERE d.status IN ('pending', 'retrying')
-			  AND d.next_attempt_at <= now()
-			ORDER BY d.next_attempt_at ASC
-			LIMIT 100
-		`)
+	rows, err := p.db.Query(ctx, queryDueDeliveries.For(p.dialect))
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("query deliveries: %w", err)
 	}
@@ -239,4 +232,32 @@ func nextBackoff(attemptCount int) time.Duration {
 	default:
 		return 1 * time.Hour
 	}
+}
+
+// Deliveries that are due: pending or retrying, with their next attempt in the
+// past.
+//
+// `LIMIT 100` has no T-SQL spelling (cleat#1133). `now()` does not either, but
+// that one the adapter handles -- plugin.Rebind rewrites it to
+// SYSUTCDATETIME(), so only the row limit needs an arm. The split is the same
+// one the adapter draws everywhere: a token that maps one-to-one is rewritten
+// centrally; a construct that moves to a different clause is written out.
+var queryDueDeliveries = plugin.Query{
+	Default: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
+FROM webhook_delivery d
+WHERE d.status IN ('pending', 'retrying')
+  AND d.next_attempt_at <= now()
+ORDER BY d.next_attempt_at ASC
+LIMIT 100`,
+	MySQL: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
+FROM webhook_delivery d
+WHERE d.status IN ('pending', 'retrying')
+  AND d.next_attempt_at <= now()
+ORDER BY d.next_attempt_at ASC
+LIMIT 100`,
+	MSSQL: `SELECT TOP 100 d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
+FROM webhook_delivery d
+WHERE d.status IN ('pending', 'retrying')
+  AND d.next_attempt_at <= now()
+ORDER BY d.next_attempt_at ASC`,
 }

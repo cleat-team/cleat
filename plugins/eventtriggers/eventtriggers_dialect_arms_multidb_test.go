@@ -22,53 +22,19 @@
 package eventtriggers
 
 import (
-	"context"
 	"testing"
 
-	"github.com/cleat-team/cleat/engine/testutil"
-	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 func TestEveryQueryArmRunsOnItsOwnDialect(t *testing.T) {
-	queries := []struct {
-		name string
-		q    plugin.Query
-		args int
-	}{
-		{"queryUnprocessedEvents", queryUnprocessedEvents, 0},
-		{"queryLatestUnprocessedEvent", queryLatestUnprocessedEvent, 2},
-	}
-
-	for _, be := range testutil.NewPluginTestBackends(t) {
-		t.Run(be.Name, func(t *testing.T) {
-			defer be.Cleanup()
-			ctx := context.Background()
-			dialect := plugin.Dialect(be.Dialect)
-			p := &Plugin{dialect: dialect}
-
-			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
-				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
-				t.Fatalf("eventtriggers migrations on %s: %v", be.Name, err)
-			}
-
-			for _, tc := range queries {
-				t.Run(tc.name, func(t *testing.T) {
-					sqlText := plugin.Rebind(tc.q.For(dialect), dialect)
-					args := make([]any, tc.args)
-					for i := range args {
-						// Values that bind on every dialect. The question is
-						// whether the STATEMENT is valid, not what it returns.
-						args[i] = "00000000-0000-0000-0000-000000000001"
-					}
-					rows, err := be.DB.QueryContext(ctx, sqlText, args...)
-					if err != nil {
-						t.Errorf("%s arm for %s was rejected by a real %s server:\n  %v\n  %s",
-							tc.name, be.Name, be.Name, err, sqlText)
-						return
-					}
-					_ = rows.Close()
-				})
-			}
-		})
-	}
+	plugintest.RunEveryArm(t, &Plugin{}, []plugintest.Arm{
+		{Name: "queryUnprocessedEvents", Q: queryUnprocessedEvents, WantCols: 5},
+		{
+			Name:     "queryLatestUnprocessedEvent",
+			Q:        queryLatestUnprocessedEvent,
+			Args:     []any{"00000000-0000-0000-0000-000000000001", "some.event"},
+			WantCols: 4,
+		},
+	})
 }

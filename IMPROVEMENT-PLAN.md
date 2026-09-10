@@ -10951,7 +10951,47 @@ silent loop.
 reverting the interval reddens `mysql` with `Error 1064`. Two faults in one statement need two
 falsifications, or the second is only assumed.
 
-**Still open in #1133 after this:** five `LIMIT` sites (`eventstore`, `notifications`,
-`jobqueue`'s `pollPending`, `pgvector`) and one `ON CONFLICT` (`blobstore`). `pgvector`'s six
-are PostgreSQL-only by declaration — it ships no `UpMySQL`/`UpMSSQL` migration arms — which is
-recorded and unresolved as cleat#1157.
+**THE REMAINING FOUR, DONE IN THE SAME PASS**, because they are the same decision applied to
+four more statements:
+
+| site | fault | arm written |
+|---|---|---|
+| `notifications/background.go` | `LIMIT 100` | `SELECT TOP 100` |
+| `eventstore/routes.go` | `LIMIT $4` — a **parameter**, not a literal | `OFFSET 0 ROWS FETCH NEXT $4 ROWS ONLY` |
+| `jobqueue/background.go` | `LIMIT 10` | `SELECT TOP 10` |
+| `blobstore/host_functions.go` | `ON CONFLICT DO NOTHING` | `INSERT … SELECT … WHERE NOT EXISTS` |
+
+`jobqueue`'s is `pollPending`, and it is the one that shows why a guard over `plugin.Query`
+*declarations* could never have closed this. §3.414 and §3.415 fixed the reaper's `UPDATE`,
+twice. This `SELECT` sits **eight lines above** one of the values they were fixing, as a raw
+literal, and was in neither. So after both repairs the reaper was correct and had nothing to
+reap on SQL Server, because no job could reach `running` there. **`plugin.Query` was never the
+boundary of the defect, only the boundary of the fix.** A check has to anchor on where SQL is
+*executed*, not where a dialect table is *declared*. Found by a peer session reading the file;
+confirmed here.
+
+`eventstore`'s is the one with a shape worth noting: the limit is a **parameter**, which rules
+out the usual `SELECT TOP n` (a variable needs `TOP (@p4)`), and the `$4` is deliberately left
+as `$4` in every arm — placeholders are the adapter's job, clause structure is the arm's.
+
+`blobstore`'s T-SQL arm uses `NOT EXISTS` rather than `MERGE`. `MERGE` is the textbook answer
+and the wrong one here: heavier, with documented concurrency caveats, for a best-effort
+reference count whose failure is already only logged.
+
+**ONE HELPER, NOT SIX COPIES.** `plugins/plugintest.RunEveryArm` runs each arm against a real
+server of its dialect, on the schema the plugin's own migrations build. It lives in its own
+package because the natural home cannot host it: `engine/testutil` is imported by `engine`'s
+and `plugin`'s own tests, so it can import neither — an import cycle **in the test binary**,
+which `go build` does not notice and `go vet` does. `plugins/*` are leaves, so a helper there
+can import everything it needs.
+
+**Falsifications, each red for its own reason and each naming an error a peer had measured in
+a live worker log:** reverting the eventtriggers boolean → `mssql`; reverting the webhookingest
+interval → `mysql`, `Error 1064`; reverting the jobqueue `TOP 10` → `mssql`,
+`Incorrect syntax near 'LIMIT'` — which was 61 of that log's errors, all attributed to
+`jobqueue: poll failed`.
+
+**Still open in #1133 after this:** `pgvector`'s six, which are PostgreSQL-only by declaration —
+it ships no `UpMySQL`/`UpMSSQL` migration arms, so its tables never exist elsewhere and its
+queries fail on a missing table either way. That the declaration is recorded and then never read
+is cleat#1157.
