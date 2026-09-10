@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/google/uuid"
 	"regexp"
 	"strings"
 )
@@ -141,4 +142,49 @@ func (j JSONColumn) Value() (driver.Value, error) {
 		return nil, nil
 	}
 	return string(j.Raw), nil
+}
+
+// GUID scans a UUID-valued column into a uuid.UUID on any dialect.
+//
+// SQL Server's UNIQUEIDENTIFIER is not stored or transmitted in RFC 4122 byte
+// order. Microsoft's GUID encoding is mixed-endian: the first three groups are
+// little-endian and the last two big-endian. go-mssqldb hands those 16 bytes
+// over unchanged, and uuid.UUID's own Scan accepts any 16-byte slice as-is --
+// so scanning succeeds, reports no error, and yields a DIFFERENT id.
+//
+// Measured against SQL Server 2022: a row whose id the server prints as
+// CAFBE5D6-8D74-4215-9908-9E01D7AE2654 scans into uuid.UUID as
+// d6e5fbca-748d-1542-9908-9e01d7ae2654 -- each of the first three groups
+// reversed, the last two intact.
+//
+// The consequence is silent rather than loud, which is why this survived: the
+// corrupted id is well-formed, so a following `WHERE id = ?` is valid SQL that
+// simply matches no row. The UPDATE reports success, having changed nothing.
+// See cleat#1133, where it left every claimed schedule unadvanced on SQL Server
+// with nothing in the log.
+//
+// Writes need no equivalent: uuid.UUID's Value returns the text form, which
+// SQL Server converts correctly.
+//
+// The discriminator is a 16-byte slice, which only SQL Server produces here:
+// this repo's UUID columns are UUID on PostgreSQL (lib/pq delivers the 36-byte
+// text form) and CHAR(36) on MySQL. A BINARY(16) column on either would need
+// its own handling rather than this one.
+type GUID struct {
+	uuid.UUID
+}
+
+func (g *GUID) Scan(src any) error {
+	b, ok := src.([]byte)
+	if !ok || len(b) != 16 {
+		// Text forms, and PostgreSQL/MySQL's own representations, are already
+		// correct -- defer to the standard behaviour.
+		return g.UUID.Scan(src)
+	}
+	swapped := make([]byte, 16)
+	copy(swapped, b)
+	swapped[0], swapped[1], swapped[2], swapped[3] = b[3], b[2], b[1], b[0]
+	swapped[4], swapped[5] = b[5], b[4]
+	swapped[6], swapped[7] = b[7], b[6]
+	return g.UUID.Scan(swapped)
 }

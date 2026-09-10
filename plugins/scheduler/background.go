@@ -22,10 +22,14 @@ var dueSchedulesQuery = plugin.Query{
 		FROM schedules
 		WHERE enabled = true AND next_run_at <= NOW()
 		FOR UPDATE SKIP LOCKED`,
+	// enabled is BIT here, and T-SQL has no boolean literal: a bare `true` parses
+	// as an identifier and the query fails with "Invalid column name 'true'".
+	// now() needs no such treatment -- plugin.Rebind rewrites it to
+	// SYSUTCDATETIME() on this dialect, which is why only the boolean was wrong.
 	MSSQL: `
 		SELECT id, tenant_id, name, cron, workflow_name, input, next_run_at
 		FROM schedules WITH (UPDLOCK, READPAST, ROWLOCK)
-		WHERE enabled = true AND next_run_at <= now()`,
+		WHERE enabled = 1 AND next_run_at <= now()`,
 }
 
 // Run starts the background scheduler loop. Every 60 seconds it queries the
@@ -107,16 +111,35 @@ func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
 	for rows.Next() {
 		var s dueSchedule
 		var nextRunAt *time.Time
-		if err := rows.Scan(&s.id, &s.tenantID, &s.name, &s.cron,
+		// plugin.GUID, not uuid.UUID: SQL Server returns UNIQUEIDENTIFIER in
+		// mixed-endian byte order, which scans without error into a different
+		// id. See its doc comment.
+		var id, tenantID plugin.GUID
+		if err := rows.Scan(&id, &tenantID, &s.name, &s.cron,
 			&s.workflowName, &s.input, &nextRunAt); err != nil {
 			p.logger.Error("scheduler: scan due schedule", "error", err)
 			continue
 		}
+		s.id, s.tenantID = id.UUID, tenantID.UUID
 		due = append(due, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		p.logger.Error("scheduler: rows iteration error", "error", err)
+	}
 
-		// Advance next_run_at under the transaction lock so other
-		// workers skip this row even if this worker crashes before
-		// calling StartWorkflow.
+	// Advance next_run_at under the transaction lock so other workers skip
+	// these rows even if this worker crashes before calling StartWorkflow.
+	//
+	// This runs after the cursor is drained and closed, and used to run inside
+	// the scan loop above. A transaction holds a single connection, so issuing
+	// an Exec on it while its own Rows are still open fails outright -- "pq:
+	// there is already a query being processed on this connection". Every one
+	// of these updates was therefore lost, on every dialect, and the error went
+	// to the log and nowhere else. A schedule that is never advanced stays due,
+	// so it fired again on the next poll and its cron expression had no effect
+	// on how often it ran.
+	for _, s := range due {
 		now := time.Now()
 		next := nextRun(s.cron, now)
 		var nextRunAtUpdate *time.Time
@@ -131,10 +154,6 @@ func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
 			p.logger.Error("scheduler: update schedule after claim",
 				"id", s.id, "error", err)
 		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		p.logger.Error("scheduler: rows iteration error", "error", err)
 	}
 
 	if err := tx.Commit(); err != nil {
