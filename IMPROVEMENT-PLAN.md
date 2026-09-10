@@ -10649,16 +10649,54 @@ Note the rejection case, which is a discriminator rather than an assertion: `max
 with kind `rejections`, while one that narrows never asks for `alpha` again and refuses the second
 delivery as `out_of_set`. Both are errors; only the *kind* separates them.
 
-#### What is not done
+#### What is not done, and why the first version of this paragraph was wrong
 
-Java and AssemblyScript are unfixed and do not consume the table. That is a toolchain limit, not a
-judgement: `crates/cleat-java` has neither `gradlew` nor a `gradle` on this machine, and neither
-change could have been falsified locally. Shipping four SDK edits with two of them unverified would
-have been worse than shipping two. `packages/cleat-as` additionally needs the loop extracted the same
-way, since `awaitSignalsWithQuorumMs` takes `namesJson: string` and narrowing means parsing and
-re-serialising a JSON array.
+Java and AssemblyScript are unfixed and do not consume the table. Both are open on cleat#1136; the
+Java half was claimed by another session within the hour, from this section.
 
-    # the two SDKs that do not yet consume the shared table:
+**This paragraph first said `crates/cleat-java` has "neither `gradlew` nor a `gradle` on this
+machine", and half of that was false.** There is no `gradlew` — the `Makefile` hardcodes
+`./gradlew test`, so `make test` fails with `No such file or directory`, which is the wall anyone
+meets first. But **system gradle is installed and works**:
+
+    $ gradle --version | sed -n 3p          # Gradle 9.6.0
+    $ cd crates/cleat-java && gradle test --console=plain
+    BUILD SUCCESSFUL in 4s
+
+So the blocker was the Makefile's hardcoded wrapper path, not a missing toolchain, and the Java
+half was falsifiable here all along.
+
+**The probe that produced the wrong answer is worth more than the correction.** It was:
+
+    for t in cargo python3 java mvn gradle node npm; do
+      command -v $t >/dev/null && $t --version 2>&1 | head -1 || echo MISSING
+    done
+
+`gradle --version` **leads with a blank line** — the version is on line 3, between two rules — so
+`head -1` returned the empty string. Every other tool in that loop prints its version on line 1.
+The row read `gradle` followed by nothing, which is not what "MISSING" looks like and is not what
+"present" looks like either; it is a third state the probe had no way to express.
+
+This is the *"a tool applied to a format it does not model"* row in CLAUDE.md, in its cheapest
+possible form: `head -1` assumes version output starts on line 1. Two things make it worse than an
+ordinary parsing slip:
+
+* **The anomaly was seen and not chased.** The blank row was noticed at the time and read as noise.
+  CLAUDE.md says an absence is data — *"a probe that does not fire is a measurement, not a dead
+  end"* — and this is that rule arriving as a blank field rather than a silent function.
+* **It erred in the direction that flattered the finding.** A missing toolchain justified narrowing
+  scope, so the wrong reading was the convenient one, and nothing re-derives a number that lets you
+  stop. That asymmetry is already recorded in CLAUDE.md against a UTC-offset error and a Rust
+  surface scan; this is the same shape with a shell loop.
+
+The decision it supported was still right — two SDKs verified beats four with two unfalsifiable —
+but it was right by luck about the reason, and a reason stated in a plan file is what the next
+session acts on.
+
+AS additionally needs the loop extracted the same way, since `awaitSignalsWithQuorumMs` takes
+`namesJson: string` and narrowing means parsing and re-serialising a JSON array.
+
+    # the SDKs that do not yet consume the shared table:
     for d in crates/cleat-java packages/cleat-as; do
       printf '%-24s %s\n' "$d" "$(git grep -l quorum_cases.json -- "$d" | wc -l | tr -d ' ')"
     done
