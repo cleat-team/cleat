@@ -10564,6 +10564,174 @@ the mutation is now checked to have changed the file before the outcome is read.
 same bytes produces the *wrong* id, so the fixture is known to reproduce the defect rather than
 being satisfied by any implementation.
 
+---
+
+### 3.318 A quorum counted deliveries in every SDK, and nothing compared them — 🔶 **PARTLY FIXED 2026-09-10 — Rust and Python done, Java and AssemblyScript open** (cleat#1136)
+
+`await_signals_with_quorum` passed the **full** name set to `await_signals_ms` on every iteration,
+so three deliveries of one name satisfied a quorum of three with the other two never sent. Fixed in
+Go by #1135 (cleat#1132) and still wrong in the other four, which is the part worth writing down:
+**the fix did not travel, because nothing in the tree could notice that it had not.**
+
+#### Rust is the one an auditor would have skipped
+
+`crates/cleat-sdk/src/host_calls.rs` carried, above the line that collects the names:
+
+    // Gather signal names not yet received as a &[&str].
+    let remaining_names: Vec<&str> = signal_names.iter().map(|s| s.as_str()).collect();
+
+The comment describes a `.filter()` that is not in the code. CLAUDE.md records the trap where a
+`grep` is satisfied by a *retraction* — a sentence denying the thing it records. This is the mirror:
+**an affirmation that nothing implements.** A reader auditing Rust for this defect reads that
+comment and moves on, and the more careful the reader, the more reliably it works.
+
+#### The mechanism, which is the point of the change
+
+Five copies of one algorithm cannot share an implementation, so the fix is unavoidably a sweep. But
+the reason it went wrong five times identically and stayed wrong is a mechanism: **no test compared
+SDK-level composite host calls across languages.** `hostabi_runtime_parity_test.go` compares the two
+host ABI *registrations* and has nothing to say here — every SDK binds `await_signals_ms` correctly.
+What differs is the logic each layers on top of it.
+
+`tests/conformance/quorum_cases.json` is that comparison: six behavioural cases, consumed by each
+SDK's own test runner. It carries **no message text** — the SDKs word their errors differently and
+always will — so each case names a semantic `error_kind` and each consumer maps that to its own
+wording in one place.
+
+Two properties it needs, and both were arrived at the hard way:
+
+* **It asserts what the loop ASKED FOR, not only what it returned.** `awaited_sets` is the exact
+  sequence of name sets handed to each await. Checking the outcome alone passes against an
+  implementation that fails for an unrelated reason — which is how the polite/impolite distinction
+  below stays honest.
+* **Two host modes.** A *polite* host delivers a queued name only while that name is still awaited,
+  which is what the engine does; it exercises the **narrowing**. An *impolite* host delivers
+  whatever is queued; it exercises the **out-of-set guard**. A fix resting on only the polite case
+  is a fix resting on the host's manners.
+
+#### Why Go runs the table too, when Go was already fixed
+
+`cleat/quorum_conformance_test.go` adds nothing to Go's own coverage — `quorum_counts_voters_test.go`
+already pins the behaviour. It is there to test **the table**. A table written by the same session
+that writes the ports encodes that session's understanding, and two ports agreeing with it proves
+only that they were built from it. Go is the implementation that was reviewed and merged
+independently, so it is the one that could have disagreed. It did not, on all six cases including
+every `awaited_sets` sequence.
+
+#### The loop had to be extracted before it could be tested at all
+
+Every method on Rust's `HostCalls` calls an `extern "C"` import that exists only inside a cleat WASM
+runtime — the stop-bit tests in that same file say so, and are held from the Go side for exactly
+that reason. That is survivable for a bit-decoding helper. It was not survivable here: **cleat#1132
+is a logic defect in this loop, and no test in any language could reach the logic to fail on it.**
+So `HostCalls::quorum_over` (Rust) and `_quorum_over` (Python) take the await as a parameter. The
+remaining-time function is injected for the same reason and is not a clock abstraction — tests hand
+it a constant so the deadline never fires, leaving the host's own `timed_out` as the only source of
+a timeout.
+
+#### Falsification
+
+Each of the three parts was reverted **alone**, because reverting a multi-part fix together goes red
+and reads as confirmation of the whole thing (CLAUDE.md, and #1138 is where that was learned):
+
+| reverted, alone | Rust | Python |
+|---|---|---|
+| the narrowing | `expected an error, got ["alpha","alpha","alpha"]` | 5 of 6 cases red |
+| the unsatisfiable guard | kind `timeout`, want `unsatisfiable` | same, 1 case |
+| the out-of-set guard | `expected an error, got ["alpha","alpha","alpha"]` | 2 cases |
+
+And the **known-positive**, which is the check the table itself needs: one `awaited_sets` entry was
+edited to say the wrong thing, and Go and Rust both went red naming that field. A consumer that
+cannot fail on a wrong table is not comparing anything.
+
+Note the rejection case, which is a discriminator rather than an assertion: `max_rejections` is 1 and
+`alpha` rejects twice, so an implementation that does **not** narrow counts two rejections and fails
+with kind `rejections`, while one that narrows never asks for `alpha` again and refuses the second
+delivery as `out_of_set`. Both are errors; only the *kind* separates them.
+
+#### The table's own consumers can go stale, and each build system hides it differently
+
+Found by the session porting the table to Java (cleat#1160), and it is the sharpest form of this
+whole section: **the test that exists to validate the table was the one that did not re-run when
+the table changed.**
+
+Their symptom was `BUILD SUCCESSFUL in 578ms` against a deliberately corrupted table — green, and
+the *duration* was the only field that said the tests had not run. `tests/conformance` is at the
+repo root and the test reads it at runtime, which gradle cannot infer, so `:test` was up to date
+whenever only the table had changed. Fixed by declaring the file as a task input.
+
+They reported Go and Python as unaffected. **Python is; Go is not, and this was measured rather
+than reasoned about.** Go's test cache tracks only files opened *inside the package directory*, and
+the table is at the repo root while the consumer is in `cleat/`, so the read crosses `..` and is
+invisible to the cache. A throwaway module, one test reading two files, each change made alone from
+a warm cache:
+
+| change | `go test` |
+|---|---|
+| nothing | `ok (cached)` |
+| the file **outside** the package dir | `ok (cached)` — not noticed |
+| the file **inside** the package dir | `ok 0.205s` — re-ran |
+
+Confirmed against the real test: with one `awaited_sets` entry corrupted, `go test .` returned
+`(cached)` and passed. `ci.yml` passes `-count=1` to every matrix package, so **CI is sound and the
+exposure is a local run** — which is why this is a comment in the test rather than a symlink into
+`cleat/testdata/` (the repo tracks no symlinks today, and that is a precedent worth more than a
+local-only staleness). The tell is the word `(cached)` where a duration should be.
+
+Three build systems, three different concealments: gradle hid it in the **duration**, Go hides it
+in a **parenthesis**, and pytest does not cache at all. None of the three announces it as an error.
+
+#### What is not done, and why the first version of this paragraph was wrong
+
+Java and AssemblyScript are unfixed and do not consume the table. Both are open on cleat#1136; the
+Java half was claimed by another session within the hour, from this section.
+
+**This paragraph first said `crates/cleat-java` has "neither `gradlew` nor a `gradle` on this
+machine", and half of that was false.** There is no `gradlew` — the `Makefile` hardcodes
+`./gradlew test`, so `make test` fails with `No such file or directory`, which is the wall anyone
+meets first. But **system gradle is installed and works**:
+
+    $ gradle --version | sed -n 3p          # Gradle 9.6.0
+    $ cd crates/cleat-java && gradle test --console=plain
+    BUILD SUCCESSFUL in 4s
+
+So the blocker was the Makefile's hardcoded wrapper path, not a missing toolchain, and the Java
+half was falsifiable here all along.
+
+**The probe that produced the wrong answer is worth more than the correction.** It was:
+
+    for t in cargo python3 java mvn gradle node npm; do
+      command -v $t >/dev/null && $t --version 2>&1 | head -1 || echo MISSING
+    done
+
+`gradle --version` **leads with a blank line** — the version is on line 3, between two rules — so
+`head -1` returned the empty string. Every other tool in that loop prints its version on line 1.
+The row read `gradle` followed by nothing, which is not what "MISSING" looks like and is not what
+"present" looks like either; it is a third state the probe had no way to express.
+
+This is the *"a tool applied to a format it does not model"* row in CLAUDE.md, in its cheapest
+possible form: `head -1` assumes version output starts on line 1. Two things make it worse than an
+ordinary parsing slip:
+
+* **The anomaly was seen and not chased.** The blank row was noticed at the time and read as noise.
+  CLAUDE.md says an absence is data — *"a probe that does not fire is a measurement, not a dead
+  end"* — and this is that rule arriving as a blank field rather than a silent function.
+* **It erred in the direction that flattered the finding.** A missing toolchain justified narrowing
+  scope, so the wrong reading was the convenient one, and nothing re-derives a number that lets you
+  stop. That asymmetry is already recorded in CLAUDE.md against a UTC-offset error and a Rust
+  surface scan; this is the same shape with a shell loop.
+
+The decision it supported was still right — two SDKs verified beats four with two unfalsifiable —
+but it was right by luck about the reason, and a reason stated in a plan file is what the next
+session acts on.
+
+AS additionally needs the loop extracted the same way, since `awaitSignalsWithQuorumMs` takes
+`namesJson: string` and narrowing means parsing and re-serialising a JSON array.
+
+    # the SDKs that do not yet consume the shared table:
+    for d in crates/cleat-java packages/cleat-as; do
+      printf '%-24s %s\n' "$d" "$(git grep -l quorum_cases.json -- "$d" | wc -l | tr -d ' ')"
+    done
 ### 3.418 Rebind could not tell SQL from a string inside SQL, so booleans were unsafe to add — ✅ **FIXED 2026-09-10** (cleat#1133)
 
 **Scope note first, because this is one of four parts and a reader will otherwise

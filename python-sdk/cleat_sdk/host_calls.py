@@ -1063,6 +1063,96 @@ if not _USING_WASM:
 # ========================================================================
 
 
+def _quorum_over(
+    signal_names: list[str],
+    min_count: int,
+    max_rejections: int,
+    remaining_ms: Callable[[], int],
+    await_signals: Callable[[list[str], int], SignalResult],
+) -> list[SignalResult]:
+    """The quorum loop itself, over an injected ``await_signals``.
+
+    Split out from :meth:`HostCalls.await_signals_with_quorum` so it can be
+    TESTED without a host. cleat#1132 was a logic defect in this loop, present
+    in all five SDKs at once, and no test in any language could reach the logic
+    to fail on it. The shared cases live in ``tests/conformance/quorum_cases.json``
+    and every SDK runs them (cleat#1136).
+
+    ``remaining_ms`` is injected for the same reason and is not a clock
+    abstraction -- tests hand it a constant so the deadline never fires,
+    leaving the host's own ``timed_out`` as the only source of a timeout.
+    """
+    # A quorum of N over a set of M names is unsatisfiable when N > M, and it
+    # used to spin to the timeout and report "got k/N signals" -- a message
+    # that describes a slow sender rather than a caller asking for something
+    # arithmetic forbids. Once names narrow it is guaranteed to fail, so it is
+    # refused here as the programming error it is.
+    if min_count > len(signal_names):
+        raise RuntimeError(
+            f"await_signals_with_quorum: quorum of {min_count} over "
+            f"{len(signal_names)} name(s) {signal_names} is unsatisfiable; "
+            f"a quorum counts DISTINCT names, so it cannot exceed the size of the set"
+        )
+
+    results: list[SignalResult] = []
+    rejection_count = 0
+
+    # COPIED, not aliased. ``remaining`` narrows below and ``signal_names``
+    # belongs to the caller -- a workflow may still be holding that list.
+    remaining = list(signal_names)
+
+    while len(results) < min_count:
+        wait_ms = remaining_ms()
+        if wait_ms <= 0:
+            raise RuntimeError(f"quorum timeout: got {len(results)}/{min_count} signals")
+
+        result = await_signals(list(remaining), wait_ms)
+        if result.timed_out:
+            raise RuntimeError(f"quorum timeout: got {len(results)}/{min_count} signals")
+
+        # A name outside the requested set has not been asked for, and counting
+        # it would reinstate the defect through the other door: narrowing what
+        # we ASK for is only half the fix if we accept whatever arrives.
+        #
+        # A well-behaved host returns one of the names it was given, so this is
+        # unreachable through the engine's own await. It is here because the fix
+        # must not rest on that politeness.
+        if result.name not in remaining:
+            raise RuntimeError(
+                f"await_signals_with_quorum: awaited {remaining} and received "
+                f"{result.name!r}, which is not among them; a quorum counts "
+                f"distinct names and cannot count this one"
+            )
+
+        results.append(result)
+
+        # Narrow the set: this name has voted, and a quorum counts VOTERS.
+        #
+        # Without this, the full ``signal_names`` went to every await, so three
+        # deliveries of one name satisfied a quorum of three with the other two
+        # never sent (cleat#1132).
+        #
+        # A rejection narrows too. A voter that votes no has voted, and leaving
+        # it in the set would let one rejector trip ``max_rejections`` alone --
+        # the same defect wearing the other outcome.
+        remaining.remove(result.name)
+
+        # Check for rejection if max_rejections >= 0.
+        if max_rejections >= 0 and result.payload:
+            try:
+                payload_data = json.loads(result.payload)
+                if isinstance(payload_data, dict) and payload_data.get("rejected"):
+                    rejection_count += 1
+                    if rejection_count > max_rejections:
+                        raise RuntimeError(
+                            f"quorum exceeded max rejections ({max_rejections})"
+                        )
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    return results
+
+
 class HostCalls:
     """High-level Python wrapper around all 29 cleat WASM host function imports.
 
@@ -3206,34 +3296,13 @@ class HostCalls:
             If the timeout expires or max rejections is exceeded.
         """
         deadline_ns = time.monotonic_ns() + timeout_ms * 1_000_000
-        results: list[SignalResult] = []
-        rejection_count = 0
-
-        while len(results) < min_count:
-            remaining_ms = max(0, (deadline_ns - time.monotonic_ns()) // 1_000_000)
-
-            if remaining_ms <= 0:
-                raise RuntimeError(f"quorum timeout: got {len(results)}/{min_count} signals")
-
-            result = self.await_signals_ms(signal_names, remaining_ms)
-            if result.timed_out:
-                raise RuntimeError(f"quorum timeout: got {len(results)}/{min_count} signals")
-            results.append(result)
-
-            # Check for rejection if max_rejections >= 0.
-            if max_rejections >= 0 and result.payload:
-                import json
-
-                try:
-                    payload_data = json.loads(result.payload)
-                    if isinstance(payload_data, dict) and payload_data.get("rejected"):
-                        rejection_count += 1
-                        if rejection_count > max_rejections:
-                            raise RuntimeError(f"quorum exceeded max rejections ({max_rejections})")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-        return results
+        return _quorum_over(
+            signal_names,
+            min_count,
+            max_rejections,
+            lambda: max(0, (deadline_ns - time.monotonic_ns()) // 1_000_000),
+            self.await_signals_ms,
+        )
 
     # --------------------------------------------------------------------
     # 35. signal_workflow — send a signal to another workflow

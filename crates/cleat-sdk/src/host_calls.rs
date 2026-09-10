@@ -996,28 +996,112 @@ impl HostCalls {
     /// reads like a quorum error for a segment that merely needs to resume.
     pub fn await_signals_with_quorum(&self, signal_names: &[String], min_count: i32, max_rejections: i32, timeout_ms: i64) -> Result<Vec<SignalResult>, CallError> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+        Self::quorum_over(
+            signal_names,
+            min_count,
+            max_rejections,
+            timeout_ms,
+            || deadline.saturating_duration_since(std::time::Instant::now()).as_millis() as i64,
+            |names, remaining| self.await_signals_ms(names, remaining),
+        )
+    }
+
+    /// The quorum loop itself, over an injected `await_signals` rather than the
+    /// `extern "C"` import.
+    ///
+    /// Split out so it can be TESTED. Every other method on this type calls an
+    /// import that exists only inside a cleat WASM runtime, which is why the
+    /// stop-bit tests in this file say they "cannot drive the HostCalls
+    /// methods" and are held from the Go side instead. That was survivable for
+    /// a bit-decoding helper. It was not survivable here: cleat#1132 is a
+    /// LOGIC defect in this loop, in all five SDKs at once, and no test in any
+    /// language could reach the logic to fail on it.
+    ///
+    /// `remaining_ms` is injected for the same reason and is not a clock
+    /// abstraction -- tests hand it a constant so the deadline never fires,
+    /// leaving the host's own `timed_out` as the only source of a timeout.
+    pub(crate) fn quorum_over<R, A>(
+        signal_names: &[String],
+        min_count: i32,
+        max_rejections: i32,
+        timeout_ms: i64,
+        remaining_ms: R,
+        mut await_signals: A,
+    ) -> Result<Vec<SignalResult>, CallError>
+    where
+        R: Fn() -> i64,
+        A: FnMut(&[&str], i64) -> Result<AwaitedSignal, CallError>,
+    {
+        // A quorum of N over a set of M names is unsatisfiable when N > M, and
+        // it used to spin to the timeout and report "got k/N signals" -- a
+        // message that describes a slow sender rather than a caller asking for
+        // something arithmetic forbids. Once names narrow it is guaranteed to
+        // fail, so it is refused here as the programming error it is.
+        if min_count > signal_names.len() as i32 {
+            return Err(CallError::Failed(format!(
+                "await_signals_with_quorum: quorum of {} over {} name(s) {:?} is unsatisfiable; \
+                 a quorum counts DISTINCT names, so it cannot exceed the size of the set",
+                min_count, signal_names.len(), signal_names)));
+        }
+
         let mut results: Vec<SignalResult> = Vec::new();
         let mut rejection_count = 0;
 
+        // CLONED, not borrowed-and-filtered in place. `remaining` narrows below,
+        // and `signal_names` belongs to the caller -- a workflow may still be
+        // holding it.
+        let mut remaining: Vec<String> = signal_names.to_vec();
+
         while (results.len() as i32) < min_count {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.as_millis() == 0 {
+            let remaining_time = remaining_ms();
+            if remaining_time <= 0 {
                 return Err(CallError::Failed(format!("quorum timeout after {}ms: got {}/{} signals", timeout_ms, results.len(), min_count)));
             }
 
-            // Gather signal names not yet received as a &[&str].
-            let remaining_names: Vec<&str> = signal_names.iter().map(|s| s.as_str()).collect();
-            let sig = self.await_signals_ms(&remaining_names, remaining.as_millis() as i64)?;
+            let awaited: Vec<&str> = remaining.iter().map(|s| s.as_str()).collect();
+            let sig = await_signals(&awaited, remaining_time)?;
             if sig.timed_out {
                 return Err(CallError::Failed(format!("quorum timeout after {}ms: got {}/{} signals", timeout_ms, results.len(), min_count)));
             }
-            let payload = sig.payload.clone();
 
+            // A name outside the requested set has not been asked for, and
+            // counting it would reinstate the defect through the other door:
+            // narrowing what we ASK for is only half the fix if we accept
+            // whatever arrives.
+            //
+            // A well-behaved host returns one of the names it was given, so
+            // this is unreachable through the engine's own await. It is here
+            // because the fix must not rest on that politeness.
+            if !remaining.iter().any(|n| n == &sig.name) {
+                return Err(CallError::Failed(format!(
+                    "await_signals_with_quorum: awaited {:?} and received {:?}, which is not \
+                     among them; a quorum counts distinct names and cannot count this one",
+                    remaining, sig.name)));
+            }
+
+            let payload = sig.payload.clone();
+            let name = sig.name.clone();
             results.push(SignalResult {
                 name: sig.name,
                 payload: sig.payload,
                 timed_out: false,
             });
+
+            // Narrow the set: this name has voted, and a quorum counts VOTERS.
+            //
+            // Without this, every await was handed the full `signal_names`, so
+            // three deliveries of one name satisfied a quorum of three with the
+            // other two never sent (cleat#1132). The variable here was called
+            // `remaining_names` and the comment above it described a `.filter()`
+            // that was not in the code -- an affirmation nothing implemented,
+            // which is why Rust was the SDK an auditor was most likely to skip.
+            //
+            // A rejection narrows too. A voter that votes no has voted, and
+            // leaving it in the set would let one rejector trip max_rejections
+            // alone -- the same defect wearing the other outcome.
+            if let Some(i) = remaining.iter().position(|n| n == &name) {
+                remaining.remove(i);
+            }
 
             // Check for rejection if max_rejections >= 0.
             if max_rejections >= 0 && !payload.is_empty() {
@@ -2048,5 +2132,146 @@ mod stop_bit_tests {
         let (_, _, timed_out, _) = memory::decode_await_signals_result(memory::SUSPEND_STOP_BIT);
         assert!(timed_out, "bit 31 no longer lands in the await-signals timed-out field; \
             re-check which field it overlaps and update the ordering note on stop_requested");
+    }
+}
+
+#[cfg(test)]
+mod quorum_conformance {
+    use super::*;
+    use serde_json::Value;
+
+    // The table is shared with every other SDK, embedded at compile time so a
+    // test binary run from any directory reads the same bytes. cleat#1136: the
+    // quorum defect was identical in five languages and no test compared them,
+    // which is why it survived a fix in one of them.
+    const CASES: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/conformance/quorum_cases.json"
+    ));
+
+    /// Map this SDK's wording onto the table's semantic tag.
+    ///
+    /// The table deliberately does not carry message text -- five SDKs word
+    /// these differently and always will. This function is the translation, and
+    /// it is the only place in the Rust tests that knows a message string.
+    fn kind_of(err: &CallError) -> String {
+        let msg = format!("{:?}", err);
+        for (needle, kind) in [
+            ("unsatisfiable", "unsatisfiable"),
+            ("which is not", "out_of_set"),
+            ("quorum timeout", "timeout"),
+            ("max rejections", "rejections"),
+        ] {
+            if msg.contains(needle) {
+                return kind.to_string();
+            }
+        }
+        format!("UNCLASSIFIED({})", msg)
+    }
+
+    fn strings(v: &Value) -> Vec<String> {
+        v.as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn every_case_in_the_shared_table_holds() {
+        let doc: Value = serde_json::from_str(CASES).expect("the shared table must parse");
+        let cases = doc["cases"].as_array().expect("cases must be an array");
+        assert!(!cases.is_empty(), "an empty table would pass vacuously");
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let signal_names = strings(&case["signal_names"]);
+            let min_count = case["min_count"].as_i64().unwrap() as i32;
+            let max_rejections = case["max_rejections"].as_i64().unwrap() as i32;
+            let polite = case["host"].as_str().unwrap() == "polite";
+            let deliveries = strings(&case["deliveries"]);
+            let payload_for = |n: &str| -> String {
+                case.get("payloads")
+                    .and_then(|p| p.get(n))
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("{\"ok\":true}")
+                    .to_string()
+            };
+            let expect = &case["expect"];
+
+            // The caller's own collection, kept to check it is not edited.
+            let caller_set = signal_names.clone();
+
+            let mut asked: Vec<Vec<String>> = Vec::new();
+            let mut i = 0usize;
+            let timed_out = AwaitedSignal {
+                name: String::new(),
+                payload: String::new(),
+                timed_out: true,
+                reply_to: String::new(),
+            };
+
+            // remaining_ms is a constant: the deadline must never be what ends a
+            // case, so the host's own timed_out is the only source of a timeout
+            // and the assertions are about the loop rather than about the clock.
+            let outcome = HostCalls::quorum_over(
+                &signal_names,
+                min_count,
+                max_rejections,
+                60_000,
+                || 60_000,
+                |want, _ms| {
+                    asked.push(want.iter().map(|s| s.to_string()).collect());
+                    while i < deliveries.len() {
+                        let n = deliveries[i].clone();
+                        i += 1;
+                        // A polite host hands over a queued name only while that
+                        // name is still awaited, which is what the engine does.
+                        // An impolite one hands over whatever is queued.
+                        if !polite || want.iter().any(|w| *w == n) {
+                            return Ok(AwaitedSignal {
+                                payload: payload_for(&n),
+                                name: n,
+                                timed_out: false,
+                                reply_to: String::new(),
+                            });
+                        }
+                    }
+                    Ok(timed_out.clone())
+                },
+            );
+
+            match expect["outcome"].as_str().unwrap() {
+                "ok" => {
+                    let got = outcome.unwrap_or_else(|e| {
+                        panic!("{}: expected success, got {:?}", name, e)
+                    });
+                    let got_names: Vec<String> = got.iter().map(|r| r.name.clone()).collect();
+                    assert_eq!(got_names, strings(&expect["result_names"]), "{}: result names", name);
+                }
+                "error" => {
+                    let err = match outcome {
+                        Ok(got) => {
+                            let got_names: Vec<String> = got.iter().map(|r| r.name.clone()).collect();
+                            panic!("{}: expected an error, got {:?}", name, got_names)
+                        }
+                        Err(e) => e,
+                    };
+                    assert_eq!(
+                        kind_of(&err),
+                        expect["error_kind"].as_str().unwrap(),
+                        "{}: failed for the wrong reason: {:?}", name, err
+                    );
+                }
+                other => panic!("{}: unknown expected outcome {:?}", name, other),
+            }
+
+            // The narrowing is the mechanism, and this is the assertion that
+            // sees it. Checking only the outcome passes against an
+            // implementation that fails for an unrelated reason.
+            let want_asked: Vec<Vec<String>> = expect["awaited_sets"]
+                .as_array().unwrap().iter().map(strings).collect();
+            assert_eq!(asked, want_asked, "{}: the sets it awaited", name);
+
+            if expect.get("caller_set_unchanged").and_then(|v| v.as_bool()).unwrap_or(false) {
+                assert_eq!(signal_names, caller_set, "{}: the caller's set was edited", name);
+            }
+        }
     }
 }
