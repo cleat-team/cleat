@@ -10278,3 +10278,57 @@ assertion:
 
 The second reproduces the original asymmetry exactly, which is what shows the test is about the
 disagreement rather than about either arm.
+
+---
+
+### 3.413 The orphan-import scan judged the export wrapper's imports against the workflow's closure — ✅ **FIXED 2026-09-09** (cleat#1125)
+
+Every WASM build warned that `cleat_complete` and `cleat_poll_work` were orphaned imports, including
+builds of a workflow the toolchain itself reported as using **zero** host functions.
+
+- `wasm/generator.go` writes both into every shim unconditionally — *"Always include
+  `cleat_complete` — the export wrapper calls it"*. They are the **wrapper's**, not the workflow's.
+- `wasm/scan.go`'s `FindCleatOrphanedImports` compares every `cleat_`-prefixed import against
+  `usage.Used`, the **workflow's** computed closure, which cannot contain them by construction.
+
+Two halves each correct about what they own, with nothing reconciling them. The same shape as
+§3.410's cascade and as the `GetWorkflowByID` / `ListWorkflows` field asymmetry.
+
+#### A guard that never disagrees carries no information, in either direction
+
+Everything this file has recorded lately is a check that was too **quiet** — silent about a region,
+blind in its denominator. This one is too **loud**, and it is the same defect: the output does not
+depend on the input, so it can be produced without looking.
+
+**And the harm is not the noise.** A true `W003` — *"your single string parameter receives the ENTIRE
+input JSON"* — was emitted correctly and predicted the exact failure that surfaced two layers later
+as a result stored as `{}`. It went unread and was nearly filed as a cleat defect, because it
+arrived **third in a list whose first two entries are always wrong**. A channel whose first two
+entries are always wrong trains its readers to skip it, and what the noise stands in front of is the
+cost.
+
+#### Why the names live in one place
+
+A hand-maintained skip-list in `scan.go` reproduces the defect one level over: the generator stays
+free to add a third unconditional import, the scan does not know, and the warning returns with
+nobody having touched it. `normalizeImportName`'s variant map already has that weakness.
+
+`generatorEmittedImports` is the reconciliation, and
+`TestTheGeneratorEmitsExactlyTheImportsTheScanExempts` asserts the generator's emitted block declares
+exactly that set **in both directions** — a third import fails at authoring time, and an exemption
+covering nothing is reported as a grant waiting to cover something else.
+
+The exemption is also narrow: these names are skipped only when absent from the closure, which is the
+case the generator creates. A workflow that genuinely calls one has it in `Used` and never reaches
+the check.
+
+#### Falsification — three mutations, three distinct failure modes
+
+| mutation | what went red |
+|---|---|
+| remove the exemption (the pre-fix tree) | the bug's own case, reporting exactly the two warnings from #1125 |
+| `isGeneratorEmitted` returns true for everything | the control: *"expected exactly the one real orphan, got 0 — the generator exemption has swallowed the whole check"* |
+| generator gains a third unconditional import | the reconciliation test, naming `cleat_log` |
+
+The second is the one that matters. **Suppressing two warnings and deleting the scan produce
+identical output on the case being fixed** — only an import that *should* warn separates them.
