@@ -10332,3 +10332,75 @@ the check.
 
 The second is the one that matters. **Suppressing two warnings and deleting the scan produce
 identical output on the case being fixed** — only an import that *should* warn separates them.
+
+---
+
+### 3.414 Plugin SQL that its own dialect rejects — the reaper had never run on PostgreSQL — ✅ **FIXED 2026-09-10** (cleat#1133)
+
+Plugin queries failed at runtime on all three dialects, continuously, in nightly runs that passed.
+Background loops error without failing an assertion, and the worker log is not in the CI console —
+`.port-results` is dotted and `actions/upload-artifact@v4` skips hidden files by default, so the
+errors landed in a file CI reported uploading and did not (cleat-ports#162).
+
+#### Two shapes, and the second is the one a SQL-Server-only reading misses
+
+**Wrong for its own dialect, on the primary one.** `plugins/jobqueue`'s reaper had
+`Default: UPDATE task_queue SET ... LIMIT 1000`. `plugin.Query.For()` returns `Default` for every
+dialect that is not MySQL or MSSQL, so **PostgreSQL ran it**, and PostgreSQL has no
+`UPDATE ... LIMIT`. Measured: `ERROR: syntax error at or near "LIMIT"`. The reaper had never
+executed on the primary dialect. `Default` differed from the `MySQL` arm only in the interval
+literal — it *was* the MySQL statement — while the `MSSQL` arm beside it was already correct.
+
+**Not translated past the thing the comment named.** `plugins/scheduler` and
+`plugins/scheduledbackup` both carry the doc comment *"provides dialect-specific FOR UPDATE SKIP
+LOCKED equivalents"*, and the locking hint is exactly what was translated: `FOR UPDATE SKIP LOCKED`
+→ `WITH (UPDLOCK, READPAST, ROWLOCK)`. The `WHERE` clause was copied verbatim, keeping
+`enabled = true AND next_run_at <= now()`, neither valid in T-SQL. **A comment naming a variant's
+purpose narrows the reviewer to that purpose**, and the rest of the literal inherits the primary
+dialect unexamined. Two plugins, one copy-paste.
+
+Eight arms fixed: four in `datadogexport`, one each in `ratelimiter`, `scheduledbackup`,
+`scheduler`, and the `jobqueue` `Default`.
+
+#### Why the guard is lexical, which is measured rather than preferred
+
+The obvious closure is to run each arm through its dialect's parser. Against SQL Server 2022:
+
+| statement | `SET PARSEONLY ON` |
+|---|---|
+| `... WHERE enabled = true AND next_run_at <= now()` | `Msg 195 'now' is not a recognized built-in function name` |
+| `... WHERE enabled = true AND next_run_at <= SYSUTCDATETIME()` | **no error** |
+
+**`PARSEONLY` is blind to `enabled = true`** — a column *binding* error, not a syntax error, and
+binding is 30 of the 74 faults in #1133. `SET NOEXEC ON` does catch it, but only by binding, which
+needs the schema and therefore a live database per dialect. A guard needing three DSNs skips where
+they are absent, and a skipped guard is a false green.
+
+So the shipped guard is a token scan over `plugin.Query` arms, extracted with the **Go parser** (an
+earlier regex anchored on a newline before the closing brace, and `jobqueue` writes its arms on one
+line — so the single Query carrying the PostgreSQL fault was invisible to the scan looking for it).
+It runs in every job with no database. `SET NOEXEC ON` per dialect is named in the test as the
+stronger successor rather than implied.
+
+One incidental advantage: it reports **every** fault in a statement. SQL Server stops at the first,
+so the log showed `now()` and hid `enabled = true` behind it — fixing what the error named would
+have produced a second, identical-looking failure.
+
+#### Scope, stated so a pass is not read as more than it is
+
+The guard covers the 77 arms whose dialect intent is **explicit**. It does not cover raw SQL using
+no `plugin.Query` at all: 204 such strings at the time of writing, **69** carrying a token invalid
+for some dialect they can reach. That is a larger separate tranche and the test says so.
+
+#### Falsification
+
+| mutation | what went red |
+|---|---|
+| restore the original `scheduler` MSSQL arm | **both** faults, separately — `now()` and the boolean literal |
+| restore the original `jobqueue` `Default` | the top-level `LIMIT` rule |
+| point the walk at a directory with one file | the vacuity guard: *"the walk is broken and this guard asserts nothing"* |
+
+The `LIMIT` rule needed the fix the guard itself provoked: `UPDATE ... WHERE id IN (SELECT ... LIMIT n)`
+is valid PostgreSQL and is the **repair**, so a rule matching `LIMIT` anywhere flags the fix as the
+defect. It did, on its first run, against the fix in this same commit. Balanced parentheses are
+stripped before the check so only clauses of the outer statement remain.

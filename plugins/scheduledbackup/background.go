@@ -51,7 +51,7 @@ var dueBackupsQuery = plugin.Query{
 	MSSQL: `
 		SELECT id, tenant_id, name, cron
 		FROM backup_config WITH (UPDLOCK, READPAST, ROWLOCK)
-		WHERE enabled = true AND next_run_at <= now()`,
+		WHERE enabled = 1 AND next_run_at <= now()`,
 }
 
 // Run starts the background backup scheduler loop. Every 60 seconds it queries

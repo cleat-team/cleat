@@ -12,7 +12,16 @@ import (
 // resetStuckJobsQuery resets running jobs that have been running for more than
 // 5 minutes back to pending, so they can be picked up by another worker.
 var resetStuckJobsQuery = plugin.Query{
-	Default: `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE status = 'running' AND started_at < NOW() - INTERVAL '5 minutes' LIMIT 1000`,
+	// PostgreSQL has no `UPDATE ... LIMIT`, so the bound goes in a subquery --
+	// the same shape the MSSQL variant below already uses. This arm previously
+	// carried `LIMIT 1000` directly and PostgreSQL rejected it with
+	// `syntax error at or near "LIMIT"` on every reaper tick, which is to say
+	// the reaper had never run on the primary dialect (cleat#1133).
+	//
+	// It read as the MySQL statement because it WAS: the two differed only in
+	// the interval literal. Default is what plugin.Query.For() returns for
+	// PostgreSQL, so a MySQL statement left in Default is a PostgreSQL bug.
+	Default: `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE id IN (SELECT id FROM task_queue WHERE status = 'running' AND started_at < NOW() - INTERVAL '5 minutes' ORDER BY id LIMIT 1000)`,
 	MySQL:   `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE status = 'running' AND started_at < NOW() - INTERVAL 5 MINUTE LIMIT 1000`,
 	MSSQL:   `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE id IN (SELECT id FROM task_queue WHERE status = 'running' AND started_at < DATEADD(minute, -5, SYSUTCDATETIME()) ORDER BY id OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY)`,
 }
