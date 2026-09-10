@@ -513,6 +513,12 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 // It stays void: the contract with callers has not changed, only whether a
 // failure is observable.
 func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
+	s.enforceParentClosePolicyAt(ctx, parentWorkflowID, 0)
+}
+
+// enforceParentClosePolicyAt is enforceParentClosePolicy with the recursion
+// depth carried explicitly. See cascadeIntoClosedChildren.
+func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkflowID string, depth int) {
 	steps := []struct {
 		policy string
 		query  string
@@ -596,6 +602,9 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 	}
 
 	releaseTerminatedChildren(s.log(), s, terminated)
+	cascadeIntoClosedChildren(s.log(), depth, terminated, func(id string, d int) {
+		s.enforceParentClosePolicyAt(ctx, id, d)
+	})
 }
 
 // terminateChildrenQuery selects the children the TERMINATE arm is about to
