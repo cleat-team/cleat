@@ -99,11 +99,11 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 	// Look up collection.
 	var collectionID uuid.UUID
 	var dimensions int
-	err := p.db.QueryRow(ctx, `
+	err := plugin.ScanRow(p.db.QueryRow(ctx, `
 		SELECT id, dimensions
 		FROM pgvector_collections
 		WHERE name = $1
-	`, input.Collection).Scan(&collectionID, &dimensions)
+	`, input.Collection), &collectionID, &dimensions)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}
@@ -148,7 +148,7 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 			metaJSON   []byte
 			score      float64
 		)
-		if err := rows.Scan(&id, &externalID, &content, &metaJSON, &score); err != nil {
+		if err := plugin.ScanRow(rows, &id, &externalID, &content, &metaJSON, &score); err != nil {
 			return "", fmt.Errorf("pgvector: scan: %w", err)
 		}
 		r := searchResult{
@@ -204,9 +204,9 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 
 	// Look up collection.
 	var collectionID uuid.UUID
-	err := p.db.QueryRow(ctx, `
+	err := plugin.ScanRow(p.db.QueryRow(ctx, `
 		SELECT id FROM pgvector_collections WHERE name = $1
-	`, input.Collection).Scan(&collectionID)
+	`, input.Collection), &collectionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}
@@ -235,7 +235,7 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 
 	if input.ExternalID != "" && vectorStr != "" {
 		// Upsert by external_id.
-		err = p.db.QueryRow(ctx, `
+		err = plugin.ScanRow(p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, external_id, content, metadata, embedding)
 			VALUES ($1, $2, $3, $4, $5, $6::vector)
 			ON CONFLICT (tenant_id, collection_id, external_id) DO UPDATE
@@ -244,10 +244,10 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 			    embedding = EXCLUDED.embedding,
 			    updated_at = now()
 			RETURNING id
-		`, cc.TenantID, collectionID, input.ExternalID, input.Content, metaJSON, vectorStr).Scan(&id)
+		`, cc.TenantID, collectionID, input.ExternalID, input.Content, metaJSON, vectorStr), &id)
 	} else if input.ExternalID != "" {
 		// Upsert without embedding.
-		err = p.db.QueryRow(ctx, `
+		err = plugin.ScanRow(p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, external_id, content, metadata)
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (tenant_id, collection_id, external_id) DO UPDATE
@@ -255,21 +255,21 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 			    metadata = EXCLUDED.metadata,
 			    updated_at = now()
 			RETURNING id
-		`, cc.TenantID, collectionID, input.ExternalID, input.Content, metaJSON).Scan(&id)
+		`, cc.TenantID, collectionID, input.ExternalID, input.Content, metaJSON), &id)
 	} else if vectorStr != "" {
 		// Insert new row with embedding.
-		err = p.db.QueryRow(ctx, `
+		err = plugin.ScanRow(p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, content, metadata, embedding)
 			VALUES ($1, $2, $3, $4, $5::vector)
 			RETURNING id
-		`, cc.TenantID, collectionID, input.Content, metaJSON, vectorStr).Scan(&id)
+		`, cc.TenantID, collectionID, input.Content, metaJSON, vectorStr), &id)
 	} else {
 		// Insert new row without embedding.
-		err = p.db.QueryRow(ctx, `
+		err = plugin.ScanRow(p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, content, metadata)
 			VALUES ($1, $2, $3, $4)
 			RETURNING id
-		`, cc.TenantID, collectionID, input.Content, metaJSON).Scan(&id)
+		`, cc.TenantID, collectionID, input.Content, metaJSON), &id)
 	}
 	if err != nil {
 		return "", fmt.Errorf("pgvector: upsert: %w", err)
@@ -304,9 +304,9 @@ func (p *Plugin) delete(ctx context.Context, inputJSON string) (string, error) {
 
 	// Look up collection.
 	var collectionID uuid.UUID
-	err := p.db.QueryRow(ctx, `
+	err := plugin.ScanRow(p.db.QueryRow(ctx, `
 		SELECT id FROM pgvector_collections WHERE name = $1
-	`, input.Collection).Scan(&collectionID)
+	`, input.Collection), &collectionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}

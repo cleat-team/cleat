@@ -170,7 +170,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	schedules := make([]schedule, 0)
 	for rows.Next() {
 		var s schedule
-		err := rows.Scan(
+		err := plugin.ScanRow(rows,
 			&s.ID, &s.Name, &s.Cron, &s.WorkflowName,
 			&s.Input, &s.Enabled, &s.LastRunAt, &s.NextRunAt,
 			&s.CreatedAt, &s.UpdatedAt,
@@ -202,11 +202,11 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var s schedule
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT id, name, cron, workflow_name, input, enabled, last_run_at, next_run_at, created_at, updated_at
 		FROM schedules
 		WHERE id = $1 AND tenant_id = $2
-	`, p.dialect), id, tid).Scan(
+	`, p.dialect), id, tid),
 		&s.ID, &s.Name, &s.Cron, &s.WorkflowName,
 		&s.Input, &s.Enabled, &s.LastRunAt, &s.NextRunAt,
 		&s.CreatedAt, &s.UpdatedAt,

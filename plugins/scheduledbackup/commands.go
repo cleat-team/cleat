@@ -230,7 +230,7 @@ func (p *Plugin) cliBackupList(cmds []string) error {
 			completedAt  sql.NullTime
 			errorMessage sql.NullString
 		)
-		if err := rows.Scan(&hid, &cid, &fn, &sizeBytes, &status, &startedAt, &completedAt, &errorMessage); err != nil {
+		if err := plugin.ScanRow(rows, &hid, &cid, &fn, &sizeBytes, &status, &startedAt, &completedAt, &errorMessage); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: scan row: %v\n", err)
 			continue
 		}

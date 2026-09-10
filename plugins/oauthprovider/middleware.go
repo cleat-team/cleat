@@ -85,11 +85,11 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		var userEmail sql.NullString
 		var expiresAt sql.NullTime
 
-		err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+		err := plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 				SELECT id, tenant_id, user_email, expires_at
 				FROM oauth_sessions
 				WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
-			`, p.dialect), tokenHash).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
+			`, p.dialect), tokenHash), &sessionID, &tenantID, &userEmail, &expiresAt)
 		if err != nil {
 			// Reaching here means the token LOOKS like one of ours (see
 			// looksLikeSessionToken above) and is not a live session -- unknown,

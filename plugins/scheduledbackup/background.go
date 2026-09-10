@@ -135,7 +135,7 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 	var due []dueBackup
 	for rows.Next() {
 		var b dueBackup
-		if err := rows.Scan(&b.id, &b.tenantID, &b.name, &b.cronExpr); err != nil {
+		if err := plugin.ScanRow(rows, &b.id, &b.tenantID, &b.name, &b.cronExpr); err != nil {
 			p.logger.Error("scheduledbackup: scan due backup", "error", err)
 			continue
 		}

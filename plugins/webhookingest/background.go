@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/cleat-team/cleat/plugin"
 )
 
 const defaultRetryInterval = 30 * time.Second
@@ -71,7 +73,7 @@ func (p *Plugin) processBatch(parentCtx context.Context) {
 			signalName       string
 			retryCount       int
 		)
-		if err := rows.Scan(&eventID, &sourceID, &eventType, &payload, &receivedAt,
+		if err := plugin.ScanRow(rows, &eventID, &sourceID, &eventType, &payload, &receivedAt,
 			&signalWorkflowID, &signalName, &retryCount); err != nil {
 			p.logger.Error("webhook-ingest: scan event", "error", err)
 			continue

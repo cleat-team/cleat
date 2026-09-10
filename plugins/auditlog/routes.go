@@ -104,7 +104,7 @@ func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var e auditEvent
 		var metadataJSON []byte
-		if err := rows.Scan(
+		if err := plugin.ScanRow(rows,
 			&e.ID, &e.TenantID, &e.Timestamp, &e.Method, &e.Path,
 			&e.StatusCode, &e.UserID, &e.IPAddress, &e.UserAgent,
 			&e.DurationMs, &metadataJSON,

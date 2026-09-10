@@ -96,7 +96,7 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 		receivedAt time.Time
 	)
 
-	err := p.db.QueryRow(ctx, plugin.Rebind(query, p.dialect), args...).Scan(
+	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(query, p.dialect), args...),
 		&eventID, &eventType, &payloadRaw, &receivedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

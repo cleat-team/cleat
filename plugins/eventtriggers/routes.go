@@ -207,8 +207,8 @@ func (p *Plugin) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 			return
 		}
 	} else {
-		err = p.db.QueryRow(r.Context(), plugin.Rebind(insertSubscriptionReturning.For(p.dialect), p.dialect),
-			tid, req.EventType, req.DefName, req.EntryPoint, inputTemplateStr, req.FilterExpr, req.MaxRetries, now).Scan(&subID)
+		err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(insertSubscriptionReturning.For(p.dialect), p.dialect),
+			tid, req.EventType, req.DefName, req.EntryPoint, inputTemplateStr, req.FilterExpr, req.MaxRetries, now), &subID)
 	}
 	if err != nil {
 		p.logger.Error("event-triggers: create subscription", "error", err)
@@ -270,7 +270,7 @@ func (p *Plugin) handleListSubscriptions(w http.ResponseWriter, r *http.Request)
 			s                subscriptionJSON
 			inputTemplateRaw []byte
 		)
-		if err := rows.Scan(&s.ID, &s.TenantID, &s.EventType, &s.DefName,
+		if err := plugin.ScanRow(rows, &s.ID, &s.TenantID, &s.EventType, &s.DefName,
 			&s.EntryPoint, &inputTemplateRaw, &s.FilterExpr, &s.MaxRetries, &s.Enabled, &s.CreatedAt); err != nil {
 			p.logger.Error("event-triggers: scan subscription", "error", err)
 			continue

@@ -89,7 +89,7 @@ func (p *Plugin) cliList(args []string) error {
 			nextRunAt sql.NullTime
 			createdAt time.Time
 		)
-		if err := rows.Scan(&id, &name, &cron, &workflow, &enabled, &lastRunAt, &nextRunAt, &createdAt); err != nil {
+		if err := plugin.ScanRow(rows, &id, &name, &cron, &workflow, &enabled, &lastRunAt, &nextRunAt, &createdAt); err != nil {
 			return fmt.Errorf("scan: %w", err)
 		}
 

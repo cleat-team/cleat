@@ -188,3 +188,58 @@ func (g *GUID) Scan(src any) error {
 	swapped[6], swapped[7] = b[7], b[6]
 	return g.UUID.Scan(swapped)
 }
+
+// ScanRow scans a database row, correcting SQL Server's UNIQUEIDENTIFIER byte
+// order for any destination that is a *uuid.UUID.
+//
+// cleat#1137: SQL Server returns UNIQUEIDENTIFIER in mixed-endian byte order.
+// uuid.UUID's own Scan accepts those 16 bytes WITHOUT ERROR and yields a
+// different uuid — so every plugin reading an id from SQL Server got the wrong
+// one, silently, and nothing failed. GUID (above) exists to swap them.
+//
+// WHY A WRAPPER RATHER THAN 85 EDITS. The type checker found 85 Scan arguments
+// across 15 plugins resolving to *uuid.UUID. Fixing each by hand means 85
+// chances to get it wrong on paths no test exercises, and leaves the next
+// author free to write the 86th. A backlog of near-identical findings is
+// usually one missing abstraction; this is it. The call-site change is
+// mechanical and uniform:
+//
+//	rows.Scan(&s.id, &s.tenantID, &s.name)
+//	plugin.ScanRow(rows, &s.id, &s.tenantID, &s.name)
+//
+// and the byte-order knowledge lives in one tested place instead of being
+// restated per site.
+//
+// Destinations that are not *uuid.UUID are passed through untouched, so this is
+// safe to apply to a whole Scan call rather than to selected arguments — which
+// matters, because deciding per-argument is what a reader gets wrong.
+func ScanRow(s interface{ Scan(...any) error }, dest ...any) error {
+	// Substitute in place, remembering which slots to copy back. The common
+	// case has no uuid at all and allocates nothing.
+	var swapped map[int]*GUID
+	args := dest
+	for i, d := range dest {
+		u, ok := d.(*uuid.UUID)
+		if !ok {
+			continue
+		}
+		if swapped == nil {
+			swapped = make(map[int]*GUID, len(dest))
+			args = make([]any, len(dest))
+			copy(args, dest)
+		}
+		g := &GUID{}
+		swapped[i] = g
+		args[i] = g
+		_ = u
+	}
+	if err := s.Scan(args...); err != nil {
+		return err
+	}
+	// Copy back only on success: a failed Scan leaves destinations untouched
+	// under database/sql, and this must not differ from that.
+	for i, g := range swapped {
+		*(dest[i].(*uuid.UUID)) = g.UUID
+	}
+	return nil
+}

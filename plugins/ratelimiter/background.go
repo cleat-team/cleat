@@ -86,7 +86,7 @@ func (p *Plugin) reload(ctx context.Context) (int, error) {
 		var tid uuid.UUID
 		var limitKey string
 		var maxRequests, windowSeconds int
-		if err := rows.Scan(&tid, &limitKey, &maxRequests, &windowSeconds); err != nil {
+		if err := plugin.ScanRow(rows, &tid, &limitKey, &maxRequests, &windowSeconds); err != nil {
 			p.logger.Error("rate-limiter: scan row", "error", err)
 			continue
 		}

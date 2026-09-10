@@ -113,12 +113,12 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 
 func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider string) (*oauthConfigRow, error) {
 	var cfg oauthConfigRow
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
+	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
 			SELECT tenant_id, provider, client_id, client_secret, redirect_url,
 			       COALESCE(domain, '') AS domain, enabled
 			FROM oauth_config
 			WHERE tenant_id = $1 AND provider = $2 AND enabled = true
-		`, p.dialect), tenantID, provider).Scan(
+		`, p.dialect), tenantID, provider),
 		&cfg.TenantID, &cfg.Provider, &cfg.ClientID, &cfg.ClientSecret,
 		&cfg.RedirectURL, &cfg.Domain, &cfg.Enabled,
 	)
@@ -160,11 +160,11 @@ func (p *Plugin) extractSession(r *http.Request) *SessionInfo {
 
 	tokenHash := sha256Hex(token)
 
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err := plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, tenant_id, user_email, expires_at
 			FROM oauth_sessions
 			WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
-		`, p.dialect), tokenHash).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
+		`, p.dialect), tokenHash), &sessionID, &tenantID, &userEmail, &expiresAt)
 	if err != nil {
 		return nil
 	}
@@ -291,11 +291,11 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	var codeVerifier sql.NullString
 	var sessionID uuid.UUID
 
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err := plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, tenant_id, provider, code_verifier
 			FROM oauth_sessions
 			WHERE state = $1 AND expires_at > now()
-		`, p.dialect), state).Scan(&sessionID, &tid, &storedProvider, &codeVerifier)
+		`, p.dialect), state), &sessionID, &tid, &storedProvider, &codeVerifier)
 	if err != nil {
 		p.logger.Error("oauth: state lookup", "error", err)
 		p.writeError(w, http.StatusBadRequest, "invalid or expired state")
@@ -480,7 +480,7 @@ func (p *Plugin) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		var entry sessionEntry
 		var userEmail sql.NullString
 		var expiresAt sql.NullTime
-		if err := rows.Scan(&entry.ID, &entry.Provider, &userEmail, &entry.CreatedAt, &expiresAt); err != nil {
+		if err := plugin.ScanRow(rows, &entry.ID, &entry.Provider, &userEmail, &entry.CreatedAt, &expiresAt); err != nil {
 			p.logger.Error("oauth: scan session row", "error", err)
 			continue
 		}

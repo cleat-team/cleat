@@ -101,11 +101,11 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Look up the webhook source.
 	var source webhookSourceJSON
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1
-	`, p.dialect), sourceID).Scan(&source.ID, &source.TenantID, &source.Name, &source.SourceType,
+	`, p.dialect), sourceID), &source.ID, &source.TenantID, &source.Name, &source.SourceType,
 		&source.Secret, &source.Enabled, &source.SignalWorkflowID, &source.SignalName,
 		&source.CreatedAt, &source.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -297,7 +297,7 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 	var sources []webhookSourceJSON
 	for rows.Next() {
 		var s webhookSourceJSON
-		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &s.SourceType,
+		if err := plugin.ScanRow(rows, &s.ID, &s.TenantID, &s.Name, &s.SourceType,
 			&s.Secret, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
 			&s.CreatedAt, &s.UpdatedAt); err != nil {
 			p.logger.Error("webhook-ingest: scan source", "error", err)
@@ -402,11 +402,11 @@ func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var s webhookSourceJSON
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND tenant_id = $2
-	`, p.dialect), id, tid).Scan(&s.ID, &s.TenantID, &s.Name, &s.SourceType,
+	`, p.dialect), id, tid), &s.ID, &s.TenantID, &s.Name, &s.SourceType,
 		&s.Secret, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
 		&s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -514,7 +514,7 @@ func (p *Plugin) handleListEvents(w http.ResponseWriter, r *http.Request) {
 			headersRaw []byte
 			payloadRaw []byte
 		)
-		if err := rows.Scan(
+		if err := plugin.ScanRow(rows,
 			&e.ID, &e.SourceID, &e.TenantID, &e.EventType,
 			&headersRaw, &payloadRaw, &e.ReceivedAt, &e.Processed,
 		); err != nil {

@@ -10457,3 +10457,52 @@ The MSSQL arm carried the identical `id` fault and is fixed with a join to a `TO
 SQL Server does not accept a row constructor in `IN`. MySQL's arm was correct throughout — `UPDATE
 ... LIMIT` is valid there — and passes unchanged, which is the control that shows the test is about
 the statement rather than the harness.
+---
+
+### 3.417 Every UUID read from SQL Server was a different UUID, and nothing errored — ✅ **FIXED 2026-09-10** (cleat#1137)
+
+SQL Server returns `UNIQUEIDENTIFIER` in mixed-endian byte order. `uuid.UUID`'s `Scan` accepts those
+16 bytes **without error** and yields a different id — so every plugin reading an id from SQL Server
+got the wrong one, silently. `plugin.GUID` existed to swap them; what was open was how many sites
+still scanned into `uuid.UUID` directly.
+
+#### The count was 85, and every lexical reading undercounted
+
+`&x` is a **name**; the defect is a **type**. Four regex-shaped scans gave four answers — 6, 27, 13
+and 54 — and none of them was the question. Both documented readings fail in opposite directions:
+the narrow one **misses the confirmed bug** (the scheduler's fault was on struct *fields*), and the
+wide one **flags the fix**, because `dueSchedule` still has fields named `id`/`tenantID` typed
+`uuid.UUID` beside the new `plugin.GUID` locals.
+
+Resolved with `go/types`: **85 arguments across 15 plugins**. Confirmed by a second, differently
+traversed reading — every address-of expression whose operand is `uuid.UUID`, without looking at
+`Scan` at all — which returns 85 and reports **all 85 inside Scan calls, none outside**. Two
+traversals agreeing on the total *and* the membership.
+
+#### One abstraction, not 85 edits
+
+`plugin.ScanRow(rows, dest...)` substitutes a `GUID` for any `*uuid.UUID` destination, scans, and
+copies back on success only. Non-uuid destinations pass through untouched, so it applies to a whole
+`Scan` call rather than to selected arguments — which matters, because deciding per-argument is what
+a reader gets wrong.
+
+85 hand edits would be 85 chances to err on paths no test exercises, and would leave the next author
+free to write the 86th. *"A backlog of 200 similar findings is usually one missing abstraction"* —
+this is that. **59 call sites rewritten mechanically** from the same type information that found
+them, so the edit set and the finding set cannot disagree.
+
+#### Falsification
+
+| mutation | what went red |
+|---|---|
+| revert one call site to `rows.Scan` | the guard, naming `plugins/scheduler/routes.go:174` |
+| `ScanRow` stops substituting | `TestScanRowCorrectsMixedEndianBytes` |
+
+**The first falsification did not apply on its first attempt** — the regex required a trailing space
+and the call is `plugin.ScanRow(rows,` followed by a newline — and the guard's resulting pass was
+briefly read as a result. A falsification that does not apply is not a falsification that passed;
+the mutation is now checked to have changed the file before the outcome is read.
+
+`TestScanRowIsTheThingThatCorrects` is the control: it asserts a **direct** `uuid.UUID` scan of the
+same bytes produces the *wrong* id, so the fixture is known to reproduce the defect rather than
+being satisfied by any implementation.

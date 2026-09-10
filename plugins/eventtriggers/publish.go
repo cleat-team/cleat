@@ -100,7 +100,7 @@ func triggerMatchingWorkflows(
 			sub              subscriptionJSON
 			inputTemplateRaw []byte
 		)
-		if err := rows.Scan(&sub.ID, &sub.TenantID, &sub.EventType, &sub.DefName,
+		if err := plugin.ScanRow(rows, &sub.ID, &sub.TenantID, &sub.EventType, &sub.DefName,
 			&sub.EntryPoint, &inputTemplateRaw, &sub.FilterExpr, &sub.Enabled, &sub.CreatedAt, &sub.MaxRetries); err != nil {
 			logger.Error("event-triggers: scan subscription", "error", err)
 			continue

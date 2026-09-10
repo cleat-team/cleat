@@ -165,7 +165,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	var configs []configJSON
 	for rows.Next() {
 		var c configJSON
-		if err := rows.Scan(&c.ID, &c.Name, &c.APIKey, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.Name, &c.APIKey, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			p.logger.Error("datadog-export: scan config", "error", err)
 			continue
 		}
@@ -197,11 +197,11 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var c configJSON
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, name, api_key, site, metrics_prefix, enabled, created_at, updated_at
 			FROM dd_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&c.ID, &c.Name, &c.APIKey, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.Name, &c.APIKey, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "config not found")
 		return
@@ -304,11 +304,11 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	// Return the updated config.
 	var c configJSON
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, name, api_key, site, metrics_prefix, enabled, created_at, updated_at
 			FROM dd_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&c.ID, &c.Name, &c.APIKey, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.Name, &c.APIKey, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("datadog-export: re-fetch config", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated config")

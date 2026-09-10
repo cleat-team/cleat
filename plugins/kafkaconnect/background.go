@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/eventtriggers"
 	"github.com/google/uuid"
 )
@@ -70,7 +71,7 @@ func (p *Plugin) pollConfigs(ctx context.Context) error {
 
 	for rows.Next() {
 		var c configRow
-		if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.Brokers, &c.Topic, &c.ConsumerGroup, &c.EventType); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.TenantID, &c.Name, &c.Brokers, &c.Topic, &c.ConsumerGroup, &c.EventType); err != nil {
 			p.logger.Error("kafka-connect: scan config row", "error", err)
 			continue
 		}

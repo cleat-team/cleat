@@ -155,7 +155,7 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 	var configs []slackConfigJSON
 	for rows.Next() {
 		var c slackConfigJSON
-		if err := rows.Scan(&c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			p.logger.Error("slack-notify: scan config", "error", err)
 			continue
 		}
@@ -187,11 +187,11 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var c slackConfigJSON
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, name, webhook_url, default_channel, enabled, created_at, updated_at
 			FROM slack_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "config not found")
 		return
@@ -296,11 +296,11 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Return the updated config.
 	var c slackConfigJSON
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, name, webhook_url, default_channel, enabled, created_at, updated_at
 			FROM slack_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("slack-notify: re-fetch config", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated config")
