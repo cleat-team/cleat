@@ -157,12 +157,29 @@ type WorkflowInstance struct {
 	// been measured at generation 12. See
 	// engine/generation_is_not_a_reclaim_count_test.go.
 	//
-	// POPULATED ON THE READ PATH ONLY, for the same reason as ContinuedFrom
-	// above: GetWorkflowByID sets it and nothing else does. The claim queries
-	// share one scanner and the dispatch loop has no use for the value, so
-	// widening the hottest query in the system to carry it would buy nothing.
-	// So 0 means either "never reclaimed" OR "you did not get this from
-	// GetWorkflowByID".
+	// POPULATED ON BOTH READ PATHS: GetWorkflowByID and ListWorkflows. Not on
+	// the claim path, and the distinction is the whole of the argument.
+	//
+	// This comment said "GetWorkflowByID sets it and nothing else does" until
+	// cleat#1123, and cited "the hottest query in the system" for not widening
+	// the others. That objection is about the CLAIM query -- the dispatch loop
+	// runs it continuously and has no use for the value -- and the claim path
+	// has its own column list and its own scanner
+	// (Dialect.scanWorkflowInstanceExtra), so it is untouched. ListWorkflows is
+	// a user-facing endpoint reached once per page view, and it reads
+	// Dialect.workflowInstanceColumns(), which now selects the column.
+	//
+	// Carrying it there is not a nicety. The field has no omitempty, and
+	// deliberately so -- see engine/reclaim_count_records_reclaims_only_test.go,
+	// where dropping a zero is argued against because 0 is the answer for most
+	// workflows. That decision is only safe if every path that serialises the
+	// field has actually read it: a 0 from a path that never SELECTed the
+	// column is indistinguishable from "never reclaimed", so the list reported
+	// a confident 0 for every run, including one in the reclaim loop the
+	// column exists to surface.
+	//
+	// So 0 now means "never reclaimed" on either read path.
+	// engine/list_workflows_returns_every_field_test.go enforces it.
 	ReclaimCount int64 `json:"reclaim_count"`
 }
 

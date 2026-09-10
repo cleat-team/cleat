@@ -198,7 +198,7 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		var traceID sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &traceID); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &traceID, &wf.ReclaimCount); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		wf.TraceID = traceID.String

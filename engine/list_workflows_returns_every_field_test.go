@@ -58,6 +58,14 @@ func TestListWorkflowsReturnsEveryFieldTheRowCanHold(t *testing.T) {
 		// An exemption is never checked. Exempting a field that works removes
 		// it from the guard's denominator, which is the exact defect this file
 		// exists to answer, committed inside the answer.
+		// `reclaim_count` was exempt here until cleat#1123 was fixed. It is now
+		// SELECTed by the list path, so this guard enforces it -- which is the
+		// maintenance path this file was written for: an exemption is deleted
+		// and the assertion takes over. It was the worst of the ten omissions,
+		// because a plain int with no omitempty serialises as 0 whether or not
+		// anything read it, so the list reported "never reclaimed" for every
+		// run -- including the ones in a reclaim loop the column exists to
+		// surface.
 		"result": "not selected by the list path. Defensible: a result can be " +
 			"large and a list returns many rows, so carrying it multiplies the " +
 			"payload by the page size. cleat#1123",
@@ -80,10 +88,6 @@ func TestListWorkflowsReturnsEveryFieldTheRowCanHold(t *testing.T) {
 		"continued_from": "not selected by the list path. cleat#1123; #826 is " +
 			"the finding that a continue-as-new chain is unfollowable, so this " +
 			"one has a live argument for being carried",
-		"reclaim_count": "not selected by the list path, though it is present " +
-			"in the JSON as a zero because it is a plain int rather than a " +
-			"pointer -- absent and zero look identical here, which is its own " +
-			"small hazard. cleat#1123",
 	}
 
 	for _, backend := range registeredBackends {

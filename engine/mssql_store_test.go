@@ -1418,7 +1418,7 @@ func TestMSSQLStore_ListWorkflows_Simple(t *testing.T) {
 			{
 				"wf-1", "test-wf", int64(1), "running", `{"key":"val"}`,
 				"worker-1", now, nil, nil, nil, now,
-				int64(3), int64(0), "",
+				int64(3), int64(0), "", int64(4), // reclaim_count (cleat#1123)
 			},
 		}},
 	}, nil)
@@ -1434,6 +1434,14 @@ func TestMSSQLStore_ListWorkflows_Simple(t *testing.T) {
 	}
 	if wfs[0].ID != "wf-1" || wfs[0].DefName != "test-wf" || wfs[0].Status != "running" {
 		t.Errorf("unexpected workflow fields: %+v", wfs[0])
+	}
+	// reclaim_count is the field cleat#1123 was about: it is a plain int64 with
+	// no omitempty, so before the fix the list serialised a confident 0 for every
+	// run -- "never reclaimed" and "this path does not read the column" looked the
+	// same to a caller. This is the only place the SQL Server list scan is exercised
+	// without a live server.
+	if wfs[0].ReclaimCount != 4 {
+		t.Errorf("ReclaimCount = %d, want 4 (cleat#1123)", wfs[0].ReclaimCount)
 	}
 }
 
