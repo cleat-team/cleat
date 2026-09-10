@@ -1775,28 +1775,120 @@ public class HostCalls {
      */
     public CleatResult<java.util.List<AwaitSignalsResult>> awaitSignalsWithQuorumMs(
         String[] signalNames, int minCount, int maxRejections, long timeoutMs) {
+        final long deadline = this.now() + timeoutMs;
+        return quorumOver(
+            signalNames,
+            minCount,
+            maxRejections,
+            () -> deadline - this.now(),
+            (names, waitMs) -> this.awaitSignalsMs(names.toArray(new String[0]), waitMs));
+    }
+
+    /**
+     * The quorum loop itself, over an injected {@code awaitSignals}.
+     * <p>
+     * Split out of {@link #awaitSignalsWithQuorumMs} so it can be TESTED
+     * without a host. Every method on this class calls an {@code extern "C"}
+     * import that exists only inside a cleat WASM runtime, so before this
+     * extraction no test in this language could reach the logic at all --
+     * which is why cleat#1132, one defect written five times, stayed live in
+     * four SDKs after Go was fixed. The shared cases live in
+     * {@code tests/conformance/quorum_cases.json} and every SDK runs them
+     * (cleat#1136).
+     * <p>
+     * {@code remainingMs} is injected for the same reason and is not a clock
+     * abstraction -- tests hand it a constant so the deadline never fires,
+     * leaving the host's own {@code timedOut} as the only source of a timeout.
+     *
+     * @param signalNames   the caller's name set; NOT modified
+     * @param minCount      distinct names required
+     * @param maxRejections rejections tolerated ({@code -1} to disable)
+     * @param remainingMs   milliseconds left before the caller's deadline
+     * @param awaitSignals  awaits one signal from the given (narrowed) set
+     * @return the collected results, or the first error
+     */
+    static CleatResult<java.util.List<AwaitSignalsResult>> quorumOver(
+        String[] signalNames,
+        int minCount,
+        int maxRejections,
+        java.util.function.LongSupplier remainingMs,
+        java.util.function.BiFunction<java.util.List<String>, Long,
+            CleatResult<AwaitSignalsResult>> awaitSignals) {
+
+        // A quorum of N over a set of M names is unsatisfiable when N > M, and
+        // it used to spin to the timeout and report "got k/N signals" -- a
+        // message describing a slow sender rather than a caller asking for
+        // something arithmetic forbids. Once names narrow it is guaranteed to
+        // fail, so it is refused here as the programming error it is.
+        if (minCount > signalNames.length) {
+            return CleatResult.err(
+                "awaitSignalsWithQuorum: quorum of " + minCount + " over "
+                + signalNames.length + " name(s) ["
+                + String.join(", ", signalNames)
+                + "] is unsatisfiable; a quorum counts DISTINCT names, so it "
+                + "cannot exceed the size of the set");
+        }
+
         java.util.List<AwaitSignalsResult> results = new java.util.ArrayList<>();
-        long deadline = this.now() + timeoutMs;
         int rejectionCount = 0;
 
+        // COPIED, not aliased. `remaining` narrows below and `signalNames`
+        // belongs to the caller -- a workflow may still be holding that array.
+        java.util.List<String> remaining =
+            new java.util.ArrayList<>(java.util.Arrays.asList(signalNames));
+
         while (results.size() < minCount) {
-            long remainingMs = deadline - this.now();
-            if (remainingMs <= 0) {
+            long waitMs = remainingMs.getAsLong();
+            if (waitMs <= 0) {
                 return CleatResult.err(
-                    "quorum timeout waiting for signals [" + String.join(", ", signalNames) + "]: got " + results.size() + "/" + minCount + " signals");
+                    "quorum timeout waiting for signals ["
+                    + String.join(", ", signalNames) + "]: got "
+                    + results.size() + "/" + minCount + " signals");
             }
 
-            CleatResult<AwaitSignalsResult> signalResult = this.awaitSignalsMs(signalNames, remainingMs);
+            CleatResult<AwaitSignalsResult> signalResult =
+                awaitSignals.apply(new java.util.ArrayList<>(remaining), waitMs);
             if (signalResult.isErr()) {
-                return CleatResult.err("quorum signal error waiting for signals [" + String.join(", ", signalNames) + "]: " + signalResult.getError());
+                return CleatResult.err(
+                    "quorum signal error waiting for signals ["
+                    + String.join(", ", signalNames) + "]: "
+                    + signalResult.getError());
             }
             AwaitSignalsResult asr = signalResult.getValue();
             if (asr.timedOut) {
                 return CleatResult.err(
-                    "quorum timeout waiting for signals [" + String.join(", ", signalNames) + "]: got " + results.size() + "/" + minCount + " signals");
+                    "quorum timeout waiting for signals ["
+                    + String.join(", ", signalNames) + "]: got "
+                    + results.size() + "/" + minCount + " signals");
+            }
+
+            // A name outside the requested set has not been asked for, and
+            // counting it would reinstate the defect through the other door:
+            // narrowing what we ASK for is only half the fix if we accept
+            // whatever arrives.
+            //
+            // A well-behaved host returns one of the names it was given, so
+            // this is unreachable through the engine's own await. It is here
+            // because the fix must not rest on that politeness.
+            if (!remaining.contains(asr.signalName)) {
+                return CleatResult.err(
+                    "awaitSignalsWithQuorum: awaited [" + String.join(", ", remaining)
+                    + "] and received '" + asr.signalName + "', which is not among "
+                    + "them; a quorum counts distinct names and cannot count this one");
             }
 
             results.add(asr);
+
+            // Narrow the set: this name has voted, and a quorum counts VOTERS.
+            //
+            // Without this, the full `signalNames` went to every await, so
+            // three deliveries of one name satisfied a quorum of three with the
+            // other two never sent (cleat#1132).
+            //
+            // A rejection narrows too. A voter that votes no has voted, and
+            // leaving it in the set would let one rejector trip maxRejections
+            // alone -- the same defect wearing the other outcome.
+            remaining.remove(asr.signalName);
 
             // Check for rejection if maxRejections >= 0.
             if (maxRejections >= 0 && asr.payload != null && !asr.payload.isEmpty()) {
@@ -1807,7 +1899,9 @@ public class HostCalls {
                         rejectionCount++;
                         if (rejectionCount > maxRejections) {
                             return CleatResult.err(
-                                "quorum exceeded max rejections (" + maxRejections + ") while waiting for signals [" + String.join(", ", signalNames) + "]");
+                                "quorum exceeded max rejections (" + maxRejections
+                                + ") while waiting for signals ["
+                                + String.join(", ", signalNames) + "]");
                         }
                     }
                 } catch (Exception e) {
