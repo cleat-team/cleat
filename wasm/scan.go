@@ -171,6 +171,12 @@ func FindCleatOrphanedImports(wasmBytes []byte, expectedImports map[string]bool)
 		// Map import names to their closure-analysis keys.
 		// Both "cleat_call" and "cleat_call_retry" are tracked under "cleat_call"
 		// in the usage map. Normalize by taking the base name.
+		// The export wrapper's own imports are not the workflow's, so the
+		// workflow's closure is the wrong thing to judge them against.
+		// See generatorEmittedImports.
+		if isGeneratorEmitted(imp.Name) {
+			continue
+		}
 		baseName := normalizeImportName(imp.Name)
 		if !expectedImports[baseName] && !expectedImports[imp.Name] {
 			orphans = append(orphans, fmt.Sprintf(
@@ -181,6 +187,42 @@ func FindCleatOrphanedImports(wasmBytes []byte, expectedImports map[string]bool)
 		}
 	}
 	return orphans
+}
+
+// generatorEmittedImports are the host functions wasm/generator.go writes into
+// EVERY shim, regardless of what the workflow calls. They belong to the export
+// wrapper -- it calls cleat_complete to report a result and cleat_poll_work to
+// receive one -- not to the workflow, so they are never in the workflow's
+// computed closure.
+//
+// cleat#1125: comparing them against that closure could therefore only ever
+// warn, and did, on every build of every workflow -- including one the toolchain
+// itself reported as using zero host functions. Two halves each correct about
+// what they own, with nothing reconciling them.
+//
+// THIS LIST IS THE RECONCILIATION, and it is one list rather than two because
+// the alternative reproduces the defect. A skip-list maintained here by hand
+// would leave the generator free to add a third unconditional import with this
+// file not knowing -- the warning would come back and no one would have touched
+// the scan. TestTheGeneratorEmitsExactlyTheImportsTheScanExempts asserts the
+// generator's emitted block declares exactly this set, in both directions, so a
+// third one fails at authoring time.
+//
+// Note what this does NOT exempt: these names are skipped only when they are
+// absent from the closure, which is the case the generator creates. A workflow
+// that genuinely calls one still has it in Used and never reaches here.
+var generatorEmittedImports = []string{
+	"cleat_complete",
+	"cleat_poll_work",
+}
+
+func isGeneratorEmitted(name string) bool {
+	for _, n := range generatorEmittedImports {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeImportName maps a WASM import name to the key used in UsageInfo.Used.
