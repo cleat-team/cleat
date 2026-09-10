@@ -44,18 +44,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 func (p *Plugin) processBatch(parentCtx context.Context) {
 	start := time.Now()
 
-	rows, err := p.db.Query(parentCtx, `
-		SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at,
-		       COALESCE(s.signal_workflow_id, ''), COALESCE(s.signal_name, 'webhook_received'),
-		       COALESCE(e.retry_count, 0)
-		FROM webhook_events e
-		LEFT JOIN webhook_sources s ON e.source_id = s.id
-		WHERE NOT e.processed
-		  AND (e.status = 'pending' OR e.status IS NULL)
-		  AND e.received_at < NOW() - INTERVAL '10 seconds'
-		ORDER BY e.received_at
-		LIMIT 100
-	`)
+	rows, err := p.db.Query(parentCtx, queryUnprocessedWebhookEvents.For(p.dialect))
 	if err != nil {
 		p.logger.Error("webhook-ingest: query unprocessed events", "error", err)
 		return
@@ -164,4 +153,55 @@ func (p *Plugin) markRetryFailed(ctx context.Context, eventID uuid.UUID, current
 			"error", errMsg,
 		)
 	}
+}
+
+// The batch of webhook events still awaiting delivery.
+//
+// This was one raw literal reaching all three backends, and it was valid on
+// exactly one of them (cleat#1133). Three separate constructs, each with no
+// portable spelling:
+//
+//   - `NOT e.processed` -- T-SQL has no boolean type, so a BIT column is a
+//     value and not a condition: Msg 4145, "An expression of non-boolean type
+//     specified in a context where a condition is expected".
+//   - `NOW() - INTERVAL '10 seconds'` -- PostgreSQL's interval literal. MySQL
+//     spells it `INTERVAL 10 SECOND`, unquoted and singular, and answers
+//     `Error 1064 (42000)` to the quoted form. Verified against a live MySQL:
+//     the quoted spelling exits 1, the unquoted one exits 0.
+//   - `LIMIT 100` -- T-SQL spells row limits as TOP or OFFSET/FETCH.
+//
+// So this statement failed on MySQL and on SQL Server, on every tick of the
+// background loop, and neither failure fails an assertion anywhere: the errors
+// go to the worker log, which is not in the CI console.
+var queryUnprocessedWebhookEvents = plugin.Query{
+	Default: `SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at,
+       COALESCE(s.signal_workflow_id, ''), COALESCE(s.signal_name, 'webhook_received'),
+       COALESCE(e.retry_count, 0)
+FROM webhook_events e
+LEFT JOIN webhook_sources s ON e.source_id = s.id
+WHERE NOT e.processed
+  AND (e.status = 'pending' OR e.status IS NULL)
+  AND e.received_at < NOW() - INTERVAL '10 seconds'
+ORDER BY e.received_at
+LIMIT 100`,
+	MySQL: `SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at,
+       COALESCE(s.signal_workflow_id, ''), COALESCE(s.signal_name, 'webhook_received'),
+       COALESCE(e.retry_count, 0)
+FROM webhook_events e
+LEFT JOIN webhook_sources s ON e.source_id = s.id
+WHERE NOT e.processed
+  AND (e.status = 'pending' OR e.status IS NULL)
+  AND e.received_at < NOW() - INTERVAL 10 SECOND
+ORDER BY e.received_at
+LIMIT 100`,
+	MSSQL: `SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at,
+       COALESCE(s.signal_workflow_id, ''), COALESCE(s.signal_name, 'webhook_received'),
+       COALESCE(e.retry_count, 0)
+FROM webhook_events e
+LEFT JOIN webhook_sources s ON e.source_id = s.id
+WHERE e.processed = 0
+  AND (e.status = 'pending' OR e.status IS NULL)
+  AND e.received_at < DATEADD(second, -10, SYSUTCDATETIME())
+ORDER BY e.received_at
+OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,
 }

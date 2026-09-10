@@ -10883,3 +10883,115 @@ notice; `go vet` does. That is why `testutil.Dialect` is a duplicated type and w
 **A grep for the import path found two `engine/*.go` files mentioning `engine/testutil` and
 both were comments about it**, which would have made the cycle look pre-existing and settled.
 Checked before concluding.
+
+### 3.420 Three plugin statements were valid on PostgreSQL and nowhere else — ✅ **FIXED 2026-09-10** (cleat#1133)
+
+**cleat#1133, part 4 of 4.** §3.418 made the rewriter safe, §3.419 applied it at the adapter.
+These are the statements the adapter deliberately does not touch, because they change the
+*shape* of a statement rather than a token in it.
+
+| site | fault | rejected by |
+|---|---|---|
+| `eventtriggers/queries.go` **MSSQL arm** | `WHERE NOT processed` | SQL Server |
+| `eventtriggers/host_functions.go:74` | `NOT processed`, `LIMIT 1` | SQL Server |
+| `webhookingest/background.go:45` | `NOT e.processed`, `NOW() - INTERVAL '10 seconds'`, `LIMIT 100` | SQL Server **and MySQL** |
+
+**THE MSSQL ARM IS THE INSTRUCTIVE ONE.** In one literal, `LIMIT 100` had been translated to
+`OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY` and `NOW() - INTERVAL` to `DATEADD` — and
+`NOT processed` was left as written. Someone translated this arm carefully and stopped at the
+constructs they were thinking about. That is the failure the `plugin.Query` shape invites and
+which §3.414 records generally: naming what a variant is *for* narrows the reviewer to that
+purpose, and the rest of the literal inherits the primary dialect unexamined.
+
+**THE ERROR MESSAGE NAMES THE WRONG CONSTRUCT**, which is why nobody followed it here.
+Measured against SQL Server 2022, same table, three statements:
+
+| statement | server says |
+|---|---|
+| `WHERE NOT processed`, no `OFFSET/FETCH` | `Msg 4145` non-boolean type — **the cause** |
+| `WHERE NOT processed` **+** `OFFSET…FETCH` | `Msg 4145` near `'ORDER'` **and** `Msg 153` |
+| `WHERE processed = 0` + `OFFSET…FETCH` | succeeds |
+
+SQL Server reports **both**; the Go driver surfaces only the **last**. So the worker log says
+`Invalid usage of the option NEXT in the FETCH statement` — naming a clause that is correct
+T-SQL — while the defect is the boolean two lines above. A reader who trusts the message goes
+to the row-limit clause and finds nothing wrong.
+
+**That invalidates error-text census as a way to size this work**, and one was in use: a peer
+session's four-minute log survey grouped 163 errors into six categories. At least one category
+is a *consequence*, and `webhook-ingest` appears twice — once as non-boolean, once as
+`Error 1064` — which is **one statement seen from two dialects**, not two defects. Withdrawn by
+its author on cleat#1143 once reproduced. The useful output is **statement identity**, not
+error text.
+
+**Why the adapter does not do these.** A boolean *column* is not a boolean *literal*: rewriting
+`NOT x` would have to leave `NOT EXISTS`, `NOT IN`, `NOT LIKE`, `NOT NULL` and `NOT (a AND b)`
+alone. And `LIMIT n` → `TOP n` relocates a token to a different clause, while `OFFSET…FETCH`
+additionally requires an `ORDER BY`. Both belong in an explicit arm.
+
+**A COUNT I PUBLISHED AND HAD TO RETRACT, IN THE INFLATING DIRECTION.** I reported **5** bare
+boolean sites; it is **3**. The scan flagged every `NOT <col>` without asking which dialect arm
+it sat in — and `NOT processed` in a `Default` or `MySQL` arm is *correct for that dialect*. It
+also counted `WHEN NOT MATCHED` from `MERGE` statements, which is not a boolean at all.
+
+    A construct is only a defect if it can REACH a dialect that rejects it.
+
+For a `plugin.Query` that means asking which arm, **including the fallback**: `Query.For`
+returns `Default` for MSSQL when no MSSQL arm exists, so a `Default` arm is not automatically
+PostgreSQL-only. Re-derive arm-aware, never by matching the token alone.
+
+**Verified by execution, not by reading.** `TestEveryQueryArmRunsOnItsOwnDialect` and
+`TestTheBatchQueryRunsOnEveryDialect` run each arm against a real server of that dialect, on
+the schema built by the plugin's own migrations — not a fixture written to suit the query,
+which is what §3.415 cost. The webhookingest test also asserts the column *count* the caller
+scans, since a valid statement returning the wrong shape fails later, at `Scan`, in the same
+silent loop.
+
+**Falsifications, each red for its own reason:** reverting the boolean reddens `mssql`;
+reverting the interval reddens `mysql` with `Error 1064`. Two faults in one statement need two
+falsifications, or the second is only assumed.
+
+**THE REMAINING FOUR, DONE IN THE SAME PASS**, because they are the same decision applied to
+four more statements:
+
+| site | fault | arm written |
+|---|---|---|
+| `notifications/background.go` | `LIMIT 100` | `SELECT TOP 100` |
+| `eventstore/routes.go` | `LIMIT $4` — a **parameter**, not a literal | `OFFSET 0 ROWS FETCH NEXT $4 ROWS ONLY` |
+| `jobqueue/background.go` | `LIMIT 10` | `SELECT TOP 10` |
+| `blobstore/host_functions.go` | `ON CONFLICT DO NOTHING` | `INSERT … SELECT … WHERE NOT EXISTS` |
+
+`jobqueue`'s is `pollPending`, and it is the one that shows why a guard over `plugin.Query`
+*declarations* could never have closed this. §3.414 and §3.415 fixed the reaper's `UPDATE`,
+twice. This `SELECT` sits **eight lines above** one of the values they were fixing, as a raw
+literal, and was in neither. So after both repairs the reaper was correct and had nothing to
+reap on SQL Server, because no job could reach `running` there. **`plugin.Query` was never the
+boundary of the defect, only the boundary of the fix.** A check has to anchor on where SQL is
+*executed*, not where a dialect table is *declared*. Found by a peer session reading the file;
+confirmed here.
+
+`eventstore`'s is the one with a shape worth noting: the limit is a **parameter**, which rules
+out the usual `SELECT TOP n` (a variable needs `TOP (@p4)`), and the `$4` is deliberately left
+as `$4` in every arm — placeholders are the adapter's job, clause structure is the arm's.
+
+`blobstore`'s T-SQL arm uses `NOT EXISTS` rather than `MERGE`. `MERGE` is the textbook answer
+and the wrong one here: heavier, with documented concurrency caveats, for a best-effort
+reference count whose failure is already only logged.
+
+**ONE HELPER, NOT SIX COPIES.** `plugins/plugintest.RunEveryArm` runs each arm against a real
+server of its dialect, on the schema the plugin's own migrations build. It lives in its own
+package because the natural home cannot host it: `engine/testutil` is imported by `engine`'s
+and `plugin`'s own tests, so it can import neither — an import cycle **in the test binary**,
+which `go build` does not notice and `go vet` does. `plugins/*` are leaves, so a helper there
+can import everything it needs.
+
+**Falsifications, each red for its own reason and each naming an error a peer had measured in
+a live worker log:** reverting the eventtriggers boolean → `mssql`; reverting the webhookingest
+interval → `mysql`, `Error 1064`; reverting the jobqueue `TOP 10` → `mssql`,
+`Incorrect syntax near 'LIMIT'` — which was 61 of that log's errors, all attributed to
+`jobqueue: poll failed`.
+
+**Still open in #1133 after this:** `pgvector`'s six, which are PostgreSQL-only by declaration —
+it ships no `UpMySQL`/`UpMSSQL` migration arms, so its tables never exist elsewhere and its
+queries fail on a missing table either way. That the declaration is recorded and then never read
+is cleat#1157.

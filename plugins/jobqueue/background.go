@@ -121,13 +121,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 // referenced workflow. Jobs without a def_name are marked completed immediately.
 // Returns (claimed, dispatched, failed, error).
 func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
-	rows, err := p.db.Query(ctx, `
-			SELECT tenant_id, queue_name, job_id, payload, def_name, input
-			FROM task_queue
-			WHERE status = 'pending'
-			ORDER BY created_at ASC
-			LIMIT 10
-		`)
+	rows, err := p.db.Query(ctx, queryPendingJobs.For(p.dialect))
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -221,4 +215,34 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 	}
 
 	return claimed, dispatched, failed, rows.Err()
+}
+
+// The next batch of pending jobs to dispatch.
+//
+// THIS IS WHY "the reaper works now" DID NOT MEAN "jobqueue works now".
+// cleat#1134 and cleat#1141 fixed the reaper's UPDATE, twice. This SELECT sits
+// eight lines above one of the plugin.Query values they were fixing and was
+// never part of either: a raw literal with `LIMIT 10`, issued to all three
+// backends. So after both repairs the reaper was correct and had nothing to
+// reap on SQL Server, because no job could reach `running` there.
+//
+// The general point, and the reason a guard over plugin.Query declarations
+// cannot close cleat#1133: plugin.Query was never the boundary of the defect,
+// only the boundary of the fix. A check has to anchor on where SQL is
+// EXECUTED, not on where a dialect table is DECLARED.
+var queryPendingJobs = plugin.Query{
+	Default: `SELECT tenant_id, queue_name, job_id, payload, def_name, input
+FROM task_queue
+WHERE status = 'pending'
+ORDER BY created_at ASC
+LIMIT 10`,
+	MySQL: `SELECT tenant_id, queue_name, job_id, payload, def_name, input
+FROM task_queue
+WHERE status = 'pending'
+ORDER BY created_at ASC
+LIMIT 10`,
+	MSSQL: `SELECT TOP 10 tenant_id, queue_name, job_id, payload, def_name, input
+FROM task_queue
+WHERE status = 'pending'
+ORDER BY created_at ASC`,
 }
