@@ -21,6 +21,29 @@ import (
 // That is the point of running it in three languages rather than writing three
 // tests: the table has to be able to disagree with somebody. See cleat#1136.
 
+// RUN THIS WITH -count=1, WHICH IS WHAT CI DOES. The table is at the repo root
+// and this package is cleat/, so the read below crosses `..` -- and Go's test
+// cache tracks only files opened INSIDE the package directory. A fixture read
+// through `..` is invisible to it, so a table edit does not invalidate the
+// cached pass. Measured 2026-09-10 in a throwaway module, one test reading two
+// files, each change made alone from a warm cache:
+//
+//	change nothing                          -> ok  (cached)
+//	change the file OUTSIDE the package dir -> ok  (cached)   <- not noticed
+//	change the file INSIDE the package dir  -> ok  0.205s     <- re-ran
+//
+// Confirmed against this very test: with the table corrupted so that a case
+// asserts the wrong awaited_sets, `go test .` returned "(cached)" and passed.
+// `.github/workflows/ci.yml` passes -count=1 to every matrix package, so CI is
+// sound; a local `go test ./...` after editing the table is not, and the tell
+// is the word "(cached)" rather than a duration.
+//
+// This was found by the session porting the table to Java, where gradle's
+// up-to-date check produced the same false green from the same cause -- a
+// runtime read of a path the build system cannot see. The fix there was to
+// declare the file as a task input. Go offers no equivalent, so the honest
+// answer is -count=1 and this comment.
+
 type quorumCase struct {
 	Name          string            `json:"name"`
 	Why           string            `json:"why"`

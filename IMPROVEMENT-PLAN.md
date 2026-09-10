@@ -10649,6 +10649,38 @@ Note the rejection case, which is a discriminator rather than an assertion: `max
 with kind `rejections`, while one that narrows never asks for `alpha` again and refuses the second
 delivery as `out_of_set`. Both are errors; only the *kind* separates them.
 
+#### The table's own consumers can go stale, and each build system hides it differently
+
+Found by the session porting the table to Java (cleat#1160), and it is the sharpest form of this
+whole section: **the test that exists to validate the table was the one that did not re-run when
+the table changed.**
+
+Their symptom was `BUILD SUCCESSFUL in 578ms` against a deliberately corrupted table — green, and
+the *duration* was the only field that said the tests had not run. `tests/conformance` is at the
+repo root and the test reads it at runtime, which gradle cannot infer, so `:test` was up to date
+whenever only the table had changed. Fixed by declaring the file as a task input.
+
+They reported Go and Python as unaffected. **Python is; Go is not, and this was measured rather
+than reasoned about.** Go's test cache tracks only files opened *inside the package directory*, and
+the table is at the repo root while the consumer is in `cleat/`, so the read crosses `..` and is
+invisible to the cache. A throwaway module, one test reading two files, each change made alone from
+a warm cache:
+
+| change | `go test` |
+|---|---|
+| nothing | `ok (cached)` |
+| the file **outside** the package dir | `ok (cached)` — not noticed |
+| the file **inside** the package dir | `ok 0.205s` — re-ran |
+
+Confirmed against the real test: with one `awaited_sets` entry corrupted, `go test .` returned
+`(cached)` and passed. `ci.yml` passes `-count=1` to every matrix package, so **CI is sound and the
+exposure is a local run** — which is why this is a comment in the test rather than a symlink into
+`cleat/testdata/` (the repo tracks no symlinks today, and that is a precedent worth more than a
+local-only staleness). The tell is the word `(cached)` where a duration should be.
+
+Three build systems, three different concealments: gradle hid it in the **duration**, Go hides it
+in a **parenthesis**, and pytest does not cache at all. None of the three announces it as an error.
+
 #### What is not done, and why the first version of this paragraph was wrong
 
 Java and AssemblyScript are unfixed and do not consume the table. Both are open on cleat#1136; the
