@@ -452,6 +452,46 @@ telling them apart is what separated the two halves above: of 22 cancelled `Tier
 it is only final once the run is. The same run sampled twenty minutes apart gave `1` and then `3`
 here, and the `1` went into a table before this sentence was written.
 
+**"Should no longer happen" is true of `develop` and false of a PR, and the trigger is one you
+reach for constantly: EDITING THE PR BODY.** `ci.yml` fires on
+`types: [opened, synchronize, reopened, edited]`, and `edited` is the activity type a **title,
+body or base change** produces — it is there deliberately, because a retargeted PR would otherwise
+never trigger the workflow at all (see the comment above the line). PR runs share one concurrency
+group per ref and supersede, by design. So `gh pr edit --body-file` while checks are running
+cancels the in-flight run and starts a fresh one.
+
+Measured 2026-09-10 on #1158, by doing it. A push at 17:57:59 created **9** runs; a body edit
+**thirteen seconds later** created **7** more against *the same SHA*, and the in-flight members of
+the first set were cancelled where they stood:
+
+    gh run list --branch <branch> --limit 30 --json createdAt,conclusion,status \
+      --jq 'group_by(.createdAt)[] | "\(.[0].createdAt) count=\(length)"'
+
+| | |
+|---|---|
+| runs at 17:57:59, sha `64204be9` | 9 — the ones still running were cancelled |
+| runs at 17:58:12, sha `64204be9` | 7 — the live set, same SHA |
+| steps in the cancelled `Layer 1 — SDK` job | **every one `success`** |
+| its job conclusion | `cancelled` |
+
+Note the two counts differ, so this is not a clean "one set replaces another": the trigger and the
+path filters between them are not identical, and a run that had already finished stays finished.
+Do not read the pair as a constant — re-derive it with the command above.
+
+**That last pair is what makes it expensive.** `gh pr checks` reports a cancelled job as `fail`,
+and any watcher whose parse is `$2!="pass" && $2!="pending" && $2!="skipping"` — the one this file
+recommends, correctly — counts it as a failure and prints RED. So a body edit produces a red PR
+whose failing job has no failing step, which reads exactly like a real breakage and sends you into
+a log that says `ok`. The discriminator is the `jobs | length` line above plus the job's own
+`conclusion` field:
+
+    gh api repos/<owner>/<repo>/actions/jobs/<job-id> --jq '.conclusion'   # cancelled, not failure
+    gh api repos/<owner>/<repo>/actions/jobs/<job-id> --jq '.steps[].conclusion' | sort -u
+
+All-`success` steps under a non-success job means the job was killed, not that it failed. The
+practical rule is cheaper than the diagnosis: **get the body right before pushing, and if you must
+edit it, do so before the checks start or after they settle.**
+
 **When a schema migration lands, recreate your test databases.** `CREATE TABLE IF NOT EXISTS`
 never adds a column, so a long-lived database keeps its old shape and dozens of tests fail on a
 missing column. Drop and recreate; do not debug the code.
