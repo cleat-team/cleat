@@ -382,10 +382,41 @@ failures on 2026-09-05, plus one already recorded above from 2026-08-31 — one 
 | `grep -cE '^\S+\s+pending'` | a tab-delimited table whose fields contain spaces | `awk -F'\t'` |
 | `pub fn <name>(` | a declaration can carry generics | a parse that admits them |
 | a name scan over `.ts` | source contains prose *about* names | anchor to where the artifact lives |
+| `` `[^`]{10,600}` `` | a rejected literal leaves the scan mid-string | pair first, filter after |
 
 "Check your regex" is the weak form of this. The strong form is that **a text search cannot tell a
 thing from a sentence about the thing**, and neither can a line-oriented read of a structured
 format. When the answer matters, read it with something that knows the shape.
+
+**That last row is a different failure from the four above it, and the difference is the reason it
+is here.** Every other row MISSES what it aimed at, which is bad and visible: a count comes out
+low and you go looking. A bound applied *while pairing delimiters* does something worse — it
+**re-phases the rest of the file and consumes an unrelated statement as a delimiter.**
+
+Measured 2026-09-10, surveying `cmd/` for SQL that reaches an RLS table.
+`cmd/cleatctl/replay.go` holds exactly two backtick literals: a 698-character usage string, then a
+303-character `SELECT`. With `` `[^`]{10,600}` `` the first is rejected for length — and the regex
+resumes *inside* it, so its closing backtick pairs with the SELECT's opening one and the statement
+is swallowed as a delimiter. The bound excluded nothing it was aimed at and hid something it was
+not. **And a count cannot see it**: both readings return exactly ONE literal from that file,
+just not the same one — a substitution rather than a shortfall, so a sanity check on the total
+agrees with itself.
+
+Two scans of that population, run independently, disagreed at 6 against 12; five separate
+narrowings were found reconciling them, and **every one had been written as a parsing
+convenience** — a length bound, a 60-character proximity rule, `…Context`-only call forms,
+backticks-only, and anchoring on the call site at all. That last one is the least visible: a query
+living in a `[]struct{label, query string}` executed later in a loop is invisible to a call-site
+scan **by construction**, and it held nine of the seventeen.
+
+Neither session found its own. The correct total, 17, came out of the disagreement — which is the
+case for two derivations that CAN disagree rather than one that gets checked. Cite it with the
+command, and pair before you filter:
+
+    # WRONG: the bound is inside the pairing
+    re.finditer(r'`([^`]{10,600})`', src)
+    # RIGHT: pair, then discard
+    [m for m in re.finditer(r'`([^`]*)`', src) if 10 <= len(m.group(1)) <= 600]
 
 **And the portable version of that, which needs no parser: anchor to where the artifact lives, not
 to what it is called.** "Extract the declarations" requires a tool per language. `^` does not. A
