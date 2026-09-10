@@ -11108,3 +11108,72 @@ between the acquire and the read-back, with a *correct* implementation:
 That reproduces the CI failure's shape and magnitude locally, which is what distinguishes
 "this is a flaky test" from "this is a flake". The failure message now prints `dbElapsed`, so
 the next reader is not left to infer the round trip from the size of the negative number.
+
+### 3.423 A statement that reaches an RLS table with no tenant set, and why a tenant predicate does not save it — ✅ **DONE 2026-09-10** (cleat#1178)
+
+`PostgresStore.successorOfRun` issued `SELECT id FROM workflow_instances WHERE continued_from
+= $1` through `s.db.QueryRowContext` — no transaction, so no
+`set_config('cleat.tenant_id', …)`. That table is `ENABLE` + `FORCE ROW LEVEL SECURITY` with a
+fail-closed policy whose `USING` calls `cleat.assert_tenant_set()`, which `RAISE`s when the
+tenant is unset. Every continue-as-new chain with a successor errored (cleat#1177, fix in
+flight as cleat#1179). This is the guard that keeps the class at zero.
+
+**THE DECIDING VARIABLE IS A PROPERTY OF THE TRANSACTION, NOT OF THE SQL**, and the obvious
+criterion is wrong in the direction that makes a guard useless. Measured by cleat#1178 on a
+live database as `cleat_app`:
+
+    SELECT id FROM workflow_instances WHERE continued_from='…' AND tenant_id='2222…';
+    ERROR:  cleat.tenant_id is not set -- tenant context required for RLS-scoped query
+
+A policy is applied **in addition** to the query's own predicates, never instead of them. A
+guard keyed on "the SQL mentions `tenant_id`" passes both known faults, including the one it
+exists to prevent.
+
+**That is asserted, not just described.** Deleting `AND tenant_id = $3` from a statement that
+runs inside a proper RLS transaction leaves the guard **silent** — the second half of the
+known-positive, and the half that proves it is keyed on the right variable. The first half:
+unexempting `terminal_run.go:132` makes it report exactly that site; moving a safe `tx`
+statement onto `s.db` makes it report the new one.
+
+**WHY STATIC AND NOT AN INTEGRATION TEST.** A policy's `USING` is evaluated **per candidate
+row**, so the same check against an empty table returns `(0 rows)` and no error under every
+role — indistinguishable from working. Two sessions were caught by that on 2026-09-10. And CI
+could not find these anyway: every job hands the Go suite a superuser DSN, and a superuser
+bypasses RLS unconditionally, `FORCE` included.
+
+**THREE DEFECTS IN THE GUARD, ALL FOUND BY RUNNING IT, ALL IN THE OVER-REPORTING DIRECTION** —
+which is the cheaper direction to have, but a guard that reports non-faults gets switched off:
+
+  * **Filtering by filename cannot separate the dialects.** All three `successorOfRun`
+    implementations live in `terminal_run.go`, so a scan skipping `mysql_*`/`mssql_*` files
+    still scored the MySQL and MSSQL arms — neither of which has RLS. The **receiver type** is
+    the only thing that can separate them.
+  * **A statement can establish the tenant in its own SQL.** The adaptive flusher carries
+    `WITH cfg AS (SELECT set_config('cleat.tenant_id', …, true))` ahead of its `INSERT`
+    (`flush.go:102` explains why the CTE form is needed there). A guard looking only for
+    Go-level `setRLSOnTx`/`beginTxWithRLS` calls scores both flusher statements a fault.
+  * **A table name inside a string literal is not a reference to the table.**
+    `pg_total_relation_size('event_history')` takes the name and reads no rows, so no policy is
+    evaluated. Stripping quoted literals before matching handles that shape wherever it
+    appears, rather than exempting one call site.
+
+**MY CENSUS AND THE ISSUE'S DISAGREED ON MEMBERSHIP, AND THAT WAS THE USEFUL PART.** cleat#1178
+reports one live and one latent, scoped to `PostgresStore`. Scanning every receiver found nine
+more latent instances — `WorkflowLoader` ×6 and `FaultInjector` ×3 — all reaching RLS tables
+outside a transaction. **Neither type has a production constructor**: every call is in
+`engine/unit_test.go` and every one passes a `nil` db.
+
+    grep -rn 'NewWorkflowLoader(\|NewFaultInjector(' --include='*.go' . | grep -v 'func New'
+
+So they are excluded, by name and with that command recorded, rather than exempted — guarding
+them would add nine allowances for no safety. The live count is one, and it agrees with the
+issue.
+
+**Exemptions are required to stay LIVE.** An allowlist that may only shrink is the usual goal;
+one that *cannot outlive its cause* is the enforceable form. Each entry must still match a real
+statement, so when cleat#1179 lands and `terminal_run.go:132` stops being a fault, the guard
+fails on the stale exemption rather than carrying it quietly.
+
+**The RLS table list is read from `migrations/postgres/`, not written here.** Eleven today; a
+literal silently stops covering the twelfth. Comments are stripped first, or a header quoting
+an `ALTER TABLE … ENABLE ROW LEVEL SECURITY` counts as a declaration.
