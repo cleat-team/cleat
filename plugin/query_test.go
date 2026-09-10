@@ -94,10 +94,19 @@ func TestRebind(t *testing.T) {
 			want:    "SELECT * FROM orders WHERE created_at < SYSUTCDATETIME()",
 		},
 		{
+			// This case's NAME has always been right and its expectation was
+			// always wrong. "$1 not a param" is exactly the point -- it is
+			// inside a string literal, so it is a price, not a placeholder --
+			// and the want then asserted that Rebind rewrites it anyway. The
+			// expectation was captured from what the implementation did rather
+			// than derived from what the name says should happen, so it locked
+			// the defect in and the name went on describing the fix.
+			//
+			// Corrected with the literal-aware scanner (cleat#1133).
 			name:    "mysql with dollar sign not a param",
 			query:   "SELECT '$1' as price FROM users",
 			dialect: DialectMySQL,
-			want:    "SELECT '?' as price FROM users",
+			want:    "SELECT '$1' as price FROM users",
 		},
 	}
 

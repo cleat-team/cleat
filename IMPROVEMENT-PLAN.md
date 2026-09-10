@@ -10732,3 +10732,84 @@ AS additionally needs the loop extracted the same way, since `awaitSignalsWithQu
     for d in crates/cleat-java packages/cleat-as; do
       printf '%-24s %s\n' "$d" "$(git grep -l quorum_cases.json -- "$d" | wc -l | tr -d ' ')"
     done
+### 3.418 Rebind could not tell SQL from a string inside SQL, so booleans were unsafe to add — ✅ **FIXED 2026-09-10** (cleat#1133)
+
+**Scope note first, because this is one of four parts and a reader will otherwise
+credit it with the rest.** cleat#1133 is 56 plugin SQL sites that fail on a dialect they
+can reach. This section covers the *rewriter*. Applying it at the adapter, the guard, and
+the 15 structural sites are separate.
+
+`plugin.Rebind` translates the primary dialect's spelling into the target's — `$N` to
+`?`/`@pN`, `now()` to `SYSUTCDATETIME()`. It did that with two regexes over the whole
+statement, and **a regex cannot tell SQL from a string that appears inside SQL**:
+
+    Rebind(`SELECT * FROM t WHERE label = 'costs $100' AND id = $1`, MSSQL)
+      -> SELECT * FROM t WHERE label = 'costs @p100' AND id = @p1
+                                                ^^^^ user-visible data, corrupted
+
+No shipped plugin has a `$N` inside a string literal (`grep -rnoE "'[^']*\$[0-9][^']*'"`
+over `plugins/` → nothing), so this was latent rather than live. **It was about to stop
+being latent, for two independent reasons**: the rewrite moves from the 166 call sites
+that opt in to the adapter, where it meets every plugin statement; and `TRUE`/`FALSE`
+joins the substitution list, which is a token that appears in ordinary English in ordinary
+columns — `WHERE note = 'set this to true'` is not exotic.
+
+So `Rebind` now scans, copying through every quoted region and comment untouched, in all
+four spellings the three dialects use (`'…'`, `"…"`, `` `…` ``, `[…]`) plus `--` and
+`/* */`. That is more code than two regexes, and it is what keeps the rewrite in the
+category of things an adapter may safely do.
+
+**A TEST ASSERTED THE CORRUPTION, AND ITS NAME ASSERTED THE FIX.** `query_test.go` carried:
+
+    name:    "mysql with dollar sign not a param",
+    query:   "SELECT '$1' as price FROM users",
+    want:    "SELECT '?' as price FROM users",
+
+The name is right and has always been right — `$1` inside quotes is a *price*, not a
+placeholder. The `want` then asserts it is rewritten anyway. The expectation was captured
+from what the implementation did rather than derived from what the name says, so it locked
+the defect in while the name went on describing the repair. This is the shape CLAUDE.md
+records for `TestFinalizeDeferPhaseIsFencedOnTheClaimAndOnTheMarker`, arriving through a
+golden value instead of a mechanism.
+
+**Booleans: 38 tokens, 17 contexts, two shapes.** Derived from SQL string literals reached
+via the Go parser, not from a text grep, because Go source is full of `true`:
+
+    go run scripts/… # or: parse plugins/**/*.go, keep BasicLits matching
+                     # ^\s*(SELECT|INSERT|UPDATE|DELETE|WITH), scan those for \b(TRUE|FALSE)\b
+
+  * `= true` / `= false` — 28
+  * a bare `true`/`false` in a `VALUES` list — 10
+
+**A regex keyed on `=\s*true` sees the first shape and is blind to the second**, which is
+why the scan was written against the literals rather than against an assumed spelling.
+MySQL needs no boolean rewrite at all — `TRUE`/`FALSE` are documented aliases for `1`/`0`
+— and does not get one.
+
+**Why this is a binding error and not a syntax error, which is why a parse sweep says it
+is fine.** T-SQL has no boolean type, so `enabled = true` resolves `true` as a *column
+name*. `SET PARSEONLY ON` accepts it; only `SET NOEXEC ON`, which binds, rejects it. That
+is 22 of #1133's sites and the reason §3.414's guard is lexical.
+
+**Verified on a live SQL Server 2022, with a negative control**, against the real
+`slack_config` table rather than a fixture built to fit the assumption (§3.415 is what
+happens without that discipline):
+
+| statement | result |
+|---|---|
+| shipped `Rebind` — `… AND enabled = true` | **REJECTED**: `mssql: Invalid column name 'true'.` |
+| this change — `… AND enabled = 1` | **ACCEPTED** |
+
+The control is load-bearing: without it, a server that accepts anything produces the same
+pass. This reproduces from the other direction the `Invalid column name 'true'` ×9 that a
+peer session attributed to `kafka-connect` in a four-minute worker log.
+
+**Idempotence is asserted, not argued** (`TestRebindIsIdempotent`), because the adapter
+will apply `Rebind` to statements whose call site already did: `@p1` contains no `$N`,
+`SYSUTCDATETIME()` does not match `now()`, `1` does not match `TRUE`.
+
+**What this fixes on its own: 8 sites** — the ones that already call `Rebind` and carry a
+boolean (`eventtriggers/publish.go`, `kafkaconnect/host_functions.go`,
+`oauthprovider/routes.go`, `pagerdutyalert/host_functions.go` ×2,
+`slacknotify/host_functions.go`, `webhookingest/host_functions.go`,
+`webhookingest/routes.go`). The other 48 wait on the adapter change and the structural work.
