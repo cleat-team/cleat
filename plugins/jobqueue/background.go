@@ -12,18 +12,30 @@ import (
 // resetStuckJobsQuery resets running jobs that have been running for more than
 // 5 minutes back to pending, so they can be picked up by another worker.
 var resetStuckJobsQuery = plugin.Query{
-	// PostgreSQL has no `UPDATE ... LIMIT`, so the bound goes in a subquery --
-	// the same shape the MSSQL variant below already uses. This arm previously
-	// carried `LIMIT 1000` directly and PostgreSQL rejected it with
-	// `syntax error at or near "LIMIT"` on every reaper tick, which is to say
-	// the reaper had never run on the primary dialect (cleat#1133).
+	// task_queue's key is (tenant_id, queue_name, job_id). THERE IS NO `id`
+	// COLUMN, and both of these arms were keyed on one until now.
 	//
-	// It read as the MySQL statement because it WAS: the two differed only in
-	// the interval literal. Default is what plugin.Query.For() returns for
-	// PostgreSQL, so a MySQL statement left in Default is a PostgreSQL bug.
-	Default: `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE id IN (SELECT id FROM task_queue WHERE status = 'running' AND started_at < NOW() - INTERVAL '5 minutes' ORDER BY id LIMIT 1000)`,
+	// The PostgreSQL arm was `UPDATE ... LIMIT 1000`, which PostgreSQL rejects,
+	// so the reaper had never run (cleat#1133). #1134 replaced it with a
+	// subquery -- and keyed that subquery on `id`, copied from the MSSQL arm
+	// beside it. The MSSQL arm had never run either: `Invalid column name 'id'`
+	// is in the nightly's own allowlist. So the repair took its column name from
+	// a statement whose never having executed was the thing being fixed, and the
+	// reaper still did not run -- only the error changed shape, from
+	// `syntax error at or near "LIMIT"` to `column "id" does not exist`
+	// (cleat#1141).
+	//
+	// It passed review because it was "verified against a live server" -- on a
+	// table created by hand for the test, with an `id` column, because the query
+	// under test used one. The fixture was built to fit the assumption, so the
+	// check could not have disagreed. Both statements below are now run against
+	// the schema in migrations.go.
+	//
+	// PostgreSQL takes a row constructor in IN; SQL Server does not, so its arm
+	// joins to a TOP subquery on the same three columns.
+	Default: `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE (tenant_id, queue_name, job_id) IN (SELECT tenant_id, queue_name, job_id FROM task_queue WHERE status = 'running' AND started_at < NOW() - INTERVAL '5 minutes' ORDER BY tenant_id, queue_name, job_id LIMIT 1000)`,
 	MySQL:   `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE status = 'running' AND started_at < NOW() - INTERVAL 5 MINUTE LIMIT 1000`,
-	MSSQL:   `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE id IN (SELECT id FROM task_queue WHERE status = 'running' AND started_at < DATEADD(minute, -5, SYSUTCDATETIME()) ORDER BY id OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY)`,
+	MSSQL:   `UPDATE tq SET status = 'pending', started_at = NULL FROM task_queue tq INNER JOIN (SELECT TOP 1000 tenant_id, queue_name, job_id FROM task_queue WHERE status = 'running' AND started_at < DATEADD(minute, -5, SYSUTCDATETIME()) ORDER BY tenant_id, queue_name, job_id) s ON tq.tenant_id = s.tenant_id AND tq.queue_name = s.queue_name AND tq.job_id = s.job_id`,
 }
 
 // runReaper resets stuck running jobs back to pending. Returns the number of

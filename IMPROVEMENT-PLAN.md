@@ -10335,7 +10335,7 @@ identical output on the case being fixed** — only an import that *should* warn
 
 ---
 
-### 3.414 Plugin SQL that its own dialect rejects — the reaper had never run on PostgreSQL — ✅ **FIXED 2026-09-10** (cleat#1133)
+### 3.414 Plugin SQL that its own dialect rejects — the reaper had never run on PostgreSQL — 🔶 **PARTLY FIXED 2026-09-10 — the jobqueue half was WRONG, see §3.415** (cleat#1133)
 
 Plugin queries failed at runtime on all three dialects, continuously, in nightly runs that passed.
 Background loops error without failing an assertion, and the worker log is not in the CI console —
@@ -10404,3 +10404,56 @@ The `LIMIT` rule needed the fix the guard itself provoked: `UPDATE ... WHERE id 
 is valid PostgreSQL and is the **repair**, so a rule matching `LIMIT` anywhere flags the fix as the
 defect. It did, on its first run, against the fix in this same commit. Balanced parentheses are
 stripped before the check so only clauses of the outer statement remain.
+
+
+---
+
+### 3.415 The reaper still had never run: §3.414 keyed its repair on a column that does not exist — ✅ **FIXED 2026-09-10** (cleat#1141)
+
+§3.414 reported the `jobqueue` reaper fixed on PostgreSQL. It was not. The repair replaced
+`UPDATE ... LIMIT 1000` with a subquery **keyed on `id`**, and `task_queue` has no `id` column —
+its key is `(tenant_id, queue_name, job_id)`. The reaper still never ran; only the error changed
+shape, from `syntax error at or near "LIMIT"` to `column "id" does not exist`.
+
+#### Where the column name came from, which is the whole lesson
+
+From the `MSSQL` arm beside it, which **had also never executed** — `Invalid column name 'id'` is in
+the nightly's own allowlist. **The repair took its column name from a statement whose never having
+run was the defect being repaired.**
+
+#### And the verification was built to agree
+
+§3.414 claimed the fix was "measured on a live server". It was — against a table created by hand for
+the check:
+
+    CREATE TABLE IF NOT EXISTS task_queue (id INT, status TEXT, started_at TIMESTAMPTZ);
+
+An `id` column, because the query under test used one. **The fixture was built to fit the
+assumption, so the check could not have disagreed.** That is the same defect this file has recorded
+all night in other people's guards — a check whose universe never contained the answer — committed
+inside the change that documents it, by the author documenting it.
+
+The lexical guard added in §3.414 is blind to this by construction: it compares *tokens*, and a
+column name is not a token class. It says so in its own doc comment, and that statement is now load
+bearing rather than decorative.
+
+#### The closure
+
+`TestReaperResetsAStuckJob_MultiBackend` builds its schema from the plugin's **own migrations** and
+asserts the stuck job is reset — the effect, not the absence of an error, because `runReaper` logs
+and returns `-1`, so a statement that does not execute is indistinguishable from an empty queue to
+every caller and to a green nightly.
+
+It rejects **both** previously-shipped statements, which is what makes it a regression test rather
+than a restatement:
+
+| statement | result |
+|---|---|
+| pre-§3.414 `UPDATE ... LIMIT 1000` (§3.410's #1133) | **FAIL** |
+| §3.414's `id IN (SELECT id ...)` | **FAIL** |
+| `(tenant_id, queue_name, job_id) IN (...)` | pass on all three dialects |
+
+The MSSQL arm carried the identical `id` fault and is fixed with a join to a `TOP` subquery, since
+SQL Server does not accept a row constructor in `IN`. MySQL's arm was correct throughout — `UPDATE
+... LIMIT` is valid there — and passes unchanged, which is the control that shows the test is about
+the statement rather than the harness.
