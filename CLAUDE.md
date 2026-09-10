@@ -395,8 +395,9 @@ to a file you have never seen, which "write a real parser" is not.
 
 **The unifying question, and it is the one to ask before recording any confirmation: could this
 check have disagreed?** Every trap above is a check that was going to say yes whatever the truth
-was. Two ways that happens, both measured on 2026-09-08, and neither looks like a weak check at
-the time:
+was. Three ways that happens — the first two measured 2026-09-08, the third 2026-09-10 — and none
+looks like a weak check at the time. **The first two are checks that could not see far enough. The
+third never ran at all.**
 
 **1. A documented failure mode absorbs every instance of its symptom, including the ones it does
 not explain.** `401 invalid or revoked API key` from the port harness has *four* causes — a stale
@@ -430,6 +431,64 @@ already records that trap for *numbers* — two export counts agreeing at 55 whi
 members — and it works identically on conclusions. **"Independent" has to mean differently scoped,
 not separately performed.** When a second party confirms, ask what they *searched*, not whether
 they agreed.
+
+**3. A check whose SETUP destroys the state it is measuring.** This is the hardest of the three to
+spot, because the setup is where you are being careful — the damage is done by the part of the
+procedure you added on purpose.
+
+Measured 2026-09-10, twice, by two sessions, in opposite directions, within an hour. The question
+both times: *does this test re-run when the fixture it reads changes?* — a shared JSON table at the
+repo root, read at runtime by consumers in several languages (cleat#1136).
+
+| | how the cache was cold before the "measurement" | what was concluded |
+|---|---|---|
+| one session | the previous step had already changed another tracked file | "the change was noticed" |
+| the other | the first run used `-count=1`, which writes no cache entry | "the change was noticed" |
+
+Both readings were of a run that was going to re-run regardless. **An experiment about caching must
+begin from a WARM cache and change exactly one thing** — and the sting is in the setup: any
+`-count=1`, `clean`, or `--rerun-tasks` there destroys the state under test. Those are exactly the
+flags careful practice tells you to add, so **the more disciplined the habit, the more reliably it
+erases the evidence.**
+
+Done properly, one change at a time from a warm cache, the answer is a fact about Go worth knowing
+on its own: **`go test` caches on files opened INSIDE the package directory, and a fixture read
+through `..` is invisible to it.**
+
+| change | `go test` (no `-count=1`) |
+|---|---|
+| nothing | `ok (cached)` |
+| a file the test read, **outside** the package dir | `ok (cached)` — not noticed |
+| a file the test read, **inside** the package dir | `ok 0.205s` — re-ran |
+
+So a test whose fixture lives outside its package silently passes against an edited fixture. CI is
+sound here only because `ci.yml` passes `-count=1` to every matrix package; a local `go test ./...`
+is not, and **the tell is the word `(cached)` where a duration should be**.
+
+Three build systems concealed that same fact three ways in one afternoon, and none of the three
+reports anything wrong. Gradle hid it in the **duration** — `BUILD SUCCESSFUL in 578ms` against a
+real 3s, on a deliberately corrupted fixture. Go hides it in a **parenthesis**. pytest does not
+cache at all.
+
+**Note which of those was caught and how**, because it is the argument for what follows: the gradle
+staleness was real and was spotted, from the duration alone. The verdict said `SUCCESSFUL` and was
+useless; the one field nobody reads was the only one telling the truth.
+
+**The remedy generalises past caching, and it is the one thing to take from this item: print the
+PRECONDITIONS beside every row of a result table, not just the verdict.**
+
+    B [stream=WS-1 patched=1 MERGE_HEAD=yes] exit=0 want=0
+
+Those three bracketed fields are what separate *the check ran and allowed it* from *the check never
+looked*. A verdict column alone has no way to say "I did not run" — which is this whole section's
+subject, and the reason every trap in it reads as a pass.
+
+That remedy was paid for rather than thought up: cleat#1162 collected **three more empty greens in
+one sitting**, each from a different mechanism and none reporting anything wrong — a clean merge
+runs no pre-commit hook at all; `git reset --hard` silently reverted the test's own sandbox
+registration, so the hook skipped for "unknown stream"; and an already-merged `HEAD` staged nothing,
+so the commit failed with "nothing to commit". Read that issue before writing a test harness for a
+guard.
 
 **A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
