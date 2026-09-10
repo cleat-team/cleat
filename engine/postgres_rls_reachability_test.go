@@ -49,6 +49,29 @@ import (
 //
 // And CI could not find these anyway: every job hands the Go suite a superuser
 // DSN, and a superuser bypasses RLS unconditionally, FORCE included.
+//
+// WHAT THIS GUARD DOES NOT COVER, SAID HERE SO ITS SILENCE IS NOT READ AS
+// COVERAGE. There are two ways a statement and a policy can disagree, and this
+// checks one of them:
+//
+//	fail-CLOSED   the statement cannot run at all -- no tenant is set, so
+//	              assert_tenant_set() raises. Loud, and what this guard finds.
+//	fail-OPEN     the statement runs unscoped -- it carries no tenant predicate
+//	              of its own and relies entirely on the policy to scope it. On a
+//	              connection that bypasses RLS (a superuser, and every CI job
+//	              uses one) it returns other tenants' rows and nothing errors.
+//
+// The second is cleat#1180, and it is NOT a defect the way the first is: a
+// statement relying on the policy is the architecture working as intended.
+// Which is exactly why it cannot be checked the way this file checks the other
+// -- there is no rule of the form "a statement naming an RLS table must carry a
+// tenant predicate" that is true, so a static guard would either flag the
+// intended design or nothing at all. Read cleat#1180 for the counts rather than
+// copying them here, where they would rot.
+//
+// So: a green run of this test means no statement is unable to run. It says
+// nothing about what a statement returns on a connection that bypasses the
+// policy.
 func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 	rls := rlsTablesFromMigrations(t)
 	if len(rls) < 5 {
