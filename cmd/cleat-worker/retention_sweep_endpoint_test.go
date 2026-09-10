@@ -123,9 +123,6 @@ func TestADisabledArmIsNamedRatherThanReportedAsZero(t *testing.T) {
 // a button that reports success and changes nothing — which is what it would
 // have been without `older_than`.
 func TestTheSweepDeletesOnlyWithTheOverride(t *testing.T) {
-	if testing.Short() {
-		t.Skip("needs a database")
-	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
 	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
@@ -214,9 +211,6 @@ func TestTheSweepDeletesOnlyWithTheOverride(t *testing.T) {
 // reversed — an operator triggering a sweep to apply a config change would
 // silently get a destructive one they never enabled.
 func TestAnOverrideDoesNotEnableADisabledArm(t *testing.T) {
-	if testing.Short() {
-		t.Skip("needs a database")
-	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
 	store := engine.NewPostgresStore(db)
 	ctx := context.Background()

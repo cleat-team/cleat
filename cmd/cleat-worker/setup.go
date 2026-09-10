@@ -2593,12 +2593,12 @@ func (w *Worker) runRetentionSweepWindow(retentionDays, completedWorkflowRetenti
 		if n, err := w.store.DeleteExpiredEvents(w.ctx, cutoff); err != nil {
 			res.Errors = append(res.Errors, "events: "+err.Error())
 		} else {
-			res.EventsDeleted = int64(n)
+			res.EventsDeleted = n
 		}
 		if n, err := w.store.ClearExpiredCompactionState(w.ctx, cutoff); err != nil {
 			res.Errors = append(res.Errors, "compaction_state: "+err.Error())
 		} else {
-			res.CompactionStateCleared = int64(n)
+			res.CompactionStateCleared = n
 		}
 	} else {
 		res.Skipped = append(res.Skipped, "events and compaction_state (--retention-days is 0)")
@@ -2607,7 +2607,7 @@ func (w *Worker) runRetentionSweepWindow(retentionDays, completedWorkflowRetenti
 		if n, err := w.store.DeleteCompletedWorkflows(w.ctx, at(completedWorkflowRetentionDays)); err != nil {
 			res.Errors = append(res.Errors, "completed_workflows: "+err.Error())
 		} else {
-			res.CompletedWorkflows = int64(n)
+			res.CompletedWorkflows = n
 		}
 	} else {
 		res.Skipped = append(res.Skipped, "completed_workflows (--completed-workflow-retention-days is 0)")
@@ -2616,7 +2616,7 @@ func (w *Worker) runRetentionSweepWindow(retentionDays, completedWorkflowRetenti
 		if n, err := w.store.DeleteDeadLetteredWorkflows(w.ctx, at(deadLetterRetentionDays)); err != nil {
 			res.Errors = append(res.Errors, "dead_lettered: "+err.Error())
 		} else {
-			res.DeadLetteredWorkflows = int64(n)
+			res.DeadLetteredWorkflows = n
 		}
 	} else {
 		res.Skipped = append(res.Skipped, "dead_lettered (--dead-letter-retention-days is 0)")
