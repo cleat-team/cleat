@@ -10995,3 +10995,52 @@ interval → `mysql`, `Error 1064`; reverting the jobqueue `TOP 10` → `mssql`,
 it ships no `UpMySQL`/`UpMSSQL` migration arms, so its tables never exist elsewhere and its
 queries fail on a missing table either way. That the declaration is recorded and then never read
 is cleat#1157.
+
+### 3.422 A TTL assertion that a slow runner fails, in the test written to remove timing dependence — ✅ **FIXED 2026-09-10**
+
+`TestConcurrencyKeyTTLKeepsSubSecondPrecision/mssql/500ms` went red on `Test SQL Server`:
+
+    a 500ms lock was stored already expired (-163.188ms remaining): the next caller
+    takes it, and two workflows hold the same key
+
+**The implementation was correct.** A 500 ms TTL with a database-side round trip of about
+663 ms yields a negative remainder, and so does a *correct* implementation on a loaded
+runner. The check asserted a property of the machine.
+
+**THE SAME DEFECT, IN THE SAME TEST, AS THE ONE ITS OWN COMMENT DESCRIBES.** The lower bound
+used to be `remaining < ttl/2` and failed identically on 2026-08-07 (run 31145314648, *"a
+500ms lock expires in 202.46ms"*) with nothing wrong. It was replaced by `ttl - dbElapsed`,
+which needs no slack and no tuning, and the file carries a long comment on why guessing a
+fraction is wrong. **The `remaining <= 0` check three lines above was left timing-dependent in
+that same edit** — and it is the one that fired.
+
+The fix is the guard, not slack: `remaining <= 0 && dbElapsed < ttl`. If the round trip took
+longer than the TTL, a correct implementation *also* yields a negative remainder and the lock
+really has expired.
+
+**NOTHING IS LOST, AND THAT IS MEASURED RATHER THAN ARGUED.** Restoring the historical
+truncation defect on PostgreSQL (`float64(int(ttl.Seconds()))`) still reddens the test, and
+the two assertions divide the space exactly:
+
+| case | round trip | caught by |
+|---|---|---|
+| 500 ms | 9.7 ms | the zero check |
+| 999 ms | 3.8 ms | the zero check |
+| 1.5 s → 1 s | 3.9 ms | the **lower bound** — remainder is positive, so the zero check cannot see it |
+| 30 s | — | correctly passes; truncation is a no-op |
+
+A truncated TTL stores `expires_at == acquire time`, so `remaining ≈ -dbElapsed`, which is
+below `ttl - dbElapsed` for every positive `ttl` **at any speed**. The lower bound therefore
+catches truncation the zero check must skip.
+
+**And the slow runner was reproduced rather than reasoned about.** Inserting a 700 ms sleep
+between the acquire and the read-back, with a *correct* implementation:
+
+| | |
+|---|---|
+| guard removed (today's code) | **FAIL** — `-208.262ms remaining, database-side round trip 709.663ms` |
+| guard present | **PASS**, all four TTLs |
+
+That reproduces the CI failure's shape and magnitude locally, which is what distinguishes
+"this is a flaky test" from "this is a flake". The failure message now prints `dbElapsed`, so
+the next reader is not left to infer the round trip from the size of the negative number.

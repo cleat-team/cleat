@@ -172,10 +172,38 @@ func TestConcurrencyKeyTTLKeepsSubSecondPrecision(t *testing.T) {
 					remaining := readConcurrencyKeyExpiry(t, adminDB, backend, key)
 					dbElapsed := time.Duration(dbNowMicros(t, adminDB, backend)-before) * time.Microsecond
 
-					if remaining <= 0 {
-						t.Fatalf("a %s lock was stored already expired (%s remaining): "+
-							"the next caller takes it, and two workflows hold the same key",
-							ttl, remaining)
+					// A stored-already-expired lock is the defect this file
+					// exists for -- but only when a correct implementation could
+					// not have produced it. If the database-side round trip took
+					// longer than the TTL itself, a correct implementation yields
+					// a negative remainder too, and the lock really has expired
+					// through no fault of the code.
+					//
+					// Without the dbElapsed guard this is an assertion about the
+					// RUNNER, not about the code, and it fails accordingly: on
+					// `Test SQL Server`, 2026-09-10, "a 500ms lock was stored
+					// already expired (-163.188ms remaining)" -- a ~663 ms round
+					// trip on a loaded runner, with the stored TTL correct.
+					//
+					// That is the same defect, in the same test, that the comment
+					// on the lower bound below describes and fixes for ITSELF:
+					// `remaining < ttl/2` was replaced by `ttl - dbElapsed`
+					// precisely because the first asserts a property of the
+					// machine. This check was left timing-dependent in the same
+					// edit.
+					//
+					// NOTHING IS LOST BY THE GUARD. The lower bound catches
+					// truncation on its own and does so at any speed: a TTL
+					// truncated to whole seconds stores expires_at == acquire
+					// time, so remaining is about -dbElapsed, which is below
+					// ttl-dbElapsed for every positive ttl. The two together
+					// cover the fast runner and the slow one, and neither depends
+					// on which it is.
+					if remaining <= 0 && dbElapsed < ttl {
+						t.Fatalf("a %s lock was stored already expired (%s remaining, "+
+							"database-side round trip %s): the next caller takes it, "+
+							"and two workflows hold the same key",
+							ttl, remaining, dbElapsed)
 					}
 					// Exact upper bound: the round trip costs real time, so the
 					// remainder is slightly less than the TTL. It must never
