@@ -78,7 +78,7 @@ func TestSchedulerClaimsADueSchedule_MultiBackend(t *testing.T) {
 			// runDueSchedules reports every SQL failure to its logger and to
 			// nothing else, so the log is the only place a diagnosis exists.
 			var logbuf bytes.Buffer
-			p.db = &engine.SQLDBAdapter{DB: be.DB}
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.logger = slog.New(slog.NewTextHandler(&logbuf, nil))
 			p.env = &plugin.Environment{
 				StartWorkflow: func(context.Context, string, json.RawMessage) (string, error) {
@@ -145,7 +145,7 @@ func TestSchedulerAPIWritesAScheduleOnEveryBackend_MultiBackend(t *testing.T) {
 			}
 
 			var logbuf bytes.Buffer
-			p.db = &engine.SQLDBAdapter{DB: be.DB}
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.logger = slog.New(slog.NewTextHandler(&logbuf, nil))
 
 			tenant := uuid.New()

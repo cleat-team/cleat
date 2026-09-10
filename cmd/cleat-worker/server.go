@@ -21,6 +21,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 	"golang.org/x/time/rate"
 )
 
@@ -1962,20 +1963,27 @@ func generateUpdatePromiseID() (string, error) {
 
 // getPluginDB returns the plugin DB adapter, using pluginDB if available
 // (separate pool), falling back to the main db otherwise.
-func getPluginDB(db, pluginDB *sql.DB) *engine.SQLDBAdapter {
+//
+// The dialect is a REQUIRED PARAMETER rather than a field the caller may set,
+// because Rebind on the zero Dialect is a no-op that looks exactly like a
+// working rewrite -- statements pass through untouched and every test that
+// runs on PostgreSQL still passes. A constructor that can be called correctly
+// by accident and incorrectly by omission is the shape this repository keeps
+// paying for, so omission is made impossible at compile time instead.
+func getPluginDB(db, pluginDB *sql.DB, dialect plugin.Dialect) *engine.SQLDBAdapter {
 	if pluginDB != nil {
-		return &engine.SQLDBAdapter{DB: pluginDB}
+		return &engine.SQLDBAdapter{DB: pluginDB, Dialect: dialect}
 	}
-	return &engine.SQLDBAdapter{DB: db}
+	return &engine.SQLDBAdapter{DB: db, Dialect: dialect}
 }
 
 // getPluginReadOnlyDB returns the read-only plugin DB adapter, using pluginDB
 // if available (separate pool), falling back to the main db otherwise.
-func getPluginReadOnlyDB(db, pluginDB *sql.DB) *engine.ReadOnlyDB {
+func getPluginReadOnlyDB(db, pluginDB *sql.DB, dialect plugin.Dialect) *engine.ReadOnlyDB {
 	if pluginDB != nil {
-		return &engine.ReadOnlyDB{Inner: pluginDB}
+		return &engine.ReadOnlyDB{Inner: pluginDB, Dialect: dialect}
 	}
-	return &engine.ReadOnlyDB{Inner: db}
+	return &engine.ReadOnlyDB{Inner: db, Dialect: dialect}
 }
 
 // ---- Rate limiter ----

@@ -52,7 +52,7 @@ func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("jobqueue migrations on %s: %v", be.Name, err)
 			}
-			p.db = &engine.SQLDBAdapter{DB: be.DB}
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 			tenant := uuid.New()
@@ -124,7 +124,7 @@ func TestReaperTouchesNothingItShouldNot(t *testing.T) {
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("jobqueue migrations on %s: %v", be.Name, err)
 			}
-			p.db = &engine.SQLDBAdapter{DB: be.DB}
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 			tenant := uuid.New()

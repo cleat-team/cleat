@@ -10813,3 +10813,73 @@ boolean (`eventtriggers/publish.go`, `kafkaconnect/host_functions.go`,
 `oauthprovider/routes.go`, `pagerdutyalert/host_functions.go` ×2,
 `slacknotify/host_functions.go`, `webhookingest/host_functions.go`,
 `webhookingest/routes.go`). The other 48 wait on the adapter change and the structural work.
+
+### 3.419 Plugins had to remember to translate their own SQL, and 40 sites did not — ✅ **FIXED 2026-09-10** (cleat#1133)
+
+**cleat#1133, part 2 of 4.** §3.418 made the rewriter safe; this applies it. The guard and
+the 15 structural sites are separate.
+
+`plugin.Rebind` was opt-in at the call site. **166 sites called it and 40 did not**, so those
+40 sent PostgreSQL `$N` placeholders to MySQL and SQL Server, where they are not placeholders.
+
+**The tempting diagnosis is wrong and worth recording, because it would have produced a
+different fix.** "The dialect was not available at the plugin" is false: **19 of 21 plugins
+already hold a `plugin.Dialect` field**, and the only one that does not is `pgvector`
+(`grep -rlE '(dialect|Dialect)\s+plugin\.Dialect' --include='*.go' plugins/`). These sites had
+everything they needed. It was never a plumbing problem; it was a remembering problem, and the
+fix for a remembering problem is to stop requiring the memory.
+
+So `engine.SQLDBAdapter` and `engine.ReadOnlyDB` now rebind every statement on the way to the
+driver, along with their transaction types. Safe for the 166 sites that already do it
+themselves because Rebind is idempotent, which §3.418 asserts rather than argues.
+
+**SCOPE IS A DELIBERATE LINE, NOT A LIMIT WE RAN INTO.** The adapter handles the frequent,
+mechanical differences — placeholders, `now()`, boolean literals: 75 of the 90 token instances.
+It deliberately does **not** attempt `LIMIT`/`TOP`, `ON CONFLICT`/`MERGE` or
+`RETURNING`/`OUTPUT`. Those change the *shape* of the statement rather than a token in it —
+`LIMIT n` → `TOP n` moves to a different clause, and T-SQL's `OFFSET…FETCH` additionally
+requires an `ORDER BY`. A rewrite that ambitious buried in an adapter would be unreviewable.
+Plugins handle those 15 with conditional code on `Environment.Dialect`.
+
+**THE MULTI-DIALECT SUITE COULD NOT HAVE DETECTED THIS CHANGE, WHICH IS THE FINDING.** Every
+multi-backend plugin test built its adapter as:
+
+    p.db = &engine.SQLDBAdapter{DB: be.DB}          // be.Dialect, right there, dropped
+
+`PluginTestBackend` carries `DB` **and** `Dialect`. Six sites across four files took the first
+and dropped the second, so the plugin under test received its statements unrewritten on every
+backend — and the entire multi-dialect plugin suite would have passed identically with the
+adapter's rewrite present or absent. `tests/plugin-harness/harness.go:50` had the same omission
+**with the dialect in its own function signature**, which means the harness could not detect
+the class of defect it exists to catch.
+
+That is the shape this file keeps recording: not a check that is wrong, a check that is
+**silent** — and it is why part 2 is not finished by the adapter change alone.
+
+**A ZERO DIALECT IS A NO-OP THAT LOOKS LIKE A WORKING REWRITE**, which is why the constructors
+now take it as a *required parameter* rather than a settable field. `getPluginDB(db, pluginDB,
+dialect)` cannot be called with it omitted; the struct literal could be, and was, four times.
+
+**The guard covers where omission is definitely wrong, not everywhere.** There are ~235 adapter
+constructions in the tree and nearly all are single-backend PostgreSQL fixtures, where no
+rewrite is correct. Requiring the field universally would be a sweep that teaches people to
+type `Dialect: DialectPostgres` without meaning it. `TestEveryDialectSensitiveAdapterCarriesItsDialect`
+covers two cases: non-test code, and test files that use `NewPluginTestBackends`. It reports
+**11 dialect-sensitive constructions across 1102 tracked files**, and uses `git ls-files`
+rather than a walk — this checkout has fourteen worktrees under it, and a walk attributes
+their contents to the main tree, a scope error that makes a guard *more* likely to pass as the
+working tree gets messier.
+
+**Verified with a known-positive on a real site**, not only a synthetic one: reverting
+`kvstore_multidb_test.go:72` makes the guard fail naming that file and line. The synthetic
+control proves the AST matcher works; the real one proves the guard does.
+
+**`engine/testutil` cannot import `plugin` or `engine`** — both packages' own tests import
+`testutil`, so either would be an import cycle *in the test binary*. `go build` does not
+notice; `go vet` does. That is why `testutil.Dialect` is a duplicated type and why the fix is
+`plugin.Dialect(be.Dialect)` at six sites rather than a helper that hands out a configured
+`PluginDB`. `TestDialectConstantsAgree` compares the two constant **sets**, not their count.
+
+**A grep for the import path found two `engine/*.go` files mentioning `engine/testutil` and
+both were comments about it**, which would have made the cycle look pre-existing and settled.
+Checked before concluding.

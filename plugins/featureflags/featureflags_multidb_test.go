@@ -75,7 +75,7 @@ func TestFFBehavioral_MultiBackend(t *testing.T) {
 			// field instead, and so exercised an object no deployment
 			// produces.
 			p.dialect = pluginDialect
-			p.db = &engine.SQLDBAdapter{DB: be.DB}
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.mux = http.NewServeMux()
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 

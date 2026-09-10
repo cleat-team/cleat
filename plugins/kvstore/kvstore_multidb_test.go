@@ -69,7 +69,7 @@ func TestKVStoreBehavioral_MultiBackend(t *testing.T) {
 			// produces: Init sets this field, and the test built the plugin
 			// field by field instead.
 			p.dialect = pluginDialect
-			p.db = &engine.SQLDBAdapter{DB: be.DB}
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.mux = http.NewServeMux()
 			p.logger = slog.Default()
 			p.config = Config{MaxValueSize: 1_048_576}
