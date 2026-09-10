@@ -490,6 +490,32 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			if backoffMs < 1 {
 				backoffMs = 1 // minimum backoff to prevent a tight retry loop
 			}
+			// THE WAIT IS WORKER-LOCAL, AND THAT IS A DECISION (2026-09-10,
+			// cleat#1111). This is host memory: a worker lost during the
+			// backoff discards the remaining wait, and the reclaimed run
+			// retries as soon as the reaper releases it rather than at the time
+			// this policy implied. Measured on the port harness at a 20s
+			// interval: 19.6s between attempts uninterrupted, 11.4s across a
+			// worker kill -- the reaper's latency, not the interval.
+			//
+			// Declined: making the wait durable here. The reclaim delay is
+			// already latency the policy did not ask for, and re-waiting the
+			// untaken remainder on top would make a crash cost more than the
+			// outage that caused it. A backoff spaces attempts against a
+			// dependency; it is not a promise about elapsed time.
+			//
+			// The SDK-level loop in cleat/runtime.go -- taken by policies above
+			// hostRetryBudget -- backs off with DurableSleep and DOES survive,
+			// because its deadline is in the history. So --host-retry-budget is
+			// the boundary for this property as well as for slot-holding, which
+			// its flag help now says, and which
+			// docs/operations/workflow-retention.md states for operators.
+			//
+			// NOT covered by that decision, and still a defect: no event is
+			// recorded for a failed attempt (recordEvent above fires only on
+			// success), so a reclaimed run restarts the policy from attempt one
+			// and re-spends MaxAttempts. Measured at 4 calls for a 3-attempt
+			// policy across a crash, against 3 uninterrupted. See cleat#1145.
 			select {
 			case <-ctx.Done():
 				// errCode 0 here reported a *successful* call with an empty
