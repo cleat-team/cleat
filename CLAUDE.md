@@ -427,6 +427,7 @@ failures on 2026-09-05, plus one already recorded above from 2026-08-31 — one 
 | `pub fn <name>(` | a declaration can carry generics | a parse that admits them |
 | a name scan over `.ts` | source contains prose *about* names | anchor to where the artifact lives |
 | `` `[^`]{10,600}` `` | a rejected literal leaves the scan mid-string | pair first, filter after |
+| `grep --include=*.go` (unquoted) | **zsh eats the glob and grep never runs** | quote it; see the zsh/bash section |
 
 "Check your regex" is the weak form of this. The strong form is that **a text search cannot tell a
 thing from a sentence about the thing**, and neither can a line-oriented read of a structured
@@ -1085,6 +1086,7 @@ cleat-ports session:
 | `v="echo hello world"; $v` | `command not found: echo hello world` | `hello world` |
 | `spec="a b c"; set -- $spec; echo $#` | **1** | **3** |
 | `ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)`, sourced as `./scripts/env.sh` | the **parent** of the project | the project |
+| `grep -rn 'pat' --include=*.go dir/` | `no matches found: --include=*.go`, **grep never runs** | searches `dir/` |
 
 The first two are one fact: **zsh does not word-split an unquoted parameter expansion.** The third
 is separate — `BASH_SOURCE` does not exist in zsh, so `dirname ""` is `.` and the `/..` climbs one
@@ -1103,7 +1105,57 @@ Running five repository guards as `for g in "python3 scripts/check-x.py" ...; do
 ran*. A non-zero exit from a check you have not confirmed executed is not evidence about the tree
 — it is the "checks never started" case from *Is this result real?*, one layer down.
 
-The rule is the same one the paragraph above gives for patterns, and it covers all three rows:
+**Row 4 is row 1's failure with the noise removed, and it is the one to internalise.** Measured
+2026-09-11 by me and independently by the cleat-ports session. zsh expands `--include=*.go` itself,
+finds no file of that literal name, and kills the command before `grep` runs. Bare, it is loud — it
+aborts the rest of the command list, and in the peer's run **two following `echo` markers never
+printed**, so in a block that greps first and interprets afterwards, what vanishes is the part that
+would have reported the problem.
+
+Add `| head` and it goes silent *and successful*:
+
+| state | stdout | stderr | exit |
+|---|---|---|---|
+| never ran (glob eaten by zsh) | empty | `no matches found: --include=*.go` | **0** |
+| ran, matched nothing | empty | empty | **0** |
+| ran, matched something | lines | empty | **0** |
+
+Exit status cannot separate the first two — `| head` supplies the 0 — and the stderr line that could
+is phrased as a *report about the search*: "no matches found" is what a search says when it
+searched. Attending to stderr is not enough, because the sentence agrees with the wrong reading.
+
+**The generalisable part is not the zsh bug.** You add `| head` when you expect output that might be
+long — that is, when you are confident the command works. The habit that tidies the output is the
+habit that conceals the failure, and it is applied in proportion to your confidence that there is
+nothing to conceal. Every tracked occurrence in an *executable* file is already quoted — restricted to `'*.sh' '*.py'`
+the unquoted pattern matches nothing, and the positive control is that the quoted pattern matches
+one file, `scripts/check-dead-exports.sh`. So the exposure is entirely in commands typed or pasted
+at a prompt, where a human reads the result and moves on.
+
+(Restrict it to executables deliberately. Run the same search over `'*.md'` and it matches this
+section, because prose *about* the hazard contains the hazard — the "a text search cannot tell a
+thing from a sentence about the thing" row, three hundred lines up, biting the paragraph that cites
+it. I published the wider command here first and it was false the moment it was committed.)
+
+Two clauses that follow, and they apply well beyond this row:
+
+- **Before believing a blank, make the same command produce a non-blank on a case whose answer you
+  already know.** This is the control the whole *Is this result real?* section asks for, and it is
+  the only one that separates "never ran" from "ran and found nothing".
+- **Publish the pattern with any universal negative** — "no callers outside `_test.go`", not "no
+  callers" — so the next reader can disagree with the pattern rather than only with the conclusion.
+  A bare "zero callers" is unfalsifiable by anyone who does not already suspect it. It is also
+  frequently wrong in the *other* direction: the same blank reads as "this claim is stale, delete
+  the claim" and as "this mechanism is dead, delete the mechanism", and both edits feel like tidying.
+
+One thing that is **not** a control, recorded because it was mistaken for one: a peer nearly deleted
+an accurate section of `plugin-security.md` on an empty grep for `.For(ctx` — the live call site is
+`.For(w.ctx, …)` — and what stopped them was that the deletion *felt disproportionate to the
+evidence*. A sense of proportion scales with the size of the edit, not the strength of the evidence,
+so it guards the rare large edit and abandons the common small one. That is luck with a plausible
+name, and it was correctly refiled as such.
+
+The rule is the same one the paragraph above gives for patterns, and it covers all four rows:
 **run anything that mimics the harness through `bash -c '...'`.** Not for patterns only — for any
 loop, any `set --`, any `source` of a script that resolves its own path.
 
