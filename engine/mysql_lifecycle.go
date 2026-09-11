@@ -677,7 +677,7 @@ func (s *MySQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID s
 // duplicate. Returns the workflow ID, whether it already existed, and any error.
 // StartNewRun is the entry point without a concurrency key.
 func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
-	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, "")
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, StartOptions{})
 }
 
 // StartNewRunWithConcurrencyKey records the key on the row in the INSERT that
@@ -689,10 +689,20 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 // existing rows were written, and migration 058 records what happens when the
 // two conventions meet.
 func (s *MySQLStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
-	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, StartOptions{ConcurrencyKey: concurrencyKey})
 }
 
-func (s *MySQLStore) startNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+// StartNewRunWithOptions records every per-run value a start can set, in the
+// INSERT that creates the run. See StartOptions.
+func (s *MySQLStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, opts)
+}
+
+func (s *MySQLStore) startNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	concurrencyKey := opts.ConcurrencyKey
+	runInstanceMs := msOrNil(opts.RunLimits.WasmInstanceTimeout)
+	runWallClockMs := msOrNil(opts.RunLimits.WasmWallClockCeiling)
+	runRetryMs := msOrNil(opts.RunLimits.HostRetryBudget)
 	// TYPED nils, not `any(nil)`. go-mssqldb infers the parameter type from the
 	// Go value, and an untyped nil arrives as NVARCHAR NULL -- which SQL Server
 	// refuses to put in a VARBINARY(32) column: "Implicit conversion from data
@@ -794,11 +804,11 @@ func (s *MySQLStore) startNewRun(ctx context.Context, runID, defName string, def
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms)
 			VALUES (?, ?, ?, 'ready', ?,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-			        ?, ?, ?, ?)
-		`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash)
+			        ?, ?, ?, ?, ?, ?, ?)
+		`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -814,11 +824,11 @@ func (s *MySQLStore) startNewRun(ctx context.Context, runID, defName string, def
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms)
 		VALUES (?, ?, ?, 'ready', ?,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-		        ?, ?, ?, ?)
-	`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash)
+		        ?, ?, ?, ?, ?, ?, ?)
+	`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}

@@ -551,6 +551,12 @@ func (s *ShardedStore) StartNewRun(ctx context.Context, runID, defName string, d
 // the run would start and never be deferred, which is the bug cleat#1186 is
 // about. So a shard that cannot do it returns an error rather than a run.
 func (s *ShardedStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	return s.StartNewRunWithOptions(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, StartOptions{ConcurrencyKey: concurrencyKey})
+}
+
+// StartNewRunWithOptions routes like StartNewRun -- by RUN id -- and refuses
+// rather than silently dropping what it cannot record. See StartOptions.
+func (s *ShardedStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -561,16 +567,20 @@ func (s *ShardedStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID,
 	if shard == nil {
 		return "", false, fmt.Errorf("start_new_run: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	if concurrencyKey == "" {
+	if opts == (StartOptions{}) {
 		return shard.Store.StartNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority)
 	}
 	starter, ok := shard.Store.(interface {
-		StartNewRunWithConcurrencyKey(context.Context, string, string, int, json.RawMessage, string, string, int, string) (string, bool, error)
+		StartNewRunWithOptions(context.Context, string, string, int, json.RawMessage, string, string, int, StartOptions) (string, bool, error)
 	})
 	if !ok {
-		return "", false, fmt.Errorf("start_new_run: shard %q cannot record a concurrency key, so the run would start and never be deferred", shard.Config.Name)
+		// Refuse rather than drop. A silently discarded concurrency key starts
+		// a run that is never deferred; a silently discarded limit starts one
+		// that runs to its TENANT's bound instead of the tighter one asked for.
+		// Both are worse than an error, because both look like success.
+		return "", false, fmt.Errorf("start_new_run: shard %q cannot record per-run start options, so the run would silently ignore them", shard.Config.Name)
 	}
-	return starter.StartNewRunWithConcurrencyKey(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
+	return starter.StartNewRunWithOptions(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, opts)
 }
 
 // StartChildWorkflow places the child on the same shard as the parent.
