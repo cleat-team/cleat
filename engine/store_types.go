@@ -305,6 +305,19 @@ type WorkflowFilter struct {
 	// IDPrefix matches the start of the run id. `id` is text on all three
 	// dialects (TEXT / VARCHAR(255) / NVARCHAR(255)), so this needs no cast.
 	IDPrefix string
+
+	// ConcurrencyKey matches the key a run asked for, exactly.
+	//
+	// cleat#1172: when a start is refused for a key conflict the two questions
+	// are what holds it and for how long. The refusal now names the holder
+	// (#1230), but an operator looking at a STUCK key has no run id to start
+	// from -- they have the key, which is the thing they typed. This is the
+	// route from the key back to the runs.
+	//
+	// Matches on concurrency_key, the text, not concurrency_key_hash. An
+	// operator has the key string; making them hash it first to search for it
+	// would be a worse API than not having the filter.
+	ConcurrencyKey string
 	// StartedAfter and StartedBefore bound created_at, inclusive of after and
 	// exclusive of before -- the usual half-open interval, so adjacent windows
 	// tile without double-counting a row on the boundary.
