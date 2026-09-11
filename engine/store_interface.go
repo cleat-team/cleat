@@ -146,6 +146,21 @@ type WorkflowStore interface {
 
 	// ReleaseWorkflow returns a workflow to the ready queue.
 	// Used when a workflow suspends (sleep/await signals).
+	//
+	// Returns ErrFenceLost when the caller no longer holds the claim -- the
+	// same report CompleteWorkflow, FailWorkflow and FinalizeWorkflowSegment
+	// make for the same condition. It means nothing was written and nothing
+	// needed to be: another worker owns the run, so the release the caller
+	// asked for is already true. Callers should treat it as the no-op it is
+	// rather than as a failure; cmd/cleat-worker's releaseWorkflow is the
+	// reference handling.
+	//
+	// Until cleat#1223 this returned nil on PostgreSQL and MySQL and a raw
+	// "no rows affected" error on SQL Server, so the condition was
+	// undetectable on two dialects and not errors.Is-able on the third.
+	//
+	// nextWakeAt must be a real time. MySQL rejects the zero value for this
+	// column where the other two accept it.
 	ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
 
 	// ContinueAsNew atomically creates a new workflow run AND completes the

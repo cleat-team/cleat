@@ -780,7 +780,16 @@ func TestRLSTenantIsolation(t *testing.T) {
 		}
 
 		// Release tenant A's workflow so it doesn't affect the tenant B test.
-		if err := storeA.ReleaseWorkflow(ctx, wfsA[0].ID, "worker-a", 0, time.Now()); err != nil {
+		//
+		// wfsA[0].Generation, not a literal 0. The generation is part of the
+		// fence, and a claimed run's is not zero -- so this passed credentials
+		// it did not hold and the UPDATE matched no rows. Until cleat#1223 a
+		// zero-row release returned nil on PostgreSQL, so the release this
+		// comment describes has never happened: the test went on to pass
+		// because tenant scoping, not the release, is what keeps tenant B's
+		// claim clean. The fix that made a lost fence reportable is what
+		// surfaced it.
+		if err := storeA.ReleaseWorkflow(ctx, wfsA[0].ID, "worker-a", wfsA[0].Generation, time.Now()); err != nil {
 			t.Fatalf("ReleaseWorkflow tenant A: %v", err)
 		}
 	}
