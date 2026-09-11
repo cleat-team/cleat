@@ -166,8 +166,23 @@ func TestReleasingAClaimTwiceDoesNotResurrectIt_MultiBackend(t *testing.T) {
 
 			// worker-1 releases again, with the credentials it used to hold.
 			// It must not take the workflow away from worker-2.
-			if err := store.ReleaseWorkflow(ctx, first.ID, "worker-1", first.Generation, time.Now().UTC()); err != nil {
-				t.Fatalf("the stale ReleaseWorkflow errored rather than no-opping: %v", err)
+			//
+			// THE DIALECTS DISAGREE ABOUT HOW A STALE RELEASE REPORTS ITSELF,
+			// and that difference is deliberately not asserted here.
+			// PostgreSQL and MySQL no-op silently; SQL Server returns "no rows
+			// affected for <id>". Both wrote nothing, which is the outcome this
+			// test is about -- and an earlier version of it called the error a
+			// failure, which made SQL Server red for having the same effect by
+			// a different route.
+			//
+			// It is still a divergence worth someone deciding on: a caller
+			// cannot tell "you no longer hold this" from "it worked" on two of
+			// three dialects, and cannot write portable code that distinguishes
+			// them. Filed rather than settled here, because picking the winner
+			// is an API decision and this test's subject is the exclusion.
+			staleErr := store.ReleaseWorkflow(ctx, first.ID, "worker-1", first.Generation, time.Now().UTC())
+			if staleErr != nil {
+				t.Logf("stale release reported an error on this dialect (not a failure, see above): %v", staleErr)
 			}
 
 			after, err := store.GetWorkflowByID(ctx, first.ID)
