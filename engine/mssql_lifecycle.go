@@ -1304,7 +1304,7 @@ var mssqlParentCloseDeferPhase = fmt.Sprintf(`
 		    generation = generation + 1
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND tenant_id = @p2
 		  AND %s
 	`, deferPhaseDeadlineMSSQL, deferPhaseOwedSQL)
@@ -1330,7 +1330,7 @@ func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		    assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND tenant_id = @p2
 		  AND NOT ` + deferPhaseOwedSQL + `
 	`},
@@ -1340,7 +1340,7 @@ func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		SET cancellation_requested = 1
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND tenant_id = @p2
 	`},
 	}
@@ -1389,7 +1389,7 @@ func (s *MSSQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkfl
 		SELECT id FROM workflow_instances
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND tenant_id = @p2
 		  AND NOT `+deferPhaseOwedSQL+`
 	`, parentWorkflowID, s.tenantID)

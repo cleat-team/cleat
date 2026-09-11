@@ -1049,7 +1049,7 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		    assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND tenant_id = ?
 		  AND NOT `+deferPhaseOwedSQL+`
 	`, parentWorkflowID, s.tenantID); err != nil {
@@ -1070,7 +1070,7 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		    generation = generation + 1
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND tenant_id = ?
 		  AND `+deferPhaseOwedSQL+`
 	`, parentWorkflowID, s.tenantID); err != nil {
@@ -1085,7 +1085,7 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		SET cancellation_requested = true
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'REQUEST_CANCEL'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND tenant_id = ?
 	`, parentWorkflowID, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "enforceParentClosePolicy: REQUEST_CANCEL children not flagged",
@@ -1114,7 +1114,7 @@ func (s *MySQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkfl
 		SELECT id FROM workflow_instances
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND tenant_id = ?
 		  AND NOT `+deferPhaseOwedSQL+`
 	`, parentWorkflowID, s.tenantID)

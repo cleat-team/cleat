@@ -603,6 +603,39 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		// partition the children exactly. deferPhaseOwedSQL is never NULL --
 		// it is an IN over a NOT NULL column ANDed with an IS NOT NULL and an
 		// EXISTS -- so NOT is total and no child falls between them.
+		// WHAT COUNTS AS ALREADY-TERMINAL HERE, and why the list is four values
+		// rather than two.
+		//
+		// It was `NOT IN ('done', 'failed')`, and the engine writes two more
+		// terminal statuses than that: 'dead_lettered' and 'terminated'. So a
+		// dead-lettered child MATCHED, and a parent closing with TERMINATE
+		// overwrote it (cleat#1227, measured on all three dialects):
+		//
+		//	BEFORE  status=dead_lettered  error_msg="retries exhausted"           error_code=E_RETRY
+		//	AFTER   status=failed         error_msg="parent workflow terminated"  error_code=E_RETRY
+		//
+		// Three losses in one UPDATE. The run leaves the dead-letter queue; its
+		// original failure reason is replaced; and error_code is NOT in the SET
+		// list, so the surviving row reports TWO DIFFERENT CAUSES at once. That
+		// last part is what makes it worse than a plain overwrite -- nothing about
+		// the result looks wrong.
+		//
+		// 'terminating' is deliberately NOT here. A child mid-shutdown is not
+		// terminal, and the two arms below split on deferPhaseOwedSQL precisely to
+		// give it a defer phase rather than a terminal write.
+		//
+		// 'cancelled' is deliberately NOT here either: nothing writes it to
+		// workflow_instances.status. It exists elsewhere in the codebase, which is
+		// exactly the trap -- a status list assembled by grepping the tree for
+		// status-shaped strings picks it up. There is no CHECK constraint to
+		// consult, so the vocabulary has to come from what production actually
+		// writes.
+		//
+		// REQUEST_CANCEL gets the same predicate though it overwrites nothing --
+		// it only sets cancellation_requested. Setting that flag on a run that has
+		// already finished is not data loss today, but it leaves a latent
+		// instruction on a row a reprocess could pick up, and one rule stated once
+		// is what stops the four-way split cleat#1227 is really about.
 		{"TERMINATE", `
 		UPDATE workflow_instances
 		SET status = 'failed', error_msg = 'parent workflow terminated',
@@ -611,7 +644,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		    assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND NOT ` + deferPhaseOwedSQL + `
 	`},
 		{"TERMINATE (defer phase)", `
@@ -625,7 +658,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		    generation = generation + 1
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND ` + deferPhaseOwedSQL + `
 	`},
 		{"REQUEST_CANCEL", `
@@ -633,7 +666,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		SET cancellation_requested = true
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 	`},
 	}
 
@@ -682,7 +715,7 @@ func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWor
 		SELECT id FROM workflow_instances
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 		  AND NOT `+deferPhaseOwedSQL+`
 	`, parentWorkflowID)
 	if err != nil {
