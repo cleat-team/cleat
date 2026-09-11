@@ -214,6 +214,36 @@ type EventRecord struct {
 	DeferDescription string `json:"defer_description,omitempty"`
 	DeferID          string `json:"defer_id,omitempty"`
 
+	// InDeferPhase records that this event was produced while the guest was
+	// DRAINING its defer table, rather than by the workflow body.
+	//
+	// It exists because the two were indistinguishable, and one consumer of
+	// the history cannot do its job without telling them apart: dead-lettering
+	// asks what the workflow's last durable act was, and a defer's own host
+	// calls are durable calls appended after it. So a workflow that exhausted
+	// its retries and then cleaned up looked, to that question, exactly like a
+	// workflow that exhausted its retries and carried on working -- and was
+	// classified `failed` rather than `dead_lettered`, which is the difference
+	// between being retained for an operator and being deleted by retention.
+	// cleat#1155.
+	//
+	// GUEST-ASSERTED, not host-observed, and that is a real limitation rather
+	// than an oversight. On the ordinary failure path the guest's own wrapper
+	// drains the table (wasm/exports.go), so the host is not in the loop and
+	// cannot infer the boundary; the guest already tracks it internally and
+	// now reports it. A guest that never reports gets the old behaviour, which
+	// fails toward the existing defect rather than a new one.
+	//
+	// A FLAG RATHER THAN A MARKER EVENT, deliberately. Replay is positional --
+	// s.history[s.stepCount] -- so an event marking the transition would
+	// consume a step, and a workflow already in flight when this shipped would
+	// replay an old history whose step N is not the marker the new guest
+	// emits. A field on events that are recorded anyway shifts nothing.
+	//
+	// Emitted into the checksum payload only when true (see
+	// eventRecordToPayload), so every event ever written keeps its checksum.
+	InDeferPhase bool `json:"in_defer_phase,omitempty"`
+
 	// Promise fields.
 	PromiseName   string `json:"promise_name,omitempty"`
 	PromiseID     string `json:"promise_id,omitempty"`
@@ -604,6 +634,7 @@ type execSession struct {
 	randomSeq        int64 // monotonic counter for deterministic Random()
 	suspendErr       *SuspendError
 	deferrals        map[string]string // registered defer callbacks (deferID -> description)
+	inDeferPhase     bool              // true while the guest is draining its defer table (cleat#1155)
 	workflowID       string            // parent workflow instance ID (for child workflows)
 	defName          string            // workflow definition name (for metrics labels)
 	execRunID        string            // current execution run ID

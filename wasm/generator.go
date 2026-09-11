@@ -462,11 +462,21 @@ func GenerateImports(pkgName string, usage *UsageInfo) []byte {
 
 	// Always include cleat_complete — the export wrapper calls it
 	// to signal workflow completion before the Go WASI runtime exits.
+	//
+	// cleat_defer_phase is here for the same reason and not in hostFunctions:
+	// that table maps an import to a HostCalls METHOD, and this one has none.
+	// It is called by the generated defer table, which is emitted into every
+	// module, so it is needed whenever the generated code is -- exactly like
+	// cleat_complete. Putting it in hostFunctions instead generated a bogus
+	// adapter field and a call with no arguments. cleat#1155.
 	buf.WriteString(`//go:wasmimport env cleat_complete
 func cleatCompleteImport(status uint32, resultPtr unsafe.Pointer, resultLen uint32) int64
 
 //go:wasmimport env cleat_poll_work
 func cleatPollWorkImport(entryNamePtr unsafe.Pointer, entryNameMaxLen uint32, argsPtr unsafe.Pointer, argsMaxLen uint32) int64
+
+//go:wasmimport env cleat_defer_phase
+func cleatDeferPhaseImport(on uint32) int64
 
 `)
 

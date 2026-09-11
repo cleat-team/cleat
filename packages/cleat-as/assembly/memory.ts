@@ -508,9 +508,35 @@ export function isInDeferPhase(): bool {
   return _inDeferPhase;
 }
 
-/** Marks the start and end of the defer drain. Called by `runDeferred`. */
+/**
+ * `cleat_defer_phase` reports the start and end of the defer drain to the HOST.
+ *
+ * Declared here rather than in `host-calls.ts` to keep the property the comment
+ * above depends on: `memory.ts` imports no module, so it cannot take part in a
+ * cycle. An `@external` declaration is a WASM import, not a module import, so
+ * it costs that property nothing.
+ */
+@external("env", "cleat_defer_phase")
+declare function import_cleat_defer_phase(on: i32): i64;
+
+/**
+ * Marks the start and end of the defer drain. Called by `runDeferred`.
+ *
+ * Tells the host as well as setting the local flag, and that is why the host
+ * call lives HERE rather than at the call sites: `runDeferred` has three exits
+ * -- normal, suspended, and the loop's end -- and three copies of a paired
+ * update is three chances for one of them to be missed. One assignment, one
+ * notification, no way for them to disagree.
+ *
+ * Without it a defer body's durable calls are indistinguishable from the
+ * workflow body's in the recorded history, which is what made a workflow that
+ * exhausted its retries and then cleaned up come out `failed` rather than
+ * `dead_lettered` -- deleted by retention instead of kept for an operator.
+ * cleat#1155.
+ */
 export function setInDeferPhase(v: bool): void {
   _inDeferPhase = v;
+  import_cleat_defer_phase(v ? 1 : 0);
 }
 
 // ──────────────────────────────────────────────

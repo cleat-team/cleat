@@ -96,6 +96,18 @@ mod imports {
             defer_id_ptr: *mut u8, defer_id_max_len: u32,
         ) -> i64;
 
+        // cleat_defer_phase - reports the start (1) and end (0) of the defer
+        // drain. Records no event; it marks the events the drain produces so
+        // the engine can tell a defer body's durable calls from the workflow
+        // body's. cleat#1155.
+        // Unused on non-wasm32 targets by construction: its only caller,
+        // set_defer_phase, is cfg-gated because defer::run_deferred is unit
+        // tested on the HOST, where calling an undefined import would not
+        // link. The other externs here have no host-side caller and so need
+        // no such gate.
+        #[allow(dead_code)]
+        pub fn cleat_defer_phase(on: u32) -> i64;
+
         // cleatpoll_cancellation - one string out
         pub fn cleat_poll_cancellation(
             reason_ptr: *mut u8, reason_max_len: u32,
@@ -375,6 +387,22 @@ mod imports {
         ) -> i64;
     }
 }
+
+// set_defer_phase reports the start and end of the guest's defer drain.
+//
+// A free pub(crate) function rather than a HostCalls method: defer::run_deferred
+// has no HostCalls value in scope, and `imports` is private to this module. It
+// is not part of the public SDK surface because no workflow author should call
+// it -- the generated drain does. cleat#1155.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn set_defer_phase(on: bool) {
+    unsafe {
+        imports::cleat_defer_phase(if on { 1 } else { 0 });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn set_defer_phase(_on: bool) {}
 
 /// Options for starting a child workflow with version control.
 /// `version = 0` means default resolution (parent's version or latest).

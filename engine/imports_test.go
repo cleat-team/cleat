@@ -1786,3 +1786,11 @@ func TestHostFunc_CleatAwaitAllChildren(t *testing.T) {
 		t.Errorf("runIDsJSON = %q, want %q", handler.runIDsJSON, runIDsJSON)
 	}
 }
+
+// SetDeferPhase satisfies HostHandler. The flag it would set is only read when
+// events are recorded, which these mocks do not do.
+func (h *stubHostHandler) SetDeferPhase(_ context.Context, _ bool) int64 { return 0 }
+
+// SetDeferPhase satisfies HostHandler. The flag it would set is only read when
+// events are recorded, which these mocks do not do.
+func (h *deferRecorder) SetDeferPhase(_ context.Context, _ bool) int64 { return 0 }

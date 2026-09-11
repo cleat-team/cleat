@@ -300,3 +300,7 @@ func (h *mockHostHandler) JsonStringify(ctx context.Context, m api.Module, input
 	h.record("JsonStringify", input)
 	return h.ret
 }
+
+// SetDeferPhase satisfies HostHandler. The flag it would set is only read when
+// events are recorded, which these mocks do not do.
+func (h *mockHostHandler) SetDeferPhase(_ context.Context, _ bool) int64 { return 0 }
