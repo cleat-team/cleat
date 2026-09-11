@@ -19,21 +19,30 @@ const maxPayloadLen = 4096
 type EventType string
 
 const (
-	EventTypeCall             EventType = "call"
-	EventTypeAwaitSignals     EventType = "await_signals"
-	EventTypeSignalReceived   EventType = "signal_received"
-	EventTypeDefer            EventType = "defer"
-	EventTypeChildWorkflow    EventType = "child_workflow"
-	EventTypeAwaitChild       EventType = "await_child"
-	EventTypeContinueAsNew    EventType = "continue_as_new"
-	EventTypeHeartbeat        EventType = "heartbeat"
-	EventTypeAwaitAllChildren EventType = "await_all_children"
-	EventTypePluginCall       EventType = "plugin_call"
-	EventTypeCreatePromise    EventType = "create_promise"
-	EventTypeAwaitPromise     EventType = "await_promise"
-	EventTypePromiseResolved  EventType = "promise_resolved"
-	EventTypePromiseRejected  EventType = "promise_rejected"
-	EventTypeUpdateHandler    EventType = "update_handler"
+	EventTypeCall EventType = "call"
+	// EventTypeCallAttemptFailed is one failed attempt of a host-path retry
+	// policy that is about to make another. It exists so MaxAttempts bounds
+	// attempts per WORKFLOW rather than per incarnation: nothing was recorded
+	// until the call finished, so a worker lost mid-backoff restarted the
+	// policy at attempt 1 and re-spent the whole budget (cleat#1145).
+	//
+	// Always followed by a terminal EventTypeCall for the same step unless the
+	// run was interrupted -- which is exactly the case replay has to read.
+	EventTypeCallAttemptFailed EventType = "call_attempt_failed"
+	EventTypeAwaitSignals      EventType = "await_signals"
+	EventTypeSignalReceived    EventType = "signal_received"
+	EventTypeDefer             EventType = "defer"
+	EventTypeChildWorkflow     EventType = "child_workflow"
+	EventTypeAwaitChild        EventType = "await_child"
+	EventTypeContinueAsNew     EventType = "continue_as_new"
+	EventTypeHeartbeat         EventType = "heartbeat"
+	EventTypeAwaitAllChildren  EventType = "await_all_children"
+	EventTypePluginCall        EventType = "plugin_call"
+	EventTypeCreatePromise     EventType = "create_promise"
+	EventTypeAwaitPromise      EventType = "await_promise"
+	EventTypePromiseResolved   EventType = "promise_resolved"
+	EventTypePromiseRejected   EventType = "promise_rejected"
+	EventTypeUpdateHandler     EventType = "update_handler"
 	// EventTypeUpdateReceived records that a pending update request was
 	// delivered to the guest at this step. It is what makes an update
 	// replayable: on replay the poll reads this event rather than the
@@ -299,6 +308,10 @@ type EventRecord struct {
 	LockKey      string `json:"lock_key,omitempty"`
 	LockTTLMs    int64  `json:"lock_ttl_ms,omitempty"`
 	LockAcquired int    `json:"lock_acquired,omitempty"`
+	// Attempt is the 1-based attempt number of an EventTypeCallAttemptFailed.
+	// Replay could count the events instead; recording it makes a history
+	// self-describing for `cleatctl replay` and lets replay notice a gap.
+	Attempt int `json:"attempt,omitempty"`
 	// LockNotHeld marks a release that matched no row the caller held -- an
 	// expired key, or a key belonging to someone else. Not an error; recorded
 	// so the no-op leaves a trace (cleat#1188).

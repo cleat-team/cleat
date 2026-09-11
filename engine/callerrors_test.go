@@ -232,10 +232,34 @@ func callWithRetry(t *testing.T, err error) (int64, EventRecord) {
 	// distinguishable from "ran out of attempts".
 	result := s.DurableCallWithRetry(context.Background(), nil, "svc", "op", `{}`,
 		5, 1, 100, 1, "", 0, 0)
-	if len(s.history) != 1 {
-		t.Fatalf("expected exactly one recorded event, got %d", len(s.history))
+
+	// THIS USED TO ASSERT EXACTLY ONE EVENT, and that was the defect rather
+	// than the contract: recording nothing until the call finished is why a
+	// worker lost mid-backoff restarted the policy and re-spent MaxAttempts
+	// (cleat#1145). Every attempt that leads to another now records one
+	// call_attempt_failed event.
+	//
+	// Asserting the SHAPE rather than a count, because the count differs
+	// legitimately between the two callers here: a non-retryable error breaks
+	// at attempt 1 and records none, while an exhausted policy records four.
+	if len(s.history) == 0 {
+		t.Fatal("no event recorded")
 	}
-	return result, s.history[0]
+	for i, rec := range s.history[:len(s.history)-1] {
+		if rec.EventType != EventTypeCallAttemptFailed {
+			t.Fatalf("history[%d] is %s; every event before the terminal one must be a "+
+				"failed attempt", i, rec.EventType)
+		}
+		if rec.Attempt != i+1 {
+			t.Fatalf("history[%d] records attempt %d; attempts must be numbered in order "+
+				"or replay cannot tell how much budget is spent", i, rec.Attempt)
+		}
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeCall {
+		t.Fatalf("the last event is %s; a finished policy must end on a call event", last.EventType)
+	}
+	return result, last
 }
 
 // TestNonRetryableCallIsNotReportedAsRetryable is the regression test for the
