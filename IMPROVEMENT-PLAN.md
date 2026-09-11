@@ -11590,6 +11590,63 @@ known, `kv_store` and `feature_flags` are plugin-owned — and none of those rea
 blanket apply would make the migration a claim rather than a check. cleat#1097, the in-memory gauge,
 is a metric-labelling decision and stays where it is.
 
+### 3.429 `cleatctl deploy plugin` wrote to a table that has never existed — ✅ **FIXED 2026-09-11** (cleat#1226)
+
+Three statements against **`plugin_registry`**, a name no migration has ever created, so the command
+could not work at all. It was not a rename: `plugin_defs` is keyed `(name, version)` and has
+`config` rather than `metadata`, no `id`, and no `updated_at`, so every assumption about the shape
+was wrong too — including the one that mattered, **one row per name**.
+
+A correct writer already existed (`engine.PluginLoader.DeployPlugin`, upserting on `(name, version)`),
+so the work was an argument surface and a decision, not a deployment path.
+
+**The decision: require the version.** `cleatctl deploy plugin <name> <version> <wasm-file>`.
+
+It looks like taste and is not, because the column already has a consumer that **parses** it.
+`ResolvePlugin` compares versions as semver and *silently skips* a row it cannot parse
+(`if !semver.IsValid(v) { continue }`), so an invented default risks a plugin that is in the table,
+listed by `cleat plugin list`, and resolvable by nothing. Measured against the same
+`ensureVPrefix` + `golang.org/x/mod/semver`:
+
+| candidate | valid | verdict |
+|---|---|---|
+| `1.0.0` — what `cleat plugin install` already writes | yes | the existing convention |
+| `a3f9c2b1` — a content hash | **no** | deployed and permanently unresolvable |
+| `1` | yes | but `semver.Compare("v1","v1.0.0") == 0`: a **distinct primary key** that is the **same version** to the resolver |
+| auto-increment | yes | `plugin_cmd.go:416` picks the latest with `ORDER BY version DESC`, a TEXT sort where `"9" > "10"` |
+
+Requiring it is also the only option that adds no second convention: `cleat plugin uninstall
+<name> <version>` already takes this shape.
+
+**A non-semver version is refused at deploy time**, rather than accepted and skipped later. Taking
+one would move this exact defect — a write that reports success and produces something nothing can
+read — one step downstream.
+
+**Why every existing test passed.** All five `deployPlugin` tests drive a fake `driver.Connector`
+that returns a canned result for any query, so they accept SQL no database would — the same failure
+mode `plugins/*_dialect_arms_multidb_test.go` was built for, and the reason
+`TestEveryInlineStatementParsesOnPostgres` exists. They reported `Deployed plugin` for a statement
+naming a table that does not exist. They are kept, because they cover argument handling, refusals
+and output; what they cannot do is notice the write went nowhere.
+
+So the new test asserts the **round trip** against a real PostgreSQL: deploy, then *resolve*. It
+additionally pins the `(name, version)` model that the decision is about — a second version adds a
+row rather than replacing, both remain resolvable, and redeploying a version replaces its bytes
+without adding a row. Falsified two ways: pointing the writer back at `plugin_registry` kills the
+command at the deploy step, and writing under a different name lets the deploy *succeed* and the
+resolve fail — the sharper one, because it isolates exactly the property the old code's intent
+claimed and its effect did not have.
+
+**The three pins in `TestEveryInlineStatementParsesOnPostgres` are deleted**, and that is a check
+rather than bookkeeping: it fails in both directions, so a pin outliving its defect fails the run.
+
+**Found on the way, filed as cleat#1243:** an exact-version plugin constraint matches nothing.
+`parseConstraint` maps a bare or `=` version to `{Min: v, Max: v}` and `versionInRange` excludes the
+upper bound, so `ResolvePlugin(name, "1.0.0")` cannot return 1.0.0. Nothing in the tree passes an
+exact version — every internal caller uses `""` or a range — so the two broken forms are precisely
+the ones a human reaches for first. This test uses `^1.0.0` with a comment pointing at the issue,
+rather than quietly avoiding the form that fails.
+
 ### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
 
 `ReleaseConcurrencyKey` took only the key. Its statement carried `AND tenant_id` and no

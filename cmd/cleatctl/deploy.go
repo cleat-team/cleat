@@ -4,10 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"time"
+
+	"golang.org/x/mod/semver"
 
 	"github.com/cleat-team/cleat/engine"
 )
@@ -36,7 +37,8 @@ func printDeployUsage() {
 
 Subcommands:
   workflow <name> <wasm-file>  deploy a new workflow WASM binary
-  plugin   <name> <wasm-file>  deploy a plugin WASM binary
+  plugin   <name> <version> <wasm-file>
+                               deploy a plugin WASM binary at a semver version
 
 `)
 }
@@ -127,16 +129,54 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		name, nextVersion, abiVersion, minVersion, len(wasmBytes), hash[:8])
 }
 
-// deployPlugin reads a plugin WASM binary and registers it in the
-// plugin_registry table. This is a simple database insert.
+// deployPlugin reads a plugin WASM binary and writes it to plugin_defs.
+//
+// IT USED TO WRITE TO plugin_registry, A TABLE NO MIGRATION HAS EVER CREATED
+// (cleat#1216, cleat#1226), so the command could not work at all -- three
+// statements against a name that resolves to nothing. It is not a rename:
+// plugin_defs is keyed (name, version) and has config rather than metadata and
+// no id and no updated_at, so every assumption the old code made about the
+// shape was wrong too.
+//
+// THE VERSION IS REQUIRED, and that is a decision rather than an omission.
+// plugin_defs.version is TEXT and NOT NULL, and engine.PluginLoader.Resolve-
+// Plugin parses it as semver and SILENTLY SKIPS a row it cannot parse:
+//
+//	v := ensureVPrefix(p.Version)
+//	if !semver.IsValid(v) { continue }
+//
+// so any invented default risks writing a plugin that is present in the table,
+// listed by `cleat plugin list`, and resolvable by nothing. A content hash is
+// invalid semver outright; "1" is valid but compares EQUAL to "1.0.0" while
+// being a different primary key, which leaves two rows the resolver cannot
+// tell apart; an auto-incrementing integer breaks `ORDER BY version DESC` in
+// cmd/cleat/plugin_cmd.go, which is a text sort where "9" sorts above "10".
+//
+// `cleat plugin install` already writes registry semver into this column and
+// `cleat plugin uninstall <name> <version>` already takes this argument shape,
+// so requiring it is the only option that does not add a second convention.
 func deployPlugin(ctx context.Context, db *sql.DB, args []string) {
-	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy plugin <name> <wasm-file>")
+	if len(args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy plugin <name> <version> <wasm-file>")
+		fmt.Fprintln(os.Stderr, "  <version> is a semver string, e.g. 1.0.0 -- plugin_defs is keyed (name, version)")
+		fmt.Fprintln(os.Stderr, "  and the resolver compares versions as semver.")
 		osExit(1)
 	}
 
 	name := args[0]
-	wasmPath := args[1]
+	version := args[1]
+	wasmPath := args[2]
+
+	// Refused here rather than accepted and skipped at resolution time. A
+	// version the resolver cannot parse produces a deploy that reports success
+	// and a plugin nothing can load -- the failure this command already had,
+	// moved one step downstream.
+	if !semver.IsValid(ensureSemverVPrefix(version)) {
+		fmt.Fprintf(os.Stderr, "invalid plugin version %q: must be a semver string such as 1.0.0.\n", version)
+		fmt.Fprintln(os.Stderr, "  The resolver compares plugin versions as semver and ignores rows it cannot")
+		fmt.Fprintln(os.Stderr, "  parse, so a plugin deployed with this version would be silently unusable.")
+		osExit(1)
+	}
 
 	wasmBytes, err := os.ReadFile(wasmPath)
 	if err != nil {
@@ -146,30 +186,24 @@ func deployPlugin(ctx context.Context, db *sql.DB, args []string) {
 
 	hash := sha256.Sum256(wasmBytes)
 
-	// Check if a plugin with this name already exists.
-	var existingID string
-	err = db.QueryRowContext(ctx, `SELECT id FROM plugin_registry WHERE name = $1`, name).Scan(&existingID)
-	if err == nil {
-		// Update existing plugin.
-		_, err = db.ExecContext(ctx, `UPDATE plugin_registry SET wasm_bytes = $1, updated_at = now() WHERE name = $2`, wasmBytes, name)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error updating plugin %s: %v\n", name, err)
-			osExit(1)
-		}
-		fmt.Printf("Updated plugin %s (%d bytes, SHA256=%x)\n", name, len(wasmBytes), hash[:8])
-		return
-	}
-
-	// Insert new plugin.
-	meta := json.RawMessage(`{"deployed_by": "cleatctl"}`)
-	_, err = db.ExecContext(ctx, `
-		INSERT INTO plugin_registry (name, wasm_bytes, metadata, created_at, updated_at)
-		VALUES ($1, $2, $3, now(), now())
-	`, name, wasmBytes, meta)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error deploying plugin %s: %v\n", name, err)
+	// DeployPlugin upserts on (name, version): redeploying a version replaces
+	// its bytes and clears `deprecated`, and a new version adds a row rather
+	// than overwriting the old one. The command this replaces had one row per
+	// NAME, which is the model plugin_defs deliberately does not use.
+	if err := engine.NewPluginLoader(db, nil).DeployPlugin(ctx, name, version, wasmBytes, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "error deploying plugin %s v%s: %v\n", name, version, err)
 		osExit(1)
 	}
 
-	fmt.Printf("Deployed plugin %s (%d bytes, SHA256=%x)\n", name, len(wasmBytes), hash[:8])
+	fmt.Printf("Deployed plugin %s v%s (%d bytes, SHA256=%x)\n", name, version, len(wasmBytes), hash[:8])
+}
+
+// ensureSemverVPrefix mirrors engine's ensureVPrefix, which is unexported.
+// The two must agree: this decides what is accepted, and that one decides what
+// is resolvable, so a divergence would reintroduce exactly the gap above.
+func ensureSemverVPrefix(v string) string {
+	if len(v) > 0 && v[0] == 'v' {
+		return v
+	}
+	return "v" + v
 }

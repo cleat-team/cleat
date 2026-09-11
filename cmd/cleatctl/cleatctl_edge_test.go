@@ -151,7 +151,7 @@ func TestRunDeploy_DispatchPlugin(t *testing.T) {
 	defer db.Close()
 
 	stdout, stderr := captureOutputs(t, func() {
-		runDeploy(context.Background(), &mockStore{}, db, []string{"plugin", "dispatch-plugin", path})
+		runDeploy(context.Background(), &mockStore{}, db, []string{"plugin", "dispatch-plugin", "1.0.0", path})
 	})
 	if !strings.Contains(stdout, "Deployed plugin dispatch-plugin") {
 		t.Errorf("expected deploy plugin via dispatch, got stdout: %s, stderr: %s", stdout, stderr)
