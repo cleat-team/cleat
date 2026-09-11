@@ -41,7 +41,11 @@ func TestMySQLStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		// Step 1: SELECT FOR UPDATE — return one ID.
-		{match: "SELECT id FROM", data: [][]driver.Value{{"wf-1"}}, consume: true},
+		// Four columns since cleat#1186: the candidate select carries the
+		// key so the claim can acquire it. NULL key and hash here, which is
+		// the ordinary run and means no INSERT IGNORE is attempted -- the
+		// acquisition path has its own database-backed tests.
+		{match: "SELECT id, tenant_id", data: [][]driver.Value{{"wf-1", "t-1", nil, nil}}, consume: true},
 		// Step 3: SELECT after update — return full workflow row.
 		// Columns: id, def_name, def_version, status, input, assigned_to,
 		//          next_wake_at, tenant_id, created_at, error_code, error_op,
@@ -104,7 +108,7 @@ func TestMySQLStore_ClaimWorkflow_BeginError(t *testing.T) {
 
 func TestMySQLStore_ClaimWorkflow_SelectError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT id FROM", err: errors.New("SELECT failed")},
+		{match: "SELECT id, tenant_id", err: errors.New("SELECT failed")},
 	}, nil)
 	defer db.Close()
 

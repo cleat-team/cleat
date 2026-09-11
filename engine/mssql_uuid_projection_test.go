@@ -274,6 +274,21 @@ func findRawUUIDProjections(file, src string, byTable map[string]map[string]bool
 			if trimmedEndsWith(head, "INSERT") {
 				continue
 			}
+			// Nor is the SELECT that FEEDS an INSERT. Its values go straight
+			// into another column of the same type and are never scanned into
+			// Go, so the driver's raw-bytes behaviour -- the entire subject of
+			// this guard -- cannot apply to them. Converting such a projection
+			// to text would be the wrong fix: it would round-trip a UUID
+			// through NVARCHAR for no reader.
+			//
+			// cleat#1186 added the first one, acquiring concurrency keys with
+			// INSERT INTO concurrency_keys ... SELECT ... FROM workflow_instances.
+			// Detected by looking back for an unterminated INSERT INTO rather
+			// than by allowlisting a line, so the whole class is covered and an
+			// exemption cannot rot onto a different statement.
+			if feedsAnInsert(head) {
+				continue
+			}
 			proj := sql[pm[4]:pm[5]]
 			for col := range uuidCols {
 				colRe := regexp.MustCompile(`(?i)(?:\w+\.)?\b` + regexp.QuoteMeta(col) + `\b`)
@@ -418,4 +433,20 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// feedsAnInsert reports whether the projection starting after head is the
+// source of an INSERT INTO ... SELECT.
+//
+// "Unterminated" is the whole test: an INSERT earlier in the same statement
+// means this SELECT supplies its rows, while one in a PREVIOUS statement --
+// separated by a semicolon -- has nothing to do with it. Without the semicolon
+// check, any SELECT following any INSERT in a multi-statement string would be
+// excused.
+func feedsAnInsert(head string) bool {
+	i := strings.LastIndex(strings.ToUpper(head), "INSERT INTO")
+	if i < 0 {
+		return false
+	}
+	return !strings.Contains(head[i:], ";")
 }
