@@ -476,6 +476,33 @@ members — and it works identically on conclusions. **"Independent" has to mean
 not separately performed.** When a second party confirms, ask what they *searched*, not whether
 they agreed.
 
+**And the worst version has no shared scope to compare, because the claim travelled through
+CHAT.** Measured 2026-09-11, two sessions, three wrong theories, several hours — about a rule as
+small as how a `Closes` keyword closes an issue.
+
+One session concluded "the squash message comes from the commit, so a body-only keyword never
+fires" and sent it to the other. The other restated it in stronger form and sent it back. Both
+then cited the other's version as support. **Each was holding disconfirming evidence the whole
+time** — one had a merge whose keyword sat in *both* places, so it could not discriminate; the
+other had a body-only success and read it as consistent with a commit rule, having never checked
+where the keyword actually was.
+
+The rule above says to ask what a confirming party *searched*. Here there was nothing to ask
+about: no scan, no scope, no artefact. Two stale readers of one checkout can at least both name
+the ref. **A claim passed through conversation leaves nothing to point at**, so the usual
+tell — "we were both reading the same thing" — is absent.
+
+The clause that catches it: **when a peer confirms something you told them, that is not evidence.
+Ask whether their case could have come out the other way.** If it could not, the count of
+independent observations is still one.
+
+What settled it was one case where the two hypotheses DISAGREE — a PR carrying an *invalid*
+keyword in its body and a *valid* one in its commit. It closed by hand: the commit did not fire.
+Every earlier case had the keyword in both places or in neither, which is precisely why two
+sessions could build opposite rules on the same pile and each feel corroborated. **Before
+believing a rule, find the case that separates its candidates; a case consistent with both is not
+evidence for either.**
+
 **3. A check whose SETUP destroys the state it is measuring.** This is the hardest of the three to
 spot, because the setup is where you are being careful — the damage is done by the part of the
 procedure you added on purpose.
