@@ -1575,6 +1575,22 @@ func (s *PostgresStore) deleteCompletedWorkflowsBatch(ctx context.Context, older
 		return 0, fmt.Errorf("delete completed workflows: delete event_history: %w", err)
 	}
 
+	// idempotency_keys is the same shape as event_history: no FK, so nothing
+	// removes it when the instance goes (cleat#1255). Leaving it behind is
+	// worse than a leaked row -- the key still resolves, so a retry is answered
+	// `already_started` with a workflow_id that 404s on every read path, and a
+	// client that did not hear the first response is told its work is already
+	// running when the run no longer exists. Deleting the key means the retry
+	// starts a NEW run, which is the right answer once the run it named has
+	// been swept.
+	//
+	// Not an FK: a start that is rejected records a key with an error_msg and
+	// no surviving instance, so the column cannot carry a referential
+	// constraint without inventing a row for those.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM idempotency_keys WHERE workflow_id = ANY($1)`, pq.Array(ids)); err != nil {
+		return 0, fmt.Errorf("delete completed workflows: delete idempotency_keys: %w", err)
+	}
+
 	result, err := tx.ExecContext(ctx, `DELETE FROM workflow_instances WHERE id = ANY($1)`, pq.Array(ids))
 	if err != nil {
 		return 0, fmt.Errorf("delete completed workflows: delete instances: %w", err)
