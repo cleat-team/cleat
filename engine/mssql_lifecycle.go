@@ -1170,7 +1170,7 @@ func (s *MSSQLStore) CheckCancellation(ctx context.Context, workflowID string) (
 // If idempotencyKey is non-empty, provides exactly-once semantics.
 // StartNewRun is the entry point without a concurrency key.
 func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
-	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, "")
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, StartOptions{})
 }
 
 // StartNewRunWithConcurrencyKey records the key on the row in the INSERT that
@@ -1182,16 +1182,21 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 // every existing key_hash was written from Go over UTF-8, so the two never
 // match. Migration 058's comment carries the full account.
 func (s *MSSQLStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
-	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, StartOptions{ConcurrencyKey: concurrencyKey})
 }
 
-func (s *MSSQLStore) startNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+// StartNewRunWithOptions records every per-run value a start can set, in the
+// INSERT that creates the run. See StartOptions.
+func (s *MSSQLStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, opts)
+}
 
+func (s *MSSQLStore) startNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
 	var newID string
 	var existed bool
 	err := withRollbackGuaranteedRetry(ctx, "start new run", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		var err error
-		newID, existed, err = s.startNewRunOnce(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
+		newID, existed, err = s.startNewRunOnce(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, opts)
 		return err
 	})
 	if err != nil {
@@ -1200,7 +1205,11 @@ func (s *MSSQLStore) startNewRun(ctx context.Context, runID, defName string, def
 	return newID, existed, nil
 }
 
-func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	concurrencyKey := opts.ConcurrencyKey
+	runInstanceMs := msOrNil(opts.RunLimits.WasmInstanceTimeout)
+	runWallClockMs := msOrNil(opts.RunLimits.WasmWallClockCeiling)
+	runRetryMs := msOrNil(opts.RunLimits.HostRetryBudget)
 	// Computed here rather than in the caller because this function is RETRIED
 	// -- withRollbackGuaranteedRetry may run it several times -- and the hash
 	// must be identical on every attempt. It is a pure function of the key, so
@@ -1316,11 +1325,11 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms)
 			VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
-			        @p5, @p6, @p7, @p8)
-		`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash)
+			        @p5, @p6, @p7, @p8, @p9, @p10, @p11)
+		`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -1336,11 +1345,11 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms)
 		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
-		        @p5, @p6, @p7, @p8)
-	`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash)
+		        @p5, @p6, @p7, @p8, @p9, @p10, @p11)
+	`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}

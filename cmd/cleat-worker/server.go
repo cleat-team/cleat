@@ -536,6 +536,17 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		TenantID       string          `json:"tenant_id"`
 		Namespace      string          `json:"namespace"` // deprecated; use tenant_id
 		Priority       int             `json:"priority"`
+
+		// Per-run limit overrides (cleat#1187). Each is clamped to this
+		// tenant's setting and then to the operator's flag, so a value larger
+		// than either is honoured only up to the smaller -- a run may tighten
+		// its own bounds and never widen them.
+		//
+		// Milliseconds, matching tenant_settings' columns and the units the
+		// guest APIs already speak. Zero or absent means no override.
+		WasmInstanceTimeoutMs  int64 `json:"wasm_instance_timeout_ms"`
+		WasmWallClockCeilingMs int64 `json:"wasm_wall_clock_ceiling_ms"`
+		HostRetryBudgetMs      int64 `json:"host_retry_budget_ms"`
 	}
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
@@ -659,11 +670,28 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	var runID string
 	var alreadyExisted bool
 	keyRecorded := false
+	//
+	// A NEGATIVE value is refused rather than clamped. Zero already means "no
+	// override", so a negative cannot be expressed as a tightening at all --
+	// and silently treating it as "unset" would answer a caller who asked for
+	// something impossible with a run bounded by someone else's limits.
+	if input.WasmInstanceTimeoutMs < 0 || input.WasmWallClockCeilingMs < 0 || input.HostRetryBudgetMs < 0 {
+		s.writeError(w, 400, "per-run limit overrides must be positive milliseconds; 0 or absent means no override")
+		return
+	}
+	startOpts := engine.StartOptions{
+		ConcurrencyKey: concurrencyKey,
+		RunLimits: engine.TenantSettings{
+			WasmInstanceTimeout:  time.Duration(input.WasmInstanceTimeoutMs) * time.Millisecond,
+			WasmWallClockCeiling: time.Duration(input.WasmWallClockCeilingMs) * time.Millisecond,
+			HostRetryBudget:      time.Duration(input.HostRetryBudgetMs) * time.Millisecond,
+		},
+	}
 	if starter, ok := st.(interface {
-		StartNewRunWithConcurrencyKey(context.Context, string, string, int, json.RawMessage, string, string, int, string) (string, bool, error)
-	}); ok && concurrencyKey != "" {
-		runID, alreadyExisted, err = starter.StartNewRunWithConcurrencyKey(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority, concurrencyKey)
-		keyRecorded = err == nil
+		StartNewRunWithOptions(context.Context, string, string, int, json.RawMessage, string, string, int, engine.StartOptions) (string, bool, error)
+	}); ok && startOpts != (engine.StartOptions{}) {
+		runID, alreadyExisted, err = starter.StartNewRunWithOptions(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority, startOpts)
+		keyRecorded = err == nil && concurrencyKey != ""
 	} else {
 		runID, alreadyExisted, err = st.StartNewRun(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority)
 	}
