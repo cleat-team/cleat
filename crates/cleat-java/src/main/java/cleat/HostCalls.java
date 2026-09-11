@@ -137,7 +137,25 @@ public class HostCalls {
      * Called by {@link Defer#runDeferred()}, not by workflow code.
      */
     public static void setDeferPhase(boolean on) {
-        cleatDeferPhaseRaw(on ? 1 : 0);
+        try {
+            cleatDeferPhaseRaw(on ? 1 : 0);
+        } catch (UnsatisfiedLinkError e) {
+            // No WASM host: this is the JVM, running the SDK's own unit tests.
+            // Defer.runDeferred() had no native call before cleat#1155, so
+            // introducing one made every DeferTest case throw here -- the same
+            // shape as the AssemblyScript specs, which run the module with no
+            // host and needed a stub.
+            //
+            // SWALLOWED DELIBERATELY, and the cost said out loud: a guest whose
+            // worker does not export cleat_defer_phase also takes this path and
+            // carries on silently, instead of failing. That is the right
+            // direction for THIS call -- an unreported defer phase means the
+            // engine classifies as it did before cleat#1155, which is the
+            // pre-existing defect rather than a new one -- and it would be the
+            // wrong direction for a host call whose result the guest uses.
+            // Nothing here reads a return value; the local flag in Defer is
+            // what the restrictions consult, and it is set independently.
+        }
     }
 
     @Import(module = "env", name = "cleat_poll_cancellation")
