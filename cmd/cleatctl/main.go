@@ -6,6 +6,11 @@
 //
 //	cleatctl [--db <postgres-dsn>] <command> [<args>]
 //
+// --db must name a PostgreSQL role that row-level security does not apply to
+// (a superuser, or one with BYPASSRLS). It is deliberately not the role
+// cleat-worker takes: the worker refuses to start on a connection that
+// bypasses RLS, and cleatctl needs one. See cleat#1184.
+//
 // Commands:
 //
 //	versions list [<name>]          — list workflow versions
@@ -35,7 +40,9 @@ import (
 var osExit = os.Exit
 
 func main() {
-	dsn := flag.String("db", "", "PostgreSQL DSN (default: $CLEAT_DB_URL)")
+	dsn := flag.String("db", "",
+		"PostgreSQL DSN for a role that is a superuser or has BYPASSRLS "+
+			"-- NOT the cleat_app role cleat-worker requires (default: $CLEAT_DB_URL)")
 	flag.Parse()
 
 	if *dsn == "" {
@@ -64,6 +71,12 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	// Say once, up front, that this connection cannot answer the questions
+	// cleatctl asks. Before the store is opened, so it is the first thing on
+	// stderr rather than something to find after a wrong answer. cleat#1184.
+	warnIfTenantScoped(ctx, db)
+
 	factory := engine.NewPostgresStoreFactory(db, "public")
 	store, closer, err := factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
@@ -117,6 +130,18 @@ Commands:
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)
+
+Which database role:
+  cleatctl asks cluster-wide questions, so --db must name a role that
+  row-level security does not apply to: a superuser, or one with BYPASSRLS.
+  On a connection RLS applies to, commands answer with a single tenant's
+  rows and do not say so, and the raw-statement commands fail with
+  "cleat.tenant_id is not set".
+
+  This is NOT the role cleat-worker takes. cleat-worker refuses to start on
+  a connection that bypasses RLS; cleatctl needs one. Two credentials, on
+  purpose -- run cleatctl with the owner DSN you also pass to the worker's
+  --migrate-db.
 
 `)
 }

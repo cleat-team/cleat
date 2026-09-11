@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -134,6 +136,24 @@ func makeMultiRowResult(cols []string, rows [][]driver.Value) checkDBResult {
 // runCheckDBTest runs runCheckDB with a scripted mock and returns stdout and stderr.
 func runCheckDBTest(t *testing.T, script []checkDBResult, args []string) (stdout, stderr string) {
 	t.Helper()
+	// The default posture is "exempt", so a test that says nothing about
+	// row-level security gets the configuration cleatctl is meant to run on
+	// and its script describes only the statements it cares about. Tests that
+	// are about the posture set rlsPostureFn themselves, before calling this.
+	if rlsPostureFn == nil {
+		t.Fatal("rlsPostureFn is nil")
+	}
+	restore := rlsPostureFn
+	t.Cleanup(func() { rlsPostureFn = restore })
+	rlsPostureFn = stubPosture(rlsExempt, nil)
+
+	return runCheckDBTestNoStub(t, script, args)
+}
+
+// runCheckDBTestNoStub leaves rlsPostureFn alone, for the tests whose subject IS
+// the posture. They set it themselves before calling.
+func runCheckDBTestNoStub(t *testing.T, script []checkDBResult, args []string) (stdout, stderr string) {
+	t.Helper()
 	current := 0
 	connector := &checkDBMockConnector{script: script, current: &current}
 	db := sql.OpenDB(connector)
@@ -142,6 +162,26 @@ func runCheckDBTest(t *testing.T, script []checkDBResult, args []string) (stdout
 	return withExitPanicOutput(t, func() {
 		runCheckDB(context.Background(), db, args)
 	})
+}
+
+// stubPosture returns a replacement for rlsPostureFn. It takes a posture and an
+// error rather than a database, because the thing under test in every caller is
+// what runCheckDB DOES with the answer, not how the answer is derived --
+// rlsPostureOf's own derivation is exercised against a real PostgreSQL.
+func stubPosture(p rlsPosture, err error) func(context.Context, *sql.DB) (rlsPosture, []engine.RLSBypassReason, error) {
+	return func(context.Context, *sql.DB) (rlsPosture, []engine.RLSBypassReason, error) {
+		if err != nil {
+			return rlsUnknown, nil, err
+		}
+		var reasons []engine.RLSBypassReason
+		switch p {
+		case rlsExempt:
+			reasons = []engine.RLSBypassReason{{Kind: "superuser", Detail: "test role is a superuser"}}
+		case rlsUnprotected:
+			reasons = []engine.RLSBypassReason{{Kind: "no_policies", Detail: "no table in schema public has any policy"}}
+		}
+		return p, reasons, nil
+	}
 }
 
 // =========================================================================
@@ -527,10 +567,24 @@ func TestRunCheckDB_Instances_QueryError(t *testing.T) {
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
 	}
-	stdout, _ := runCheckDBTest(t, script, nil)
-	// Should not contain INSTANCES line
+	stdout, stderr := runCheckDBTest(t, script, nil)
+
+	// This test asserted the defect until cleat#1184: "should not contain
+	// INSTANCES on query error". Saying nothing is exactly what made a
+	// cleat_app connection report STATUS: healthy with the section missing.
 	if strings.Contains(stdout, "INSTANCES:") {
-		t.Errorf("should not contain INSTANCES on query error, got: %s", stdout)
+		t.Errorf("the INSTANCES line belongs on stderr when the table cannot be read, "+
+			"not stdout: %s", stdout)
+	}
+	if !strings.Contains(stderr, "INSTANCES: UNREADABLE") {
+		t.Errorf("an unreadable workflow_instances must be reported WITHOUT --verbose; "+
+			"got stderr: %s", stderr)
+	}
+	if !strings.Contains(stderr, "instance query error") {
+		t.Errorf("the underlying error must be named, got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "DEGRADED") {
+		t.Errorf("a table that could not be read is not a healthy database, got: %s", stderr)
 	}
 }
 
@@ -556,8 +610,8 @@ func TestRunCheckDB_Instances_QueryErrorVerbose(t *testing.T) {
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
 	}
 	_, stderr := runCheckDBTest(t, script, []string{"--verbose"})
-	if !strings.Contains(stderr, "WARNING") || !strings.Contains(stderr, "workflow_instances") {
-		t.Errorf("expected WARNING about workflow_instances in stderr, got: %s", stderr)
+	if !strings.Contains(stderr, "UNREADABLE") || !strings.Contains(stderr, "workflow_instances") {
+		t.Errorf("expected the workflow_instances failure in stderr, got: %s", stderr)
 	}
 }
 

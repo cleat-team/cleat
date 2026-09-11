@@ -81,6 +81,34 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 		fmt.Printf("SCHEMA: version %s (applied: %s)\n", schemaVersion, timeStr)
 	}
 
+	// 2b. What this connection can see.
+	//
+	// Reported before the table checks because it EXPLAINS them: on a
+	// connection row-level security applies to, the reads below fail or
+	// return one tenant's rows, and without this line the operator is left to
+	// infer a permissions problem from a count. Telling them what their
+	// database looks like is this command's whole job. cleat#1184.
+	switch posture, reasons, rerr := rlsPostureFn(ctx, db); {
+	case rerr != nil:
+		fmt.Fprintf(os.Stderr, "RLS: WARNING: cannot determine enforcement: %v\n", rerr)
+		issues = append(issues, fmt.Sprintf("row-level security check failed: %v", rerr))
+	case posture == rlsExempt:
+		fmt.Println("RLS: connection is exempt (superuser or BYPASSRLS) -- reads are cluster-wide")
+	case posture == rlsSubject:
+		fmt.Fprintln(os.Stderr, "RLS: connection IS subject to row-level security -- reads below "+
+			"are scoped to one tenant, or fail")
+		issues = append(issues, "--db is subject to row-level security: cleatctl needs a "+
+			"superuser or BYPASSRLS role, not the cleat_app role cleat-worker takes")
+	case posture == rlsUnprotected:
+		// Reads will work, and that is the bad news rather than the good.
+		// Nothing is isolating tenants in this database.
+		fmt.Fprintln(os.Stderr, "RLS: this DATABASE is not enforcing tenant isolation:")
+		for _, r := range reasons {
+			fmt.Fprintf(os.Stderr, "  - %s\n", r.Detail)
+		}
+		issues = append(issues, "row-level security is not enforced by this database")
+	}
+
 	// 3. Table accessibility.
 	tables := []string{
 		"workflow_instances",
@@ -165,8 +193,15 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 			}
 			fmt.Printf("  by status: %s\n", strings.Join(parts, ", "))
 		}
-	} else if verbose {
-		fmt.Fprintf(os.Stderr, "INSTANCES: WARNING: cannot query workflow_instances: %v\n", err)
+	} else {
+		// Not `else if verbose`, and that is the whole point of cleat#1184.
+		// This branch used to print nothing without --verbose, so the section
+		// simply vanished from the report and STATUS stayed "healthy" -- a
+		// diagnostic command reporting health about a table it could not read.
+		// Measured on a cleat_app connection: exit 0, "STATUS: healthy", and
+		// the INSTANCES and EVENT HISTORY lines absent with no trace.
+		fmt.Fprintf(os.Stderr, "INSTANCES: UNREADABLE: %v\n", err)
+		issues = append(issues, fmt.Sprintf("cannot read workflow_instances: %v", err))
 	}
 
 	// 5. Event history size estimate.
@@ -178,11 +213,16 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 	if err == nil {
 		sizeMB := float64(histSize) / (1024 * 1024)
 		fmt.Printf("EVENT HISTORY: %.1f MB\n", sizeMB)
-	} else if verbose {
-		// Fallback: count rows
+	} else {
+		// The row-count fallback first: pg_column_size over row_to_json is the
+		// expensive form and can fail where a plain COUNT(*) succeeds. Only
+		// when BOTH fail has the table proved unreadable.
 		var rowCount int64
 		if countErr := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM event_history").Scan(&rowCount); countErr == nil {
 			fmt.Printf("EVENT HISTORY: %d rows\n", rowCount)
+		} else {
+			fmt.Fprintf(os.Stderr, "EVENT HISTORY: UNREADABLE: %v\n", countErr)
+			issues = append(issues, fmt.Sprintf("cannot read event_history: %v", countErr))
 		}
 	}
 
