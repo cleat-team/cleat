@@ -40,7 +40,10 @@ func TestOnlyOneOfTwoRunsWantingTheSameKeyIsClaimed(t *testing.T) {
 				StartNewRunWithConcurrencyKey(context.Context, string, string, int, json.RawMessage, string, string, int, string) (string, bool, error)
 			})
 			if !ok {
-				t.Skipf("%T cannot record a concurrency key", store)
+				// Fatal, not Skip. All three registered backends implement it
+				// -- that is what this test is about -- so a store that does
+				// not is a regression, and a skip would report it as a pass.
+				t.Fatalf("%T cannot record a concurrency key", store)
 			}
 
 			const key = "one-at-a-time"
