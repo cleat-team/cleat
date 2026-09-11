@@ -66,6 +66,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -142,6 +143,43 @@ type finding struct {
 	param string
 }
 
+// testFiles lists the repo's _test.go files, tracked or newly written.
+//
+// git ls-files, not filepath.Walk. .claude/worktrees/ holds whole extra copies
+// of this repository, and a walk descends into every one of them: on a machine
+// with two agent worktrees this reported 22 findings, ALL of them from scratch
+// checkouts and none from the tree being checked, and exited 1. That makes the
+// gate fail locally and pass in CI -- the same shape as cleat#1244, and the
+// shape that teaches everyone to ignore it.
+//
+// CLAUDE.md states the rule and the reason: "Prefer git ls-files over
+// rglob/find for anything that reasons about 'the repo'", because a scope
+// mistake gets MORE likely as the working tree gets messier. .gitignore already
+// carries .claude/worktrees/, so --exclude-standard honours it for free.
+//
+// --others as well as --cached, so a test file that has just been written is
+// scanned before it is added. Invisible-until-staged is the permissive
+// direction for a gate whose whole job is to catch a double as it is written.
+func testFiles(root string) ([]string, error) {
+	cmd := exec.Command("git", "-C", root, "ls-files",
+		"--cached", "--others", "--exclude-standard", "*_test.go")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, rel := range strings.Fields(string(out)) {
+		// Vendored and generated trees are not ours to police.
+		if strings.Contains(rel, "/vendor/") || strings.HasPrefix(rel, "vendor/") ||
+			strings.Contains(rel, "/node_modules/") || strings.HasPrefix(rel, "node_modules/") ||
+			strings.Contains(rel, "/testdata/") || strings.HasPrefix(rel, "testdata/") {
+			continue
+		}
+		files = append(files, filepath.Join(root, rel))
+	}
+	return files, nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: findblinddoubles <dir>...")
@@ -149,26 +187,13 @@ func main() {
 	}
 	var findings []finding
 	for _, root := range os.Args[1:] {
-		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if info.IsDir() {
-				// Vendored and generated trees are not ours to police.
-				if base := info.Name(); base == "vendor" || base == "node_modules" || base == "testdata" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if !strings.HasSuffix(path, "_test.go") {
-				return nil
-			}
-			findings = append(findings, scanFile(path)...)
-			return nil
-		})
+		files, err := testFiles(root)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "walk %s: %v\n", root, err)
+			fmt.Fprintf(os.Stderr, "enumerate %s: %v\n", root, err)
 			os.Exit(1)
+		}
+		for _, path := range files {
+			findings = append(findings, scanFile(path)...)
 		}
 	}
 	sort.Slice(findings, func(i, j int) bool {
