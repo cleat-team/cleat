@@ -152,6 +152,30 @@ type Migration struct {
 	UpMySQL string // optional — MySQL DDL. Empty means PG-only for this version.
 	UpMSSQL string // optional — MSSQL DDL. Empty means PG-only for this version.
 	Down    string // optional — SQL to roll back
+
+	// TenantScoped names tables this migration creates whose rows belong to
+	// one tenant, identified by a tenant_id column. The runtime enables
+	// row-level security on each and installs a policy filtering on the
+	// cleat.tenant_id set by SQLDBAdapter for the statement. cleat#1277.
+	//
+	// Declare it rather than writing the policy into Up, so that twenty-odd
+	// hand-written schemas do not each get it slightly wrong -- and so that
+	// the set of tenant-scoped plugin tables is a value the runtime can
+	// read rather than a pattern someone greps for.
+	//
+	// POSTGRESQL ONLY, and this is a real limit rather than a rounding
+	// error. MySQL has no row-level security, so a table named here is
+	// scoped by the plugin's own WHERE clause there and by nothing else.
+	// SQL Server binds a tenant to a whole connection pool
+	// (tenantSessionConnector), which a per-request tenant does not fit.
+	// On both, this field is accepted and does nothing.
+	//
+	// ONLY FOR TABLES WHOSE EVERY READER HAS A TENANT. A policy fails
+	// closed, so a plugin that also sweeps across tenants from a background
+	// loop -- where no tenant is in context -- will find those sweeps
+	// returning nothing. kvstore qualifies because all of its access is
+	// request-scoped; most plugins do not yet.
+	TenantScoped []string
 }
 
 // HasCommands: plugin adds CLI subcommands.

@@ -970,31 +970,60 @@ func TestDeleteNonExistent(t *testing.T) {
 	}
 }
 
-// TestMigrations verifies that the Migrations method returns the expected schema.
+// TestMigrations verifies the schema kvstore declares.
+//
+// This asserted len(migrations) == 1 until cleat#1277 added a second, and a
+// count of a set that grows with ordinary work is guaranteed to go wrong --
+// the only question is when. What the suite actually needs from this is that
+// the versions are usable and that v1 still creates the table, both of which
+// are true at 2 and at 5.
 func TestMigrations(t *testing.T) {
 	p := &Plugin{}
 	migrations := p.Migrations()
-	if len(migrations) != 1 {
-		t.Fatalf("expected 1 migration, got %d", len(migrations))
+	if len(migrations) == 0 {
+		t.Fatal("kvstore declares no migrations")
 	}
-	if migrations[0].Version != 1 {
-		t.Errorf("expected Version 1, got %d", migrations[0].Version)
+
+	seen := map[int]bool{}
+	prev := 0
+	for _, m := range migrations {
+		if m.Version <= prev {
+			t.Errorf("versions are not ascending: %d follows %d", m.Version, prev)
+		}
+		if seen[m.Version] {
+			t.Errorf("duplicate migration version %d", m.Version)
+		}
+		seen[m.Version] = true
+		prev = m.Version
 	}
-	if migrations[0].Up == "" {
-		t.Error("expected non-empty Up SQL")
+
+	first := migrations[0]
+	if first.Version != 1 {
+		t.Errorf("expected the first migration to be Version 1, got %d", first.Version)
 	}
-	if !strings.Contains(migrations[0].Up, "CREATE TABLE") {
-		t.Error("expected Up to contain CREATE TABLE")
+	if !strings.Contains(first.Up, "CREATE TABLE") || !strings.Contains(first.Up, "kv_store") {
+		t.Error("expected v1 Up to create kv_store")
 	}
-	if !strings.Contains(migrations[0].Up, "kv_store") {
-		t.Error("expected Up to mention kv_store")
+	if !strings.Contains(first.Down, "DROP TABLE") {
+		t.Error("expected v1 Down to contain DROP TABLE")
 	}
-	if migrations[0].Down == "" {
-		t.Error("expected non-empty Down SQL")
+}
+
+// kv_store must stay declared tenant-scoped. Deleting the declaration is a
+// silent removal of the only database-level thing keeping one tenant's keys
+// away from another's -- every kvstore test would still pass, because they
+// all set a tenant. cleat#1277.
+func TestKVStoreIsDeclaredTenantScoped(t *testing.T) {
+	for _, m := range (&Plugin{}).Migrations() {
+		for _, table := range m.TenantScoped {
+			if table == "kv_store" {
+				return
+			}
+		}
 	}
-	if !strings.Contains(migrations[0].Down, "DROP TABLE") {
-		t.Error("expected Down to contain DROP TABLE")
-	}
+	t.Fatal("no migration declares kv_store in TenantScoped, so the runtime " +
+		"installs no row-level security policy for it and the tenant predicate " +
+		"in each handler is the only isolation left")
 }
 
 // TestRegisterRoutesNilMux verifies that RegisterRoutes returns an error for a nil mux.

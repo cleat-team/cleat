@@ -302,6 +302,14 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 				return fmt.Errorf("plugin %s migration v%d: %w", name, m.Version, err)
 			}
 
+			// Tenant isolation for the tables this migration declared. In
+			// the same transaction as the CREATE TABLE, so a table is never
+			// briefly visible without its policy.
+			if err := applyTenantScoping(ctx, tx.ExecContext, dialect, m.TenantScoped); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("plugin %s migration v%d tenant scoping: %w", name, m.Version, err)
+			}
+
 			if _, err := tx.ExecContext(ctx,
 				insertPluginMigrationSQL(dialect),
 				name, m.Version); err != nil {
@@ -331,4 +339,66 @@ func RegisterPluginTables(ctx context.Context, db *sql.DB, pluginName string, ta
 		}
 	}
 	return nil
+}
+
+// applyTenantScoping enables row-level security on each declared table and
+// installs a policy filtering it on the statement's tenant. cleat#1277.
+//
+// The predicate is cleat.assert_tenant_set(), the same one every engine table
+// uses, and it RAISES rather than filtering when no tenant is set. That is the
+// deliberate choice: a policy that silently returns no rows turns a missing
+// tenant context into an empty result, which reads as "no data" and is exactly
+// the failure this is meant to prevent. An exception names the problem.
+//
+// FORCE is required as well as ENABLE. Without it row-level security is
+// silently bypassed for the table's owner, which is whoever ran the migration
+// -- see the comment above the engine's own FORCE block in 001_schema.sql.
+//
+// Non-PostgreSQL dialects return nil without doing anything; see the
+// TenantScoped field for why, and note that it is a real gap rather than an
+// omission.
+func applyTenantScoping(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), dialect Dialect, tables []string) error {
+	if len(tables) == 0 || dialect != DialectPostgres {
+		return nil
+	}
+	for _, table := range tables {
+		if !isPlainIdentifier(table) {
+			return fmt.Errorf("tenant-scoped table %q is not a plain identifier", table)
+		}
+		policy := table + "_tenant_isolation"
+		for _, stmt := range []string{
+			fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", table),
+			fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY", table),
+			fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s", policy, table),
+			fmt.Sprintf("CREATE POLICY %s ON %s FOR ALL USING (tenant_id = cleat.assert_tenant_set())",
+				policy, table),
+		} {
+			if _, err := exec(ctx, stmt); err != nil {
+				return fmt.Errorf("%s: %w", stmt, err)
+			}
+		}
+	}
+	return nil
+}
+
+// isPlainIdentifier reports whether s is safe to interpolate into DDL.
+//
+// The table names come from plugin source rather than from a request, so this
+// is not the primary defence against injection -- it is there so that a
+// mistake in a plugin becomes a migration error naming the table, instead of
+// arbitrary DDL executing under the migration's privileges.
+func isPlainIdentifier(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r == '_':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
