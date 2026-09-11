@@ -123,6 +123,9 @@ CREATE TABLE workflow_instances (
     started_at TIMESTAMPTZ,
     concurrency_key TEXT,
     concurrency_key_hash BYTEA,
+    run_wasm_instance_timeout_ms BIGINT,
+    run_wasm_wall_clock_ceiling_ms BIGINT,
+    run_host_retry_budget_ms BIGINT,
     PRIMARY KEY (id),
     FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs(tenant_id, name, version)
 );
