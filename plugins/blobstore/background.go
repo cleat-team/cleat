@@ -83,12 +83,16 @@ func (p *Plugin) cleanupExpired(ctx context.Context) (staleRefs, expiredEntries,
 	// ref_count on blob_content.
 	var affected int64
 	if p.dialect == plugin.DialectMySQL {
-		// MySQL: DELETE first, then UPDATE (no DELETE..RETURNING)
-		_, err = p.db.Exec(ctx, plugin.Rebind(deleteBlobIndexExpired.For(p.dialect), p.dialect))
+		// MySQL has no DELETE..RETURNING, so the decrement and the delete are
+		// separate statements. The UPDATE counts the index rows matching the
+		// expiry predicate, so it MUST run first: with the DELETE first its
+		// subquery finds nothing, the join is empty, and ref_count is never
+		// decremented at all (cleat#1148).
+		affected, err = p.db.Exec(ctx, plugin.Rebind(deleteChunksReturning.For(p.dialect), p.dialect))
 		if err != nil {
 			return staleRefs, expiredEntries, orphanedBlobs, err
 		}
-		affected, err = p.db.Exec(ctx, plugin.Rebind(deleteChunksReturning.For(p.dialect), p.dialect))
+		_, err = p.db.Exec(ctx, plugin.Rebind(deleteBlobIndexExpired.For(p.dialect), p.dialect))
 	} else {
 		affected, err = p.db.Exec(ctx, plugin.Rebind(deleteChunksReturning.For(p.dialect), p.dialect))
 	}

@@ -118,19 +118,26 @@ INNER JOIN (
 	GROUP BY bi.sha256
 ) d ON bc.sha256 = d.sha256
 SET bc.ref_count = bc.ref_count - d.cnt`,
-	MSSQL: `WITH deleted AS (
-	DELETE FROM blob_index
-	OUTPUT DELETED.sha256
-	WHERE (expires_at < SYSUTCDATETIME() OR deleted_at IS NOT NULL)
-)
+	// T-SQL has no data-modifying CTE: a WITH body must be a SELECT, so the
+	// PostgreSQL arm above does not transliterate. OUTPUT ... INTO a table
+	// variable carries the deleted keys to the UPDATE instead. That makes this
+	// two statements rather than one, so a crash between them leaves the index
+	// rows gone and ref_count too high -- blobs that are never collected, which
+	// is the leak this fix removes rather than a new failure mode.
+	MSSQL: `DECLARE @deleted TABLE (sha256 VARBINARY(32));
+
+DELETE FROM blob_index
+OUTPUT DELETED.sha256 INTO @deleted
+WHERE (expires_at < SYSUTCDATETIME() OR deleted_at IS NOT NULL);
+
 UPDATE bc
-SET ref_count = ref_count - cnt.cnt
+SET ref_count = bc.ref_count - cnt.cnt
 FROM blob_content bc
 INNER JOIN (
 	SELECT sha256, COUNT(*) AS cnt
-	FROM deleted
+	FROM @deleted
 	GROUP BY sha256
-) cnt ON bc.sha256 = cnt.sha256`,
+) cnt ON bc.sha256 = cnt.sha256;`,
 }
 
 var deleteBlobIndexExpired = plugin.Query{

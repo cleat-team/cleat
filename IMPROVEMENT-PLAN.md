@@ -11290,6 +11290,71 @@ recorded on cleat#1189 as a question, not a finding — the HTTP path has not be
 
 ---
 
+### 3.425 blobstore's expiry phase decremented `ref_count` on PostgreSQL only, for two different reasons — ✅ **FIXED 2026-09-10** (cleat#1148, cleat#1142)
+
+`cleanupExpired` phase 2 deletes expired and soft-deleted `blob_index` rows and subtracts one
+from `blob_content.ref_count` per row removed. Phase 3 then collects any content whose count
+reached zero. **Phase 2 performed no decrement at all on MySQL or SQL Server**, so phase 3 found
+nothing to collect on either, and blob storage grew without bound on both.
+
+Two dialects, two unrelated causes, one property.
+
+| | cause | symptom |
+|---|---|---|
+| SQL Server | a `DELETE` inside a CTE | one `ERROR` an hour, phase 3 unreachable |
+| MySQL | the `DELETE` ran **before** the `UPDATE` that counts its rows | **none** |
+
+**T-SQL requires a `WITH` body to be a `SELECT`.** The MSSQL arm was the PostgreSQL statement with
+`RETURNING` swapped for `OUTPUT` — the right token translation through a structural difference
+that does not survive it. Measured on SQL Server 2022, the server returns *two* errors and the Go
+driver surfaces only the last, so the log reads `Incorrect syntax near ')'` and points at the CTE's
+closing bracket rather than at the `DELETE` two lines above:
+
+    Msg 156 ... Incorrect syntax near the keyword 'DELETE'.
+    Msg 102 ... Incorrect syntax near ')'.
+
+The repair is `DELETE … OUTPUT DELETED.sha256 INTO @deleted` followed by an `UPDATE … FROM` over
+the table variable. That is two statements where PostgreSQL has one: a crash between them leaves
+the index rows gone and `ref_count` too high, which is *the leak this removes*, not a new failure
+mode. Stated in the code rather than papered over with a transaction inside a plugin query string.
+
+**The MySQL half is the one worth remembering, because nothing reported it.** The arm is valid SQL
+and the fault is the order of two `Exec` calls in `background.go`. Its subquery counts index rows
+matching the expiry predicate; the `DELETE` had just removed them, so the join was empty, the
+update touched nothing, and `affected` — reported as `expiredEntries` — was always 0. A comment
+above the branch stated the order plainly, and the order was the defect.
+
+Measured on live servers, same fixture, three contents at `ref_count` 3 / 1 / 2 with two of the
+first's three references expired and the second's sole reference soft-deleted:
+
+| | PostgreSQL | MySQL before | MySQL after | SQL Server before | SQL Server after |
+|---|---|---|---|---|---|
+| two of three refs expired | 3 → 1 | 3 → **3** | 3 → 1 | error | 3 → 1 |
+| sole ref soft-deleted | 1 → 0 | 1 → **1** | 1 → 0 | error | 1 → 0 |
+| nothing expiring | 2 → 2 | 2 → 2 | 2 → 2 | error | 2 → 2 |
+
+**A silent wrong answer is worse than a loud one**, and this pair is the clean demonstration.
+cleat-ports' worker-log check found the SQL Server half precisely because SQL Server complains.
+Nothing could have found the MySQL half that way; it took asking what the count *became*.
+
+**Why the existing arm test could not have caught it.** `RunEveryArm` (3.42x, cleat#1133 part 4)
+executes each dialect arm on a real server of that dialect and asks whether it is accepted. That
+finds the SQL Server half the moment the arm is listed — and it is structurally blind to the MySQL
+half, where both statements are accepted and the defect is which runs first. **A check on one
+statement cannot see a defect that lives between two.** The new test asserts the resulting
+`ref_count`, and additionally that the content whose last reference expired is *collected* — so
+phase 3 being reachable is part of what is pinned.
+
+**The regression test's first falsification was void, and the cause is worth the line.** It went
+red on all three dialects with `duplicate key value violates unique constraint` — leftover fixture
+rows, because the cleanup was registered with `t.Cleanup` while the pool is closed by
+`defer be.Cleanup()`. **`t.Cleanup` runs after the function's defers**, so every delete ran against
+a closed database, failed, and was discarded by a `_`. Two discoveries in one: the fixture leak,
+and that a cleanup whose errors are dropped cannot report its own failure. Now a `defer`, and the
+errors are checked. The rows it had already leaked were purged and counted — 1 index row and 1
+content row per dialect for the first content, 2 and 1 for the third, and **zero for the second on
+every dialect**, which is independent confirmation that the fix collected it.
+
 ### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
 
 `ReleaseConcurrencyKey` took only the key. Its statement carried `AND tenant_id` and no
