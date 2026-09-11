@@ -132,11 +132,22 @@ func TestGetTerminalRunFollowsARealChainUnderRLS(t *testing.T) {
 	// only thing scoping the read. Drop `AND tenant_id = $2` and this fails
 	// while control 1 stays green.
 	//
-	// Not a hypothetical configuration. `-rls-check` accepts "off", and "auto"
-	// only WARNS unless --require-auth is set, so a single-tenant deployment can
-	// run with the policy unenforced -- and there the predicate is the whole of
-	// the tenant scoping. The engine's own test harness is such a connection,
-	// which is why the sibling assertions above had to be moved off it.
+	// Not a hypothetical configuration, though it is narrower than this comment
+	// said when it was written, and the correction runs the other way. It read
+	// that "auto" only WARNS unless --require-auth is set. --require-auth
+	// defaults to TRUE (cmd/cleat-worker/config.go), unconditionally at the flag
+	// layer, and the switch in main.go reads it with no --api-addr condition --
+	// so the default is to REFUSE. Measured 2026-09-10 against a superuser DSN
+	// with no flags but --db: ERROR "refusing to start", exit 1.
+	//
+	// Three configurations reach a bypassing connection: an explicit
+	// -rls-check=off (measured: no check runs at all), an explicit
+	// --require-auth=false (measured: WARN, and the worker continues -- but
+	// tiers.yaml declares that deployment unsupported), and the inconclusive
+	// arm, where CheckRLSEnforced itself errors and the worker warns rather than
+	// making a database hiccup fatal. There the predicate is the whole of the
+	// tenant scoping. The engine's own test harness is such a connection, which
+	// is why the sibling assertions above had to be moved off it.
 	// It asks successorOfRun DIRECTLY rather than through GetTerminalRun, and
 	// that narrowing is not tidiness. GetTerminalRun begins with
 	// GetWorkflowByID, whose PostgreSQL SELECT is `WHERE id = $1` with no
@@ -158,7 +169,7 @@ func TestGetTerminalRunFollowsARealChainUnderRLS(t *testing.T) {
 			"returned tenant A's successor %s.\n\n"+
 			"With the policy contributing nothing, `AND tenant_id = $2` is the only thing "+
 			"keeping this read inside its tenant -- and it is not there. That configuration "+
-			"is reachable: -rls-check accepts \"off\", and the default \"auto\" only WARNS "+
-			"unless --require-auth is set (cleat#1177).", bypassed)
+			"is reachable: -rls-check accepts \"off\", and an inconclusive check warns "+
+			"rather than refusing (cleat#1177).", bypassed)
 	}
 }
