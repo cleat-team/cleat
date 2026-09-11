@@ -443,8 +443,19 @@ type ConcurrencyKeyStore interface {
 	// Automatically releases expired keys during acquisition.
 	AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error)
 
-	// ReleaseConcurrencyKey releases a specific concurrency key.
-	ReleaseConcurrencyKey(ctx context.Context, key string) error
+	// ReleaseConcurrencyKey releases a concurrency key held by workflowID.
+	//
+	// workflowID is the HOLDER, and the statement predicates on it. Without
+	// that, any workflow in the tenant that knows a key string could release a
+	// lock another workflow holds -- and the key is an arbitrary string from the
+	// guest (cleat_release_lock), so naming someone else's is not an exotic
+	// input. cleat#1188.
+	//
+	// Releasing a key held by someone else is not an error; it removes nothing.
+	// A caller cannot distinguish "I released it" from "it was not mine" by the
+	// error alone, deliberately: the guest must not learn whether another
+	// workflow holds a key by trying to release it.
+	ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error
 }
 
 type ChildWorkflowStore interface {

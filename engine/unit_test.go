@@ -1534,7 +1534,7 @@ func (s *stubWorkflowStore) CompleteUpdateRequest(ctx context.Context, workflowI
 func (s *stubWorkflowStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	return false, nil
 }
-func (s *stubWorkflowStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (s *stubWorkflowStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	return nil
 }
 func (s *stubWorkflowStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
@@ -2125,7 +2125,7 @@ type mockConcurrencyKeyStore struct{}
 func (m *mockConcurrencyKeyStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	return true, nil
 }
-func (m *mockConcurrencyKeyStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (m *mockConcurrencyKeyStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	return nil
 }
 
@@ -2139,7 +2139,7 @@ type releaseErrorStore struct {
 	mockConcurrencyKeyStore
 }
 
-func (r *releaseErrorStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (r *releaseErrorStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	return fmt.Errorf("simulated release failure")
 }
 
@@ -2690,7 +2690,7 @@ func (m *mockCollectMetricsStore) CompleteUpdateRequest(ctx context.Context, wor
 func (m *mockCollectMetricsStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockCollectMetricsStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (m *mockCollectMetricsStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	return nil
 }
 func (m *mockCollectMetricsStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
@@ -2880,7 +2880,7 @@ func (m *mockCheckStaleStore) CompleteUpdateRequest(ctx context.Context, workflo
 func (m *mockCheckStaleStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockCheckStaleStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (m *mockCheckStaleStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	return nil
 }
 func (m *mockCheckStaleStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
@@ -3067,7 +3067,9 @@ func (m *mockGCStore) CompleteUpdateRequest(ctx context.Context, workflowID, upd
 func (m *mockGCStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockGCStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
+func (m *mockGCStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
+	return nil
+}
 func (m *mockGCStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
 }
@@ -3244,7 +3246,9 @@ func (m *mockPurgeStore) CompleteUpdateRequest(ctx context.Context, workflowID, 
 func (m *mockPurgeStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockPurgeStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
+func (m *mockPurgeStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
+	return nil
+}
 func (m *mockPurgeStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
 }

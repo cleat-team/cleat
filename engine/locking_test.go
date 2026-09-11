@@ -21,7 +21,7 @@ func (a *acquireNotAcquiredStore) AcquireConcurrencyKey(ctx context.Context, key
 	return false, nil
 }
 
-func (a *acquireNotAcquiredStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (a *acquireNotAcquiredStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	return nil
 }
 
@@ -107,7 +107,7 @@ func (r *releaseLockErrorStore) AcquireConcurrencyKey(ctx context.Context, key, 
 	return false, nil
 }
 
-func (r *releaseLockErrorStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (r *releaseLockErrorStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	return errors.New("release failed")
 }
 

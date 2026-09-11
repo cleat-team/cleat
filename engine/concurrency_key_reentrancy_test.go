@@ -80,7 +80,7 @@ func TestAcquireConcurrencyKeyIsNeverReentrant(t *testing.T) {
 			// Control 2: the key is refusable, not poisoned. This is the other
 			// way "always false" would slip through -- and it also pins that a
 			// released key is genuinely reusable.
-			if err := store.ReleaseConcurrencyKey(ctx, key); err != nil {
+			if err := store.ReleaseConcurrencyKey(ctx, key, runID); err != nil {
 				t.Fatalf("release: %v", err)
 			}
 			reacquired, err := store.AcquireConcurrencyKey(ctx, key, otherRunID, ttl)

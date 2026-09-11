@@ -909,9 +909,13 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 				t.Error("same-tenant acquire of held key should have returned false")
 			}
 
-			// storeB tries to release "iso-key" — tenant-scoped, should be a no-op
-			// because the row has tenant_id = tenant A.
-			if err := storeB.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+			// storeB tries to release "iso-key" — a no-op for two independent
+			// reasons now: the row has tenant_id = tenant A (cleat#1189) and
+			// workflow_id = wf-a, not wf-b (cleat#1188). Either predicate alone
+			// makes this DELETE match nothing, so this assertion no longer
+			// isolates which one is doing the work -- TestReleasingALockYouDoNotHold
+			// covers the owner predicate on its own.
+			if err := storeB.ReleaseConcurrencyKey(ctx, "iso-key", "wf-b"); err != nil {
 				t.Fatalf("ReleaseConcurrencyKey on store B: %v", err)
 			}
 
@@ -925,7 +929,7 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 			}
 
 			// storeA releases its own key.
-			if err := storeA.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+			if err := storeA.ReleaseConcurrencyKey(ctx, "iso-key", "wf-a"); err != nil {
 				t.Fatalf("ReleaseConcurrencyKey on store A (own key): %v", err)
 			}
 
@@ -962,12 +966,12 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 			}
 
 			// Cleanup part 1 for A as well, now that it holds a row too.
-			if err := storeA.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+			if err := storeA.ReleaseConcurrencyKey(ctx, "iso-key", "wf-a-3"); err != nil {
 				t.Fatalf("ReleaseConcurrencyKey on store A cleanup: %v", err)
 			}
 
 			// Cleanup part 1.
-			if err := storeB.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+			if err := storeB.ReleaseConcurrencyKey(ctx, "iso-key", "wf-b"); err != nil {
 				t.Fatalf("ReleaseConcurrencyKey on store B cleanup: %v", err)
 			}
 

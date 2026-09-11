@@ -387,7 +387,7 @@ func TestMySQLStore_ReleaseConcurrencyKey(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
 		{match: "DELETE FROM concurrency_keys WHERE key_hash", affected: 1},
 	})
-	err := store.ReleaseConcurrencyKey(testCtx, "my-key")
+	err := store.ReleaseConcurrencyKey(testCtx, "my-key", "wf-owner")
 	if err != nil {
 		t.Fatalf("ReleaseConcurrencyKey: %v", err)
 	}

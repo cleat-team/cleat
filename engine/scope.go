@@ -35,7 +35,7 @@ func (s *execSession) ClearScope(ctx context.Context) {
 	if s.scopeSet && s.scopePrefix != "" {
 		scopeKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
 		if s.engine.concurrencyKeyStore != nil {
-			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey); err != nil {
+			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey, s.workflowID); err != nil {
 				s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			}
 		}
@@ -73,7 +73,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 	if s.scopeSet && s.scopePrefix != "" {
 		oldKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
 		if s.engine.concurrencyKeyStore != nil {
-			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, oldKey); err != nil {
+			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, oldKey, s.workflowID); err != nil {
 				s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			}
 		}
@@ -239,7 +239,7 @@ func (s *execSession) releaseHeldScopes(ctx context.Context) {
 		return
 	}
 	for _, scopeKey := range s.heldScopes {
-		if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey); err != nil {
+		if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey, s.workflowID); err != nil {
 			s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}

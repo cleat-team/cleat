@@ -580,7 +580,7 @@ func (m *mockShardStore) AcquireConcurrencyKey(ctx context.Context, key, workflo
 	return false, nil
 }
 
-func (m *mockShardStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (m *mockShardStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	m.recordCall("ReleaseConcurrencyKey")
 	return m.err
 }
@@ -1958,7 +1958,7 @@ func TestAcquireConcurrencyKey_NilShard(t *testing.T) {
 
 func TestReleaseConcurrencyKey_Success(t *testing.T) {
 	ss, _ := makeShardedStore(t, 2)
-	err := ss.ReleaseConcurrencyKey(context.Background(), "key-1")
+	err := ss.ReleaseConcurrencyKey(context.Background(), "key-1", "wf-owner")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -3222,7 +3222,7 @@ func TestGetEventCount_NilShard(t *testing.T) {
 
 func TestReleaseConcurrencyKey_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	err := ss.ReleaseConcurrencyKey(context.Background(), "key-1")
+	err := ss.ReleaseConcurrencyKey(context.Background(), "key-1", "wf-owner")
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}

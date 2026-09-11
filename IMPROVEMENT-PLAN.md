@@ -11287,3 +11287,70 @@ remaining five (`event_history`, `workflow_instances`, `workflow_promises`, `wor
 `workflow_update_requests`) all reduce to one unanswered question: whether a **run ID** is
 client-supplied. `StartNewRun` generates a UUID when `runID == ""` but accepts one. That is
 recorded on cleat#1189 as a question, not a finding — the HTTP path has not been traced.
+
+### 3.425 ReleaseConcurrencyKey took only the key, so one workflow could release another's lock — ✅ **FIXED 2026-09-10** (cleat#1188)
+
+`ReleaseConcurrencyKey(ctx, key string) error` had no owner parameter, and its `DELETE` carried
+`tenant_id` but not `workflow_id` — while `ReleaseWorkflowConcurrencyKeys`, three lines below
+it, **did** predicate on `workflow_id`. The column was available and the omission was local to
+one statement. Within a tenant, any workflow that knew a key string released a lock a different
+workflow held, and the key is an arbitrary string from the guest (`cleat_release_lock`), so
+naming someone else's is not an exotic input.
+
+Cross-tenant was never affected — the `tenant_id` predicate and RLS both hold. This is a
+within-tenant defect, and distinct from §3.424, which is the same table from the other
+direction: putting the tenant in the key does not add an owner predicate, and adding one does
+not stop the cross-tenant collision.
+
+**THE ASSERTION HAS TO BE "C IS REFUSED", NOT "B'S RELEASE SUCCEEDED"**, and this is the part a
+test would most easily get wrong. The release is a `DELETE` that reports success either way — it
+affects one row when it matches and zero when it does not, and `freshReleaseLock` discards the
+count. **A test checking that B's release returned no error returns no error both before and
+after the fix.** The observable difference is downstream, in whether the lock is still held.
+
+So the test asserts **both** halves, because either alone is satisfied by the wrong thing:
+
+| assertion | what it alone would also accept |
+|---|---|
+| A still holds the key after B's release | a release that failed for *any* reason, including one that never ran |
+| C is refused | a key nobody can ever acquire — a poisoned row rather than a held one |
+
+and a third sub-test is the control for both: A releases its **own** key and C can then take it.
+Without it, "the lock is held" and "the lock is unreleasable" look identical.
+
+**THE SIGNATURE CHANGED RATHER THAN A SAFE VARIANT BEING ADDED**, which is a judgement worth
+recording. Adding `ReleaseConcurrencyKeyOwnedBy` alongside would grow surface (frozen by
+WORKSTREAM R7) and leave the unsafe call available, so the next caller gets it right only by
+remembering — the shape §3.419 exists to remove. Checked first that no caller *legitimately*
+releases a lock it does not own: all four are `execSession` methods holding `s.workflowID`
+(`locking.go:121`, `scope.go:38/76/242`), and the fifth is pure delegation. **There is no admin
+force-release path today**, so no caller needed an escape hatch. If one is wanted later it
+should be added deliberately, with a name saying it ignores ownership.
+
+Cost: 21 implementations, 5 production and the rest test mocks. The compiler enforces
+completeness — which is the argument for changing the signature rather than the statement alone.
+
+**A PUBLIC HELPER HAD STOPPED BEING SUBSTITUTABLE FOR THE REAL STORE, SILENTLY.**
+`cleat/wasmtest.InMemoryConcurrencyKeyStore` is documented as *"implements
+engine.ConcurrencyKeyStore"* — and that sentence was the only thing saying so. **No `var _`
+assertion existed**, so after the signature changed it no longer implemented the interface and
+`go build ./...` stayed green, because nothing in that package ever required it to. A public
+stand-in for the real store, no longer standing in for it, with no compile error. The assertion
+is now there, and its in-memory release predicates on the owner too — a stand-in that deletes
+regardless would let a test pass against behaviour no backend has.
+
+**Three falsifications, and TWO OF THEM WERE VOID ON THE FIRST ATTEMPT.** Removing only the
+predicate left the third argument still being passed, so the driver errored before the SQL ran:
+
+    postgres  pq: got 3 parameters but the statement requires 2
+    mysql     sql: expected 2 arguments, got 3
+
+Red, and red for a reason that says nothing about ownership. SQL Server tolerated the unused
+named parameter and so gave a genuine result on the first try — which is exactly how one
+dialect's tolerance can make a void falsification look like a real one. Removing the predicate
+**and** the argument together reddens all three on both halves.
+
+`TestTenantIsolation_ConcurrencyKeys`' cross-tenant no-op assertion now passes for two
+independent reasons (wrong tenant *and* wrong owner), so it no longer isolates which predicate
+does the work. Noted in that test, with a pointer to `TestReleasingALockYouDoNotHold`, which
+covers the owner predicate on its own.

@@ -362,6 +362,15 @@ func (s *InMemoryChildWorkflowStore) ResolveVersionByTag(_ context.Context, work
 
 // InMemoryConcurrencyKeyStore implements engine.ConcurrencyKeyStore with an
 // in-memory map.
+//
+// The assertion below is not decoration. That sentence was the only thing
+// claiming the interface was satisfied, and prose does not compile: changing
+// ReleaseConcurrencyKey's signature in engine (cleat#1188) left this type no
+// longer implementing it, and `go build ./...` stayed green because nothing
+// here ever required it to. A public helper whose whole purpose is to stand in
+// for the real store had silently stopped being substitutable for it.
+var _ engine.ConcurrencyKeyStore = (*InMemoryConcurrencyKeyStore)(nil)
+
 type InMemoryConcurrencyKeyStore struct {
 	mu   sync.Mutex
 	keys map[string]concurrencyKeyEntry
@@ -402,10 +411,17 @@ func (s *InMemoryConcurrencyKeyStore) AcquireConcurrencyKey(_ context.Context, k
 	return true, nil
 }
 
-func (s *InMemoryConcurrencyKeyStore) ReleaseConcurrencyKey(_ context.Context, key string) error {
+// ReleaseConcurrencyKey removes the key only if workflowID holds it.
+//
+// The real stores predicate their DELETE on workflow_id (cleat#1188); an
+// in-memory stand-in that deletes regardless would let a test pass against
+// behaviour no backend has.
+func (s *InMemoryConcurrencyKeyStore) ReleaseConcurrencyKey(_ context.Context, key, workflowID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.keys, key)
+	if entry, ok := s.keys[key]; ok && entry.workflowID == workflowID {
+		delete(s.keys, key)
+	}
 	return nil
 }
 

@@ -105,8 +105,8 @@ func TestTwoTenantsCanHoldTheSameConcurrencyKey(t *testing.T) {
 			// The names two tenants actually collide on.
 			key := fmt.Sprintf("nightly-%d", time.Now().UnixNano())
 			t.Cleanup(func() {
-				_ = sa.ReleaseConcurrencyKey(context.Background(), key)
-				_ = sb.ReleaseConcurrencyKey(context.Background(), key)
+				_ = sa.ReleaseConcurrencyKey(context.Background(), key, runA)
+				_ = sb.ReleaseConcurrencyKey(context.Background(), key, runB)
 			})
 
 			gotA, err := sa.AcquireConcurrencyKey(ctx, key, runA, time.Minute)
@@ -142,7 +142,7 @@ func TestTwoTenantsCanHoldTheSameConcurrencyKey(t *testing.T) {
 			}
 
 			// And a release must free only the releasing tenant's row.
-			if err := sa.ReleaseConcurrencyKey(ctx, key); err != nil {
+			if err := sa.ReleaseConcurrencyKey(ctx, key, runA); err != nil {
 				t.Fatalf("tenant A release: %v", err)
 			}
 			stillB, err := sb.AcquireConcurrencyKey(ctx, key, runB, time.Minute)

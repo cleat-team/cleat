@@ -469,7 +469,7 @@ func TestReleaseConcurrencyKey(t *testing.T) {
 			}
 
 			// Release the key.
-			if err := store.ReleaseConcurrencyKey(ctx, "key-rel"); err != nil {
+			if err := store.ReleaseConcurrencyKey(ctx, "key-rel", "wf-1"); err != nil {
 				t.Fatalf("ReleaseConcurrencyKey: %v", err)
 			}
 

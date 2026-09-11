@@ -425,7 +425,7 @@ func (m *mockStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID s
 	return true, nil
 }
 
-func (m *mockStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (m *mockStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	if m.releaseConcurrencyKeyFn != nil {
 		return m.releaseConcurrencyKeyFn(ctx, key)
 	}

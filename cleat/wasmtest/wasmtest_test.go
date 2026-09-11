@@ -312,7 +312,7 @@ func TestInMemoryConcurrencyKeyStore_AcquireAndRelease(t *testing.T) {
 	}
 
 	// Release.
-	if err := s.ReleaseConcurrencyKey(ctx, "key-1"); err != nil {
+	if err := s.ReleaseConcurrencyKey(ctx, "key-1", "wf-1"); err != nil {
 		t.Fatalf("ReleaseConcurrencyKey: %v", err)
 	}
 

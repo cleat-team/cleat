@@ -118,7 +118,7 @@ func (s *execSession) ReleaseLock(ctx context.Context, m api.Module, key string)
 
 func (s *execSession) freshReleaseLock(ctx context.Context, m api.Module, key string) int64 {
 	if s.engine.concurrencyKeyStore != nil {
-		err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, key)
+		err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, key, s.workflowID)
 		if err != nil {
 			rec := EventRecord{
 				Step:      s.stepCount,

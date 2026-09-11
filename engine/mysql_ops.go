@@ -271,12 +271,18 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.
-func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	hash := sha256.Sum256([]byte(key))
 	keyHash := hash[:]
+	// The workflow_id predicate is the point of cleat#1188: without it, any
+	// workflow in the tenant that knows a key string releases a lock another
+	// workflow holds, and the key is an arbitrary string from the guest.
+	// ReleaseWorkflowConcurrencyKeys, just below, already predicated on
+	// workflow_id -- so the column was available and the omission was local to
+	// this one statement.
 	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?
-	`, keyHash, s.tenantID)
+		DELETE FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ? AND workflow_id = ?
+	`, keyHash, s.tenantID, workflowID)
 	if err != nil {
 		return fmt.Errorf("ReleaseConcurrencyKey: %w", err)
 	}

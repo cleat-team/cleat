@@ -1282,7 +1282,7 @@ func TestMSSQLIntegration_ConcurrencyKeys(t *testing.T) {
 	}
 
 	// Release one key.
-	if err := store.ReleaseConcurrencyKey(ctx, "resource-a"); err != nil {
+	if err := store.ReleaseConcurrencyKey(ctx, "resource-a", wfID); err != nil {
 		t.Fatalf("ReleaseConcurrencyKey: %v", err)
 	}
 

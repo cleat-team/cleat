@@ -800,14 +800,23 @@ func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflow
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.
-func (s *PostgresStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (s *PostgresStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("release concurrency key: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256') AND tenant_id = $2`, key, s.tenantID)
+	// The workflow_id predicate is the point of cleat#1188: without it, any
+	// workflow in the tenant that knows a key string releases a lock another
+	// workflow holds, and the key is an arbitrary string from the guest.
+	// ReleaseWorkflowConcurrencyKeys, just below, already predicated on
+	// workflow_id -- so the column was available and the omission was local to
+	// this one statement.
+	_, err = tx.ExecContext(ctx,
+		`DELETE FROM concurrency_keys
+		  WHERE key_hash = digest($1, 'sha256') AND tenant_id = $2 AND workflow_id = $3`,
+		key, s.tenantID, workflowID)
 	if err != nil {
 		return fmt.Errorf("release concurrency key: %w", err)
 	}

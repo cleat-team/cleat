@@ -849,7 +849,7 @@ type trackingConcurrencyStore struct {
 	releases []string
 }
 
-func (t *trackingConcurrencyStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (t *trackingConcurrencyStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.releases = append(t.releases, key)
