@@ -141,10 +141,24 @@ func TestClearingIsDistinctFromLeavingAlone(t *testing.T) {
 	}
 }
 
-// postgresOnly gives a PostgresStore against a real database, skipping when
-// none is configured. tenant_settings is PostgreSQL-only in the same way
-// CreateTenant is: the other two dialects have their own read paths and no
-// write path, so a multi-backend loop here would assert nothing about them.
+// postgresOnly gives a PostgresStore against a real database. tenant_settings
+// is PostgreSQL-only in the same way CreateTenant is: the other two dialects
+// have their own read paths and no write path, so a multi-backend loop here
+// would assert nothing about them.
+//
+// Neither branch below skips, and that is deliberate. The "is a database
+// configured" question is already answered one level down -- PostgresBackend
+// .Setup calls testutil.TestDB, which guards on whether one was REQUESTED
+// rather than on whether one is reachable. By the time we are here that
+// decision is made, so both remaining branches describe things that cannot
+// happen in this repo: postgres is registered unconditionally at init with
+// Enabled() == true, and Setup returns NewPostgresStore, which is a
+// *PostgresStore by construction.
+//
+// They were t.Skip and check-skips.sh was right to reject them (case (c), the
+// precondition is always satisfiable). A skip is indistinguishable from a
+// pass, so had either somehow fired, every assertion in this file would have
+// been reported as passing while testing nothing.
 func postgresOnly(t *testing.T) (*PostgresStore, func()) {
 	t.Helper()
 	for _, b := range registeredBackends {
@@ -155,7 +169,7 @@ func postgresOnly(t *testing.T) (*PostgresStore, func()) {
 		ps, ok := store.(*PostgresStore)
 		if !ok {
 			teardown()
-			t.Skipf("the postgres backend returned %T", store)
+			t.Fatalf("the postgres backend returned %T, want *PostgresStore", store)
 		}
 		truncateAll(t, store)
 		// truncateAll does not clear tenant_settings, so a row written by an
@@ -170,6 +184,6 @@ func postgresOnly(t *testing.T) (*PostgresStore, func()) {
 		}
 		return ps, teardown
 	}
-	t.Skip("no postgres backend registered")
+	t.Fatal("no postgres backend registered -- RegisterBackend(&PostgresBackend{}) runs at init, so this means the registration was removed")
 	return nil, func() {}
 }
