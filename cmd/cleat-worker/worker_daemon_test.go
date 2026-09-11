@@ -63,6 +63,7 @@ type mockStore struct {
 	listWorkflowsFn                    func(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error)
 	countWorkflowsFn                   func(ctx context.Context, filter engine.WorkflowFilter) (int, error)
 	getWorkflowByIDFn                  func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
+	deliverSignalIdempotentFn          func(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error)
 	validateVersionFn                  func(ctx context.Context, defName string, defVersion int) (bool, error)
 	setRoutingRuleFn                   func(ctx context.Context, workflowName string, targetVersion int, weight float64) error
 	removeRoutingRuleFn                func(ctx context.Context, ruleID string) error
@@ -239,6 +240,18 @@ func (m *mockStore) CheckCancellation(ctx context.Context, workflowID string) (b
 		return m.checkCancellationFn(ctx, workflowID)
 	}
 	return false, "", nil
+}
+
+// deliverSignalIdempotentFn makes mockStore satisfy engine.SignalIdempotencyStore.
+//
+// Its presence matters: the interface is asserted at run time, so a mockStore
+// without it would send every handler test down the plain-delivery path and the
+// idempotent branch would be covered by nothing (cleat#1121).
+func (m *mockStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
+	if m.deliverSignalIdempotentFn != nil {
+		return m.deliverSignalIdempotentFn(ctx, workflowID, signalName, payload, idempotencyKey)
+	}
+	return false, m.DeliverSignal(ctx, workflowID, signalName, payload)
 }
 
 func (m *mockStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {

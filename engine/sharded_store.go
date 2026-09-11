@@ -508,6 +508,25 @@ func (s *ShardedStore) DeliverSignal(ctx context.Context, workflowID, signalName
 //
 // This is the reason ConsumeSignal takes a workflowID it does not strictly
 // need to identify the row: an id alone cannot be routed to a shard.
+// DeliverSignalIdempotent routes to the shard owning the workflow, like its
+// non-idempotent sibling.
+//
+// The token is therefore scoped to that shard's idempotency_keys, which is
+// correct for the same reason the routing is: a signal names one workflow, and
+// one workflow lives on one shard. A key cannot be presented for two different
+// workflows and mean the same thing.
+func (s *ShardedStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return false, fmt.Errorf("deliver_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	si, ok := shard.Store.(SignalIdempotencyStore)
+	if !ok {
+		return false, fmt.Errorf("shard %q: %T cannot absorb a duplicate signal", shard.Config.Name, shard.Store)
+	}
+	return si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
+}
+
 func (s *ShardedStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {

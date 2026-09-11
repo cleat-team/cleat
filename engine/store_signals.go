@@ -157,27 +157,80 @@ func decodeJSONPayload(raw string) string {
 // call with the same key returns the existing workflow ID without creating a
 // duplicate. Returns the workflow ID, whether it already existed, and any error.
 
+// DeliverSignalIdempotent implements SignalIdempotencyStore.
+//
+// The key insert comes FIRST and is what decides. If it conflicts, this token
+// has already delivered a signal and the transaction rolls back without
+// writing one -- so the duplicate is absorbed rather than detected afterwards.
+// Ordering it the other way would deliver, then discover the duplicate, and
+// have nothing to undo outside a transaction.
+func (s *PostgresStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
+	if idempotencyKey == "" {
+		// No token. Deliver unconditionally and record nothing -- see the
+		// interface doc for why "" is an absence rather than a value.
+		return false, s.DeliverSignal(ctx, workflowID, signalName, payload)
+	}
+
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var inserted bool
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO idempotency_keys (key_hash, workflow_id, tenant_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (key_hash, tenant_id) DO NOTHING
+		RETURNING true
+	`, signalIdempotencyHash(idempotencyKey), workflowID, s.tenantID).Scan(&inserted)
+	if errors.Is(err, sql.ErrNoRows) {
+		// DO NOTHING returned no row: the token is already spent.
+		return true, tx.Commit()
+	}
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
+	}
+
+	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload); err != nil {
+		return false, err
+	}
+	pgNotify(ctx, tx, s.notifyChannel)
+	return false, tx.Commit()
+}
+
 func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("deliver signal: begin: %w", err)
 	}
 	defer tx.Rollback()
+	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload); err != nil {
+		return err
+	}
+	pgNotify(ctx, tx, s.notifyChannel)
+	return tx.Commit()
+}
 
+// deliverSignalTx is the body of a delivery, inside a caller's transaction.
+//
+// Extracted so DeliverSignal and DeliverSignalIdempotent cannot drift. A second
+// copy of these two writes is exactly the shape this repo keeps paying for --
+// GetChildResult and GetChildCount held two definitions of "terminal" forty
+// lines apart, and only one of them decided anything (cleat#1213).
+func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, signalName, payload string) error {
 	payload = encodeJSONPayload(payload)
 	// A plain INSERT. It carried ON CONFLICT (workflow_id, signal_name) DO
 	// UPDATE until 3.215, which discarded the earlier payload with no error --
 	// so a workflow collecting one approval per reviewer saw only the last.
 	// The conflict is gone because the key is gone: the table's primary key is
 	// now a surrogate id and every delivery is its own row.
-	_, err = tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		VALUES ($1, $2, $3, $4)
-	`, workflowID, signalName, payload, s.tenantID)
-	if err != nil {
+	`, workflowID, signalName, payload, tenantID); err != nil {
 		return err
 	}
-
 	// Two writes, two different windows, and neither replaces the other.
 	//
 	// next_wake_at wakes a workflow that is ALREADY suspended, and its
@@ -190,32 +243,17 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 	// unconditionally, in this transaction, so the counter and the delivery
 	// become visible together: a reader that can see the row can see the
 	// bump (cleat#953).
-	_, err = tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,
 		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
 		WHERE id = $1
-	`, workflowID)
-	if err != nil {
+	`, workflowID); err != nil {
 		return err
 	}
-	pgNotify(ctx, tx, s.notifyChannel)
-	return tx.Commit()
+	return nil
 }
 
-// PollSignal satisfies the SignalStore interface by returning the oldest
-// unconsumed delivery with this name, without consuming it.
-//
-// ORDER BY id LIMIT 1 is the whole of the FIFO guarantee, and it needs the
-// surrogate key to mean anything: before 3.215 there was at most one row per
-// (workflow_id, signal_name), so "which one" was not a question the query
-// could be asked.
-//
-// It must stay a plain read. It used to delegate straight to
-// PollAndClaimSignal, whose name and doc comment both say it "atomically
-// checks for AND CLAIMS" a signal (i.e. DELETEs the row) -- the opposite of
-// what SignalStore's own doc comment promises here. Consumption is
-// ConsumeSignal, called separately once the event is durable.
 func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
