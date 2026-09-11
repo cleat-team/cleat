@@ -108,14 +108,18 @@ func TestDeployPluginIsResolvableAfterwards(t *testing.T) {
 	// asks for the latest cannot tell "both rows exist" from "the second
 	// overwrote the first and happens to be the one I wanted".
 	//
-	// "^1.0.0" RATHER THAN THE EXACT FORM "1.0.0", and not as a style choice:
-	// an exact-match constraint currently matches nothing. parseConstraint maps
-	// a bare or "=" version to {Min: v, Max: v} and versionInRange excludes the
-	// upper bound (`semver.Compare(v, r.Max) >= 0` fails it), so the one version
-	// such a constraint names is the one version it cannot return. Measured on
-	// all five forms; filed as cleat#1243, because it is in engine/plugin_loader.go
-	// and has nothing to do with this command.
-	oldVersion, oldDef, err := loader.ResolvePlugin(ctx, name, "^1.0.0")
+	// THE EXACT FORM, which is the stronger assertion: "^1.0.0" would be
+	// satisfied by anything in 1.x, and what this needs to show is that version
+	// 1.0.0 in particular is still there.
+	//
+	// It carried "^1.0.0" when this test was written, because an exact
+	// constraint matched NOTHING -- parseConstraint encoded both exact forms as
+	// {Min: v, Max: v} and versionInRange excluded the upper bound, so the one
+	// version such a constraint named was the one version it could not return
+	// (cleat#1243, fixed in cleat#1253 with an explicit Exact field). Switched
+	// back now that it works: a comment saying "this form is broken" outlives
+	// the breakage and tells the next reader to avoid something that is fine.
+	oldVersion, oldDef, err := loader.ResolvePlugin(ctx, name, "1.0.0")
 	if err != nil {
 		t.Fatalf("resolve 1.0.0 after 2.0.0 was deployed: %v", err)
 	}
@@ -141,7 +145,7 @@ func TestDeployPluginIsResolvableAfterwards(t *testing.T) {
 		t.Errorf("redeploying 1.0.0 left %d rows for %s, want 2 -- an upsert on (name, version) "+
 			"must replace rather than accumulate", rows, name)
 	}
-	_, oldDef, err = loader.ResolvePlugin(ctx, name, "^1.0.0")
+	_, oldDef, err = loader.ResolvePlugin(ctx, name, "1.0.0")
 	if err != nil {
 		t.Fatalf("resolve 1.0.0 after redeploy: %v", err)
 	}
