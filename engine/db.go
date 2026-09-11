@@ -412,6 +412,33 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 }
 
 // GetWorkflowByID returns a single workflow instance by ID.
+// GetWorkflowByID carries its own tenant predicate, rather than leaving the
+// scoping entirely to row-level security.
+//
+// cleat#1180: the statement was `WHERE id = $1`. Inside beginTxWithRLS the
+// policy narrows it to one tenant, so under ENFORCED RLS the behaviour was
+// already right and the missing predicate was invisible. Over a bypassing
+// connection it was not -- measured, not reasoned: a store scoped to tenant B
+// returned tenant A's row, and GetTerminalRun (which starts here) therefore
+// answered a whole chain walk from another tenant's head.
+//
+// A bypassing connection is reachable: `-rls-check` accepts `off`, and its
+// default `auto` only warns unless --require-auth is set. So whether this
+// statement was scoped was a property of the DEPLOYMENT FLAGS rather than of
+// the query, and nothing said so.
+//
+// WHY THIS IS A CORRECTION RATHER THAN A POLICY CHANGE. Both other dialects
+// have always had it -- mysql_ops.go `WHERE id = ? AND tenant_id = ?`,
+// mssql_deployment.go `WHERE id = @p1 AND tenant_id = @p2` -- because neither
+// has row-level security to fall back on. PostgreSQL was the only one of the
+// three without it. That also settles the compatibility question without
+// needing to audit callers: a caller that RELIED on reading another tenant's
+// row here would already be broken on two of three dialects, so no correct
+// one can exist.
+//
+// Under enforced RLS this adds nothing the policy was not already doing, which
+// is why it is safe; the value is that the query now says what it means on a
+// connection where the policy is not doing it.
 func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -433,8 +460,8 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 		       generation, COALESCE(priority, 0) AS priority,
 		       COALESCE(trace_id, ''), tenant_id, continued_from, reclaim_count, parent_workflow_id,
 		       created_at, COALESCE(pending_terminal_status, '')
-		FROM workflow_instances WHERE id = $1
-	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
+		FROM workflow_instances WHERE id = $1 AND tenant_id = $2
+	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
 		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
