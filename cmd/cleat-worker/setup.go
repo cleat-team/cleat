@@ -800,9 +800,54 @@ func loadShardConfigs(path string) ([]engine.ShardConfig, error) {
 // Idempotency key cleanup
 // ---------------------------------------------------------------------------
 
-// idempotencyCleanupLoop periodically deletes idempotency keys whose associated
-// workflows completed more than a week ago.
-func idempotencyCleanupLoop(ctx context.Context, db *sql.DB, interval time.Duration) {
+// expiredIdempotencyKeysSQL returns the delete for one dialect.
+//
+// The predicate is expires_at, the column the insert already writes from the
+// store's configured TTL (cleat#1261). It used to be `created_at < now() - 7
+// days`, a Go constant that duplicated the schema default and ignored the
+// configured value entirely -- so WithIdempotencyKeyTTL was computed, stored,
+// indexed by idx_idempotency_expires, and read by nothing. A one-hour TTL still
+// honoured a key for a week; a thirty-day one lost it after seven.
+//
+// No parameter: the comparison is against the database's own clock, so the
+// worker's clock never enters it. That also keeps the statement portable enough
+// to differ only in the clock function.
+//
+// idempotency_keys carries no RLS policy -- migrations/postgres/061 records why
+// ("read before any RLS context exists") -- so this runs on the plain pool, as
+// it always has.
+func expiredIdempotencyKeysSQL(driver string) (string, bool) {
+	switch driver {
+	case "postgres":
+		return `DELETE FROM idempotency_keys WHERE expires_at < now()`, true
+	case "mysql":
+		return `DELETE FROM idempotency_keys WHERE expires_at < NOW(6)`, true
+	case "mssql", "sqlserver":
+		return `DELETE FROM idempotency_keys WHERE expires_at < SYSUTCDATETIME()`, true
+	default:
+		return "", false
+	}
+}
+
+// idempotencyCleanupLoop periodically deletes idempotency keys whose expiry has
+// passed.
+//
+// It runs on every dialect. It used to be started only under
+// `if *driver == "postgres"`, and nothing removed keys on the other two
+// (cleat#1256) -- so the table grew for the life of the deployment and, worse,
+// a key was honoured forever there: the same client code got a fresh run on
+// PostgreSQL and `already_started` from an arbitrarily old run on MySQL or SQL
+// Server, with nothing in the API to say so.
+//
+// An unknown driver is logged once and the loop exits rather than ticking
+// forever doing nothing, so a dialect added later fails loudly here instead of
+// silently inheriting the old behaviour.
+func idempotencyCleanupLoop(ctx context.Context, db *sql.DB, driver string, interval time.Duration) {
+	stmt, ok := expiredIdempotencyKeysSQL(driver)
+	if !ok {
+		slog.Warn("idempotency key cleanup not started: no delete for this driver", "driver", driver)
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -810,14 +855,11 @@ func idempotencyCleanupLoop(ctx context.Context, db *sql.DB, interval time.Durat
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Only run on Postgres. Other drivers skip silently.
 			if db == nil {
 				continue
 			}
-			cutoff := time.Now().Add(-7 * 24 * time.Hour)
-			_, err := db.ExecContext(ctx, `DELETE FROM idempotency_keys WHERE created_at < $1`, cutoff)
-			if err != nil {
-				slog.Warn("idempotency key cleanup failed", "error", err)
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				slog.Warn("idempotency key cleanup failed", "driver", driver, "error", err)
 			}
 		}
 	}
