@@ -302,6 +302,50 @@ sends you chasing a defect that is not there (measured 2026-09-05, #748). Neithe
 models the difference between a command and text that looks like one. Join line-continuations and
 drop comments **before** asking any question about a shell command in a workflow.
 
+**And the known-positive is MANDATORY, not advisory, for a probe you wrote BECAUSE you already
+suspected a bug.** The rule above is stated for guards. Applied to a probe it is the one people
+skip, and it is where it is most needed — because there the mis-aiming is *correlated with the
+thing being looked for*.
+
+A guard is written before anyone knows what is broken, so its blind spots fall where they fall. A
+probe written **for** a suspicion is built around that suspicion: the roles, the connection, the
+statement are all chosen to expose it, and whatever is left unconsidered is left unconsidered *for
+the same reason the bug was hard to see*. Its clean result is therefore worth less than a guard's,
+exactly when it feels worth more.
+
+Measured 2026-09-11 on cleat#1285/#1286. The question was whether `ReadOnlyDB` scopes a statement
+by tenant the way `SQLDBAdapter` does. The probe ran `SELECT count(*)` through both adapters, same
+non-superuser connection, same tenant in context, against a freshly-migrated table:
+
+| | first probe, empty table | after seeding one row |
+|---|---|---|
+| `SQLDBAdapter` | `err=<nil>` | `err=<nil>` |
+| `ReadOnlyDB` | **`err=<nil>`** | `cleat.tenant_id is not set … (P0001)` |
+
+The first column reads as "no gap here". The gap was real, and the probe could not see it:
+**a policy `USING` clause is a row-level predicate, so against zero rows it is never evaluated**,
+`cleat.assert_tenant_set()` never fires, and a read succeeds whether the policy is correct, wrong,
+or **absent**. Same empty green as connecting as a superuser, reached through a different door —
+and note the direction: the empty table hid a bug rather than inventing one.
+
+So **"the policy fails closed" means fails closed when there is something to filter.** A read-side
+assertion over an empty table is a decoration. A write-side one still fires, because `WITH CHECK`
+is evaluated per row being inserted — which is why the sibling test in #1280 was unaffected and
+gave no warning that its neighbour was empty.
+
+What caught it was the probe disagreeing with a plain reading of the code — `ReadOnlyDB.Query`
+calls `Inner.QueryContext` directly, so it cannot be setting anything. That is the two-derivations
+rule working as specified, **not** a counter-example to *"instrument rather than read the code"*:
+either derivation could have been the wrong one, and the disagreement is what had to be resolved.
+It is a thin thing to rely on, and the known-positive removes the need to:
+
+    -- before believing a clean probe, make the bug real and confirm the probe reports it
+    INSERT INTO <table> (tenant_id, …) VALUES ('<a DIFFERENT tenant>', …);
+
+Seed the row the policy is supposed to **exclude**, never one it would admit — a row belonging to
+the tenant under test makes the predicate fire and still passes against a broken policy. Thirty
+seconds before, rather than an afternoon after.
+
 **A count answers "did this go up". It never answers "is anything still missing".** Same day,
 same family: a `-run` pattern was widened to select a test that was running nowhere, and the fix
 was verified by counting that test's subtests, 0 before and 24 after. That is proof about one
