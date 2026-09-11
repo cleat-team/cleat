@@ -25,7 +25,7 @@ func newTestController(monitor *MemoryMonitor, concurrency int, soft, hard float
 		dynamicConcurrency:    concurrency,
 		scalingThreshold:      defaultScalingThreshold,
 		recoveryInterval:      5 * time.Millisecond,
-		defEstimates:          make(map[string]float64),
+		defEstimates:          make(map[memoryEstimateKey]float64),
 	}
 }
 
@@ -97,27 +97,27 @@ func TestController_Recovery(t *testing.T) {
 
 func TestController_RecordWorkflowMemory(t *testing.T) {
 	mc := newTestController(newTestMonitor(), 10, 0.80, 0.95)
-	mc.RecordWorkflowMemory(context.Background(), nil, "wf-a", 50*1024*1024)
-	if mc.WorkflowMemoryEstimate("wf-a") != 50*1024*1024 {
+	mc.RecordWorkflowMemory(context.Background(), nil, testTenant, "wf-a", 50*1024*1024)
+	if mc.WorkflowMemoryEstimate(testTenant, "wf-a") != 50*1024*1024 {
 		t.Errorf("expected 50MB first estimate")
 	}
-	mc.RecordWorkflowMemory(context.Background(), nil, "wf-a", 100*1024*1024)
+	mc.RecordWorkflowMemory(context.Background(), nil, testTenant, "wf-a", 100*1024*1024)
 	expected := uint64(0.3*100*1024*1024 + 0.7*50*1024*1024)
-	if mc.WorkflowMemoryEstimate("wf-a") != expected {
-		t.Errorf("expected EWMA=%d, got %d", expected, mc.WorkflowMemoryEstimate("wf-a"))
+	if mc.WorkflowMemoryEstimate(testTenant, "wf-a") != expected {
+		t.Errorf("expected EWMA=%d, got %d", expected, mc.WorkflowMemoryEstimate(testTenant, "wf-a"))
 	}
 }
 
 func TestController_DefaultEstimate(t *testing.T) {
 	mc := newTestController(newTestMonitor(), 10, 0.80, 0.95)
-	if mc.WorkflowMemoryEstimate("unknown") != defaultMemoryEstimate {
+	if mc.WorkflowMemoryEstimate(testTenant, "unknown") != defaultMemoryEstimate {
 		t.Error("expected default estimate for unknown def")
 	}
 }
 
 func TestController_LoadEstimates(t *testing.T) {
 	mc := newTestController(newTestMonitor(), 10, 0.80, 0.95)
-	if err := mc.LoadEstimates(context.Background()); err != nil {
+	if err := mc.LoadEstimates(context.Background(), testTenant); err != nil {
 		t.Fatalf("LoadEstimates: %v", err)
 	}
 }

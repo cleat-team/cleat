@@ -140,7 +140,7 @@ type Metrics struct {
 	lastTotal                       int64
 	lastConcurrencyLimit            int64
 	lastDesiredConcurrency          int64
-	lastWorkflowMemoryEstimate      map[string]float64 // keyed by defName
+	lastWorkflowMemoryEstimate      map[workflowMemoryKey]float64 // keyed by (tenant, defName)
 	lastWasmCacheEntries            int64
 	lastWasmCacheBytes              int64
 	lastWorkflowsStuck              int64
@@ -178,7 +178,7 @@ func New(cfg Config) (*Metrics, error) {
 			attribute.String("worker_id", cfg.WorkerID),
 		},
 		lastEventHistorySize:       make(map[string]int64),
-		lastWorkflowMemoryEstimate: make(map[string]float64),
+		lastWorkflowMemoryEstimate: make(map[workflowMemoryKey]float64),
 	}
 
 	var err error
@@ -1180,20 +1180,38 @@ func (m *Metrics) RecordDesiredConcurrency(ctx context.Context, desired int64, e
 	m.desiredConcurrency.Add(ctx, delta, metric.WithAttributes(attrs...))
 }
 
-// RecordWorkflowMemoryEstimate records the estimated memory per workflow execution
-// by def_name. Converts the absolute value to a delta for the UpDownCounter.
-func (m *Metrics) RecordWorkflowMemoryEstimate(ctx context.Context, defName string, bytes float64, extraAttrs ...attribute.KeyValue) {
+// workflowMemoryKey scopes the delta baseline to the tenant that produced it.
+//
+// cleat#1097. THE BASELINE HAD TO MOVE WITH THE LABEL, and this is the half
+// that makes a naive fix worse than the defect. workflowMemoryEstimate is an
+// UpDownCounter, so this function converts an absolute estimate into a DELTA
+// against the last value it saw. Keyed by def_name alone, tenant A's estimate
+// was differenced against tenant B's last value -- so adding a tenant
+// attribute while leaving this map name-keyed would have produced a per-tenant
+// series carrying arithmetic computed across tenants. Blended numbers replaced
+// by wrong ones, and the label would have made them look trustworthy.
+type workflowMemoryKey struct {
+	tenantID string
+	defName  string
+}
+
+// RecordWorkflowMemoryEstimate records the estimated memory per workflow
+// execution, scoped to the tenant. Converts the absolute value to a delta for
+// the UpDownCounter.
+func (m *Metrics) RecordWorkflowMemoryEstimate(ctx context.Context, tenantID, defName string, bytes float64, extraAttrs ...attribute.KeyValue) {
+	key := workflowMemoryKey{tenantID: tenantID, defName: defName}
 	m.mu.Lock()
-	last, exists := m.lastWorkflowMemoryEstimate[defName]
+	last, exists := m.lastWorkflowMemoryEstimate[key]
 	delta := int64(bytes - last)
 	if !exists {
 		delta = int64(bytes)
 	}
-	m.lastWorkflowMemoryEstimate[defName] = bytes
+	m.lastWorkflowMemoryEstimate[key] = bytes
 	m.mu.Unlock()
 
 	attrs := m.mergeAttrs(append([]attribute.KeyValue{
 		attribute.String("def_name", defName),
+		attribute.String("tenant_id", tenantID),
 	}, extraAttrs...)...)
 	m.workflowMemoryEstimate.Add(ctx, delta, metric.WithAttributes(attrs...))
 }

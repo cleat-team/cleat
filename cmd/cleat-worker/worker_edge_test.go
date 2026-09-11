@@ -372,7 +372,7 @@ func TestLoadShardConfigs_Success(t *testing.T) {
 func TestMemoryController_WorkflowMemoryEstimate_Default(t *testing.T) {
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, nil, "test-worker", 10, 0.8, 0.95)
-	est := mc.WorkflowMemoryEstimate("nonexistent")
+	est := mc.WorkflowMemoryEstimate(testTenant, "nonexistent")
 	if est != defaultMemoryEstimate {
 		t.Errorf("expected default memory estimate %d, got %d", defaultMemoryEstimate, est)
 	}
@@ -382,9 +382,9 @@ func TestMemoryController_WorkflowMemoryEstimate_Zero(t *testing.T) {
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, nil, "test-worker", 10, 0.8, 0.95)
 	mc.mu.Lock()
-	mc.defEstimates = map[string]float64{"mywf": 0}
+	mc.defEstimates = map[memoryEstimateKey]float64{{tenantID: testTenant, defName: "mywf"}: 0}
 	mc.mu.Unlock()
-	est := mc.WorkflowMemoryEstimate("mywf")
+	est := mc.WorkflowMemoryEstimate(testTenant, "mywf")
 	if est != defaultMemoryEstimate {
 		t.Errorf("expected default for zero estimate %d, got %d", defaultMemoryEstimate, est)
 	}
@@ -394,9 +394,9 @@ func TestMemoryController_WorkflowMemoryEstimate_Custom(t *testing.T) {
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, nil, "test-worker", 10, 0.8, 0.95)
 	mc.mu.Lock()
-	mc.defEstimates = map[string]float64{"mywf": 64 * 1024 * 1024}
+	mc.defEstimates = map[memoryEstimateKey]float64{{tenantID: testTenant, defName: "mywf"}: 64 * 1024 * 1024}
 	mc.mu.Unlock()
-	est := mc.WorkflowMemoryEstimate("mywf")
+	est := mc.WorkflowMemoryEstimate(testTenant, "mywf")
 	if est != 64*1024*1024 {
 		t.Errorf("expected 64MB estimate, got %d", est)
 	}
@@ -406,21 +406,24 @@ func TestMemoryController_DefEstimates(t *testing.T) {
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, nil, "test-worker", 10, 0.8, 0.95)
 	mc.mu.Lock()
-	mc.defEstimates = map[string]float64{"wf-a": 10.5, "wf-b": 20.5}
+	mc.defEstimates = map[memoryEstimateKey]float64{
+		{tenantID: testTenant, defName: "wf-a"}: 10.5,
+		{tenantID: testTenant, defName: "wf-b"}: 20.5,
+	}
 	mc.mu.Unlock()
 	ests := mc.DefEstimates()
 	if len(ests) != 2 {
 		t.Errorf("expected 2 estimates, got %d", len(ests))
 	}
-	if ests["wf-a"] != 10.5 {
-		t.Errorf("expected wf-a=10.5, got %f", ests["wf-a"])
+	if ests[memoryEstimateKey{tenantID: testTenant, defName: "wf-a"}] != 10.5 {
+		t.Errorf("expected wf-a=10.5, got %f", ests[memoryEstimateKey{tenantID: testTenant, defName: "wf-a"}])
 	}
-	if ests["wf-b"] != 20.5 {
-		t.Errorf("expected wf-b=20.5, got %f", ests["wf-b"])
+	if ests[memoryEstimateKey{tenantID: testTenant, defName: "wf-b"}] != 20.5 {
+		t.Errorf("expected wf-b=20.5, got %f", ests[memoryEstimateKey{tenantID: testTenant, defName: "wf-b"}])
 	}
-	ests["new-key"] = 100
+	ests[memoryEstimateKey{tenantID: testTenant, defName: "new-key"}] = 100
 	mc.mu.RLock()
-	_, exists := mc.defEstimates["new-key"]
+	_, exists := mc.defEstimates[memoryEstimateKey{tenantID: testTenant, defName: "new-key"}]
 	mc.mu.RUnlock()
 	if exists {
 		t.Error("DefEstimates should return a copy")
@@ -436,10 +439,10 @@ func TestMemoryController_LoadEstimates(t *testing.T) {
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, ms, "test-worker", 10, 0.8, 0.95)
 
-	if err := mc.LoadEstimates(context.Background()); err != nil {
+	if err := mc.LoadEstimates(context.Background(), testTenant); err != nil {
 		t.Fatalf("LoadEstimates: %v", err)
 	}
-	est := mc.WorkflowMemoryEstimate("wf")
+	est := mc.WorkflowMemoryEstimate(testTenant, "wf")
 	if est != 42 {
 		t.Errorf("expected estimate 42, got %d", est)
 	}
@@ -454,7 +457,7 @@ func TestMemoryController_LoadEstimates_Error(t *testing.T) {
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, ms, "test-worker", 10, 0.8, 0.95)
 
-	err := mc.LoadEstimates(context.Background())
+	err := mc.LoadEstimates(context.Background(), testTenant)
 	if err == nil {
 		t.Fatal("expected error from LoadEstimates")
 	}
