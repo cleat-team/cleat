@@ -113,11 +113,26 @@ func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request
 	// cap: a bare array of exactly 100 is indistinguishable from a store
 	// holding exactly 100.
 	//
-	// It matters more here than it did there. The retention sweep deliberately
-	// never deletes a dead-lettered run -- correctly, since it is work an
-	// operator may still re-drive -- so this is the ONE terminal status whose
-	// population only grows, and it was the one listing with no way to see part
-	// of it.
+	// It matters more here than it did there -- though less than cleat#1166's
+	// headline said, and less than this comment said when #1232 added it.
+	//
+	// --completed-workflow-retention-days never touches a dead-lettered run,
+	// correctly: it is the run an operator most wants to inspect afterwards.
+	// But a SECOND knob deletes them -- --dead-letter-retention-days
+	// (cleat#1023), which removes the row with its event_history, signals and
+	// promises -- and it DEFAULTS TO 0, meaning off.
+	//
+	// So "the one class retention never deletes" is wrong. The true statement
+	// is weaker and still sufficient: unbounded growth is a property of the
+	// DEFAULT CONFIGURATION rather than of the design, which makes this the
+	// listing most likely to be long on a deployment nobody has tuned.
+	//
+	// Both #1166 and cleat#1227 reached the wrong version from the same
+	// sentence: DeleteCompletedWorkflows excludes dead_lettered with a comment
+	// reading "it has its own lifecycle and its own deletion path", and two
+	// readers took that as an explanation for the omission rather than as a
+	// pointer to a path that exists. The refutation was inside the thing being
+	// cited, which is why neither of us went looking.
 	q := r.URL.Query()
 	filter := engine.WorkflowFilter{Status: "dead_lettered", Limit: 100}
 	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 {
