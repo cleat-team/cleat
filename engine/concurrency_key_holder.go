@@ -119,3 +119,18 @@ func (s *MSSQLStore) GetConcurrencyKeyHolder(ctx context.Context, key string) (C
 	h.Held = true
 	return h, nil
 }
+
+// claimedKeyTTL is how long a key acquired BY THE CLAIM is held before it
+// expires on its own.
+//
+// A backstop, not the release path. releaseWorkflowResources calls
+// ReleaseWorkflowConcurrencyKeys from every terminal commit on all three
+// dialects -- completion, failure, termination, the defer phases, the admin
+// paths and the terminated-children loop -- so in the ordinary case the key is
+// gone the moment the run ends, whatever this value is.
+//
+// It matters only when a worker dies holding a claim. Thirty minutes matches
+// what the HTTP layer used when IT acquired the key (cleat#1186 moved the
+// acquisition into the claim), so a deployment's worst-case wait for a key
+// stranded by a crash is unchanged by that move.
+const claimedKeyTTL = 30 * time.Minute
