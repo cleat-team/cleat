@@ -178,8 +178,8 @@ func TestReleasingAClaimTwiceDoesNotResurrectIt_MultiBackend(t *testing.T) {
 			// It is still a divergence worth someone deciding on: a caller
 			// cannot tell "you no longer hold this" from "it worked" on two of
 			// three dialects, and cannot write portable code that distinguishes
-			// them. Filed rather than settled here, because picking the winner
-			// is an API decision and this test's subject is the exclusion.
+			// them. Filed as cleat#1223 rather than settled here, because picking the
+			// winner is an API decision and this test's subject is the exclusion.
 			staleErr := store.ReleaseWorkflow(ctx, first.ID, "worker-1", first.Generation, time.Now().UTC())
 			if staleErr != nil {
 				t.Logf("stale release reported an error on this dialect (not a failure, see above): %v", staleErr)
