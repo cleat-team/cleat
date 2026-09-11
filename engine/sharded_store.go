@@ -534,6 +534,45 @@ func (s *ShardedStore) StartNewRun(ctx context.Context, runID, defName string, d
 	return shard.Store.StartNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority)
 }
 
+// StartNewRunWithConcurrencyKey routes like StartNewRun -- by RUN id, not by
+// key -- because the row it writes is the run's, and the run has to live on the
+// shard that will claim it.
+//
+// That differs from AcquireConcurrencyKey, which routes by KEY so that every
+// contender for a key meets on one shard. Both are right and the difference is
+// load-bearing: the key row and the run row are on different shards whenever
+// the two hashes disagree, which is the normal case. It works because the claim
+// predicate correlates on the run's own tenant and key hash, and the claim path
+// acquires on the same shard it claims from -- so nothing here ever has to read
+// a key row belonging to another shard.
+//
+// Falls back to the plain StartNewRun when the shard's store cannot record a
+// key. Silently dropping the key would be worse than not offering the feature:
+// the run would start and never be deferred, which is the bug cleat#1186 is
+// about. So a shard that cannot do it returns an error rather than a run.
+func (s *ShardedStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	if runID == "" {
+		runID = uuid.New().String()
+	}
+	if tenantID == "" {
+		tenantID = DefaultTenantUUID
+	}
+	shard := s.getShard(runID)
+	if shard == nil {
+		return "", false, fmt.Errorf("start_new_run: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if concurrencyKey == "" {
+		return shard.Store.StartNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority)
+	}
+	starter, ok := shard.Store.(interface {
+		StartNewRunWithConcurrencyKey(context.Context, string, string, int, json.RawMessage, string, string, int, string) (string, bool, error)
+	})
+	if !ok {
+		return "", false, fmt.Errorf("start_new_run: shard %q cannot record a concurrency key, so the run would start and never be deferred", shard.Config.Name)
+	}
+	return starter.StartNewRunWithConcurrencyKey(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
+}
+
 // StartChildWorkflow places the child on the same shard as the parent.
 // defVersion is passed through to the underlying store for version resolution.
 func (s *ShardedStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {

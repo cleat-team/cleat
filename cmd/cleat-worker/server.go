@@ -652,7 +652,21 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	// Redact sensitive fields in the input before storing.
 	in = json.RawMessage(engine.Redact(string(in)))
-	runID, alreadyExisted, err := st.StartNewRun(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority)
+	// The key is recorded BY THE INSERT when the store can do it, so the run is
+	// never claimable-without-its-key even for an instant (cleat#1186). Stores
+	// that cannot fall through to the plain StartNewRun and keep the old
+	// acquire-or-refuse behaviour below.
+	var runID string
+	var alreadyExisted bool
+	keyRecorded := false
+	if starter, ok := st.(interface {
+		StartNewRunWithConcurrencyKey(context.Context, string, string, int, json.RawMessage, string, string, int, string) (string, bool, error)
+	}); ok && concurrencyKey != "" {
+		runID, alreadyExisted, err = starter.StartNewRunWithConcurrencyKey(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority, concurrencyKey)
+		keyRecorded = err == nil
+	} else {
+		runID, alreadyExisted, err = st.StartNewRun(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority)
+	}
 	if err != nil {
 		// A rejected idempotency key is a CLIENT error and was reported as a
 		// server fault (cleat#1170, and cleat#832's shape). 409: the request
@@ -688,8 +702,19 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	// If concurrency key is specified, try to acquire it for the new run.
-	if concurrencyKey != "" {
+	// A BLOCKED START NOW WAITS INSTEAD OF BEING REFUSED (cleat#1186).
+	//
+	// When the key is on the row, the claim path does the enforcing: it defers
+	// a run whose key someone else holds, and ACQUIRES the key as part of
+	// claiming. So the run is simply left 'ready' and the caller gets its id --
+	// a limit on how many run at once, which is what a concurrency key is for,
+	// rather than a limit on how many may be accepted.
+	//
+	// The old path below is kept for stores that cannot record the key. There
+	// it still acquires here and terminates the loser with 409, because the
+	// alternative for such a store is a run that starts and is never deferred
+	// -- strictly worse than a refusal.
+	if concurrencyKey != "" && !keyRecorded {
 		ttl := 30 * time.Minute
 		acquired, err := st.AcquireConcurrencyKey(r.Context(), concurrencyKey, runID, ttl)
 		if err != nil {
@@ -718,16 +743,20 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 			// another run, so a held key defers a claim as well as failing an
 			// acquire here.
 			//
-			// The first clause is still true and is why this block stays.
-			// StartNewRun does not yet record concurrency_key on the
-			// instance, so that predicate sees NULL for every production row
-			// and defers nothing; and even once it does, the acquire has to
-			// move into the claim transaction before this rejection can go.
-			// Until then nothing would acquire on a waiting run's behalf, two
-			// waiting runs with one key would both become claimable the
-			// moment the holder released, and deferral would be strictly
-			// worse than this 409 -- it would remove the exclusion rather
-			// than relax it.
+			// The first clause has now gone too, and this block is the
+			// FALLBACK rather than the enforcement. The conditions it was
+			// waiting on are both met: StartNewRunWithConcurrencyKey records
+			// the key in the INSERT that creates the run, and the claim
+			// ACQUIRES that key as part of claiming, on all three dialects.
+			// So a store that can do both defers instead of refusing, and
+			// never reaches here.
+			//
+			// This runs only for a store that cannot record the key. There the
+			// old behaviour is still the right one: without a recorded key
+			// nothing would defer the run and nothing would acquire on its
+			// behalf, two waiting runs would both become claimable the moment
+			// the holder released, and "deferral" would remove the exclusion
+			// rather than relax it -- strictly worse than this 409.
 			//
 			// TerminateWorkflow is the unowned-writer primitive: it does not
 			// fence on assigned_to or generation, and it bumps generation, so

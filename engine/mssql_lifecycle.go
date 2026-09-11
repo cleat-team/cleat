@@ -109,6 +109,55 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 
 	tqParam := s.buildTaskQueueParam()
 
+	// Acquire the keys BEFORE the claim, in the same transaction.
+	//
+	// cleat#1186. The predicate in the claim asks "does anybody ELSE hold this
+	// key"; when the answer is no for two runs wanting the same key, both pass
+	// and both would be claimed. Taking the key is what makes it exclusive.
+	//
+	// THIS IS THE THIRD SHAPE, and the divergence is deliberate. PostgreSQL does
+	// it in one statement with a data-modifying CTE; MySQL does it per candidate
+	// between its two phases because it has no RETURNING. SQL Server has neither
+	// data-modifying CTEs nor a way to feed OUTPUT back into the same statement,
+	// so the acquisition is a separate INSERT ... SELECT that runs first. The
+	// UPDATE below then claims only runs that hold their own key.
+	//
+	// ROW_NUMBER is not decoration. Two candidates wanting the SAME key in one
+	// INSERT ... SELECT would both be inserted and violate the primary key --
+	// SQL Server has no per-row "ignore this conflict", so the statement would
+	// FAIL rather than the loser losing gracefully. Deduping to one row per
+	// (key_hash, tenant_id) inside the select is what turns a contended batch
+	// into a winner and a non-claim. The ordering matches the claim's own
+	// (priority, created_at), so the run that would have been claimed first is
+	// the one that gets the key.
+	//
+	// UPDLOCK/ROWLOCK/READPAST on the candidate read is what makes this safe
+	// across workers: the rows are locked by this transaction before the insert
+	// and stay locked until commit, so no other claimer sits between its own
+	// read and write on them.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+		SELECT c.concurrency_key_hash, c.concurrency_key, c.id,
+		       DATEADD(second, @p5, SYSUTCDATETIME()), c.tenant_id
+		FROM (
+			SELECT w.id, w.tenant_id, w.concurrency_key, w.concurrency_key_hash,
+			       ROW_NUMBER() OVER (PARTITION BY w.concurrency_key_hash, w.tenant_id
+			                          ORDER BY w.priority ASC, w.created_at) AS rn
+			FROM workflow_instances w WITH (READPAST, UPDLOCK, ROWLOCK)
+			WHERE w.status IN ('ready', 'terminating')
+			  AND w.next_wake_at <= SYSUTCDATETIME()
+			  AND w.task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+			  AND w.tenant_id = @p4
+			  AND w.concurrency_key_hash IS NOT NULL
+			  AND NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+			                   WHERE ck.key_hash = w.concurrency_key_hash
+			                     AND ck.tenant_id = w.tenant_id)
+		) c
+		WHERE c.rn = 1
+	`, workerID, tqParam, limit, s.tenantID, int64(claimedKeyTTL.Seconds())); err != nil {
+		return nil, fmt.Errorf("claim workflows: acquire concurrency keys: %w", err)
+	}
+
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'running',
@@ -152,6 +201,34 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
                          AND ck.expires_at > SYSUTCDATETIME()
                          AND ck.workflow_id <> workflow_instances.id))
 			  AND tenant_id = @p4
+			  -- Holds its own key, or has none.
+			  --
+			  -- REDUNDANT WITH THE PREDICATE BELOW, and kept deliberately --
+			  -- both were falsified to find out which does the work, and the
+			  -- answer is "either, independently":
+			  --
+			  --   invert this clause  -> still 1 of 2 claimed (the predicate
+			  --                          excluded the loser, because the
+			  --                          INSERT above is a SEPARATE EARLIER
+			  --                          STATEMENT and the predicate sees it)
+			  --   disable the INSERT  -> 0 of 2 claimed (this clause excluded
+			  --                          both, since neither holds a key)
+			  --
+			  -- That asymmetry is why the three dialects are shaped
+			  -- differently. On PostgreSQL the candidates and the predicate are
+			  -- evaluated in ONE snapshot, so the predicate cannot see the
+			  -- acquisition and an explicit "is in the acquired set" test is
+			  -- load-bearing. Here it is not, because ordinary statement
+			  -- ordering already does it.
+			  --
+			  -- Kept anyway: it states the requirement rather than relying on
+			  -- the reader deducing it from statement order, and mutual
+			  -- exclusion is worth two independent enforcements.
+			  AND (workflow_instances.concurrency_key_hash IS NULL
+			       OR EXISTS (SELECT 1 FROM concurrency_keys k
+			                   WHERE k.key_hash = workflow_instances.concurrency_key_hash
+			                     AND k.tenant_id = workflow_instances.tenant_id
+			                     AND k.workflow_id = workflow_instances.id))
 			ORDER BY priority ASC, created_at
 			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
 		)
@@ -1091,12 +1168,30 @@ func (s *MSSQLStore) CheckCancellation(ctx context.Context, workflowID string) (
 
 // StartNewRun creates a new workflow instance.
 // If idempotencyKey is non-empty, provides exactly-once semantics.
+// StartNewRun is the entry point without a concurrency key.
 func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, "")
+}
+
+// StartNewRunWithConcurrencyKey records the key on the row in the INSERT that
+// creates it. See the PostgreSQL implementation for why it is written by the
+// insert and why this is not on the interface.
+//
+// Hashed in Go, matching AcquireConcurrencyKey on this store. Doing it in SQL
+// here would be silently wrong: HASHBYTES over NVARCHAR hashes UTF-16, and
+// every existing key_hash was written from Go over UTF-8, so the two never
+// match. Migration 058's comment carries the full account.
+func (s *MSSQLStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
+}
+
+func (s *MSSQLStore) startNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+
 	var newID string
 	var existed bool
 	err := withRollbackGuaranteedRetry(ctx, "start new run", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		var err error
-		newID, existed, err = s.startNewRunOnce(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority)
+		newID, existed, err = s.startNewRunOnce(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
 		return err
 	})
 	if err != nil {
@@ -1105,7 +1200,25 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 	return newID, existed, nil
 }
 
-func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
+func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	// Computed here rather than in the caller because this function is RETRIED
+	// -- withRollbackGuaranteedRetry may run it several times -- and the hash
+	// must be identical on every attempt. It is a pure function of the key, so
+	// this is cheap and cannot drift between retries.
+	// TYPED nils, not `any(nil)`. go-mssqldb infers the parameter type from the
+	// Go value, and an untyped nil arrives as NVARCHAR NULL -- which SQL Server
+	// refuses to put in a VARBINARY(32) column: "Implicit conversion from data
+	// type nvarchar to varbinary is not allowed". A *string and a []byte carry
+	// their own types, so NULL arrives as the right kind of NULL.
+	//
+	// It failed on the NO-KEY path, which is every ordinary run, so this is not
+	// an edge case -- it is the common one.
+	var ckText *string
+	var ckHash []byte
+	if concurrencyKey != "" {
+		h := sha256.Sum256([]byte(concurrencyKey))
+		ckText, ckHash = &concurrencyKey, h[:]
+	}
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -1203,11 +1316,11 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
 			VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
-			        @p5, @p6)
-		`, runID, defName, defVersion, string(input), tenantID, priority)
+			        @p5, @p6, @p7, @p8)
+		`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -1223,11 +1336,11 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
 		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
-		        @p5, @p6)
-	`, runID, defName, defVersion, string(input), tenantID, priority)
+		        @p5, @p6, @p7, @p8)
+	`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}

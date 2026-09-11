@@ -84,7 +84,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	selArgs = append(selArgs, tqArgs...)
 	selArgs = append(selArgs, s.tenantID, limit)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id FROM workflow_instances
+		SELECT id, tenant_id, concurrency_key, concurrency_key_hash FROM workflow_instances
 		WHERE status IN ('ready', 'terminating')
 		  AND next_wake_at <= NOW(6)
 		  AND task_queue IN (%s)
@@ -104,18 +104,86 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	}
 	defer rows.Close()
 
-	var ids []string
+	type candidate struct {
+		id       string
+		tenantID string
+		key      *string
+		hash     []byte
+	}
+	var cands []candidate
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.tenantID, &c.key, &c.hash); err != nil {
 			return nil, fmt.Errorf("claim workflows: scan id: %w", err)
 		}
-		ids = append(ids, id)
+		cands = append(cands, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("claim workflows: rows: %w", err)
 	}
 	rows.Close()
+
+	// Acquire each candidate's concurrency key, and drop the ones that lose.
+	//
+	// cleat#1186. THIS IS THE DIALECT THAT DIVERGES, deliberately and with the
+	// repository owner's agreement. PostgreSQL and SQL Server do the same work
+	// inside the claim STATEMENT -- a data-modifying CTE with
+	// `ON CONFLICT DO NOTHING RETURNING`, and `INSERT ... OUTPUT` respectively.
+	// MySQL has no RETURNING, so there is no way to learn which rows an
+	// INSERT IGNORE actually inserted from within one statement.
+	//
+	// It is still correct, and the reason is the FOR UPDATE SKIP LOCKED above:
+	// every candidate row is locked by this transaction before we get here and
+	// stays locked until it commits, so no other claimer can be between its own
+	// select and update on these rows. The acquisition is serialised by the row
+	// locks rather than by the statement.
+	//
+	// Why the predicate alone is not enough, on any dialect: it asks "does
+	// anybody ELSE hold this key". When the answer is no for two candidates
+	// wanting the same key, both pass and both would be claimed. Taking the key
+	// is what makes it exclusive.
+	ids := make([]string, 0, len(cands))
+	for _, c := range cands {
+		if c.hash == nil {
+			ids = append(ids, c.id)
+			continue
+		}
+		res, err := tx.ExecContext(ctx, `
+			INSERT IGNORE INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+			VALUES (?, ?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?)
+		`, c.hash, c.key, c.id, int64(claimedKeyTTL.Seconds()), c.tenantID)
+		if err != nil {
+			return nil, fmt.Errorf("claim workflows: acquire concurrency key: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("claim workflows: acquire concurrency key: %w", err)
+		}
+		if n > 0 {
+			ids = append(ids, c.id)
+			continue
+		}
+		// INSERT IGNORE affected nothing: the key row already exists. Either
+		// THIS run holds it -- a re-claim after a lost fence, which the
+		// predicate above deliberately lets through -- or another run took it
+		// between the select and here. Only the first is claimable, and the two
+		// are indistinguishable without asking.
+		var holder string
+		err = tx.QueryRowContext(ctx,
+			`SELECT workflow_id FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?`,
+			c.hash, c.tenantID).Scan(&holder)
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("claim workflows: concurrency key holder: %w", err)
+			}
+			// Released between the INSERT and this read. Not ours, not claimed;
+			// the next poll will pick it up.
+			continue
+		}
+		if holder == c.id {
+			ids = append(ids, c.id)
+		}
+	}
 
 	if len(ids) == 0 {
 		tx.Rollback()
@@ -607,7 +675,38 @@ func (s *MySQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID s
 // If idempotencyKey is non-empty, provides exactly-once semantics: a subsequent
 // call with the same key returns the existing workflow ID without creating a
 // duplicate. Returns the workflow ID, whether it already existed, and any error.
+// StartNewRun is the entry point without a concurrency key.
 func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, "")
+}
+
+// StartNewRunWithConcurrencyKey records the key on the row in the INSERT that
+// creates it. See the PostgreSQL implementation for why it is written by the
+// insert and why this is not on the interface.
+//
+// The hash is computed in Go here, matching AcquireConcurrencyKey on this
+// store; PostgreSQL hashes in SQL. That split is not tidiness -- it is how the
+// existing rows were written, and migration 058 records what happens when the
+// two conventions meet.
+func (s *MySQLStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
+}
+
+func (s *MySQLStore) startNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	// TYPED nils, not `any(nil)`. go-mssqldb infers the parameter type from the
+	// Go value, and an untyped nil arrives as NVARCHAR NULL -- which SQL Server
+	// refuses to put in a VARBINARY(32) column: "Implicit conversion from data
+	// type nvarchar to varbinary is not allowed". A *string and a []byte carry
+	// their own types, so NULL arrives as the right kind of NULL.
+	//
+	// It failed on the NO-KEY path, which is every ordinary run, so this is not
+	// an edge case -- it is the common one.
+	var ckText *string
+	var ckHash []byte
+	if concurrencyKey != "" {
+		h := sha256.Sum256([]byte(concurrencyKey))
+		ckText, ckHash = &concurrencyKey, h[:]
+	}
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -695,11 +794,11 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
 			VALUES (?, ?, ?, 'ready', ?,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-			        ?, ?)
-		`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority)
+			        ?, ?, ?, ?)
+		`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -715,11 +814,11 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
 		VALUES (?, ?, ?, 'ready', ?,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-		        ?, ?)
-	`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority)
+		        ?, ?, ?, ?)
+	`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
