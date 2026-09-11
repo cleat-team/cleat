@@ -103,6 +103,54 @@ export default {
       }
     }
 
+    // ── the shared quorum conformance table ────────────────────────────
+    //
+    // tests/conformance/quorum_cases.json is consumed by Go, Rust, Python and
+    // Java by opening the file at test time. AssemblyScript compiles to WASM
+    // and has no filesystem, so the table has to cross the boundary -- and it
+    // is read HERE, from the canonical path, on every run. Nothing is
+    // generated and nothing is checked in, so the table cannot go stale
+    // against this SDK the way a generated fixture could. cleat#1136.
+    //
+    // Flattened into control-character-separated fields rather than handed
+    // over as JSON, because the guest would otherwise need a nested parser for
+    // awaited_sets (an array of arrays) and the SDK's jsonStrArray reads flat
+    // arrays only. The flattening is mechanical and happens at test time from
+    // the canonical file, so the property that matters holds: change the
+    // table and this SDK's test changes with it.
+    //
+    // Separators are US/RS/GS (0x1f/0x1e/0x1d) so a signal name containing a
+    // comma or a pipe cannot split a field.
+    const cases = JSON.parse(
+      await (await import("node:fs/promises")).readFile(
+        new URL("../../tests/conformance/quorum_cases.json", import.meta.url),
+        "utf8",
+      ),
+    ).cases;
+
+    const US = "\x1f", RS = "\x1e", GS = "\x1d";
+    const joinList = (xs) => (xs || []).join(RS);
+    const flattenCase = (c) => [
+      c.name,
+      joinList(c.signal_names),
+      String(c.min_count),
+      String(c.max_rejections),
+      c.host,
+      joinList(c.deliveries),
+      Object.keys(c.payloads || {}).map((k) => k + RS + c.payloads[k]).join(GS),
+      c.expect.outcome,
+      c.expect.error_kind || "",
+      joinList(c.expect.result_names),
+      (c.expect.awaited_sets || []).map(joinList).join(GS),
+    ].join(US);
+
+    /** Writes the i-th case into WASM memory; returns (len<<32)|0, or -1. */
+    function conformanceCase(index, outPtr, outMaxLen) {
+      if (index < 0 || index >= cases.length) return BigInt(-1);
+      const written = writeWasmString(outPtr, flattenCase(cases[index]), outMaxLen);
+      return encodeResult(written, 0);
+    }
+
     // cleat_now, so a module that pulls in HostCalls can be INSTANTIATED.
     //
     // A WebAssembly import must be satisfied at instantiation whether or not
@@ -142,6 +190,8 @@ export default {
         cleat_json_stringify: jsonStringify,
         cleat_now: cleatNow,
         cleat_defer_phase: deferPhase,
+        cleat_test_conformance_count: () => cases.length,
+        cleat_test_conformance_case: conformanceCase,
       },
     };
 
