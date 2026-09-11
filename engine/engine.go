@@ -67,6 +67,8 @@ type Engine struct {
 	// them rather than one each.
 	tenantSettingsOnce  sync.Once
 	tenantSettingsValue TenantSettings
+	runLimitsOnce       sync.Once
+	runLimitsValue      TenantSettings
 
 	deferPassBudget time.Duration // total for one runDefers pass; see WithDeferPassBudget
 	deferPhase      bool          // this execution is a defer segment; see WithDeferPhase
@@ -349,11 +351,25 @@ func (e *Engine) wallClockCeiling(ctx context.Context) time.Duration {
 	if operator <= 0 {
 		operator = e.wasmInstanceTimeout
 	}
-	return ClampToCeiling(e.tenantSettings(ctx).WasmWallClockCeiling, operator)
+	return e.resolveLimit(ctx, operator,
+		func(t TenantSettings) time.Duration { return t.WasmWallClockCeiling })
 }
 
-// tenantInstanceTimeout is this tenant's own bound on guest EXECUTION, or 0
-// when it set none.
+// perExecutionInstanceTimeout is the bound on guest EXECUTION that the CALLER
+// tiers ask for -- this run's, tightened against its tenant's -- or 0 when
+// neither set one.
+//
+// cleat#1187 added the run tier here rather than in resolveLimit because this
+// value's operator ceiling is not an Engine field (see below), so the clamp
+// against it happens in the backend. Composing run-against-tenant first and
+// letting the backend clamp the result to the operator preserves the same
+// chain the other two get from resolveLimit:
+//
+//	min(run, tenant, operator)
+//
+// The name changed from tenantInstanceTimeout when the run tier arrived: it is
+// no longer only the tenant's number, and a resolver named for one tier that
+// silently returns two is how the next reader gets it wrong.
 //
 // Deliberately UNCLAMPED, which is the one asymmetry in this file. The other
 // two resolvers (wallClockCeiling, hostRetryBudget) clamp here because the
@@ -368,8 +384,11 @@ func (e *Engine) wallClockCeiling(ctx context.Context) time.Duration {
 // -- it survives only as wallClockCeiling's fallback -- so clamping to it here
 // would reintroduce the conflation 3.90 removed, and would bound a tenant by a
 // number the operator's flag never set.
-func (e *Engine) tenantInstanceTimeout(ctx context.Context) time.Duration {
-	return e.tenantSettings(ctx).WasmInstanceTimeout
+func (e *Engine) perExecutionInstanceTimeout(ctx context.Context) time.Duration {
+	return ClampToCeiling(
+		e.runLimits(ctx).WasmInstanceTimeout,
+		e.tenantSettings(ctx).WasmInstanceTimeout,
+	)
 }
 
 // DefaultHostRetryBudget is the ceiling applied when an operator sets none.
@@ -406,7 +425,67 @@ func (e *Engine) hostRetryBudget(ctx context.Context) time.Duration {
 	if operator <= 0 {
 		operator = DefaultHostRetryBudget
 	}
-	return ClampToCeiling(e.tenantSettings(ctx).HostRetryBudget, operator)
+	return e.resolveLimit(ctx, operator,
+		func(t TenantSettings) time.Duration { return t.HostRetryBudget })
+}
+
+// resolveLimit is THE precedence rule, written once.
+//
+// cleat#1187 asked for exactly that -- "one precedence rule, stated once and
+// tested once, rather than three implementations":
+//
+//	operator flag  >=  tenant setting  >=  per-run override
+//
+// Each tier may LOWER and never raise, which falls straight out of applying
+// ClampToCeiling twice: the tenant's value is clamped to the operator's, and
+// the run's is clamped to that result. A tier that set nothing contributes
+// nothing, because ClampToCeiling treats a non-positive value as "no override"
+// and returns the ceiling unchanged.
+//
+// The direction is the whole point and is not symmetric. Read ClampToCeiling's
+// own comment before adding a fourth tier or a fourth field: "smaller is safer"
+// holds for every setting here because each one bounds a resource the caller
+// consumes, and a future floor-shaped setting would need the opposite
+// comparison. Using this for one would grant precisely the escalation the
+// clamp exists to refuse.
+func (e *Engine) resolveLimit(ctx context.Context, operator time.Duration, field func(TenantSettings) time.Duration) time.Duration {
+	tenant := ClampToCeiling(field(e.tenantSettings(ctx)), operator)
+	return ClampToCeiling(field(e.runLimits(ctx)), tenant)
+}
+
+// runLimits reads this run's own overrides once and memoises them, mirroring
+// tenantSettings -- including its failure posture.
+//
+// A read failure resolves to the tier above rather than failing the workflow.
+// The fallback direction is the safe one: a run that cannot read its override
+// gets its tenant's limits, which are already clamped to the operator's, so an
+// unreadable row can only ever produce a WIDER-than-intended bound up to the
+// operator's ceiling and never past it.
+//
+// Read rather than carried on the claim, deliberately. The claim projects
+// through fifteen sites and is the hottest statement in the system; this is one
+// query per execution, memoised, on the same shape the tenant tier already
+// uses. If per-execution reads ever become the bottleneck, both tiers should
+// move together.
+func (e *Engine) runLimits(ctx context.Context) TenantSettings {
+	e.runLimitsOnce.Do(func() {
+		if e.workflowID == "" {
+			return
+		}
+		reader, ok := e.workflowStore.(RunLimitsReader)
+		if !ok {
+			return
+		}
+		s, err := reader.GetRunLimits(ctx, e.workflowID)
+		if err != nil {
+			e.log().WarnContext(ctx,
+				"reading per-run limits failed, falling back to the tenant's",
+				"tenant_id", e.tenantID, "workflow_id", e.workflowID, "error", err)
+			return
+		}
+		e.runLimitsValue = s
+	})
+	return e.runLimitsValue
 }
 
 // WithDefaultWorkflowTimeout sets the total workflow timeout.
