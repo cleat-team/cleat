@@ -133,6 +133,32 @@ func makeMultiRowResult(cols []string, rows [][]driver.Value) checkDBResult {
 	return checkDBResult{cols: cols, rows: rows}
 }
 
+// tablesAllPresent returns one "this table exists" result per core table.
+//
+// The scripts in this file used to spell out thirteen of these by hand, which
+// is why correcting coreTables to match the schema (cleat#1216) broke every one
+// of them at once -- and why the next migration that adds a table would break
+// them all again. The count is derived here for the same reason the list itself
+// is derived from migrations/: one place that knows, instead of nineteen places
+// that have to be remembered.
+func tablesAllPresent() []checkDBResult {
+	out := make([]checkDBResult, 0, len(coreTables))
+	for range coreTables {
+		out = append(out, makeQueryResult([]string{"count"}, []driver.Value{int64(1)}))
+	}
+	return out
+}
+
+// tablesAllAbsent is tablesAllPresent's mirror: information_schema reports 0
+// for every core table. Same derivation, same reason.
+func tablesAllAbsent() []checkDBResult {
+	out := make([]checkDBResult, 0, len(coreTables))
+	for range coreTables {
+		out = append(out, makeQueryResult([]string{"count"}, []driver.Value{int64(0)}))
+	}
+	return out
+}
+
 // runCheckDBTest runs runCheckDB with a scripted mock and returns stdout and stderr.
 func runCheckDBTest(t *testing.T, script []checkDBResult, args []string) (stdout, stderr string) {
 	t.Helper()
@@ -205,26 +231,14 @@ func TestRunCheckDB_PingFailure(t *testing.T) {
 }
 
 func TestRunCheckDB_PingSuccess(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}), // schema
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 13
-		makeMultiRowResult([]string{"status", "cnt"}, nil),                             // instances (none)
-		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),                    // event history
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),                   // dead letters
-	}
+	}, tablesAllPresent()...),
+		makeMultiRowResult([]string{"status", "cnt"}, nil),           // instances (none)
+		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),  // event history
+		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // dead letters
+	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "connected") {
 		t.Errorf("expected 'connected', got: %s", stdout)
@@ -239,27 +253,15 @@ func TestRunCheckDB_PingSuccess(t *testing.T) {
 // =========================================================================
 
 func TestRunCheckDB_SchemaVersion_NoRows(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, nil), // no rows
 		// rest doesn't matter for this path but must be provided
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "no migrations applied yet") {
 		t.Errorf("expected 'no migrations applied yet', got: %s", stdout)
@@ -267,27 +269,15 @@ func TestRunCheckDB_SchemaVersion_NoRows(t *testing.T) {
 }
 
 func TestRunCheckDB_SchemaVersion_ReadError(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryError(fmt.Errorf("schema query timeout")), // schema error
 		// rest
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	_, stderr := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stderr, "WARNING") || !strings.Contains(stderr, "schema version") {
 		t.Errorf("expected WARNING about schema version, got: %s", stderr)
@@ -296,29 +286,17 @@ func TestRunCheckDB_SchemaVersion_ReadError(t *testing.T) {
 
 func TestRunCheckDB_SchemaVersion_Valid(t *testing.T) {
 	appliedAt := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult(
 			[]string{"version", "applied_at"},
 			[]driver.Value{"005_migration", &appliedAt},
 		),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(1024 * 1024)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "005_migration") {
 		t.Errorf("expected version '005_migration', got: %s", stdout)
@@ -329,26 +307,14 @@ func TestRunCheckDB_SchemaVersion_Valid(t *testing.T) {
 }
 
 func TestRunCheckDB_SchemaVersion_VerboseNoRows(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
-		makeQueryResult([]string{"version", "applied_at"}, nil),      // no rows
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+		makeQueryResult([]string{"version", "applied_at"}, nil), // no rows
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	stdout, _ := runCheckDBTest(t, script, []string{"--verbose"})
 	if !strings.Contains(stdout, "(none)") {
 		t.Errorf("expected '(none)' in verbose output, got: %s", stdout)
@@ -360,29 +326,18 @@ func TestRunCheckDB_SchemaVersion_VerboseNoRows(t *testing.T) {
 // =========================================================================
 
 func TestRunCheckDB_Tables_AllAccessible(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	stdout, _ := runCheckDBTest(t, script, nil)
-	if !strings.Contains(stdout, "all 13 accessible") {
-		t.Errorf("expected 'all 13 accessible', got: %s", stdout)
+	want := fmt.Sprintf("all %d accessible", len(coreTables))
+	if !strings.Contains(stdout, want) {
+		t.Errorf("expected %q, got: %s", want, stdout)
 	}
 }
 
@@ -419,30 +374,23 @@ func TestRunCheckDB_Tables_FallbackPath(t *testing.T) {
 }
 
 func TestRunCheckDB_Tables_AllMissing(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		// All 13 tables: information_schema returns count=0, no fallback triggered
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 13
+		// Every core table absent: information_schema returns count=0, no
+		// fallback triggered. Built from len(coreTables) rather than restated,
+		// so a migration that adds a table does not silently leave one entry
+		// of this script unconsumed -- which would shift every result after it
+		// and fail somewhere unrelated.
+	}, tablesAllAbsent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	stdout, stderr := runCheckDBTest(t, script, nil)
-	if !strings.Contains(stdout, "0 accessible, 13 missing") {
-		t.Errorf("expected '0 accessible, 13 missing' in stdout, got: %s", stdout)
+	wantMissing := fmt.Sprintf("0 accessible, %d missing", len(coreTables))
+	if !strings.Contains(stdout, wantMissing) {
+		t.Errorf("expected %q in stdout, got: %s", wantMissing, stdout)
 	}
 	if !strings.Contains(stderr, "DEGRADED") {
 		t.Errorf("expected DEGRADED in stderr, got: %s", stderr)
@@ -484,22 +432,10 @@ func TestRunCheckDB_Tables_VerboseMissing(t *testing.T) {
 // =========================================================================
 
 func TestRunCheckDB_Instances_WithStatuses(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, [][]driver.Value{
 			{"running", int64(5)},
 			{"completed", int64(10)},
@@ -507,7 +443,7 @@ func TestRunCheckDB_Instances_WithStatuses(t *testing.T) {
 		}),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "INSTANCES: 18 total") {
 		t.Errorf("expected 'INSTANCES: 18 total', got: %s", stdout)
@@ -515,28 +451,16 @@ func TestRunCheckDB_Instances_WithStatuses(t *testing.T) {
 }
 
 func TestRunCheckDB_Instances_VerboseStatuses(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, [][]driver.Value{
 			{"running", int64(2)},
 		}),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	stdout, _ := runCheckDBTest(t, script, []string{"--verbose"})
 	if !strings.Contains(stdout, "by status:") {
 		t.Errorf("expected 'by status:' in verbose output, got: %s", stdout)
@@ -547,26 +471,14 @@ func TestRunCheckDB_Instances_VerboseStatuses(t *testing.T) {
 }
 
 func TestRunCheckDB_Instances_QueryError(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
-		makeQueryError(fmt.Errorf("instance query error")),           // instance query fails
+	}, tablesAllPresent()...),
+		makeQueryError(fmt.Errorf("instance query error")), // instance query fails
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	stdout, stderr := runCheckDBTest(t, script, nil)
 
 	// This test asserted the defect until cleat#1184: "should not contain
@@ -589,26 +501,14 @@ func TestRunCheckDB_Instances_QueryError(t *testing.T) {
 }
 
 func TestRunCheckDB_Instances_QueryErrorVerbose(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeQueryError(fmt.Errorf("instance query error")),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	_, stderr := runCheckDBTest(t, script, []string{"--verbose"})
 	if !strings.Contains(stderr, "UNREADABLE") || !strings.Contains(stderr, "workflow_instances") {
 		t.Errorf("expected the workflow_instances failure in stderr, got: %s", stderr)
@@ -620,26 +520,14 @@ func TestRunCheckDB_Instances_QueryErrorVerbose(t *testing.T) {
 // =========================================================================
 
 func TestRunCheckDB_EventHistory_Size(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(5 * 1024 * 1024)}), // 5MB
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "EVENT HISTORY: 5.0 MB") {
 		t.Errorf("expected 'EVENT HISTORY: 5.0 MB', got: %s", stdout)
@@ -647,27 +535,15 @@ func TestRunCheckDB_EventHistory_Size(t *testing.T) {
 }
 
 func TestRunCheckDB_EventHistory_FallbackCount(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryError(fmt.Errorf("pg_column_size not available")),    // size query fails
 		makeQueryResult([]string{"count"}, []driver.Value{int64(42)}), // fallback count
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	stdout, _ := runCheckDBTest(t, script, []string{"--verbose"})
 	if !strings.Contains(stdout, "42 rows") {
 		t.Errorf("expected '42 rows' in verbose fallback, got: %s", stdout)
@@ -678,85 +554,41 @@ func TestRunCheckDB_EventHistory_FallbackCount(t *testing.T) {
 // Dead Letter Tests
 // =========================================================================
 
-func TestRunCheckDB_DeadLetters_WithCount(t *testing.T) {
-	script := []checkDBResult{
-		makePingResult(nil), // ping ok
-		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
-		makeMultiRowResult([]string{"status", "cnt"}, nil),
-		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(3)}), // 3 dead letters
-	}
-	stdout, _ := runCheckDBTest(t, script, []string{"--verbose"})
-	if !strings.Contains(stdout, "DEAD LETTERS: 3 workflows") {
-		t.Errorf("expected 'DEAD LETTERS: 3 workflows', got: %s", stdout)
-	}
-}
-
-func TestRunCheckDB_DeadLetters_ZeroCount(t *testing.T) {
-	script := []checkDBResult{
-		makePingResult(nil), // ping ok
-		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
-		makeMultiRowResult([]string{"status", "cnt"}, nil),
-		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // zero dead letters
-	}
-	stdout, _ := runCheckDBTest(t, script, []string{"--verbose"})
-	if strings.Contains(stdout, "DEAD LETTERS:") {
-		t.Errorf("should not show DEAD LETTERS when count is 0, got: %s", stdout)
-	}
-}
+// The two DEAD LETTERS tests that stood here are deleted, and what they were
+// testing is worth recording.
+//
+// TestRunCheckDB_DeadLetters_WithCount asserted that check-db prints
+// "DEAD LETTERS: 3 workflows". It passed for years. That line has never once
+// been printed by the command, on any database: it ran
+// `SELECT COUNT(*) FROM workflow_dead_letters` behind `if err == nil`, and
+// there is no such table -- dead_lettered is a status on workflow_instances.
+// Against a real PostgreSQL the query returns
+// `ERROR: relation "workflow_dead_letters" does not exist`, err is non-nil,
+// and the branch is unreachable.
+//
+// It passed because the mock driver in this file DISCARDS the SQL string and
+// answers from a positional script, so a statement naming a table that has
+// never existed is indistinguishable from one that works. The test did not
+// merely fail to catch the defect; it asserted the defective behaviour was
+// correct, and would have had to be edited by anyone fixing it.
+//
+// This is the sharpest case of the thing cleat#1216 is about, and the reason
+// the fix removes the query rather than repointing it: section 4's `by status`
+// line already reports dead_lettered under the same --verbose gate. cleat#1216.
 
 // =========================================================================
 // Verbose / Summary Tests
 // =========================================================================
 
 func TestRunCheckDB_Verbose_JSONSummary(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	_, stderr := runCheckDBTest(t, script, []string{"--verbose"})
 	if !strings.Contains(stderr, "JSON summary") {
 		t.Errorf("expected 'JSON summary' in stderr, got: %s", stderr)
@@ -767,26 +599,14 @@ func TestRunCheckDB_Verbose_JSONSummary(t *testing.T) {
 }
 
 func TestRunCheckDB_ShortVerboseFlag(t *testing.T) {
-	script := []checkDBResult{
+	script := append(append([]checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
-	}
+	)
 	_, stderr := runCheckDBTest(t, script, []string{"-v"})
 	if !strings.Contains(stderr, "JSON summary") {
 		t.Errorf("expected JSON summary with -v flag, got: %s", stderr)
