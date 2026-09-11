@@ -457,25 +457,68 @@ func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		return fmt.Errorf("deliver signal: begin: %w", err)
 	}
 	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
-		VALUES (?, ?, ?, ?)
-	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID)
-	if err != nil {
+	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
 		return err
 	}
+	return tx.Commit()
+}
 
-	_, err = tx.ExecContext(ctx, `
+// DeliverSignalIdempotent implements SignalIdempotencyStore. See the
+// PostgreSQL implementation for why the key insert comes first.
+//
+// INSERT IGNORE rather than ON CONFLICT, and RowsAffected rather than
+// RETURNING: MySQL has neither of the latter. A zero-row insert is the
+// duplicate, which is the same decision by a different spelling.
+func (s *MySQLStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
+	if idempotencyKey == "" {
+		return false, s.DeliverSignal(ctx, workflowID, signalName, payload)
+	}
+
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, tenant_id)
+		VALUES (?, ?, ?)
+	`, signalIdempotencyHash(idempotencyKey), workflowID, s.tenantID)
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: rows affected: %w", err)
+	}
+	if n == 0 {
+		return true, tx.Commit()
+	}
+
+	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
+		return false, err
+	}
+	return false, tx.Commit()
+}
+
+// deliverSignalTx is the body of a delivery, inside a caller's transaction.
+// Extracted so the two entry points above cannot drift.
+func (s *MySQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID, signalName, payload string) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
+		VALUES (?, ?, ?, ?)
+	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,
 		    next_wake_at = CASE WHEN status = 'ready' THEN NOW(6) ELSE next_wake_at END
 		WHERE id = ? AND tenant_id = ?
-	`, workflowID, s.tenantID)
-	if err != nil {
+	`, workflowID, s.tenantID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 // PollSignal returns the oldest unconsumed delivery with this name without

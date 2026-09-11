@@ -18,6 +18,54 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		return fmt.Errorf("deliver signal: begin: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DeliverSignalIdempotent implements SignalIdempotencyStore. See the
+// PostgreSQL implementation for why the key insert comes first.
+//
+// A guarded INSERT ... WHERE NOT EXISTS rather than ON CONFLICT or INSERT
+// IGNORE, neither of which T-SQL has. @@ROWCOUNT of zero is the duplicate.
+func (s *MSSQLStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
+	if idempotencyKey == "" {
+		return false, s.DeliverSignal(ctx, workflowID, signalName, payload)
+	}
+
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO idempotency_keys (key_hash, workflow_id, tenant_id)
+		SELECT @p1, @p2, @p3
+		WHERE NOT EXISTS (
+			SELECT 1 FROM idempotency_keys WITH (UPDLOCK, HOLDLOCK)
+			WHERE key_hash = @p1 AND tenant_id = @p3
+		)
+	`, signalIdempotencyHash(idempotencyKey), workflowID, s.tenantID)
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: rows affected: %w", err)
+	}
+	if n == 0 {
+		return true, tx.Commit()
+	}
+
+	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
+		return false, err
+	}
+	return false, tx.Commit()
+}
+
+func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID, signalName, payload string) error {
 
 	// A plain INSERT, and it is worth saying what it replaced because the
 	// replaced statement was the subtlest tenant bug in this file.
@@ -37,7 +85,7 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	// answered yes, off the INSERT column list, which says nothing about the
 	// row a MERGE MATCHES. That is why the gate 3.86 describes needs a
 	// position-aware check rather than a substring one.
-	_, err = tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4)
 	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID)
@@ -56,7 +104,7 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 // PollSignal returns the oldest unconsumed delivery with this name, without

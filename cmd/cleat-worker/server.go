@@ -907,6 +907,39 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 			return
 		}
 	}
+	// Idempotency-Key, mirroring the start path's header (cleat#1121).
+	//
+	// A sender retrying after a timeout cannot tell a lost signal from a slow
+	// one. Without a token it must choose between possibly losing the signal
+	// and possibly delivering it twice; with one, a retry is absorbed and said
+	// to have been.
+	//
+	// No header means NO TOKEN, not a token equal to "" -- otherwise two
+	// callers who both send nothing would collide with each other. A keyless
+	// caller keeps today's behaviour exactly, including the right to send the
+	// same signal deliberately twice, which is why no key is derived for them.
+	// Same decision as cleat#1167 took for reprocess.
+	key := r.Header.Get("Idempotency-Key")
+	si, canAbsorb := st.(engine.SignalIdempotencyStore)
+	if key != "" && canAbsorb {
+		already, err := si.DeliverSignalIdempotent(r.Context(), id, req.SignalName, payload, key)
+		if err != nil {
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		// 200 either way, with the outcome named -- mirroring the start path's
+		// already_started. The status code cannot carry this: a retry that
+		// answered 409 would be indistinguishable from a real conflict, and one
+		// that answered a bare 200 would be indistinguishable from having
+		// delivered, which is the ambiguity this whole feature removes.
+		status := "delivered"
+		if already {
+			status = "already_delivered"
+		}
+		s.writeJSON(w, 200, map[string]string{"status": status})
+		return
+	}
+
 	if err := st.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
 		s.writeError(w, 500, err.Error())
 		return

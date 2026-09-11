@@ -124,3 +124,119 @@ func TestASignalForAnUnownedWorkflowNeverReachesTheStore(t *testing.T) {
 			"own; it must not be reached at all", calls)
 	}
 }
+
+// A key-respecting fake, modelling the constraint the real stores enforce: one
+// token delivers once.
+//
+// Deliberately NOT a mock that returns alreadyDelivered unconditionally while
+// ignoring its key. #1167 found two tests built that way -- replacing the
+// handler's header read with a constant left both green -- so "the header is
+// actually read" was under test nowhere. A mock that ignores the value it is
+// handed cannot fail for a wrong one.
+//
+// Empty keys are not recorded, which is the same distinction the stores make:
+// "" is the ABSENCE of a token, so two keyless callers must not collide.
+type signalKeyRecorder struct {
+	spent      map[string]bool
+	deliveries int
+	keysSeen   []string
+}
+
+func newKeyedSignalServer() (*apiServer, *signalKeyRecorder) {
+	rec := &signalKeyRecorder{spent: map[string]bool{}}
+	ms := &mockStore{}
+	ms.deliverSignalIdempotentFn = func(_ context.Context, _, _, _, key string) (bool, error) {
+		rec.keysSeen = append(rec.keysSeen, key)
+		if key != "" && rec.spent[key] {
+			return true, nil
+		}
+		if key != "" {
+			rec.spent[key] = true
+		}
+		rec.deliveries++
+		return false, nil
+	}
+	ms.deliverSignalFn = func(context.Context, string, string, string) error {
+		// The keyless path does not reach DeliverSignalIdempotent, so it is
+		// counted here -- otherwise "two keyless sends deliver twice" would
+		// assert against a counter nothing increments.
+		rec.keysSeen = append(rec.keysSeen, "")
+		rec.deliveries++
+		return nil
+	}
+	return newTestAPIServer(ms), rec
+}
+
+func postSignal(api *apiServer, id, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/"+id+"/signal",
+		strings.NewReader(`{"signal_name":"approve","payload":"{}"}`))
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
+	rec := httptest.NewRecorder()
+	api.handleWorkflows(rec, req)
+	return rec
+}
+
+// TestARetriedSignalWithTheSameKeyIsAbsorbed — cleat#1121 at the HTTP edge.
+func TestARetriedSignalWithTheSameKeyIsAbsorbed(t *testing.T) {
+	api, ks := newKeyedSignalServer()
+
+	first := postSignal(api, "wf-1", "tok-a")
+	if first.Code != 200 || !strings.Contains(first.Body.String(), `"delivered"`) {
+		t.Fatalf("first send: %d %s", first.Code, first.Body.String())
+	}
+
+	retry := postSignal(api, "wf-1", "tok-a")
+	if retry.Code != 200 {
+		t.Fatalf("retry status %d, want 200", retry.Code)
+	}
+	if !strings.Contains(retry.Body.String(), "already_delivered") {
+		t.Errorf("retry answered %s, want already_delivered.\n\n"+
+			"A bare \"delivered\" is indistinguishable from having delivered a second "+
+			"time, which is the ambiguity the key exists to remove.", retry.Body.String())
+	}
+	if ks.deliveries != 1 {
+		t.Errorf("the store delivered %d time(s) for one token, want 1", ks.deliveries)
+	}
+
+	// A different key delivers again: idempotency is not a once-ever rule.
+	other := postSignal(api, "wf-1", "tok-b")
+	if !strings.Contains(other.Body.String(), `"delivered"`) || ks.deliveries != 2 {
+		t.Errorf("a second key answered %s with %d total deliveries, want delivered and 2",
+			other.Body.String(), ks.deliveries)
+	}
+}
+
+// TestTheHeaderIsReadRatherThanAssumed — the assertion #1167 found missing.
+//
+// A handler that passed a constant, or dropped the header entirely, would
+// satisfy every status assertion above: the first send is "delivered" either
+// way. Only the key the STORE was handed can tell.
+func TestTheHeaderIsReadRatherThanAssumed(t *testing.T) {
+	api, ks := newKeyedSignalServer()
+
+	postSignal(api, "wf-1", "tok-from-the-header")
+	if len(ks.keysSeen) != 1 || ks.keysSeen[0] != "tok-from-the-header" {
+		t.Fatalf("the store was handed %v, want [tok-from-the-header]", ks.keysSeen)
+	}
+}
+
+// TestTwoKeylessSignalsDoNotCollide — "" is an absence, not a token.
+//
+// If the handler treated a missing header as the key "", the second keyless
+// caller would be absorbed as a duplicate of the first: a signal silently never
+// delivered, from a client that asked for no idempotency at all.
+func TestTwoKeylessSignalsDoNotCollide(t *testing.T) {
+	api, ks := newKeyedSignalServer()
+
+	for i := 0; i < 2; i++ {
+		rec := postSignal(api, "wf-1", "")
+		if !strings.Contains(rec.Body.String(), `"delivered"`) {
+			t.Fatalf("keyless send %d answered %s", i, rec.Body.String())
+		}
+	}
+	if ks.deliveries != 2 {
+		t.Errorf("two keyless sends produced %d delivery/deliveries, want 2", ks.deliveries)
+	}
+}
