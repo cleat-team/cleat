@@ -40,14 +40,29 @@ func (s *MSSQLStore) DeliverSignalIdempotent(ctx context.Context, workflowID, si
 	}
 	defer tx.Rollback()
 
+	// expires_at from the CONFIGURED TTL, not the column default.
+	//
+	// idempotency_keys.expires_at defaults to now() + 7 days, and the
+	// store's idempotencyKeyTTL defaults to 720 hours. The start path sets
+	// it explicitly; this one did not when it was added in cleat#1266, so a
+	// SIGNAL token silently stopped working after 7 days while the
+	// configured and documented lifetime was 30 -- a retry on day 8 would
+	// be delivered a second time, which is the whole thing the token exists
+	// to prevent.
+	//
+	// Same shape as cleat#1261, where cleanup deleted at created_at + 7
+	// days against the same 720h default and swept LIVE keys 23 days early:
+	// idempotency that stops working long before it says it does, silently,
+	// because nothing compares the two numbers.
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO idempotency_keys (key_hash, workflow_id, tenant_id)
-		SELECT @p1, @p2, @p3
+		INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
+		SELECT @p1, @p2, DATEADD(SECOND, @p4, SYSUTCDATETIME()), @p3
 		WHERE NOT EXISTS (
 			SELECT 1 FROM idempotency_keys WITH (UPDLOCK, HOLDLOCK)
 			WHERE key_hash = @p1 AND tenant_id = @p3
 		)
-	`, signalIdempotencyHash(idempotencyKey), workflowID, s.tenantID)
+	`, signalIdempotencyHash(idempotencyKey), workflowID, s.tenantID,
+		int(s.idempotencyKeyTTL.Seconds()))
 	if err != nil {
 		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
 	}
