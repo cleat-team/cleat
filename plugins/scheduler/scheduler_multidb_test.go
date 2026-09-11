@@ -55,10 +55,18 @@ func TestSchedulerClaimsADueSchedule_MultiBackend(t *testing.T) {
 			// below are written to tolerate them. Nothing here deletes outside
 			// this tenant.
 			tenant := uuid.New()
-			t.Cleanup(func() {
-				_, _ = be.DB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM schedules WHERE tenant_id = $1`, dialect), tenant)
-			})
+			// A DEFER, NOT t.Cleanup. `defer be.Cleanup()` above closes the pool
+			// when this function returns, and t.Cleanup runs AFTER the
+			// function's defers -- so these deletes executed against a closed
+			// database, failed, and were discarded by the `_`. Measured
+			// 2026-09-10: one run of these tests left 5 rows in task_queue and
+			// 2 in schedules (cleat#1148).
+			defer func() {
+				if _, err := be.DB.ExecContext(context.Background(),
+					plugin.Rebind(`DELETE FROM schedules WHERE tenant_id = $1`, dialect), tenant); err != nil {
+					t.Errorf("cleanup schedules on %s: %v", be.Name, err)
+				}
+			}()
 
 			// Every value is bound as a parameter, so this INSERT carries no
 			// dialect-specific expression and cannot reintroduce the defect it
@@ -149,13 +157,21 @@ func TestSchedulerAPIWritesAScheduleOnEveryBackend_MultiBackend(t *testing.T) {
 			p.logger = slog.New(slog.NewTextHandler(&logbuf, nil))
 
 			tenant := uuid.New()
-			t.Cleanup(func() {
-				_, _ = be.DB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM schedules WHERE tenant_id = $1`, dialect), tenant)
+			// A DEFER, NOT t.Cleanup. `defer be.Cleanup()` above closes the pool
+			// when this function returns, and t.Cleanup runs AFTER the
+			// function's defers -- so these deletes executed against a closed
+			// database, failed, and were discarded by the `_`. Measured
+			// 2026-09-10: one run of these tests left 5 rows in task_queue and
+			// 2 in schedules (cleat#1148).
+			defer func() {
+				if _, err := be.DB.ExecContext(context.Background(),
+					plugin.Rebind(`DELETE FROM schedules WHERE tenant_id = $1`, dialect), tenant); err != nil {
+					t.Errorf("cleanup schedules on %s: %v", be.Name, err)
+				}
 				if t.Failed() && logbuf.Len() > 0 {
 					t.Logf("scheduler log on %s:\n%s", be.Name, logbuf.String())
 				}
-			})
+			}()
 
 			mux := http.NewServeMux()
 			if err := p.RegisterRoutes(mux); err != nil {
