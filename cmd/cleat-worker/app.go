@@ -224,7 +224,20 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	// workflow re-created it under the default tenant regardless of whose
 	// workflow it was, so a tenant's own retry moved its run into another
 	// tenant's scope.
-	runID, alreadyExisted, serr := st.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, "", s.tenantFor(r), 0)
+	// Reprocess honours Idempotency-Key for the same reason start does: a lost
+	// response followed by a retry would otherwise re-drive work that already
+	// failed partway, so partial side effects get repeated (cleat#1167). The
+	// key is a client-supplied token, unique per (key_hash, tenant_id) -- the
+	// caller never invents an id in the server's namespace.
+	//
+	// With no header this stays as it was: a new run per call. Deriving a key
+	// from `id` would protect callers that send nothing, but it would also
+	// refuse a DELIBERATE second re-drive -- fix the downstream, re-drive
+	// again -- and answering that with the first run is worse than the
+	// duplicate this guards against. Making reprocess idempotent by identity
+	// removes an operation and needs to be its own decision.
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+	runID, alreadyExisted, serr := st.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, idempotencyKey, s.tenantFor(r), 0)
 	if serr != nil {
 		s.writeError(w, 500, serr.Error())
 		return
