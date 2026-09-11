@@ -318,16 +318,25 @@ func (s *InMemoryChildWorkflowStore) StartChildWorkflowAtomic(_ context.Context,
 	return s.StartChildWorkflow(context.Background(), parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
 
-func (s *InMemoryChildWorkflowStore) GetChildResult(_ context.Context, runID string) (string, bool, error) {
+// GetChildResult implements engine.ChildWorkflowStore.
+//
+// A registered child ERROR is now reported as a completed-and-failed outcome
+// rather than as a returned error. It used to come back as
+// `("", true, fmt.Errorf(msg))` -- the child's failure smuggled through the
+// STORE error return -- which made this fake behave CORRECTLY while every real
+// store reported a failed child as an empty success (cleat#1115). A fake that
+// is right for a reason the production path does not share cannot fail with
+// it, and that is why nothing driven by this store ever noticed.
+func (s *InMemoryChildWorkflowStore) GetChildResult(_ context.Context, runID string) (engine.ChildOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if result, ok := s.childResults[runID]; ok {
-		return result, true, nil
+		return engine.ChildOutcome{Completed: true, Result: result}, nil
 	}
 	if errMsg, ok := s.childErrors[runID]; ok {
-		return "", true, fmt.Errorf("%s", errMsg)
+		return engine.ChildOutcome{Completed: true, Failed: true, Error: errMsg}, nil
 	}
-	return "", false, nil
+	return engine.ChildOutcome{}, nil
 }
 
 // GetChildCompletedAtMs implements engine.ChildWorkflowStore.

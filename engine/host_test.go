@@ -1317,9 +1317,9 @@ func (m *mockChildWorkflowStore) StartChildWorkflowAtomic(ctx context.Context, c
 	return "child-run-001", nil
 }
 
-func (m *mockChildWorkflowStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (m *mockChildWorkflowStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	m.gotRunID = runID
-	return m.result, m.completed, m.err
+	return ChildOutcome{Completed: m.completed, Result: m.result}, m.err
 }
 
 func (m *mockChildWorkflowStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {

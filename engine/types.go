@@ -474,6 +474,36 @@ type ConcurrencyKeyStore interface {
 	ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (released bool, err error)
 }
 
+// ChildOutcome is what a child run left behind, as its parent sees it.
+//
+// The parent asks one question -- "is my child finished, and how did it go" --
+// and it has three answers, not two. Before cleat#1115 the store returned
+// (resultJSON, completed, err) where err meant a STORE failure, so "the child
+// failed" had no representation at all and arrived as (empty result, completed,
+// nil): indistinguishable from a child that succeeded and returned nothing.
+type ChildOutcome struct {
+	// Completed is true once the child has reached a terminal status.
+	Completed bool
+
+	// Failed is true when the child reached a terminal status by failing.
+	//
+	// Cancellation is an ERROR CODE rather than a status here (see
+	// WorkflowFilter.ErrorCode), so a cancelled child is a failed one and
+	// needs no third case.
+	Failed bool
+
+	// Result is the child's result, and is empty when it failed -- a failed
+	// run's `result` column is never written (migration 053 routes the
+	// finalize parameter to `error_msg` on the 'failed' branch).
+	Result string
+
+	// Error is the child's own error message, read from `error_msg`. It is
+	// what the parent can act on, and what replay returns on the next
+	// execution; a failure flag with no message moves the defect rather than
+	// fixing it.
+	Error string
+}
+
 type ChildWorkflowStore interface {
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
 	// defVersion is the explicit workflow definition version to use, or 0 to use
@@ -489,7 +519,13 @@ type ChildWorkflowStore interface {
 	// ON CONFLICT (workflow_id, step) DO NOTHING.
 	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error)
 
-	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
+	// GetChildResult reports what a child run left behind. The returned error
+	// is a STORE error; a child that ran and FAILED is a successful call with
+	// Outcome.Failed set, and conflating the two is cleat#1115 -- the triple
+	// this used to return had nowhere to say "completed, and failed", so every
+	// caller reported a failed child to its parent as a success with an empty
+	// result.
+	GetChildResult(ctx context.Context, runID string) (outcome ChildOutcome, err error)
 
 	// GetChildCompletedAtMs returns the child's completion time in Unix
 	// milliseconds, and whether it has one. A child that is still running

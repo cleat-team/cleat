@@ -50,7 +50,7 @@ type mockStore struct {
 	pollAndClaimSignalFn               func(ctx context.Context, workflowID, signalName string) (string, bool, error)
 	startNewRunFn                      func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error)
 	startChildWorkflowFn               func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
-	getChildResultFn                   func(ctx context.Context, runID string) (string, bool, error)
+	getChildResultFn                   func(ctx context.Context, runID string) (engine.ChildOutcome, error)
 	reapStaleInstancesFn               func(ctx context.Context, timeout time.Duration) (int, error)
 	getQueryStateFn                    func(ctx context.Context, workflowID, key string) (string, error)
 	listWorkflowsFn                    func(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error)
@@ -242,11 +242,11 @@ func (m *mockStore) StartChildWorkflowAtomic(ctx context.Context, childID, paren
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
 
-func (m *mockStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (m *mockStore) GetChildResult(ctx context.Context, runID string) (engine.ChildOutcome, error) {
 	if m.getChildResultFn != nil {
 		return m.getChildResultFn(ctx, runID)
 	}
-	return "", false, nil
+	return engine.ChildOutcome{}, nil
 }
 
 func (m *mockStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {

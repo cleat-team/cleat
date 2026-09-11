@@ -499,8 +499,8 @@ func (m *mockCompactStore) StartChildWorkflow(ctx context.Context, parentID, def
 func (m *mockCompactStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (m *mockCompactStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
-	return "", false, nil
+func (m *mockCompactStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
 func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
 	return 0, nil

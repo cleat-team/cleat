@@ -1380,7 +1380,8 @@ func TestMSSQLIntegration_ChildWorkflows(t *testing.T) {
 	}
 
 	// GetChildResult should not be completed yet.
-	_, completed, err := store.GetChildResult(ctx, childID)
+	_outcome, err := store.GetChildResult(ctx, childID)
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -1397,7 +1398,9 @@ func TestMSSQLIntegration_ChildWorkflows(t *testing.T) {
 		t.Fatalf("complete child via SQL: %v", err)
 	}
 
-	result, completed, err := store.GetChildResult(ctx, childID)
+	_outcome, err = store.GetChildResult(ctx, childID)
+	result := _outcome.Result
+	completed = _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult after complete: %v", err)
 	}

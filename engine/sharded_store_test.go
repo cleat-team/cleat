@@ -59,7 +59,7 @@ type mockShardStore struct {
 	startNewRunFn                func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error)
 	startChildWorkflowFn         func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
 	startChildWorkflowAtomicFn   func(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error)
-	getChildResultFn             func(ctx context.Context, runID string) (string, bool, error)
+	getChildResultFn             func(ctx context.Context, runID string) (ChildOutcome, error)
 	streamEventHistoryFn         func(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error)
 	resolveTenantFn              func(ctx context.Context, keyHash []byte) (uuid.UUID, error)
 	loadWorkflowConfigFn         func(ctx context.Context, defName string, defVersion int) (int, error)
@@ -350,15 +350,15 @@ func (m *mockShardStore) StartChildWorkflowAtomic(ctx context.Context, childID, 
 	return childID, nil
 }
 
-func (m *mockShardStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (m *mockShardStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	m.recordCall("GetChildResult")
 	if m.getChildResultFn != nil {
 		return m.getChildResultFn(ctx, runID)
 	}
 	if m.err != nil {
-		return "", false, m.err
+		return ChildOutcome{}, m.err
 	}
-	return "", false, nil
+	return ChildOutcome{}, nil
 }
 
 func (m *mockShardStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
@@ -1766,7 +1766,7 @@ func TestStartNewRun_GeneratesUUID(t *testing.T) {
 	var capturedID string
 	mocks[0].startNewRunFn = func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
 		capturedID = runID
-		return runID, true, nil
+		return runID, false, nil
 	}
 
 	id, _, err := ss.StartNewRun(context.Background(), "", "my-def", 1, nil, "", "", 0)
@@ -1864,11 +1864,12 @@ func TestStartChildWorkflowAtomic_GeneratesChildID(t *testing.T) {
 
 func TestGetChildResult_Success(t *testing.T) {
 	ss, mocks := makeShardedStore(t, 2)
-	mocks[0].getChildResultFn = func(ctx context.Context, runID string) (string, bool, error) {
-		return "result-json", true, nil
+	mocks[0].getChildResultFn = func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{Completed: true, Result: "result-json"}, nil
 	}
 
-	result, completed, err := ss.GetChildResult(context.Background(), "child-1")
+	out, err := ss.GetChildResult(context.Background(), "child-1")
+	result, completed := out.Result, out.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult failed: %v", err)
 	}
@@ -1882,7 +1883,7 @@ func TestGetChildResult_Success(t *testing.T) {
 
 func TestGetChildResult_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	_, _, err := ss.GetChildResult(context.Background(), "child-1")
+	_, err := ss.GetChildResult(context.Background(), "child-1")
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}

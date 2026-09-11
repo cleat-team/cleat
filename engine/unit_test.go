@@ -1447,8 +1447,8 @@ func (s *stubWorkflowStore) StartChildWorkflow(ctx context.Context, parentID, de
 func (s *stubWorkflowStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
 	return s.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (s *stubWorkflowStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
-	return "", false, nil
+func (s *stubWorkflowStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
 func (s *stubWorkflowStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
 	return 0, nil
@@ -2616,8 +2616,8 @@ func (m *mockCollectMetricsStore) StartChildWorkflow(ctx context.Context, parent
 func (m *mockCollectMetricsStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error) {
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (m *mockCollectMetricsStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) {
-	return "", false, nil
+func (m *mockCollectMetricsStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
 func (m *mockCollectMetricsStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
 	return 0, nil
@@ -2808,8 +2808,8 @@ func (m *mockCheckStaleStore) StartChildWorkflow(ctx context.Context, parentID, 
 func (m *mockCheckStaleStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error) {
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (m *mockCheckStaleStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) {
-	return "", false, nil
+func (m *mockCheckStaleStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
 func (m *mockCheckStaleStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
 	return 0, nil
@@ -2997,8 +2997,8 @@ func (m *mockGCStore) StartChildWorkflow(ctx context.Context, parentID, defName,
 func (m *mockGCStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error) {
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (m *mockGCStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) {
-	return "", false, nil
+func (m *mockGCStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
 func (m *mockGCStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
 	return 0, nil
@@ -3176,8 +3176,8 @@ func (m *mockPurgeStore) StartChildWorkflow(ctx context.Context, parentID, defNa
 func (m *mockPurgeStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error) {
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (m *mockPurgeStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) {
-	return "", false, nil
+func (m *mockPurgeStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
 func (m *mockPurgeStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
 	return 0, nil

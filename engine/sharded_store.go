@@ -564,7 +564,7 @@ func (s *ShardedStore) StartChildWorkflowAtomic(ctx context.Context, childID, pa
 }
 
 // GetChildResult routes by child run ID.
-func (s *ShardedStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (s *ShardedStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	// Resolve the chain ACROSS shards before routing, not after. The concrete
 	// stores resolve it too (cleat#955), but only within themselves -- and a
 	// continue-as-new chain crosses shards routinely, because every
@@ -575,11 +575,11 @@ func (s *ShardedStore) GetChildResult(ctx context.Context, runID string) (string
 	// looks like it covers.
 	terminal, err := terminalRunID(ctx, runID, s.successorAcrossShards)
 	if err != nil {
-		return "", false, err
+		return ChildOutcome{}, err
 	}
 	shard := s.getShard(terminal)
 	if shard == nil {
-		return "", false, fmt.Errorf("get_child_result: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+		return ChildOutcome{}, fmt.Errorf("get_child_result: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.GetChildResult(ctx, terminal)
 }

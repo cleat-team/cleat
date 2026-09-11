@@ -386,30 +386,38 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 	return childID, nil
 }
 
-// GetChildResult checks whether a child workflow has completed and returns its result.
-func (s *MySQLStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+// GetChildResult reports what a child workflow left behind -- see the
+// ChildWorkflowStore interface. The returned error is a STORE error; a child
+// that ran and failed is a successful call with Failed set (cleat#1115).
+func (s *MySQLStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	// Resolve the chain first -- see PostgresStore.GetChildResult for why: a
 	// child that continued as new leaves its first run 'done' with an empty
 	// result, and that is the run the parent holds the id of (cleat#955).
 	runID, err := terminalRunID(ctx, runID, s.successorOfRun)
 	if err != nil {
-		return "", false, err
+		return ChildOutcome{}, err
 	}
 	var result string
 	var status string
+	var errMsg sql.NullString
 	err = s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(result, '{}'), status FROM workflow_instances WHERE id = ? AND tenant_id = ?
-	`, runID, s.tenantID).Scan(&result, &status)
+		SELECT COALESCE(result, '{}'), status, error_msg FROM workflow_instances WHERE id = ? AND tenant_id = ?
+	`, runID, s.tenantID).Scan(&result, &status, &errMsg)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return ChildOutcome{}, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("get child result: %w", err)
+		return ChildOutcome{}, fmt.Errorf("get child result: %w", err)
 	}
-	if status == "done" || status == "failed" {
-		return compactJSONString(result), true, nil
+	if status == "failed" {
+		// The result column is never written on this branch; the message is
+		// in error_msg. See PostgresStore.GetChildResult.
+		return ChildOutcome{Completed: true, Failed: true, Error: errMsg.String}, nil
 	}
-	return "", false, nil
+	if status == "done" {
+		return ChildOutcome{Completed: true, Result: compactJSONString(result)}, nil
+	}
+	return ChildOutcome{}, nil
 }
 
 // ---------------------------------------------------------------------------

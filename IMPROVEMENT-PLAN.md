@@ -11375,6 +11375,82 @@ those two messages, and the fixed one passes twice in a row.
 **A fixture that depends on what an earlier test left behind is not a fixture**, and a local run
 cannot tell you it is doing that — the residue is invisible and it always helps.
 
+### 3.426 A failed child was reported to its parent as a success with an empty result — ✅ **FIXED 2026-09-11** (cleat#1115)
+
+A parent that spawned a child, awaited it, and branched on the error took the **success** branch
+when the child failed. The natural guest shape is silently wrong:
+
+```go
+result, err := h.AwaitChild(childID)
+if err != nil { /* never reached */ }
+```
+
+and an empty result is a plausible success value, so nothing downstream looks wrong either. **The
+parent was not denied the reason — it was told the opposite.**
+
+**The information never left the store.** `finalize_workflow_status` writes a failed run's message
+to `error_msg` (migration 053 routes the payload there on the `'failed'` branch);
+`GetChildResult` selected `COALESCE(result, '{}')` and `status`, tested
+`status == "done" || status == "failed"` as one condition, and returned
+`(resultJSON string, completed bool, err error)` — **a triple with nowhere to say "completed, and
+failed."** `err` is a *store* error. A failed child arrived as `("{}", true, nil)`.
+
+So this is one missing fact, not four bugs. Every caller was wrong the same way:
+
+| call site | what a completed child got |
+|---|---|
+| `AwaitChild` | `packAwaitChildResult(written, 0)` — the success flag |
+| `AwaitAnyChild` | `out.Result = result`, `out.Error` left empty |
+| `AwaitAllChildren` | `childOutcome{RunID: rid, Result: result}` |
+| `PollChild` | fell through to `completed` |
+
+The fix returns a `ChildOutcome{Completed, Failed, Result, Error}` from one query, so the child's
+status and its `error_msg` reach all four.
+
+**`PollChild` had a guess in place of the missing fact, and the guess was wrong in the other
+direction.** Its last branch read `pollResult{Status: "failed", Error: "child workflow failed
+(empty result)"}` — so a child that *succeeded and returned nothing* was reported as failed. That
+guess is removed rather than kept beside an answer it can contradict.
+
+**Its test stated the defect as a specification**, which is the same shape as §3.424's tenant
+comment: the mock in `TestPollChild_EmptyResult` carried the comment *"completed but empty result
+== failed"*. That is not a fact about a child; it is a description of the guess. Corrected, with
+`TestPollChild_ChildFailed` added for the case the guess stood in for.
+
+**The in-memory fake was MORE correct than every real store, and that is why nothing caught it.**
+`wasmtest.InMemoryChildWorkflowStore.GetChildResult` reported a registered child error as
+`("", true, fmt.Errorf(msg))` — the child's failure smuggled through the **store error** return.
+`AwaitChild`'s `err != nil` branch then did the right thing. So every test driven by the fake saw
+correct behaviour, produced by a mechanism the production path does not have. A fake that is right
+for the wrong reason cannot fail with the thing it stands in for. It now returns a failed outcome,
+and `SetError` — public API that nothing exercised — has a test.
+
+**Cancellation needs no third case, checked rather than assumed:** it is an **error code**, not a
+status (`WorkflowFilter.ErrorCode` says so, and no `status = 'cancelled'` exists in any dialect's
+migrations), so a cancelled child is a failed one.
+
+**Three fixture faults, all found by running rather than reading, and each void in a different
+way:**
+
+  * **Seeding through the wrong path.** The first version failed the child with
+    `FinalizeWorkflowSegment(..., "failed", marker)`. That path runs its payload through
+    `coerceResultJSON`, which replaces anything that is not valid JSON with `{}` — so the test read
+    `Err="{}"` and would have measured the coercion rather than the fix. The worker fails a run
+    through `FailWorkflow`, whose `errorMsg` reaches `error_msg` as written.
+  * **An order dependence that reads as a dialect problem.** `claimSpecific` loops on
+    `ClaimWorkflow` until the id matches, and every claim it discards *consumes* a workflow — so
+    claiming one child left the other claimed and unclaimable. It passed on PostgreSQL and MySQL,
+    where the order happened to suit, and failed on SQL Server. Both children are now claimed in
+    one pass.
+  * **A mechanical rewrite that hit a function it was not aimed at.** Updating ~17 mock
+    implementations with a regex on `return X, true, nil` also rewrote `StartNewRun`, which happens
+    to share the shape. Found by auditing every changed line for its **enclosing function** rather
+    than by trusting the pattern — the compiler caught two of the three, and the third was in a
+    branch the compiler accepted.
+
+**Both halves are falsified separately**, because either alone leaves the defect: making the store
+stop reporting `Failed` fails PostgreSQL only; making the session stop acting on it fails all three.
+
 ### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
 
 `ReleaseConcurrencyKey` took only the key. Its statement carried `AND tenant_id` and no

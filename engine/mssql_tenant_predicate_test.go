@@ -185,8 +185,8 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select name, def_name, entry_point, cron_expression, input, enabled, next_run_",
 		Reason: deliberatelyCrossTenant,
 	},
-	"mssql_signals_promises.go:GetChildResult#521eed12da63": {
-		SQL:    "select isnull(result, '{}'), status from workflow_instances where id = @p1",
+	"mssql_signals_promises.go:GetChildResult#18eaf4c5f15d": {
+		SQL:    "select isnull(result, '{}'), status, error_msg from workflow_instances where ",
 		Reason: scopedByCaller,
 	},
 	"mssql_signals_promises.go:GetChildCount#7e68d2d025fd": {

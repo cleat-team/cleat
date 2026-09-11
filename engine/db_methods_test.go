@@ -496,12 +496,14 @@ func TestPostgresStore_ValidateVersion_False(t *testing.T) {
 
 func TestPostgresStore_GetChildResult_Done(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT COALESCE", data: [][]driver.Value{{`{"result":"ok"}`, "done"}}},
+		{match: "SELECT COALESCE", data: [][]driver.Value{{`{"result":"ok"}`, "done", nil}}},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	result, completed, err := store.GetChildResult(testCtx, "child-1")
+	_outcome, err := store.GetChildResult(testCtx, "child-1")
+	result := _outcome.Result
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -515,12 +517,13 @@ func TestPostgresStore_GetChildResult_Done(t *testing.T) {
 
 func TestPostgresStore_GetChildResult_StillRunning(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT COALESCE", data: [][]driver.Value{{"{}", "running"}}},
+		{match: "SELECT COALESCE", data: [][]driver.Value{{"{}", "running", nil}}},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, completed, err := store.GetChildResult(testCtx, "child-1")
+	_outcome, err := store.GetChildResult(testCtx, "child-1")
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -3496,7 +3499,7 @@ func TestPostgresStore_GetChildResult_QueryError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, _, err := store.GetChildResult(testCtx, "child-1")
+	_, err := store.GetChildResult(testCtx, "child-1")
 	if err == nil {
 		t.Fatal("expected error from query failure")
 	}
@@ -5458,12 +5461,12 @@ func TestPostgresStore_LoadEventHistory_QueryError(t *testing.T) {
 func TestPostgresStore_GetChildResult_ScanError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		// struct{} is not a supported driver.Value type for *string Scan target.
-		{match: "SELECT COALESCE", data: [][]driver.Value{{`{}`, struct{}{}}}},
+		{match: "SELECT COALESCE", data: [][]driver.Value{{`{}`, struct{}{}, nil}}},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, _, err := store.GetChildResult(testCtx, "child-1")
+	_, err := store.GetChildResult(testCtx, "child-1")
 	if err == nil {
 		t.Fatal("expected scan error")
 	}

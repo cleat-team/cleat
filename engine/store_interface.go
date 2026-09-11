@@ -207,8 +207,11 @@ type WorkflowStore interface {
 	// child_workflow event in a single transaction, guaranteeing exactly-once creation.
 	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error)
 
-	// GetChildResult checks whether a child workflow has completed and returns its result.
-	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
+	// GetChildResult reports what a child workflow left behind: whether it has
+	// completed, whether it failed, and its result or its error message. The
+	// returned error is a STORE error -- a child that ran and failed is a
+	// successful call with ChildOutcome.Failed set (cleat#1115).
+	GetChildResult(ctx context.Context, runID string) (outcome ChildOutcome, err error)
 
 	// GetChildCompletedAtMs returns when a child completed, in Unix
 	// milliseconds, and whether it has completed at all. PollChild needs the
