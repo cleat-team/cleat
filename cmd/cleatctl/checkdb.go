@@ -110,29 +110,53 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 	}
 
 	// 3. Table accessibility.
-	tables := []string{
-		"workflow_instances",
-		"event_history",
-		"workflow_defs",
-		"workflow_signals",
-		"workflow_promises",
-		"child_workflows",
-		"workflow_schedules",
-		"workflow_dead_letters",
-		"idempotency_keys",
-		"concurrency_keys",
-		"tenant_api_keys",
-		"plugin_registry",
-		"plugin_audit_log",
-	}
+	//
+	// coreTables is every table migrations/postgres/ creates, and it is checked
+	// against those files by TestCoreTablesMatchTheMigrations. Before that test
+	// existed this was a hand-maintained list that had drifted in BOTH
+	// directions, silently, for as long as anyone had run the command:
+	//
+	//   - FOUR names that no migration has ever created --  child_workflows,
+	//     workflow_dead_letters, plugin_registry, plugin_audit_log -- so every
+	//     healthy database was told "TABLES: 9 accessible, 4 missing";
+	//   - and TEN real core tables it never looked at, including
+	//     workflow_routing, workflow_tags and workflow_update_requests.
+	//
+	// The over-reporting is what got noticed, because it prints. The
+	// under-reporting is the worse half: a command whose job is to say whether
+	// the schema is complete was answering about a subset chosen by hand.
+	//
+	// Two of the four phantoms were not renames and are not coming back.
+	// child_workflows: parent/child is workflow_instances.parent_workflow_id, a
+	// column. plugin_audit_log: the only audit-shaped table is audit_events,
+	// created by plugins/auditlog -- a PLUGIN, present only where it is
+	// installed, which a core health check must not require. cleat#1216.
+	tables := coreTables
 	var missingTables []string
 	var accessibleCount int
 	for _, table := range tables {
+		// Schema-qualified names are matched on BOTH parts. Matching on
+		// table_name alone -- which is what this did -- makes `admin.tenants`
+		// and a `tenants` in any other schema indistinguishable, so a table in
+		// the wrong schema reads as present. That mattered the moment the list
+		// stopped being purely public: four of these live in `admin`.
+		schemaName, bareName, qualified := strings.Cut(table, ".")
+		if !qualified {
+			bareName = table
+		}
 		var count int
-		err := db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1 AND table_schema NOT IN ('pg_catalog', 'information_schema')",
-			table,
-		).Scan(&count)
+		var err error
+		if qualified {
+			err = db.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
+				schemaName, bareName,
+			).Scan(&count)
+		} else {
+			err = db.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1 AND table_schema NOT IN ('pg_catalog', 'information_schema')",
+				bareName,
+			).Scan(&count)
+		}
 		if err != nil {
 			// information_schema might not exist on all drivers; try a simple count instead.
 			var rowCount int64
@@ -226,12 +250,21 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 		}
 	}
 
-	// 6. Dead letter queue count.
-	var deadLetterCount int64
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM workflow_dead_letters").Scan(&deadLetterCount)
-	if err == nil && deadLetterCount > 0 && verbose {
-		fmt.Printf("DEAD LETTERS: %d workflows\n", deadLetterCount)
-	}
+	// 6. Dead letters are reported by section 4 above, and were never reported
+	// here.
+	//
+	// This section used to run `SELECT COUNT(*) FROM workflow_dead_letters`
+	// behind `if err == nil && deadLetterCount > 0 && verbose`. There is no
+	// such table -- dead_lettered is a STATUS on workflow_instances
+	// (migrations/postgres/033, 052) -- so the query always errored, err was
+	// never nil, and the DEAD LETTERS line has never printed once. Removing it
+	// cannot regress output that was never produced.
+	//
+	// Not repointed at workflow_instances, because section 4's `by status`
+	// line already carries the number under the same --verbose gate: on a
+	// database with five, it prints `dead_lettered: 5`. A second statement for
+	// a figure already on screen is a second thing to drift, which is the
+	// defect this file is being repaired for. cleat#1216.
 
 	// 7. Summary.
 	if len(issues) > 0 {
