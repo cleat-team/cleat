@@ -20,34 +20,81 @@ design document and provides day-to-day operational guidance.
 
 ## 1. How tenant isolation works
 
-### Per-tenant schemas
-
-Each tenant gets its own PostgreSQL login role and schema:
+### Where the tables are
 
 ```
 Database: cleat
 ├── public.*              — core tables (workflow_instances, event_history, ...)
 │                           Owned by cleat_owner. RLS filters by tenant_id.
+│                           PLUGIN TABLES ARE ALSO HERE.
 │
-├── tenant_a1b2c3.*       — tenant X's schema
-│   └── plugin tables live here
-│
+├── tenant_a1b2c3.*       — tenant X's schema, created by admin.create_tenant
 ├── tenant_d4e5f6.*       — tenant Y's schema
 │
-├── admin.*               — admin tables (cleat_owner only)
-└── plugin_shared.*       — shared plugin metadata
+└── admin.*               — admin tables (cleat_owner only)
 ```
 
-The worker connects to PostgreSQL as the **tenant's login role**, not as
-`cleat_owner`, when executing workflow or plugin code. This means:
+**Plugin tables live in the same schema as the core tables, not in a per-tenant
+one.** This section described the opposite until cleat#1279; the per-tenant
+placement was designed and never wired up, and the documentation was written
+as though it had been.
 
-- A plugin querying `SELECT * FROM workflow_instances` only sees its own
-  tenant's rows (RLS enforces this).
-- A plugin querying `SELECT * FROM tenant_Y.some_table` gets a permission
-  error -- it has no access to other tenants' schemas.
-- A plugin running `SET ROLE cleat_owner` fails -- the tenant role is not a
-  member of `cleat_owner`.
-- A plugin running `RESET ROLE` is harmless -- it resets to itself.
+What is true: `admin.create_tenant` does create a `tenant_<uuid>` schema and a
+login role, and `admin.grant_plugin_to_tenant` exists to `GRANT` plugin tables
+to that role. But it reads `admin.plugin_tables`, which nothing populates --
+`plugin.RegisterPluginTables` is the only writer and **has no production
+caller** (it has a full unit-test suite, so grepping the name finds plenty of
+hits; grep for calls outside `_test.go` files). So the grant loop is always
+zero-iteration, and no plugin migration issues `CREATE SCHEMA` anywhere.
+
+Plugin migrations pin `search_path = public` unconditionally
+(`plugin/migration.go`), so a plugin table lands in `public` even when the
+worker runs with a non-default `--schema`. That has its own consequence,
+tracked as cleat#1287.
+
+### What actually isolates a plugin's rows
+
+Every plugin table carries a `tenant_id` column. Two things scope it:
+
+1. **The plugin's own `WHERE tenant_id = $1`**, hand-written at each query
+   site. This is the only protection for most plugin tables.
+2. **A row-level security policy**, for tables that declare `TenantScoped` on
+   their migration (cleat#1280). The runtime emits `ENABLE`/`FORCE ROW LEVEL
+   SECURITY` and a policy filtering on `cleat.assert_tenant_set()`, and the
+   plugin database adapter supplies that value transaction-locally whenever
+   the request context carries a tenant.
+
+**Only one table has a policy today** (`kv_store`). Re-derive rather than
+trusting this sentence:
+
+```bash
+grep -rn 'TenantScoped: \[\]string' plugins/*/migrations.go
+```
+
+The rest are scoped by the Go predicate and nothing else, and a forgotten
+predicate returns another tenant's rows with no error. Why the remaining
+plugins cannot simply adopt a policy is cleat#1278: a tenant reaches a plugin
+only on the HTTP path, so for a plugin with a cross-tenant background sweep,
+"add a fail-closed policy" and "silently empty the sweep" are the same change.
+
+`TenantScoped` is PostgreSQL-only. MySQL has no row-level security, and SQL
+Server binds a tenant to a whole connection pool, which a per-request tenant
+does not fit. On both, a plugin table is scoped by the Go predicate alone.
+
+### Which role a plugin runs as
+
+**Plugin code does not use the per-tenant pools described below.** It gets the
+main pool, or a dedicated plugin pool when one is configured
+(`getPluginDB` / `getPluginReadOnlyDB` in `cmd/cleat-worker`), connecting as
+whatever role the worker's DSN names. The per-tenant pools are used for
+**workflow execution** (`cmd/cleat-worker/setup.go`), not for plugin queries.
+
+This matters for what the core tables guarantee a plugin. A plugin reading
+`workflow_instances` is filtered by that table's RLS policy only if its
+connection is subject to RLS -- a superuser bypasses it unconditionally, and
+the table's owner bypasses it unless the table is `FORCE`d. `engine.CheckRLSEnforced`
+exists to detect exactly that, and the worker refuses to start on a bypassing
+connection when `-rls-check` is left at its default.
 
 ### Per-tenant connection pools
 
@@ -75,28 +122,59 @@ For N tenants, the cluster sees at most `N * 5` connections from the worker
 that's at most 501 connections. Adjust `max_connections` in PostgreSQL
 accordingly.
 
-### RLS as defense-in-depth
+### Defence in depth, and where it is one layer rather than two
 
-The existing RLS policies on `public.*` tables remain active. Even if a tenant
-role gains access to a system table it shouldn't, RLS filters by `tenant_id`.
-Both mechanisms work together:
+The RLS policies on the **core** `public.*` tables are real and active: even if
+a tenant role reaches a table it should not, the policy filters by `tenant_id`.
 
-- **Schema isolation**: tenant can't see other tenants' plugin tables
-- **RLS on public tables**: tenant can't see other tenants' rows
-- **No DDL on public**: tenant doesn't own the public schema
+For **plugin** tables the picture is thinner than this section used to claim,
+and the claim was load-bearing — it listed "schema isolation" as a layer that
+does not exist:
+
+| Layer | Core tables | Plugin tables |
+|---|---|---|
+| Schema isolation | n/a — both live in `public` | **none**; there is no per-plugin or per-tenant schema |
+| Row-level security | yes, on every tenant-scoped table | only where `TenantScoped` is declared — one table today |
+| The query's own `WHERE tenant_id` | yes | yes, and for most plugin tables it is the **only** layer |
+| No DDL on `public` | a tenant role does not own the schema | same |
+
+So for a plugin table without a policy, a forgotten `WHERE tenant_id = $1`
+returns another tenant's rows, and nothing below it will catch that. That is
+the gap cleat#1277 opened and cleat#1278 tracks the remainder of.
 
 ### Tenant deletion
 
-Deleting a tenant is a clean, three-statement operation:
+**Deleting a tenant does not delete its plugin data.** This section claimed the
+opposite until cleat#1279, and the claim followed from the same wrong premise
+as the schema diagram above: plugin tables are in `public`, so dropping the
+tenant's schema does not reach them.
 
-```sql
-DROP SCHEMA tenant_<uuid> CASCADE;
-DROP ROLE cleat_tenant_<uuid>;
-DELETE FROM admin.tenants WHERE tenant_id = '<uuid>';
+`admin.drop_tenant` drops the `tenant_<uuid>` schema and role and deletes from
+the core tables **by name**. A dropped tenant's `kv_store`, `audit_events`,
+`oauth_sessions`, `webhook_events` and `blob_index` rows survive in `public`
+indefinitely. Re-derive which tables it does cover:
+
+```bash
+sed -n '/FUNCTION admin.drop_tenant/,/\$\$ LANGUAGE/p' \
+  migrations/postgres/059_a_dropped_tenants_definitions_go_with_it.sql | grep 'DELETE FROM'
 ```
 
-All plugin data is removed atomically with the schema. No orphaned rows, no
-table-by-table cleanup.
+Tracked as cleat#1289. **Treat tenant deletion as incomplete for plugin data
+and clean up explicitly** until that lands.
+
+Two properties make the gap harder to notice than an ordinary missing
+`DELETE`:
+
+- A plugin table with a `TenantScoped` policy (cleat#1280) now holds rows
+  behind a policy keyed on a tenant that no longer exists — so they are
+  **unreadable and undeleted** rather than merely undeleted.
+- A `DELETE` issued against such a table by a role the policy applies to
+  removes nothing **and reports success**. Measured: with a different tenant
+  set in the session, `DELETE FROM kv_store WHERE tenant_id = '<dropped>'`
+  returns `DELETE 0` and commits, and the rows remain. With no tenant set it
+  raises instead. So the careless path fails loudly and the careful path fails
+  silently, and `DELETE 0` is also the correct result for "this tenant had no
+  rows" — no row count can tell the two apart.
 
 ---
 
@@ -547,12 +625,20 @@ exceed the limits will fail at runtime.
 4. If the plugin had `database: true`, check for unexpected data changes:
 
    ```sql
-   -- Unexpected table creations in the tenant's schema
+   -- Unexpected table creations. Plugin tables are in the worker's schema
+   -- (public by default), NOT in a per-tenant one -- this query named
+   -- 'tenant_<uuid>' until cleat#1279 and returned nothing during an
+   -- investigation, which reads as "the plugin created nothing".
    SELECT table_name
    FROM information_schema.tables
-   WHERE table_schema = 'tenant_<uuid>'
+   WHERE table_schema = current_schema()
    AND table_name NOT IN (known_plugin_tables);
    ```
+
+   A plugin's rows are harder to scope than its tables, because every plugin
+   table sits in one shared schema keyed by `tenant_id`. Check the tables the
+   plugin declares, filtered by the affected tenant, rather than looking for a
+   schema that holds its data.
 
 #### Step 4: Remove (after all workflows complete)
 
@@ -564,7 +650,10 @@ cleat plugin uninstall example/compromised 0.1.0 --purge
 ```
 
 This removes the entry from `plugin_defs`. It does NOT remove any data the
-plugin may have written to the tenant's schema -- that requires manual cleanup.
+plugin wrote -- that requires manual cleanup, and there is no schema to drop:
+plugin tables live in the worker's schema alongside the core tables, so removal
+is table-by-table and row-by-row (cleat#1279). Note also that dropping the
+tenant does not do it for you -- see **Tenant deletion** above and cleat#1289.
 
 #### Step 5: Notify affected tenants
 
