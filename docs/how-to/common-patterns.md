@@ -639,3 +639,29 @@ curl "http://localhost:8080/api/workflows/<id>/query?key=driver_name"
 ```
 
 Query state persists across replays and ContinueAsNew.
+
+### Reading a key you do not know
+
+**The HTTP API is keyed-only by design: every reader takes the key as a required
+argument, and there is no endpoint that lists which keys a run published.** That
+keeps published state a contract between the workflow and the callers that know
+what to ask for, rather than a bag whose shape callers discover at runtime.
+
+For the case where you genuinely do not know — a run misbehaved and you want to
+see everything it published — use the debugger, which is DBA-authenticated by
+connection string rather than by a tenant API key:
+
+```bash
+cleatctl --db "$DSN" debug <workflow-id> --entry-point <name>
+# then, at the prompt:
+state
+```
+
+`state` dumps the whole map. Because the debugger works by replaying the
+workflow, it shows keys appearing step by step rather than only the final set,
+which is usually what you want when diagnosing one.
+
+Decided in cleat#1119, which asked whether published state should be enumerable
+over the API. The answer was no: the operational case behind the request is
+debugging, and `cleatctl debug` already serves it without making the caller
+contract looser.
