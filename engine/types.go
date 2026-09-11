@@ -304,6 +304,17 @@ type EventRecord struct {
 	// so the no-op leaves a trace (cleat#1188).
 	LockNotHeld bool `json:"lock_not_held,omitempty"`
 
+	// ReplacedOutcome is the terminal outcome an admin action erased, carried
+	// on the audit event that records the action. Set only by AdminReReplay,
+	// and only when the row had an outcome to lose -- see
+	// eventRecordToPayload's admin_action arm, where an unconditional key
+	// would rewrite the checksum of every admin event already written.
+	ReplacedStatus      string `json:"replaced_status,omitempty"`
+	ReplacedErrorMsg    string `json:"replaced_error_msg,omitempty"`
+	ReplacedErrorCode   string `json:"replaced_error_code,omitempty"`
+	ReplacedErrorOp     string `json:"replaced_error_op,omitempty"`
+	ReplacedCompletedAt string `json:"replaced_completed_at,omitempty"`
+
 	// SideEffect fields.
 	SideEffectResult string `json:"side_effect_result,omitempty"`
 

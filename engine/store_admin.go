@@ -167,6 +167,12 @@ type adminForce struct {
 	errorMsg  string // force-fail only
 	errorCode string // force-fail only
 	operator  string
+
+	// replaced is the terminal outcome this action is about to erase, read
+	// before the statement that erases it. Set by AdminReReplay only:
+	// force-complete and force-fail WRITE an outcome rather than clearing one,
+	// so there is nothing they lose. cleat#1185.
+	replaced *AdminReplacedOutcome
 }
 
 // reason is the human-readable detail stored on the audit event.
@@ -193,6 +199,7 @@ func (a adminForce) auditEvent(step int) EventRecord {
 		Action:   a.action,
 		Operator: a.operator,
 		Reason:   a.reason(),
+		Replaced: a.replaced,
 	})
 	rec.TimestampMs = time.Now().UnixMilli()
 	return rec

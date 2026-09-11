@@ -387,6 +387,27 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.Err != "" {
 			payload["error"] = rec.Err
 		}
+		// Each key only when the row carried that value. A re-replay of a run
+		// with no error and no completion adds nothing, so every admin event
+		// written before these keys existed hashes to exactly what it hashed
+		// to before -- the same constraint as lock_not_held above. The status
+		// rides along only when there is something else to record: every row
+		// has one, so emitting it alone would put a key on every re-replay.
+		if rec.ReplacedStatus != "" {
+			payload["replaced_status"] = rec.ReplacedStatus
+		}
+		if rec.ReplacedErrorMsg != "" {
+			payload["replaced_error_msg"] = rec.ReplacedErrorMsg
+		}
+		if rec.ReplacedErrorCode != "" {
+			payload["replaced_error_code"] = rec.ReplacedErrorCode
+		}
+		if rec.ReplacedErrorOp != "" {
+			payload["replaced_error_op"] = rec.ReplacedErrorOp
+		}
+		if rec.ReplacedCompletedAt != "" {
+			payload["replaced_completed_at"] = rec.ReplacedCompletedAt
+		}
 	case "side_effect":
 		if rec.SideEffectResult != "" {
 			payload["side_effect_result"] = rec.SideEffectResult
@@ -801,6 +822,17 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["error"].(string); ok {
 			rec.Err = v
+		}
+		for key, dst := range map[string]*string{
+			"replaced_status":       &rec.ReplacedStatus,
+			"replaced_error_msg":    &rec.ReplacedErrorMsg,
+			"replaced_error_code":   &rec.ReplacedErrorCode,
+			"replaced_error_op":     &rec.ReplacedErrorOp,
+			"replaced_completed_at": &rec.ReplacedCompletedAt,
+		} {
+			if v, ok := m[key].(string); ok {
+				*dst = v
+			}
 		}
 	case "side_effect":
 		if v, ok := m["side_effect_result"].(string); ok {

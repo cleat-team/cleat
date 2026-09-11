@@ -45,8 +45,8 @@ func adminReReplayMiss(status string, stored, requested int64, workflowID string
 // reReplayAudit is the audit record for a re-replay. It reuses adminForce so
 // the operator/action/reason mapping stays in the one place EventFromRecord
 // reverses.
-func reReplayAudit(operator string) adminForce {
-	return adminForce{action: adminActionReReplay, operator: operator}
+func reReplayAudit(operator string, replaced *AdminReplacedOutcome) adminForce {
+	return adminForce{action: adminActionReReplay, operator: operator, replaced: replaced}
 }
 
 func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
@@ -55,6 +55,14 @@ func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, ge
 		return fmt.Errorf("admin %s: begin: %w", adminActionReReplay, err)
 	}
 	defer tx.Rollback()
+
+	// Read the outcome BEFORE the statement that erases it, inside the same
+	// transaction. RETURNING cannot serve: it yields post-update values, which
+	// for these four columns is NULL -- the state being recorded. cleat#1185.
+	replaced, err := readReplacedOutcome(ctx, tx, s.dialect, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("admin %s: %w", adminActionReReplay, err)
+	}
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
@@ -86,7 +94,7 @@ func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, ge
 		return adminReReplayMiss(status, stored, generation, workflowID, true)
 	}
 
-	if err := s.adminAppendAudit(ctx, tx, workflowID, reReplayAudit(operator)); err != nil {
+	if err := s.adminAppendAudit(ctx, tx, workflowID, reReplayAudit(operator, replaced)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -98,6 +106,14 @@ func (s *MySQLStore) AdminReReplay(ctx context.Context, workflowID string, gener
 		return fmt.Errorf("admin %s: begin: %w", adminActionReReplay, err)
 	}
 	defer tx.Rollback()
+
+	// Read the outcome BEFORE the statement that erases it, inside the same
+	// transaction. RETURNING cannot serve: it yields post-update values, which
+	// for these four columns is NULL -- the state being recorded. cleat#1185.
+	replaced, err := readReplacedOutcome(ctx, tx, s.dialect, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("admin %s: %w", adminActionReReplay, err)
+	}
 
 	// IN (?,?,?) expanded from the shared list rather than written out, so the
 	// three dialects cannot drift on which statuses are re-replayable.
@@ -132,7 +148,7 @@ func (s *MySQLStore) AdminReReplay(ctx context.Context, workflowID string, gener
 		return adminReReplayMiss(status, stored, generation, workflowID, true)
 	}
 
-	if err := s.adminAppendAudit(ctx, tx, workflowID, reReplayAudit(operator)); err != nil {
+	if err := s.adminAppendAudit(ctx, tx, workflowID, reReplayAudit(operator, replaced)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -151,6 +167,14 @@ func (s *MSSQLStore) adminReReplayOnce(ctx context.Context, workflowID string, g
 		return fmt.Errorf("admin %s: begin: %w", adminActionReReplay, err)
 	}
 	defer tx.Rollback()
+
+	// Read the outcome BEFORE the statement that erases it, inside the same
+	// transaction. RETURNING cannot serve: it yields post-update values, which
+	// for these four columns is NULL -- the state being recorded. cleat#1185.
+	replaced, err := readReplacedOutcome(ctx, tx, s.dialect, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("admin %s: %w", adminActionReReplay, err)
+	}
 
 	//nolint:gosec // G202: as above -- sqlPlaceholders() only, statuses bound as arguments.
 	res, err := tx.ExecContext(ctx, `
@@ -183,7 +207,7 @@ func (s *MSSQLStore) adminReReplayOnce(ctx context.Context, workflowID string, g
 		return adminReReplayMiss(status, stored, generation, workflowID, true)
 	}
 
-	if err := s.adminAppendAudit(ctx, tx, workflowID, reReplayAudit(operator)); err != nil {
+	if err := s.adminAppendAudit(ctx, tx, workflowID, reReplayAudit(operator, replaced)); err != nil {
 		return err
 	}
 	return tx.Commit()
