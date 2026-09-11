@@ -32,6 +32,13 @@ func applyWorkflowFilters(qb *QueryBuilder, d Dialect, filter WorkflowFilter) {
 	if filter.ErrorCode != "" {
 		qb.AddCondition("error_code = %s", filter.ErrorCode)
 	}
+	if filter.ConcurrencyKey != "" {
+		// Exact match on the text column, not the hash: the caller has the key
+		// string. cleat#1172, and cheap only because cleat#1214 put the column
+		// on the row -- before that this needed a join to concurrency_keys,
+		// which is why the issue called it the larger half.
+		qb.AddCondition("concurrency_key = %s", filter.ConcurrencyKey)
+	}
 	if filter.IDPrefix != "" {
 		// `id` is text on all three dialects, so no cast. Case-sensitive: run
 		// ids are lowercase-hex UUIDs, and an ILIKE here would widen the match

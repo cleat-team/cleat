@@ -284,6 +284,12 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		DefName:       q.Get("def_name"),
 		ErrorCode:     q.Get("error_code"),
 		IDPrefix:      q.Get("id_prefix"),
+		// cleat#1172 measured this parameter being ACCEPTED and IGNORED:
+		// `?concurrency_key=NONSENSE-XYZ` returned the same rows as the real
+		// key and as no filter at all. A parameter that is read and discarded
+		// is worse than one that 400s, because the caller reads the result as
+		// an answer.
+		ConcurrencyKey: q.Get("concurrency_key"),
 	}
 
 	// Paging, mirroring handleGetInstanceEvents: both parameters read from the
