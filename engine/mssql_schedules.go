@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -536,40 +537,10 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 func (s *MSSQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		// Deleted first, and for the same reason as the other two dialects: a
-		// surviving idempotency key answers a retry `already_started` with a
-		// workflow_id that no longer exists (cleat#1255). SQL Server declares
-		// no foreign keys to workflow_instances at all -- `grep -c "REFERENCES
-		// workflow_instances" migrations/mssql/*.sql` is 0, against 5 for each
-		// of the other dialects -- so nothing here cascades and every child
-		// table is explicit or orphaned.
-		if _, err := s.db.ExecContext(ctx, `
-			DELETE k FROM idempotency_keys k
-			INNER JOIN workflow_instances w ON w.id = k.workflow_id
-			WHERE w.status IN ('done', 'failed', 'terminated')
-			  AND w.completed_at IS NOT NULL
-			  AND w.completed_at < @p1
-			  AND w.tenant_id = @p2
-			  AND k.tenant_id = @p2
-		`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID)); err != nil {
-			return totalDeleted, fmt.Errorf("delete completed workflows: delete idempotency_keys: %w", err)
-		}
-		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM workflow_instances
-			WHERE id IN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed', 'terminated')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < @p1
-				  AND tenant_id = @p2
-				ORDER BY id
-				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
-			)
-		`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
+		n, err := s.deleteCompletedWorkflowsBatch(ctx, olderThan)
 		if err != nil {
-			return totalDeleted, fmt.Errorf("delete completed workflows: %w", err)
+			return totalDeleted, err
 		}
-		n, _ := result.RowsAffected()
 		totalDeleted += n
 		if n == 0 {
 			break
@@ -577,6 +548,153 @@ func (s *MSSQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan tim
 		time.Sleep(10 * time.Millisecond)
 	}
 	return totalDeleted, nil
+}
+
+// mssqlWorkflowChildTables are the tables a workflow_instances row owns, in
+// deletion order.
+//
+// SQL Server declares NO foreign keys to workflow_instances -- `grep -c
+// "REFERENCES workflow_instances" migrations/mssql/*.sql` is 0, against 5 for
+// each of the other dialects -- so nothing cascades here and every one of these
+// must be deleted explicitly or it is orphaned permanently (cleat#1265). The
+// audit that found this measured 6 of 6 surviving a sweep, including the whole
+// of event_history, which is the largest table in the schema: deleting the
+// instance row removes what made those rows reachable, so they were not merely
+// retained but unreachable AND permanent, while the falling instance count told
+// the operator retention was working.
+//
+// Not event_awaiters or workflow_blob_refs: those carry a workflow_id but are
+// owned by the eventtriggers and blobstore plugins, each with its own
+// migrations.go. Whether plugin-owned rows should follow the run is a real
+// question and a different one.
+var mssqlWorkflowChildTables = []string{
+	"event_history",
+	"idempotency_keys",
+	"concurrency_keys",
+	"workflow_signals",
+	"workflow_promises",
+	"workflow_update_requests",
+}
+
+// deleteCompletedWorkflowsBatch deletes one batch, retrying the whole
+// transaction on a rollback-guaranteed failure.
+//
+// Required on this dialect, and TestEveryMSSQLTransactionBoundaryIsRetried
+// caught its absence: SQL Server rolls a deadlock victim back itself, so the
+// failure reaches Go as an ordinary error and the batch would simply be lost
+// rather than replayed. Every other MSSQL path that opens a transaction is
+// wrapped the same way.
+func (s *MSSQLStore) deleteCompletedWorkflowsBatch(ctx context.Context, olderThan time.Time) (int64, error) {
+	var deleted int64
+	err := withRollbackGuaranteedRetry(ctx, "delete completed workflows", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		n, err := s.deleteCompletedWorkflowsBatchOnce(ctx, olderThan)
+		if err != nil {
+			return err
+		}
+		deleted = n
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+// deleteCompletedWorkflowsBatchOnce deletes up to 10000 terminal workflow
+// instances and the rows they own, in ONE transaction.
+//
+// The transaction is the point, and the previous shape had none: children were
+// deleted by one statement and parents by another, so a failure between them
+// left rows whose owner was gone with nothing to find them by. This mirrors the
+// PostgreSQL batch in engine/db.go, which selects the batch first and deletes
+// against that fixed id set rather than re-evaluating the predicate per
+// statement.
+func (s *MSSQLStore) deleteCompletedWorkflowsBatchOnce(ctx context.Context, olderThan time.Time) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("delete completed workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE status IN ('done', 'failed', 'terminated')
+		  AND completed_at IS NOT NULL
+		  AND completed_at < @p1
+		  AND tenant_id = @p2
+		ORDER BY id
+		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
+	`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
+	if err != nil {
+		return 0, fmt.Errorf("delete completed workflows: select batch: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("delete completed workflows: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("delete completed workflows: rows: %w", err)
+	}
+	rows.Close()
+
+	if len(ids) == 0 {
+		return 0, tx.Commit()
+	}
+
+	// SQL Server has no array parameter, so the id list is expanded into named
+	// placeholders. Never interpolated: these ids come from the database, but a
+	// value that round-trips is still a value, and the batch is capped at 10000
+	// which is well inside the 2100-parameter limit only because it is chunked
+	// below.
+	for _, table := range mssqlWorkflowChildTables {
+		if err := s.deleteByWorkflowIDs(ctx, tx, table, ids); err != nil {
+			return 0, err
+		}
+	}
+	if err := s.deleteByWorkflowIDs(ctx, tx, "workflow_instances", ids); err != nil {
+		return 0, err
+	}
+	return int64(len(ids)), tx.Commit()
+}
+
+// deleteByWorkflowIDs deletes rows keyed to the given workflow ids, in chunks.
+//
+// SQL Server caps a statement at 2100 parameters, and the batch above is 10000
+// ids, so a single IN (...) would fail with "too many parameters" -- on the
+// large batches only, which is the shape that would have passed every test and
+// failed on the first real retention run.
+func (s *MSSQLStore) deleteByWorkflowIDs(ctx context.Context, tx *sql.Tx, table string, ids []string) error {
+	const chunk = 2000
+	column := "workflow_id"
+	if table == "workflow_instances" {
+		column = "id"
+	}
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		part := ids[start:end]
+		placeholders := make([]string, len(part))
+		args := make([]any, 0, len(part))
+		for i, id := range part {
+			name := fmt.Sprintf("id%d", i)
+			placeholders[i] = "@" + name
+			args = append(args, sql.Named(name, id))
+		}
+		stmt := fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)",
+			table, column, strings.Join(placeholders, ", "))
+		if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
+			return fmt.Errorf("delete completed workflows: delete %s: %w", table, err)
+		}
+	}
+	return nil
 }
 
 // scheduleInputJSON renders a schedule's input for a SQL Server text column.
