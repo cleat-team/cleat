@@ -878,6 +878,44 @@ export class ChildWorkflowOptions {
   }
 }
 
+/**
+ * Renders signal names as a JSON array.
+ *
+ * The names come from jsonStrArray, which delimits on escapes without decoding
+ * them -- so an element arrives still escaped and re-wrapping it in quotes
+ * reproduces the original JSON. Escaping again here would double it.
+ */
+function namesToJson(names: string[]): string {
+  let out: string = "[";
+  for (let i: i32 = 0; i < names.length; i++) {
+    if (i > 0) out += ",";
+    out += "\"" + names[i] + "\"";
+  }
+  return out + "]";
+}
+
+/** Index of `want` in `names`, or -1. */
+function indexOfName(names: string[], want: string): i32 {
+  for (let i: i32 = 0; i < names.length; i++) {
+    if (names[i] == want) return i;
+  }
+  return -1;
+}
+
+/** A copy of `names` with the first occurrence of `drop` removed. */
+function withoutName(names: string[], drop: string): string[] {
+  let out: string[] = [];
+  let dropped: bool = false;
+  for (let i: i32 = 0; i < names.length; i++) {
+    if (!dropped && names[i] == drop) {
+      dropped = true;
+      continue;
+    }
+    out.push(names[i]);
+  }
+  return out;
+}
+
 export class HostCalls {
   /** Memory helper for string I/O in linear memory. */
   protected memory: Memory;
@@ -2520,10 +2558,41 @@ export class HostCalls {
     maxRejections: i32,
     timeoutMs: i64,
   ): AwaitSignalsOutcome[] {
-    // Simple implementation: call awaitSignalsMs in a loop.
+    // A quorum counts DISTINCT voters, so the set has to NARROW as they vote.
+    // Until cleat#1136 this passed `namesJson` -- the parameter -- to every
+    // awaitSignalsMs call, so three deliveries of one name satisfied a quorum
+    // of three while the other two were never sent (cleat#1132). Go was fixed
+    // in #1135, Rust and Python in #1158, Java in #1160; this is the last.
+    //
+    // Parsed once. AssemblyScript is the only SDK whose quorum API takes the
+    // set as JSON rather than a list, so this is the one place the fix is not
+    // a transliteration of #1135.
+    let names: string[] = jsonStrArray(namesJson);
+    if (names.length == 0) {
+      // Told apart from an unsatisfiable quorum below, because "quorum of 3
+      // over 0 names" would describe a caller error that did not happen.
+      throw new Error(
+        "quorum: could not read a signal-name array from " + namesJson,
+      );
+    }
+    // A quorum of N over M names is unsatisfiable when N > M. It used to spin
+    // to the deadline and report "got k/N signals" -- a message describing a
+    // slow sender rather than a caller asking for what arithmetic forbids.
+    if (minCount > names.length) {
+      throw new Error(
+        "quorum of " + minCount.toString() + " over " + names.length.toString() +
+          " name(s) is unsatisfiable; a quorum counts DISTINCT names, so it " +
+          "cannot exceed the size of the set",
+      );
+    }
+
     let results: AwaitSignalsOutcome[] = [];
     let deadline: i64 = this.now() + timeoutMs;
     let rejectionCount: i32 = 0;
+
+    // COPIED, so narrowing cannot disturb the caller's array.
+    let remaining: string[] = [];
+    for (let i: i32 = 0; i < names.length; i++) remaining.push(names[i]);
 
     while (results.length < minCount) {
       let remainingMs: i64 = deadline - this.now();
@@ -2533,7 +2602,7 @@ export class HostCalls {
         );
       }
 
-      let outcome: AwaitSignalsOutcome = this.awaitSignalsMs(namesJson, remainingMs);
+      let outcome: AwaitSignalsOutcome = this.awaitSignalsMs(namesToJson(remaining), remainingMs);
       if (outcome.timedOut) {
         throw new Error(
           "quorum timeout: got " + results.length.toString() + "/" + minCount.toString() + " signals",
@@ -2543,7 +2612,27 @@ export class HostCalls {
         throw new Error("quorum signal error: " + (outcome.error as string));
       }
 
+      // Narrowing what we ASK for is only half the fix if we accept whatever
+      // arrives. A well-behaved host returns one of the names it was given, so
+      // this is unreachable through the engine's own await -- it is here
+      // because the invariant the quorum rests on is "each result is a
+      // distinct member of the set", and this is the only place that can
+      // enforce it.
+      if (indexOfName(remaining, outcome.signalName) < 0) {
+        throw new Error(
+          "quorum: received signal \"" + outcome.signalName + "\", which is not " +
+            "among the names still awaited; a quorum counts distinct names and " +
+            "cannot count this one",
+        );
+      }
+
       results.push(outcome);
+
+      // This name has voted, and a quorum counts VOTERS. A rejection narrows
+      // too: a voter that votes no has voted, and leaving it in the set would
+      // let one rejector trip maxRejections alone -- the same defect wearing
+      // the other outcome.
+      remaining = withoutName(remaining, outcome.signalName);
 
       // Check for rejection if maxRejections >= 0.
       if (maxRejections >= 0 && outcome.payload.length > 0) {

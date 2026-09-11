@@ -103,13 +103,50 @@ export default {
       }
     }
 
+    // cleat_now, so a module that pulls in HostCalls can be INSTANTIATED.
+    //
+    // A WebAssembly import must be satisfied at instantiation whether or not
+    // it is ever called, so before this the harness could not load any test
+    // that imported HostCalls at all -- the failure was
+    // `LinkError: Import #1 "env" "cleat_now": function import requires a
+    // callable`, which reads as a broken test rather than a missing stub.
+    // That is why no spec here tested a HostCalls method (cleat#1136).
+    //
+    // Monotonic rather than Date.now(): a deadline loop that reads the clock
+    // twice in the same millisecond would otherwise see no time pass.
+    let fakeNowMs = 1700000000000n;
+    const cleatNow = () => (fakeNowMs += 1n);
+
     const myImports = {
       env: {
         memory,
         cleat_json_parse: jsonParse,
         cleat_json_stringify: jsonStringify,
+        cleat_now: cleatNow,
       },
     };
+
+    // Every OTHER host import gets a stub that THROWS.
+    //
+    // Not a no-op returning 0. stop-bit.spec.ts's header states the hazard
+    // exactly -- "a test built on those would be measuring the stub's return
+    // value" -- and a zero-returning stub is indistinguishable from a real
+    // answer, so a test that wandered into one would pass while asserting
+    // nothing. Throwing makes reaching an unstubbed host call a loud failure
+    // naming the import, which is the only way a test can know it stayed on
+    // the guest side of the boundary.
+    for (const imp of WebAssembly.Module.imports(new WebAssembly.Module(binary))) {
+      if (imp.module !== "env" || imp.kind !== "function") continue;
+      if (imp.name in myImports.env) continue;
+      myImports.env[imp.name] = () => {
+        throw new Error(
+          `as-pect: host import "${imp.name}" is not stubbed. A test reached the ` +
+            `host boundary. Either it should not have, or this import needs a ` +
+            `stub here -- do not add one that returns 0, which is a plausible ` +
+            `answer and would be measured as one.`,
+        );
+      };
+    }
 
     // instantiate() is @assemblyscript/loader's instantiate which returns
     // { module, instance, exports }. Capture the module's memory export.
