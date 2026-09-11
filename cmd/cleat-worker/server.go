@@ -654,7 +654,26 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	in = json.RawMessage(engine.Redact(string(in)))
 	runID, alreadyExisted, err := st.StartNewRun(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		// A rejected idempotency key is a CLIENT error and was reported as a
+		// server fault (cleat#1170, and cleat#832's shape). 409: the request
+		// conflicts with state that already exists -- the same status
+		// writeScheduleError gives ErrScheduleExists, which is the same
+		// situation. The `detail` field names the case so a client can branch
+		// without parsing prose.
+		switch {
+		case errors.Is(err, engine.ErrIdempotencyKeyDefMismatch):
+			s.writeJSON(w, 409, map[string]string{
+				"error":  err.Error(),
+				"detail": "idempotency_key_definition_mismatch",
+			})
+		case errors.Is(err, engine.ErrIdempotencyKeyInputMismatch):
+			s.writeJSON(w, 409, map[string]string{
+				"error":  err.Error(),
+				"detail": "idempotency_key_input_mismatch",
+			})
+		default:
+			s.writeError(w, 500, err.Error())
+		}
 		return
 	}
 	if alreadyExisted {

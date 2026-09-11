@@ -1100,6 +1100,7 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 	}
 	if idempotencyKey != "" {
 		keyHash := sha256.Sum256([]byte(idempotencyKey))
+		inputDigest := IdempotencyInputDigest(input)
 
 		// Check for existing idempotency key, within this tenant.
 		//
@@ -1114,10 +1115,11 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 		// IMPROVEMENT-PLAN 3.10.
 		var existingWfID string
 		var existingDef sql.NullString
+		var existingDigest sql.NullString
 		err := s.db.QueryRowContext(ctx,
-			`SELECT workflow_id, def_name FROM idempotency_keys
+			`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
 			 WHERE key_hash = @p1 AND tenant_id = @p2 AND expires_at > SYSUTCDATETIME()`,
-			keyHash[:], tenantID).Scan(&existingWfID, &existingDef)
+			keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
 		if err == nil {
 			// A hit must be for the SAME definition. NULL means the row predates
 			// cleat#1047's backfill or its workflow has been purged -- unknown
@@ -1126,6 +1128,9 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 			if existingDef.Valid && existingDef.String != defName {
 				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
 					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+			}
+			if err := checkIdempotencyInput(existingDigest, inputDigest); err != nil {
+				return "", false, err
 			}
 			return existingWfID, true, nil
 		}
@@ -1145,13 +1150,13 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 		// race where two requests arrive with the same key simultaneously.
 		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		result, err := tx.ExecContext(ctx,
-			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name)
-			 SELECT @p1, @p2, DATEADD(SECOND, @p3, SYSUTCDATETIME()), @p4, @p5
+			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name, input_digest)
+			 SELECT @p1, @p2, DATEADD(SECOND, @p3, SYSUTCDATETIME()), @p4, @p5, @p6
 			 WHERE NOT EXISTS (
 			     SELECT 1 FROM idempotency_keys
 			     WHERE key_hash = @p1 AND tenant_id = @p4
 			 )`,
-			keyHash[:], runID, ttlSeconds, tenantID, defName)
+			keyHash[:], runID, ttlSeconds, tenantID, defName, inputDigest)
 		if err != nil {
 			return "", false, err
 		}
@@ -1161,9 +1166,9 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 			// Key was inserted concurrently — rollback and return the existing one.
 			tx.Rollback()
 			err := s.db.QueryRowContext(ctx,
-				`SELECT workflow_id, def_name FROM idempotency_keys
+				`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
 				 WHERE key_hash = @p1 AND tenant_id = @p2 AND expires_at > SYSUTCDATETIME()`,
-				keyHash[:], tenantID).Scan(&existingWfID, &existingDef)
+				keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
 			if err != nil {
 				return "", false, err
 			}
@@ -1174,6 +1179,9 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 			if existingDef.Valid && existingDef.String != defName {
 				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
 					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+			}
+			if err := checkIdempotencyInput(existingDigest, inputDigest); err != nil {
+				return "", false, err
 			}
 			return existingWfID, true, nil
 		}

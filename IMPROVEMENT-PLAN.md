@@ -11450,6 +11450,87 @@ way:**
 
 **Both halves are falsified separately**, because either alone leaves the defect: making the store
 stop reporting `Failed` fails PostgreSQL only; making the session stop acting on it fails all three.
+### 3.427 A duplicate idempotency key with a different payload silently discarded the second request — ✅ **FIXED 2026-09-11** (cleat#1170)
+
+A second request presenting a key that was already held got `200`, `already_started`, and the
+first run's id. **Its own input was dropped without a word**, and the run behind that id carries
+somebody else's arguments:
+
+    call 1   Idempotency-Key: K   {"input":{"n":7}}     -> 201 {"id":"28e97a21-…"}
+    call 2   Idempotency-Key: K   {"input":{"n":999}}   -> 200 {"already_started":"true", …}
+    the run's stored input: {"n": 7}
+
+**This is quieter than the duplicate execution idempotency keys exist to prevent.** A duplicate
+execution at least leaves a row behind. A discarded request leaves nothing anywhere: the caller
+believes its request ran, and the only trace is a run it did not start.
+
+**The mechanism already existed one column over.** Migration 051 (cleat#1047) added `def_name` so
+a key reused for a *different workflow definition* is refused — cleat already fingerprints part of
+the request and compares it on replay. It simply stopped at the name. `input_digest` is the same
+migration, the same NULL-means-unknown rule, and the same refusal.
+
+**Not backfilled, and that is the one place this departs from 051.** 051 could derive `def_name`
+from the owning workflow because a name is a name. A digest is the output of a *specific function*,
+so computing it in SQL would be **a second derivation of the same value** — free to disagree with
+the Go one over JSON text rendering (PostgreSQL's `jsonb` output inserts a space after every `:`
+and `,`; MySQL and SQL Server do not) and to do so silently for an entire upgrade. Existing rows
+keep NULL, which reads as "unknown, allow" and degrades to the old behaviour rather than to a
+refusal a caller cannot act on.
+
+**The digest is a property of the VALUE, not of the bytes.** `IdempotencyInputDigest` canonicalises
+through `json.Unmarshal`/`json.Marshal` — which sorts map keys — before hashing, so reordered keys
+and added whitespace are the same request. A byte-wise digest would refuse a caller that merely
+reformatted its JSON, and **that refusal would look exactly like the feature working**, which is
+why the test carries it as a control rather than trusting the reasoning.
+
+**What the digest cannot see, stated rather than hidden.** `server.go` calls `engine.Redact` before
+the store sees the input, so a sensitive field arrives as `"[REDACTED]"` and two requests differing
+*only* in a secret digest equal and replay. Closing that means digesting before redaction, which
+means computing it in the handler and passing it down — a ninth parameter on a function that takes
+eight. Raised on the issue as a decision rather than taken quietly.
+
+**The refusal now returns 409, and so does the one that already existed.** `handleStartWorkflow`
+mapped *every* `StartNewRun` error to `500`, including a deliberate refusal — cleat#832's shape, a
+client error reported as a server fault, which sends an operator to look at cleat for a request
+cleat handled exactly right. Both cases carry a `detail` so a client can branch without parsing
+prose. **Fixing only the new one would have standardised the old one on 500 by omission**, at the
+moment the code path gained a second caller.
+
+**Executed on three databases, where the existing check could only be asserted about source.**
+`idempotency_def_scope_test.go` reads the three stores' text, for a reason that is sound — the
+behaviour is one comparison written out once per dialect, and what breaks is one store being edited
+and the others not. That is second best, and it is no longer necessary:
+`TestAKeyReusedForAnotherDefinitionIsRefused` runs the statements, and additionally pins the two
+refusals as **distinguishable by `errors.Is`**, which a single shared error would have satisfied
+every other way.
+
+**The source guard it replaces was generalised rather than deleted**, and it earned that: its
+patterns named the exact column list, so adding one column reported *"def_name is missing"* when
+def_name was right there. It now asserts that every lookup reads **both** discriminators and that
+the INSERT writes both — matched loosely, so the next column does not produce a false red.
+Known-positives, run in an isolated worktree so the suite in flight was untouched: dropping
+`input_digest` from one of MySQL's two lookups reports *"2 idempotency lookup(s); 2 read def_name
+and 1 read input_digest"*, and dropping it from SQL Server's INSERT reports *"does not WRITE
+input_digest"*.
+
+**The scheduler is exempted, and finding out why is the part worth keeping.** Its key is
+`cron:<tenant>:<schedule>:<scheduled instant>` by design, so two workers racing one firing derive
+the same key — and if the schedule's input was edited between their reads of the row, they present
+different payloads for the same firing. A refusal there is not a caller's mistake, and treating it
+as an error would be **worse than useless**: the existing branch leaves the schedule due, the retry
+reads the *new* input, and it mismatches the stored digest again for as long as the key lives —
+**30 days**. A schedule edited at the wrong moment would wedge. The scheduler now reads the refusal
+as the suppression it is. `runID` stays empty there, which `ClaimDueSchedule` already models:
+`last_run_id = CASE WHEN $5 = '' THEN last_run_id ELSE $5 END`.
+
+**A refusal is only correct where the caller can act on it**, and that is the line between the two
+callers of `StartNewRun`, not a property of the check.
+
+Falsified per layer: removing the PostgreSQL check fails postgres alone, returning
+`existed=true, err=<nil>` — the reported symptom exactly; removing the 409 mapping fails the HTTP
+test with `500`. The HTTP test carries its own control, because "a refusal returns 409" is
+otherwise satisfied by returning 409 for everything, which reports a genuine server fault as the
+caller's fault.
 
 ### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
 
