@@ -283,30 +283,40 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 
 	// Fresh execution: check child result via store.
 	if s.engine.childWfStore != nil {
-		result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
-		if completed && err == nil {
+		out, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
+		// A child that FAILED and a store that could not answer are both
+		// errors to the guest, and they were the same value until cleat#1115:
+		// `err` is a store error, and a failed child arrived as an empty
+		// success. They are now separate conditions with the same handling,
+		// which is deliberate -- the guest can act on neither differently,
+		// and a failed child's message is the more useful of the two.
+		if err != nil || out.Failed {
+			msg := out.Error
+			if err != nil {
+				msg = err.Error()
+			}
 			rec := EventRecord{
 				Step:      s.stepCount,
 				EventType: EventTypeAwaitChild,
 				RunID:     runID,
-				Response:  result,
+				Err:       msg,
 			}
 			s.recordEvent(rec)
 
-			written, _ := s.writeResult(ctx, m, resultPtr, result, resultMaxLen)
-			return packAwaitChildResult(written, 0)
-		}
-		if err != nil {
-			rec := EventRecord{
-				Step:      s.stepCount,
-				EventType: EventTypeAwaitChild,
-				RunID:     runID,
-				Err:       err.Error(),
-			}
-			s.recordEvent(rec)
-
-			written, _ := s.writeResult(ctx, m, resultPtr, err.Error(), resultMaxLen)
+			written, _ := s.writeResult(ctx, m, resultPtr, msg, resultMaxLen)
 			return packAwaitChildResult(written, 1)
+		}
+		if out.Completed {
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeAwaitChild,
+				RunID:     runID,
+				Response:  out.Result,
+			}
+			s.recordEvent(rec)
+
+			written, _ := s.writeResult(ctx, m, resultPtr, out.Result, resultMaxLen)
+			return packAwaitChildResult(written, 0)
 		}
 	}
 
@@ -384,10 +394,18 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 	case s.engine.childWfStore == nil:
 		pr = pollResult{Status: "failed", Error: "no child workflow store"}
 	default:
-		result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
+		out, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
+		result := out.Result
+		completed := out.Completed
 		switch {
 		case err != nil:
 			pr = pollResult{Status: "failed", Error: err.Error()}
+		case out.Failed:
+			// A child that ran and failed. Before cleat#1115 this branch did
+			// not exist and the child fell through to "done" below, so a
+			// polling parent was told its failed child had succeeded -- the
+			// same defect as AwaitChild's, one status value away.
+			pr = pollResult{Status: "failed", Error: out.Error}
 		case !completed:
 			// Not complete now, so it was not complete at any earlier durable
 			// time either. No second query needed.
@@ -424,10 +442,16 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 				// Completed, but AFTER the parent's durable clock. The original
 				// execution saw it running, so every replay must too.
 				pr = pollResult{Status: "running"}
-			case result != "":
-				pr = pollResult{Status: "completed", Result: result}
 			default:
-				pr = pollResult{Status: "failed", Error: "child workflow failed (empty result)"}
+				// An empty result is NOT a failure. Until cleat#1115 this
+				// branch guessed -- "child workflow failed (empty result)" --
+				// because the store had no way to say whether the child had
+				// failed, and the guess is wrong in the other direction: a
+				// child that succeeds and returns nothing was reported as
+				// failed. `out.Failed` above answers it from the row, so the
+				// guess is gone rather than kept alongside an answer it can
+				// contradict.
+				pr = pollResult{Status: "completed", Result: result}
 			}
 		}
 	}
@@ -502,14 +526,20 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 
 	if s.engine.childWfStore != nil {
 		for _, rid := range runIDs {
-			result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
-			if err != nil || completed {
+			co, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
+			if err != nil || co.Completed {
 				var out outcome
 				out.RunID = rid
-				if err != nil {
+				switch {
+				case err != nil:
 					out.Error = err.Error()
-				} else {
-					out.Result = result
+				case co.Failed:
+					// cleat#1115: this filled Error only from the STORE error,
+					// so a child that failed was returned to the guest with
+					// Error empty and Result "{}" -- a success.
+					out.Error = co.Error
+				default:
+					out.Result = co.Result
 				}
 				outJSON, _ := json.Marshal(out)
 				rec := EventRecord{
@@ -604,11 +634,16 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 				// cmd/cleat-worker/memory_controller.go:189, which DOES wrap
 				// Background() in a timeout: nothing there is replayed, so
 				// giving up early loses only a stats row.
-				result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
+				co, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
 				if err != nil {
 					outcomes[idx] = childOutcome{RunID: rid, Error: err.Error()}
-				} else if completed {
-					outcomes[idx] = childOutcome{RunID: rid, Result: result}
+				} else if co.Failed {
+					// cleat#1115, same as AwaitAnyChild above: Error was
+					// filled only from the store error, so a failed child
+					// arrived here as a result.
+					outcomes[idx] = childOutcome{RunID: rid, Error: co.Error}
+				} else if co.Completed {
+					outcomes[idx] = childOutcome{RunID: rid, Result: co.Result}
 				} else {
 					// Still running. Not an outcome -- see the suspend below.
 					outcomes[idx] = childOutcome{RunID: rid, Error: "child not completed"}

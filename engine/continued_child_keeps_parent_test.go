@@ -97,7 +97,9 @@ func TestAContinuedChildStaysItsParentsChild(t *testing.T) {
 			if !ok {
 				t.Fatalf("%T is not a ChildWorkflowStore", store)
 			}
-			got, completed, err := childStore.GetChildResult(ctx, child)
+			_outcome, err := childStore.GetChildResult(ctx, child)
+			got := _outcome.Result
+			completed := _outcome.Completed
 			if err != nil {
 				t.Fatalf("GetChildResult: %v", err)
 			}

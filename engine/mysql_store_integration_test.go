@@ -1953,7 +1953,9 @@ func TestMySQLIntegration_ChildWorkflow(t *testing.T) {
 	}
 
 	// GetChildResult should return not completed.
-	result, completed, err := s.GetChildResult(ctx, childID)
+	_outcome, err := s.GetChildResult(ctx, childID)
+	result := _outcome.Result
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -1987,7 +1989,9 @@ func TestMySQLIntegration_ChildWorkflow(t *testing.T) {
 	}
 
 	// Now GetChildResult should return completed.
-	result, completed, err = s.GetChildResult(ctx, childID)
+	_outcome, err = s.GetChildResult(ctx, childID)
+	result = _outcome.Result
+	completed = _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult (after completion): %v", err)
 	}

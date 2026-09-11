@@ -23,12 +23,12 @@ func (f *fakeChildResultStore) StartChildWorkflowAtomic(context.Context, string,
 	return "", nil
 }
 
-func (f *fakeChildResultStore) GetChildResult(_ context.Context, runID string) (string, bool, error) {
+func (f *fakeChildResultStore) GetChildResult(_ context.Context, runID string) (ChildOutcome, error) {
 	r, ok := f.results[runID]
 	if !ok {
-		return "", false, nil
+		return ChildOutcome{}, nil
 	}
-	return r, true, nil
+	return ChildOutcome{Completed: true, Result: r}, nil
 }
 
 func (f *fakeChildResultStore) ResolveVersionByTag(context.Context, string, string) (int, error) {

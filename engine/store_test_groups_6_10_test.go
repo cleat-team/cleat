@@ -526,7 +526,9 @@ func TestGetChildResult_Completed(t *testing.T) {
 			}
 
 			// GetChildResult on the completed workflow ID.
-			resultJSON, completed, err := store.GetChildResult(ctx, claimed.ID)
+			_outcome, err := store.GetChildResult(ctx, claimed.ID)
+			resultJSON := _outcome.Result
+			completed := _outcome.Completed
 			if err != nil {
 				t.Fatalf("GetChildResult: %v", err)
 			}
@@ -567,7 +569,8 @@ func TestGetChildResult_NotCompleted(t *testing.T) {
 			}
 
 			// Do NOT claim or complete the child — it should still be pending.
-			_, completed, err := store.GetChildResult(ctx, childID)
+			_outcome, err := store.GetChildResult(ctx, childID)
+			completed := _outcome.Completed
 			if err != nil {
 				t.Fatalf("GetChildResult: %v", err)
 			}

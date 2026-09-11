@@ -132,7 +132,7 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 
 // GetChildResult checks whether a child workflow has completed (status 'done' or 'failed').
 
-func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	// Resolve the chain first: the run the parent STARTED is not necessarily
 	// the run that holds the answer. A child that continues as new leaves its
 	// first run at status 'done' with an empty result -- 'done' because it was
@@ -146,26 +146,34 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (strin
 	// untouched.
 	runID, err := terminalRunID(ctx, runID, s.successorOfRun)
 	if err != nil {
-		return "", false, err
+		return ChildOutcome{}, err
 	}
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
-		return "", false, fmt.Errorf("get child result: begin: %w", err)
+		return ChildOutcome{}, fmt.Errorf("get child result: begin: %w", err)
 	}
 	defer tx.Rollback()
 
 	var result string
 	var status string
+	var errMsg sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT COALESCE(result, '{}'), status FROM workflow_instances WHERE id = $1
-	`, runID).Scan(&result, &status)
+		SELECT COALESCE(result, '{}'), status, error_msg FROM workflow_instances WHERE id = $1
+	`, runID).Scan(&result, &status, &errMsg)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, tx.Commit()
+		return ChildOutcome{}, tx.Commit()
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("get child result: %w", err)
+		return ChildOutcome{}, fmt.Errorf("get child result: %w", err)
 	}
-	if status == "done" || status == "failed" {
+	if status == "failed" {
+		// A failed run's `result` column is never written -- migration 053
+		// routes finalize's payload to `error_msg` on this branch -- so
+		// returning the result here would return the '{}' from the COALESCE
+		// above, which is exactly the empty success cleat#1115 is about.
+		return ChildOutcome{Completed: true, Failed: true, Error: errMsg.String}, tx.Commit()
+	}
+	if status == "done" {
 		// Compact, matching the convention GetWorkflowByID and
 		// GetPromise/ListPromises already follow for JSONB result/payload
 		// columns: PostgreSQL's jsonb text output always inserts a space
@@ -175,9 +183,9 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (strin
 		if err := json.Compact(compacted, []byte(result)); err == nil {
 			result = compacted.String()
 		}
-		return result, true, tx.Commit()
+		return ChildOutcome{Completed: true, Result: result}, tx.Commit()
 	}
-	return "", false, tx.Commit()
+	return ChildOutcome{}, tx.Commit()
 }
 
 // GetChildCount returns the number of active (non-terminal) child workflows

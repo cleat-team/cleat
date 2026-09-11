@@ -20,7 +20,7 @@ const EventTypeSleep = "sleep"
 type mockChildStore struct {
 	startChildAtomicFn      func(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error)
 	startChildFn            func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
-	getChildResultFn        func(ctx context.Context, runID string) (string, bool, error)
+	getChildResultFn        func(ctx context.Context, runID string) (ChildOutcome, error)
 	getChildCompletedAtMsFn func(ctx context.Context, runID string) (int64, bool, error)
 	resolveTagFn            func(ctx context.Context, workflowName string, tag string) (int, error)
 }
@@ -39,11 +39,11 @@ func (m *mockChildStore) StartChildWorkflow(ctx context.Context, parentID, defNa
 	return "child-run-start", nil
 }
 
-func (m *mockChildStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (m *mockChildStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	if m.getChildResultFn != nil {
 		return m.getChildResultFn(ctx, runID)
 	}
-	return "", false, nil
+	return ChildOutcome{}, nil
 }
 
 func (m *mockChildStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
@@ -375,8 +375,8 @@ func TestAwaitChild_ReplayCachedError(t *testing.T) {
 }
 
 func TestAwaitChild_ReplayPastEnd(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, nil // not completed
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil // not completed
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -397,8 +397,8 @@ func TestAwaitChild_ReplayPastEnd(t *testing.T) {
 }
 
 func TestAwaitChild_FreshCompleted(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return `{"result":"ok"}`, true, nil
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{Completed: true, Result: `{"result":"ok"}`}, nil
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -418,8 +418,8 @@ func TestAwaitChild_FreshCompleted(t *testing.T) {
 }
 
 func TestAwaitChild_FreshError(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", true, fmt.Errorf("db error")
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, fmt.Errorf("db error")
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -439,8 +439,8 @@ func TestAwaitChild_FreshError(t *testing.T) {
 }
 
 func TestAwaitChild_FreshNotCompleted(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, nil // not completed, no error
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil // not completed, no error
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -485,8 +485,8 @@ func TestPollChild_Completed(t *testing.T) {
 	// it. This test used to say only that the child was done, which is the
 	// question PollChild stopped asking.
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-			return `{"ok":true}`, true, nil
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: `{"ok":true}`}, nil
 		},
 		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
 			return 1_000, true, nil
@@ -516,8 +516,8 @@ func TestPollChild_Completed(t *testing.T) {
 }
 
 func TestPollChild_Running(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, nil
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -538,8 +538,8 @@ func TestPollChild_Running(t *testing.T) {
 }
 
 func TestPollChild_Failed(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, fmt.Errorf("connection refused")
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, fmt.Errorf("connection refused")
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -590,9 +590,18 @@ func TestPollChild_EmptyResult(t *testing.T) {
 	// the parent's durable clock: the child must have completed at or before
 	// it. This test used to say only that the child was done, which is the
 	// question PollChild stopped asking.
+	//
+	// THE PREMISE OF THIS TEST WAS THE DEFECT, and it said so out loud: the
+	// mock's comment read "completed but empty result == failed", which is not
+	// a fact about a child, it is a description of the guess PollChild made
+	// because the store could not tell it whether the child had failed
+	// (cleat#1115). A child that succeeds and returns nothing is a child that
+	// succeeded. The store now answers directly, the guess is gone, and this
+	// asserts the corrected behaviour -- see TestPollChild_ChildFailed for the
+	// case the guess was standing in for.
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-			return "", true, nil // completed but empty result == failed
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: ""}, nil
 		},
 		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
 			return 1_000, true, nil
@@ -613,11 +622,49 @@ func TestPollChild_EmptyResult(t *testing.T) {
 	if err := json.Unmarshal(buf[:result>>32], &pr); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if pr.Status != "failed" {
-		t.Errorf("expected status 'failed', got %q", pr.Status)
+	if pr.Status != "completed" {
+		t.Errorf("a child that completed with an EMPTY result is reported as %q, want "+
+			"\"completed\". An empty result is a plausible success value; reporting it as a "+
+			"failure is the old guess, wrong in the other direction (cleat#1115).", pr.Status)
 	}
-	if !strings.Contains(pr.Error, "empty result") {
-		t.Errorf("expected 'empty result' in error, got %q", pr.Error)
+	if pr.Error != "" {
+		t.Errorf("expected no error for a child that succeeded, got %q", pr.Error)
+	}
+}
+
+// TestPollChild_ChildFailed is the case the "empty result" guess above stood
+// in for, and could not distinguish: a child that genuinely failed, with a
+// message of its own.
+func TestPollChild_ChildFailed(t *testing.T) {
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Failed: true, Error: "child blew up"}, nil
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return 1_000, true, nil
+		},
+	}
+	s := newTestExecSession()
+	s.nowMs = 2_000
+	s.engine.childWfStore = mock
+
+	buf := make([]byte, 256)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+	result := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
+
+	var pr struct {
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(buf[:result>>32], &pr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pr.Status != "failed" {
+		t.Errorf("a child that FAILED is reported as %q, want \"failed\"", pr.Status)
+	}
+	if pr.Error != "child blew up" {
+		t.Errorf("the poll result carries error %q, want the child's own message. A failure "+
+			"flag with no message moves the defect rather than fixing it.", pr.Error)
 	}
 }
 
@@ -700,8 +747,8 @@ func TestAwaitAnyChild_ReplayMismatch(t *testing.T) {
 }
 
 func TestAwaitAnyChild_ReplayPastEnd(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, nil
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -721,10 +768,10 @@ func TestAwaitAnyChild_ReplayPastEnd(t *testing.T) {
 func TestAwaitAnyChild_FreshCompleted(t *testing.T) {
 	callCount := 0
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
 			callCount++
 			// First child is completed.
-			return `{"result":"done"}`, true, nil
+			return ChildOutcome{Completed: true, Result: `{"result":"done"}`}, nil
 		},
 	}
 	s := newTestExecSession()
@@ -748,8 +795,8 @@ func TestAwaitAnyChild_FreshCompleted(t *testing.T) {
 }
 
 func TestAwaitAnyChild_FreshAllRunning(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, nil // all running
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil // all running
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -784,8 +831,8 @@ func TestAwaitAnyChild_InvalidJSON(t *testing.T) {
 
 func TestAwaitAllChildren_AllCompleted(t *testing.T) {
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-			return `{"result":"` + runID + `"}`, true, nil
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: `{"result":"` + runID + `"}`}, nil
 		},
 	}
 	s := newTestExecSession()
@@ -828,12 +875,12 @@ func TestAwaitAllChildren_AllCompleted(t *testing.T) {
 // held the defect in place rather than catching it.
 func TestAwaitAllChildren_SomeRunning(t *testing.T) {
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
 			switch runID {
 			case "run-a":
-				return `{"result":"a"}`, true, nil
+				return ChildOutcome{Completed: true, Result: `{"result":"a"}`}, nil
 			default:
-				return "", false, nil // still running
+				return ChildOutcome{}, nil // still running
 			}
 		},
 	}
@@ -874,8 +921,8 @@ func TestAwaitAllChildren_SomeRunning(t *testing.T) {
 func TestAwaitAllChildren_ReplayOfSuspendRecordFallsThroughToFresh(t *testing.T) {
 	// The child has completed by the time we replay.
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-			return `{"result":"done"}`, true, nil
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: `{"result":"done"}`}, nil
 		},
 	}
 	s := newTestExecSession()
@@ -1222,8 +1269,8 @@ func (m *mockChildStore) GetChildCompletedAtMs(ctx context.Context, runID string
 func pollChildStatus(t *testing.T, completedAtMs, nowMs int64) (string, string) {
 	t.Helper()
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-			return `{"done":true}`, true, nil // complete NOW, on every call
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: `{"done":true}`}, nil // complete NOW, on every call
 		},
 		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
 			return completedAtMs, true, nil
@@ -1295,8 +1342,8 @@ func TestPollChildFlipsOnceDurableTimeReachesCompletion(t *testing.T) {
 // language it does not route.
 func TestPollChildFailsClosedWithoutACompletionInstant(t *testing.T) {
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-			return `{"done":true}`, true, nil
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: `{"done":true}`}, nil
 		},
 		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
 			return 0, false, nil // complete, but no instant

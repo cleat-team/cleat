@@ -532,9 +532,11 @@ func TestMySQLBatchHeartbeat_Error(t *testing.T) {
 
 func TestMySQLGetChildResult_Done(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
-		queryRowOk("COALESCE(result, '{}')", `{"output":"ok"}`, "done"),
+		queryRowOk("COALESCE(result, '{}')", `{"output":"ok"}`, "done", nil),
 	}, nil)
-	result, done, err := store.GetChildResult(testCtxMySQL, "child-1")
+	_outcome, err := store.GetChildResult(testCtxMySQL, "child-1")
+	result := _outcome.Result
+	done := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -548,9 +550,11 @@ func TestMySQLGetChildResult_Done(t *testing.T) {
 
 func TestMySQLGetChildResult_NotDone(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
-		queryRowOk("COALESCE(result, '{}')", "{}", "running"),
+		queryRowOk("COALESCE(result, '{}')", "{}", "running", nil),
 	}, nil)
-	result, done, err := store.GetChildResult(testCtxMySQL, "child-1")
+	_outcome, err := store.GetChildResult(testCtxMySQL, "child-1")
+	result := _outcome.Result
+	done := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -566,7 +570,8 @@ func TestMySQLGetChildResult_NotFound(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		{match: "COALESCE(result, '{}')"},
 	}, nil)
-	_, done, err := store.GetChildResult(testCtxMySQL, "nonexistent")
+	_outcome, err := store.GetChildResult(testCtxMySQL, "nonexistent")
+	done := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -579,7 +584,7 @@ func TestMySQLGetChildResult_Error(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		{match: "COALESCE(result, '{}')", err: errors.New("query error")},
 	}, nil)
-	_, _, err := store.GetChildResult(testCtxMySQL, "child-1")
+	_, err := store.GetChildResult(testCtxMySQL, "child-1")
 	if err == nil {
 		t.Fatal("expected error from query failure, got nil")
 	}

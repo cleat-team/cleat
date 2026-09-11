@@ -206,7 +206,9 @@ func TestInMemoryChildWorkflowStore_StartAndGetResult(t *testing.T) {
 		t.Fatal("expected non-empty runID")
 	}
 
-	result, completed, err := s.GetChildResult(ctx, runID)
+	_outcome, err := s.GetChildResult(ctx, runID)
+	result := _outcome.Result
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -240,7 +242,9 @@ func TestInMemoryChildWorkflowStore_PreconfiguredResult(t *testing.T) {
 		t.Fatalf("StartChildWorkflow: %v", err)
 	}
 
-	result, completed, err := s.GetChildResult(ctx, runID)
+	_outcome, err := s.GetChildResult(ctx, runID)
+	result := _outcome.Result
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -249,6 +253,40 @@ func TestInMemoryChildWorkflowStore_PreconfiguredResult(t *testing.T) {
 	}
 	if result != `{"custom":"result"}` {
 		t.Fatalf("expected custom result, got %q", result)
+	}
+}
+
+// TestInMemoryChildWorkflowStore_PreconfiguredError pins the shape a FAILED
+// child comes back in. SetError is public API of this fake and nothing
+// exercised it, which mattered: until cleat#1115 it reported a failed child by
+// RETURNING AN ERROR -- the child's failure smuggled through the store error
+// return -- so this fake behaved correctly while every real store reported a
+// failed child as an empty success. A fake that is right for a reason the
+// production path does not share cannot fail with it.
+func TestInMemoryChildWorkflowStore_PreconfiguredError(t *testing.T) {
+	s := NewInMemoryChildWorkflowStore()
+	ctx := context.Background()
+
+	s.SetError("child-workflow", "child blew up")
+	runID, err := s.StartChildWorkflow(ctx, "parent-1", "child-workflow", `{}`, 0, "", 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflow: %v", err)
+	}
+
+	out, err := s.GetChildResult(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetChildResult returned a STORE error for a child that merely failed: %v.\n\n"+
+			"A child's own failure is a successful call with Failed set; conflating the two is "+
+			"what made this fake disagree with every real store (cleat#1115).", err)
+	}
+	if !out.Completed || !out.Failed {
+		t.Errorf("a failed child reports Completed=%v Failed=%v, want true/true", out.Completed, out.Failed)
+	}
+	if out.Error != "child blew up" {
+		t.Errorf("the outcome carries Error=%q, want the child's own message", out.Error)
+	}
+	if out.Result != "" {
+		t.Errorf("a failed child also presents a result %q; it must not", out.Result)
 	}
 }
 
@@ -265,7 +303,9 @@ func TestInMemoryChildWorkflowStore_Handler(t *testing.T) {
 		t.Fatalf("StartChildWorkflow: %v", err)
 	}
 
-	result, completed, err := s.GetChildResult(ctx, runID)
+	_outcome, err := s.GetChildResult(ctx, runID)
+	result := _outcome.Result
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
