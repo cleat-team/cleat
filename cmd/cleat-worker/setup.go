@@ -2542,10 +2542,18 @@ func (w *Worker) memoryReloadLoop() {
 // by passing 0; the loop itself only exits (does nothing, ever) if both are
 // disabled, since there is nothing left for it to do.
 //
-// Why the default differs between the two: --retention-days deletes
-// event_history rows, the step-by-step replay log of a workflow that has
-// already reached a terminal state -- the workflow's outcome (status,
-// result, error, def_name) survives untouched in workflow_instances.
+// Why the default differs between the two: --retention-days was written to
+// delete event_history rows -- the step-by-step replay log of a workflow that
+// has already reached a terminal state -- leaving the workflow's outcome
+// (status, result, error, def_name) untouched in workflow_instances. That is
+// a safe thing to default on, which is why it is on.
+//
+// It no longer does that, and the default is now on for a much smaller reason
+// (cleat#1016). finalize_workflow_status deletes a workflow's events when it
+// reaches 'done' or 'failed', so by the time this sweep looks there is nothing
+// to find; what the sweep still does is clear compaction state. The reasoning
+// below is preserved because it is why the default was CHOSEN, not because it
+// still describes what happens.
 // --completed-workflow-retention-days deletes the workflow_instances row
 // itself: the record that the workflow ever ran, what it returned, and why
 // it failed, gone from ListWorkflows and the admin dashboard permanently.
