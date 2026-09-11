@@ -58,10 +58,15 @@ var (
 
 	// rlsCheck decides what happens when the runtime connection turns out not
 	// to be subject to row-level security.
+	// "when --require-auth is set" was the old wording here too, and it reads
+	// as "if you pass the flag" -- which made the warning arm look like the
+	// default. --require-auth defaults TRUE, so the refusing arm is what a
+	// worker takes unless someone opts out. See the note on requireAuth below.
 	rlsCheck = flag.String("rls-check", "auto",
-		"Row-level security enforcement check on startup: \"auto\" refuses to start when "+
-			"--require-auth is set (multi-tenant) and warns otherwise, \"require\" always "+
-			"refuses, \"off\" skips the check. PostgreSQL only.")
+		"Row-level security enforcement check on startup. \"auto\" (the default) REFUSES "+
+			"to start on a connection that bypasses RLS, because --require-auth defaults "+
+			"true; it only warns if --require-auth=false. \"require\" always refuses, "+
+			"\"off\" skips the check. PostgreSQL only.")
 	driver                = flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
 	concurrency           = flag.Int("concurrency", 10, "Max concurrent workflow executions")
 	maxQueued             = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")
@@ -80,7 +85,18 @@ var (
 	memoryHardLimit       = flag.Float64("memory-hard-limit", 0.95, "Memory hard limit fraction 0.0-1.0 (reject API workflows)")
 	memoryCheckInterval   = flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
 	memorySampleRetention = flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
-	requireAuth           = flag.Bool("require-auth", true, "Require API key authentication (default: true when --api-addr is set)")
+	// The help text used to read "(default: true when --api-addr is set)",
+	// which describes when auth is APPLIED and reads as a condition on the
+	// DEFAULT. It is not one: the value is true whether or not an API is
+	// served, and main.go reads that value -- with no --api-addr condition --
+	// to decide what -rls-check=auto does. So a worker on a connection that
+	// bypasses row-level security REFUSES TO START by default, and the old
+	// wording made that look like a warning. It took two sessions and three
+	// documents down the wrong path before anyone ran `cleat-worker -h`.
+	// cleat#1180, cleat#1204.
+	requireAuth = flag.Bool("require-auth", true,
+		"Require API key authentication on --api-addr. Also selects the refusing arm "+
+			"of -rls-check=auto, whether or not --api-addr is set")
 	// Defaults to false. Originally because nothing in the product could write
 	// workflow_instances.allowed_signals, so defaulting it on denied every
 	// cross-workflow, plugin and external signal on a deployment that had never
