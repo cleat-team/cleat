@@ -57,10 +57,18 @@ func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
 
 			tenant := uuid.New()
 			job := uuid.New()
-			t.Cleanup(func() {
-				_, _ = be.DB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant)
-			})
+			// A DEFER, NOT t.Cleanup. `defer be.Cleanup()` above closes the pool
+			// when this function returns, and t.Cleanup runs AFTER the
+			// function's defers -- so these deletes executed against a closed
+			// database, failed, and were discarded by the `_`. Measured
+			// 2026-09-10: one run of these tests left 5 rows in task_queue and
+			// 2 in schedules (cleat#1148).
+			defer func() {
+				if _, err := be.DB.ExecContext(context.Background(),
+					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant); err != nil {
+					t.Errorf("cleanup task_queue on %s: %v", be.Name, err)
+				}
+			}()
 
 			stuckSince := time.Now().UTC().Add(-30 * time.Minute)
 			if _, err := be.DB.ExecContext(ctx, plugin.Rebind(
@@ -129,10 +137,18 @@ func TestReaperTouchesNothingItShouldNot_MultiBackend(t *testing.T) {
 
 			tenant := uuid.New()
 			queue := "reaper-controls"
-			t.Cleanup(func() {
-				_, _ = be.DB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant)
-			})
+			// A DEFER, NOT t.Cleanup. `defer be.Cleanup()` above closes the pool
+			// when this function returns, and t.Cleanup runs AFTER the
+			// function's defers -- so these deletes executed against a closed
+			// database, failed, and were discarded by the `_`. Measured
+			// 2026-09-10: one run of these tests left 5 rows in task_queue and
+			// 2 in schedules (cleat#1148).
+			defer func() {
+				if _, err := be.DB.ExecContext(context.Background(),
+					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant); err != nil {
+					t.Errorf("cleanup task_queue on %s: %v", be.Name, err)
+				}
+			}()
 
 			// 30 minutes and 1 minute sit far enough either side of the
 			// 5-minute threshold that skew between this process's clock and
