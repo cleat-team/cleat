@@ -1091,12 +1091,30 @@ func (s *MSSQLStore) CheckCancellation(ctx context.Context, workflowID string) (
 
 // StartNewRun creates a new workflow instance.
 // If idempotencyKey is non-empty, provides exactly-once semantics.
+// StartNewRun is the entry point without a concurrency key.
 func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, "")
+}
+
+// StartNewRunWithConcurrencyKey records the key on the row in the INSERT that
+// creates it. See the PostgreSQL implementation for why it is written by the
+// insert and why this is not on the interface.
+//
+// Hashed in Go, matching AcquireConcurrencyKey on this store. Doing it in SQL
+// here would be silently wrong: HASHBYTES over NVARCHAR hashes UTF-16, and
+// every existing key_hash was written from Go over UTF-8, so the two never
+// match. Migration 058's comment carries the full account.
+func (s *MSSQLStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
+}
+
+func (s *MSSQLStore) startNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+
 	var newID string
 	var existed bool
 	err := withRollbackGuaranteedRetry(ctx, "start new run", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		var err error
-		newID, existed, err = s.startNewRunOnce(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority)
+		newID, existed, err = s.startNewRunOnce(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
 		return err
 	})
 	if err != nil {
@@ -1105,7 +1123,25 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 	return newID, existed, nil
 }
 
-func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
+func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	// Computed here rather than in the caller because this function is RETRIED
+	// -- withRollbackGuaranteedRetry may run it several times -- and the hash
+	// must be identical on every attempt. It is a pure function of the key, so
+	// this is cheap and cannot drift between retries.
+	// TYPED nils, not `any(nil)`. go-mssqldb infers the parameter type from the
+	// Go value, and an untyped nil arrives as NVARCHAR NULL -- which SQL Server
+	// refuses to put in a VARBINARY(32) column: "Implicit conversion from data
+	// type nvarchar to varbinary is not allowed". A *string and a []byte carry
+	// their own types, so NULL arrives as the right kind of NULL.
+	//
+	// It failed on the NO-KEY path, which is every ordinary run, so this is not
+	// an edge case -- it is the common one.
+	var ckText *string
+	var ckHash []byte
+	if concurrencyKey != "" {
+		h := sha256.Sum256([]byte(concurrencyKey))
+		ckText, ckHash = &concurrencyKey, h[:]
+	}
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -1203,11 +1239,11 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
 			VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
-			        @p5, @p6)
-		`, runID, defName, defVersion, string(input), tenantID, priority)
+			        @p5, @p6, @p7, @p8)
+		`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -1223,11 +1259,11 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
 		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
-		        @p5, @p6)
-	`, runID, defName, defVersion, string(input), tenantID, priority)
+		        @p5, @p6, @p7, @p8)
+	`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}

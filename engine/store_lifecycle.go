@@ -873,7 +873,30 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 
 // RequestCancellation sets the cancellation flag.
 
+// StartNewRun is the ConcurrencyKeyStore-free entry point: no concurrency key.
 func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, "")
+}
+
+// StartNewRunWithConcurrencyKey records the key the run wants ON THE ROW, in
+// the same INSERT that creates it.
+//
+// cleat#1186. The key has to be written by the insert rather than by a second
+// statement afterwards: the row is created 'ready' with next_wake_at already
+// in the past, so a poller can claim it between the two -- and a run claimed
+// before its key is recorded is exactly the case the claim predicate exists to
+// prevent. There is no window here because there is no second statement.
+//
+// NOT on the WorkflowStore interface, deliberately. StartNewRun has four real
+// implementations and NINE test doubles; adding a parameter would edit all
+// thirteen for a field twelve of them do not care about. The HTTP layer asks
+// for this through an optional interface assertion, as it already does for
+// CountRunnableWorkflows and GetConcurrencyKeyHolder.
+func (s *PostgresStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
+}
+
+func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -968,11 +991,12 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key, concurrency_key_hash)
 			VALUES ($1, $2, $3, 'ready', $4,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
-			$5, $6, now() - INTERVAL '1 millisecond')
-		`, runID, defName, defVersion, input, tenantID, priority)
+			$5, $6, now() - INTERVAL '1 millisecond',
+			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END)
+		`, runID, defName, defVersion, input, tenantID, priority, concurrencyKey)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -989,11 +1013,12 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key, concurrency_key_hash)
 		VALUES ($1, $2, $3, 'ready', $4,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
-			$5, $6, now() - INTERVAL '1 millisecond')
-	`, runID, defName, defVersion, input, tenantID, priority)
+			$5, $6, now() - INTERVAL '1 millisecond',
+			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END)
+	`, runID, defName, defVersion, input, tenantID, priority, concurrencyKey)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}

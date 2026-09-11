@@ -607,7 +607,38 @@ func (s *MySQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID s
 // If idempotencyKey is non-empty, provides exactly-once semantics: a subsequent
 // call with the same key returns the existing workflow ID without creating a
 // duplicate. Returns the workflow ID, whether it already existed, and any error.
+// StartNewRun is the entry point without a concurrency key.
 func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, "")
+}
+
+// StartNewRunWithConcurrencyKey records the key on the row in the INSERT that
+// creates it. See the PostgreSQL implementation for why it is written by the
+// insert and why this is not on the interface.
+//
+// The hash is computed in Go here, matching AcquireConcurrencyKey on this
+// store; PostgreSQL hashes in SQL. That split is not tidiness -- it is how the
+// existing rows were written, and migration 058 records what happens when the
+// two conventions meet.
+func (s *MySQLStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, concurrencyKey)
+}
+
+func (s *MySQLStore) startNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	// TYPED nils, not `any(nil)`. go-mssqldb infers the parameter type from the
+	// Go value, and an untyped nil arrives as NVARCHAR NULL -- which SQL Server
+	// refuses to put in a VARBINARY(32) column: "Implicit conversion from data
+	// type nvarchar to varbinary is not allowed". A *string and a []byte carry
+	// their own types, so NULL arrives as the right kind of NULL.
+	//
+	// It failed on the NO-KEY path, which is every ordinary run, so this is not
+	// an edge case -- it is the common one.
+	var ckText *string
+	var ckHash []byte
+	if concurrencyKey != "" {
+		h := sha256.Sum256([]byte(concurrencyKey))
+		ckText, ckHash = &concurrencyKey, h[:]
+	}
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -695,11 +726,11 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
 			VALUES (?, ?, ?, 'ready', ?,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-			        ?, ?)
-		`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority)
+			        ?, ?, ?, ?)
+		`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -715,11 +746,11 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash)
 		VALUES (?, ?, ?, 'ready', ?,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-		        ?, ?)
-	`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority)
+		        ?, ?, ?, ?)
+	`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
