@@ -245,6 +245,10 @@ type AdminActionEvent struct {
 	Action   string // "force_complete", "force_fail", "re_replay"
 	Operator string // identity from auth context
 	Reason   string // optional detail
+
+	// Replaced is the terminal outcome the action erased, when it erased one.
+	// Nil for actions that write an outcome rather than clearing one.
+	Replaced *AdminReplacedOutcome
 }
 
 func (e AdminActionEvent) Step() int       { return e.step }
@@ -356,10 +360,25 @@ func EventRecordFromEvent(e Event) EventRecord {
 			Step: e.Step(), EventType: EventTypeRunDetached,
 		}
 	case AdminActionEvent:
-		return EventRecord{
+		rec := EventRecord{
 			Step: e.Step(), EventType: EventTypeAdminAction,
 			Service: ev.Operator, Op: ev.Action, Err: ev.Reason,
 		}
+		// Flattened at the database boundary: EventRecord is the flat struct
+		// the payload arms and the completeness guard both work over.
+		// IsEmpty rather than nil: a re-replay of a run that carried no error
+		// and no completion erased nothing, and must add no payload keys at
+		// all -- every admin event already written was hashed without them.
+		// Deciding it here keeps the payload arm a plain per-field non-empty
+		// check, which is what makes each field round-trip on its own.
+		if !ev.Replaced.IsEmpty() {
+			rec.ReplacedStatus = ev.Replaced.Status
+			rec.ReplacedErrorMsg = ev.Replaced.ErrorMsg
+			rec.ReplacedErrorCode = ev.Replaced.ErrorCode
+			rec.ReplacedErrorOp = ev.Replaced.ErrorOp
+			rec.ReplacedCompletedAt = ev.Replaced.CompletedAt
+		}
+		return rec
 	default:
 		return EventRecord{Step: e.Step(), EventType: e.Type()}
 	}
