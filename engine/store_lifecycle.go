@@ -629,7 +629,19 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		// exactly the trap -- a status list assembled by grepping the tree for
 		// status-shaped strings picks it up. There is no CHECK constraint to
 		// consult, so the vocabulary has to come from what production actually
-		// writes.
+		// WRITES, and the whole of it is seven values:
+		//
+		//	dead_lettered  done  failed  ready  running  terminated  terminating
+		//
+		// 'suspended' is the sharpest illustration and is NOT one of them.
+		// Thirty-five predicates read `status IN ('ready', 'suspended')` and no
+		// statement anywhere sets it -- a suspension is written as 'ready' with a
+		// next_wake_at, so those predicates are correct and merely carry a dead
+		// branch. A name can be part of this codebase's vocabulary without ever
+		// being part of its data, and with no CHECK constraint nothing catches
+		// that. 'completed', 'pending', 'rejected' and 'resolved' are the same
+		// shape from the other side: real statuses, of promises and schedules,
+		// not of this table.
 		//
 		// REQUEST_CANCEL gets the same predicate though it overwrites nothing --
 		// it only sets cancellation_requested. Setting that flag on a run that has
