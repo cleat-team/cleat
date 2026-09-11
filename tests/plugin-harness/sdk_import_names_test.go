@@ -411,17 +411,6 @@ var sdkUnreachedBaseline = map[string][]string{
 	// they share, differing only on cleat_register_query_handler, which is in
 	// notWorkflowFacing above.
 	"python (wasm/component_rewrite.go WitToEnvImport)": {
-		// A REAL gap, unlike Go's entry above, and tracked as one. Python binds
-		// through a generated WIT world, so this host call needs a WIT
-		// interface change and a regeneration -- separate work from the defect
-		// cleat#1155 fixes. Go, Rust, Java and AssemblyScript all bind it.
-		//
-		// The cost until it closes: a Python workflow that exhausts its retries
-		// and then runs a defer touching the host stays `failed` rather than
-		// `dead_lettered`, so retention deletes it. That is the behaviour every
-		// language had before cleat#1155 -- it fails toward the old defect, not
-		// a new one -- but Python keeps it while the others do not. cleat#1237.
-		"cleat_defer_phase",
 
 		// The json pair. Not gaps: the
 		// `json` module is in the standard library and engine/lifecycle.go's

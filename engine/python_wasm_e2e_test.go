@@ -544,22 +544,6 @@ var pythonUnboundBaseline = []string{
 	"cleat_complete",
 	"cleat_poll_work",
 
-	// A REAL GAP, recorded as one rather than dressed up. cleat#1155 added
-	// cleat_defer_phase and bound it in Go, Rust and AssemblyScript, all of
-	// which declare host imports directly. Python does not: it binds through a
-	// generated WIT world (wit_world.imports.durable_lifecycle), so the call
-	// needs a WIT interface change and a regeneration, which is a different
-	// piece of work from the defect and does not belong in the same change.
-	//
-	// WHAT IT COSTS UNTIL IT IS CLOSED, stated so nobody has to rediscover it:
-	// a Python workflow that exhausts its retries and then runs a defer which
-	// touches the host is still classified `failed` rather than
-	// `dead_lettered`, and so is deleted by retention rather than retained for
-	// an operator. That is the behaviour every language had before cleat#1155
-	// -- this fails toward the existing defect, not a new one -- but Python
-	// keeps it while the others do not. cleat#1237.
-	"cleat_defer_phase",
-
 	// Deliberately unbindable. See docs/determinism.md, "Why there is no
 	// RegisterQueryHandler" -- no engine version ever routed an external query
 	// to it. Every SDK carries a comment saying it is absent on purpose.

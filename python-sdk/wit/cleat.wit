@@ -133,6 +133,19 @@ interface durable-lifecycle {
     /// Returns the generated defer ID.
     durable-defer: func(desc: string) -> string;
 
+    /// Report that the guest has started (true) or finished (false) draining
+    /// its defer table.
+    ///
+    /// Records no event. It marks the events the drain produces so the engine
+    /// can tell a defer body's durable calls from the workflow body's --
+    /// without which a workflow that exhausted its retries and then cleaned up
+    /// is classified failed rather than dead_lettered, and deleted by
+    /// retention instead of retained for an operator. cleat#1155.
+    ///
+    /// The host cannot observe this boundary itself: on the ordinary failure
+    /// path the guest drains its own table, so the host is not in the loop.
+    durable-defer-phase: func(on: bool);
+
     /// Replace workflow input and restart execution (history compaction).
     durable-continue-as-new: func(input: string) -> u64;
 

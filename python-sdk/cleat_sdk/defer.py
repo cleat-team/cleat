@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from .host_calls import SuspendSentinel
+from .host_calls import SuspendSentinel, _import_cleat_defer_phase
 
 # Registered defer bodies, in registration order. A module-level list is the
 # right scope: a WASM guest is one instance running one workflow segment.
@@ -115,6 +115,12 @@ def run_deferred(*, propagate_suspend: bool = True) -> int:
     # this function, and a flag left set would make the next segment's first
     # defer_func refuse.
     _IN_DEFER_PHASE = True
+    # Told to the HOST as well, so the engine can tell a defer body's durable
+    # calls from the workflow body's. Paired with the clear in the `finally`
+    # below for the same reason the local flag is: a suspension propagates out
+    # of here, and an event recorded after the drain must not carry the mark.
+    # cleat#1237, closing the gap cleat#1155 left open for this SDK.
+    _import_cleat_defer_phase(True)
     try:
         ran = 0
         for _defer_id, fn in reversed(taken):
@@ -129,3 +135,4 @@ def run_deferred(*, propagate_suspend: bool = True) -> int:
         return ran
     finally:
         _IN_DEFER_PHASE = False
+        _import_cleat_defer_phase(False)
