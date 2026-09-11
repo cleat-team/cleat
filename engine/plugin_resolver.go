@@ -208,3 +208,34 @@ func resolveOnePlugin(ctx context.Context, db *sql.DB, name, constraintStr strin
 	return "", fmt.Errorf("no version of plugin %q satisfies constraint %q (available: %v)",
 		name, constraintStr, versions)
 }
+
+// VersionSatisfies reports whether a concrete plugin version satisfies a
+// dependency constraint of the kind cleat.PluginDeps documents.
+//
+// A WRAPPER, NOT A FOURTH IMPLEMENTATION. This repo already had three
+// constraint matchers that disagree with each other (cleat#1252), and the
+// worker's plugin-dependency check had a fourth behaviour inline: it compared
+// the constraint to the version with `!=`, so every form except a bare literal
+// permanently failed the workflow (cleat#1260). Adding another matcher to fix
+// that would have made the underlying problem worse, so this delegates to
+// matchesConstraint and adds only the one thing it lacks.
+//
+// THE ONE THING: an empty or "*" constraint means "any version". Two of the
+// three existing matchers already treat it that way; matchesConstraint parses
+// it as a bare version, fails, and returns false for every candidate -- which
+// is how an unconstrained dependency came to resolve to nothing.
+//
+// An unparseable VERSION is false rather than an error: the caller is asking a
+// yes/no question about a specific candidate, and a malformed version in the
+// registry should exclude that candidate rather than fail the whole check.
+func VersionSatisfies(version, constraint string) bool {
+	c := strings.TrimSpace(constraint)
+	if c == "" || c == "*" {
+		return true
+	}
+	v, err := parseVersion(version)
+	if err != nil {
+		return false
+	}
+	return matchesConstraint(v, c)
+}

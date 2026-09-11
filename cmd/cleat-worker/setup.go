@@ -1675,24 +1675,10 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			info := lp.Plugin.Info()
 			workerPlugins[info.Name] = info.Version
 		}
-		for pluginName, requiredVersion := range wfMeta.PluginDeps {
-			workerVersion, ok := workerPlugins[pluginName]
-			if !ok {
-				err := fmt.Errorf(
-					"missing plugin: workflow requires plugin %q version %s but it is not installed in this worker. Available plugins: %v",
-					pluginName, requiredVersion, pluginNames(workerPlugins))
-				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-				w.recordTerminalFailure(wf, workflowStartTime, err.Error(), engine.ErrPermanent.String(), "plugin_check")
-				return
-			}
-			if workerVersion != requiredVersion {
-				err := fmt.Errorf(
-					"plugin version mismatch: workflow requires plugin %q version %s but worker has version %s",
-					pluginName, requiredVersion, workerVersion)
-				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-				w.recordTerminalFailure(wf, workflowStartTime, err.Error(), engine.ErrPermanent.String(), "plugin_check")
-				return
-			}
+		if err := checkPluginDeps(workerPlugins, wfMeta.PluginDeps); err != nil {
+			w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+			w.recordTerminalFailure(wf, workflowStartTime, err.Error(), engine.ErrPermanent.String(), "plugin_check")
+			return
 		}
 	}
 
@@ -3622,4 +3608,36 @@ func (w *Worker) claimGeneral(limit int) ([]*engine.WorkflowInstance, error) {
 		})
 	}
 	return w.store.ClaimWorkflows(w.ctx, w.id, limit)
+}
+
+// checkPluginDeps reports whether the plugins loaded in this worker satisfy a
+// workflow's declared dependencies.
+//
+// Extracted from the inline check it replaces so that it can be tested at all:
+// the behaviour it encodes had no test, which is how the defect below survived.
+func checkPluginDeps(workerPlugins, deps map[string]string) error {
+	for pluginName, requiredVersion := range deps {
+		workerVersion, ok := workerPlugins[pluginName]
+		if !ok {
+			return fmt.Errorf(
+				"missing plugin: workflow requires plugin %q version %s but it is not installed in this worker. Available plugins: %v",
+				pluginName, requiredVersion, pluginNames(workerPlugins))
+		}
+		// A CONSTRAINT, not a version, and this used to compare the two with
+		// `!=`. cleat/version.go documents plugin_deps as "a JSON object
+		// mapping plugin names to semver constraints" and gives
+		// {"llm": ">=1.2.0", "blobstore": "~2.0.0"} as the example -- so the
+		// documented form compared ">=1.2.0" against "1.3.0", found them
+		// unequal, and failed the workflow with ErrPermanent. Seven of the
+		// eight forms a workflow can write were rejected on a worker that
+		// satisfied them; the only one that worked was a bare literal equal to
+		// the installed version, which needs no constraint vocabulary at all.
+		// cleat#1260.
+		if !engine.VersionSatisfies(workerVersion, requiredVersion) {
+			return fmt.Errorf(
+				"plugin version mismatch: workflow requires plugin %q %s but worker has version %s",
+				pluginName, requiredVersion, workerVersion)
+		}
+	}
+	return nil
 }
