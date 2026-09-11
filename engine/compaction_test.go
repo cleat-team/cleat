@@ -583,7 +583,9 @@ func (m *mockCompactStore) CompleteUpdateRequest(ctx context.Context, workflowID
 func (m *mockCompactStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	return false, nil
 }
-func (m *mockCompactStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
+func (m *mockCompactStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
+}
 func (m *mockCompactStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
 }

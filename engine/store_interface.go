@@ -376,7 +376,7 @@ type WorkflowStore interface {
 	AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error)
 
 	// ReleaseConcurrencyKey releases a specific concurrency key.
-	ReleaseConcurrencyKey(ctx context.Context, key string) error
+	ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (released bool, err error)
 
 	// ReleaseWorkflowConcurrencyKeys releases all concurrency keys held by a workflow.
 	ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error

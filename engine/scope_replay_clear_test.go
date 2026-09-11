@@ -44,9 +44,9 @@ func (r *recordingKeyStore) AcquireConcurrencyKey(ctx context.Context, key, work
 	return true, nil
 }
 
-func (r *recordingKeyStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (r *recordingKeyStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	r.released = append(r.released, key)
-	return nil
+	return true, nil
 }
 
 func scopeSession(t *testing.T) (*execSession, *recordingKeyStore) {

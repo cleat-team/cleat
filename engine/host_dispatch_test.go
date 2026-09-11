@@ -849,11 +849,11 @@ type trackingConcurrencyStore struct {
 	releases []string
 }
 
-func (t *trackingConcurrencyStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (t *trackingConcurrencyStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.releases = append(t.releases, key)
-	return nil
+	return true, nil
 }
 
 func TestSetScopeSwitchingReleasesOldKey(t *testing.T) {

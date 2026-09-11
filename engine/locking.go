@@ -117,8 +117,12 @@ func (s *execSession) ReleaseLock(ctx context.Context, m api.Module, key string)
 }
 
 func (s *execSession) freshReleaseLock(ctx context.Context, m api.Module, key string) int64 {
+	notHeld := false
 	if s.engine.concurrencyKeyStore != nil {
-		err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, key)
+		// s.workflowID is the holder the store compares against. The key itself
+		// is guest-supplied and arbitrary, so without this the guest could name
+		// any key in its tenant and the DELETE would take it (cleat#1188).
+		released, err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, key, s.workflowID)
 		if err != nil {
 			rec := EventRecord{
 				Step:      s.stepCount,
@@ -129,12 +133,23 @@ func (s *execSession) freshReleaseLock(ctx context.Context, m api.Module, key st
 			s.recordEvent(rec)
 			return int64(1)
 		}
+		notHeld = !released
 	}
 
+	// Releasing something this workflow does not hold stays a SUCCESS, and that
+	// is deliberate rather than inherited. A key whose TTL has passed is already
+	// gone; the workflow releasing it has done nothing wrong and an error there
+	// is one the guest cannot act on. TestPostgresStore_ReleaseConcurrencyKey_
+	// NonExistent has asserted that contract since before this change.
+	//
+	// What was missing was any trace of it, which is why LockNotHeld is
+	// recorded: a release that matched nothing and a release that freed a lock
+	// were previously the same event.
 	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeReleaseLock,
-		LockKey:   key,
+		Step:        s.stepCount,
+		EventType:   EventTypeReleaseLock,
+		LockKey:     key,
+		LockNotHeld: notHeld,
 	}
 	s.recordEvent(rec)
 

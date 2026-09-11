@@ -11287,3 +11287,69 @@ remaining five (`event_history`, `workflow_instances`, `workflow_promises`, `wor
 `workflow_update_requests`) all reduce to one unanswered question: whether a **run ID** is
 client-supplied. `StartNewRun` generates a UUID when `runID == ""` but accepts one. That is
 recorded on cleat#1189 as a question, not a finding — the HTTP path has not been traced.
+
+---
+
+### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
+
+`ReleaseConcurrencyKey` took only the key. Its statement carried `AND tenant_id` and no
+`workflow_id`, on all three dialects. Within one tenant, any workflow that knew a key string
+removed the row whoever held it — so B released A's lock, C then acquired it, and A carried on
+believing it held mutual exclusion. Nothing errored on any side.
+
+Reproduced on a scratch database before the fix: `DELETE 1` against a row the caller did not own,
+then a successful acquire by a third workflow, with the holder still `status='running'`.
+
+#### The hazard was already written down, in this package, as a comment
+
+`concurrency_key_reentrancy_test.go` explains why re-entrancy must keep returning false:
+
+> ReleaseConcurrencyKey takes only the key and has no hold count, so acquire+acquire+release
+> frees a lock the workflow still believes it holds.
+
+That is this defect, described accurately, in the tree, before it was filed. It was load-bearing
+for a *different* test's reasoning and was never turned into an assertion of its own. **A sentence
+in a test cannot fail.** The new test can, and the hold-count half of that sentence remains true
+and remains pinned where it was.
+
+#### The fourth route into one end state
+
+| | |
+|---|---|
+| §3.34 | a TTL truncated to whole seconds; the key was born expired — *"two workflows holding the same mutual-exclusion key, with nothing logged"* |
+| §3.39 | re-acquiring a key you already hold answered differently per dialect |
+| §3.318 (cleat#1189) | the key namespace was global across tenants |
+| this | a release matched a row it did not own |
+
+Each of the first three was fixed where it surfaced. What none of them asserted is the property
+itself, which is why the regression test here checks the *consequence* — C acquires — and not only
+the symptom. Asserting `released == false` alone would pass against a store that reported false and
+deleted the row anyway.
+
+#### Releasing a key you do not hold is still a success, deliberately
+
+`TestPostgresStore_ReleaseConcurrencyKey_NonExistent` has asserted that contract since before this
+change, and the contract is right rather than merely established: a key whose TTL has passed is
+already gone, the workflow releasing it has done nothing wrong, and an error there is one the guest
+cannot act on. The visible-error alternative was proposed and declined for that reason.
+
+What was missing was any *trace*. A release that freed a lock and one that matched nothing were the
+same event. `EventRecord.LockNotHeld` now distinguishes them, and `eventRecordToPayload` emits
+`lock_not_held` **only when true** — `computeEventChecksum` runs over that map, so an unconditional
+key would have rewritten the checksum of every release event in every existing history.
+
+#### Falsification
+
+Each dialect's predicate reverted alone, to the exact pre-fix statement:
+
+| reverted | result |
+|---|---|
+| postgres | `postgres` FAIL, `mysql` and `mssql` PASS |
+| mysql + mssql | both FAIL, `postgres` PASS |
+
+and both failures name both assertions — *"B released a key held by A"* and *"C acquired a key A
+still holds"*. **The first attempt at the postgres mutation was not faithful**: it deleted `$2` from
+the SQL while still passing three arguments, so the test went red on
+`pq: could not determine data type of parameter $2 (42P18)` — a red for the wrong reason, which is
+the outcome the "read *why* it failed" rule exists to catch. The mutation was rewritten to restore
+the pre-fix statement exactly.
