@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/cleat-team/cleat/engine"
@@ -102,11 +103,47 @@ func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request
 		s.writeError(w, 405, "method not allowed")
 		return
 	}
-	workflows, err := st.ListWorkflows(r.Context(), engine.WorkflowFilter{Status: "dead_lettered", Limit: 100})
+	// Paging, mirroring handleWorkflowsList, which mirrors
+	// handleGetInstanceEvents: both parameters read from the query, a server
+	// ceiling applied rather than assumed, and the total sent as a header.
+	//
+	// Before this, Limit was hard-coded to 100 and Offset was never read -- the
+	// sentence cleat#1182 wrote about /api/workflows, still true one endpoint
+	// over (cleat#1166). A cap pretending to be a default is worse than a small
+	// cap: a bare array of exactly 100 is indistinguishable from a store
+	// holding exactly 100.
+	//
+	// It matters more here than it did there. The retention sweep deliberately
+	// never deletes a dead-lettered run -- correctly, since it is work an
+	// operator may still re-drive -- so this is the ONE terminal status whose
+	// population only grows, and it was the one listing with no way to see part
+	// of it.
+	q := r.URL.Query()
+	filter := engine.WorkflowFilter{Status: "dead_lettered", Limit: 100}
+	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 {
+		filter.Limit = v
+	}
+	if filter.Limit > 1000 {
+		filter.Limit = 1000
+	}
+	if v, err := strconv.Atoi(q.Get("offset")); err == nil && v >= 0 {
+		filter.Offset = v
+	}
+
+	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
+	workflows, err := st.ListWorkflows(r.Context(), filter)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+
+	// Header rather than an envelope: the body stays a bare array, so no
+	// existing caller breaks.
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	if workflows == nil {
 		workflows = []engine.WorkflowInstance{}
 	}
