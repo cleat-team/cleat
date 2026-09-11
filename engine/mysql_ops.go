@@ -1380,6 +1380,30 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 func (s *MySQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
+		// idempotency_keys has no FK to workflow_instances on any dialect, so
+		// nothing removes it when the instance goes (cleat#1255). It is deleted
+		// FIRST: a key that outlives its run still resolves, and answers a
+		// retry `already_started` with a workflow_id that 404s on every read
+		// path -- telling a client that did not hear the first response that
+		// its work is already running, when the run no longer exists.
+		//
+		// The five FK'd children (event_history, workflow_signals,
+		// workflow_promises, concurrency_keys, workflow_update_requests) are
+		// ON DELETE CASCADE in mysql/001_schema.sql and need nothing here;
+		// verified against a database built fresh from the migrations, because
+		// a long-lived one built before those constraints keeps the old shape
+		// under CREATE TABLE IF NOT EXISTS.
+		if _, err := s.db.ExecContext(ctx, `
+			DELETE k FROM idempotency_keys k
+			INNER JOIN workflow_instances w ON w.id = k.workflow_id
+			WHERE w.status IN ('done', 'failed', 'terminated')
+			  AND w.completed_at IS NOT NULL
+			  AND w.completed_at < ?
+			  AND w.tenant_id = ?
+			  AND k.tenant_id = ?
+		`, olderThan, s.tenantID, s.tenantID); err != nil {
+			return totalDeleted, fmt.Errorf("delete completed workflows: delete idempotency_keys: %w", err)
+		}
 		result, err := s.db.ExecContext(ctx, `
 			DELETE w FROM workflow_instances w
 			INNER JOIN (

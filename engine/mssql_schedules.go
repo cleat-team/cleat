@@ -536,6 +536,24 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 func (s *MSSQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
+		// Deleted first, and for the same reason as the other two dialects: a
+		// surviving idempotency key answers a retry `already_started` with a
+		// workflow_id that no longer exists (cleat#1255). SQL Server declares
+		// no foreign keys to workflow_instances at all -- `grep -c "REFERENCES
+		// workflow_instances" migrations/mssql/*.sql` is 0, against 5 for each
+		// of the other dialects -- so nothing here cascades and every child
+		// table is explicit or orphaned.
+		if _, err := s.db.ExecContext(ctx, `
+			DELETE k FROM idempotency_keys k
+			INNER JOIN workflow_instances w ON w.id = k.workflow_id
+			WHERE w.status IN ('done', 'failed', 'terminated')
+			  AND w.completed_at IS NOT NULL
+			  AND w.completed_at < @p1
+			  AND w.tenant_id = @p2
+			  AND k.tenant_id = @p2
+		`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID)); err != nil {
+			return totalDeleted, fmt.Errorf("delete completed workflows: delete idempotency_keys: %w", err)
+		}
 		result, err := s.db.ExecContext(ctx, `
 			DELETE FROM workflow_instances
 			WHERE id IN (
