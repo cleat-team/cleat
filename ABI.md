@@ -479,6 +479,43 @@ Register a cleanup callback to run on workflow exit.
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `deferIDLen` — bytes written to defer ID buffer |
 
+#### 2.10a `cleat_defer_phase`
+
+Report that the guest has started or finished draining its defer table.
+
+```
+(func (import "env" "cleat_defer_phase")
+  (param i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `on` | `i32` | 1 when the drain begins, 0 when it ends |
+
+**Return:** always `0`. There is nothing for the guest to read.
+
+**This host call records no event.** It sets a flag that the host stamps onto
+events recorded while it is on (`in_defer_phase` in the event payload), which is
+what lets the engine tell a defer body's durable calls from the workflow body's.
+
+**SDK obligation.** An SDK that runs defer bodies must call this with `1`
+immediately before draining its defer table and `0` on every exit from the
+drain, including the suspension path. An SDK that never runs defers need not
+import it.
+
+The host cannot observe the boundary itself: on the ordinary failure path the
+guest's own wrapper runs the registered defers, so the host is not in the loop.
+Every SDK already tracks this internally in order to refuse defer registration
+from inside a defer body; this reports what it already knows.
+
+**If an SDK does not call it,** events produced by its defer bodies are
+indistinguishable from body events, which is the behaviour that existed before
+this call and the defect it exists to fix: a workflow that exhausts its retries
+and then runs a defer that touches the host is classified `failed` rather than
+`dead_lettered`, and so is deleted by retention rather than retained for an
+operator. See cleat#1155.
+
 #### 2.11 `cleat_poll_cancellation`
 
 Check if workflow cancellation has been requested.

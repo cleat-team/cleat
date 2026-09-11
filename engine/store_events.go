@@ -591,6 +591,19 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 			payload["response_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.Response))
 		}
 	}
+
+	// OUTSIDE the switch, because any event type can be produced while the
+	// guest is draining its defer table -- a call, a log, a state write. Every
+	// other conditional key above belongs to one event type; this one is a
+	// property of WHEN the event happened rather than of what it is.
+	//
+	// Only when true, the same convention as retries_exhausted and
+	// lock_not_held: an event recorded by the workflow body produces a
+	// byte-identical payload to what it always did, so no history written
+	// before this field existed reverifies differently. cleat#1155.
+	if rec.InDeferPhase {
+		payload["in_defer_phase"] = true
+	}
 	return sortedJSONMarshal(payload)
 }
 
@@ -1033,5 +1046,15 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		} else if v, ok := m["response"].(string); ok {
 			rec.Response = v
 		}
+	}
+
+	// Outside the switch, mirroring where eventRecordToPayload writes it.
+	// Absent on every event written before cleat#1155, which reads back false
+	// -- meaning "not known to be a defer" -- so a workflow in flight across
+	// the upgrade keeps exactly the dead-lettering behaviour it started with,
+	// the same compatibility this file already relies on for
+	// retries_exhausted.
+	if v, ok := m["in_defer_phase"].(bool); ok {
+		rec.InDeferPhase = v
 	}
 }

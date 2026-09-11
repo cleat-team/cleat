@@ -877,3 +877,36 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 	}
 	return 0
 }
+
+// SetDeferPhase records that the guest has started or finished draining its
+// defer table.
+//
+// WHY THE GUEST HAS TO TELL US. On the ordinary failure path the guest's own
+// generated wrapper runs the registered defer bodies -- see wasm/exports.go's
+// _cleatRunDeferred, and engine/executor.go, which explains why the host must
+// NOT also invoke them. So the host is not in the loop, and a defer's host
+// calls arrive through exactly the same path as the body's. They were
+// indistinguishable in the history, and cleat#1155 is what that cost: a
+// workflow that exhausted its retries and then cleaned up was classified
+// `failed` rather than `dead_lettered`, because the cleanup's own durable call
+// was the last event and dead-lettering asks what the last durable act was.
+//
+// The guest already knew -- every SDK tracks this internally to refuse
+// registration from inside a defer body. This reports what it already has.
+//
+// IT RECORDS NO EVENT, and that is the design rather than an economy. Replay
+// is positional: an event here would consume a step, and any workflow already
+// in flight when this shipped would replay a history whose step N is not the
+// event the new guest emits. A flag on events that are recorded anyway shifts
+// nothing, and a history written before this existed simply carries no flags.
+//
+// Idempotent and reentrant-safe by being a plain assignment: a guest that
+// reports the phase twice, or never reports the end because it trapped, leaves
+// the session in a state that only affects events recorded after it -- and a
+// trapped guest records nothing more.
+func (s *execSession) SetDeferPhase(_ context.Context, on bool) int64 {
+	s.mu.Lock()
+	s.inDeferPhase = on
+	s.mu.Unlock()
+	return 0
+}

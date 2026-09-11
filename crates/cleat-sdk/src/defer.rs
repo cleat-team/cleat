@@ -124,13 +124,21 @@ pub fn run_deferred() -> i64 {
     // left set would make the next segment's first defer_func refuse. Kept as a
     // guard struct rather than a pair of assignments: it costs nothing, and an
     // early return added to the loop later would otherwise leak the flag.
+    // The host is told as well as the thread-local, and through the same
+    // guard so the two cannot diverge on an early return. The host cannot
+    // observe this boundary itself -- on the ordinary failure path the guest
+    // drains its own table -- and without it a defer body's durable calls are
+    // indistinguishable from the workflow body's in the recorded history.
+    // cleat#1155.
     struct PhaseGuard;
     impl Drop for PhaseGuard {
         fn drop(&mut self) {
             IN_DEFER_PHASE.with(|f| f.set(false));
+            crate::host_calls::set_defer_phase(false);
         }
     }
     IN_DEFER_PHASE.with(|f| f.set(true));
+    crate::host_calls::set_defer_phase(true);
     let _phase = PhaseGuard;
 
     for (_id, f) in taken.into_iter().rev() {

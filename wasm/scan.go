@@ -214,6 +214,11 @@ func FindCleatOrphanedImports(wasmBytes []byte, expectedImports map[string]bool)
 var generatorEmittedImports = []string{
 	"cleat_complete",
 	"cleat_poll_work",
+	// Unconditional for the same reason as the pair above: the generated
+	// defer table calls it, and that table is emitted into every module. Not
+	// listing it would make FindCleatOrphanedImports warn about a legitimate
+	// import on every build of every workflow. cleat#1155.
+	"cleat_defer_phase",
 }
 
 func isGeneratorEmitted(name string) bool {

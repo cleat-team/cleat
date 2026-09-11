@@ -178,6 +178,14 @@ func (s *execSession) freshCallWithIntent(ctx context.Context, service, operatio
 		Service:   service,
 		Op:        operation,
 		Request:   requestJSON,
+		// Stamped at CONSTRUCTION, not in recordEventPersisted like the
+		// non-intent path, because this path computes the payload and the
+		// checksum from `rec` before persisting it. Setting the flag after
+		// that would leave the stored row and the in-memory event disagreeing
+		// about a field the checksum covers -- and the intent written ahead of
+		// the call has to carry it too, or a crash between the intent and its
+		// completion would resume with the flag lost. cleat#1155.
+		InDeferPhase: s.inDeferPhase,
 	}
 	if err := st.WriteCallIntent(ctx, s.workflowID, intent, s.engine.workerID, s.engine.generation); err != nil {
 		// The call has NOT been dispatched. That is the correct outcome of a

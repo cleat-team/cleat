@@ -1132,6 +1132,9 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatDefer(linker); err != nil {
 		return err
 	}
+	if err := b.registerCleatDeferPhase(linker); err != nil {
+		return err
+	}
 	if err := b.registerCleatPollCancellation(linker); err != nil {
 		return err
 	}

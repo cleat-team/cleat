@@ -116,6 +116,24 @@ export default {
     // twice in the same millisecond would otherwise see no time pass.
     let fakeNowMs = 1700000000000n;
     const cleatNow = () => (fakeNowMs += 1n);
+    /**
+     * JS stub for cleat_defer_phase.
+     *
+     * The unit tests run the module with no cleat host, so every host import
+     * a test PATH reaches has to be stubbed here -- an unstubbed one traps
+     * when called. defer.ts's enterDeferPhase reports the defer-phase boundary
+     * to the host (cleat#1155) and the defer specs reach it through
+     * runDeferred, so this became one of them.
+     *
+     * A no-op returning 0 is the whole contract: the host call records no
+     * event and returns nothing the guest reads. What the specs assert is the
+     * LOCAL flag, which is set before this is called and is unaffected by it.
+     *
+     * @returns {bigint} always 0n -- the import is declared to return i64.
+     */
+    function deferPhase(_on) {
+      return 0n;
+    }
 
     const myImports = {
       env: {
@@ -123,6 +141,7 @@ export default {
         cleat_json_parse: jsonParse,
         cleat_json_stringify: jsonStringify,
         cleat_now: cleatNow,
+        cleat_defer_phase: deferPhase,
       },
     };
 

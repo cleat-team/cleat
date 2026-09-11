@@ -39,6 +39,15 @@ type HostHandler interface {
 	DurableSleep(ctx context.Context, m api.Module, durationMs int64) int64
 	DurableAwaitSignals(ctx context.Context, m api.Module, signalNames string, timeoutMs int64, sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen uint32) int64
 	DurableDefer(ctx context.Context, m api.Module, description string, deferIDPtr, deferIDMaxLen uint32) int64
+
+	// SetDeferPhase reports that the guest has started (1) or finished (0)
+	// draining its defer table. It records NO event: it sets a session flag
+	// that recordEvent stamps onto events recorded while it is on.
+	//
+	// Recording nothing is what makes this safe to add to a running system.
+	// Replay is positional, so a call that consumed a step would desynchronise
+	// every workflow already in flight when it shipped. cleat#1155.
+	SetDeferPhase(ctx context.Context, on bool) int64
 	DurableLog(ctx context.Context, m api.Module, message string) int64
 	PollCancellation(ctx context.Context, m api.Module, reasonPtr, reasonMaxLen uint32) int64
 	PollSignal(ctx context.Context, m api.Module, signalName string, payloadPtr, payloadMaxLen uint32) int64
@@ -202,6 +211,11 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		}
 		return uint64(handlerFromContext(ctx).DurableDefer(ctx, m, desc, deferIDPtr, deferIDMaxLen))
 	}).Export("cleat_defer")
+
+	// cleat_defer_phase: (on) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, on uint32) uint64 {
+		return uint64(handlerFromContext(ctx).SetDeferPhase(ctx, on != 0))
+	}).Export("cleat_defer_phase")
 
 	// cleat_poll_cancellation: (ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,

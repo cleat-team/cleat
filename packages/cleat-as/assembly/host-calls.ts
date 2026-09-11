@@ -96,6 +96,18 @@ export declare function import_cleat_min_version(): i64;
  * 7. cleat_defer: Register cleanup to run on workflow exit.
  * (import "env" "cleat_defer") (param i32 i32 i32 i32) (result i64)
  */
+/**
+ * 7a. cleat_defer_phase: report the start (1) and end (0) of the defer drain.
+ * (import "env" "cleat_defer_phase") (param i32) (result i64)
+ *
+ * Records no event. It marks the events the drain produces so the engine can
+ * tell a defer body's durable calls from the workflow body's -- without which a
+ * workflow that exhausted its retries and then cleaned up is classified failed
+ * rather than dead_lettered. cleat#1155.
+ */
+@external("env", "cleat_defer_phase")
+export declare function import_cleat_defer_phase(on: i32): i64;
+
 @external("env", "cleat_defer")
 export declare function import_cleat_defer(
   descPtr: i32,

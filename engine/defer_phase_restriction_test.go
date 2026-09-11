@@ -205,3 +205,67 @@ func TestAGoDeferBodyCannotContinueAsNew(t *testing.T) {
 		}
 	}
 }
+
+// The flag cleat#1155 added has to survive the whole path: a real Go guest, the
+// generated defer table, the cleat_defer_phase import, the host handler, and
+// recordEvent. Every other test of it works on hand-built histories, which
+// proves the RULE and says nothing about whether the signal ever arrives.
+//
+// This one asserts the arrival, and it asserts both halves. Only checking that
+// the defer's event is flagged would pass just as well if the host flagged
+// EVERYTHING from the first defer registration onward -- so the body's own call
+// is checked to be unflagged in the same run. A flag that is always on carries
+// no information, and is exactly what a careless implementation produces.
+func TestADeferBodysCallIsRecordedAsDeferPhaseAndTheBodysIsNot(t *testing.T) {
+	wasmBytes, eng, caller := deferEngine(t, "wf-go-defer-phase-flag")
+
+	_, hist, _, _, _, err := eng.Execute(context.Background(), wasmBytes,
+		"defer_registers_defer", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("defer_registers_defer: %v", err)
+	}
+
+	ops := operationsCalled(caller)
+	if !containsOp(ops, "outer_defer_ran") {
+		t.Fatalf("the defer body never ran (calls: %v), so this test proves nothing "+
+			"about how its events were recorded", ops)
+	}
+
+	var deferPhase, bodyPhase []string
+	for _, rec := range hist {
+		if rec.EventType != EventTypeCall {
+			continue
+		}
+		if rec.InDeferPhase {
+			deferPhase = append(deferPhase, rec.Op)
+		} else {
+			bodyPhase = append(bodyPhase, rec.Op)
+		}
+	}
+
+	var sawDeferCall bool
+	for _, op := range deferPhase {
+		if op == "outer_defer_ran" {
+			sawDeferCall = true
+		}
+	}
+	if !sawDeferCall {
+		t.Errorf("the defer body's call was not recorded as defer-phase.\n"+
+			"  flagged:   %v\n  unflagged: %v\n\n"+
+			"The guest reports the boundary with cleat_defer_phase from its "+
+			"generated defer table (wasm/exports.go). If nothing is flagged, "+
+			"either the import was not emitted into the module or the handler "+
+			"is not setting the session flag -- and dead-lettering is back to "+
+			"being unable to tell cleanup from the workflow carrying on.",
+			deferPhase, bodyPhase)
+	}
+
+	// The other half: the flag must be OFF for the body's own work.
+	if len(bodyPhase) == 0 {
+		t.Errorf("every recorded call was flagged as defer-phase (%v).\n\n"+
+			"A flag that is never off distinguishes nothing. This is what a "+
+			"set-and-never-cleared implementation looks like, and it would "+
+			"dead-letter workflows on the strength of their body calls.",
+			deferPhase)
+	}
+}

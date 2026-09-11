@@ -23,6 +23,15 @@ var notDeclaredForGo = map[string]string{
 	// Registered but deliberately unbindable. CLAUDE.md names this one.
 	"cleat_register_query_handler": "deliberately unbindable from a guest",
 
+	// Emitted unconditionally by the generator, like the handshake pair above,
+	// and for the same structural reason: hostFunctions maps an import to a
+	// HostCalls METHOD, and this one has none. Its caller is the generated
+	// defer table, not anything a workflow author writes -- so there is no SDK
+	// method for a guard keyed on hostFunctions to be blind to. Declaring it
+	// there produced a bogus adapter field and a call with no arguments.
+	// cleat#1155.
+	"cleat_defer_phase": "called by the generated defer table, not by an SDK method; emitted unconditionally alongside cleat_complete",
+
 	// Provided natively by Go, so no import is needed. These exist for guest
 	// languages that cannot do them in-process.
 	"cleat_uuid":           "HostCallsImpl.UUID derives it in Go from workflowID+seed via SHA-256, deterministic without a host call",

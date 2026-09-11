@@ -28,6 +28,23 @@ func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {
 	})
 }
 
+// registerCleatDeferPhase registers cleat_defer_phase, which reports that the
+// guest has started or finished draining its defer table.
+//
+// It takes no memory and returns no value the guest uses -- there is nothing to
+// read and nothing to write -- so unlike its neighbours it needs no buffer.
+// cleat#1155.
+func (b *wasmtimeBackend) registerCleatDeferPhase(linker *wasmtime.Linker) error {
+	if b.skipIfNotNeeded("cleat_defer_phase") {
+		return nil
+	}
+
+	return b.hostFunc(linker, "env", "cleat_defer_phase", func(caller *wasmtime.Caller,
+		on int32) int64 {
+		return b.handler.SetDeferPhase(context.Background(), on != 0)
+	})
+}
+
 func (b *wasmtimeBackend) registerCleatPollCancellation(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_poll_cancellation") {
 		return nil

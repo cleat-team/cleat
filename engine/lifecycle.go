@@ -149,6 +149,13 @@ func (s *execSession) recordEvent(rec EventRecord) {
 	if rec.TimestampMs == 0 {
 		rec.TimestampMs = time.Now().UnixMilli()
 	}
+	// Stamped here rather than at each call site, because "was the guest
+	// draining its defer table when this happened" is a property of the
+	// session at the moment of recording, and there are too many call sites
+	// for any of them to be the place that remembers. cleat#1155.
+	if s.inDeferPhase {
+		rec.InDeferPhase = true
+	}
 	// The durable clock must not go backwards (cleat#944).
 	//
 	// Two clock domains feed Now(). Before any event is recorded it is the

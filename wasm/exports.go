@@ -358,7 +358,25 @@ func _cleatRunDeferred() (ran int) {
 	// leaving it set would make the next segment's first DurableDeferFunc
 	// refuse.
 	_cleatInDeferPhase = true
-	defer func() { _cleatInDeferPhase = false }()
+	// Told to the HOST as well as tracked here. The guest has always known it
+	// was draining -- that is what _cleatInDeferPhase is for -- but the host
+	// did not, so a defer body's durable calls were indistinguishable from the
+	// workflow body's in the recorded history. cleat#1155: that is what made a
+	// workflow which exhausted its retries and then cleaned up come out with
+	// status failed rather than dead_lettered, and so deleted by retention
+	// rather than kept for an operator.
+	//
+	// No backticks in this comment, deliberately: it lives inside a Go raw
+	// string literal, which a backtick would terminate.
+	//
+	// Paired with the clear below rather than set-and-forget: an event
+	// recorded after the drain finishes -- a suspended defer resumes, and the
+	// body continues -- must not carry the flag.
+	cleatDeferPhaseImport(1)
+	defer func() {
+		_cleatInDeferPhase = false
+		cleatDeferPhaseImport(0)
+	}()
 	for i := len(ids) - 1; i >= 0; i-- {
 		fn := _cleatDeferFuncs[ids[i]]
 		delete(_cleatDeferFuncs, ids[i])

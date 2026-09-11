@@ -3043,10 +3043,39 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 // operator one dismissal; one wrongly dropped costs the work.
 // TestTheLimitOfWhatPositionCanTell asserts that choice on purpose.
 func endedOnAnExhaustedCall(history []engine.EventRecord) bool {
-	if len(history) == 0 {
+	// Trailing defer-phase events are skipped, because they are not the
+	// workflow going on to do more work -- they are its cleanup, and the rule
+	// above is about the former. cleat#1155.
+	//
+	// A defer body's host calls are durable calls, deliberately: "a defer that
+	// cannot call the host cannot release the lock it took"
+	// (engine/defer_phase.go). So they land in the history AFTER the call that
+	// ended the run, and before EventRecord.InDeferPhase existed there was
+	// nothing to tell them apart from the body's own. The effect was precise
+	// and backwards: a workflow whose cleanup touched the host -- the cleanup
+	// worth having, the one that releases something -- moved itself OUT of the
+	// dead-letter queue by cleaning up, and retention then deleted it.
+	//
+	// Only trailing ones. A defer that ran, and was then followed by more body
+	// work, means the workflow carried on; that is the case this rule already
+	// judges correctly and it must keep judging it the same way.
+	//
+	// Events written before cleat#1155 carry no flag, so this loop stops
+	// immediately and the answer is exactly what it was. A workflow in flight
+	// across the upgrade keeps the behaviour it started with, which is the
+	// same compatibility retries_exhausted itself relies on.
+	i := len(history) - 1
+	for i >= 0 && history[i].InDeferPhase {
+		i--
+	}
+	if i < 0 {
+		// Every event was a defer. There is no body act to judge, which is not
+		// the same as a body act that was not an exhaustion -- but it is not
+		// an exhaustion either, and inventing one here would dead-letter a
+		// workflow on the strength of its cleanup alone.
 		return false
 	}
-	return history[len(history)-1].RetriesExhausted
+	return history[i].RetriesExhausted
 }
 
 // recordTerminalFailure is the no-history form, for the failure paths that run
