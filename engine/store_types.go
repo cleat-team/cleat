@@ -287,6 +287,29 @@ type WorkflowFilter struct {
 	Search        string
 	Offset        int
 	Limit         int
+
+	// The four below address columns the row already carries. Before them the
+	// only way to ask "the runs of workflow X" was Search, a four-way substring
+	// LIKE over input, result, error_msg and def_name -- so it also matched
+	// unrelated runs whose PAYLOAD contained the string, and gave no signal
+	// about which column matched. cleat#1183, and cleat#1122 from a second
+	// upstream asking for the same surface.
+
+	// DefName matches def_name exactly. Search is substring and spans four
+	// columns; this is the targeted form.
+	DefName string
+	// ErrorCode matches error_code exactly. Cancellation is an error code
+	// rather than a status, so without this a cancelled run cannot be selected
+	// as a class at all.
+	ErrorCode string
+	// IDPrefix matches the start of the run id. `id` is text on all three
+	// dialects (TEXT / VARCHAR(255) / NVARCHAR(255)), so this needs no cast.
+	IDPrefix string
+	// StartedAfter and StartedBefore bound created_at, inclusive of after and
+	// exclusive of before -- the usual half-open interval, so adjacent windows
+	// tile without double-counting a row on the boundary.
+	StartedAfter  time.Time
+	StartedBefore time.Time
 }
 
 // RoutingRule represents a traffic-splitting rule for A/B testing.

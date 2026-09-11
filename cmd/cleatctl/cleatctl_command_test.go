@@ -1827,3 +1827,14 @@ func (_ *mockStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []str
 func (m *mockStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
 	return 0, false, nil
 }
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockStore) CountWorkflows(ctx context.Context, filter engine.WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
+}

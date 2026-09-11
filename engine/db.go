@@ -374,50 +374,8 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE 1=1",
 	)
 
-	if filter.Status != "" {
-		qb.AddCondition("status = %s", filter.Status)
-	}
-	if filter.InputContains != "" {
-		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
-	}
-	if filter.ErrorContains != "" {
-		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
-	}
-	if filter.Search != "" {
-		pattern := "%" + filter.Search + "%"
-		icol := d.castExpr("input")
-		rcol := d.castExpr("result")
-		n := qb.NextPos()
-		// Search matches the workflow's def_name in addition to its
-		// input/result/error content: a general "Search" box (as opposed to
-		// the more targeted InputContains/ErrorContains filters) is most
-		// often used to find workflows of a given type by name, e.g. an
-		// admin dashboard search box (cmd/cleat-worker/server.go passes the
-		// "search" query param straight through to this filter).
-		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s OR %s)",
-			d.likeExpr(icol, n, true),
-			d.likeExpr(rcol, n+1, true),
-			d.likeExpr("error_msg", n+2, true),
-			d.likeExpr("def_name", n+3, true)))
-		qb.AddArgs(pattern, pattern, pattern, pattern)
-	}
-
-	qb.AddRaw("ORDER BY created_at DESC")
-
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 100
-	} else if limit > 1000 {
-		limit = 1000
-	}
-
-	if filter.Offset > 0 {
-		qb.AddRaw(d.limitOffset(qb.NextPos(), qb.NextPos()+1, true))
-		qb.AddArgs(limit, filter.Offset)
-	} else {
-		qb.AddRaw(d.limitOffset(qb.NextPos(), 0, false))
-		qb.AddArgs(limit)
-	}
+	applyWorkflowFilters(qb, d, filter)
+	applyWorkflowListPaging(qb, d, filter)
 
 	query, args := qb.SQL()
 	rows, err := tx.QueryContext(ctx, query, args...)
