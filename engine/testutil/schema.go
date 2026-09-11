@@ -582,11 +582,33 @@ const postgresRLSTestPassword = "cleat-rls-test-role-password" //nolint:gosec //
 func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 	t.Helper()
 	stmts := []string{
+		// CREATE first, catch the collision -- not IF NOT EXISTS, which is
+		// check-then-act and therefore a race.
+		//
+		// A PostgreSQL role is CLUSTER-wide, not per-database, so every package
+		// that wants it contends on one object however many databases are in
+		// play. Two sessions both saw "not exists" and both issued CREATE ROLE;
+		// the loser got
+		//
+		//   pq: duplicate key value violates unique constraint
+		//       "pg_authid_rolname_index" (23505)
+		//
+		// in CI's `Test Go (commands)` entry, which runs ./cmd/... with
+		// packages in parallel. Intermittent by nature: it passed for hours
+		// after the caller that made it reachable landed (cleat#1209).
+		//
+		// Both conditions are caught because PostgreSQL raises either
+		// depending on where in the create the collision is detected:
+		// duplicate_object (42710) from the command's own check, or
+		// unique_violation (23505) from the index, which is what CI hit.
 		`DO $$
 		BEGIN
-			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '` + PostgresRLSTestRole + `') THEN
-				CREATE ROLE ` + PostgresRLSTestRole + ` LOGIN PASSWORD '` + postgresRLSTestPassword + `' NOSUPERUSER NOCREATEDB NOCREATEROLE;
-			END IF;
+			CREATE ROLE ` + PostgresRLSTestRole + ` LOGIN PASSWORD '` + postgresRLSTestPassword + `' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+		EXCEPTION
+			WHEN duplicate_object OR unique_violation THEN
+				-- Another session created it first. That is the outcome this
+				-- wanted; nothing to do.
+				NULL;
 		END $$;`,
 		`GRANT USAGE ON SCHEMA public TO ` + PostgresRLSTestRole,
 		`GRANT USAGE ON SCHEMA cleat TO ` + PostgresRLSTestRole,
