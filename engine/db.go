@@ -936,7 +936,7 @@ func (s *PostgresStore) ClearStickyWorker(ctx context.Context, workflowID string
 
 // CreateUpdateRequest registers an incoming update request for a workflow.
 func (s *PostgresStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("record memory sample: begin: %w", err)
 	}
@@ -966,28 +966,45 @@ func (s *PostgresStore) RecordWorkflowMemorySample(ctx context.Context, defName 
 
 // LoadMemoryEstimates returns EWMA mean bytes for all def_names.
 func (s *PostgresStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
-	rows, err := s.db.QueryContext(ctx,
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load memory estimates: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx,
 		`SELECT def_name, mean_bytes FROM workflow_memory_stats WHERE tenant_id = $1`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("load memory estimates: %w", err)
 	}
-	defer rows.Close()
 
 	estimates := make(map[string]float64)
 	for rows.Next() {
 		var name string
 		var mean float64
 		if err := rows.Scan(&name, &mean); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("load memory estimates: scan: %w", err)
 		}
 		estimates[name] = mean
 	}
-	return estimates, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("load memory estimates: %w", err)
+	}
+	rows.Close()
+	return estimates, tx.Commit()
 }
 
 // LoadMemoryStats returns full distribution statistics for all def_names.
 func (s *PostgresStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load memory stats: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT def_name,
 		       MIN(sample_bytes)::BIGINT,
 		       AVG(sample_bytes),
@@ -1007,18 +1024,23 @@ func (s *PostgresStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemorySt
 	if err != nil {
 		return nil, fmt.Errorf("load memory stats: %w", err)
 	}
-	defer rows.Close()
 
 	var stats []WorkflowMemoryStats
 	for rows.Next() {
 		var st WorkflowMemoryStats
 		if err := rows.Scan(&st.DefName, &st.MinBytes, &st.AvgBytes, &st.MaxBytes,
 			&st.P10, &st.P25, &st.P50, &st.P75, &st.P90, &st.P99, &st.SampleCount); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("load memory stats: scan: %w", err)
 		}
 		stats = append(stats, st)
 	}
-	return stats, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("load memory stats: %w", err)
+	}
+	rows.Close()
+	return stats, tx.Commit()
 }
 
 // QueueDepth returns the count of ready workflows in the store's task queues.
@@ -1041,28 +1063,40 @@ func (s *PostgresStore) QueueDepth(ctx context.Context) (int64, error) {
 
 // CleanupMemorySamples deletes samples beyond maxSamplesPerDef per def_name.
 func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
-	defRows, err := s.db.QueryContext(ctx,
+	// ONE transaction for the whole sweep. The list and the deletes were two
+	// unrelated connections before cleat#1098; they are now one RLS-scoped
+	// transaction, which is also the only way the policy below can apply to
+	// both -- cleat.tenant_id is set per transaction, not per connection.
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("cleanup memory samples: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	defRows, err := tx.QueryContext(ctx,
 		`SELECT DISTINCT def_name FROM workflow_memory_samples WHERE tenant_id = $1`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("cleanup memory samples: list defs: %w", err)
 	}
-	defer defRows.Close()
 
 	var defNames []string
 	for defRows.Next() {
 		var name string
 		if err := defRows.Scan(&name); err != nil {
+			defRows.Close()
 			return 0, fmt.Errorf("cleanup memory samples: scan def: %w", err)
 		}
 		defNames = append(defNames, name)
 	}
 	if err := defRows.Err(); err != nil {
+		defRows.Close()
 		return 0, err
 	}
+	defRows.Close()
 
 	var totalDeleted int64
 	for _, defName := range defNames {
-		result, err := s.db.ExecContext(ctx, `
+		result, err := tx.ExecContext(ctx, `
 			DELETE FROM workflow_memory_samples
 			WHERE def_name = $1
 			  AND tenant_id = $3
@@ -1079,6 +1113,9 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 		}
 		n, _ := result.RowsAffected()
 		totalDeleted += n
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("cleanup memory samples: commit: %w", err)
 	}
 	return totalDeleted, nil
 }
