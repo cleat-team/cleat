@@ -67,8 +67,8 @@ func (s *mockWorkflowInstanceStmt) Query(_ []driver.Value) (driver.Rows, error) 
 }
 
 func (r *mockWorkflowInstanceRows) Columns() []string {
-	return []string{"id", "def_name", "def_version", "min_version", "status", "input",
-		"result", "error", "error_code", "error_op", "assigned_to", "next_wake_at",
+	return []string{"id", "def_name", "def_version", "status", "input",
+		"result", "error_msg", "error_code", "error_op", "assigned_to", "next_wake_at",
 		"tenant_id", "created_at", "generation"}
 }
 func (r *mockWorkflowInstanceRows) Close() error { r.closed = true; return nil }
@@ -84,21 +84,25 @@ func (r *mockWorkflowInstanceRows) Next(dest []driver.Value) error {
 	if r.instance == nil {
 		return errors.New("no instance set")
 	}
+	// Fourteen, not fifteen: min_version left the SELECT in cleat#1208, because
+	// it is a column of workflow_defs and has never been one of
+	// workflow_instances. This mock happily fed a value for it for as long as
+	// the statement asked -- which is the point of that issue. It accepts
+	// whatever shape the code asks for, so it can only ever agree.
 	dest[0] = r.instance.ID
 	dest[1] = r.instance.DefName
 	dest[2] = int64(r.instance.DefVersion)
-	dest[3] = int64(r.instance.MinVersion)
-	dest[4] = r.instance.Status
-	dest[5] = []byte(r.instance.Input)
-	dest[6] = r.instance.Result
-	dest[7] = r.instance.Error
-	dest[8] = r.instance.ErrorCode
-	dest[9] = r.instance.ErrorOp
-	dest[10] = r.instance.AssignedTo
-	dest[11] = r.instance.NextWakeAt
-	dest[12] = r.instance.TenantID
-	dest[13] = r.instance.CreatedAt
-	dest[14] = r.instance.Generation
+	dest[3] = r.instance.Status
+	dest[4] = []byte(r.instance.Input)
+	dest[5] = r.instance.Result
+	dest[6] = r.instance.Error
+	dest[7] = r.instance.ErrorCode
+	dest[8] = r.instance.ErrorOp
+	dest[9] = r.instance.AssignedTo
+	dest[10] = r.instance.NextWakeAt
+	dest[11] = r.instance.TenantID
+	dest[12] = r.instance.CreatedAt
+	dest[13] = r.instance.Generation
 	return nil
 }
 

@@ -255,13 +255,23 @@ func findAPIKey(ctx context.Context, db *sql.DB, sel revokeKeySelector) (*apiKey
 		row apiKeyRow
 		err error
 	)
-	q := `SELECT key_id, tenant_id, description, created_at, revoked_at
-	      FROM admin.tenant_api_keys WHERE `
+	// Two whole statements rather than a shared prefix plus two suffixes. The
+	// duplicated column list is the price of being CHECKABLE: a fragment
+	// ending in "WHERE " cannot be handed to PREPARE, so the concatenated form
+	// was the one statement in this package that
+	// TestEveryInlineStatementParsesOnPostgres could not cover -- and a
+	// coverage hole is worth more than a repeated line. cleat#1208.
 	if sel.keyHash != nil {
-		err = db.QueryRowContext(ctx, q+`key_hash = $1`, sel.keyHash).
+		err = db.QueryRowContext(ctx, `
+			SELECT key_id, tenant_id, description, created_at, revoked_at
+			FROM admin.tenant_api_keys WHERE key_hash = $1
+		`, sel.keyHash).
 			Scan(&row.keyID, &row.tenantID, &row.description, &row.createdAt, &row.revokedAt)
 	} else {
-		err = db.QueryRowContext(ctx, q+`key_id = $1`, sel.keyID).
+		err = db.QueryRowContext(ctx, `
+			SELECT key_id, tenant_id, description, created_at, revoked_at
+			FROM admin.tenant_api_keys WHERE key_id = $1
+		`, sel.keyID).
 			Scan(&row.keyID, &row.tenantID, &row.description, &row.createdAt, &row.revokedAt)
 	}
 	if err == sql.ErrNoRows {
