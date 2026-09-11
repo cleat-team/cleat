@@ -447,5 +447,25 @@ jobs:
       - name: Run plugin migration tests
         run: go test -count=1 -p 1 -timeout=600s -run TestPluginMigrations ./engine/...
 
+      # Unfiltered, and -p 1. cleat#1203.
+      #
+      # This step ran `-run 'MultiBackend'` until 2026-09-10, which made the
+      # job's coverage a naming convention rather than a scope. Six
+      # `*_dialect_arms_multidb_test.go` entry points do not carry the
+      # substring, so the only job with MySQL and SQL Server DSNs did not
+      # select them, and the tests built to execute every dialect arm on a
+      # real server of that dialect had only ever run on PostgreSQL.
+      #
+      # Dropping the filter rather than renaming the six ends the class: an
+      # unmatched -run is not an error, so the next badly-named test would be
+      # just as invisible. Measured 2026-09-10 with all three DSNs set, one
+      # tree, one flag varied: filtered 13s, unfiltered with -p 1 31s, against
+      # this step's 900s timeout.
+      #
+      # -p 1 is not optional once the filter is gone. testutil's
+      # CleanupPostgresTestData issues an unqualified DELETE FROM over a list
+      # that includes workflow_instances, so database-backed packages running
+      # concurrently against one server delete each other's fixtures mid-test.
+      # That serialisation is part of the 31s above, not an addition to it.
       - name: Run plugin behavioral tests (all backends)
-        run: go test -count=1 -timeout=900s -run 'MultiBackend' ./plugins/...
+        run: go test -count=1 -p 1 -timeout=900s ./plugins/...
