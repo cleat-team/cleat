@@ -55,7 +55,18 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 
 	// Grab from "AND (workflow_instances.concurrency_key_hash" to the closing
 	// "))" that ends the NOT EXISTS arm.
-	extract := regexp.MustCompile(`(?s)AND \(workflow_instances\.concurrency_key_hash.*?workflow_instances\.id\)\)`)
+	// Requires the expires_at test, which is what distinguishes the DEFERRAL
+	// predicate from other clauses that also mention concurrency_key_hash.
+	//
+	// cleat#1186 added one: SQL Server's claim carries
+	// `AND (concurrency_key_hash IS NULL OR EXISTS (... k.workflow_id = ...id))`
+	// to require that a run holds its OWN key. That is a different question --
+	// "do I hold it" rather than "is it held by someone else, right now" -- and
+	// without this the guard counted it as a fifth copy in that file and failed.
+	// It failing was correct: two clauses that look alike and mean different
+	// things is exactly what it exists to notice. The fix is to say which one
+	// this test is about, not to loosen it.
+	extract := regexp.MustCompile(`(?s)AND \(workflow_instances\.concurrency_key_hash IS NULL\s*OR NOT EXISTS.*?ck\.expires_at.*?workflow_instances\.id\)\)`)
 
 	var canon string
 	var canonFrom string

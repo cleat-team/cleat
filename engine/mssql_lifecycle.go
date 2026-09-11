@@ -109,6 +109,55 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 
 	tqParam := s.buildTaskQueueParam()
 
+	// Acquire the keys BEFORE the claim, in the same transaction.
+	//
+	// cleat#1186. The predicate in the claim asks "does anybody ELSE hold this
+	// key"; when the answer is no for two runs wanting the same key, both pass
+	// and both would be claimed. Taking the key is what makes it exclusive.
+	//
+	// THIS IS THE THIRD SHAPE, and the divergence is deliberate. PostgreSQL does
+	// it in one statement with a data-modifying CTE; MySQL does it per candidate
+	// between its two phases because it has no RETURNING. SQL Server has neither
+	// data-modifying CTEs nor a way to feed OUTPUT back into the same statement,
+	// so the acquisition is a separate INSERT ... SELECT that runs first. The
+	// UPDATE below then claims only runs that hold their own key.
+	//
+	// ROW_NUMBER is not decoration. Two candidates wanting the SAME key in one
+	// INSERT ... SELECT would both be inserted and violate the primary key --
+	// SQL Server has no per-row "ignore this conflict", so the statement would
+	// FAIL rather than the loser losing gracefully. Deduping to one row per
+	// (key_hash, tenant_id) inside the select is what turns a contended batch
+	// into a winner and a non-claim. The ordering matches the claim's own
+	// (priority, created_at), so the run that would have been claimed first is
+	// the one that gets the key.
+	//
+	// UPDLOCK/ROWLOCK/READPAST on the candidate read is what makes this safe
+	// across workers: the rows are locked by this transaction before the insert
+	// and stay locked until commit, so no other claimer sits between its own
+	// read and write on them.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+		SELECT c.concurrency_key_hash, c.concurrency_key, c.id,
+		       DATEADD(second, @p5, SYSUTCDATETIME()), c.tenant_id
+		FROM (
+			SELECT w.id, w.tenant_id, w.concurrency_key, w.concurrency_key_hash,
+			       ROW_NUMBER() OVER (PARTITION BY w.concurrency_key_hash, w.tenant_id
+			                          ORDER BY w.priority ASC, w.created_at) AS rn
+			FROM workflow_instances w WITH (READPAST, UPDLOCK, ROWLOCK)
+			WHERE w.status IN ('ready', 'terminating')
+			  AND w.next_wake_at <= SYSUTCDATETIME()
+			  AND w.task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+			  AND w.tenant_id = @p4
+			  AND w.concurrency_key_hash IS NOT NULL
+			  AND NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+			                   WHERE ck.key_hash = w.concurrency_key_hash
+			                     AND ck.tenant_id = w.tenant_id)
+		) c
+		WHERE c.rn = 1
+	`, workerID, tqParam, limit, s.tenantID, int64(claimedKeyTTL.Seconds())); err != nil {
+		return nil, fmt.Errorf("claim workflows: acquire concurrency keys: %w", err)
+	}
+
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'running',
@@ -152,6 +201,34 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
                          AND ck.expires_at > SYSUTCDATETIME()
                          AND ck.workflow_id <> workflow_instances.id))
 			  AND tenant_id = @p4
+			  -- Holds its own key, or has none.
+			  --
+			  -- REDUNDANT WITH THE PREDICATE BELOW, and kept deliberately --
+			  -- both were falsified to find out which does the work, and the
+			  -- answer is "either, independently":
+			  --
+			  --   invert this clause  -> still 1 of 2 claimed (the predicate
+			  --                          excluded the loser, because the
+			  --                          INSERT above is a SEPARATE EARLIER
+			  --                          STATEMENT and the predicate sees it)
+			  --   disable the INSERT  -> 0 of 2 claimed (this clause excluded
+			  --                          both, since neither holds a key)
+			  --
+			  -- That asymmetry is why the three dialects are shaped
+			  -- differently. On PostgreSQL the candidates and the predicate are
+			  -- evaluated in ONE snapshot, so the predicate cannot see the
+			  -- acquisition and an explicit "is in the acquired set" test is
+			  -- load-bearing. Here it is not, because ordinary statement
+			  -- ordering already does it.
+			  --
+			  -- Kept anyway: it states the requirement rather than relying on
+			  -- the reader deducing it from statement order, and mutual
+			  -- exclusion is worth two independent enforcements.
+			  AND (workflow_instances.concurrency_key_hash IS NULL
+			       OR EXISTS (SELECT 1 FROM concurrency_keys k
+			                   WHERE k.key_hash = workflow_instances.concurrency_key_hash
+			                     AND k.tenant_id = workflow_instances.tenant_id
+			                     AND k.workflow_id = workflow_instances.id))
 			ORDER BY priority ASC, created_at
 			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
 		)
