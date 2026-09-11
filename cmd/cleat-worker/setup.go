@@ -2377,6 +2377,38 @@ func (w *Worker) scheduleLoop() {
 				// to weekly, real for a monthly schedule after a long outage.
 				idemKey := fmt.Sprintf("cron:%s:%s:%d", tenantID, sch.Name, scheduled.UTC().Unix())
 				runID, alreadyExisted, serr := schStore.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, idemKey, tenantID, 0)
+				if errors.Is(serr, engine.ErrIdempotencyKeyInputMismatch) {
+					// A DIFFERENT input under the same (schedule, instant) key.
+					// For an HTTP caller that is a refusal (cleat#1170): their
+					// key derivation does not capture something their requests
+					// distinguish, and replaying would hand them a run started
+					// with someone else's arguments.
+					//
+					// Here it is neither surprising nor the caller's mistake.
+					// The key is (schedule, tenant, scheduled instant) by
+					// design, so two workers racing one firing derive the same
+					// key -- and if the schedule's input was edited between
+					// their reads of the row, they present different payloads
+					// for the same firing. The contract this loop owes is ONE
+					// RUN PER INSTANT, and that run already exists.
+					//
+					// Treating it as an error would be worse than useless: the
+					// branch below leaves the schedule due, the retry reads the
+					// NEW input, and it mismatches the stored digest again --
+					// for as long as the key lives, which is 30 days. A
+					// schedule edited at the wrong moment would wedge.
+					// serr only. Setting alreadyExisted would ALSO fire the
+					// suppression log below, twice-counting the metric and
+					// printing an empty workflow_id -- this branch does not
+					// learn which run won.
+					//
+					// runID stays "", which ClaimDueSchedule already models:
+					// `last_run_id = CASE WHEN $5 = '' THEN last_run_id ELSE $5
+					// END` leaves the column alone rather than blanking it.
+					w.logger.InfoContext(w.ctx, "Scheduler: duplicate firing suppressed at admission; the schedule's input changed between two readings of the same firing", "worker_id", w.id, "schedule", sch.Name, "scheduled_at", scheduled.Format(time.RFC3339))
+					w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "schedule_duplicates_suppressed", 1)
+					serr = nil
+				}
 				if serr != nil {
 					// Deliberately NOT advancing. The schedule stays due and
 					// the next tick retries it, which is what at-least-once

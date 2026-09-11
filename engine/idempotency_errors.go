@@ -26,3 +26,22 @@ import "errors"
 // ambiguity first appears.
 var ErrIdempotencyKeyDefMismatch = errors.New(
 	"idempotency key already used to start a different workflow definition")
+
+// ErrIdempotencyKeyInputMismatch is returned when an idempotency key was already
+// used to start the SAME workflow definition with a DIFFERENT input.
+//
+// cleat#1170. The key matched, the definition matched, and the second request's
+// arguments were silently dropped: the caller got 200 with already_started and
+// a workflow id, and the run behind that id carries the FIRST request's input.
+// Nothing in the response says so, and nothing in the store records that a
+// second request was ever made -- which makes this quieter than the duplicate
+// execution idempotency keys exist to prevent.
+//
+// The remedy is the one cleat#1047 already chose for the definition, and the
+// argument carries over unchanged: this is one caller with one key namespace
+// they control, so a collision means their key derivation does not capture
+// something their requests distinguish. Refusing says so once, when the
+// ambiguity first appears. Replaying silently would hide it and would shift
+// behaviour under them later.
+var ErrIdempotencyKeyInputMismatch = errors.New(
+	"idempotency key already used to start the same workflow with a different input")

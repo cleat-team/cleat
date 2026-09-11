@@ -51,25 +51,53 @@ func TestEveryDialectRefusesAnIdempotencyKeyReusedForAnotherDefinition(t *testin
 			// the race path returned the other workflow's id even though the
 			// ordinary lookup refused it, which is the same defect reachable
 			// only under contention, where it is hardest to see.
-			sel := len(regexp.MustCompile(`SELECT workflow_id, def_name FROM idempotency_keys`).FindAllString(src, -1))
-			bare := len(regexp.MustCompile(`SELECT workflow_id FROM idempotency_keys`).FindAllString(src, -1))
-			if sel < 2 || bare != 0 {
-				t.Errorf("%s reads def_name on %d idempotency lookup(s) and still has %d "+
-					"that do not.\n\nBoth the ordinary lookup and the post-collision "+
-					"re-SELECT must read it. A path that does not cannot see a mismatch, "+
-					"so it passes the refusal assertion while behaving exactly as before.",
-					f, sel, bare)
+			// The column list is matched LOOSELY on purpose. It grew once
+			// already -- cleat#1170 added input_digest beside def_name -- and a
+			// pattern naming the exact list turns every future column into a
+			// red guard that says "def_name is missing" when it is not. What
+			// must hold is that each lookup reads BOTH discriminators and that
+			// no lookup reads neither.
+			lookups := regexp.MustCompile(`SELECT workflow_id([^`+"`"+`]*?)FROM idempotency_keys`).FindAllStringSubmatch(src, -1)
+			withDef, withDigest := 0, 0
+			for _, m := range lookups {
+				if strings.Contains(m[1], "def_name") {
+					withDef++
+				}
+				if strings.Contains(m[1], "input_digest") {
+					withDigest++
+				}
+			}
+			if len(lookups) < 2 || withDef < len(lookups) || withDigest < len(lookups) {
+				t.Errorf("%s has %d idempotency lookup(s); %d read def_name and %d read "+
+					"input_digest.\n\nBoth the ordinary lookup and the post-collision "+
+					"re-SELECT must read both. A path that reads neither cannot see a "+
+					"mismatch, so it passes the refusal assertion while behaving exactly "+
+					"as before (cleat#1047, cleat#1170).",
+					f, len(lookups), withDef, withDigest)
 			}
 			if n := strings.Count(src, "ErrIdempotencyKeyDefMismatch"); n < 2 {
-				t.Errorf("%s refuses on %d path(s), want both the ordinary lookup and the "+
-					"post-collision re-SELECT.", f, n)
+				t.Errorf("%s refuses a DEFINITION mismatch on %d path(s), want both the "+
+					"ordinary lookup and the post-collision re-SELECT.", f, n)
+			}
+			if n := strings.Count(src, "checkIdempotencyInput"); n < 2 {
+				t.Errorf("%s refuses an INPUT mismatch on %d path(s), want both the ordinary "+
+					"lookup and the post-collision re-SELECT.\n\ncleat#1047 shipped with "+
+					"only the first and CI caught it: the race path returned the other "+
+					"request's id even though the ordinary lookup refused it. cleat#1170 is "+
+					"the same shape one column over.", f, n)
 			}
 
-			if !regexp.MustCompile(`INTO idempotency_keys \(key_hash, workflow_id, expires_at, tenant_id, def_name\)`).MatchString(src) {
-				t.Errorf("%s does not WRITE def_name.\n\n"+
-					"Rows written without it read back NULL, which this fix treats as "+
-					"\"unknown, allow\" -- correct for rows predating the backfill, and "+
-					"silently disabling the check for every new row.", f)
+			ins := regexp.MustCompile(`INTO idempotency_keys \(([^)]*)\)`).FindStringSubmatch(src)
+			if ins == nil {
+				t.Fatalf("%s has no INSERT INTO idempotency_keys at all", f)
+			}
+			for _, col := range []string{"def_name", "input_digest"} {
+				if !strings.Contains(ins[1], col) {
+					t.Errorf("%s does not WRITE %s.\n\n"+
+						"Rows written without it read back NULL, which both checks treat as "+
+						"\"unknown, allow\" -- correct for rows predating the column, and "+
+						"silently disabling the check for every new row.", f, col)
+				}
 			}
 		})
 	}

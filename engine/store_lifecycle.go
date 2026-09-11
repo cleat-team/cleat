@@ -817,6 +817,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 	}
 	if idempotencyKey != "" {
 		keyHash := sha256.Sum256([]byte(idempotencyKey))
+		inputDigest := IdempotencyInputDigest(input)
 
 		// Check for existing idempotency key, within this tenant.
 		//
@@ -831,10 +832,11 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 		// 3.10.
 		var existingWfID string
 		var existingDef sql.NullString
+		var existingDigest sql.NullString
 		err := s.db.QueryRowContext(ctx,
-			`SELECT workflow_id, def_name FROM idempotency_keys
+			`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
 			 WHERE key_hash = $1 AND tenant_id = $2 AND expires_at > now()`,
-			keyHash[:], tenantID).Scan(&existingWfID, &existingDef)
+			keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
 		if err == nil {
 			// A hit must be for the SAME definition. NULL means the row predates
 			// cleat#1047's backfill or its workflow has been purged -- unknown
@@ -843,6 +845,9 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 			if existingDef.Valid && existingDef.String != defName {
 				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
 					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+			}
+			if err := checkIdempotencyInput(existingDigest, inputDigest); err != nil {
+				return "", false, err
 			}
 			return existingWfID, true, nil
 		}
@@ -862,10 +867,10 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 		// race where two requests arrive with the same key simultaneously.
 		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name)
-			 VALUES ($1, $2, now() + ($3 * INTERVAL '1 second'), $4, $5)
+			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name, input_digest)
+			 VALUES ($1, $2, now() + ($3 * INTERVAL '1 second'), $4, $5, $6)
 			 ON CONFLICT (key_hash, tenant_id) DO NOTHING`,
-			keyHash[:], runID, ttlSeconds, tenantID, defName)
+			keyHash[:], runID, ttlSeconds, tenantID, defName, inputDigest)
 		if err != nil {
 			return "", false, err
 		}
@@ -875,9 +880,9 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 			// Key was inserted concurrently — rollback and return the existing one.
 			_ = tx.Rollback()
 			err := s.db.QueryRowContext(ctx,
-				`SELECT workflow_id, def_name FROM idempotency_keys
+				`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
 				 WHERE key_hash = $1 AND tenant_id = $2 AND expires_at > now()`,
-				keyHash[:], tenantID).Scan(&existingWfID, &existingDef)
+				keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
 			if err != nil {
 				return "", false, err
 			}
@@ -888,6 +893,9 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 			if existingDef.Valid && existingDef.String != defName {
 				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
 					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+			}
+			if err := checkIdempotencyInput(existingDigest, inputDigest); err != nil {
+				return "", false, err
 			}
 			return existingWfID, true, nil
 		}

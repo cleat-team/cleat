@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -2563,6 +2564,80 @@ func TestAPIStartWorkflow_WithIdempotencyKey(t *testing.T) {
 	// Body is bytes.Buffer; no Close needed.
 	if resp["already_started"] != "true" {
 		t.Error("expected already_started=true in response")
+	}
+}
+
+// TestAPIStartWorkflow_RejectedIdempotencyKeyIs409 is cleat#1170's second half
+// and cleat#832's shape: a caller that reused a key badly has made a CLIENT
+// error, and it was reported as a server fault. 500 sends an operator to look
+// at cleat for a request cleat handled exactly right.
+//
+// Both refusals are covered, not just the new one. Fixing only the input case
+// would leave the definition case on 500 by omission -- standardising the wrong
+// answer at the moment the code path gained a second caller.
+func TestAPIStartWorkflow_RejectedIdempotencyKeyIs409(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantDetail string
+	}{
+		{"definition mismatch", engine.ErrIdempotencyKeyDefMismatch, "idempotency_key_definition_mismatch"},
+		{"input mismatch", engine.ErrIdempotencyKeyInputMismatch, "idempotency_key_input_mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := &mockStore{}
+			ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+				return []int{1}, nil
+			}
+			ms.startNewRunFn = func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
+				return "", false, fmt.Errorf("%w: detail", tc.err)
+			}
+
+			api := newTestAPIServer(ms)
+			req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(`{"input":{}}`))
+			req.Header.Set("Idempotency-Key", "idem-123")
+			w := httptest.NewRecorder()
+			api.handleStartWorkflow(w, req, "my-wf")
+
+			if w.Code != 409 {
+				t.Errorf("a refused idempotency key returned %d, want 409. A client error "+
+					"reported as a server fault sends an operator looking at cleat for a "+
+					"request cleat handled correctly (cleat#832).", w.Code)
+			}
+			var resp map[string]string
+			json.NewDecoder(w.Body).Decode(&resp)
+			if resp["detail"] != tc.wantDetail {
+				t.Errorf("detail = %q, want %q -- a client should be able to branch without "+
+					"parsing prose", resp["detail"], tc.wantDetail)
+			}
+			if resp["error"] == "" {
+				t.Error("the response carries no error message")
+			}
+		})
+	}
+}
+
+// TestAPIStartWorkflow_AnOrdinaryStoreErrorIsStill500 is the control for the
+// test above. Without it, "a refusal returns 409" is equally satisfied by
+// returning 409 for everything, which would report a genuine server fault as
+// the caller's fault -- the same defect pointing the other way.
+func TestAPIStartWorkflow_AnOrdinaryStoreErrorIsStill500(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return []int{1}, nil
+	}
+	ms.startNewRunFn = func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
+		return "", false, errors.New("connection refused")
+	}
+
+	api := newTestAPIServer(ms)
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(`{"input":{}}`))
+	req.Header.Set("Idempotency-Key", "idem-123")
+	w := httptest.NewRecorder()
+	api.handleStartWorkflow(w, req, "my-wf")
+
+	if w.Code != 500 {
+		t.Errorf("an ordinary store error returned %d, want 500", w.Code)
 	}
 }
 
