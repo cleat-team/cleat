@@ -184,6 +184,35 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	return packDurableCallResult(int(written), 0, 0)
 }
 
+// replayRetryAttempts consumes the call_attempt_failed events at the head of
+// the remaining history and reports how many attempts they account for.
+//
+// resume is true ONLY when the history ends on them -- attempts recorded with
+// no terminal call event after. Anything else (a terminal event follows, no
+// attempt events at all, a service/op mismatch) returns false and leaves the
+// record for replayCall, which already reports divergence with the better
+// message.
+func (s *execSession) replayRetryAttempts(ctx context.Context, service, operation string) (spent int64, firstStep int, resume bool) {
+	firstStep = -1
+	for s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		if rec.EventType != EventTypeCallAttemptFailed {
+			return spent, firstStep, false
+		}
+		if rec.Service != service || rec.Op != operation {
+			return spent, firstStep, false
+		}
+		if firstStep < 0 {
+			firstStep = rec.Step
+		}
+		if !s.advanceReplayStep(ctx, &rec) {
+			return spent, firstStep, false
+		}
+		spent++
+	}
+	return spent, firstStep, spent > 0
+}
+
 func (s *execSession) replayCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 
 	if s.engine.Metrics != nil {
@@ -353,7 +382,25 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 		maxAttempts = int64(ceiling)
 	}
 	if s.isReplay {
-		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+		spent, firstStep, resume := s.replayRetryAttempts(ctx, service, operation)
+		if !resume {
+			return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+		}
+		// History ended INSIDE the policy: attempts were recorded and no
+		// terminal call event follows, which happens exactly when the worker
+		// was lost while the policy was still running. Finish it from where it
+		// stopped rather than restarting it, which is what re-spent the
+		// caller's MaxAttempts (cleat#1145).
+		//
+		// The budget check below is not repeated: a policy that fitted on the
+		// first incarnation fits with fewer attempts left.
+		s.exitReplay()
+		if s.stopBeforeNewWork() {
+			return callSuspendSentinel
+		}
+		return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
+			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
+			nonRetryableErrorsJSON, responsePtr, responseMaxLen, spent, firstStep)
 	}
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
@@ -376,14 +423,14 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	}
 	return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
 		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
-		nonRetryableErrorsJSON, responsePtr, responseMaxLen)
+		nonRetryableErrorsJSON, responsePtr, responseMaxLen, 0, -1)
 }
 
 func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	service, operation, requestJSON string,
 	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
 	nonRetryableErrorsJSON string,
-	responsePtr, responseMaxLen uint32) int64 {
+	responsePtr, responseMaxLen uint32, attemptsSpent int64, resumeStep int) int64 {
 
 	// Parse non-retryable error patterns.
 	//
@@ -424,7 +471,22 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	// key. That is the intent: a retry of a call that may already have been
 	// performed is exactly the case a key exists to collapse.
 	retryStep := s.stepCount
-	for attempt := int64(1); attempt <= maxAttempts; attempt++ {
+	if resumeStep >= 0 {
+		// Resuming a policy a crash interrupted: keep the step the FIRST
+		// incarnation used, so every attempt across every incarnation still
+		// carries one idempotency key. Without this the key changes at exactly
+		// the moment a duplicate is most likely.
+		retryStep = resumeStep
+	}
+
+	// Attempts spent before this incarnation, read from the recorded
+	// call_attempt_failed events by the replay path above. Starting at 1
+	// unconditionally is what made MaxAttempts a per-incarnation bound: a
+	// 3-attempt policy crashed mid-backoff made four real calls, measured
+	// against a control of three (cleat#1145). A caller's MaxAttempts is a
+	// bound on how many times a side effect may be attempted, and a crash is
+	// not consent to exceed it.
+	for attempt := attemptsSpent + 1; attempt <= maxAttempts; attempt++ {
 		resp, callErr := s.callService(ctx, service, operation, requestJSON, retryStep)
 
 		if callErr == nil {
@@ -465,6 +527,21 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 					attribute.String("operation", operation),
 				)
 			}
+
+			// Record the spent attempt BEFORE the backoff, because the backoff
+			// is where the worker is lost. Recorded only when another attempt
+			// follows: the final failure falls out of this loop and is carried
+			// by the terminal call event below, so a history never ends with an
+			// attempt event unless the run was interrupted -- which is the
+			// signal the replay path reads (cleat#1145).
+			s.recordEvent(EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeCallAttemptFailed,
+				Service:   service,
+				Op:        operation,
+				Attempt:   int(attempt),
+				Err:       callErr.Error(),
+			})
 
 			// Exponential backoff using host time (not DurableSleep).
 			//

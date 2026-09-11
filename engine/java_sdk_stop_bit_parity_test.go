@@ -283,7 +283,17 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// Note the pattern: the message below suggests
 	// `grep -rn "stopBeforeNewWork()"`, which also matches the function's own
 	// declaration and returns 18. The count here is call SITES.
-	const stopSitesOn20260904 = 17
+	// 18 since cleat#1145: DurableCallWithRetry consults it a SECOND time, on
+	// the path that resumes a retry policy a crash interrupted. Resuming runs
+	// the remaining attempts, which is new work, so it has to be refusable in a
+	// defer segment exactly as the fresh path is.
+	//
+	// The other side was checked rather than assumed. Java needs NO new method:
+	// this is a second site for cleat_call_with_retry, which the Java SDK
+	// already declares and already guards -- javaCallsTheHostCanRefuse covers
+	// the CALL, not the site. A count of sites and a list of methods are
+	// different things, and this is the case that separates them.
+	const stopSitesOn20260904 = 18
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

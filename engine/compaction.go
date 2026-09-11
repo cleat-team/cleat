@@ -93,6 +93,7 @@ const (
 	EventCodePollChild             = 32
 	EventCodeAdminAction           = 33
 	EventCodeUpdateReceived        = 34
+	EventCodeCallAttemptFailed     = 36
 	EventCodeUpdateCompleted       = 35
 )
 
@@ -102,6 +103,7 @@ const (
 
 var eventTypeToCode = map[EventType]int{
 	EventTypeCall:                  EventCodeCall,
+	EventTypeCallAttemptFailed:     EventCodeCallAttemptFailed,
 	EventTypeAwaitSignals:          EventCodeAwaitSignals,
 	EventTypeSignalReceived:        EventCodeSignalReceived,
 	EventTypeDefer:                 EventCodeDefer,
@@ -139,6 +141,7 @@ var eventTypeToCode = map[EventType]int{
 
 var codeToEventType = map[int]EventType{
 	EventCodeCall:                  EventTypeCall,
+	EventCodeCallAttemptFailed:     EventTypeCallAttemptFailed,
 	EventCodeAwaitSignals:          EventTypeAwaitSignals,
 	EventCodeSignalReceived:        EventTypeSignalReceived,
 	EventCodeDefer:                 EventTypeDefer,

@@ -11370,3 +11370,74 @@ the SQL while still passing three arguments, so the test went red on
 `pq: could not determine data type of parameter $2 (42P18)` — a red for the wrong reason, which is
 the outcome the "read *why* it failed" rule exists to catch. The mutation was rewritten to restore
 the pre-fix statement exactly.
+
+---
+
+### 3.320 A crash mid-retry granted a fresh MaxAttempts, because nothing was recorded until the call finished — ✅ **FIXED 2026-09-11** (cleat#1145)
+
+The host retry loop recorded an event only when the call *finished*. A failed attempt persisted
+nothing, so a worker lost mid-backoff replayed into a step with no history, restarted the policy at
+attempt 1, and spent the caller's whole budget a second time. `MaxAttempts` bounded attempts **per
+incarnation**, not per workflow, and a run that crashed repeatedly was bounded by nothing.
+
+Measured on the port harness before the fix, with the control that makes the number readable:
+
+| | attempts | crash | calls |
+|---|---:|---|---:|
+| control | 3 | no | **3** |
+| probe | 3 | mid-backoff | **4** |
+
+The unit test reproduces that exact pair, and its falsification message prints `Total across both
+incarnations: 4`.
+
+#### The fix is one event, and the constraint that shaped it is not in the issue
+
+`EventTypeCallAttemptFailed` is recorded before each backoff — only when another attempt follows, so
+a history ends on one **only** when the run was interrupted. That is the signal replay reads.
+
+The issue proposed "record the failed attempt" and stopped there. Three properties of this engine
+decide what that can mean, and none is obvious from the call site:
+
+* **`recordEvent` advances `stepCount`, and replay is positional** (`s.history[s.stepCount]`, then
+  `advanceReplayStep` increments). One event per step. A new event therefore shifts every
+  subsequent step in *new* histories — harmless, because old histories are replayed positionally
+  against themselves and never compared across versions, but it rules out any "extra event on the
+  same step" design.
+* **The compaction codec is a pair of exhaustive maps**, so a new type needs a code in both or it
+  round-trips as unknown.
+* **Attempts deliberately share one step** so every attempt carries one idempotency key. Resuming
+  therefore has to carry the *first* incarnation's step, or the key changes at exactly the moment a
+  duplicate is most likely. `freshCallWithRetry` takes `resumeStep` for that reason.
+
+#### Three guards caught what the tests did not
+
+The suite passed and then three existing guards failed — each about the *completeness* of adding an
+event type, which is precisely what a behavioural test cannot see:
+
+| guard | what it caught |
+|---|---|
+| `TestTheCarrierAuditCoversEveryEventTypeConstant` | the new type was in `eventTypeToCode` but in no audit list, so no field was checked against its payload arm |
+| `TestEveryEventRecordFieldTheDatabasePayloadMustCarryDoesCarry` | `Attempt` was carried unconditionally rather than guarded on non-zero |
+| `TestTheRequiredJavaGuardsCoverEveryHostStopSite` | the resume path adds an 18th `stopBeforeNewWork()` site |
+
+The third is the interesting one, and it is a case its own comment did not anticipate: the new site
+is a **second site for a call the Java SDK already guards**. Java needs no new method, because
+`javaCallsTheHostCanRefuse` covers the *call*, not the *site*. A count of sites and a list of
+methods are different things, and this is the case that separates them — recorded at the constant.
+
+#### Falsification
+
+Passing `0` instead of the spent count reddens both tests: *"a crash after attempt 1 of a 3-attempt
+policy made 3 further calls, want 2 — total across both incarnations: 4"*, which is the field
+measurement reproduced in a unit test.
+
+**The first attempt at that mutation did not compile** — removing the value left `spent` unused, and
+the filtered output printed nothing, which reads exactly like a pass. Caught by reading the
+unfiltered tail. The mutation was rewritten to keep the tree compiling (`_ = spent`), which is the
+repair CLAUDE.md prescribes for exactly this.
+
+#### What this does not change
+
+The **wait** is still worker-local (§3.317, cleat#1111): a resumed policy fires immediately rather
+than re-waiting the remainder of its backoff. That was a decision and it stands. This changes only
+which attempt it resumes at.
