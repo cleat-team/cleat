@@ -544,7 +544,6 @@ var pythonUnboundBaseline = []string{
 	"cleat_complete",
 	"cleat_poll_work",
 
-
 	// Deliberately unbindable. See docs/determinism.md, "Why there is no
 	// RegisterQueryHandler" -- no engine version ever routed an external query
 	// to it. Every SDK carries a comment saying it is absent on purpose.
