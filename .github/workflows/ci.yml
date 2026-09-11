@@ -188,6 +188,21 @@ jobs:
       - name: Conditional-skip guard
         run: scripts/check-skips.sh
 
+      # A test double that never reads the parameter its test is named after
+      # cannot fail for the reason the test exists. That is not hypothetical:
+      # reprocess never read Idempotency-Key (cleat#1167), and the two tests
+      # asserting idempotency passed on the broken code because their double
+      # returned "already started" whatever it was handed. Sabotaging the start
+      # path -- the one that WORKED -- left them green too.
+      #
+      # This is a ratchet over a baseline, not a defect detector: some flagged
+      # doubles ignore the argument deliberately, and the script's header says
+      # which. It also cannot see a double whose test is named for the concept
+      # rather than the parameter, so it does not replace sabotaging the read
+      # and running the suite. CONTRIBUTING.md carries that procedure.
+      - name: Blind test-double guard
+        run: scripts/check-blind-doubles.sh
+
       # Added by WS-1 rather than WS-3, who own this file, because an unwired
       # guard is worse than none -- it reads as coverage nobody has. Said here
       # rather than only in the PR, per WORKSTREAM.md's protocol for this file.

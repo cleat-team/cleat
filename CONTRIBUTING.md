@@ -285,6 +285,77 @@ cd packages/cleat-as && npm test
 > MySQL, and SQL Server configurations. The compose file defines all three
 > database services for local multi-backend development.
 
+## Proving a test can fail
+
+A passing test is evidence of nothing until you have seen it fail. Two specific
+habits, both of which came out of real defects in this repo.
+
+### Sabotage the read
+
+**To find out whether a parameter is guarded, break it and run the suite.**
+Replace the place the value is read with a constant, run the package, and see
+whether anything goes red:
+
+```go
+idempotencyKey := "" // was r.Header.Get("Idempotency-Key")
+```
+
+If nothing fails, that parameter is unguarded — regardless of how many tests
+mention it, and regardless of what they are called. This is the only check here
+with no blind spot, because it asks the code rather than the names.
+
+It is not hypothetical. `POST /api/dead-letters/{id}/reprocess` passed the empty
+string where `StartNewRun` takes an idempotency key, so an operator retry after a
+lost response re-drove work that had already failed partway (cleat#1167). Two
+tests asserted idempotency and both passed on the broken code. Sabotaging the
+start path — the one that *worked* — left them green as well, so "the header is
+read at all" was under test nowhere in the package.
+
+Run over every parameter a handler reads, the same method found that four of the
+seven `/api/workflows` list filters were guarded by nothing (cleat#1248), while a
+test named `TestTheTargetedFiltersReachTheStore` covered exactly three of them.
+
+Beware the cheap proxy. "Is this parameter mentioned in a test file?" answered
+**13 of 14 covered** for that same API. Sabotage answered 3 of 7 for the subset
+it was asked about. The metric that is easy to compute reports close to the
+opposite of the truth.
+
+### A double that ignores an argument cannot see it
+
+**Test doubles should record what they were handed**, not return a canned answer
+regardless of it. This is blind:
+
+```go
+ms.startNewRunFn = func(_ context.Context, runID, defName string, defVersion int,
+    input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
+    return "wf-existing", true, nil   // "already started", whatever it is given
+}
+```
+
+A test driving that asserts the handler *renders* the already-started branch,
+never that anything can reach it.
+
+Model the constraint the real thing enforces, and keep what you were passed.
+`keyedRunStarter` in `cmd/cleat-worker/reprocess_idempotency_test.go` is the
+worked example: `idempotency_keys` is `PRIMARY KEY (key_hash, tenant_id)`, so a
+repeated key returns the original run, and every key it receives is appended to a
+slice the test asserts on. Dropping the header then fails an assertion instead of
+sailing past one.
+
+One detail worth copying: treat an empty token as the **absence** of a token,
+never as a token equal to `""`. Otherwise two callers who both send nothing
+collide.
+
+`scripts/check-blind-doubles.sh` ratchets this — it fails on a *new* double that
+never reads a parameter its test is named after. It is a prompt to look, not a
+verdict: some doubles ignore an argument on purpose, and
+`TestGetCompactionCandidates_LimitEnforcement` is one (it returns three
+candidates for a limit of two precisely so the assertion can prove the wrapper
+truncates). Entries in `scripts/blind-doubles-baseline.txt` are not a to-do list.
+Its blind spot is the reason the sabotage habit above is not optional: a double
+whose test is named for the *concept* rather than the parameter is invisible to
+it.
+
 ## Svelte UI dev setup
 
 The web UI is a Svelte 5 application located in the `web/` directory. It
