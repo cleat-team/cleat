@@ -1266,8 +1266,8 @@ func (w *Worker) dispatchLoop() {
 		w.Metrics.RecordConcurrencyLimit(w.ctx, int64(state.DynamicConcurrency))
 		w.Metrics.SetMemoryPressure(w.ctx, state.Pressure)
 		w.Metrics.SetScalingPressure(w.ctx, state.ScalingPressure)
-		for defName, bytes := range w.memoryController.DefEstimates() {
-			w.Metrics.RecordWorkflowMemoryEstimate(w.ctx, defName, bytes)
+		for key, bytes := range w.memoryController.DefEstimates() {
+			w.Metrics.RecordWorkflowMemoryEstimate(w.ctx, key.tenantID, key.defName, bytes)
 		}
 		w.Metrics.SetQueueDepth(w.ctx, state.QueueDepth)
 		updateThroughputGauges()
@@ -1481,7 +1481,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 					// tenant's store as unavailable with more context.
 					memStore = nil
 				}
-				w.memoryController.RecordWorkflowMemory(context.Background(), memStore, wf.DefName, delta)
+				w.memoryController.RecordWorkflowMemory(context.Background(), memStore, wf.TenantID, wf.DefName, delta)
 			}
 		}
 	}()
@@ -2523,7 +2523,7 @@ func (w *Worker) memoryReloadLoop() {
 		case <-ticker.C:
 			w.healthTracker.recordRun("memory_reload")
 			mrStart := time.Now()
-			if err := w.memoryController.LoadEstimates(w.ctx); err != nil {
+			if err := w.memoryController.LoadEstimates(w.ctx, w.storeTenantID); err != nil {
 				w.logger.ErrorContext(w.ctx, "memory reload error", "worker_id", w.id, "error", err)
 				w.Metrics.RecordBackgroundLoop(w.ctx, "memory_reload", "error")
 			} else {

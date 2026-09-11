@@ -1009,7 +1009,7 @@ func main() {
 	monitor.logger = logger
 	mc := NewMemoryController(monitor, store, workerID, *concurrency, *memorySoftLimit, *memoryHardLimit)
 	mc.logger = logger
-	if err := mc.LoadEstimates(ctx); err != nil {
+	if err := mc.LoadEstimates(ctx, defaultTenantID); err != nil {
 		logger.WarnContext(context.Background(), "failed to load memory estimates", "worker_id", workerID, "error", err)
 	}
 	w.memoryController = mc

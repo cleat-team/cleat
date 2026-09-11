@@ -48,7 +48,7 @@ func TestAMemorySampleIsPersistedThroughTheWorkflowsOwnTenantStore(t *testing.T)
 	mc := newTestController(newTestMonitor(), 10, 0.80, 0.95)
 	mc.store = controllerStore
 
-	mc.RecordWorkflowMemory(context.Background(), tenantStore, "wf-of-another-tenant", 4*1024*1024)
+	mc.RecordWorkflowMemory(context.Background(), tenantStore, testTenant, "wf-of-another-tenant", 4*1024*1024)
 
 	// The persist is deliberately asynchronous so a slow write cannot delay a
 	// workflow, so this waits on the observable effect rather than sleeping a
@@ -95,7 +95,7 @@ func TestAMemorySampleFallsBackToTheControllerStore(t *testing.T) {
 		},
 	}
 
-	mc.RecordWorkflowMemory(context.Background(), nil, "wf-single-tenant", 1024)
+	mc.RecordWorkflowMemory(context.Background(), nil, testTenant, "wf-single-tenant", 1024)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
