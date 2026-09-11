@@ -45,19 +45,47 @@ import (
 // transaction-local scope and would leak to the next borrower of a pooled
 // connection. Both are left untouched rather than half-covered.
 func (a *SQLDBAdapter) tenantTx(ctx context.Context) (*sql.Tx, error) {
-	if a.Dialect != plugin.DialectPostgres {
+	return beginTenantTx(ctx, a.DB, a.Dialect, nil)
+}
+
+// beginTenantTx is the gate itself, shared by both plugin.PluginDB
+// implementations. cleat#1285.
+//
+// It is a free function rather than a method because there are TWO adapters
+// over the pool -- SQLDBAdapter and ReadOnlyDB -- and #1280 scoped only the
+// first. That gap was not a leak but a hard failure: a read-only plugin
+// reading a TenantScoped table got
+//
+//	cleat.tenant_id is not set -- tenant context required for RLS-scoped query
+//
+// even with a tenant in the request context, because nothing set the value
+// its policy filters on. Keeping one implementation is what stops the two
+// from drifting again.
+//
+// opts is passed through to BeginTx so ReadOnlyDB can keep its read-only
+// transaction; nil gives the default read-write.
+//
+// Returns (nil, nil) when no scoping applies -- a dialect without row-level
+// security, or a context with no tenant. Both are ordinary states, not
+// errors: host calls and background loops legitimately have no tenant, and
+// scoping them to the zero UUID would match nothing and read as an empty
+// table.
+func beginTenantTx(ctx context.Context, db *sql.DB, dialect plugin.Dialect, opts *sql.TxOptions) (*sql.Tx, error) {
+	if dialect != plugin.DialectPostgres {
 		return nil, nil
 	}
 	tid, ok := tenantctx.From(ctx)
 	if !ok {
 		return nil, nil
 	}
-	tx, err := a.DB.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 	// `true` is the is_local flag: the setting reverts when this transaction
-	// ends, so it cannot follow the connection back into the pool.
+	// ends, so it cannot follow the connection back into the pool. It is also
+	// what makes this legal inside a READ ONLY transaction, where a
+	// session-level SET would not be.
 	if _, err := tx.ExecContext(ctx,
 		`SELECT set_config('cleat.tenant_id', $1, true)`, tid.String()); err != nil {
 		_ = tx.Rollback()

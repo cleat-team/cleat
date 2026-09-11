@@ -24,9 +24,14 @@ type ReadOnlyDB struct {
 var _ plugin.PluginDB = (*ReadOnlyDB)(nil)
 
 func (r *ReadOnlyDB) Begin(ctx context.Context) (plugin.PluginTx, error) {
-	tx, err := r.Inner.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("readOnlyDB begin tx: %w", err)
+		return nil, fmt.Errorf("readOnlyDB begin tenant-scoped tx: %w", err)
+	}
+	if tx == nil {
+		if tx, err = r.Inner.BeginTx(ctx, &sql.TxOptions{ReadOnly: true}); err != nil {
+			return nil, fmt.Errorf("readOnlyDB begin tx: %w", err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, "SET TRANSACTION READ ONLY"); err != nil {
 		tx.Rollback()
@@ -40,16 +45,36 @@ func (r *ReadOnlyDB) Exec(ctx context.Context, query string, args ...any) (int64
 }
 
 func (r *ReadOnlyDB) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
-	rows, err := r.Inner.QueryContext(ctx, plugin.Rebind(query, r.Dialect), args...)
+	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
-	return &sqlRowsWrapper{rows: rows}, nil
+	if tx == nil {
+		rows, err := r.Inner.QueryContext(ctx, plugin.Rebind(query, r.Dialect), args...)
+		if err != nil {
+			return nil, err
+		}
+		return &sqlRowsWrapper{rows: rows}, nil
+	}
+	rows, err := tx.QueryContext(ctx, plugin.Rebind(query, r.Dialect), args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &sqlRowsWrapper{rows: rows, done: tx.Commit}, nil
 }
 
 func (r *ReadOnlyDB) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
-	row := r.Inner.QueryRowContext(ctx, plugin.Rebind(query, r.Dialect), args...)
-	return &rowScanner{row: row}
+	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return &rowScanner{err: err}
+	}
+	if tx == nil {
+		row := r.Inner.QueryRowContext(ctx, plugin.Rebind(query, r.Dialect), args...)
+		return &rowScanner{row: row}
+	}
+	row := tx.QueryRowContext(ctx, plugin.Rebind(query, r.Dialect), args...)
+	return &rowScanner{row: row, done: tx.Commit}
 }
 
 func (r *ReadOnlyDB) Ping(ctx context.Context) error {
