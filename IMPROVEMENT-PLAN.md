@@ -11355,6 +11355,26 @@ errors are checked. The rows it had already leaked were purged and counted — 1
 content row per dialect for the first content, 2 and 1 for the third, and **zero for the second on
 every dialect**, which is independent confirmation that the fix collected it.
 
+**And it passed locally on three dialects while failing CI on two, which is the sharper half.**
+`NewPluginTestBackends` opens a connection and applies *nothing*; the schema a test gets is
+whatever `plugin.RunMigrations` builds plus whatever the database already had. `cleanupExpired`'s
+phase 1 joins `workflow_instances` — an **engine** table, because a plugin runs inside the
+engine's database — which no plugin migration creates. My local MySQL and SQL Server had it from
+earlier engine-suite runs. CI's are fresh, and both failed at phase 1:
+
+    Error 1146 (42S02): Table 'cleat.workflow_instances' doesn't exist
+    mssql: Invalid object name 'workflow_instances'.
+
+PostgreSQL passed in both places because `TestDB` applies the schema and `MySQLTestDB` /
+`MSSQLTestDB` do not — an asymmetry invisible from the call site, which reads as one helper
+returning three equivalent backends. Fixed with `testutil.SetupMinimalSchema`, and **verified by
+reproducing the CI condition rather than by reasoning about it**: a fresh `cleat_bp` database on
+each of the three servers, where the pre-fix test fails on exactly mysql and mssql with exactly
+those two messages, and the fixed one passes twice in a row.
+
+**A fixture that depends on what an earlier test left behind is not a fixture**, and a local run
+cannot tell you it is doing that — the residue is invisible and it always helps.
+
 ### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
 
 `ReleaseConcurrencyKey` took only the key. Its statement carried `AND tenant_id` and no

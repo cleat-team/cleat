@@ -54,6 +54,19 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 			dialect := plugin.Dialect(be.Dialect)
 			p := &Plugin{dialect: dialect}
 
+			// The ENGINE schema as well as the plugin's own. cleanupExpired's
+			// phase 1 deletes from workflow_blob_refs by joining
+			// workflow_instances, which no plugin migration creates -- the
+			// blobstore runs inside the engine's database and reaches one of
+			// its tables. NewPluginTestBackends opens a connection and applies
+			// nothing, so a database that has only ever run plugin migrations
+			// fails at phase 1 with "Table 'workflow_instances' doesn't exist".
+			//
+			// It passed locally on all three dialects and failed in CI on two,
+			// because the local MySQL and SQL Server had the engine schema from
+			// earlier engine-suite runs and CI's are fresh. A fixture that
+			// depends on what a previous test left behind is not a fixture.
+			testutil.SetupMinimalSchema(t, be.DB, be.Dialect)
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("blobstore migrations on %s: %v", be.Name, err)
