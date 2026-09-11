@@ -94,7 +94,15 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
 		Reason: mysqlScopedByCandidateQuery,
 	},
-	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants#08db9d12c05e": {
+	// Re-made again at cleat#1186, which added the claimable-concurrency-key
+	// filter to this statement's WHERE clause. Unlike #1094 above, this one DOES
+	// change row selection, so the reason was re-checked rather than carried:
+	// the added predicate correlates the key to the candidate row's OWN tenant
+	// (ck.tenant_id = workflow_instances.tenant_id), so it can only ever remove
+	// rows from the result, never admit a row from a tenant this statement would
+	// not already have returned. The statement is still deliberately
+	// cross-tenant, and still gated on cleat_admin membership in Go.
+	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants#4d4c8656690d": {
 		SQL:    "select id from workflow_instances where status in ('ready', 'terminating') and",
 		Reason: mysqlDeliberatelyCrossTenant,
 	},

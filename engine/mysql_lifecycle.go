@@ -58,6 +58,12 @@ func (s *MySQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
 		WHERE status IN ('ready', 'terminating')
 		  AND next_wake_at <= NOW(6)
 		  AND task_queue IN (%s)
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > NOW(6)
+                         AND ck.workflow_id <> workflow_instances.id))
 		  AND tenant_id = ?
 	`, placeholders), args...).Scan(&n)
 	return n, err
@@ -82,6 +88,12 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		WHERE status IN ('ready', 'terminating')
 		  AND next_wake_at <= NOW(6)
 		  AND task_queue IN (%s)
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > NOW(6)
+                         AND ck.workflow_id <> workflow_instances.id))
 		  AND tenant_id = ?
 		ORDER BY priority ASC, created_at
 		LIMIT ?
@@ -183,6 +195,12 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		  AND next_wake_at <= NOW(6)
 		  AND sticky_worker_id = ?
 		  AND task_queue IN (%s)
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > NOW(6)
+                         AND ck.workflow_id <> workflow_instances.id))
 		  AND tenant_id = ?
 		ORDER BY priority ASC, created_at
 		LIMIT ?
@@ -326,6 +344,12 @@ func (s *MySQLStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID s
 		WHERE status IN ('ready', 'terminating')
 		  AND next_wake_at <= NOW(6)
 		  AND task_queue IN (%s)
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > NOW(6)
+                         AND ck.workflow_id <> workflow_instances.id))
 		ORDER BY priority ASC, created_at
 		LIMIT ?
 		FOR UPDATE SKIP LOCKED
