@@ -141,7 +141,33 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				return
 			}
 
-			rows, err := s.db.QueryContext(ctx, `
+			// One RLS-armed transaction per page, not s.db directly.
+			//
+			// cleat#1178: event_history has ENABLE + FORCE ROW LEVEL SECURITY
+			// and its policy is `tenant_id = cleat.assert_tenant_set()`, which
+			// RAISES the moment a candidate row is examined. A statement issued
+			// on s.db runs outside any transaction, so nothing has set
+			// cleat.tenant_id and this failed for ANY workflow that has events
+			// -- a wider blast radius than cleat#1177, which needed a chain with
+			// a successor.
+			//
+			// It was latent rather than live only because this method has no
+			// production caller; store_reachability_test.go lists it in
+			// storeUnreachedBaseline. Fixed rather than commented, so that
+			// wiring it up is not also a bug report.
+			//
+			// Per PAGE rather than one transaction around the whole stream: the
+			// consumer decides how fast it reads, and holding a transaction open
+			// across an unbounded channel send would pin a connection for as
+			// long as the reader takes. Paging already accepts that rows may
+			// change between pages -- LIMIT/OFFSET over ORDER BY step says so.
+			tx, err := s.beginTxWithRLS(ctx)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			rows, err := tx.QueryContext(ctx, `
 				SELECT step, event_type, service, operation, request, response, error,
 				       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 				       defer_description, defer_id, child_name, child_input, run_id, new_input,
@@ -155,6 +181,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				LIMIT $2 OFFSET $3
 			`, workflowID, pageSize, offset)
 			if err != nil {
+				_ = tx.Rollback()
 				errCh <- err
 				return
 			}
@@ -182,6 +209,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 					&promiseName, &promiseID, &promiseResult, &promiseError,
 					&createdAt); err != nil {
 					rows.Close()
+					_ = tx.Rollback()
 					errCh <- err
 					return
 				}
@@ -227,6 +255,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				case eventCh <- rec:
 				case <-ctx.Done():
 					rows.Close()
+					_ = tx.Rollback()
 					errCh <- ctx.Err()
 					return
 				}
@@ -234,6 +263,11 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 			rows.Close()
 
 			if err := rows.Err(); err != nil {
+				_ = tx.Rollback()
+				errCh <- err
+				return
+			}
+			if err := tx.Commit(); err != nil {
 				errCh <- err
 				return
 			}

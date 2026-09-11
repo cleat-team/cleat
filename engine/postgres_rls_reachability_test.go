@@ -218,10 +218,16 @@ type rlsFault struct{ pos, table, why string }
 // allowance is not inert: terminal_run.go:132 is now a perfectly ordinary line,
 // and an exemption still naming it would silently cover whatever statement
 // arrives there next.
-var knownRLSFaults = map[string]string{
-	"store_event_stream.go:144": "cleat#1178, StreamEventHistory reads event_history " +
-		"outside a transaction; latent because no shipped caller reaches it with RLS enforced",
-}
+// Empty, and that is the finding rather than a gap: cleat#1178's census found
+// exactly two, cleat#1177 fixed the live one, and StreamEventHistory -- the
+// latent one this entry covered -- now opens a transaction per page through
+// beginTxWithRLS. Its exemption was removed by this guard's own liveness check
+// rather than by anyone remembering, the same way terminal_run.go:132's was.
+//
+// An empty map is not a reason to delete the mechanism. The next statement
+// written on s.db against an RLS table is the case it exists for, and it will
+// be reported rather than exempted.
+var knownRLSFaults = map[string]string{}
 
 // receiversWithoutRLS are store types whose backends have no row-level
 // security, so a statement of theirs naming one of these tables is not a
