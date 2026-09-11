@@ -492,22 +492,10 @@ func (s *MSSQLStore) clearExpiredCompactionStateOnce(ctx context.Context, olderT
 func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM workflow_instances
-			WHERE id IN (
-				SELECT id FROM workflow_instances
-				WHERE status = 'dead_lettered'
-				  AND completed_at IS NOT NULL
-				  AND completed_at < @p1
-				  AND tenant_id = @p2
-				ORDER BY id
-				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
-			)
-		`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
+		n, err := s.deleteWorkflowsBatch(ctx, mssqlSelectDeadLetteredBatch, "delete dead-lettered workflows", olderThan)
 		if err != nil {
-			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
+			return totalDeleted, err
 		}
-		n, _ := result.RowsAffected()
 		totalDeleted += n
 		if n == 0 {
 			break
@@ -537,7 +525,7 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 func (s *MSSQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		n, err := s.deleteCompletedWorkflowsBatch(ctx, olderThan)
+		n, err := s.deleteWorkflowsBatch(ctx, mssqlSelectCompletedBatch, "delete completed workflows", olderThan)
 		if err != nil {
 			return totalDeleted, err
 		}
@@ -600,10 +588,10 @@ var mssqlDeleteByWorkflowPrefix = map[string]string{
 // failure reaches Go as an ordinary error and the batch would simply be lost
 // rather than replayed. Every other MSSQL path that opens a transaction is
 // wrapped the same way.
-func (s *MSSQLStore) deleteCompletedWorkflowsBatch(ctx context.Context, olderThan time.Time) (int64, error) {
+func (s *MSSQLStore) deleteWorkflowsBatch(ctx context.Context, selectSQL, label string, olderThan time.Time) (int64, error) {
 	var deleted int64
-	err := withRollbackGuaranteedRetry(ctx, "delete completed workflows", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		n, err := s.deleteCompletedWorkflowsBatchOnce(ctx, olderThan)
+	err := withRollbackGuaranteedRetry(ctx, label, mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		n, err := s.deleteWorkflowsBatchOnce(ctx, selectSQL, label, olderThan)
 		if err != nil {
 			return err
 		}
@@ -625,37 +613,58 @@ func (s *MSSQLStore) deleteCompletedWorkflowsBatch(ctx context.Context, olderTha
 // PostgreSQL batch in engine/db.go, which selects the batch first and deletes
 // against that fixed id set rather than re-evaluating the predicate per
 // statement.
-func (s *MSSQLStore) deleteCompletedWorkflowsBatchOnce(ctx context.Context, olderThan time.Time) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("delete completed workflows: begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	rows, err := tx.QueryContext(ctx, `
+// mssqlSelectCompletedBatch and mssqlSelectDeadLetteredBatch differ in one
+// line -- the status predicate -- and everything after the SELECT is shared.
+//
+// WRITTEN AS TWO CONSTANTS RATHER THAN ONE FORMAT STRING so no SQL is built at
+// run time, and passed to one batch function rather than copied into two, which
+// is the half of cleat#1265 this closes. The completed sweep's comment used to
+// cite the dead-letter sweep as its "verified reference" for the claim that
+// SQL Server cascades; neither was verified, and the citation is what made the
+// copy look supported. Two functions sharing a premise is how that happened,
+// so they now share the code instead.
+const mssqlSelectCompletedBatch = `
 		SELECT id FROM workflow_instances
 		WHERE status IN ('done', 'failed', 'terminated')
 		  AND completed_at IS NOT NULL
 		  AND completed_at < @p1
 		  AND tenant_id = @p2
 		ORDER BY id
-		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
-	`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
+		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY`
+
+const mssqlSelectDeadLetteredBatch = `
+		SELECT id FROM workflow_instances
+		WHERE status = 'dead_lettered'
+		  AND completed_at IS NOT NULL
+		  AND completed_at < @p1
+		  AND tenant_id = @p2
+		ORDER BY id
+		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY`
+
+func (s *MSSQLStore) deleteWorkflowsBatchOnce(ctx context.Context, selectSQL, label string, olderThan time.Time) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("delete completed workflows: select batch: %w", err)
+		return 0, fmt.Errorf("%s: begin: %w", label, err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, selectSQL,
+		sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
+	if err != nil {
+		return 0, fmt.Errorf("%s: select batch: %w", label, err)
 	}
 	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("delete completed workflows: scan: %w", err)
+			return 0, fmt.Errorf("%s: scan: %w", label, err)
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return 0, fmt.Errorf("delete completed workflows: rows: %w", err)
+		return 0, fmt.Errorf("%s: rows: %w", label, err)
 	}
 	rows.Close()
 
