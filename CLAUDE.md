@@ -554,6 +554,40 @@ Those three bracketed fields are what separate *the check ran and allowed it* fr
 looked*. A verdict column alone has no way to say "I did not run" — which is this whole section's
 subject, and the reason every trap in it reads as a pass.
 
+**And when a precondition cannot be established, the result is `UNMEASURED` — never a verdict, and
+never silence.** Printing preconditions beside the verdict is half of it; the other half is having
+somewhere honest to put a row whose preconditions failed. A verdict column with no such value forces
+every row into pass or fail, and an unrunnable check then reports the reassuring one.
+
+Paid for on 2026-09-11, auditing which child tables survive a retention sweep on SQL Server. The
+first run reported **4 of 4 clean**. Two of the six tables had failed to seed — one on a duplicate
+key, one on a NOT NULL column — and a table with no row in it counts zero afterwards for the same
+reason a correctly-cleaned one does:
+
+    workflow_promises          UNMEASURED (seed failed: duplicate key ...)
+    workflow_update_requests   UNMEASURED (seed failed: NULL into 'update_name' ...)
+    seeded and verified: 4 of 6
+
+Those two lines are the entire reason the number was not published. With the seeds repaired the
+answer was **6 of 6 orphaned** (cleat#1265) — the audit was wrong by a third, in the flattering
+direction, and nothing but the explicit `UNMEASURED` rows distinguished "clean" from "never looked".
+
+The same run then produced the mirror image: a sweep that deleted **0** rows, because the store was
+built on a plain pool that sets no session context, so every child "survived" trivially. That is why
+the shipped test asserts the **parent row is gone** before believing any child count. Two failure
+modes, opposite mechanisms, one observable — everything looks fine.
+
+Three rules follow, and the third is the one that is easy to skip:
+
+- **A check that cannot establish its precondition reports `UNMEASURED`**, with the reason, and is
+  excluded from the denominator rather than counted as a pass.
+- **State the denominator next to the verdict** — `6 of 6`, not `all clean`. A fraction whose
+  numerator and denominator both come from the same failed setup is visibly wrong; "all" is not.
+- **The remedy for a failed precondition is nearly always one more read, and the cost of skipping it
+  is not bounded by anything.** One extra `SELECT` against a published finding that was wrong by a
+  third; one re-read of `closingIssuesReferences` against a CI cycle spent "fixing" a PR that had
+  already parsed its keyword correctly.
+
 That remedy was paid for rather than thought up: cleat#1162 collected **three more empty greens in
 one sitting**, each from a different mechanism and none reporting anything wrong — a clean merge
 runs no pre-commit hook at all; `git reset --hard` silently reverted the test's own sandbox
