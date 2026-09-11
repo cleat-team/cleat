@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/plugin"
 )
 
@@ -48,7 +48,7 @@ func (a *SQLDBAdapter) tenantTx(ctx context.Context) (*sql.Tx, error) {
 	if a.Dialect != plugin.DialectPostgres {
 		return nil, nil
 	}
-	tid, ok := auth.TenantIDFromContext(ctx)
+	tid, ok := tenantctx.From(ctx)
 	if !ok {
 		return nil, nil
 	}
