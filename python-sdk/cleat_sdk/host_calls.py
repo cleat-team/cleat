@@ -160,6 +160,9 @@ try:
         durable_defer as _import_cleat_defer,
     )
     from wit_world.imports.durable_lifecycle import (
+        durable_defer_phase as _import_cleat_defer_phase,
+    )
+    from wit_world.imports.durable_lifecycle import (
         durable_poll_cancellation as _import_cleat_poll_cancellation,
     )
     from wit_world.imports.durable_lock import (
@@ -675,6 +678,27 @@ if not _USING_WASM:
     def _import_cleat_defer(desc: str) -> str:
         """Stub for WASM import ``(import "env" "cleat_defer") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError("cleat_defer can only be called within a cleat WASM runtime.")
+
+    def _import_cleat_defer_phase(on: bool) -> None:  # noqa: ARG001
+        """No-op stub for ``cleat_defer_phase`` off-WASM.
+
+        A NO-OP rather than a ``NotImplementedError``, unlike every other stub
+        in this block, and the difference is deliberate.
+
+        ``run_deferred`` is called directly by this SDK's own tests
+        (tests/test_defer.py, tests/test_call_outcomes.py), which run on
+        CPython with no host. Raising here would break them -- which is
+        precisely what happened in the other four SDKs when cleat#1155 added
+        this call: Rust needed a ``cfg`` gate, AssemblyScript an as-pect stub,
+        and Java a ``catch``. Three symptoms, one cause: a host call on a path
+        an SDK's unit tests reach fails wherever there is no WASM host.
+
+        Silence is safe for THIS call specifically because nothing reads its
+        result and it records no event. A guest that never reports the defer
+        phase gets the behaviour every language had before cleat#1155 -- the
+        pre-existing defect rather than a new one. It would be the wrong choice
+        for a stub whose return value the caller uses. cleat#1237.
+        """
 
 
 # -- 8. cleat_poll_cancellation ---------------------------------------------
