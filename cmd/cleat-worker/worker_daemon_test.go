@@ -60,6 +60,7 @@ type mockStore struct {
 	reapStaleInstancesFn               func(ctx context.Context, timeout time.Duration) (int, error)
 	getQueryStateFn                    func(ctx context.Context, workflowID, key string) (string, error)
 	listWorkflowsFn                    func(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error)
+	countWorkflowsFn                   func(ctx context.Context, filter engine.WorkflowFilter) (int, error)
 	getWorkflowByIDFn                  func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
 	validateVersionFn                  func(ctx context.Context, defName string, defVersion int) (bool, error)
 	setRoutingRuleFn                   func(ctx context.Context, workflowName string, targetVersion int, weight float64) error
@@ -3958,4 +3959,21 @@ func TestNoPendingUpdatesMeansNoWrites(t *testing.T) {
 // every existing test's PollChild answer at "running".
 func (m *mockStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
 	return 0, false, nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockStore) CountWorkflows(ctx context.Context, filter engine.WorkflowFilter) (int, error) {
+	if m.countWorkflowsFn != nil {
+		return m.countWorkflowsFn(ctx, filter)
+	}
+	// Delegating to this mock's own ListWorkflows keeps the count and the page
+	// from disagreeing. A mock whose total its list cannot support is a trap:
+	// it makes a paging bug look like a data bug.
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
 }

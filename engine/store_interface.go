@@ -230,6 +230,13 @@ type WorkflowStore interface {
 	// Supports pagination via Offset and Limit (default 100, max 1000).
 	ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error)
 
+	// CountWorkflows returns how many rows ListWorkflows would return for the
+	// same filter with no limit, so a caller can tell a full page from the end
+	// of the data. On the interface rather than behind a type assertion: a
+	// store that cannot answer this should fail to compile, not silently omit
+	// a total and leave the caller unable to tell which happened.
+	CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error)
+
 	// GetWorkflowByID returns a single workflow instance by ID.
 	//
 	// It returns THE ROW WITH THAT ID and does not follow a ContinueAsNew

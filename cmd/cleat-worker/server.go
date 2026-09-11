@@ -281,13 +281,65 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		InputContains: q.Get("input_contains"),
 		ErrorContains: q.Get("error_contains"),
 		Search:        q.Get("search"),
-		Limit:         100,
+		DefName:       q.Get("def_name"),
+		ErrorCode:     q.Get("error_code"),
+		IDPrefix:      q.Get("id_prefix"),
+	}
+
+	// Paging, mirroring handleGetInstanceEvents: both parameters read from the
+	// query, a server ceiling applied rather than assumed, and the total sent
+	// as a header.
+	//
+	// Before this, Limit was hard-coded to 100 and Offset was never read, so a
+	// tenant with more than 100 workflows saw 100 of them and nothing in the
+	// response distinguished that from having exactly 100 (cleat#1182). A cap
+	// pretending to be a default is worse than a small cap.
+	filter.Limit = 100
+	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 {
+		filter.Limit = v
+	}
+	if filter.Limit > 1000 {
+		filter.Limit = 1000
+	}
+	if v, err := strconv.Atoi(q.Get("offset")); err == nil && v >= 0 {
+		filter.Offset = v
+	}
+
+	// A malformed time is refused rather than ignored. Dropping it would widen
+	// the window silently, which for a time-bounded query means returning rows
+	// the caller asked not to see.
+	for _, tf := range []struct {
+		param string
+		dst   *time.Time
+	}{
+		{"started_after", &filter.StartedAfter},
+		{"started_before", &filter.StartedBefore},
+	} {
+		raw := q.Get(tf.param)
+		if raw == "" {
+			continue
+		}
+		t, tErr := time.Parse(time.RFC3339, raw)
+		if tErr != nil {
+			s.writeError(w, 400, fmt.Sprintf("%s must be RFC3339, e.g. 2026-09-10T14:00:00Z: %v", tf.param, tErr))
+			return
+		}
+		*tf.dst = t
+	}
+
+	total, err := st.CountWorkflows(r.Context(), filter)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
 	}
 	workflows, err := st.ListWorkflows(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
+	// Header rather than an envelope: the body stays a bare array, so no
+	// existing caller breaks. handleGetInstanceEvents established this shape.
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	if workflows == nil {
 		workflows = []engine.WorkflowInstance{}
 	}

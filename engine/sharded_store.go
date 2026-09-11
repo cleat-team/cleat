@@ -622,16 +622,34 @@ func (s *ShardedStore) ListWorkflows(ctx context.Context, filter WorkflowFilter)
 		}
 		all = append(all, workflows...)
 	}
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 100
-	} else if limit > 1000 {
-		limit = 1000
-	}
-	if len(all) > limit {
+	if limit := clampWorkflowListLimit(filter.Limit); len(all) > limit {
 		all = all[:limit]
 	}
 	return all, nil
+}
+
+// CountWorkflows sums the per-shard counts.
+//
+// Summing IS the right answer for a count, and it is worth saying why when the
+// listing above is not equally sound: every row lives on exactly one shard, so
+// the counts partition cleanly. The LISTING does not -- it concatenates
+// per-shard pages without merging them by sort order, and passes the same
+// Offset to every shard, so on more than one shard it is neither globally
+// ordered nor correctly paged. That is pre-existing and is not made worse here;
+// it is filed rather than quietly carried.
+func (s *ShardedStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	total := 0
+	for _, shard := range shards {
+		n, err := shard.Store.CountWorkflows(ctx, filter)
+		if err != nil {
+			return 0, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // GetWorkflowByID tries each shard (workflow could be on any shard).
