@@ -93,8 +93,22 @@ var (
 	// denies every signal until an operator makes a second call per workflow.
 	// It is a per-deployment decision, not yet a safe default.
 	// IMPROVEMENT-PLAN 3.15.
-	requireSignalAuth       = flag.Bool("require-signal-auth", false, "Require signal authorization: checks caller identity against target's allowed_signals (set it with PUT /api/workflows/{id}/allowed-signals). Off by default: workflows start with an empty list, so enabling this denies every signal until callers are granted")
-	generateAPIKeyFor       = flag.String("generate-api-key", "", "Generate a new API key for the given tenant UUID and exit")
+	requireSignalAuth = flag.Bool("require-signal-auth", false, "Require signal authorization: checks caller identity against target's allowed_signals (set it with PUT /api/workflows/{id}/allowed-signals). Off by default: workflows start with an empty list, so enabling this denies every signal until callers are granted")
+	generateAPIKeyFor = flag.String("generate-api-key", "", "Generate a new API key for the given tenant UUID and exit")
+	// --create-tenant is the other half of --generate-api-key, which mints a key
+	// for a tenant UUID it does not create. admin.tenant_api_keys.tenant_id
+	// REFERENCES admin.tenants(tenant_id), so minting against an id that does not
+	// exist fails on the foreign key -- and until this flag there was no command
+	// that made one. A test harness wanting a second tenant had to INSERT INTO
+	// admin.tenants directly, which puts raw SQL underneath the assertions that
+	// exist to test tenant isolation (cleat#1114).
+	//
+	// PostgreSQL only, and loudly: auth.CreateTenant refuses on MySQL and SQL
+	// Server rather than emitting PostgreSQL SQL at them, because RETURNING has
+	// no MySQL equivalent and SQL Server spells it OUTPUT. That refusal is the
+	// correct behaviour and this flag surfaces it verbatim.
+	createTenantNamed       = flag.String("create-tenant", "", "Create a tenant with the given name, print its UUID, and exit (PostgreSQL only)")
+	createTenantDisplayName = flag.String("tenant-display-name", "", "Display name for --create-tenant (defaults to the name)")
 	maxBodySize             = flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
 	httpReadTimeout         = flag.Duration("http-read-timeout", 30*time.Second, "HTTP read timeout")
 	httpWriteTimeout        = flag.Duration("http-write-timeout", 60*time.Second, "HTTP write timeout")
