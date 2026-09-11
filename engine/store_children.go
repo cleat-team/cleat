@@ -166,11 +166,27 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (Child
 	if err != nil {
 		return ChildOutcome{}, fmt.Errorf("get child result: %w", err)
 	}
-	if status == "failed" {
+	if status == "failed" || status == "dead_lettered" {
+		// dead_lettered is terminal and was missing here until cleat#1213,
+		// while GetChildCount forty lines down has always excluded all three
+		// of ('done', 'failed', 'dead_lettered'). Two definitions of terminal
+		// in one file, and only this one decides whether a parent stops
+		// waiting -- so a parent awaiting a child that exhausted its retries
+		// suspended, was re-claimed on its next_wake_at, replayed, got the
+		// same non-answer and suspended again, for the life of the deployment.
+		//
+		// Reported as FAILED rather than left to a later retry, and the reason
+		// is that the alternative does not exist: nothing pushes a parent
+		// awake. executor.go names "child completion via wakeParent"; there is
+		// no wakeParent in this repo. The only wake is the timeout, so "the
+		// parent waits for the child to be retried" and "the parent replays
+		// forever" are the same behaviour, and only one of them is a story.
+		//
 		// A failed run's `result` column is never written -- migration 053
 		// routes finalize's payload to `error_msg` on this branch -- so
 		// returning the result here would return the '{}' from the COALESCE
 		// above, which is exactly the empty success cleat#1115 is about.
+		// MoveToDeadLetterQueue writes its reason to the same column.
 		return ChildOutcome{Completed: true, Failed: true, Error: errMsg.String}, tx.Commit()
 	}
 	if status == "done" {
