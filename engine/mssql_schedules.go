@@ -488,25 +488,120 @@ func (s *MSSQLStore) clearExpiredCompactionStateOnce(ctx context.Context, olderT
 	return totalCleared, nil
 }
 
+// SQL Server declares NO foreign keys to workflow_instances -- `grep -c
+// "REFERENCES workflow_instances" migrations/mssql/*.sql` is 0, against 5 for
+// each of the other dialects -- so nothing cascades and every child row a
+// retention sweep leaves behind is orphaned permanently: the instance row that
+// made it reachable is gone, and no later sweep looks at anything but
+// workflow_instances.status.
+//
+// THE CHILD DELETES ARE WRITTEN ONCE, and that is the point rather than
+// tidiness. Both sweeps previously carried the same wrong assumption -- one in
+// a doc comment that said event_history's FK "is ON DELETE CASCADE and SQL
+// Server never dropped it", flagged UNVERIFIED in the same comment because no
+// SQL Server was available when it was written (cleat#1265). Two copies of a
+// premise is how they came to disagree with the schema and with each other; a
+// shared suffix means the next table added here cannot be added to one sweep
+// and forgotten in the other.
+//
+// The set is every CORE table with a workflow_id column, derived from the live
+// schema rather than listed from memory:
+//
+//	SELECT t.name FROM sys.columns c JOIN sys.tables t ON t.object_id = c.object_id
+//	WHERE c.name = 'workflow_id'
+//
+// That returns eight where plugins are installed; event_awaiters and
+// workflow_blob_refs belong to plugins/eventtriggers and plugins/blobstore and
+// are cleaned by those plugins, not by the engine's retention.
+//
+// tenant_id is carried on every delete even though @batch is already
+// tenant-scoped by the DELETE that filled it: the RLS FILTER predicate is the
+// backstop, this is the explicit layer, and cleat#1098's rule is that each must
+// be able to isolate on its own.
+const mssqlRetentionChildDeletes = `
+	DELETE FROM event_history            WHERE workflow_id IN (SELECT id FROM @batch) AND tenant_id = @p2;
+	DELETE FROM idempotency_keys         WHERE workflow_id IN (SELECT id FROM @batch) AND tenant_id = @p2;
+	DELETE FROM concurrency_keys         WHERE workflow_id IN (SELECT id FROM @batch) AND tenant_id = @p2;
+	DELETE FROM workflow_signals         WHERE workflow_id IN (SELECT id FROM @batch) AND tenant_id = @p2;
+	DELETE FROM workflow_promises        WHERE workflow_id IN (SELECT id FROM @batch) AND tenant_id = @p2;
+	DELETE FROM workflow_update_requests WHERE workflow_id IN (SELECT id FROM @batch) AND tenant_id = @p2;
+
+	SELECT COUNT(*) FROM @batch;`
+
+// The parent delete captures its own batch with OUTPUT ... INTO, so the child
+// deletes touch exactly the rows this pass removed. A correlated subquery
+// against the retention predicate would be simpler and wrong: it would delete
+// children of workflows BEYOND the batch, so an interrupted sweep would leave
+// readable workflows whose history was already gone -- orphaning in the other
+// direction.
+//
+// Not the parameter-array shape PostgreSQL uses (`WHERE id = ANY($1)` with
+// pq.Array): SQL Server caps a statement at 2100 parameters and the batch is
+// 10000 ids.
+const mssqlDeleteCompletedBatch = `
+	DECLARE @batch TABLE (id NVARCHAR(255) PRIMARY KEY);
+
+	DELETE FROM workflow_instances
+	OUTPUT DELETED.id INTO @batch
+	WHERE id IN (
+		SELECT id FROM workflow_instances
+		WHERE status IN ('done', 'failed', 'terminated')
+		  AND completed_at IS NOT NULL
+		  AND completed_at < @p1
+		  AND tenant_id = @p2
+		ORDER BY id
+		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
+	);
+` + mssqlRetentionChildDeletes
+
+const mssqlDeleteDeadLetteredBatch = `
+	DECLARE @batch TABLE (id NVARCHAR(255) PRIMARY KEY);
+
+	DELETE FROM workflow_instances
+	OUTPUT DELETED.id INTO @batch
+	WHERE id IN (
+		SELECT id FROM workflow_instances
+		WHERE status = 'dead_lettered'
+		  AND completed_at IS NOT NULL
+		  AND completed_at < @p1
+		  AND tenant_id = @p2
+		ORDER BY id
+		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
+	);
+` + mssqlRetentionChildDeletes
+
+// deleteRetentionBatch removes one batch of workflows and every child row that
+// names them, in a single transaction.
+//
+// beginTxWithContext, not s.db: the previous version ran each statement on the
+// pool. That works in production only because MSSQLStoreFactory hands out a
+// pool whose connector applies sp_set_session_context to every connection as it
+// opens -- so the RLS predicates are satisfied by accident of the pool rather
+// than by anything this function does. A transaction sets it explicitly and
+// makes the parent and child deletes atomic, which is what stops an interrupted
+// sweep leaving a workflow without its history.
+func (s *MSSQLStore) deleteRetentionBatch(ctx context.Context, stmt string, olderThan time.Time) (int64, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("delete workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var n int64
+	if err := tx.QueryRowContext(ctx, stmt,
+		sql.Named("p1", olderThan), sql.Named("p2", s.tenantID)).Scan(&n); err != nil {
+		return 0, fmt.Errorf("delete workflows: %w", err)
+	}
+	return n, tx.Commit()
+}
+
 func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM workflow_instances
-			WHERE id IN (
-				SELECT id FROM workflow_instances
-				WHERE status = 'dead_lettered'
-				  AND completed_at IS NOT NULL
-				  AND completed_at < @p1
-				  AND tenant_id = @p2
-				ORDER BY id
-				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
-			)
-		`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
+		n, err := s.deleteRetentionBatch(ctx, mssqlDeleteDeadLetteredBatch, olderThan)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
 		}
-		n, _ := result.RowsAffected()
 		totalDeleted += n
 		if n == 0 {
 			break
@@ -522,54 +617,35 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 // excluded -- see the interface doc (store_interface.go) and
 // DeleteDeadLetteredWorkflows above.
 //
-// No explicit event_history delete is needed here: migrations/mssql/001_schema.sql
-// declares event_history's FK to workflow_instances ON DELETE CASCADE and SQL
-// Server never dropped it (only PostgreSQL did, deliberately). Deleting the
-// workflow_instances row below cascades event_history (and workflow_signals,
-// workflow_promises, concurrency_keys, workflow_update_requests)
-// automatically.
+// EVERY CHILD IS DELETED EXPLICITLY, because nothing cascades on this dialect.
 //
-// UNVERIFIED: no SQL Server instance was available to run this against; it
-// is written to match DeleteDeadLetteredWorkflows immediately above exactly
-// (same batching shape, same reliance on cascade), which was itself the
-// verified reference for this dialect's FK graph.
+// This comment used to say the opposite -- that 001_schema.sql "declares
+// event_history's FK to workflow_instances ON DELETE CASCADE and SQL Server
+// never dropped it", and that the parent delete therefore cascades
+// event_history, workflow_signals, workflow_promises, concurrency_keys and
+// workflow_update_requests automatically. It declares none of them:
+//
+//	grep -c "REFERENCES workflow_instances" migrations/mssql/*.sql   -> 0
+//	                                        migrations/postgres/*.sql -> 5
+//	                                        migrations/mysql/*.sql    -> 5
+//
+// so retention removed the instance row and left all six children behind
+// permanently -- unreachable, because the row that made them reachable was the
+// one thing deleted (cleat#1265).
+//
+// THE COMMENT SAID SO ITSELF. It ended "UNVERIFIED: no SQL Server instance was
+// available to run this against; it is written to match
+// DeleteDeadLetteredWorkflows immediately above exactly (same batching shape,
+// same reliance on cascade), which was itself the verified reference for this
+// dialect's FK graph." The reference was not verified either, and copying it
+// is how one unchecked claim became two functions.
 func (s *MSSQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		// Deleted first, and for the same reason as the other two dialects: a
-		// surviving idempotency key answers a retry `already_started` with a
-		// workflow_id that no longer exists (cleat#1255). SQL Server declares
-		// no foreign keys to workflow_instances at all -- `grep -c "REFERENCES
-		// workflow_instances" migrations/mssql/*.sql` is 0, against 5 for each
-		// of the other dialects -- so nothing here cascades and every child
-		// table is explicit or orphaned.
-		if _, err := s.db.ExecContext(ctx, `
-			DELETE k FROM idempotency_keys k
-			INNER JOIN workflow_instances w ON w.id = k.workflow_id
-			WHERE w.status IN ('done', 'failed', 'terminated')
-			  AND w.completed_at IS NOT NULL
-			  AND w.completed_at < @p1
-			  AND w.tenant_id = @p2
-			  AND k.tenant_id = @p2
-		`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID)); err != nil {
-			return totalDeleted, fmt.Errorf("delete completed workflows: delete idempotency_keys: %w", err)
-		}
-		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM workflow_instances
-			WHERE id IN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed', 'terminated')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < @p1
-				  AND tenant_id = @p2
-				ORDER BY id
-				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
-			)
-		`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
+		n, err := s.deleteRetentionBatch(ctx, mssqlDeleteCompletedBatch, olderThan)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete completed workflows: %w", err)
 		}
-		n, _ := result.RowsAffected()
 		totalDeleted += n
 		if n == 0 {
 			break

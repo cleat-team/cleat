@@ -11647,6 +11647,79 @@ exact version — every internal caller uses `""` or a range — so the two brok
 the ones a human reaches for first. This test uses `^1.0.0` with a comment pointing at the issue,
 rather than quietly avoiding the form that fails.
 
+### 3.430 SQL Server retention orphaned every child table, in both sweeps — ✅ **FIXED 2026-09-11** (cleat#1265)
+
+Retention deleted the `workflow_instances` row and left **all six** child tables behind, including
+the entire event history. Not merely retained — the instance row was the only thing that made those
+rows reachable, and no later sweep looks at anything but `workflow_instances.status`, so they were
+**unreachable and permanent**. The operator sees the instance count fall and concludes retention is
+working.
+
+**Because nothing cascades on this dialect, and both sweeps assumed it did:**
+
+    grep -c "REFERENCES workflow_instances" migrations/mssql/*.sql     -> 0
+                                            migrations/postgres/*.sql -> 5
+                                            migrations/mysql/*.sql    -> 5
+
+**The comment said so itself.** `DeleteCompletedWorkflows` carried *"migrations/mssql/001_schema.sql
+declares event_history's FK to workflow_instances ON DELETE CASCADE and SQL Server never dropped
+it"* — and ended:
+
+> UNVERIFIED: no SQL Server instance was available to run this against; it is written to match
+> `DeleteDeadLetteredWorkflows` immediately above exactly (same batching shape, same reliance on
+> cascade), which was itself the verified reference for this dialect's FK graph.
+
+The reference was not verified either. **One unchecked claim became two functions by being cited**,
+and the citation is what made the second look supported. `DeleteDeadLetteredWorkflows` has the same
+defect and is fixed here too; the issue named only the first.
+
+**The child deletes are written once** — a shared `const` suffix both statements build on — so the
+next table cannot be added to one sweep and forgotten in the other. Two copies of a premise is the
+mechanism that produced this.
+
+**The set is derived, not listed.** Every core table with a `workflow_id` column:
+
+    SELECT t.name FROM sys.columns c JOIN sys.tables t ON t.object_id = c.object_id
+    WHERE c.name = 'workflow_id'
+
+That returns **eight** where plugins are installed. `event_awaiters` and `workflow_blob_refs` belong
+to `plugins/eventtriggers` and `plugins/blobstore`, which clean them themselves — blobstore's phase 1
+removes refs whose workflow is not `ready`/`running`, which a deleted instance satisfies. The engine's
+retention does not reach into a plugin's table. Worth recording, because the next person running that
+query will see eight and the right answer is six.
+
+**Shape, and the two simplifications that are wrong.** The parent `DELETE` captures its own batch
+with `OUTPUT DELETED.id INTO @batch` and the children delete by that set, in one transaction.
+
+  * *Not* `WHERE id = ANY($1)` with a parameter array, as PostgreSQL uses: SQL Server caps a
+    statement at 2100 parameters and the batch is 10000 ids.
+  * *Not* a correlated subquery against the retention predicate per child, which is the tempting
+    one-liner: it would delete children of workflows **beyond** the batch, so an interrupted sweep
+    would leave readable workflows whose history was already gone — orphaning in the other direction.
+
+**`beginTxWithContext`, not `s.db`.** The previous version ran each statement on the pool, which
+works in production only because `MSSQLStoreFactory` hands out a pool whose connector applies
+`sp_set_session_context` to **every connection as it opens** — so the RLS predicates were satisfied
+by an accident of the pool rather than by anything the function did. Worth stating because the
+natural worry on reading this is that retention was a total no-op on SQL Server; it was not, and
+that is why.
+
+**The regression test keeps both preconditions from the audit that found this**, because that audit
+was wrong twice first and both times reported the reassuring answer: counts go through
+`testutil.MSSQLAdminDB`, since an RLS **FILTER** predicate makes a surviving row read as zero on an
+ordinary connection; and the parent row is asserted **gone** before any child count is believed,
+since a sweep with no session context deletes nothing and every child then "survives" for an
+unrelated reason.
+
+Falsified by removing the six child deletes: **12 findings, 6 per sweep**, with both preconditions
+still passing — the issue's measured audit, reproduced from the other side.
+
+**The open question in the issue, answered:** an orphaned `concurrency_keys` row cannot block a new
+run past its own TTL. `AcquireConcurrencyKey` deletes expired rows for the key first and its
+`NOT EXISTS` guard requires `expires_at > SYSUTCDATETIME()`, so an orphan excludes a new run only
+until it expires — and a workflow old enough to be swept is far older than any concurrency TTL. The
+consequence was storage and reachability, not live behaviour.
+
 ### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
 
 `ReleaseConcurrencyKey` took only the key. Its statement carried `AND tenant_id` and no
