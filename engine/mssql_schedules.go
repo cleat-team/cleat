@@ -576,6 +576,22 @@ var mssqlWorkflowChildTables = []string{
 	"workflow_update_requests",
 }
 
+// mssqlDeleteByWorkflowPrefix holds the complete, constant head of each delete.
+//
+// The table and column are NOT formatted into the statement at run time. Every
+// candidate is spelled out here, so the only text ever appended is the generated
+// placeholder list (@id0, @id1, ...) -- which also keeps gosec's G201 satisfied
+// without a #nosec, since there is no SQL string formatting left to audit.
+var mssqlDeleteByWorkflowPrefix = map[string]string{
+	"event_history":            "DELETE FROM event_history WHERE workflow_id IN (",
+	"idempotency_keys":         "DELETE FROM idempotency_keys WHERE workflow_id IN (",
+	"concurrency_keys":         "DELETE FROM concurrency_keys WHERE workflow_id IN (",
+	"workflow_signals":         "DELETE FROM workflow_signals WHERE workflow_id IN (",
+	"workflow_promises":        "DELETE FROM workflow_promises WHERE workflow_id IN (",
+	"workflow_update_requests": "DELETE FROM workflow_update_requests WHERE workflow_id IN (",
+	"workflow_instances":       "DELETE FROM workflow_instances WHERE id IN (",
+}
+
 // deleteCompletedWorkflowsBatch deletes one batch, retrying the whole
 // transaction on a rollback-guaranteed failure.
 //
@@ -649,9 +665,7 @@ func (s *MSSQLStore) deleteCompletedWorkflowsBatchOnce(ctx context.Context, olde
 
 	// SQL Server has no array parameter, so the id list is expanded into named
 	// placeholders. Never interpolated: these ids come from the database, but a
-	// value that round-trips is still a value, and the batch is capped at 10000
-	// which is well inside the 2100-parameter limit only because it is chunked
-	// below.
+	// value that round-trips is still a value.
 	for _, table := range mssqlWorkflowChildTables {
 		if err := s.deleteByWorkflowIDs(ctx, tx, table, ids); err != nil {
 			return 0, err
@@ -671,9 +685,9 @@ func (s *MSSQLStore) deleteCompletedWorkflowsBatchOnce(ctx context.Context, olde
 // failed on the first real retention run.
 func (s *MSSQLStore) deleteByWorkflowIDs(ctx context.Context, tx *sql.Tx, table string, ids []string) error {
 	const chunk = 2000
-	column := "workflow_id"
-	if table == "workflow_instances" {
-		column = "id"
+	prefix, ok := mssqlDeleteByWorkflowPrefix[table]
+	if !ok {
+		return fmt.Errorf("delete completed workflows: no delete defined for table %q", table)
 	}
 	for start := 0; start < len(ids); start += chunk {
 		end := start + chunk
@@ -688,8 +702,7 @@ func (s *MSSQLStore) deleteByWorkflowIDs(ctx context.Context, tx *sql.Tx, table 
 			placeholders[i] = "@" + name
 			args = append(args, sql.Named(name, id))
 		}
-		stmt := fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)",
-			table, column, strings.Join(placeholders, ", "))
+		stmt := prefix + strings.Join(placeholders, ", ") + ")"
 		if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 			return fmt.Errorf("delete completed workflows: delete %s: %w", table, err)
 		}
