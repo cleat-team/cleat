@@ -109,6 +109,59 @@ func TestKVStoreRowsAreScopedByAPolicyNotOnlyByTheQuery(t *testing.T) {
 			t.Error("tenant B inserted a row carrying tenant A's id")
 		}
 	})
+
+	// FORCE is what binds the table's OWNER, and nothing above can see it.
+	// cleat#1283.
+	//
+	// Every assertion so far runs as PostgresRLSTestRole, which is not the
+	// owner -- and a non-owner is bound by ENABLE alone. Measured before this
+	// subtest existed: deleting the FORCE statement from applyTenantScoping
+	// left all four green, and the only guard that noticed was a unit test
+	// matching the literal DDL string. A text comparison standing in for a
+	// behavioural property.
+	//
+	// The distinction is not academic. The owner is whoever ran the
+	// migrations, so in a deployment where the worker connects as that role,
+	// ENABLE without FORCE means the plugin path walks straight through the
+	// policy while pg_policy still shows a perfectly good one.
+	//
+	// Ownership is moved for the duration because that is the only way to ask
+	// the question here: the real owner of these tables is a superuser, and a
+	// superuser bypasses row-level security unconditionally, FORCE or not. So
+	// a test that simply connected as the owner would measure the superuser
+	// bypass and report nothing about FORCE.
+	t.Run("the table's owner is bound by the policy too", func(t *testing.T) {
+		if _, err := pg.DB.Exec(
+			`ALTER TABLE kv_store OWNER TO ` + testutil.PostgresRLSTestRole); err != nil {
+			t.Fatalf("hand kv_store to the RLS role: %v", err)
+		}
+		// Hand it back, or every later test in this package runs against a
+		// table owned by a role the suite does not expect.
+		defer func() {
+			var owner string
+			if err := pg.DB.QueryRow(`SELECT current_user`).Scan(&owner); err != nil {
+				t.Fatalf("reading the owner to restore: %v", err)
+			}
+			if _, err := pg.DB.Exec(`ALTER TABLE kv_store OWNER TO ` + owner); err != nil {
+				t.Fatalf("restore kv_store ownership to %s: %v", owner, err)
+			}
+		}()
+
+		// Same statement as the first subtest, now issued by the owner.
+		_, err := db.Exec(context.Background(),
+			`INSERT INTO kv_store (tenant_id, key, value) VALUES ($1, $2, $3)`,
+			tenantA.String(), "owner-write", `"from the owner"`)
+		if err == nil {
+			t.Fatal("the table's owner wrote a row with no tenant in context.\n\n" +
+				"ENABLE ROW LEVEL SECURITY does not bind the owner; FORCE does. " +
+				"Without it the policy is real, visible in pg_policy, and " +
+				"silently inert for whichever role ran the migrations -- which " +
+				"is the role a worker may well be connecting as.")
+		}
+		if !strings.Contains(err.Error(), "cleat.tenant_id is not set") {
+			t.Fatalf("the owner was refused, but not by the tenant policy: %v", err)
+		}
+	})
 }
 
 // postgresBackend returns the PostgreSQL backend from the standard set.
