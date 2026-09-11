@@ -398,9 +398,22 @@ Measured 2026-09-10, surveying `cmd/` for SQL that reaches an RLS table.
 303-character `SELECT`. With `` `[^`]{10,600}` `` the first is rejected for length — and the regex
 resumes *inside* it, so its closing backtick pairs with the SELECT's opening one and the statement
 is swallowed as a delimiter. The bound excluded nothing it was aimed at and hid something it was
-not. **And a count cannot see it**: both readings return exactly ONE literal from that file,
-just not the same one — a substitution rather than a shortfall, so a sanity check on the total
-agrees with itself.
+not.
+
+**And it is worse than a substitution: the bounded read FABRICATES a literal.** Pairing the usage
+string's closing backtick with the SELECT's opening one makes the *Go source between them* look
+like a string. Both readings return exactly ONE match from that file, at the same count, and the
+contents are unrelated:
+
+    bounded DURING pairing   1 match, 225 chars, `)\n}\n\n// loadWorkflowInstance loads a sin…`
+    paired THEN filtered     1 match, 303 chars, `SELECT id, def_name, def_version, min_versi…`
+
+A closing paren, a brace, a blank line and a comment, reported as string data. So the scan did not
+drop a statement and keep the rest — it returned something that is not a literal at all, and every
+count-based sanity check agrees with itself.
+
+**What surfaced it was comparing CONTENTS rather than totals.** Seeing 1 and 1 and concluding the
+bound was harmless is the obvious reading, and it is wrong.
 
 Two scans of that population, run independently, disagreed at 6 against 12; five separate
 narrowings were found reconciling them, and **every one had been written as a parsing
