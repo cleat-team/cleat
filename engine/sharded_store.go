@@ -611,32 +611,143 @@ func (s *ShardedStore) GetQueryState(ctx context.Context, workflowID, key string
 
 // ListWorkflows merges results from all shards.
 func (s *ShardedStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
-	var all []WorkflowInstance
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
-	for _, shard := range shards {
-		workflows, err := shard.Store.ListWorkflows(ctx, filter)
-		if err != nil {
-			return nil, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+
+	limit := clampWorkflowListLimit(filter.Limit)
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	cursors := make([]*shardListCursor, len(shards))
+	for i, shard := range shards {
+		cursors[i] = &shardListCursor{
+			name:   shard.Config.Name,
+			store:  shard.Store,
+			filter: filter,
 		}
-		all = append(all, workflows...)
 	}
-	if limit := clampWorkflowListLimit(filter.Limit); len(all) > limit {
-		all = all[:limit]
+
+	// Declared nil rather than make([]WorkflowInstance, 0, limit): every store
+	// in this package returns a nil slice for an empty listing, and nil and
+	// empty are not interchangeable at the API boundary -- one marshals to
+	// `null` and the other to `[]`. Preallocating changed that, and
+	// TestListWorkflows_MaxLimit caught it. Whether `[]` is the better JSON
+	// answer is a real question and not this change's to settle.
+	var out []WorkflowInstance
+	for taken := 0; taken < offset+limit; taken++ {
+		best := -1
+		var bestRow *WorkflowInstance
+		for i, c := range cursors {
+			row, err := c.peek(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("shard %q: %w", c.name, err)
+			}
+			if row == nil {
+				continue
+			}
+			if bestRow == nil || workflowListOrderLess(row, bestRow) {
+				best, bestRow = i, row
+			}
+		}
+		if best < 0 {
+			break // every shard exhausted
+		}
+		if taken >= offset {
+			out = append(out, *bestRow)
+		}
+		cursors[best].advance()
 	}
-	return all, nil
+	return out, nil
 }
+
+// workflowListOrderLess reports whether a sorts before b under the listing's
+// order, `created_at DESC, id DESC`.
+//
+// It has to agree with workflowListOrder exactly. A merge whose comparison
+// disagrees with the per-shard ORDER BY does not produce a differently-ordered
+// result -- it produces a WRONG one, because it will take a row from one shard
+// believing the others have nothing earlier when they do, and that row is then
+// lost from the page rather than misplaced.
+func workflowListOrderLess(a, b *WorkflowInstance) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID > b.ID
+}
+
+// shardListChunk is how many rows one shard is asked for at a time.
+//
+// It is the store's own ceiling (clampWorkflowListLimit), so asking for more
+// would be silently reduced to this anyway -- which is the trap the chunking
+// exists to avoid. Fetching offset+limit in one call looks simpler and is
+// wrong for any page past the first thousand rows: the shard returns 1000, the
+// merge believes the shard is exhausted, and the tail of the result is missing
+// with nothing reporting it.
+const shardListChunk = 1000
+
+// shardListCursor reads one shard's rows in order, a chunk at a time.
+//
+// Chunking rather than fetching offset+limit up front bounds what is held in
+// memory to shards*chunk + limit, independent of how deep the page is. That
+// matters because Offset is unbounded at the API, and the sharded path buffers
+// in Go where the single-store path does not: an offset a single store answers
+// with a slow OFFSET scan would otherwise be answered here by materialising the
+// same number of rows per shard.
+//
+// The per-shard Offset it accumulates is a genuine offset WITHIN one shard,
+// which is sound -- each shard's own order is total. That is precisely what the
+// caller's Offset was not when it was handed to every shard unchanged
+// (cleat#1197): an offset over a distributed set is not the sum of itself.
+type shardListCursor struct {
+	name   string
+	store  WorkflowStore
+	filter WorkflowFilter
+
+	buf  []WorkflowInstance
+	pos  int
+	off  int
+	done bool
+}
+
+// peek returns the cursor's current row, or nil when the shard is exhausted.
+func (c *shardListCursor) peek(ctx context.Context) (*WorkflowInstance, error) {
+	for c.pos >= len(c.buf) {
+		if c.done {
+			return nil, nil
+		}
+		f := c.filter
+		f.Limit = shardListChunk
+		f.Offset = c.off
+		rows, err := c.store.ListWorkflows(ctx, f)
+		if err != nil {
+			return nil, err
+		}
+		// Advance by what came back rather than by the chunk size: a shard that
+		// returns a short page has no more rows, and stepping past the gap
+		// would skip whatever arrives there later.
+		c.off += len(rows)
+		c.buf, c.pos = rows, 0
+		if len(rows) < shardListChunk {
+			c.done = true
+		}
+	}
+	return &c.buf[c.pos], nil
+}
+
+func (c *shardListCursor) advance() { c.pos++ }
 
 // CountWorkflows sums the per-shard counts.
 //
-// Summing IS the right answer for a count, and it is worth saying why when the
-// listing above is not equally sound: every row lives on exactly one shard, so
-// the counts partition cleanly. The LISTING does not -- it concatenates
-// per-shard pages without merging them by sort order, and passes the same
-// Offset to every shard, so on more than one shard it is neither globally
-// ordered nor correctly paged. That is pre-existing and is not made worse here;
-// it is filed rather than quietly carried.
+// Summing IS the right answer for a count, and the asymmetry with the listing
+// above is worth keeping written down: a count is decomposable across shards
+// because every row lives on exactly one of them, so the counts partition
+// cleanly with no ordering question. ORDERED PAGING IS NOT decomposable, which
+// is why ListWorkflows needs a merge and this needs a loop. It is also why the
+// listing was wrong for as long as it was -- the shape that is correct here
+// reads as if it ought to be correct there (cleat#1197).
 func (s *ShardedStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
 	s.mu.RLock()
 	shards := s.shards
