@@ -11532,6 +11532,64 @@ test with `500`. The HTTP test carries its own control, because "a refusal retur
 otherwise satisfied by returning 409 for everything, which reports a genuine server fault as the
 caller's fault.
 
+### 3.428 The workflow-memory tables were tenant-scoped on PostgreSQL with nothing behind the predicate — ✅ **FIXED 2026-09-11** (cleat#1098)
+
+§3.x/cleat#1096 gave `workflow_memory_stats` and `workflow_memory_samples` a `tenant_id`, scoped
+all twelve statements, and bound both to `dbo.fn_tenant_filter` on SQL Server. **PostgreSQL got the
+column and the Go predicate and no policy** — a tenant-scoped table carrying one layer on the one
+dialect where a second was available.
+
+| dialect | Go predicate | database backstop |
+|---|---|---|
+| PostgreSQL | yes | **no** ← this item |
+| MySQL | yes | none exists |
+| SQL Server | yes | `TenantFilter_MemoryStats` / `_MemorySamples` |
+
+**It could not be done in #1096, and that is the whole shape of the work.** All four access sites
+read outside an RLS transaction — `RecordWorkflowMemorySample` on `s.db.BeginTx`, the other three
+straight onto `s.db.QueryContext`/`ExecContext`. `cleat.tenant_id` is set per **transaction** by
+`setRLSOnTx`, so a fail-closed `tenant_id = cleat.assert_tenant_set()` policy raises the moment any
+of them runs. The restructuring onto `beginTxWithRLS` is the change; the policy is what it buys.
+`QueueDepth` sits eighty lines away in the same file already doing it.
+
+`CleanupMemorySamples` needed more than a swapped opener: its def listing and its per-def `DELETE`s
+ran on **two unrelated connections**. One per-transaction setting cannot cover two connections, so
+they are now one transaction.
+
+**A policy nothing exercises is indistinguishable from no policy, so the proof is a PAIR.** The
+existing `TestTheMemoryProfileIsScopedToTenant` passed before this item — the Go predicate was
+doing all the work — so its passing afterwards says nothing on its own. Measured, same mutation
+(the Go predicate deleted from `LoadMemoryEstimates`) run twice:
+
+| | `TestTheMemoryProfileIsScopedToTenant/postgres` |
+|---|---|
+| policy dropped (the pre-fix state) | **FAIL** — tenant A's estimate reads `9000000`, want `1000000` |
+| policy present | **PASS** — the policy alone carried it |
+
+`9000000` is tenant B's sample arriving in tenant A's EWMA. That pair is the property SQL Server
+already had and PostgreSQL did not, and it is the one #1096 named as the reason a second layer
+earns its keep.
+
+`TestMemoryProfileRLS_LayerSeparation` pins both directions permanently, in the shape
+`engine/rls_gap_concurrency_and_update_requests_test.go` established: the policy filtering a query
+carrying **no tenant predicate at all** on a non-superuser connection, and the Go predicate
+filtering over a superuser connection the policy cannot reach. Both halves falsified; dropping the
+policy makes Layer 1 report both tables by name.
+
+**The guard extended itself, which is the argument for deriving a list rather than writing one.**
+`TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet` (§3.x, cleat#1178) reads its table set
+from `ENABLE ROW LEVEL SECURITY` in the migrations, so this migration brought both tables under it
+with no edit to the guard. On the pre-fix tree it now names **all six** offending statements —
+`db.go:945, 952, 969, 990, 1044, 1065` — each with the reason (`runs on a transaction from
+s.db.BeginTx, and RecordWorkflowMemorySample never calls setRLSOnTx`). A hand-written table list
+would have silently kept passing.
+
+**Scope is two tables, deliberately.** 031's header reasons about each table it declined —
+`idempotency_keys` is read before any RLS context exists, `admin.tenant_api_keys` before a tenant is
+known, `kv_store` and `feature_flags` are plugin-owned — and none of those reasons has changed. A
+blanket apply would make the migration a claim rather than a check. cleat#1097, the in-memory gauge,
+is a metric-labelling decision and stays where it is.
+
 ### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
 
 `ReleaseConcurrencyKey` took only the key. Its statement carried `AND tenant_id` and no
