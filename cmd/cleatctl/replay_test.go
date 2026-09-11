@@ -71,8 +71,8 @@ func (s *mockReplayStmt) Query(_ []driver.Value) (driver.Rows, error) {
 type mockReplayNoRows struct{}
 
 func (r *mockReplayNoRows) Columns() []string {
-	return []string{"id", "def_name", "def_version", "min_version", "status", "input",
-		"result", "error", "error_code", "error_op", "assigned_to",
+	return []string{"id", "def_name", "def_version", "status", "input",
+		"result", "error_msg", "error_code", "error_op", "assigned_to",
 		"next_wake_at", "tenant_id", "created_at", "generation"}
 }
 
@@ -85,8 +85,8 @@ type mockReplayRows struct {
 }
 
 func (r *mockReplayRows) Columns() []string {
-	return []string{"id", "def_name", "def_version", "min_version", "status", "input",
-		"result", "error", "error_code", "error_op", "assigned_to",
+	return []string{"id", "def_name", "def_version", "status", "input",
+		"result", "error_msg", "error_code", "error_op", "assigned_to",
 		"next_wake_at", "tenant_id", "created_at", "generation"}
 }
 
@@ -98,21 +98,24 @@ func (r *mockReplayRows) Next(dest []driver.Value) error {
 	}
 	r.called = true
 	now := time.Now()
+	// Fourteen, not fifteen. min_version left the SELECT in cleat#1208: it is a
+	// column of workflow_defs and has never been one of workflow_instances.
+	// This mock fed a value for it for as long as the statement asked, which is
+	// the whole of that issue -- it agrees with whatever the code requests.
 	dest[0] = "wf-test-123"
 	dest[1] = "my-workflow"
 	dest[2] = int64(3)
-	dest[3] = int64(1)
-	dest[4] = "running"
-	dest[5] = []byte(`{"customer":"acme"}`)
+	dest[3] = "running"
+	dest[4] = []byte(`{"customer":"acme"}`)
+	dest[5] = ""
 	dest[6] = ""
 	dest[7] = ""
 	dest[8] = ""
-	dest[9] = ""
-	dest[10] = "worker-1"
-	dest[11] = now
-	dest[12] = "tenant-default"
-	dest[13] = now
-	dest[14] = int64(5)
+	dest[9] = "worker-1"
+	dest[10] = now
+	dest[11] = "tenant-default"
+	dest[12] = now
+	dest[13] = int64(5)
 	return nil
 }
 
@@ -228,9 +231,7 @@ func TestLoadWorkflowInstance_Success(t *testing.T) {
 	if inst.DefVersion != 3 {
 		t.Errorf("DefVersion = %d, want 3", inst.DefVersion)
 	}
-	if inst.MinVersion != 1 {
-		t.Errorf("MinVersion = %d, want 1", inst.MinVersion)
-	}
+
 	if inst.Status != "running" {
 		t.Errorf("Status = %q, want %q", inst.Status, "running")
 	}
