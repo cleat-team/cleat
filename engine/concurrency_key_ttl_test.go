@@ -167,7 +167,7 @@ func TestConcurrencyKeyTTLKeepsSubSecondPrecision(t *testing.T) {
 					if !acquired {
 						t.Fatal("AcquireConcurrencyKey returned false for a fresh key")
 					}
-					t.Cleanup(func() { _ = store.ReleaseConcurrencyKey(ctx, key) })
+					t.Cleanup(func() { _, _ = store.ReleaseConcurrencyKey(ctx, key, runID) })
 
 					remaining := readConcurrencyKeyExpiry(t, adminDB, backend, key)
 					dbElapsed := time.Duration(dbNowMicros(t, adminDB, backend)-before) * time.Microsecond
@@ -279,7 +279,7 @@ func TestConcurrencyKeyExcludesWhileHeld(t *testing.T) {
 			if !acquired {
 				t.Fatal("first AcquireConcurrencyKey returned false for a fresh key")
 			}
-			t.Cleanup(func() { _ = store.ReleaseConcurrencyKey(ctx, key) })
+			t.Cleanup(func() { _, _ = store.ReleaseConcurrencyKey(ctx, key, runID) })
 
 			again, err := store.AcquireConcurrencyKey(ctx, key, otherRunID, 500*time.Millisecond)
 			if err != nil {

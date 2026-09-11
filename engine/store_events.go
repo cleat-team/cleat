@@ -502,6 +502,14 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.LockKey != "" {
 			payload["lock_key"] = rec.LockKey
 		}
+		// Emitted ONLY when true, so every release event written before this
+		// field existed -- and every ordinary release written after -- hashes
+		// to exactly what it hashed to before. computeEventChecksum runs over
+		// this map, so an unconditional key would rewrite the checksum of every
+		// release in every existing history.
+		if rec.LockNotHeld {
+			payload["lock_not_held"] = true
+		}
 	case "durable_send":
 		if rec.Service != "" {
 			payload["service"] = rec.Service
@@ -901,6 +909,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 	case "release_lock":
 		if v, ok := m["lock_key"].(string); ok {
 			rec.LockKey = v
+		}
+		if v, ok := m["lock_not_held"].(bool); ok {
+			rec.LockNotHeld = v
 		}
 	case "durable_send":
 		if v, ok := m["service"].(string); ok {

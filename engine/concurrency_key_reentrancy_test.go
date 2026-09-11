@@ -20,11 +20,20 @@ import (
 // and a workflow's behaviour depended on which database was deployed under it.
 //
 // The contract is now "never re-entrant" on all three. That is not just a
-// majority vote: ReleaseConcurrencyKey takes only the key and deletes the row
-// unconditionally, with no hold count anywhere in the system. Under the old
-// MySQL answer, acquire(k); acquire(k); release(k) left the key free while the
+// majority vote: there is no hold count anywhere in the system, so
+// acquire(k); acquire(k); release(k) would leave the key free while the
 // workflow still believed it held it -- precisely the failure a mutual
 // exclusion primitive exists to prevent.
+//
+// THIS PARAGRAPH USED TO SAY MORE, AND THE PART THAT WENT WAS A LIVE DEFECT.
+// It read "ReleaseConcurrencyKey takes only the key and deletes the row
+// unconditionally", which was true, was the reason given for a rule about
+// something else, and was cleat#1188 stated flatly -- one workflow could free
+// another's lock. It sat here for months as the justification for this test
+// rather than as anything a test asserted. A sentence in a test cannot fail.
+// The release now carries the holder (see engine/db.go and
+// concurrency_key_holder_test.go); the no-hold-count half above survives and is
+// still what this test pins.
 //
 // Reverting mysql_ops.go to `return ownerID == workflowID` fails the
 // self-reacquire subtest on mysql and leaves the other two dialects passing,
@@ -62,9 +71,10 @@ func TestAcquireConcurrencyKeyIsNeverReentrant(t *testing.T) {
 			if again {
 				t.Errorf("re-acquiring a key this workflow already holds returned true.\n\n" +
 					"The contract is never re-entrant, on every dialect. Returning true " +
-					"here is unsafe under the current release API: ReleaseConcurrencyKey " +
-					"takes only the key and has no hold count, so acquire+acquire+release " +
-					"frees a lock the workflow still believes it holds.")
+					"here is unsafe because there is no hold count: acquire+acquire+release " +
+					"frees a lock the workflow still believes it holds. The release checks " +
+					"the holder since cleat#1188, which stops another workflow taking the " +
+					"row -- it does not make a second acquire by the SAME workflow safe.")
 			}
 
 			// Control 1: mutual exclusion still holds. Without this, making
@@ -80,7 +90,7 @@ func TestAcquireConcurrencyKeyIsNeverReentrant(t *testing.T) {
 			// Control 2: the key is refusable, not poisoned. This is the other
 			// way "always false" would slip through -- and it also pins that a
 			// released key is genuinely reusable.
-			if err := store.ReleaseConcurrencyKey(ctx, key); err != nil {
+			if _, err := store.ReleaseConcurrencyKey(ctx, key, runID); err != nil {
 				t.Fatalf("release: %v", err)
 			}
 			reacquired, err := store.AcquireConcurrencyKey(ctx, key, otherRunID, ttl)

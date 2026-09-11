@@ -799,19 +799,24 @@ func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflow
 	return true, tx.Commit()
 }
 
-// ReleaseConcurrencyKey releases a specific concurrency key.
-func (s *PostgresStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+// ReleaseConcurrencyKey releases a concurrency key held by workflowID.
+func (s *PostgresStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
-		return fmt.Errorf("release concurrency key: begin: %w", err)
+		return false, fmt.Errorf("release concurrency key: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256') AND tenant_id = $2`, key, s.tenantID)
+	// workflow_id is in the predicate, not just the tenant. Without it this
+	// matched any row for the key within the tenant, so B could release A's
+	// lock and C could then take it while A was still running and still
+	// believed it held it -- mutual exclusion gone, silently (cleat#1188).
+	res, err := tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256') AND workflow_id = $2 AND tenant_id = $3`, key, workflowID, s.tenantID)
 	if err != nil {
-		return fmt.Errorf("release concurrency key: %w", err)
+		return false, fmt.Errorf("release concurrency key: %w", err)
 	}
-	return tx.Commit()
+	n, _ := res.RowsAffected()
+	return n > 0, tx.Commit()
 }
 
 // ReleaseWorkflowConcurrencyKeys releases all concurrency keys held by a workflow.

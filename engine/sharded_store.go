@@ -1172,12 +1172,12 @@ func (s *ShardedStore) AcquireConcurrencyKey(ctx context.Context, key, workflowI
 }
 
 // ReleaseConcurrencyKey routes by key text hash.
-func (s *ShardedStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (s *ShardedStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	shard := s.getShard(key)
 	if shard == nil {
-		return fmt.Errorf("release_concurrency_key: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+		return false, fmt.Errorf("release_concurrency_key: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.ReleaseConcurrencyKey(ctx, key)
+	return shard.Store.ReleaseConcurrencyKey(ctx, key, workflowID)
 }
 
 // ReleaseWorkflowConcurrencyKeys routes by workflow ID.

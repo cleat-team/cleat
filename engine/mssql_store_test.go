@@ -1715,7 +1715,7 @@ func TestMSSQLStore_ReleaseConcurrencyKey_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
-	err := store.ReleaseConcurrencyKey(context.Background(), "my-key")
+	_, err := store.ReleaseConcurrencyKey(context.Background(), "my-key", "wf-1")
 	if err != nil {
 		t.Fatalf("ReleaseConcurrencyKey: %v", err)
 	}

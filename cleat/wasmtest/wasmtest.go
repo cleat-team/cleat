@@ -402,11 +402,18 @@ func (s *InMemoryConcurrencyKeyStore) AcquireConcurrencyKey(_ context.Context, k
 	return true, nil
 }
 
-func (s *InMemoryConcurrencyKeyStore) ReleaseConcurrencyKey(_ context.Context, key string) error {
+func (s *InMemoryConcurrencyKeyStore) ReleaseConcurrencyKey(_ context.Context, key, workflowID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Ownership is checked here too. A fake that releases anything would let a
+	// workflow test pass against behaviour the real stores refuse (cleat#1188),
+	// which is the failure mode a fake exists to avoid rather than to add.
+	entry, ok := s.keys[key]
+	if !ok || entry.workflowID != workflowID {
+		return false, nil
+	}
 	delete(s.keys, key)
-	return nil
+	return true, nil
 }
 
 // TestWorkflowState implements engine.WorkflowState for testing.

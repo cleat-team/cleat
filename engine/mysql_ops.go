@@ -271,16 +271,19 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.
-func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	hash := sha256.Sum256([]byte(key))
 	keyHash := hash[:]
-	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?
-	`, keyHash, s.tenantID)
+	// workflow_id, not just tenant_id -- see PostgresStore.ReleaseConcurrencyKey
+	// and cleat#1188. All three dialects carried the same omission.
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM concurrency_keys WHERE key_hash = ? AND workflow_id = ? AND tenant_id = ?
+	`, keyHash, workflowID, s.tenantID)
 	if err != nil {
-		return fmt.Errorf("ReleaseConcurrencyKey: %w", err)
+		return false, fmt.Errorf("ReleaseConcurrencyKey: %w", err)
 	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // ReapExpiredConcurrencyKeys deletes all expired concurrency keys
