@@ -32,13 +32,28 @@ import (
 // cmd/cleatctl cannot import.
 func apply032ForDropTenantTest(t *testing.T, db *sql.DB) {
 	t.Helper()
-	path := filepath.Join("..", "..", "migrations", "postgres", "032_drop_tenant_deletes_tenant_data.sql")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	if _, err := db.Exec(string(data)); err != nil {
-		t.Fatalf("apply %s: %v", path, err)
+	// Every migration that DEFINES admin.drop_tenant, in order. Applying only
+	//032 reinstalls the 032 body over whatever the migrations produced --
+	// CREATE OR REPLACE keeps whichever ran last -- so a later change to the
+	// routine would be invisible here while the command under test used it.
+	// cleat#1201's fix lives in 059; with this list pinned to 032 the tests
+	// below exercised a routine the shipped schema does not have.
+	//
+	// Duplicated from engine/drop_tenant_test.go's list for the reason the
+	// comment above already gives: cmd/cleatctl cannot import another
+	// package's _test.go file. Keep the two in step.
+	for _, f := range []string{
+		"032_drop_tenant_deletes_tenant_data.sql",
+		"059_a_dropped_tenants_definitions_go_with_it.sql",
+	} {
+		path := filepath.Join("..", "..", "migrations", "postgres", f)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if _, err := db.Exec(string(data)); err != nil {
+			t.Fatalf("apply %s: %v", path, err)
+		}
 	}
 }
 

@@ -40,18 +40,42 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// apply032DropTenantMigration reads and executes
-// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql against db.
+// dropTenantDefiningMigrations lists, in order, every migration that defines
+// admin.drop_tenant. Applying only the first of them is how a change to the
+// routine becomes invisible: CREATE OR REPLACE installs whichever file ran
+// last, so a helper pinned to 032 silently reinstalls the 032 body over
+// whatever the migrations produced, and every test here then exercises a
+// routine the shipped schema does not have.
+//
+// That is not hypothetical -- it is why cleat#1201's fix had to be verified
+// twice. The first version leaned on a foreign key, so the tests passed while
+// this helper was still installing 032; moving the fix INTO the routine made
+// them fail, correctly, and TestTheDatabaseHasTheLatestDefinitionOfEveryRoutine
+// TheMigrationsShip reported the same drift one layer down.
+//
+// Add to this list whenever a migration redefines admin.drop_tenant. The same
+// hazard, and the same shape of list, is documented at
+// postgresProcedureMigrations in store_backends_procedures_test.go.
+var dropTenantDefiningMigrations = []string{
+	"032_drop_tenant_deletes_tenant_data.sql",
+	"059_a_dropped_tenants_definitions_go_with_it.sql",
+}
+
+// apply032DropTenantMigration installs the CURRENT admin.drop_tenant by
+// applying every migration that defines it, in order. The name is kept because
+// call sites read as "give me the drop_tenant the migrations ship".
 // Must be called with a superuser/owner connection.
 func apply032DropTenantMigration(t *testing.T, db *sql.DB) {
 	t.Helper()
-	path := filepath.Join("..", "migrations", "postgres", "032_drop_tenant_deletes_tenant_data.sql")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	if _, err := db.Exec(string(data)); err != nil {
-		t.Fatalf("apply %s: %v", path, err)
+	for _, f := range dropTenantDefiningMigrations {
+		path := filepath.Join("..", "migrations", "postgres", f)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if _, err := db.Exec(string(data)); err != nil {
+			t.Fatalf("apply %s: %v", path, err)
+		}
 	}
 }
 
