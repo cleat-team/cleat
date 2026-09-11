@@ -476,9 +476,15 @@ func TestMySQLStore_ListSchedules_WithRows(t *testing.T) {
 }
 
 func TestMySQLStore_DeleteSchedule(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "DELETE FROM workflow_schedules", affected: 1},
-	})
+	// The count row is required since cleat#1297: the method checks the
+	// schedule exists before deleting, because RowsAffected cannot answer
+	// "was it there" on MySQL. Absent-schedule behaviour is covered in
+	// schedule_mutations_report_not_found_test.go.
+	store := newMySQLStoreForTest(t,
+		[]mockRowsResult{queryRowOk("SELECT count(*) FROM workflow_schedules", int64(1))},
+		[]mockExecResult{
+			{match: "DELETE FROM workflow_schedules", affected: 1},
+		})
 	err := store.DeleteSchedule(testCtx, "daily")
 	if err != nil {
 		t.Fatalf("DeleteSchedule: %v", err)
@@ -486,9 +492,13 @@ func TestMySQLStore_DeleteSchedule(t *testing.T) {
 }
 
 func TestMySQLStore_SetScheduleEnabled(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_schedules SET enabled", affected: 1},
-	})
+	// See TestMySQLStore_DeleteSchedule: the existence check is new in
+	// cleat#1297 and needs a count row.
+	store := newMySQLStoreForTest(t,
+		[]mockRowsResult{queryRowOk("SELECT count(*) FROM workflow_schedules", int64(1))},
+		[]mockExecResult{
+			{match: "UPDATE workflow_schedules SET enabled", affected: 1},
+		})
 	err := store.SetScheduleEnabled(testCtx, "daily", false)
 	if err != nil {
 		t.Fatalf("SetScheduleEnabled: %v", err)

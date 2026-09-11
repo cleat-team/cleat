@@ -1817,9 +1817,14 @@ func TestMSSQLStore_CreateSchedule_Success(t *testing.T) {
 }
 
 func TestMSSQLStore_DeleteSchedule_Success(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "DELETE FROM workflow_schedules"},
-	})
+	// The count row is required since cleat#1297: DeleteSchedule checks the
+	// schedule exists first, so that an absent name is reported as not-found
+	// rather than answered 200 {"status":"deleted"}.
+	db := newMockDBForPostgres(t,
+		[]mockRowsResult{queryRowOk("SELECT count(*) FROM workflow_schedules", int64(1))},
+		[]mockExecResult{
+			{match: "DELETE FROM workflow_schedules"},
+		})
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
@@ -1830,9 +1835,13 @@ func TestMSSQLStore_DeleteSchedule_Success(t *testing.T) {
 }
 
 func TestMSSQLStore_SetScheduleEnabled_Success(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_schedules SET enabled"},
-	})
+	// See TestMSSQLStore_DeleteSchedule_Success: the existence check is new
+	// in cleat#1297.
+	db := newMockDBForPostgres(t,
+		[]mockRowsResult{queryRowOk("SELECT count(*) FROM workflow_schedules", int64(1))},
+		[]mockExecResult{
+			{match: "UPDATE workflow_schedules SET enabled"},
+		})
 	defer db.Close()
 
 	store := NewMSSQLStore(db)

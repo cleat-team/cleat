@@ -1920,19 +1920,19 @@ func (s *apiServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 2 && parts[1] == "enable" && r.Method == http.MethodPost:
 		if err := st.SetScheduleEnabled(r.Context(), name, true); err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeScheduleError(w, r, "enable", name, err)
 			return
 		}
 		s.writeJSON(w, 200, map[string]string{"status": "enabled"})
 	case len(parts) == 2 && parts[1] == "disable" && r.Method == http.MethodPost:
 		if err := st.SetScheduleEnabled(r.Context(), name, false); err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeScheduleError(w, r, "disable", name, err)
 			return
 		}
 		s.writeJSON(w, 200, map[string]string{"status": "disabled"})
 	case len(parts) == 1 && r.Method == http.MethodDelete:
 		if err := st.DeleteSchedule(r.Context(), name); err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeScheduleError(w, r, "delete", name, err)
 			return
 		}
 		s.writeJSON(w, 200, map[string]string{"status": "deleted"})
@@ -2059,6 +2059,21 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 // which is where it reached one before.
 func (s *apiServer) writeScheduleError(w http.ResponseWriter, r *http.Request, op, name string, err error) {
 	switch {
+	case errors.Is(err, engine.ErrScheduleNotFound):
+		// 404 rather than 500, and rather than the 200 this was until
+		// cleat#1297: a name that does not exist is the caller's mistake, and
+		// answering success to it tells an operator mid-incident that a
+		// schedule is disabled while it keeps firing.
+		//
+		// A cross-tenant attempt arrives here and is answered the same way.
+		// Every store statement is scoped by tenant_id, so tenant B asking
+		// about tenant A's schedule finds no row -- and "not found" is also
+		// the response that leaks least, being indistinguishable from a name
+		// nobody has ever used.
+		s.writeJSON(w, 404, map[string]string{
+			"error":  fmt.Sprintf("no schedule named %q", name),
+			"detail": "schedule_not_found",
+		})
 	case errors.Is(err, engine.ErrScheduleExists):
 		s.writeJSON(w, 409, map[string]string{
 			"error":  fmt.Sprintf("a schedule named %q already exists", name),

@@ -358,6 +358,16 @@ func (s *MySQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 
 // DeleteSchedule removes a schedule by name.
 func (s *MySQLStore) DeleteSchedule(ctx context.Context, name string) error {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM workflow_schedules WHERE name = ? AND tenant_id = ?
+	`, name, s.tenantID).Scan(&n); err != nil {
+		return fmt.Errorf("DeleteSchedule: %w", err)
+	}
+	if n == 0 {
+		return ErrScheduleNotFound
+	}
+
 	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM workflow_schedules WHERE name = ? AND tenant_id = ?
 	`, name, s.tenantID)
@@ -369,6 +379,20 @@ func (s *MySQLStore) DeleteSchedule(ctx context.Context, name string) error {
 
 // SetScheduleEnabled enables or disables a schedule.
 func (s *MySQLStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error {
+	// NOT RowsAffected: on MySQL an UPDATE setting a column to the value it
+	// already holds reports 0 affected rows without CLIENT_FOUND_ROWS, which
+	// cleat does not set -- so that reading would 404 an idempotent
+	// re-disable on this dialect alone. cleat#1297.
+	var n int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM workflow_schedules WHERE name = ? AND tenant_id = ?
+	`, name, s.tenantID).Scan(&n); err != nil {
+		return fmt.Errorf("SetScheduleEnabled: %w", err)
+	}
+	if n == 0 {
+		return ErrScheduleNotFound
+	}
+
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_schedules SET enabled = ? WHERE name = ? AND tenant_id = ?
 	`, enabled, name, s.tenantID)

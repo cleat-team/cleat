@@ -574,6 +574,18 @@ func (s *PostgresStore) DeleteSchedule(ctx context.Context, name string) error {
 	}
 	defer tx.Rollback()
 
+	// Inside the transaction, so the row cannot appear between the check and
+	// the delete. cleat#1297.
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM workflow_schedules WHERE name = $1 AND tenant_id = $2`,
+		name, s.tenantID).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrScheduleNotFound
+	}
+
 	_, err = tx.ExecContext(ctx, `DELETE FROM workflow_schedules WHERE name = $1 AND tenant_id = $2`, name, s.tenantID)
 	if err != nil {
 		return err
@@ -587,6 +599,18 @@ func (s *PostgresStore) SetScheduleEnabled(ctx context.Context, name string, ena
 		return fmt.Errorf("set schedule enabled: begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// See ErrScheduleNotFound: RowsAffected cannot answer this on MySQL, so
+	// the check is explicit and identical on every dialect. cleat#1297.
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM workflow_schedules WHERE name = $1 AND tenant_id = $2`,
+		name, s.tenantID).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrScheduleNotFound
+	}
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_schedules SET enabled = $2 WHERE name = $1 AND tenant_id = $3
