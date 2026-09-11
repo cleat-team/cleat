@@ -12,19 +12,23 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/cleat-team/cleat/internal/tenantctx"
 )
 
-type tenantIDKey struct{}
-
-// WithTenantID sets the tenant ID in the context. Primarily for testing.
+// WithTenantID sets the tenant ID in the context.
+//
+// Delegates to internal/tenantctx so that engine can read the same value
+// without importing this package -- auth's own tests import engine, so that
+// direction is a cycle. These two functions stay the way everything outside
+// engine refers to the tenant; only the key moved.
 func WithTenantID(ctx context.Context, tenantID uuid.UUID) context.Context {
-	return context.WithValue(ctx, tenantIDKey{}, tenantID)
+	return tenantctx.With(ctx, tenantID)
 }
 
 // TenantIDFromContext extracts the tenant ID from the request context.
 func TenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
-	tid, ok := ctx.Value(tenantIDKey{}).(uuid.UUID)
-	return tid, ok
+	return tenantctx.From(ctx)
 }
 
 // TenantResolver is the only thing this middleware needs from a store: turning
@@ -101,7 +105,7 @@ func Middleware(store TenantResolver, requireAuth bool, publicPatterns ...string
 				http.Error(w, `{"error":"invalid or revoked API key"}`, http.StatusUnauthorized)
 				return
 			}
-			ctx := context.WithValue(r.Context(), tenantIDKey{}, tenantID)
+			ctx := tenantctx.With(r.Context(), tenantID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

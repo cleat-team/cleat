@@ -65,6 +65,19 @@ func TestEveryLinkedPluginSupportsEveryDialectTheWorkerRunsOn(t *testing.T) {
 
 		name := lp.Plugin.Info().Name
 		for _, m := range p.Migrations() {
+			// A policy-only migration has no DDL on ANY dialect, so there is
+			// no dialect arm to be missing and nothing for the skip path to
+			// leave uncreated -- the tables it scopes were created by an
+			// earlier version that this guard still checks. cleat#1277.
+			//
+			// Narrow on purpose: it requires TenantScoped to be non-empty, so
+			// a migration that is empty by ACCIDENT still trips the guard.
+			// This is the case the comment below already described as out of
+			// subject; only the implementation did not say so.
+			if m.Up == "" && len(m.TenantScoped) > 0 {
+				continue
+			}
+
 			// Up is the PostgreSQL arm and the fallback; a migration with no Up
 			// at all is a different defect and not this test's subject.
 			if m.UpMySQL == "" {

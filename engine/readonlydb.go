@@ -86,22 +86,80 @@ func (r *readOnlyTx) Rollback() error { return r.tx.Rollback() }
 // sqlRowsWrapper wraps *sql.Rows to implement plugin.Rows.
 type sqlRowsWrapper struct {
 	rows *sql.Rows
+
+	// done, when set, ends the transaction the rows were read on. A
+	// tenant-scoped Query (see SQLDBAdapter.tenantTx) must keep its
+	// transaction open until the caller has finished reading, because
+	// set_config's is_local scope ends with the transaction -- committing
+	// before Close would pull the policy context out from under the rows.
+	done func() error
 }
 
 var _ plugin.Rows = (*sqlRowsWrapper)(nil)
 
-func (w *sqlRowsWrapper) Next() bool             { return w.rows.Next() }
+// Next ends the transaction as soon as the rows are exhausted, rather than
+// waiting for Close.
+//
+// Callers should defer Close and do; the difference matters for one that does
+// not. Before this change, forgetting Close leaked a connection back to the
+// pool late. With a tenant-scoped Query it would hold an open transaction
+// as well, which is a worse thing to leak -- so the common exit path ends it
+// without relying on the caller.
+//
+// Close remains correct after this: endTx clears the hook, and a second call
+// does nothing.
+func (w *sqlRowsWrapper) Next() bool {
+	if w.rows.Next() {
+		return true
+	}
+	_ = w.endTx()
+	return false
+}
+
+// endTx runs the transaction hook at most once.
+func (w *sqlRowsWrapper) endTx() error {
+	if w.done == nil {
+		return nil
+	}
+	done := w.done
+	w.done = nil
+	return done()
+}
 func (w *sqlRowsWrapper) Scan(dest ...any) error { return w.rows.Scan(dest...) }
-func (w *sqlRowsWrapper) Close() error           { return w.rows.Close() }
-func (w *sqlRowsWrapper) Err() error             { return w.rows.Err() }
+func (w *sqlRowsWrapper) Close() error {
+	err := w.rows.Close()
+	if derr := w.endTx(); err == nil {
+		err = derr
+	}
+	return err
+}
+func (w *sqlRowsWrapper) Err() error { return w.rows.Err() }
 
 // rowScanner adapts *sql.Row to plugin.RowScanner.
 type rowScanner struct {
 	row *sql.Row
+
+	// err, when set, is returned instead of scanning -- QueryRow has no
+	// error return of its own, so a failure to open the tenant-scoped
+	// transaction has to be carried to the caller's Scan.
+	err error
+
+	// done ends the transaction the row was read on. See sqlRowsWrapper.
+	done func() error
 }
 
 var _ plugin.RowScanner = (*rowScanner)(nil)
 
 func (r *rowScanner) Scan(dest ...any) error {
-	return r.row.Scan(dest...)
+	if r.err != nil {
+		return r.err
+	}
+	err := r.row.Scan(dest...)
+	if r.done != nil {
+		if derr := r.done(); err == nil {
+			err = derr
+		}
+		r.done = nil
+	}
+	return err
 }

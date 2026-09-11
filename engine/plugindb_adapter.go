@@ -42,32 +42,77 @@ type SQLDBAdapter struct {
 var _ plugin.PluginDB = (*SQLDBAdapter)(nil)
 
 func (a *SQLDBAdapter) Begin(ctx context.Context) (plugin.PluginTx, error) {
-	tx, err := a.DB.BeginTx(ctx, nil)
+	tx, err := a.tenantTx(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if tx == nil {
+		if tx, err = a.DB.BeginTx(ctx, nil); err != nil {
+			return nil, err
+		}
 	}
 	return &sqlTxAdapter{tx: tx, dialect: a.Dialect}, nil
 }
 
 func (a *SQLDBAdapter) Exec(ctx context.Context, query string, args ...any) (int64, error) {
-	result, err := a.DB.ExecContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+	tx, err := a.tenantTx(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	if tx == nil {
+		result, err := a.DB.ExecContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+		if err != nil {
+			return 0, err
+		}
+		return result.RowsAffected()
+	}
+	result, err := tx.ExecContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (a *SQLDBAdapter) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
-	rows, err := a.DB.QueryContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+	tx, err := a.tenantTx(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &sqlRowsWrapper{rows: rows}, nil
+	if tx == nil {
+		rows, err := a.DB.QueryContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+		if err != nil {
+			return nil, err
+		}
+		return &sqlRowsWrapper{rows: rows}, nil
+	}
+	rows, err := tx.QueryContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &sqlRowsWrapper{rows: rows, done: tx.Commit}, nil
 }
 
 func (a *SQLDBAdapter) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
-	row := a.DB.QueryRowContext(ctx, plugin.Rebind(query, a.Dialect), args...)
-	return &rowScanner{row: row}
+	tx, err := a.tenantTx(ctx)
+	if err != nil {
+		return &rowScanner{err: err}
+	}
+	if tx == nil {
+		row := a.DB.QueryRowContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+		return &rowScanner{row: row}
+	}
+	row := tx.QueryRowContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+	return &rowScanner{row: row, done: tx.Commit}
 }
 
 func (a *SQLDBAdapter) Ping(ctx context.Context) error {

@@ -46,5 +46,27 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS kv_store;
 			`,
 		},
+		{
+			// Tenant isolation for kv_store. cleat#1277.
+			//
+			// A separate version rather than a TenantScoped on v1, because
+			// v1 is already recorded as applied everywhere kvstore runs and
+			// a recorded migration never runs again -- editing it would
+			// protect new databases and leave every existing one open.
+			//
+			// kvstore is the first plugin to take this, and it qualifies
+			// because every one of its access sites is request-scoped: all
+			// four handlers read the tenant from the request context and
+			// already answer 401 "tenant required" without one. A plugin
+			// that also sweeps across tenants from a background loop cannot
+			// adopt this yet -- the policy fails closed and those sweeps
+			// have no tenant in context.
+			//
+			// Up is empty on purpose: the policy is emitted by the runtime
+			// from TenantScoped. On MySQL and SQL Server this version is
+			// recorded and does nothing, which is what the field documents.
+			Version:      2,
+			TenantScoped: []string{"kv_store"},
+		},
 	}
 }
