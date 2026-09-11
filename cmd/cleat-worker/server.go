@@ -735,7 +735,41 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 				s.writeError(w, 500, "workflow already running with key "+concurrencyKey+", and the losing run could not be rejected: "+err.Error())
 				return
 			}
-			s.writeError(w, 409, "workflow already running with key "+concurrencyKey)
+			// cleat#1172: the refusal used to say only "workflow already
+			// running with key K" -- and K is the value the CALLER supplied, so
+			// the response restated the request. The two questions at that
+			// moment are WHAT holds the key and FOR HOW LONG, and neither was
+			// answerable: not from the refusal, not by filtering the listing,
+			// not by paging. It is worst exactly where the feature earns its
+			// keep -- a holder that has hung blocks every later start under that
+			// key, and the only signal is a 409 naming the key back at you.
+			//
+			// The holder is LOOKED UP rather than already known. The issue reads
+			// as though it were in hand; it is not. AcquireConcurrencyKey
+			// returns a bool, and on PostgreSQL its INSERT is ON CONFLICT DO
+			// NOTHING RETURNING workflow_id -- a conflict returns no rows. The
+			// runID above is the LOSER's, created by StartNewRun a few lines
+			// earlier.
+			//
+			// Best-effort, and the 409 is unconditional. A diagnostic that can
+			// fail must not be able to turn a refusal into a 500: the caller
+			// still needs to be told it was refused, and the holder is the part
+			// that may be missing. A key released between the failed acquire and
+			// this read is a legitimate miss, not an error.
+			body := map[string]string{"error": "workflow already running with key " + concurrencyKey}
+			if lookup, ok := st.(interface {
+				GetConcurrencyKeyHolder(context.Context, string) (engine.ConcurrencyKeyHolder, error)
+			}); ok {
+				if holder, herr := lookup.GetConcurrencyKeyHolder(r.Context(), concurrencyKey); herr != nil {
+					slog.WarnContext(r.Context(), "concurrency key conflict: could not look up the holder",
+						"concurrency_key", concurrencyKey, "error", herr)
+				} else if holder.Held {
+					body["error"] = "workflow " + holder.WorkflowID + " already running with key " + concurrencyKey
+					body["held_by"] = holder.WorkflowID
+					body["held_until"] = holder.ExpiresAt.UTC().Format(time.RFC3339)
+				}
+			}
+			s.writeJSON(w, 409, body)
 			return
 		}
 	}

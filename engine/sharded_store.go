@@ -1300,6 +1300,32 @@ func (s *ShardedStore) AcquireConcurrencyKey(ctx context.Context, key, workflowI
 	return shard.Store.AcquireConcurrencyKey(ctx, key, workflowID, ttl)
 }
 
+// GetConcurrencyKeyHolder routes by key text hash, the same way the acquire
+// above does -- so the holder is read from the shard that refused the acquire,
+// which is the only one that can have it.
+//
+// Present so a sharded deployment gets the same refusal message as a
+// single-store one (cleat#1172). Without it the HTTP layer's optional
+// interface assertion fails, and sharded installs quietly keep the older 409
+// that names only the key the caller supplied -- a difference nobody would
+// think to look for, because nothing errors.
+func (s *ShardedStore) GetConcurrencyKeyHolder(ctx context.Context, key string) (ConcurrencyKeyHolder, error) {
+	shard := s.getShard(key)
+	if shard == nil {
+		return ConcurrencyKeyHolder{}, fmt.Errorf("get_concurrency_key_holder: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	holder, ok := shard.Store.(interface {
+		GetConcurrencyKeyHolder(context.Context, string) (ConcurrencyKeyHolder, error)
+	})
+	if !ok {
+		// A shard backed by a store that cannot answer. Not an error: the
+		// caller treats an unheld key and an unanswerable one alike, and the
+		// refusal still stands.
+		return ConcurrencyKeyHolder{}, nil
+	}
+	return holder.GetConcurrencyKeyHolder(ctx, key)
+}
+
 // ReleaseConcurrencyKey routes by key text hash.
 func (s *ShardedStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	shard := s.getShard(key)
