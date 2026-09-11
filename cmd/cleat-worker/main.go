@@ -152,6 +152,55 @@ func main() {
 		logger.InfoContext(context.Background(), "checksum verification enabled", "worker_id", workerID)
 	}
 
+	// Handle --create-tenant (standalone mode: create a tenant and exit).
+	//
+	// Placed before --generate-api-key because that is the order they are used
+	// in: a key cannot be minted for a tenant that does not exist --
+	// admin.tenant_api_keys.tenant_id REFERENCES admin.tenants(tenant_id) -- and
+	// before this flag there was no command that created one. See cleat#1114.
+	if *createTenantNamed != "" {
+		dbURL := *dbURL
+		if dbURL == "" {
+			dbURL = os.Getenv("DATABASE_URL")
+		}
+		if dbURL == "" {
+			logger.ErrorContext(context.Background(), "--db or DATABASE_URL required for --create-tenant", "worker_id", workerID)
+			os.Exit(1)
+		}
+		gdb, err := sql.Open(sqlDriverName(*driver), dbURL)
+		if err != nil {
+			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or DATABASE_URL environment variable", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+		defer gdb.Close()
+		store, tsErr := auth.NewTenantStoreForDialect(gdb, *driver)
+		if tsErr != nil {
+			logger.ErrorContext(context.Background(), "cannot create a tenant", "worker_id", workerID, "error", tsErr)
+			os.Exit(1)
+		}
+		display := *createTenantDisplayName
+		if display == "" {
+			display = *createTenantNamed
+		}
+		// auth.CreateTenant refuses on MySQL and SQL Server rather than emitting
+		// PostgreSQL SQL at them. Surfaced as-is: the message names the dialect,
+		// which is more useful than anything this layer could add.
+		tid, cErr := store.CreateTenant(context.Background(), *createTenantNamed, display)
+		if cErr != nil {
+			logger.ErrorContext(context.Background(), "failed to create tenant", "worker_id", workerID, "name", *createTenantNamed, "error", cErr)
+			os.Exit(1)
+		}
+		fmt.Printf("\n")
+		fmt.Printf("=== CLEAT TENANT ===\n")
+		fmt.Printf("Tenant ID: %s\n", tid)
+		fmt.Printf("Name:      %s\n", *createTenantNamed)
+		fmt.Printf("\n")
+		fmt.Printf("Mint a key for it with:\n")
+		fmt.Printf("  cleat-worker --generate-api-key %s --db \"$DSN\"\n", tid)
+		fmt.Printf("\n")
+		os.Exit(0)
+	}
+
 	// Handle --generate-api-key (standalone mode: generate key and exit).
 	if *generateAPIKeyFor != "" {
 		tenantID, err := uuid.Parse(*generateAPIKeyFor)
