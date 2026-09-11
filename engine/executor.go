@@ -515,10 +515,29 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				se = &SuspendError{Reason: "workflow suspended"}
 			}
 			if se.Until.IsZero() {
-				// Default: wake in 10 minutes. External events (child
-				// completion via wakeParent, signal delivery) wake the
-				// parent earlier. This fallback catches edge cases where
-				// the wake mechanism fails and prevents infinite hangs.
+				// Default: wake in 10 minutes.
+				//
+				// This said the default was a fallback for "edge cases where
+				// the wake mechanism fails", naming "child completion via
+				// wakeParent, signal delivery" as the mechanisms that wake a
+				// parent earlier. NO SUCH FUNCTION IS DEFINED (2026-09-11).
+				// Check it with `grep -rn '^func wakeParent' --include='*.go' .`.
+				// The ^ is load bearing and was arrived at twice: a bare name
+				// search matches this paragraph, and so does a search for the
+				// declaration form, because the quoted command contains it. A
+				// definition starts a line and prose about one never does --
+				// which is CLAUDE.md's "anchor to where the artifact lives",
+				// learned here by writing the retraction that satisfies its own
+				// grep, twice. Nothing pushes a suspended workflow awake;
+				// this timeout is the entire mechanism, and a suspension is a
+				// poll interval rather than a park.
+				//
+				// That matters beyond tidiness, and cleat#1213 is what it
+				// cost: reasoning about whether a parent awaiting a
+				// dead-lettered child would be woken by a later retry turns
+				// entirely on whether a push exists. Believing this comment,
+				// the answer is yes and the parent is waiting; measured, the
+				// answer is that it replays every ten minutes forever.
 				se.Until = time.Now().Add(10 * time.Minute)
 			}
 

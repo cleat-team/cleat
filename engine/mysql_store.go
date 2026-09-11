@@ -409,9 +409,12 @@ func (s *MySQLStore) GetChildResult(ctx context.Context, runID string) (ChildOut
 	if err != nil {
 		return ChildOutcome{}, fmt.Errorf("get child result: %w", err)
 	}
-	if status == "failed" {
-		// The result column is never written on this branch; the message is
-		// in error_msg. See PostgresStore.GetChildResult.
+	if status == "failed" || status == "dead_lettered" {
+		// dead_lettered is terminal too (cleat#1213). The result column is
+		// never written on either branch; the message is in error_msg, which
+		// MoveToDeadLetterQueue also writes. See PostgresStore.GetChildResult
+		// for why a dead-lettered child is reported as failed rather than
+		// awaited.
 		return ChildOutcome{Completed: true, Failed: true, Error: errMsg.String}, nil
 	}
 	if status == "done" {
