@@ -401,9 +401,12 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		}
-		// Start idempotency key cleanup on each shard.
+		// Start idempotency key cleanup on each shard. Sharding is a
+		// PostgreSQL configuration -- shardDBs come from the postgres
+		// connection strings above -- so the driver is named explicitly rather
+		// than inherited from *driver, which this branch does not consult.
 		for _, sdb := range shardDBs {
-			go idempotencyCleanupLoop(ctx, sdb, 1*time.Hour)
+			go idempotencyCleanupLoop(ctx, sdb, "postgres", 1*time.Hour)
 		}
 	} else {
 		// Resolve DB connection string via the configured credential provider.
@@ -594,10 +597,10 @@ func main() {
 		}
 		store = s
 
-		// Start periodic cleanup of expired idempotency keys (Postgres only).
-		if *driver == "postgres" {
-			go idempotencyCleanupLoop(ctx, db, 1*time.Hour)
-		}
+		// Start periodic cleanup of expired idempotency keys. Every dialect:
+		// the postgres-only guard that used to stand here left MySQL and SQL
+		// Server with nothing that ever removed a key (cleat#1256).
+		go idempotencyCleanupLoop(ctx, db, *driver, 1*time.Hour)
 
 	}
 

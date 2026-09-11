@@ -2129,14 +2129,14 @@ func TestScheduleLoop_StopsOnCancel(t *testing.T) {
 }
 
 func TestIdempotencyCleanupLoop_StopsOnCancel(t *testing.T) {
-	// idempotencyCleanupLoop takes a raw context + *sql.DB.
+	// idempotencyCleanupLoop takes a raw context + *sql.DB + driver name.
 	// We can't easily mock *sql.DB, but we can verify the loop exits on cancel.
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan struct{})
 	go func() {
 		// Pass nil db — the loop will exit on ctx.Done() before trying to use it.
-		idempotencyCleanupLoop(ctx, nil, 10*time.Millisecond)
+		idempotencyCleanupLoop(ctx, nil, "postgres", 10*time.Millisecond)
 		close(done)
 	}()
 
