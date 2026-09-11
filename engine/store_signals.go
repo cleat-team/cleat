@@ -178,12 +178,27 @@ func (s *PostgresStore) DeliverSignalIdempotent(ctx context.Context, workflowID,
 	defer tx.Rollback()
 
 	var inserted bool
+	// expires_at from the CONFIGURED TTL, not the column default.
+	//
+	// idempotency_keys.expires_at defaults to now() + 7 days, and the
+	// store's idempotencyKeyTTL defaults to 720 hours. The start path sets
+	// it explicitly; this one did not when it was added in cleat#1266, so a
+	// SIGNAL token silently stopped working after 7 days while the
+	// configured and documented lifetime was 30 -- a retry on day 8 would
+	// be delivered a second time, which is the whole thing the token exists
+	// to prevent.
+	//
+	// Same shape as cleat#1261, where cleanup deleted at created_at + 7
+	// days against the same 720h default and swept LIVE keys 23 days early:
+	// idempotency that stops working long before it says it does, silently,
+	// because nothing compares the two numbers.
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO idempotency_keys (key_hash, workflow_id, tenant_id)
-		VALUES ($1, $2, $3)
+		INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
+		VALUES ($1, $2, now() + ($3 * INTERVAL '1 second'), $4)
 		ON CONFLICT (key_hash, tenant_id) DO NOTHING
 		RETURNING true
-	`, signalIdempotencyHash(idempotencyKey), workflowID, s.tenantID).Scan(&inserted)
+	`, signalIdempotencyHash(idempotencyKey), workflowID,
+		int(s.idempotencyKeyTTL.Seconds()), s.tenantID).Scan(&inserted)
 	if errors.Is(err, sql.ErrNoRows) {
 		// DO NOTHING returned no row: the token is already spent.
 		return true, tx.Commit()

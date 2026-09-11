@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"testing"
 )
@@ -236,4 +237,85 @@ func TestEveryRealStoreCanAbsorbADuplicateSignal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A signal's token lives as long as a start's. cleat#1266's insert omitted
+// expires_at, so it took the COLUMN default of 7 days while the store's
+// configured TTL — and the start path — used 720 hours.
+//
+// A signal token that stops working on day 8 of a documented 30 means a retry
+// is delivered twice, silently, which is the whole thing the token prevents.
+// Same shape as cleat#1261, where cleanup deleted at created_at + 7 days
+// against the same 720h default and swept live keys 23 days early: idempotency
+// that expires long before it says it does, because nothing compared the two
+// numbers.
+//
+// So this compares them, rather than asserting a literal. A hardcoded "30 days"
+// would pass against a store configured for 1 hour and fail on a deployment
+// that tuned it — the question is whether the two paths AGREE, not what either
+// one says.
+func TestASignalTokenOutlivesTheColumnDefault(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			setupTestData(t, store)
+			truncateAll(t, store)
+			ctx := context.Background()
+
+			si, ok := store.(SignalIdempotencyStore)
+			if !ok {
+				t.Fatalf("%T does not implement SignalIdempotencyStore", store)
+			}
+			id := seedRunForSignals(t, ctx, store, "ttl")
+
+			// A start spends its token, writing expires_at from the TTL.
+			if _, _, err := store.StartNewRun(ctx, "", "test-workflow", 1,
+				json.RawMessage(`{}`), "start-token", DefaultTenantUUID, 0); err != nil {
+				t.Fatalf("StartNewRun: %v", err)
+			}
+			if _, err := si.DeliverSignalIdempotent(ctx, id, "approve", `{}`, "signal-token"); err != nil {
+				t.Fatalf("DeliverSignalIdempotent: %v", err)
+			}
+
+			startTTL := idempotencyTTLSeconds(t, ctx, store, sha256Bytes("start-token"))
+			signalTTL := idempotencyTTLSeconds(t, ctx, store, signalIdempotencyHash("signal-token"))
+
+			// Both rows were written moments apart, so their lifetimes should
+			// match to well within a minute. The tolerance is for the gap
+			// between the two inserts, not for a difference in policy.
+			if diff := startTTL - signalTTL; diff > 60 || diff < -60 {
+				t.Errorf("a signal token lives %ds and a start token %ds -- a difference of %ds.\n\n"+
+					"The signal path omitted expires_at and took the column default (7 days) "+
+					"while the start path wrote the configured TTL. A token that expires early "+
+					"stops deduplicating without saying so.", signalTTL, startTTL, diff)
+			}
+		})
+	}
+}
+
+func sha256Bytes(s string) []byte {
+	sum := sha256.Sum256([]byte(s))
+	return sum[:]
+}
+
+// idempotencyTTLSeconds reads how long a key has left, per dialect.
+func idempotencyTTLSeconds(t *testing.T, ctx context.Context, store WorkflowStore, keyHash []byte) int {
+	t.Helper()
+	var q string
+	switch store.(type) {
+	case *MySQLStore:
+		q = `SELECT TIMESTAMPDIFF(SECOND, NOW(6), expires_at) FROM idempotency_keys WHERE key_hash = ?`
+	case *MSSQLStore:
+		q = `SELECT DATEDIFF(SECOND, SYSUTCDATETIME(), expires_at) FROM idempotency_keys WHERE key_hash = @p1`
+	default:
+		q = `SELECT EXTRACT(EPOCH FROM (expires_at - now()))::int FROM idempotency_keys WHERE key_hash = $1`
+	}
+	db := rawDBOf(t, store)
+	var secs int
+	if err := db.QueryRowContext(ctx, q, keyHash).Scan(&secs); err != nil {
+		t.Fatalf("read expires_at: %v", err)
+	}
+	return secs
 }
