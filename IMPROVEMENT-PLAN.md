@@ -11312,6 +11312,23 @@ for a *different* test's reasoning and was never turned into an assertion of its
 in a test cannot fail.** The new test can, and the hold-count half of that sentence remains true
 and remains pinned where it was.
 
+**It appears twice in that file, and the second occurrence is worse than the first.** The file-level
+comment states it flatly — *"takes only the key and deletes the row unconditionally"*. The other is
+a **string literal inside the failure message of a different assertion**, printed only in the branch
+where re-entrancy misbehaves. So it is not merely an unasserted claim: it could not be *read* at all
+unless an unrelated assertion broke first. Both are corrected in this change, because a comment
+describing the pre-fix behaviour is worse than no comment — the rule this repo already applies to
+`✅` markers over stale bodies.
+
+**The obvious mechanical guard for this class does not work, and that is worth recording so nobody
+builds it.** The tempting predicate is *"a test's failure message names a production identifier the
+test never calls"*. It would not have caught this one: `concurrency_key_reentrancy_test.go:83` calls
+`ReleaseConcurrencyKey` as cleanup, so the identifier *is* called — it is just never the subject.
+The real predicate is *"this sentence states a property, and no assertion anywhere depends on that
+property holding"*, and neither of us has a mechanical form for it. Left as a stated open question
+rather than a weak guard: **a check that would not have caught the case that inspired it is worse
+than none, because it makes the class look handled.**
+
 #### The fourth route into one end state
 
 | | |
