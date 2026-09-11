@@ -135,12 +135,25 @@ var (
 	rateLimitPerTenant      = flag.Float64("rate-limit-per-tenant", 0, "Requests/second per tenant (0 = disabled; requires --require-auth)")
 	rateLimitPerTenantBurst = flag.Int("rate-limit-per-tenant-burst", 0, "Burst size for per-tenant rate limit")
 	maxRetries              = flag.Int("max-retries", 100, "Maximum retry attempts for DurableCallWithRetry")
-	// NOTE: this sweep's event_history arm cannot match anything. See
-	// retentionLoop and PostgresStore.DeleteExpiredEvents -- the rows are
-	// already gone by the time a workflow is done or failed, deleted by the
-	// finalize_workflow_status procedure. The flag is not inert: it still
-	// clears compaction state. cleat#1016.
-	retentionDays                  = flag.Int("retention-days", 30, "Days to retain completed/failed workflow event history (0 disables). NOTE: event_history rows for done/failed workflows are already deleted at finalize time by the finalize_workflow_status procedure, so this sweep's event deletion finds nothing; what it still does is clear compaction state. See cleat#1016.")
+	// WHAT THIS FLAG ACTUALLY DOES: it clears compaction state. Its
+	// event_history arm cannot match anything (cleat#1016).
+	//
+	// The arm selects `status IN ('done','failed')`, and those rows are already
+	// gone -- finalize_workflow_status deletes a workflow's events when it
+	// reaches either status, deliberately, so event_history stays bounded to
+	// active workflows. See PostgresStore.DeleteExpiredEvents, which measures it.
+	//
+	// AND THE PART AN OPERATOR WILL GET WRONG: this flag does NOT bound
+	// event_history for 'terminated' or 'dead_lettered' runs. The arm does not
+	// select them, and neither TerminateWorkflow nor MoveToDeadLetterQueue calls
+	// finalize_workflow_status -- so their events are deleted only when the
+	// workflow row itself is swept, by --completed-workflow-retention-days or
+	// --dead-letter-retention-days, both of which default to 0 (off).
+	//
+	// So on default settings the events of every terminated and dead-lettered
+	// run are retained indefinitely, and the on-by-default flag whose name says
+	// "retention" is not what bounds them.
+	retentionDays                  = flag.Int("retention-days", 30, "Days after which the compaction state of completed/failed workflows is cleared (0 disables). This does NOT bound event_history: its event arm selects done/failed runs, whose events finalize_workflow_status already deleted at terminal time, so that arm cannot match. Events of 'terminated' and 'dead_lettered' runs are bounded only by --completed-workflow-retention-days and --dead-letter-retention-days, both off by default. See cleat#1016.")
 	completedWorkflowRetentionDays = flag.Int("completed-workflow-retention-days", 0, "Days to retain workflow_instances rows for terminal workflows (done/failed/terminated) before permanently deleting them, along with any remaining event_history. 0 (default) disables this -- unlike --retention-days, this deletes the workflow record itself (status, result, error, def_name), not just its step-by-step history, so it is opt-in rather than on by default. dead_lettered workflows are never touched by this flag.")
 	deadLetterRetentionDays        = flag.Int("dead-letter-retention-days", 0, "Days to retain dead-lettered workflow_instances rows before permanently deleting them, along with their event_history, signals and promises. 0 (default) disables this. Separate from --completed-workflow-retention-days, which never touches dead-lettered workflows: a dead-lettered run is the one an operator most wants to inspect afterwards, so it has its own lifecycle and its own knob rather than being swept up with completed work.")
 	wasmCacheMaxEntries            = flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
