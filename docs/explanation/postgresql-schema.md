@@ -121,6 +121,8 @@ CREATE TABLE workflow_instances (
     signal_consumed_at_claim BIGINT NOT NULL DEFAULT 0,
     reclaim_count BIGINT NOT NULL DEFAULT 0,
     started_at TIMESTAMPTZ,
+    concurrency_key TEXT,
+    concurrency_key_hash BYTEA,
     PRIMARY KEY (id),
     FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs(tenant_id, name, version)
 );
@@ -365,6 +367,7 @@ CREATE TABLE workflow_update_requests (
 | `idx_instances_heartbeat` | `workflow_instances` | Heartbeat monitoring | Non-unique, partial |
 | `idx_instances_stale` | `workflow_instances` | Reaper: stale heartbeat detection | Non-unique, partial |
 | `idx_instances_sticky` | `workflow_instances` | Sticky worker fast path | Non-unique, partial |
+| `idx_instances_concurrency_key` | `workflow_instances` | Claim path: skip a run whose concurrency key is held | Non-unique |
 | `idx_defs_active` | `workflow_defs` | Latest-version lookup | Non-unique |
 | `idx_promises_status` | `workflow_promises` | Promise resolution lookup | Non-unique |
 | `idx_concurrency_keys_workflow` | `concurrency_keys` | Key-to-workflow lookup | Non-unique |

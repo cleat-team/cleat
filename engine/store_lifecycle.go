@@ -53,6 +53,12 @@ func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error)
 		WHERE status IN ('ready', 'terminating')
 		  AND next_wake_at <= now()
 		  AND task_queue = ANY($1)
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > now()
+                         AND ck.workflow_id <> workflow_instances.id))
 	`, pq.Array(s.taskQueues)).Scan(&n); err != nil {
 		return 0, err
 	}
@@ -106,6 +112,12 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			WHERE status IN ('ready', 'terminating')
 			  AND next_wake_at <= now()
 			  AND task_queue = ANY($2)
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > now()
+                         AND ck.workflow_id <> workflow_instances.id))
 			ORDER BY priority ASC, created_at
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
@@ -163,6 +175,12 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 			  AND next_wake_at <= now()
 			  AND sticky_worker_id = $1
 			  AND task_queue = ANY($2)
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > now()
+                         AND ck.workflow_id <> workflow_instances.id))
 			ORDER BY priority ASC, created_at
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED

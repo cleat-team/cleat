@@ -57,6 +57,12 @@ func (s *MSSQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
 		WHERE status IN ('ready', 'terminating')
 		  AND next_wake_at <= SYSUTCDATETIME()
 		  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p1, ','))
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > SYSUTCDATETIME()
+                         AND ck.workflow_id <> workflow_instances.id))
 		  AND tenant_id = @p2
 	`, strings.Join(s.taskQueues, ","), s.tenantID).Scan(&n)
 	return n, err
@@ -139,6 +145,12 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 			WHERE status IN ('ready', 'terminating')
 			  AND next_wake_at <= SYSUTCDATETIME()
 			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > SYSUTCDATETIME()
+                         AND ck.workflow_id <> workflow_instances.id))
 			  AND tenant_id = @p4
 			ORDER BY priority ASC, created_at
 			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
@@ -267,6 +279,12 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 			  AND next_wake_at <= SYSUTCDATETIME()
 			  AND sticky_worker_id = @p1
 			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > SYSUTCDATETIME()
+                         AND ck.workflow_id <> workflow_instances.id))
 			  AND tenant_id = @p4
 			ORDER BY priority ASC, created_at
 			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
@@ -461,6 +479,12 @@ func (s *MSSQLStore) claimWorkflowsAcrossTenantsOnce(ctx context.Context, worker
 			WHERE status IN ('ready', 'terminating')
 			  AND next_wake_at <= SYSUTCDATETIME()
 			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.expires_at > SYSUTCDATETIME()
+                         AND ck.workflow_id <> workflow_instances.id))
 			ORDER BY priority ASC, created_at
 			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
 		)

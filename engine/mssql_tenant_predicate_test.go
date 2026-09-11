@@ -117,7 +117,15 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	// SET list (#1094). Re-made rather than swapped: the addition changes no
 	// WHERE clause and no row selection, so "deliberately cross-tenant" still
 	// describes this statement for the same reason it did before.
-	"mssql_lifecycle.go:claimWorkflowsAcrossTenantsOnce#44368f5b6261": {
+	// Re-made again at cleat#1186, which added the claimable-concurrency-key
+	// filter to this statement's WHERE clause. Unlike #1094 above, this one DOES
+	// change row selection, so the reason was re-checked rather than carried:
+	// the added predicate correlates the key to the candidate row's OWN tenant
+	// (ck.tenant_id = workflow_instances.tenant_id), so it can only ever remove
+	// rows from the result, never admit a row from a tenant this statement would
+	// not already have returned. The statement is still deliberately
+	// cross-tenant, and still gated on cleat_admin membership in Go.
+	"mssql_lifecycle.go:claimWorkflowsAcrossTenantsOnce#949d6280509b": {
 		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
 		Reason: deliberatelyCrossTenant,
 	},

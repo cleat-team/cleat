@@ -688,10 +688,27 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 			// arguments this caller could pass, returned ErrFenceLost, and
 			// the error was discarded. The client got a 409 saying the run
 			// was rejected while the run stayed claimable, and the next
-			// worker to poll executed it. The HTTP layer is the only
-			// enforcement point for Cleat-Concurrency-Key; ClaimWorkflows
-			// does not consult concurrency_keys. See
+			// worker to poll executed it. See
 			// engine/fence_lost_callers_test.go.
+			//
+			// This used to add "the HTTP layer is the only enforcement point
+			// for Cleat-Concurrency-Key; ClaimWorkflows does not consult
+			// concurrency_keys". The second clause stopped being true in
+			// cleat#1186: the claim and sticky-claim statements on all three
+			// dialects now skip a run whose concurrency key is held by
+			// another run, so a held key defers a claim as well as failing an
+			// acquire here.
+			//
+			// The first clause is still true and is why this block stays.
+			// StartNewRun does not yet record concurrency_key on the
+			// instance, so that predicate sees NULL for every production row
+			// and defers nothing; and even once it does, the acquire has to
+			// move into the claim transaction before this rejection can go.
+			// Until then nothing would acquire on a waiting run's behalf, two
+			// waiting runs with one key would both become claimable the
+			// moment the holder released, and deferral would be strictly
+			// worse than this 409 -- it would remove the exclusion rather
+			// than relax it.
 			//
 			// TerminateWorkflow is the unowned-writer primitive: it does not
 			// fence on assigned_to or generation, and it bumps generation, so
