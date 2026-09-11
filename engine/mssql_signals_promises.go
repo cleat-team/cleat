@@ -509,19 +509,22 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	return n > 0, tx.Commit()
 }
 
-func (s *MSSQLStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (s *MSSQLStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	keyHash := sha256.Sum256([]byte(key))
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
-		return fmt.Errorf("release concurrency key: begin: %w", err)
+		return false, fmt.Errorf("release concurrency key: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = @p1 AND tenant_id = @p2`, keyHash[:], s.tenantID)
+	// workflow_id, not just tenant_id -- see PostgresStore.ReleaseConcurrencyKey
+	// and cleat#1188. All three dialects carried the same omission.
+	res, err := tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = @p1 AND workflow_id = @p2 AND tenant_id = @p3`, keyHash[:], workflowID, s.tenantID)
 	if err != nil {
-		return fmt.Errorf("release concurrency key: %w", err)
+		return false, fmt.Errorf("release concurrency key: %w", err)
 	}
-	return tx.Commit()
+	n, _ := res.RowsAffected()
+	return n > 0, tx.Commit()
 }
 
 func (s *MSSQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {

@@ -1534,8 +1534,8 @@ func (s *stubWorkflowStore) CompleteUpdateRequest(ctx context.Context, workflowI
 func (s *stubWorkflowStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	return false, nil
 }
-func (s *stubWorkflowStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	return nil
+func (s *stubWorkflowStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
 }
 func (s *stubWorkflowStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
@@ -2125,8 +2125,8 @@ type mockConcurrencyKeyStore struct{}
 func (m *mockConcurrencyKeyStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	return true, nil
 }
-func (m *mockConcurrencyKeyStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	return nil
+func (m *mockConcurrencyKeyStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
 }
 
 func newMockConcurrencyKeyStore() *mockConcurrencyKeyStore {
@@ -2139,8 +2139,8 @@ type releaseErrorStore struct {
 	mockConcurrencyKeyStore
 }
 
-func (r *releaseErrorStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	return fmt.Errorf("simulated release failure")
+func (r *releaseErrorStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return false, fmt.Errorf("simulated release failure")
 }
 
 func TestReleaseHeldScopes_NilStore(t *testing.T) {
@@ -2690,8 +2690,8 @@ func (m *mockCollectMetricsStore) CompleteUpdateRequest(ctx context.Context, wor
 func (m *mockCollectMetricsStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockCollectMetricsStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	return nil
+func (m *mockCollectMetricsStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
 }
 func (m *mockCollectMetricsStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
@@ -2880,8 +2880,8 @@ func (m *mockCheckStaleStore) CompleteUpdateRequest(ctx context.Context, workflo
 func (m *mockCheckStaleStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockCheckStaleStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	return nil
+func (m *mockCheckStaleStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
 }
 func (m *mockCheckStaleStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
@@ -3067,7 +3067,9 @@ func (m *mockGCStore) CompleteUpdateRequest(ctx context.Context, workflowID, upd
 func (m *mockGCStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockGCStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
+func (m *mockGCStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
+}
 func (m *mockGCStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
 }
@@ -3244,7 +3246,9 @@ func (m *mockPurgeStore) CompleteUpdateRequest(ctx context.Context, workflowID, 
 func (m *mockPurgeStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockPurgeStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
+func (m *mockPurgeStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
+}
 func (m *mockPurgeStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
 }
@@ -3327,4 +3331,59 @@ func (m *mockGCStore) GetChildCompletedAtMs(ctx context.Context, runID string) (
 // every existing test's PollChild answer at "running".
 func (m *mockPurgeStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
 	return 0, false, nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (s *stubWorkflowStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := s.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockCollectMetricsStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockCheckStaleStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockGCStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockPurgeStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
 }

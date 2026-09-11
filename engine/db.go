@@ -374,50 +374,8 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE 1=1",
 	)
 
-	if filter.Status != "" {
-		qb.AddCondition("status = %s", filter.Status)
-	}
-	if filter.InputContains != "" {
-		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
-	}
-	if filter.ErrorContains != "" {
-		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
-	}
-	if filter.Search != "" {
-		pattern := "%" + filter.Search + "%"
-		icol := d.castExpr("input")
-		rcol := d.castExpr("result")
-		n := qb.NextPos()
-		// Search matches the workflow's def_name in addition to its
-		// input/result/error content: a general "Search" box (as opposed to
-		// the more targeted InputContains/ErrorContains filters) is most
-		// often used to find workflows of a given type by name, e.g. an
-		// admin dashboard search box (cmd/cleat-worker/server.go passes the
-		// "search" query param straight through to this filter).
-		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s OR %s)",
-			d.likeExpr(icol, n, true),
-			d.likeExpr(rcol, n+1, true),
-			d.likeExpr("error_msg", n+2, true),
-			d.likeExpr("def_name", n+3, true)))
-		qb.AddArgs(pattern, pattern, pattern, pattern)
-	}
-
-	qb.AddRaw("ORDER BY created_at DESC")
-
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 100
-	} else if limit > 1000 {
-		limit = 1000
-	}
-
-	if filter.Offset > 0 {
-		qb.AddRaw(d.limitOffset(qb.NextPos(), qb.NextPos()+1, true))
-		qb.AddArgs(limit, filter.Offset)
-	} else {
-		qb.AddRaw(d.limitOffset(qb.NextPos(), 0, false))
-		qb.AddArgs(limit)
-	}
+	applyWorkflowFilters(qb, d, filter)
+	applyWorkflowListPaging(qb, d, filter)
 
 	query, args := qb.SQL()
 	rows, err := tx.QueryContext(ctx, query, args...)
@@ -799,19 +757,24 @@ func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflow
 	return true, tx.Commit()
 }
 
-// ReleaseConcurrencyKey releases a specific concurrency key.
-func (s *PostgresStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+// ReleaseConcurrencyKey releases a concurrency key held by workflowID.
+func (s *PostgresStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
-		return fmt.Errorf("release concurrency key: begin: %w", err)
+		return false, fmt.Errorf("release concurrency key: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256') AND tenant_id = $2`, key, s.tenantID)
+	// workflow_id is in the predicate, not just the tenant. Without it this
+	// matched any row for the key within the tenant, so B could release A's
+	// lock and C could then take it while A was still running and still
+	// believed it held it -- mutual exclusion gone, silently (cleat#1188).
+	res, err := tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256') AND workflow_id = $2 AND tenant_id = $3`, key, workflowID, s.tenantID)
 	if err != nil {
-		return fmt.Errorf("release concurrency key: %w", err)
+		return false, fmt.Errorf("release concurrency key: %w", err)
 	}
-	return tx.Commit()
+	n, _ := res.RowsAffected()
+	return n > 0, tx.Commit()
 }
 
 // ReleaseWorkflowConcurrencyKeys releases all concurrency keys held by a workflow.

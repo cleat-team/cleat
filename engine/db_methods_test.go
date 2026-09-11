@@ -2086,7 +2086,7 @@ func TestPostgresStore_ReleaseConcurrencyKey_ExecError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ReleaseConcurrencyKey(testCtx, "my-key")
+	_, err := store.ReleaseConcurrencyKey(testCtx, "my-key", "wf-1")
 	if err == nil {
 		t.Fatal("expected error from exec failure")
 	}
@@ -2097,7 +2097,7 @@ func TestPostgresStore_ReleaseConcurrencyKey_CommitError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ReleaseConcurrencyKey(testCtx, "my-key")
+	_, err := store.ReleaseConcurrencyKey(testCtx, "my-key", "wf-1")
 	if err == nil {
 		t.Fatal("expected error from commit failure")
 	}
@@ -2384,7 +2384,7 @@ func TestPostgresStore_ReleaseConcurrencyKey_NonExistent(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ReleaseConcurrencyKey(testCtx, "nonexistent-key")
+	_, err := store.ReleaseConcurrencyKey(testCtx, "nonexistent-key", "wf-1")
 	if err != nil {
 		t.Fatalf("ReleaseConcurrencyKey (non-existent): %v", err)
 	}

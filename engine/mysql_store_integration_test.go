@@ -1668,7 +1668,7 @@ func TestMySQLIntegration_ConcurrencyKeys(t *testing.T) {
 	}
 
 	// Release the key.
-	if err := s.ReleaseConcurrencyKey(ctx, "my-key"); err != nil {
+	if _, err := s.ReleaseConcurrencyKey(ctx, "my-key", runID); err != nil {
 		t.Fatalf("ReleaseConcurrencyKey: %v", err)
 	}
 

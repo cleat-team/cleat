@@ -171,6 +171,18 @@ func nullInt64(v int64) sql.NullInt64 {
 func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 	payload := make(map[string]any)
 	switch rec.EventType {
+	case "call_attempt_failed":
+		// Deliberately NOT the same shape as "call": no response, and the
+		// error is what the attempt is for. Sharing the case would make a
+		// failed attempt hash like a completed call.
+		payload["service"] = rec.Service
+		payload["operation"] = rec.Op
+		if rec.Attempt != 0 {
+			payload["attempt"] = rec.Attempt
+		}
+		if rec.Err != "" {
+			payload["error"] = rec.Err
+		}
 	case "call":
 		payload["service"] = rec.Service
 		payload["operation"] = rec.Op
@@ -502,6 +514,14 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.LockKey != "" {
 			payload["lock_key"] = rec.LockKey
 		}
+		// Emitted ONLY when true, so every release event written before this
+		// field existed -- and every ordinary release written after -- hashes
+		// to exactly what it hashed to before. computeEventChecksum runs over
+		// this map, so an unconditional key would rewrite the checksum of every
+		// release in every existing history.
+		if rec.LockNotHeld {
+			payload["lock_not_held"] = true
+		}
 	case "durable_send":
 		if rec.Service != "" {
 			payload["service"] = rec.Service
@@ -597,6 +617,19 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		return
 	}
 	switch rec.EventType {
+	case "call_attempt_failed":
+		if v, ok := m["service"].(string); ok {
+			rec.Service = v
+		}
+		if v, ok := m["operation"].(string); ok {
+			rec.Op = v
+		}
+		if v, ok := m["attempt"].(float64); ok {
+			rec.Attempt = int(v)
+		}
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
+		}
 	case "call":
 		if v, ok := m["service"].(string); ok {
 			rec.Service = v
@@ -901,6 +934,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 	case "release_lock":
 		if v, ok := m["lock_key"].(string); ok {
 			rec.LockKey = v
+		}
+		if v, ok := m["lock_not_held"].(bool); ok {
+			rec.LockNotHeld = v
 		}
 	case "durable_send":
 		if v, ok := m["service"].(string); ok {

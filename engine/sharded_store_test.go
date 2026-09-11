@@ -580,9 +580,9 @@ func (m *mockShardStore) AcquireConcurrencyKey(ctx context.Context, key, workflo
 	return false, nil
 }
 
-func (m *mockShardStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (m *mockShardStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	m.recordCall("ReleaseConcurrencyKey")
-	return m.err
+	return false, m.err
 }
 
 func (m *mockShardStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
@@ -1958,7 +1958,7 @@ func TestAcquireConcurrencyKey_NilShard(t *testing.T) {
 
 func TestReleaseConcurrencyKey_Success(t *testing.T) {
 	ss, _ := makeShardedStore(t, 2)
-	err := ss.ReleaseConcurrencyKey(context.Background(), "key-1")
+	_, err := ss.ReleaseConcurrencyKey(context.Background(), "key-1", "wf-1")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -3222,7 +3222,7 @@ func TestGetEventCount_NilShard(t *testing.T) {
 
 func TestReleaseConcurrencyKey_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	err := ss.ReleaseConcurrencyKey(context.Background(), "key-1")
+	_, err := ss.ReleaseConcurrencyKey(context.Background(), "key-1", "wf-1")
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}
@@ -4051,4 +4051,15 @@ func TestRemovingARoutingRuleOnOneShardStillWorks(t *testing.T) {
 	if got := mocks[0].CallCount("RemoveRoutingRule"); got != 1 {
 		t.Errorf("the only shard was asked %d times, want 1", got)
 	}
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockShardStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
 }

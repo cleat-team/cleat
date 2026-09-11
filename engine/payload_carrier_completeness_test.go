@@ -102,7 +102,7 @@ var payloadExemptFields = map[string]string{
 // left out here narrows this test's search rather than failing it.
 // TestTheCarrierAuditCoversEveryEventTypeConstant guards that.
 var allEventTypesForCarrierAudit = []EventType{
-	EventTypeCall, EventTypeAwaitSignals, EventTypeSignalReceived, EventTypeDefer,
+	EventTypeCall, EventTypeCallAttemptFailed, EventTypeAwaitSignals, EventTypeSignalReceived, EventTypeDefer,
 	EventTypeChildWorkflow, EventTypeAwaitChild, EventTypeContinueAsNew, EventTypeHeartbeat,
 	EventTypeAwaitAllChildren, EventTypePluginCall, EventTypeCreatePromise, EventTypeAwaitPromise,
 	EventTypePromiseResolved, EventTypePromiseRejected, EventTypeUpdateHandler,

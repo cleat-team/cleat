@@ -11287,3 +11287,157 @@ remaining five (`event_history`, `workflow_instances`, `workflow_promises`, `wor
 `workflow_update_requests`) all reduce to one unanswered question: whether a **run ID** is
 client-supplied. `StartNewRun` generates a UUID when `runID == ""` but accepts one. That is
 recorded on cleat#1189 as a question, not a finding — the HTTP path has not been traced.
+
+---
+
+### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
+
+`ReleaseConcurrencyKey` took only the key. Its statement carried `AND tenant_id` and no
+`workflow_id`, on all three dialects. Within one tenant, any workflow that knew a key string
+removed the row whoever held it — so B released A's lock, C then acquired it, and A carried on
+believing it held mutual exclusion. Nothing errored on any side.
+
+Reproduced on a scratch database before the fix: `DELETE 1` against a row the caller did not own,
+then a successful acquire by a third workflow, with the holder still `status='running'`.
+
+#### The hazard was already written down, in this package, as a comment
+
+`concurrency_key_reentrancy_test.go` explains why re-entrancy must keep returning false:
+
+> ReleaseConcurrencyKey takes only the key and has no hold count, so acquire+acquire+release
+> frees a lock the workflow still believes it holds.
+
+That is this defect, described accurately, in the tree, before it was filed. It was load-bearing
+for a *different* test's reasoning and was never turned into an assertion of its own. **A sentence
+in a test cannot fail.** The new test can, and the hold-count half of that sentence remains true
+and remains pinned where it was.
+
+**It appears twice in that file, and the second occurrence is worse than the first.** The file-level
+comment states it flatly — *"takes only the key and deletes the row unconditionally"*. The other is
+a **string literal inside the failure message of a different assertion**, printed only in the branch
+where re-entrancy misbehaves. So it is not merely an unasserted claim: it could not be *read* at all
+unless an unrelated assertion broke first. Both are corrected in this change, because a comment
+describing the pre-fix behaviour is worse than no comment — the rule this repo already applies to
+`✅` markers over stale bodies.
+
+**The obvious mechanical guard for this class does not work, and that is worth recording so nobody
+builds it.** The tempting predicate is *"a test's failure message names a production identifier the
+test never calls"*. It would not have caught this one: `concurrency_key_reentrancy_test.go:83` calls
+`ReleaseConcurrencyKey` as cleanup, so the identifier *is* called — it is just never the subject.
+The real predicate is *"this sentence states a property, and no assertion anywhere depends on that
+property holding"*, and neither of us has a mechanical form for it. Left as a stated open question
+rather than a weak guard: **a check that would not have caught the case that inspired it is worse
+than none, because it makes the class look handled.**
+
+#### The fourth route into one end state
+
+| | |
+|---|---|
+| §3.34 | a TTL truncated to whole seconds; the key was born expired — *"two workflows holding the same mutual-exclusion key, with nothing logged"* |
+| §3.39 | re-acquiring a key you already hold answered differently per dialect |
+| §3.318 (cleat#1189) | the key namespace was global across tenants |
+| this | a release matched a row it did not own |
+
+Each of the first three was fixed where it surfaced. What none of them asserted is the property
+itself, which is why the regression test here checks the *consequence* — C acquires — and not only
+the symptom. Asserting `released == false` alone would pass against a store that reported false and
+deleted the row anyway.
+
+#### Releasing a key you do not hold is still a success, deliberately
+
+`TestPostgresStore_ReleaseConcurrencyKey_NonExistent` has asserted that contract since before this
+change, and the contract is right rather than merely established: a key whose TTL has passed is
+already gone, the workflow releasing it has done nothing wrong, and an error there is one the guest
+cannot act on. The visible-error alternative was proposed and declined for that reason.
+
+What was missing was any *trace*. A release that freed a lock and one that matched nothing were the
+same event. `EventRecord.LockNotHeld` now distinguishes them, and `eventRecordToPayload` emits
+`lock_not_held` **only when true** — `computeEventChecksum` runs over that map, so an unconditional
+key would have rewritten the checksum of every release event in every existing history.
+
+#### Falsification
+
+Each dialect's predicate reverted alone, to the exact pre-fix statement:
+
+| reverted | result |
+|---|---|
+| postgres | `postgres` FAIL, `mysql` and `mssql` PASS |
+| mysql + mssql | both FAIL, `postgres` PASS |
+
+and both failures name both assertions — *"B released a key held by A"* and *"C acquired a key A
+still holds"*. **The first attempt at the postgres mutation was not faithful**: it deleted `$2` from
+the SQL while still passing three arguments, so the test went red on
+`pq: could not determine data type of parameter $2 (42P18)` — a red for the wrong reason, which is
+the outcome the "read *why* it failed" rule exists to catch. The mutation was rewritten to restore
+the pre-fix statement exactly.
+
+---
+
+### 3.320 A crash mid-retry granted a fresh MaxAttempts, because nothing was recorded until the call finished — ✅ **FIXED 2026-09-11** (cleat#1145)
+
+The host retry loop recorded an event only when the call *finished*. A failed attempt persisted
+nothing, so a worker lost mid-backoff replayed into a step with no history, restarted the policy at
+attempt 1, and spent the caller's whole budget a second time. `MaxAttempts` bounded attempts **per
+incarnation**, not per workflow, and a run that crashed repeatedly was bounded by nothing.
+
+Measured on the port harness before the fix, with the control that makes the number readable:
+
+| | attempts | crash | calls |
+|---|---:|---|---:|
+| control | 3 | no | **3** |
+| probe | 3 | mid-backoff | **4** |
+
+The unit test reproduces that exact pair, and its falsification message prints `Total across both
+incarnations: 4`.
+
+#### The fix is one event, and the constraint that shaped it is not in the issue
+
+`EventTypeCallAttemptFailed` is recorded before each backoff — only when another attempt follows, so
+a history ends on one **only** when the run was interrupted. That is the signal replay reads.
+
+The issue proposed "record the failed attempt" and stopped there. Three properties of this engine
+decide what that can mean, and none is obvious from the call site:
+
+* **`recordEvent` advances `stepCount`, and replay is positional** (`s.history[s.stepCount]`, then
+  `advanceReplayStep` increments). One event per step. A new event therefore shifts every
+  subsequent step in *new* histories — harmless, because old histories are replayed positionally
+  against themselves and never compared across versions, but it rules out any "extra event on the
+  same step" design.
+* **The compaction codec is a pair of exhaustive maps**, so a new type needs a code in both or it
+  round-trips as unknown.
+* **Attempts deliberately share one step** so every attempt carries one idempotency key. Resuming
+  therefore has to carry the *first* incarnation's step, or the key changes at exactly the moment a
+  duplicate is most likely. `freshCallWithRetry` takes `resumeStep` for that reason.
+
+#### Three guards caught what the tests did not
+
+The suite passed and then three existing guards failed — each about the *completeness* of adding an
+event type, which is precisely what a behavioural test cannot see:
+
+| guard | what it caught |
+|---|---|
+| `TestTheCarrierAuditCoversEveryEventTypeConstant` | the new type was in `eventTypeToCode` but in no audit list, so no field was checked against its payload arm |
+| `TestEveryEventRecordFieldTheDatabasePayloadMustCarryDoesCarry` | `Attempt` was carried unconditionally rather than guarded on non-zero |
+| `TestTheRequiredJavaGuardsCoverEveryHostStopSite` | the resume path adds an 18th `stopBeforeNewWork()` site |
+
+The third is the interesting one, and it is a case its own comment did not anticipate: the new site
+is a **second site for a call the Java SDK already guards**. Java needs no new method, because
+`javaCallsTheHostCanRefuse` covers the *call*, not the *site*. A count of sites and a list of
+methods are different things, and this is the case that separates them — recorded at the constant.
+
+#### Falsification
+
+Passing `0` instead of the spent count reddens both tests: *"a crash after attempt 1 of a 3-attempt
+policy made 3 further calls, want 2 — total across both incarnations: 4"*, which is the field
+measurement reproduced in a unit test.
+
+**The first attempt at that mutation did not compile** — removing the value left `spent` unused, and
+the filtered output printed nothing, which reads exactly like a pass. Caught by reading the
+unfiltered tail. The mutation was rewritten to keep the tree compiling (`_ = spent`), which is the
+repair CLAUDE.md prescribes for exactly this.
+
+#### What this does not change
+
+The **wait** is still worker-local (§3.317, cleat#1111): a resumed policy fires immediately rather
+than re-waiting the remainder of its backoff. That was a decision and it stands. This changes only
+which attempt it resumes at.

@@ -808,6 +808,41 @@ a heading over a stale body is worse than no marker at all, because it stops the
 checking. Four separate sessions were lost to one sentence describing a build tag that had
 already been removed; three of them concluded that a working feature was broken.
 
+**And the cheap prevention, which is one word: write a justification in the PAST tense and it
+survives its own fix.** The sweep above is a discipline you have to remember at exactly the moment
+you are pleased to be finished. This is a habit that makes most of the sweep unnecessary.
+
+Two justifications for two changes, measured against each other on 2026-09-11:
+
+| | tense | after the change it justifies |
+|---|---|---|
+| `ReleaseConcurrencyKey takes only the key and deletes the row unconditionally` | present | **false** |
+| `until this flag there was no command that made one` | past | still true |
+
+Both sentences explain why a change is needed. The first states the defect as a **standing fact
+about the system**; the second states it as **the reason the change exists**. Only the second is
+still true once the change lands, and neither author chose the tense deliberately — one came out
+clean by luck of phrasing, which is the argument for making it a rule rather than a preference.
+
+The first is not hypothetical: it sat in `engine/concurrency_key_reentrancy_test.go` as the
+file-level justification for a rule about re-entrancy, was an accurate description of cleat#1188
+months before anyone filed it, and became a lie the moment #1194 fixed it — in the same PR, which
+nobody noticed until a second session read the file.
+
+**The sweep is still right when a fix changes behaviour**, and it is one command: grep the package
+for the function name and read every comment that mentions it, not only the ones you edited.
+
+    git grep -n '<FunctionName>' -- '<pkg>/*.go' | grep -E '//|\*'
+
+**That pattern over-matches on purpose and you should leave it that way.** The `\*` also catches
+every pointer receiver, so `ReleaseConcurrencyKey` returns 36 lines in `engine/` where only a
+handful are prose. A sweep you run once after a behaviour change wants the loose reading — the
+tight one is where a stale comment hides. Run against develop before #1194, this command surfaces
+`concurrency_key_reentrancy_test.go:23` as its second hit.
+
+Stale prose is not dead weight. It is a confident, well-formed, wrong answer to the next reader's
+question, and nothing fails.
+
 **Any number you write down carries a date and the command that re-derives it.** If you cannot
 write the command, do not write the number. Every count in this repo's docs was wrong when
 checked — linter totals, finding counts, skip counts, branch counts, all of them.

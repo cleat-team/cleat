@@ -271,16 +271,19 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.
-func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	hash := sha256.Sum256([]byte(key))
 	keyHash := hash[:]
-	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?
-	`, keyHash, s.tenantID)
+	// workflow_id, not just tenant_id -- see PostgresStore.ReleaseConcurrencyKey
+	// and cleat#1188. All three dialects carried the same omission.
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM concurrency_keys WHERE key_hash = ? AND workflow_id = ? AND tenant_id = ?
+	`, keyHash, workflowID, s.tenantID)
 	if err != nil {
-		return fmt.Errorf("ReleaseConcurrencyKey: %w", err)
+		return false, fmt.Errorf("ReleaseConcurrencyKey: %w", err)
 	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // ReapExpiredConcurrencyKeys deletes all expired concurrency keys
@@ -528,44 +531,8 @@ func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	)
 	qb.AddArgs(s.tenantID)
 
-	if filter.Status != "" {
-		qb.AddCondition("status = %s", filter.Status)
-	}
-	if filter.InputContains != "" {
-		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
-	}
-	if filter.ErrorContains != "" {
-		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
-	}
-	if filter.Search != "" {
-		pattern := "%" + filter.Search + "%"
-		icol := d.castExpr("input")
-		rcol := d.castExpr("result")
-		n := qb.NextPos()
-		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s OR %s)",
-			d.likeExpr(icol, n, true),
-			d.likeExpr(rcol, n+1, true),
-			d.likeExpr("error_msg", n+2, true),
-			d.likeExpr("def_name", n+3, true)))
-		qb.AddArgs(pattern, pattern, pattern, pattern)
-	}
-
-	qb.AddRaw("ORDER BY created_at DESC")
-
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 100
-	} else if limit > 1000 {
-		limit = 1000
-	}
-
-	if filter.Offset > 0 {
-		qb.AddRaw(d.limitOffset(qb.NextPos(), qb.NextPos()+1, true))
-		qb.AddArgs(limit, filter.Offset)
-	} else {
-		qb.AddRaw(d.limitOffset(qb.NextPos(), 0, false))
-		qb.AddArgs(limit)
-	}
+	applyWorkflowFilters(qb, d, filter)
+	applyWorkflowListPaging(qb, d, filter)
 
 	query, args := qb.SQL()
 	rows, err := s.db.QueryContext(ctx, query, args...)

@@ -583,7 +583,9 @@ func (m *mockCompactStore) CompleteUpdateRequest(ctx context.Context, workflowID
 func (m *mockCompactStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	return false, nil
 }
-func (m *mockCompactStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
+func (m *mockCompactStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
+}
 func (m *mockCompactStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
 }
@@ -1891,4 +1893,15 @@ func (_ *mockCompactStore) SetAllowedSignalCallers(_ context.Context, _ string, 
 // every existing test's PollChild answer at "running".
 func (m *mockCompactStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
 	return 0, false, nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockCompactStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
 }
