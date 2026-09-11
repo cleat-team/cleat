@@ -11647,6 +11647,50 @@ exact version — every internal caller uses `""` or a range — so the two brok
 the ones a human reaches for first. This test uses `^1.0.0` with a comment pointing at the issue,
 rather than quietly avoiding the form that fails.
 
+### 3.430 The dead-letter sweep still orphaned every child on SQL Server after cleat#1267 — ✅ **FIXED 2026-09-11** (cleat#1265 residual)
+
+cleat#1267 fixed `DeleteCompletedWorkflows`: it now selects the batch and deletes the six child
+tables and the instances in one transaction. **`DeleteDeadLetteredWorkflows` was left as it was** —
+a bare `DELETE FROM workflow_instances`, no transaction, no child deletes — so a dead-lettered
+workflow still left all six children orphaned and permanent.
+
+Measured against develop **after** cleat#1267 merged, one test, two arms:
+
+| arm | result |
+|---|---|
+| `completed` | PASS |
+| `dead-lettered` | **FAIL** — 1 row surviving in each of `event_history`, `idempotency_keys`, `concurrency_keys`, `workflow_signals`, `workflow_promises`, `workflow_update_requests` |
+
+**The dead-letter sweep is where the wrong premise came from.** `DeleteCompletedWorkflows` used to
+carry *"UNVERIFIED: no SQL Server instance was available … it is written to match
+`DeleteDeadLetteredWorkflows` immediately above exactly (same batching shape, same reliance on
+cascade), which was itself the verified reference for this dialect's FK graph."* The reference was
+not verified either. Fixing the citing function and leaving the cited one is the one outcome that
+keeps the original mistake alive in the place it started.
+
+**So the two now share the code, not just the premise.** Everything after the `SELECT` was already
+identical; the batch function takes the select statement as a parameter, and the two predicates are
+adjacent constants. No SQL is built at run time. Two copies of an assumption is the mechanism that
+produced cleat#1265, and a shared table list (cleat#1267's `mssqlWorkflowChildTables`) fixes half of
+that — the other half is a shared batch path, so the next table added cannot reach one sweep and
+miss the other.
+
+**Both preconditions are kept in the test**, because the audit that found cleat#1265 was wrong twice
+without them: counts go through `testutil.MSSQLAdminDB`, since an RLS **FILTER** predicate makes a
+surviving row read as zero on an ordinary connection; and the parent row is asserted **gone** before
+any child count is believed, since a sweep with no session context deletes nothing and every child
+then "survives" for an unrelated reason.
+
+**This was duplicated work, and the claim ritual is what failed.** I claimed cleat#1265 at 16:43
+after checking the issue's state (OPEN) and comments (none) — the check added after cleat#1188 —
+and cleat#1267 had been open since **15:48**. Both of these would have shown it:
+
+    gh issue view <n> --json closedByPullRequestsReferences
+    gh pr list --state all --search "<n>"
+
+An issue with no comments is not an unclaimed issue. What survived from the duplicate is the part
+that was not duplicated: the dead-letter half, the shared batch path, and a test covering both arms.
+
 ### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
 
 `ReleaseConcurrencyKey` took only the key. Its statement carried `AND tenant_id` and no

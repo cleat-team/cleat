@@ -725,7 +725,56 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if alreadyExisted {
-		s.writeJSON(w, 200, map[string]string{"workflow_id": runID, "already_started": "true"})
+		// Say what became of the winner. cleat#1151.
+		//
+		// The point of an idempotency key is to make a retry safe when the
+		// caller does not know whether the first attempt landed -- and on
+		// being told `already_started` the right next action differs: poll a
+		// running winner, fetch a finished one's result, surface a failed
+		// one rather than wait for a result that will never improve. These
+		// three answers were byte-identical, so every caller needed a second
+		// request to tell them apart and one that skipped it was wrong.
+		//
+		// READ FROM THE RUN, not from idempotency_keys.error_msg. That column
+		// is written at start time and has no production reader; the run row
+		// is written at failure time and is the live truth. Two sources for
+		// one fact is the shape cleat#1213 was -- GetChildResult and
+		// GetChildCount holding two definitions of "terminal" forty lines
+		// apart, only one of them deciding anything.
+		//
+		// ADDITIVE. workflow_id and already_started keep their names and
+		// meanings, so nothing reading them breaks, and cleat#1169's replay
+		// decision stays free to fold the shape later.
+		resp := map[string]string{
+			"workflow_id":     runID,
+			"already_started": "true",
+			// Stated, not implied by an absent field: a caller branching on
+			// status must be able to tell "I cannot tell you" from "I forgot
+			// to tell you", and an omitted key reads as the second.
+			"status": "unknown",
+		}
+		// A failed lookup leaves status "unknown" rather than failing the
+		// request. The duplicate WAS correctly recognised and workflow_id is
+		// valid; turning that into a 500 because a secondary read failed
+		// would lose the answer the caller actually asked for.
+		//
+		// The winner being GONE is not an error and is newly reachable:
+		// cleat#1264 moved key cleanup onto expires_at on all three dialects
+		// and cleat#1258 made retention delete the key with the workflow, so
+		// a key can now outlive the run it names.
+		if wf, lookupErr := st.GetWorkflowByID(r.Context(), runID); lookupErr == nil && wf != nil {
+			resp["status"] = wf.Status
+			// Only when non-empty. An empty `error` on a success is the
+			// ambiguity cleat#1115 was: a failure indistinguishable from a
+			// result nobody wrote.
+			if wf.Error != "" {
+				resp["error"] = wf.Error
+			}
+			if wf.ErrorCode != "" {
+				resp["error_code"] = wf.ErrorCode
+			}
+		}
+		s.writeJSON(w, 200, resp)
 		return
 	}
 

@@ -32,6 +32,7 @@ var WitToEnvImport = map[string]map[string]string{
 	},
 	"cleat:host-calls/durable-lifecycle": {
 		"durable-defer":             "cleat_defer",
+		"durable-defer-phase":       "cleat_defer_phase",
 		"durable-continue-as-new":   "cleat_continue_as_new",
 		"durable-poll-cancellation": "cleat_poll_cancellation",
 	},

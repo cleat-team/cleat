@@ -20,6 +20,21 @@ def durable_defer(desc: str) -> str:
     Returns the generated defer ID.
     """
     raise NotImplementedError
+def durable_defer_phase(on: bool) -> None:
+    """
+    Report that the guest has started (true) or finished (false) draining
+    its defer table.
+    
+    Records no event. It marks the events the drain produces so the engine
+    can tell a defer body's durable calls from the workflow body's --
+    without which a workflow that exhausted its retries and then cleaned up
+    is classified failed rather than dead_lettered, and deleted by
+    retention instead of retained for an operator. cleat#1155.
+    
+    The host cannot observe this boundary itself: on the ordinary failure
+    path the guest drains its own table, so the host is not in the loop.
+    """
+    raise NotImplementedError
 def durable_continue_as_new(input: str) -> int:
     """
     Replace workflow input and restart execution (history compaction).
