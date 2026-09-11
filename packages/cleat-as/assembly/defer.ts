@@ -69,6 +69,7 @@
 import { HostCalls } from "./host-calls";
 import { DurableResult } from "./host-calls";
 import { isWorkflowSuspended, isInDeferPhase, setInDeferPhase } from "./memory";
+import { import_cleat_defer_phase } from "./host-calls";
 
 /**
  * Signature for a defer body.
@@ -181,6 +182,27 @@ export function deferFunc(
  * observably: this SDK has no exceptions. That is a real difference from the
  * other three, where the drain has to catch.
  */
+
+/**
+ * Sets the local defer-phase flag AND tells the host, together.
+ *
+ * One helper rather than two calls at each site: `runDeferred` has three exits
+ * -- normal, suspended, and the loop's end -- and three copies of a paired
+ * update is three chances to update one and forget the other. The host half is
+ * what lets the engine tell a defer body's durable calls from the workflow
+ * body's; the local half is what `deferFunc` and `continueAsNew` read to refuse.
+ * cleat#1155.
+ *
+ * The extern lives in `host-calls.ts` with every other one -- `memory.ts`
+ * imports no module on purpose, so it cannot declare something `defer.ts` needs
+ * without either taking an import or hiding the declaration from the SDK
+ * surface scan in tests/plugin-harness.
+ */
+function enterDeferPhase(v: bool): void {
+  setInDeferPhase(v);
+  import_cleat_defer_phase(v ? 1 : 0);
+}
+
 export function runDeferred(h: HostCalls): i32 {
   let taken = _defers;
   _defers = [];
@@ -188,7 +210,7 @@ export function runDeferred(h: HostCalls): i32 {
   // The flag the restrictions in `deferFunc` and `HostCalls.continueAsNew`
   // read. Cleared on every exit below, including the suspension one: leaving
   // it set would make the next segment's first `deferFunc` refuse.
-  setInDeferPhase(true);
+  enterDeferPhase(true);
 
   let ran: i32 = 0;
   for (let i: i32 = taken.length - 1; i >= 0; i--) {
@@ -196,11 +218,11 @@ export function runDeferred(h: HostCalls): i32 {
     ran++;
     entry.fn(h, entry.payload);
     if (isWorkflowSuspended()) {
-      setInDeferPhase(false);
+      enterDeferPhase(false);
       return ran;
     }
   }
-  setInDeferPhase(false);
+  enterDeferPhase(false);
   return ran;
 }
 

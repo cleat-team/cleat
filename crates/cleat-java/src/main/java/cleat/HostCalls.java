@@ -122,6 +122,24 @@ public class HostCalls {
     private static native long cleatDeferRaw(
         int descPtr, int descLen, int outPtr, int maxLen);
 
+    @Import(module = "env", name = "cleat_defer_phase")
+    private static native long cleatDeferPhaseRaw(int on);
+
+    /**
+     * Reports the start (1) and end (0) of the defer drain to the host.
+     *
+     * Records no event. It marks the events the drain produces so the engine
+     * can tell a defer body's durable calls from the workflow body's -- without
+     * which a workflow that exhausted its retries and then cleaned up is
+     * classified failed rather than dead_lettered, and deleted by retention
+     * instead of retained for an operator. cleat#1155.
+     *
+     * Called by {@link Defer#runDeferred()}, not by workflow code.
+     */
+    public static void setDeferPhase(boolean on) {
+        cleatDeferPhaseRaw(on ? 1 : 0);
+    }
+
     @Import(module = "env", name = "cleat_poll_cancellation")
     private static native long cleatPollCancellationRaw(int outPtr, int maxLen);
 

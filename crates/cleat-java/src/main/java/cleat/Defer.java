@@ -111,6 +111,7 @@ public final class Defer {
         // of this method, and a flag left set would make the next segment's
         // first deferFunc refuse.
         inDeferPhase = true;
+        HostCalls.setDeferPhase(true);
         try {
             int ran = 0;
             for (int i = taken.size() - 1; i >= 0; i--) {
@@ -127,6 +128,7 @@ public final class Defer {
             return ran;
         } finally {
             inDeferPhase = false;
+            HostCalls.setDeferPhase(false);
         }
     }
 
