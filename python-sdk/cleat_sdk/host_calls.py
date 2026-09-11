@@ -679,7 +679,7 @@ if not _USING_WASM:
         """Stub for WASM import ``(import "env" "cleat_defer") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError("cleat_defer can only be called within a cleat WASM runtime.")
 
-    def _import_cleat_defer_phase(on: bool) -> None:  # noqa: ARG001
+    def _import_cleat_defer_phase(on: bool) -> None:
         """No-op stub for ``cleat_defer_phase`` off-WASM.
 
         A NO-OP rather than a ``NotImplementedError``, unlike every other stub
