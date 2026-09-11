@@ -839,7 +839,7 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 	// 'terminating' status to make. Either status is claimable, so the phase
 	// runs again either way -- this is about the status telling the truth
 	// while it waits.
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
@@ -848,6 +848,23 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 	`, workflowID, workerID, nextWakeAt, generation)
 	if err != nil {
 		return err
+	}
+
+	// A zero-row update is a lost fence, not a failure and not a success.
+	// Reported rather than discarded because the caller branches on it:
+	// cmd/cleat-worker's releaseWorkflow treats ErrFenceLost as "the no-op it
+	// is" and logs at Debug, while any OTHER error is logged as "release
+	// failed, workflow stays claimed until its lease expires" -- untrue of a
+	// stale release on both counts. Until cleat#1223 that branch was dead on
+	// PostgreSQL and MySQL, and the three sibling fenced writes (Complete,
+	// Fail, Finalize) already reported a lost fence this way on all three
+	// dialects.
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("release workflow: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrFenceLost
 	}
 
 	pgNotify(ctx, tx, s.notifyChannel)

@@ -857,8 +857,19 @@ func (s *MSSQLStore) releaseWorkflowOnce(ctx context.Context, workflowID, worker
 	if err != nil {
 		return fmt.Errorf("release workflow: rows affected: %w", err)
 	}
+	// A zero-row update is a lost fence, not a failure and not a success.
+	// cmd/cleat-worker's releaseWorkflow branches on ErrFenceLost and treats
+	// it as "the no-op it is", logging at Debug; any OTHER error is logged as
+	// "release failed, workflow stays claimed until its lease expires", which
+	// is untrue of a stale release on both counts.
+	//
+	// This dialect already DETECTED the condition and reported it as a raw
+	// error naming ROWS rather than the situation, so errors.Is was false and
+	// SQL Server deployments logged that false warning on every stale release
+	// while PostgreSQL and MySQL said nothing at all. Only the vocabulary
+	// changes here; the behaviour was already right. cleat#1223.
 	if rows == 0 {
-		return fmt.Errorf("release workflow: no rows affected for %s", workflowID)
+		return ErrFenceLost
 	}
 
 	return tx.Commit()
