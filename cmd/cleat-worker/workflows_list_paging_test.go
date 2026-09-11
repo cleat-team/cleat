@@ -98,6 +98,50 @@ func TestTheTargetedFiltersReachTheStore(t *testing.T) {
 	}
 }
 
+// TestEveryListFilterReachesTheStore covers the four the test above does not
+// (cleat#1248). Measured by sabotage: replacing each read in handleListWorkflows
+// with the empty string and running the whole package, `status`,
+// `input_contains`, `error_contains` and `search` were noticed by nothing, while
+// `def_name`, `error_code` and `id_prefix` were caught by the test above. All
+// four are live -- applyWorkflowFilters turns them into `status = %s` and three
+// LIKE conditions -- so they work today and nothing would report the day they
+// stop.
+//
+// The direction of the failure is why this matters. A dropped filter does not
+// error, it WIDENS the result: a caller asking for status=failed is handed every
+// run and a UI renders it without complaint. TestATimeWindowIsParsedAndABadOneIsRefused
+// already makes this argument for the time bounds -- "the failure would be extra
+// data, which is the direction nobody checks" -- and it covers these equally.
+//
+// Asserting every field in one request also keeps the guard honest as filters
+// are added: a new one is unprotected until it appears here, and this test is
+// where a reader looks to find out which are covered.
+func TestEveryListFilterReachesTheStore(t *testing.T) {
+	sp := newListSpy(nil, 0)
+	get(t, sp, "/api/workflows?"+
+		"status=failed&input_contains=order-42&error_contains=timed+out&search=nightly-rollup&"+
+		"def_name=nightly&error_code=cancelled&id_prefix=0f74")
+
+	for _, c := range []struct {
+		param string
+		got   string
+		want  string
+	}{
+		{"status", sp.got.Status, "failed"},
+		{"input_contains", sp.got.InputContains, "order-42"},
+		{"error_contains", sp.got.ErrorContains, "timed out"},
+		{"search", sp.got.Search, "nightly-rollup"},
+		{"def_name", sp.got.DefName, "nightly"},
+		{"error_code", sp.got.ErrorCode, "cancelled"},
+		{"id_prefix", sp.got.IDPrefix, "0f74"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s reached the store as %q, want %q -- an ignored filter "+
+				"returns MORE rows than the caller asked for, silently", c.param, c.got, c.want)
+		}
+	}
+}
+
 func TestATimeWindowIsParsedAndABadOneIsRefused(t *testing.T) {
 	sp := newListSpy(nil, 0)
 	get(t, sp, "/api/workflows?started_after=2026-09-10T14:00:00Z")
