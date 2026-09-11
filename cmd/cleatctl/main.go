@@ -102,6 +102,8 @@ func main() {
 		runDropTenant(ctx, db, args[1:])
 	case "revoke-api-key":
 		runRevokeAPIKey(ctx, db, args[1:])
+	case "set-tenant-setting":
+		runSetTenantSetting(ctx, db, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
