@@ -111,9 +111,16 @@ func TestKVStoreRowsAreScopedByAPolicyNotOnlyByTheQuery(t *testing.T) {
 	})
 }
 
-// postgresBackend returns the PostgreSQL backend, skipping when none is
-// configured. The skip is an environmental precondition -- no DSN -- and not
-// a failure being hidden.
+// postgresBackend returns the PostgreSQL backend from the standard set.
+//
+// Fatal, not Skip, and scripts/check-skips.sh is right to insist: the
+// precondition is always satisfiable here. NewPluginTestBackends always
+// attempts PostgreSQL, and the TestDB inside it already distinguishes
+// "no DSN configured" (skip, before this function returns) from "configured
+// and unreachable" (fatal). So arriving at the end of this loop does not mean
+// the environment is missing something -- it means the backend set stopped
+// containing PostgreSQL, which is a structural change this test should report
+// rather than quietly decline to run.
 func postgresBackend(t *testing.T) testutil.PluginTestBackend {
 	t.Helper()
 	for _, be := range testutil.NewPluginTestBackends(t) {
@@ -122,6 +129,8 @@ func postgresBackend(t *testing.T) testutil.PluginTestBackend {
 		}
 		be.Cleanup()
 	}
-	t.Skip("no PostgreSQL backend configured (CLEAT_TEST_POSTGRES)")
+	t.Fatal("NewPluginTestBackends returned no PostgreSQL backend; it is " +
+		"always attempted, so this is a change in the backend set rather " +
+		"than an unset DSN")
 	return testutil.PluginTestBackend{}
 }
