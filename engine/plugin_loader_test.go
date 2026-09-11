@@ -197,15 +197,18 @@ func TestPluginLoader_ResolveConstraintTypes(t *testing.T) {
 		{"gte", ">=1.5.0", "2.1.0", false},
 		{"tilde", "~1.2.0", "1.2.0", false},
 		{"caret", "^1.2.0", "1.3.0", false},
-		{
-			// KNOWN BUG: exact constraint fails because versionInRange treats
-			// Max as exclusive and Min==Max means no version can match.
-			// See lessons_learned/ for details.
-			name: "exact_bug", constraint: "=1.3.0", want: "", wantErr: true,
-		},
-		{
-			name: "bare_bug", constraint: "2.0.0", want: "", wantErr: true,
-		},
+		// These two were "exact_bug" and "bare_bug" until cleat#1243, asserting
+		// wantErr: true with a comment calling it a KNOWN BUG. The defect was
+		// pinned rather than fixed, so the suite went green on a resolver that
+		// could not return the one version an exact constraint names -- and a
+		// reader checking whether the forms were covered would have found that
+		// they were.
+		//
+		// A pin is the right tool for a defect someone is tracking; it is the
+		// wrong one when the fix is four lines, and it is actively harmful
+		// without an issue number, because nothing ever brings it back up.
+		{"exact", "=1.3.0", "1.3.0", false},
+		{"bare", "2.0.0", "2.0.0", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

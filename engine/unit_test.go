@@ -402,10 +402,12 @@ func TestParseConstraint(t *testing.T) {
 		// ^ (minor-locked)
 		{"^1.2.3", "v1.2.3", "v2.0.0", false},
 		{"^0.0.1", "v0.0.1", "v1.0.0", false},
-		// = exact
-		{"=1.2.3", "v1.2.3", "v1.2.3", false},
-		// bare version
-		{"1.2.3", "v1.2.3", "v1.2.3", false},
+		// = exact and bare version now carry Exact rather than Min == Max, so
+		// both bounds are empty here. What they resolve to is asserted in
+		// plugin_constraint_exact_test.go, which checks the behaviour rather
+		// than the representation. cleat#1243.
+		{"=1.2.3", "", "", false},
+		{"1.2.3", "", "", false},
 		// invalid
 		{">=notasemver", "", "", true},
 		{"invalid", "", "", true},

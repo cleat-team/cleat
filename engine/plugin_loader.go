@@ -99,6 +99,23 @@ func NewPluginLoader(db *sql.DB, rt *Runtime, maxSize ...int) *PluginLoader {
 type constraintRange struct {
 	Min string // minimum version (inclusive), "v"-prefixed semver
 	Max string // maximum version (exclusive), "v"-prefixed semver; empty = no upper bound
+
+	// Exact is set instead of Min/Max for the two forms that name a single
+	// version -- a bare "1.0.0" and "=1.0.0".
+	//
+	// A separate field rather than Min == Max, because Max is EXCLUSIVE by
+	// construction: ^ and ~ compute a *next* version for it, and
+	// versionInRange rejects anything >= Max. Encoding "exactly this one" as a
+	// range whose ends coincide therefore rejected the only version in it --
+	// the one version the constraint names was the one version it excluded.
+	// cleat#1243.
+	//
+	// Special-casing Min == Max inside versionInRange would fix the symptom and
+	// leave the representation lying: it would also silently accept a range
+	// whose bounds coincide for some other reason, which is a different
+	// question with a different right answer. This is the shape plugin/index.go
+	// already uses, and it is why that copy was never affected.
+	Exact string
 }
 
 // parseConstraint parses a semver constraint string and returns the
@@ -151,7 +168,7 @@ func parseConstraint(constraint string) (constraintRange, error) {
 		if !semver.IsValid(v) {
 			return constraintRange{}, fmt.Errorf("invalid semver in constraint %q", constraint)
 		}
-		return constraintRange{Min: v, Max: v}, nil
+		return constraintRange{Exact: v}, nil
 
 	default:
 		// Bare version — treat as exact match.
@@ -159,7 +176,7 @@ func parseConstraint(constraint string) (constraintRange, error) {
 		if !semver.IsValid(v) {
 			return constraintRange{}, fmt.Errorf("invalid semver version %q", constraint)
 		}
-		return constraintRange{Min: v, Max: v}, nil
+		return constraintRange{Exact: v}, nil
 	}
 }
 
@@ -167,6 +184,13 @@ func parseConstraint(constraint string) (constraintRange, error) {
 func versionInRange(v string, r constraintRange) bool {
 	if !semver.IsValid(v) {
 		return false
+	}
+	// Checked before the bounds, and by semver.Compare rather than string
+	// equality: "1.0.0" and "v1.0.0" are the same version, and the two arrive
+	// by different routes -- the stored version comes from plugin_defs, the
+	// constraint through ensureVPrefix. cleat#1243.
+	if r.Exact != "" {
+		return semver.Compare(v, r.Exact) == 0
 	}
 	if semver.Compare(v, r.Min) < 0 {
 		return false
