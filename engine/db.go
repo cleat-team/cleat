@@ -786,7 +786,7 @@ func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflow
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
 		VALUES (digest($1, 'sha256'), $1, $2, now() + make_interval(secs => $3), $4)
-		ON CONFLICT (key_hash) DO NOTHING
+		ON CONFLICT (key_hash, tenant_id) DO NOTHING
 		RETURNING workflow_id
 	`, key, workflowID, ttl.Seconds(), s.tenantID).Scan(&returnedWorkflowID)
 

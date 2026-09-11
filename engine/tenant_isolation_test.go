@@ -863,10 +863,25 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 			}
 
 			// --- Part 1: Acquire/release cross-tenant isolation ---
-			// concurrency_keys has PRIMARY KEY (key_hash) alone, so two tenants
-			// cannot simultaneously hold the same key name. The test works within
-			// this constraint, verifying tenant-scoped release isolation and
-			// sequential reuse across tenants.
+			//
+			// This block used to open by documenting the defect as a premise:
+			//
+			//	concurrency_keys has PRIMARY KEY (key_hash) alone, so two tenants
+			//	cannot simultaneously hold the same key name. The test works within
+			//	this constraint, verifying tenant-scoped release isolation and
+			//	sequential reuse across tenants.
+			//
+			// That is an accurate description of the schema and it is not a
+			// constraint -- it is cleat#1189, in the one test named for the
+			// property it violates. A key namespace global across tenants meant
+			// tenant B was blocked by a row it could not see and could not
+			// release, until the TTL expired. "The test works within this
+			// constraint" is how a defect becomes a specification.
+			//
+			// Migration 057 makes the key (key_hash, tenant_id). The assertions
+			// below are otherwise unchanged and were all correct: a tenant must
+			// still exclude ITSELF, and one tenant's release must not reach
+			// another's row.
 
 			acquired, err := storeA.AcquireConcurrencyKey(ctx, "iso-key", "wf-a", 60*time.Second)
 			if err != nil {
@@ -932,13 +947,23 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 				t.Error("storeB should acquire iso-key after storeA released it")
 			}
 
-			// Now storeA cannot acquire — key is held by storeB (PK conflict).
+			// storeA acquires the same key name while storeB holds it. Two
+			// tenants, two rows, no interaction -- which is what the name of
+			// this test claims to check. The old assertion here was the exact
+			// negation of this one (cleat#1189).
 			acquired, err = storeA.AcquireConcurrencyKey(ctx, "iso-key", "wf-a-3", 60*time.Second)
 			if err != nil {
-				t.Fatalf("AcquireConcurrencyKey on storeA after storeB holds: %v", err)
+				t.Fatalf("AcquireConcurrencyKey on storeA while storeB holds: %v", err)
 			}
-			if acquired {
-				t.Error("storeA should not acquire iso-key while storeB holds it")
+			if !acquired {
+				t.Error("storeA was refused iso-key because storeB holds it: the key " +
+					"namespace is global across tenants, so B blocks A with a row A " +
+					"cannot see and cannot release (cleat#1189)")
+			}
+
+			// Cleanup part 1 for A as well, now that it holds a row too.
+			if err := storeA.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+				t.Fatalf("ReleaseConcurrencyKey on store A cleanup: %v", err)
 			}
 
 			// Cleanup part 1.

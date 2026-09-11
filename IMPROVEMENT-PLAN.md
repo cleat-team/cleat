@@ -11188,3 +11188,102 @@ control: it shows the guard **protects the fix**, not merely that it once descri
 **The RLS table list is read from `migrations/postgres/`, not written here.** Eleven today; a
 literal silently stops covering the twelfth. Comments are stripped first, or a header quoting
 an `ALTER TABLE … ENABLE ROW LEVEL SECURITY` counts as a declaration.
+
+### 3.424 A concurrency key was global across tenants — the second instance of a class that already had a written fix — ✅ **FIXED 2026-09-10** (cleat#1189)
+
+`concurrency_keys` was `PRIMARY KEY (key_hash)` with the hash computed from the key text alone
+— `digest(<key>, 'sha256')`, no tenant. **The key namespace was global while every operation on
+the table is tenant-scoped and the table is under RLS**, so the uniqueness dimension and the
+access dimension disagreed.
+
+The consequence is worse than a refusal. Tenant 2 could not acquire; could not *release*,
+because its `DELETE` carries `AND tenant_id = <its own>` and matched nothing; and could not
+*see* the blocking row, because RLS correctly hides another tenant's. **Blocked, unclearable
+and invisible** until the TTL ran out. The colliding names are the ones everyone picks —
+`nightly`, `sync`, `cleanup`.
+
+**THIS IS THE SECOND INSTANCE OF A CLASS THAT ALREADY HAD A WRITTEN FIX**, which is the part
+worth carrying. `idempotency_keys` had the identical shape and was repaired by migration 010;
+its post-mortem is quoted in `store_lifecycle.go:770` — two customers both choosing
+`order-123`, and the second handed the first's workflow ID with `alreadyExisted = true` while
+its own workflow was never started. Same client-supplied string, same global namespace, same
+outcome. **The sibling table was left behind**, and nothing existed to notice that.
+
+**Why not fold the tenant into the hash, which needs no migration at all.** Migration 010
+considered and rejected that for `idempotency_keys`: it changes every hash, so no existing key
+matches after the upgrade and a retried request starts a second workflow. The reasoning
+transfers with the consequence changed — here, existing locks would become invisible to their
+holders and a second workflow could acquire a key someone is still holding, a double-acquire
+window for the length of the TTL in a table whose whole purpose is mutual exclusion. Changing
+the key preserves every row, and `concurrency_keys` already carries `tenant_id NOT NULL`, so
+unlike 010 there is no column to add.
+
+**EACH DIALECT REFUSED FOR A DIFFERENT REASON, so the fix is not one change** — and a test
+running only on PostgreSQL would have reported the SQL Server path fixed:
+
+| dialect | how it refused | fix |
+|---|---|---|
+| postgres | `ON CONFLICT (key_hash) DO NOTHING` — conflict target was the whole key | conflict target |
+| mysql | `INSERT IGNORE`, which relies on the PRIMARY KEY | **migration alone** |
+| mssql | `WHERE NOT EXISTS (… key_hash = @p1 …)` — **no tenant predicate at all** | + `AND tenant_id` |
+
+MySQL needed one step the others did not: its `tenant_id` is `CHAR(36)` with no `NOT NULL`,
+while PostgreSQL and SQL Server both declare it `NOT NULL` with the all-zero default. A
+nullable column cannot sit in a primary key, and MySQL would silently coerce it and take the
+implicit `''` default — **a different tenant id from the one every other dialect uses**. The
+migration makes it `NOT NULL` with the matching default, explicitly, first.
+
+**Three falsifications, one per dialect, because there are three distinct fixes.** Reverting
+the PostgreSQL conflict target reddens postgres; removing the MSSQL tenant predicate reddens
+mssql naming the key; and reverting the *schema* in the live MySQL database — the migration
+being the entire fix there — reddens mysql. One falsification would have proved one third of
+this.
+
+**The test also asserts the mutex still excludes.** "Two tenants can hold it" is satisfied by a
+lock that excludes nobody, so the same test re-acquires as the *same* tenant and requires a
+refusal, and checks that one tenant's release does not free another's row.
+
+**AND THE DEFECT WAS ALREADY WRITTEN DOWN — AS A SPECIFICATION, IN THE TEST NAMED FOR THE
+PROPERTY IT VIOLATES.** `TestTenantIsolation_ConcurrencyKeys` failed on all three dialects after
+this fix, on an assertion that reads:
+
+    // Now storeA cannot acquire — key is held by storeB (PK conflict).
+    if acquired {
+        t.Error("storeA should not acquire iso-key while storeB holds it")
+    }
+
+and its Part 1 opened by stating the premise outright:
+
+    // concurrency_keys has PRIMARY KEY (key_hash) alone, so two tenants cannot
+    // simultaneously hold the same key name. The test works within this
+    // constraint, verifying tenant-scoped release isolation and sequential
+    // reuse across tenants.
+
+That is an accurate description of the schema, correctly attributing the mechanism, and it is
+**not a constraint** — it is this defect, recorded as a design property and then built around.
+*"The test works within this constraint"* is how a defect becomes a specification: the author
+saw it, described it precisely, and shaped the assertions to accommodate it.
+
+This is the same shape as §3.418's `"mysql with dollar sign not a param"`, where an expectation
+captured from the implementation sat under a name describing the fix — but a degree worse,
+because here the accommodation is *documented and reasoned about* rather than merely typed. A
+reviewer reading that comment would have found it persuasive.
+
+The assertion is now its own negation, the premise is rewritten, and every other assertion in
+that test was correct and is unchanged: a tenant must still exclude itself, and one tenant's
+release must not reach another's row.
+
+**A census, with two corrections to my own first pass — both over-reporting.** Scanning every
+tenant-scoped table for a primary key omitting `tenant_id` first reported ten. `workflow_schedules`
+and `workflow_tags` are **already fixed** (`036_workflow_schedules_tenant_in_key.sql`); my scan
+matched `ADD CONSTRAINT <name> PRIMARY KEY (...)` and missed the bare `ADD PRIMARY KEY (...)`
+form. **The final key is what matters, and migrations restate it in more than one syntax.** I
+nearly filed a fixed bug.
+
+Corrected, eight remain — and **a PK omitting `tenant_id` is not itself the defect**. The
+defect needs the key to be **derived from a client-supplied string**, so two tenants naturally
+choose the same value. `tenant_api_keys.key_id` and `workflow_routing.id` are generated. The
+remaining five (`event_history`, `workflow_instances`, `workflow_promises`, `workflow_signals`,
+`workflow_update_requests`) all reduce to one unanswered question: whether a **run ID** is
+client-supplied. `StartNewRun` generates a UUID when `runID == ""` but accepts one. That is
+recorded on cleat#1189 as a question, not a finding — the HTTP path has not been traced.
