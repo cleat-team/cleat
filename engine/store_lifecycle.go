@@ -291,6 +291,24 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 
 	// Complete the current run.
 	qsJSON := marshalQueryState(queryState)
+	// `assigned_to = NULL` is the exclusion, not the WHERE clause.
+	//
+	// Nothing here bumps `generation`. Claiming does, so `generation = $5`
+	// excludes a caller from an EARLIER claim and `assigned_to = $2` excludes a
+	// DIFFERENT worker -- but two callers holding the SAME claim are
+	// indistinguishable to both. What refuses the second is that the first set
+	// assigned_to to NULL, so `assigned_to = $2` no longer matches.
+	//
+	// Measured, not asserted: delete the generation predicate and
+	// TestASecondContinueAsNewOnTheSameClaimIsRefused_MultiBackend still
+	// passes; keep assigned_to instead of NULLing it and the second call
+	// SUCCEEDS, leaving the predecessor with two successors -- a forked chain.
+	//
+	// That second mutation is the cheapest implementation of decision 4, a
+	// durable record of which worker ran a workflow. CLAUDE.md 3.112 records
+	// the same clause doing the same unnamed job in the finalize path, where a
+	// test named for the marker predicate stayed green with that predicate
+	// deleted. cleat#1175.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
@@ -419,6 +437,24 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	defer tx.Rollback()
 
 	qsJSON := marshalQueryState(queryState)
+	// `assigned_to = NULL` is the exclusion, not the WHERE clause.
+	//
+	// Nothing here bumps `generation`. Claiming does, so `generation = $5`
+	// excludes a caller from an EARLIER claim and `assigned_to = $2` excludes a
+	// DIFFERENT worker -- but two callers holding the SAME claim are
+	// indistinguishable to both. What refuses the second is that the first set
+	// assigned_to to NULL, so `assigned_to = $2` no longer matches.
+	//
+	// Measured, not asserted: delete the generation predicate and
+	// TestASecondContinueAsNewOnTheSameClaimIsRefused_MultiBackend still
+	// passes; keep assigned_to instead of NULLing it and the second call
+	// SUCCEEDS, leaving the predecessor with two successors -- a forked chain.
+	//
+	// That second mutation is the cheapest implementation of decision 4, a
+	// durable record of which worker ran a workflow. CLAUDE.md 3.112 records
+	// the same clause doing the same unnamed job in the finalize path, where a
+	// test named for the marker predicate stayed green with that predicate
+	// deleted. cleat#1175.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
