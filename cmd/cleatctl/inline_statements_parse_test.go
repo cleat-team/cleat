@@ -71,9 +71,6 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 	// -- applied to one package. A list that is not required to shrink is an
 	// allowlist, and an allowlist is how a guard stops guarding.
 	pinned := map[string]string{
-		"SELECT id FROM plugin_registry WHERE name = $1":                                                                     "cleat#1216",
-		"UPDATE plugin_registry SET wasm_bytes = $1, updated_at = now() WHERE name = $2":                                     "cleat#1216",
-		"INSERT INTO plugin_registry (name, wasm_bytes, metadata, created_at, updated_at) VALUES ($1, $2, $3, now(), now())": "cleat#1216",
 		"SELECT COUNT(*) FROM %s": "a format string: the table name is substituted at the call site, so there is no statement here to parse",
 	}
 

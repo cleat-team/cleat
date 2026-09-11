@@ -1486,7 +1486,7 @@ func TestDeployPlugin_DBError(t *testing.T) {
 	defer db.Close()
 
 	stderr := withExitPanic(t, func() {
-		deployPlugin(context.Background(), db, []string{"test-plugin", path})
+		deployPlugin(context.Background(), db, []string{"test-plugin", "1.0.0", path})
 	})
 	if !strings.Contains(stderr, "error") {
 		t.Errorf("expected error in stderr, got: %s", stderr)
@@ -1503,7 +1503,7 @@ func TestDeployPlugin_InsertPath(t *testing.T) {
 	defer db.Close()
 
 	stdout, stderr := captureOutputs(t, func() {
-		deployPlugin(context.Background(), db, []string{"new-plugin", path})
+		deployPlugin(context.Background(), db, []string{"new-plugin", "1.0.0", path})
 	})
 	if !strings.Contains(stdout, "Deployed plugin new-plugin") {
 		t.Errorf("expected 'Deployed plugin new-plugin' in stdout, got: %s", stdout)
@@ -1516,7 +1516,13 @@ func TestDeployPlugin_InsertPath(t *testing.T) {
 	}
 }
 
-func TestDeployPlugin_UpdatePath(t *testing.T) {
+func TestDeployPlugin_RedeployingAVersionSaysDeployed(t *testing.T) {
+	// There is no separate "Updated plugin" message any more, and that is the
+	// change rather than a wording choice. The command used to SELECT by name,
+	// branch, and UPDATE or INSERT -- a one-row-per-name model, on a table that
+	// does not exist. plugin_defs is keyed (name, version) and DeployPlugin
+	// upserts on that key, so redeploying a version and deploying a new one are
+	// the same operation and report the same way (cleat#1226).
 	dir := t.TempDir()
 	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 	path := writeWASM(t, dir, wasmBytes)
@@ -1526,16 +1532,60 @@ func TestDeployPlugin_UpdatePath(t *testing.T) {
 	defer db.Close()
 
 	stdout, stderr := captureOutputs(t, func() {
-		deployPlugin(context.Background(), db, []string{"existing-plugin", path})
+		deployPlugin(context.Background(), db, []string{"existing-plugin", "2.1.0", path})
 	})
-	if !strings.Contains(stdout, "Updated plugin existing-plugin") {
-		t.Errorf("expected 'Updated plugin existing-plugin' in stdout, got: %s", stdout)
+	if !strings.Contains(stdout, "Deployed plugin existing-plugin v2.1.0") {
+		t.Errorf("expected 'Deployed plugin existing-plugin v2.1.0' in stdout, got: %s", stdout)
 	}
 	if !strings.Contains(stdout, "SHA256") {
 		t.Errorf("expected SHA256 in stdout, got: %s", stdout)
 	}
 	if stderr != "" {
 		t.Errorf("unexpected stderr: %s", stderr)
+	}
+}
+
+// TestDeployPlugin_RefusesANonSemverVersion pins the refusal rather than the
+// acceptance, because accepting is the quiet failure. ResolvePlugin compares
+// versions as semver and SKIPS a row it cannot parse, so a plugin deployed
+// with a version like a content hash would sit in plugin_defs, appear in
+// `cleat plugin list`, and be resolvable by nothing (cleat#1226).
+func TestDeployPlugin_RefusesANonSemverVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := writeWASM(t, dir, []byte{0x00, 0x61, 0x73, 0x6d})
+	db := sql.OpenDB(&mockPluginConnector{})
+	defer db.Close()
+
+	for _, bad := range []string{"a3f9c2b1", "sha256:a3f9", "latest", ""} {
+		t.Run(bad, func(t *testing.T) {
+			stderr := withExitPanic(t, func() {
+				deployPlugin(context.Background(), db, []string{"bad-version-plugin", bad, path})
+			})
+			if !strings.Contains(stderr, "invalid plugin version") {
+				t.Errorf("deploying with version %q was not refused; stderr: %s", bad, stderr)
+			}
+		})
+	}
+}
+
+// The control for the test above: the versions the rest of the system actually
+// writes must be ACCEPTED. Without it, "non-semver is refused" is equally
+// satisfied by refusing everything.
+func TestDeployPlugin_AcceptsTheVersionsTheSystemWrites(t *testing.T) {
+	dir := t.TempDir()
+	path := writeWASM(t, dir, []byte{0x00, 0x61, 0x73, 0x6d})
+
+	for _, good := range []string{"1.0.0", "0.1.0", "2.1.0-rc1", "v1.0.0"} {
+		t.Run(good, func(t *testing.T) {
+			db := sql.OpenDB(&mockPluginConnector{})
+			defer db.Close()
+			stdout, stderr := captureOutputs(t, func() {
+				deployPlugin(context.Background(), db, []string{"good-version-plugin", good, path})
+			})
+			if !strings.Contains(stdout, "Deployed plugin good-version-plugin") {
+				t.Errorf("version %q was refused; stdout: %s stderr: %s", good, stdout, stderr)
+			}
+		})
 	}
 }
 
@@ -1557,7 +1607,7 @@ func TestDeployPlugin_FileNotFound(t *testing.T) {
 	defer db.Close()
 
 	stderr := withExitPanic(t, func() {
-		deployPlugin(context.Background(), db, []string{"plugin", "/nonexistent.wasm"})
+		deployPlugin(context.Background(), db, []string{"plugin", "1.0.0", "/nonexistent.wasm"})
 	})
 	if !strings.Contains(stderr, "error reading") {
 		t.Errorf("expected 'error reading' in stderr, got: %s", stderr)
