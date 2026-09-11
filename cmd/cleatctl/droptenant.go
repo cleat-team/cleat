@@ -56,9 +56,22 @@ import (
 //     already -- is what stands in for one. Documented here rather than
 //     assumed.
 
-// dropTenantTableCounts mirrors the tables admin.drop_tenant deletes, for
-// the dry-run / confirmation / audit output. Keep this list in sync with
+// dropTenantTableCounts mirrors the rows dropping a tenant removes, for the
+// dry-run / confirmation / audit output. Keep this list in sync with
 // migrations/postgres/032_drop_tenant_deletes_tenant_data.sql.
+//
+// "Removes", not "admin.drop_tenant deletes", because two of these go by
+// foreign key rather than by a DELETE inside the function, and the operator
+// does not care which mechanism took their data:
+//
+//   - tenant_settings, ON DELETE CASCADE from 039_tenant_settings.sql
+//   - workflow_defs, ON DELETE CASCADE from
+//     059_a_dropped_tenants_definitions_go_with_it.sql (cleat#1201)
+//
+// Both cascade off admin.tenants, which drop_tenant deletes LAST -- that
+// ordering is what 039 relied on and what 059 relies on. Reading only the
+// function's DELETE statements to maintain this list is how tenant_settings
+// came to be missing from it for twenty migrations.
 var dropTenantTables = []struct {
 	label string
 	query string
@@ -73,6 +86,8 @@ var dropTenantTables = []struct {
 	{"workflow_tags", `SELECT count(*) FROM workflow_tags WHERE tenant_id = $1`},
 	{"workflow_routing", `SELECT count(*) FROM workflow_routing WHERE tenant_id = $1`},
 	{"idempotency_keys", `SELECT count(*) FROM idempotency_keys WHERE tenant_id = $1`},
+	{"tenant_settings", `SELECT count(*) FROM tenant_settings WHERE tenant_id = $1`},
+	{"workflow_defs", `SELECT count(*) FROM workflow_defs WHERE tenant_id = $1`},
 	{"admin.tenant_api_keys", `SELECT count(*) FROM admin.tenant_api_keys WHERE tenant_id = $1`},
 	{"admin.tenant_roles", `SELECT count(*) FROM admin.tenant_roles WHERE tenant_id = $1`},
 	{"admin.tenants", `SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`},
@@ -137,9 +152,16 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 	// any confirmation prompt, rather than the SQL function's exception
 	// surfacing after they have already typed a confirmation.
 	if tenantID == engine.DefaultTenantUUID {
+		// Says plugin_defs only. workflow_defs was in this sentence and is
+		// tenant-owned -- primary key (tenant_id, name, version) -- which is
+		// cleat#1201. The reason to refuse the default tenant is unchanged and
+		// does not depend on that: every single-tenant deployment writes under
+		// it. admin.drop_tenant's own RAISE EXCEPTION still carries the older
+		// wording; correcting it means redefining the function, which 059
+		// deliberately did not do.
 		fmt.Fprintf(os.Stderr, "error: refusing to drop the default tenant (%s) -- it is shared by "+
-			"every single-tenant deployment and by workflow_defs/plugin_defs, which are not "+
-			"tenant-owned data\n", engine.DefaultTenantUUID)
+			"every single-tenant deployment and by plugin_defs, which is not tenant-owned data\n",
+			engine.DefaultTenantUUID)
 		osExit(1)
 	}
 
@@ -205,10 +227,16 @@ func printDropTenantUsage() {
 Permanently delete a tenant and every row of its data: workflow_instances,
 event_history, workflow_signals, workflow_promises, concurrency_keys,
 workflow_update_requests, workflow_schedules, workflow_tags,
-workflow_routing, idempotency_keys, admin.tenant_api_keys,
-admin.tenant_roles, admin.tenants, plus the tenant's plugin schema and
-Postgres role. Does not touch workflow_defs/plugin_defs (shared registry,
-not tenant-owned data). Refuses the default tenant
+workflow_routing, idempotency_keys, tenant_settings, workflow_defs,
+admin.tenant_api_keys, admin.tenant_roles, admin.tenants, plus the tenant's
+plugin schema and Postgres role.
+
+workflow_defs holds the tenant's uploaded WASM and IS tenant-owned -- its
+primary key is (tenant_id, name, version). It used to be left behind; see
+cleat#1201. Does not touch plugin_defs, which has no tenant_id column at all
+(primary key (name, version)) and is a genuinely shared registry.
+
+Refuses the default tenant
 (00000000-0000-0000-0000-000000000000).
 
 Always prints a full row count for every affected table before doing
