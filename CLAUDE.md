@@ -966,6 +966,42 @@ This surfaced as a script reporting 1627 citations where the identical pipeline 
 terminal reported 546 — and neither was right. A survey in Python found 2354, because the pattern
 missed four of the six forms a citation actually takes. Three tools, three answers, one command.
 
+**And it is not only `grep` — the interactive SHELL here is zsh, and every script gets bash.**
+`#!/usr/bin/env bash` at the top of a harness script, `shell: /usr/bin/bash -e {0}` in a GitHub
+Actions `run:` block, and the zsh you are typing into are three different languages for the cases
+below. A command pasted from a script into the terminal, or typed at the terminal and then pasted
+into a script, changes meaning without changing text.
+
+Three divergences, all measured 2026-09-11, all hit in one evening — two by me and one by the
+cleat-ports session:
+
+| written | zsh | bash |
+|---|---|---|
+| `v="echo hello world"; $v` | `command not found: echo hello world` | `hello world` |
+| `spec="a b c"; set -- $spec; echo $#` | **1** | **3** |
+| `ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)`, sourced as `./scripts/env.sh` | the **parent** of the project | the project |
+
+The first two are one fact: **zsh does not word-split an unquoted parameter expansion.** The third
+is separate — `BASH_SOURCE` does not exist in zsh, so `dirname ""` is `.` and the `/..` climbs one
+level too far. That third row only diverges when the script is sourced through a SUBDIRECTORY
+path; sourced as `./env.sh` both shells answer `.` and the bug hides.
+
+**Watch which of those is dangerous, because it is not the noisy one.** Rows 1 and 2 fail loudly:
+a `127`, or a blank argument that comes back as an API error. Row 3 fails **silently and
+plausibly** — a real, absolute, wrong path. It sent a build to `<home>/.port-results/...` instead
+of `<home>/ports-wt-210/.port-results/...`, where nothing errored and the artifact simply was not
+where the worker reads.
+
+Row 1 has its own trap, and it is worth naming because the output invites the wrong conclusion.
+Running five repository guards as `for g in "python3 scripts/check-x.py" ...; do $g; done` returned
+`127` for all five under zsh. That reads as *five guards failing*; it is *five guards that never
+ran*. A non-zero exit from a check you have not confirmed executed is not evidence about the tree
+— it is the "checks never started" case from *Is this result real?*, one layer down.
+
+The rule is the same one the paragraph above gives for patterns, and it covers all three rows:
+**run anything that mimics the harness through `bash -c '...'`.** Not for patterns only — for any
+loop, any `set --`, any `source` of a script that resolves its own path.
+
 **Search the tracker before writing a fix for a defect you found by reading code.** Not before
 starting to look — before starting to *build*. On 2026-09-08 I found the API-created-schedule
 `next_run_at` bug by reading `handleCreateSchedule`, fixed it, and merged it as #998. It was
