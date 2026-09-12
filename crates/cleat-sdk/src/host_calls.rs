@@ -2108,6 +2108,17 @@ pub struct SignalResult {
 /// added but never changed; this crate decodes it and must not guess.
 pub const CALL_ERROR_RETRY_POLICY_TOO_LONG: u32 = 6;
 
+/// `callErrorCode` 7 -- the host had more to write than this guest's output
+/// buffer could hold, so the value received is a PREFIX of the real one.
+///
+/// Before cleat#1312 the host cut the value silently and reported only the
+/// bytes it wrote, so a truncated response and a short one were the same thing
+/// from here.
+///
+/// Wire ABI, defined in `ABI.md` and packed by the engine. A value here can be
+/// added but never changed; this crate decodes it and must not guess.
+pub const CALL_ERROR_OUTPUT_TRUNCATED: u32 = 7;
+
 /// Retry policy for cleat_call_with_retry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryPolicy {

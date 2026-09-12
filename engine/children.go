@@ -112,8 +112,8 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 					return 0
 				}
 
-				written, _ := s.writeResult(ctx, m, runIDPtr, rec.RunID, runIDMaxLen)
-				return packSimpleResult(0, written)
+				written, writtenEC := s.writeOut(ctx, m, runIDPtr, rec.RunID, runIDMaxLen)
+				return packSimpleResult(writtenEC, written)
 			}
 		}
 		s.exitReplay()
@@ -239,8 +239,8 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		s.recordEvent(rec)
 	}
 
-	written, _ := s.writeResult(ctx, m, runIDPtr, runID, runIDMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, runIDPtr, runID, runIDMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
@@ -258,8 +258,8 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 						written, _ := s.writeResult(ctx, m, resultPtr, rec.Err, resultMaxLen)
 						return packAwaitChildResult(written, 1)
 					}
-					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
-					return packAwaitChildResult(written, 0)
+					written, writtenEC := s.writeOut(ctx, m, resultPtr, rec.Response, resultMaxLen)
+					return packAwaitChildResult(written, uint32(writtenEC))
 				}
 				s.engine.log().InfoContext(ctx, "await_child: no cached result, exitReplay to fresh", "workflow_id", s.workflowID, "runID", runID, "step", rec.Step)
 				// No cached result yet — fall through to fresh to re-check.
@@ -315,8 +315,8 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 			}
 			s.recordEvent(rec)
 
-			written, _ := s.writeResult(ctx, m, resultPtr, out.Result, resultMaxLen)
-			return packAwaitChildResult(written, 0)
+			written, writtenEC := s.writeOut(ctx, m, resultPtr, out.Result, resultMaxLen)
+			return packAwaitChildResult(written, uint32(writtenEC))
 		}
 	}
 
@@ -457,8 +457,8 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 	}
 
 	out, _ := json.Marshal(pr)
-	written, _ := s.writeResult(ctx, m, resultPtr, string(out), resultMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, resultPtr, string(out), resultMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
@@ -470,8 +470,8 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 					return 0
 				}
 				if rec.Response != "" {
-					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
-					return packSimpleResult(0, written)
+					written, writtenEC := s.writeOut(ctx, m, resultPtr, rec.Response, resultMaxLen)
+					return packSimpleResult(writtenEC, written)
 				}
 				// Empty response: this was a suspend (no child was done yet).
 				// Peek at the next event — if it is also an AwaitAnyChild with
@@ -485,8 +485,8 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 						if !s.advanceReplayStep(ctx, &nextRec) {
 							return 0
 						}
-						written, _ := s.writeResult(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
-						return packSimpleResult(0, written)
+						written, writtenEC := s.writeOut(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
+						return packSimpleResult(writtenEC, written)
 					}
 				}
 				// No cached re-execution result — fall through to fresh.
@@ -549,8 +549,8 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 					Response:  string(outJSON),
 				}
 				s.recordEvent(rec)
-				written, _ := s.writeResult(ctx, m, resultPtr, string(outJSON), resultMaxLen)
-				return packSimpleResult(0, written)
+				written, writtenEC := s.writeOut(ctx, m, resultPtr, string(outJSON), resultMaxLen)
+				return packSimpleResult(writtenEC, written)
 			}
 		}
 	}
@@ -704,8 +704,8 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 	}
 	s.recordEvent(rec)
 
-	written, _ := s.writeResult(ctx, m, resultsPtr, string(outcomesJSON), resultsMaxLen)
-	return packAwaitChildResult(written, 0)
+	written, writtenEC := s.writeOut(ctx, m, resultsPtr, string(outcomesJSON), resultsMaxLen)
+	return packAwaitChildResult(written, uint32(writtenEC))
 }
 
 func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
@@ -762,8 +762,8 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 			return packAwaitChildResult(written, 1)
 		}
 
-		written, _ := s.writeResult(ctx, m, resultsPtr, rec.Response, resultsMaxLen)
-		return packAwaitChildResult(written, 0)
+		written, writtenEC := s.writeOut(ctx, m, resultsPtr, rec.Response, resultsMaxLen)
+		return packAwaitChildResult(written, uint32(writtenEC))
 	}
 
 	s.exitReplay()

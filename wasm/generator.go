@@ -419,6 +419,17 @@ var importDefs = map[string]importDef{
 	},
 }
 
+// outBufSize is DEAD and is kept only so this comment has somewhere to live.
+//
+// cleat#1312 cites it as the guest's output buffer size. It is not: nothing
+// reads it. Verified by setting it to 777777 and regenerating -- the emitted
+// gen_host_adapter.go and gen_main_stub.go were unchanged. The live constants
+// are _cleatOutBufSize, emitted by adapter_component.go, and argsBuf in
+// build.go's main stub.
+//
+// An unreferenced package-level const is legal Go, so nothing has ever
+// complained, and a reader who changes this to fix a truncation bug will
+// change nothing and believe they have.
 const outBufSize = 65536
 
 // importParamDecl returns a Go parameter declaration for the given spec.

@@ -14,6 +14,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 
@@ -219,15 +220,69 @@ func readServiceName(mem api.Memory, ptr, length uint32) (string, bool) {
 // Returns the number of bytes actually written, or an error if the memory write fails.
 func writeWasmString(mem api.Memory, ptr uint32, s string, maxLen uint32) (uint32, error) {
 	data := []byte(s)
+	truncated := false
 	if uint32(len(data)) > maxLen {
 		data = data[:maxLen]
+		truncated = true
 	}
 	if len(data) > 0 {
 		if ok := mem.Write(ptr, data); !ok {
 			return 0, fmt.Errorf("writeWasmString: failed to write %d bytes at ptr %d", len(data), ptr)
 		}
 	}
+	if truncated {
+		// The prefix is still written, deliberately: a caller that has not yet
+		// been taught to propagate this keeps exactly its old behaviour, so
+		// adding the signal cannot itself change what a guest receives.
+		return uint32(len(data)), &OutputTruncatedError{Needed: len(s), Capacity: int(maxLen)}
+	}
 	return uint32(len(data)), nil
+}
+
+// OutputTruncatedError reports that a host call had more to write than the
+// guest's buffer could hold.
+//
+// It carries both numbers because the difference is the actionable part: a
+// guest that asked for 1 MiB and needed 3 MiB has a payload problem, and one
+// that asked for 64 KB has a buffer problem. Before cleat#1312 neither number
+// reached the guest -- writeResult returned only how many bytes it wrote, never
+// how many there were, so a truncated response was indistinguishable from a
+// short one.
+type OutputTruncatedError struct {
+	Needed   int
+	Capacity int
+}
+
+func (e *OutputTruncatedError) Error() string {
+	return fmt.Sprintf("output buffer too small: needed %d bytes, the guest supplied %d",
+		e.Needed, e.Capacity)
+}
+
+// errCodeOutputTruncated is the errCode a host call returns when the guest's
+// output buffer was too small.
+//
+// 7, which is free in both spaces this value has to live in: the simple-result
+// errCode byte (0, 1, 3, 4 and 5 are in use) and cleat.CallErrorCode, whose
+// iota ends at 6 with CallErrorRetryPolicyTooLong. Using one number for both
+// keeps a guest from having to know which layout it is decoding in order to
+// recognise this particular failure.
+//
+// Non-retryable, for the same reason CallErrorRetryPolicyTooLong is: re-issuing
+// the identical call with the identical buffer fails identically.
+const errCodeOutputTruncated byte = 7
+
+// asTruncation reports whether err is an output-truncation error, and returns
+// the errCode to pack if so.
+//
+// A helper rather than an inline errors.As at each of the call sites, because
+// there are over a hundred of them and the point of routing them all through
+// one expression is that the next one cannot get it subtly different.
+func asTruncation(err error) (byte, bool) {
+	var trunc *OutputTruncatedError
+	if errors.As(err, &trunc) {
+		return errCodeOutputTruncated, true
+	}
+	return 0, false
 }
 
 // writeWasmStringOrTrap calls writeWasmString and returns the error on failure.

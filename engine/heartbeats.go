@@ -158,8 +158,8 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 				written, _ := s.writeResult(ctx, m, responsePtr, callErr, responseMaxLen)
 				return packDurableCallResult(int(written), recordedFailureCode(nonRetryable), 1)
 			}
-			written, _ := s.writeResult(ctx, m, responsePtr, res.resp, responseMaxLen)
-			return packDurableCallResult(int(written), 0, 0)
+			written, writtenEC := s.writeOut(ctx, m, responsePtr, res.resp, responseMaxLen)
+			return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 		}
 	}
 }
@@ -248,8 +248,8 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 			return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
 		}
 
-		written, _ := s.writeResult(ctx, m, responsePtr, rec.Response, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 0)
+		written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.Response, responseMaxLen)
+		return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 	}
 
 	// Past recorded history — switch to fresh execution.

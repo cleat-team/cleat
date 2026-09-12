@@ -62,14 +62,15 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 	// TestABISetScopeReportsPreviousScopeLength.
 	prevScope := ""
 	var prevLen uint32
+	var prevEC byte
 	if s.scopeSet && s.scopePrefix != "" {
 		prevScope = s.scopePrefix
-		prevLen, _ = s.writeResult(ctx, m, prevScopePtr, prevScope, prevScopeMaxLen)
+		prevLen, prevEC = s.writeOut(ctx, m, prevScopePtr, prevScope, prevScopeMaxLen)
 	}
 
 	if objectType == "" && instanceKey == "" {
 		s.ClearScope(ctx)
-		return packSimpleResult(0, prevLen)
+		return packSimpleResult(prevEC, prevLen)
 	}
 
 	// If switching from an existing scope, release the old key first.
@@ -143,7 +144,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 				Reason: fmt.Sprintf("virtual object scope %s held by another workflow", scopeKey),
 				Until:  time.UnixMilli(s.nowMs).Add(5 * time.Second),
 			}
-			return packSimpleResult(0, prevLen)
+			return packSimpleResult(prevEC, prevLen)
 		}
 		s.heldScopes = append(s.heldScopes, scopeKey)
 	}
@@ -160,7 +161,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 	s.scopeObjType = objectType
 	s.scopeInstKey = instanceKey
 	s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
-	return packSimpleResult(0, prevLen)
+	return packSimpleResult(prevEC, prevLen)
 }
 
 func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
@@ -171,9 +172,10 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 	// did, or a workflow that reads its previous scope diverges on replay.
 	prevScope := ""
 	var prevLen uint32
+	var prevEC byte
 	if s.scopeSet && s.scopePrefix != "" {
 		prevScope = s.scopePrefix
-		prevLen, _ = s.writeResult(ctx, m, prevScopePtr, prevScope, prevScopeMaxLen)
+		prevLen, prevEC = s.writeOut(ctx, m, prevScopePtr, prevScope, prevScopeMaxLen)
 	}
 
 	if objectType == "" && instanceKey == "" {
@@ -191,7 +193,7 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 		s.scopePrefix = ""
 		s.scopeObjType = ""
 		s.scopeInstKey = ""
-		return packSimpleResult(0, prevLen)
+		return packSimpleResult(prevEC, prevLen)
 	}
 
 	if s.stepCount < len(s.history) {
@@ -229,7 +231,7 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 		s.scopeInstKey = instanceKey
 		s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
 		s.heldScopes = append(s.heldScopes, "vo:"+objectType+":"+instanceKey)
-		return packSimpleResult(0, prevLen)
+		return packSimpleResult(prevEC, prevLen)
 	}
 
 	// Past recorded history -- switch to fresh execution.

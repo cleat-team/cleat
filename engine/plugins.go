@@ -247,8 +247,8 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 			return packDurableCallResult(int(written), callFailureCode, 1)
 		}
 
-		written, _ := s.writeResult(ctx, m, responsePtr, rec.PluginOutput, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 0)
+		written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.PluginOutput, responseMaxLen)
+		return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 	}
 
 	// Past recorded history -- switch to fresh execution.
@@ -362,8 +362,8 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 		return packDurableCallResult(int(written), callFailureCode, 1)
 	}
 
-	written, _ := s.writeResult(ctx, m, responsePtr, outputJSON, responseMaxLen)
-	return packDurableCallResult(int(written), 0, 0)
+	written, writtenEC := s.writeOut(ctx, m, responsePtr, outputJSON, responseMaxLen)
+	return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 }
 
 func (s *execSession) PluginCallStreaming(ctx context.Context, m api.Module,
@@ -529,8 +529,8 @@ done:
 		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
-	written, _ := s.writeResult(ctx, m, responsePtr, string(outJSON), responseMaxLen)
-	return packDurableCallResult(int(written), 0, 0)
+	written, writtenEC := s.writeOut(ctx, m, responsePtr, string(outJSON), responseMaxLen)
+	return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 }
 
 func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Module,
@@ -614,6 +614,6 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
-	written, _ := s.writeResult(ctx, m, responsePtr, string(outJSON), responseMaxLen)
-	return packDurableCallResult(int(written), 0, 0)
+	written, writtenEC := s.writeOut(ctx, m, responsePtr, string(outJSON), responseMaxLen)
+	return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 }

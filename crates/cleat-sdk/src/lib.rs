@@ -98,6 +98,17 @@ pub enum CallError {
     /// the other. It lives on the host now, per tenant -- IMPROVEMENT-PLAN
     /// 3.94 step 4.
     RetryPolicyTooLong,
+    /// The host had more to write than the output buffer this guest supplied
+    /// could hold. What arrived is a PREFIX of the real value.
+    ///
+    /// Non-retryable: re-issuing the identical call with the identical buffer
+    /// fails identically. The fix is a larger buffer or a smaller payload.
+    ///
+    /// `callErrorCode` 7, `OutputTruncated` in `ABI.md`. Before cleat#1312 the
+    /// host truncated silently and returned only the bytes written, so this
+    /// case was indistinguishable from a genuinely short response -- which
+    /// usually surfaced as a JSON parse error blamed on the service.
+    OutputTruncated,
     /// The host refused or failed the call.
     Failed(String),
 }
@@ -109,6 +120,10 @@ impl std::fmt::Display for CallError {
             CallError::RetryPolicyTooLong => write!(
                 f,
                 "retry policy rejected: worst-case backoff exceeds the host-retry budget"
+            ),
+            CallError::OutputTruncated => write!(
+                f,
+                "output truncated: the host had more to write than this guest's buffer could hold"
             ),
             CallError::Failed(msg) => write!(f, "{msg}"),
         }

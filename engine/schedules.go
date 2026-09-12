@@ -85,8 +85,8 @@ func (s *execSession) ScheduleCron(ctx context.Context, m api.Module, workflowNa
 				written, _ := s.writeResult(ctx, m, idPtr, rec.Err, idMaxLen)
 				return packSimpleResult(1, written)
 			}
-			written, _ := s.writeResult(ctx, m, idPtr, rec.CronScheduleID, idMaxLen)
-			return packSimpleResult(0, written)
+			written, writtenEC := s.writeOut(ctx, m, idPtr, rec.CronScheduleID, idMaxLen)
+			return packSimpleResult(writtenEC, written)
 		}
 		s.exitReplay()
 	}
@@ -119,8 +119,8 @@ func (s *execSession) ScheduleCron(ctx context.Context, m api.Module, workflowNa
 		written, _ := s.writeResult(ctx, m, idPtr, err.Error(), idMaxLen)
 		return packSimpleResult(1, written)
 	}
-	written, _ := s.writeResult(ctx, m, idPtr, scheduleID, idMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, idPtr, scheduleID, idMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 // createCronSchedule does the live half of ScheduleCron: validate, enforce the
@@ -281,8 +281,8 @@ func (s *execSession) ListCrons(ctx context.Context, m api.Module, outPtr, outMa
 				written, _ := s.writeResult(ctx, m, outPtr, rec.Err, outMaxLen)
 				return packSimpleResult(1, written)
 			}
-			written, _ := s.writeResult(ctx, m, outPtr, rec.CronResult, outMaxLen)
-			return packSimpleResult(0, written)
+			written, writtenEC := s.writeOut(ctx, m, outPtr, rec.CronResult, outMaxLen)
+			return packSimpleResult(writtenEC, written)
 		}
 		s.exitReplay()
 	}
@@ -304,8 +304,8 @@ func (s *execSession) ListCrons(ctx context.Context, m api.Module, outPtr, outMa
 		written, _ := s.writeResult(ctx, m, outPtr, err.Error(), outMaxLen)
 		return packSimpleResult(1, written)
 	}
-	written, _ := s.writeResult(ctx, m, outPtr, listJSON, outMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, outPtr, listJSON, outMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) listCronSchedules(ctx context.Context) (string, error) {

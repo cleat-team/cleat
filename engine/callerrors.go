@@ -48,6 +48,21 @@ const (
 	// between attempts. See ABI.md, "Retry refusal -- cleat_call_retry only,
 	// and NOT a sentinel bit".
 	callErrorRetryPolicyTooLong byte = 6
+	// callErrorOutputTruncated is the classification for a call whose response
+	// did not fit in the buffer the guest supplied. cleat#1312: writeResult cut
+	// the value to the guest's maxLen and reported only how many bytes it had
+	// written, so a truncated response and a short one were the same thing from
+	// the guest's side. The usual symptom was a JSON unmarshal error pointing at
+	// the response body rather than at a buffer limit.
+	//
+	// Non-retryable, for the reason callErrorRetryPolicyTooLong is: reissuing
+	// the identical call with the identical buffer fails identically. The fix is
+	// a larger buffer or a smaller payload, and both are the caller's.
+	//
+	// 7 in this space and in the simple-result errCode byte, which is free in
+	// both -- so a guest recognises this failure without first having to know
+	// which result layout it is decoding.
+	callErrorOutputTruncated byte = 7
 )
 
 // callFailureCode is the code reported for a call that the *service* failed
@@ -95,6 +110,7 @@ var guestCallErrorCodes = []GuestCallErrorCode{
 	{Name: "InvalidRequest", Code: 4, Retryable: false},
 	{Name: "PermissionDenied", Code: 5, Retryable: false},
 	{Name: "RetryPolicyTooLong", Code: 6, Retryable: false},
+	{Name: "OutputTruncated", Code: 7, Retryable: false},
 }
 
 // GuestCallErrorCodes returns the engine's copy of the guest SDK's
@@ -198,4 +214,18 @@ func recordedErrorClass(err error) string {
 		return ""
 	}
 	return ce.Code.String()
+}
+
+// truncClass maps a truncation errCode onto the durable-call classification
+// field, and 0 onto 0.
+//
+// The two fields are separate on purpose -- errCode says the call failed,
+// callErrorCode says what kind -- and a guest decoding a durable call builds
+// its CallError from the classification. Setting only the low byte would leave
+// the guest reporting CallErrorUnknown for a failure the host had classified.
+func truncClass(errCode byte) byte {
+	if errCode == errCodeOutputTruncated {
+		return callErrorOutputTruncated
+	}
+	return 0
 }

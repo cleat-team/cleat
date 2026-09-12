@@ -179,7 +179,53 @@ func GenerateHostAdapter(pkgName string, usage *UsageInfo, target string) []byte
 	buf.WriteString("\t\"github.com/cleat-team/cleat/cleat\"\n")
 	buf.WriteString(")\n\n")
 
-	buf.WriteString("const _cleatOutBufSize = 65536\n\n")
+	// Output buffers start small and GROW WHEN THE HOST SAYS THEY WERE TOO
+	// SMALL, rather than being sized at the host's ceiling up front.
+	//
+	// The ceiling is engine.DefaultOutBufSize = 1 MiB, and allocating that per
+	// call was measurably wrong: it is a `make` on the guest heap, and the
+	// defer pass of an OOM-killed workflow has no heap left. Isolated by
+	// changing one constant at a time --
+	// TestTheHostRunsDefersOfAnOOMKilledWorkflow fails with the response buffer
+	// at 1 MiB and passes with it at 64 KB, while the input buffer is a
+	// package-level array and costs nothing at call time either way. That test
+	// exists for the property this would have broken: "the export takes no
+	// arguments and so needs no scratch space, which is what makes it safe to
+	// run cleanup for a guest that just exhausted its memory."
+	//
+	// So: 64 KB baseline, doubling to the host's ceiling as truncations are
+	// reported. A workflow whose payloads all fit never allocates more than it
+	// did before; one whose payloads are large pays for the size it actually
+	// needs, once, and keeps it for the rest of the segment.
+	//
+	// WHAT THIS DOES NOT DO: rescue the call that truncated. That call returns
+	// CallErrorOutputTruncated and fails, which is cleat#1312's fix -- before
+	// it, the value was cut and the call reported success. Re-fetching the
+	// recorded value without re-running the call would mean re-serving a
+	// recorded event mid-segment, which is replay machinery and belongs in its
+	// own change.
+	buf.WriteString("// _cleatOutBufCap is the current output-buffer size. It starts at the\n")
+	buf.WriteString("// historical 64 KiB and doubles, up to the host's ceiling, each time the\n")
+	buf.WriteString("// host reports that a value did not fit (ABI.md, \"Output truncation\").\n")
+	buf.WriteString("//\n")
+	buf.WriteString("// Not sized at the ceiling up front: that is a 1 MiB heap allocation per\n")
+	buf.WriteString("// call, and a workflow that has just exhausted its memory still has to\n")
+	buf.WriteString("// run its defers.\n")
+	buf.WriteString("const _cleatOutBufFloor = 65536\n")
+	buf.WriteString("const _cleatOutBufCeiling = 1048576\n\n")
+	buf.WriteString("var _cleatOutBufCap = _cleatOutBufFloor\n\n")
+	buf.WriteString("// _cleatGrowOutBuf is called when the host reports errCode 7. It doubles\n")
+	buf.WriteString("// the buffer for subsequent calls and reports whether it managed to grow.\n")
+	buf.WriteString("func _cleatGrowOutBuf() bool {\n")
+	buf.WriteString("\tif _cleatOutBufCap >= _cleatOutBufCeiling {\n")
+	buf.WriteString("\t\treturn false\n")
+	buf.WriteString("\t}\n")
+	buf.WriteString("\t_cleatOutBufCap *= 2\n")
+	buf.WriteString("\tif _cleatOutBufCap > _cleatOutBufCeiling {\n")
+	buf.WriteString("\t\t_cleatOutBufCap = _cleatOutBufCeiling\n")
+	buf.WriteString("\t}\n")
+	buf.WriteString("\treturn true\n")
+	buf.WriteString("}\n\n")
 
 	buf.WriteString("func makeHostCalls() cleat.HostCalls {\n")
 	buf.WriteString("\treturn cleat.NewHostCalls(cleat.HostCallsOptions{\n")
@@ -359,7 +405,7 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 
 	// Allocate output buffers.
 	for _, name := range outBufNames(importName) {
-		fmt.Fprintf(buf, "\t\t\t%s := make([]byte, _cleatOutBufSize)\n", name)
+		fmt.Fprintf(buf, "\t\t\t%s := make([]byte, _cleatOutBufCap)\n", name)
 	}
 
 	// Import arguments the caller does not supply (see adapterDef.PreStmts).
@@ -423,6 +469,25 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 	}
 	buf.WriteString(strings.Join(args, ", "))
 	buf.WriteString(")\n")
+
+	// Output-buffer growth, before the def's own decoding.
+	//
+	// Emitted for every adapter that HAS an output buffer, rather than for the
+	// ones that go through withSuspendCheck: that population is "calls the host
+	// can refuse mid-segment", which is a different set from "calls that write a
+	// value into the guest". WorkflowID and RunID are in the second and not the
+	// first, and would silently never grow.
+	//
+	// The errCode byte is read here before any field is decoded. That is safe
+	// for the ordering the stop sentinel requires, because withSuspendCheck --
+	// where present -- has already run and panicked.
+	if len(outBufNames(importName)) > 0 {
+		buf.WriteString("\t\t\tif uint32(result)&0xFF == 7 {\n")
+		buf.WriteString("\t\t\t\t// OutputTruncated (ABI.md). This call still fails; the\n")
+		buf.WriteString("\t\t\t\t// buffer grows so the next attempt at this step has room.\n")
+		buf.WriteString("\t\t\t\t_cleatGrowOutBuf()\n")
+		buf.WriteString("\t\t\t}\n")
+	}
 
 	// Result processing.
 	for _, stmt := range adef.ResultStmts {
