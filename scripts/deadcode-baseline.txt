@@ -15,7 +15,6 @@ cmd/cleat-worker	func (*Worker).compactionLoop
 cmd/cleat-worker	func (*Worker).waitForDB
 cmd/cleat-worker	func (*healthTracker).maxAge
 cmd/cleat-worker	func baseDSNFromDSN
-cmd/cleat-worker	func baseDSNFromURL
 cmd/cleat-worker	var lastFreshStepCount
 cmd/cleatctl	func printCheckDBUsage
 cmd/cleatctl	func printRestoreUsage

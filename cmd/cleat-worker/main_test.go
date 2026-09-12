@@ -137,46 +137,6 @@ func TestDetermineEntryPoint(t *testing.T) {
 	}
 }
 
-func TestBaseDSNFromURL(t *testing.T) {
-	tests := []struct {
-		url  string
-		want string
-	}{
-		{
-			url:  "postgres://user:pass@localhost:5432/cleat?sslmode=disable",
-			want: "host=localhost port=5432 dbname=cleat sslmode=disable",
-		},
-		{
-			url:  "postgres://user@host:5432/db",
-			want: "host=host port=5432 dbname=db sslmode=disable",
-		},
-		{
-			url:  "postgres://localhost/mydb",
-			want: "host=localhost port=5432 dbname=mydb sslmode=disable",
-		},
-		{
-			url:  "postgres://db.example.com:6432/production?sslmode=require",
-			want: "host=db.example.com port=6432 dbname=production sslmode=require",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.url, func(t *testing.T) {
-			got := baseDSNFromURL(tt.url)
-			if got != tt.want {
-				t.Errorf("baseDSNFromURL(%q) = %q, want %q", tt.url, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestBaseDSNFromURL_Invalid(t *testing.T) {
-	// url.Parse is lenient; most "invalid" inputs still parse. These verify
-	// the function returns something (doesn't panic) for edge-case inputs.
-	_ = baseDSNFromURL("not-a-url")
-	_ = baseDSNFromURL("")
-	_ = baseDSNFromURL("postgres://")
-}
-
 func TestBaseDSNFromDSN(t *testing.T) {
 	tests := []struct {
 		dsn  string
@@ -326,7 +286,6 @@ func TestWorkerFunctionsLinkage(t *testing.T) {
 	_ = generateTraceID
 	_ = isConnectionError
 	_ = determineEntryPoint
-	_ = baseDSNFromURL
 	_ = baseDSNFromDSN
 	_ = generateUpdatePromiseID
 	_ = fmt.Sprintf("compile check: %T", w)
