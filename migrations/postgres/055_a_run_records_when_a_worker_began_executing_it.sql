@@ -70,7 +70,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path FROM CURRENT
 AS $$
     WITH candidates AS (
         SELECT w.id FROM workflow_instances w

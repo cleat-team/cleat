@@ -35,23 +35,26 @@
 -- harness would re-apply the previous definition on top of this one and
 -- restore the write to a column that no longer exists.
 
--- SET search_path = public, and it is load-bearing rather than tidy.
+-- WHERE THIS CREATE FUNCTION LANDS is load-bearing rather than tidy.
 --
 -- CREATE FUNCTION *creates* in the first schema of search_path; it does not
 -- resolve an existing one the way ALTER TABLE does. The cluster's database
--- user is `cleat` and 001_schema.sql creates a schema of that name, so
--- search_path is "$user", public and an unqualified CREATE OR REPLACE lands
--- in `cleat` -- leaving the real function in `public` untouched and adding a
--- SECOND function with an identical argument list. Callers keep resolving the
--- old one. Every earlier migration that defines this function opens with this
--- same line; 051 and 052 do not, and are right not to, because ALTER TABLE on
--- an unqualified name falls through to public.
+-- user is `cleat` and 001_schema.sql creates a schema of that name, so under
+-- the default "$user", public an unqualified CREATE OR REPLACE lands in
+-- `cleat` -- leaving the real function untouched and adding a SECOND function
+-- with an identical argument list. Callers keep resolving the old one.
+--
+-- This file used to open with `SET search_path = public;` for that reason, as
+-- every earlier migration defining this function did. It no longer needs to:
+-- migration.Runner sets search_path before applying any file (cleat#1287), so
+-- the CREATE still has a definite target and that target now follows --schema.
+-- 051 and 052 never pinned, and were right not to, because ALTER TABLE on an
+-- unqualified name falls through rather than creating.
 --
 -- It cost a red Cluster Integration job to find, and it could not fail
 -- anywhere else: engine tests connect as `postgres`, no schema of that name
 -- exists, so "$user" resolves to nothing and the function lands in public
 -- either way. The bug needed a database whose user owns a schema.
-SET search_path = public;
 
 CREATE OR REPLACE FUNCTION finalize_workflow_status(
     p_workflow_id      TEXT,
@@ -139,7 +142,6 @@ BEGIN
             SELECT parent_workflow_id FROM workflow_instances WHERE id = p_workflow_id
         )
         AND status IN ('ready', 'suspended');
-
 
         -- Delete this workflow's events -- they are no longer needed
         -- for replay once the workflow has reached a terminal state.

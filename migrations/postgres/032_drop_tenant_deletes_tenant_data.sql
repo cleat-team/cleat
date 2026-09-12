@@ -146,8 +146,6 @@
 -- where the schema owner always is one.
 -- ===========================================================================
 
-SET search_path = public;
-
 CREATE OR REPLACE FUNCTION admin.drop_tenant(p_tenant_id UUID) RETURNS void AS $$
 DECLARE
     v_role_name TEXT;

@@ -24,6 +24,7 @@ package engine
 // that could drift from production.
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -110,6 +111,42 @@ var (
 func applyPostgresProcedures(t *testing.T, db *sql.DB) {
 	t.Helper()
 	postgresProceduresOnce.Do(func() {
+		// On ONE connection, with search_path set, because these files no
+		// longer say which schema they build into. Since cleat#1287 they ask
+		// -- the runner answers from --schema, the initdb script answers with
+		// PGOPTIONS, and this is the third applier in the tree and has to
+		// answer too.
+		//
+		// It matters here more than anywhere, because 003 opens with
+		// `DROP FUNCTION IF EXISTS finalize_workflow_status(...)`. DROP
+		// resolves through search_path and finds the real function in public;
+		// the CREATE that follows lands in the FIRST schema of search_path.
+		// Under the default `"$user", public` as role "cleat" -- which is what
+		// docker-compose.cluster.yml connects as, against a database where 001
+		// has created a schema of that name -- those are two different
+		// schemas, so replaying these files MOVES the function out of public.
+		// Nothing errors. The next test that looks for it in public reports
+		// that the migrations and the database disagree about what exists,
+		// which is true and says nothing about the cause.
+		//
+		// Measured in CI on cleat#1287: this was order-dependent, so the
+		// routine-drift test failed in a full run and passed alone.
+		//
+		// One connection rather than a pool Exec, for the reason
+		// migration.Runner.session gives: a bare db.Exec takes whatever
+		// connection is free, so the SET would apply to one and the files to
+		// whichever others the pool hands out.
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			postgresProceduresErr = fmt.Errorf("pin a connection: %v", err)
+			return
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(context.Background(),
+			`SET search_path = public, pg_temp`); err != nil {
+			postgresProceduresErr = fmt.Errorf("pin search_path: %v", err)
+			return
+		}
 		for _, f := range postgresProcedureMigrations {
 			path := filepath.Join("..", "migrations", "postgres", f)
 			data, err := os.ReadFile(path)
@@ -117,7 +154,7 @@ func applyPostgresProcedures(t *testing.T, db *sql.DB) {
 				postgresProceduresErr = fmt.Errorf("read migration %s: %v", path, err)
 				return
 			}
-			if _, err := db.Exec(string(data)); err != nil {
+			if _, err := conn.ExecContext(context.Background(), string(data)); err != nil {
 				postgresProceduresErr = fmt.Errorf("apply migration %s: %v", path, err)
 				return
 			}

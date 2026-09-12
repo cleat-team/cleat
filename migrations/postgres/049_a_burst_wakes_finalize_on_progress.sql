@@ -78,8 +78,6 @@
 --
 -- Only that one statement is removed. Everything else is 043_query_state_on_suspension.sql verbatim.
 
-SET search_path = public;
-
 -- No DROP here. 004 needed one because it changed the return type from VOID to
 -- BOOLEAN, which CREATE OR REPLACE rejects (42P13). This migration changes only
 -- the body, so REPLACE is enough -- and dropping a function other objects may
@@ -170,7 +168,6 @@ BEGIN
             SELECT parent_workflow_id FROM workflow_instances WHERE id = p_workflow_id
         )
         AND status IN ('ready', 'suspended');
-
 
         -- Delete this workflow's events -- they are no longer needed
         -- for replay once the workflow has reached a terminal state.

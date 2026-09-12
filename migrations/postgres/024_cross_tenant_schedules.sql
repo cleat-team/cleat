@@ -68,7 +68,9 @@ BEGIN
 END
 $$;
 
-GRANT USAGE ON SCHEMA public TO cleat_dispatcher;
+DO $do$ BEGIN
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO cleat_dispatcher', current_schema());
+END $do$;
 
 -- SELECT only. The owner of a SECURITY DEFINER function needs its own table
 -- privileges regardless of the RLS exemption -- those are two different checks,
@@ -101,7 +103,7 @@ SECURITY DEFINER
 -- Pinned so the body cannot be redirected by a caller's search_path. Standard
 -- hardening for SECURITY DEFINER, and not optional when the function holds an
 -- RLS exemption.
-SET search_path = public, pg_temp
+SET search_path FROM CURRENT
 AS $$
     SELECT s.name, s.def_name, s.entry_point, s.cron_expression, s.input,
            s.enabled, s.next_run_at, s.last_run_at, s.timezone, s.tenant_id,

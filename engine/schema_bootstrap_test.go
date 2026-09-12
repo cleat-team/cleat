@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -134,12 +135,42 @@ func bootstrapScratchDB(t *testing.T, dbName ...string) *sql.DB {
 	// numeric prefixes exist to encode.
 	sort.Strings(files)
 
+	// And so is search_path. Since cleat#1287 the files no longer state which
+	// schema they build into -- they ask, with current_schema() and with
+	// `SET search_path FROM CURRENT` -- so whoever applies them has to answer.
+	// migration.Runner answers from --schema; deploy/postgres's initdb script
+	// answers with PGOPTIONS; this helper is the third applier and has to
+	// answer too, or it silently builds into whatever "$user", public resolves
+	// to for the test role. That is public today only because no schema is
+	// named after the test user, which is a fact about the DSN rather than a
+	// property of the code.
+	//
+	// pg_temp last for the reason migration.Runner.searchPath gives: four
+	// SECURITY DEFINER functions freeze this value onto themselves, and
+	// PostgreSQL searches pg_temp first when it is not named.
+	//
+	// On ONE pinned connection, not on the pool. A bare db.Exec takes whatever
+	// connection is free, so the SET would apply to one connection and the
+	// forty-four files to whichever others the pool handed out -- which is the
+	// same pooling trap migration.Runner.session exists to avoid, and it would
+	// pass here by luck whenever the pool happened to reuse a single idle
+	// connection.
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin a connection: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(),
+		`SET search_path = public, pg_temp`); err != nil {
+		t.Fatalf("pin search_path: %v", err)
+	}
+
 	for _, name := range files {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		if _, err := db.Exec(string(data)); err != nil {
+		if _, err := conn.ExecContext(context.Background(), string(data)); err != nil {
 			t.Fatalf("applying shipped migration %s failed: %v\n\n"+
 				"These files are what docker-compose.cluster.yml mounts into "+
 				"initdb.d and what the docs tell operators to run. If this "+

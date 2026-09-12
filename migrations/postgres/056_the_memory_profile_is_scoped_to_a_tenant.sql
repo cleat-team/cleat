@@ -60,9 +60,6 @@
 -- handful of runs after the upgrade.
 -- ---------------------------------------------------------------------------
 
--- Pin the creation target; see the note in 001_schema.sql.
-SET LOCAL search_path TO public;
-
 -- Discard before adding the column: see above. TRUNCATE rather than DELETE
 -- because there is nothing to preserve and no trigger to fire.
 TRUNCATE TABLE workflow_memory_stats;

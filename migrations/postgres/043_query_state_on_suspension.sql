@@ -33,8 +33,6 @@
 --
 -- Only the 'ready' branch changes. Everything else is 004 verbatim.
 
-SET search_path = public;
-
 -- No DROP here. 004 needed one because it changed the return type from VOID to
 -- BOOLEAN, which CREATE OR REPLACE rejects (42P13). This migration changes only
 -- the body, so REPLACE is enough -- and dropping a function other objects may

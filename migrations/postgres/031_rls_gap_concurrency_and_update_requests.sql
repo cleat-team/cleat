@@ -90,8 +90,6 @@
 -- unscoped, only unbacked by a database-level policy. Flagged for a
 -- follow-up in the plugin packages themselves.
 
-SET search_path = public;
-
 ALTER TABLE concurrency_keys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workflow_update_requests ENABLE ROW LEVEL SECURITY;
 

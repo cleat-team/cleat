@@ -63,7 +63,7 @@ SECURITY DEFINER
 -- Pinned so the body cannot be redirected by a caller's search_path. Standard
 -- hardening for SECURITY DEFINER, and not optional when the function holds an
 -- RLS exemption.
-SET search_path = public, pg_temp
+SET search_path FROM CURRENT
 AS $$
     WITH candidates AS (
         SELECT w.id FROM workflow_instances w

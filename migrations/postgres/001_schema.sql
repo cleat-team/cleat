@@ -9,17 +9,28 @@
 -- All admin functions use CREATE OR REPLACE.  All tables/indexes use idempotent guards.
 
 -- ── Extensions & schemas ──────────────────────────────────────────────────────
--- Pin the creation target. The default search_path is "$user", public, so
--- every unqualified CREATE below lands in a schema named after the connecting
--- role whenever such a schema exists. This file creates a schema called
--- "cleat", and docker-compose.cluster.yml connects as POSTGRES_USER=cleat --
--- so the entire schema was being built inside the "cleat" schema instead of
--- public. Verified on PostgreSQL 16: 14 tables and finalize_workflow_status
--- all landed in "cleat", psql still found them via "$user" so it looked
--- healthy, and anything addressing public.* failed (create_tenant_role's
--- GRANTs on public.workflow_defs among them). Without this line the shipped
--- cluster deployment is broken by nothing more than its own username.
-SET search_path = public;
+-- WHERE THIS FILE BUILDS, and why it no longer says so itself.
+--
+-- Every unqualified CREATE below lands in the first schema of search_path.
+-- The default is "$user", public, so it lands in a schema named after the
+-- connecting role whenever one exists -- and this file creates a schema called
+-- "cleat" while docker-compose.cluster.yml connects as POSTGRES_USER=cleat.
+-- Verified on PostgreSQL 16 before the pin existed: 14 tables and
+-- finalize_workflow_status all landed in "cleat", psql still found them via
+-- "$user" so it looked healthy, and anything addressing public.* failed
+-- (create_tenant_role's GRANTs among them). The shipped cluster deployment was
+-- broken by nothing more than its own username.
+--
+-- The fix was `SET search_path = public;` at the top of this file and eighteen
+-- others. That defeated the role-named schema and simultaneously made the
+-- answer a constant, which is what cleat#1287 had to undo: --schema could not
+-- move it, and the twenty-five files that did NOT pin followed --schema, so a
+-- non-default value split the core schema in half and the run died at 020.
+--
+-- search_path is now set once, by migration.Runner, and by PGOPTIONS in
+-- deploy/postgres/100-apply-migrations.sh on the psql path. Both still defeat
+-- "$user" the same way; what changed is that public stopped being the only
+-- answer they can give. See WithSchema in migration/runner.go.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -71,19 +82,23 @@ BEGIN
     EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I AUTHORIZATION %I',
         'tenant_' || replace(p_tenant_id::text, '-', '_'), v_role_name);
 
-    EXECUTE format('ALTER ROLE %I SET search_path = %L, public', v_role_name,
-        'tenant_' || replace(p_tenant_id::text, '-', '_'));
+    -- current_schema() rather than a literal: the schema cleat's tables live
+    -- in is --schema's to choose (cleat#1287). Asking rather than stating is
+    -- also what makes this work under every applier of these files, none of
+    -- which substitutes anything.
+    EXECUTE format('ALTER ROLE %I SET search_path = %L, %I', v_role_name,
+        'tenant_' || replace(p_tenant_id::text, '-', '_'), current_schema());
     EXECUTE format('ALTER ROLE %I SET cleat.tenant_id = %L', v_role_name, p_tenant_id);
 
-    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', v_role_name);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', current_schema(), v_role_name);
     EXECUTE format('GRANT USAGE ON SCHEMA admin TO %I', v_role_name);
 
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.workflow_defs TO %I', v_role_name);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.workflow_instances TO %I', v_role_name);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.event_history TO %I', v_role_name);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.workflow_signals TO %I', v_role_name);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.workflow_schedules TO %I', v_role_name);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.workflow_promises TO %I', v_role_name);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_defs TO %I', current_schema(), v_role_name);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_instances TO %I', current_schema(), v_role_name);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.event_history TO %I', current_schema(), v_role_name);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_signals TO %I', current_schema(), v_role_name);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_schedules TO %I', current_schema(), v_role_name);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_promises TO %I', current_schema(), v_role_name);
 
     INSERT INTO admin.tenant_roles (tenant_id, role_name, password)
     VALUES (p_tenant_id, v_role_name, v_password)
@@ -93,7 +108,28 @@ BEGIN
 
     RETURN v_role_name;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+-- FROM CURRENT freezes the migration-time search_path onto this function, and
+-- it is what makes the current_schema() calls in the body mean what they say.
+--
+-- Without it a plpgsql function has no search_path of its own and resolves
+-- names -- and evaluates current_schema() -- with the CALLER's. This function
+-- is called at runtime, by a connection that is not the migration connection,
+-- and in the shipped cluster that caller is role "cleat" against a database
+-- where 001 has created a schema of that name. So current_schema() returns
+-- "cleat" and the GRANTs above address cleat.workflow_defs, which does not
+-- exist:
+--
+--   create_tenant_role(a): pq: relation "cleat.workflow_defs" does not exist
+--
+-- Measured in CI on cleat#1287's first attempt, where the body had just been
+-- changed from the literal public.* to current_schema(). The literal did not
+-- have this problem because it did not ask a question; asking one moved the
+-- answer to call time, and this moves it back to creation time.
+--
+-- It is also the standard hardening for SECURITY DEFINER, which this function
+-- has wanted since it was written: it creates roles and grants privileges.
+SET search_path FROM CURRENT;
 
 CREATE OR REPLACE FUNCTION admin.grant_plugin_to_tenant(p_plugin_name TEXT, p_tenant_id UUID) RETURNS void AS $$
 DECLARE
