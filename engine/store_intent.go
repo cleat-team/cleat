@@ -157,9 +157,21 @@ func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// The same encoding every other writer uses. Until #1379 this path bound
+	// rec.Request RAW, while every INSERT path base64-encodes it and every
+	// read path applies tryDecodeBase64 -- which falls back to the raw string
+	// only when decoding FAILS, so a raw request that happens to be valid
+	// base64 decoded to the wrong bytes (cleat#1319, six of nine ordinary
+	// short values). And it did not encrypt, so --encrypt-sensitive-payloads
+	// left every write-ahead intent's request in the clear.
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
+	if err != nil {
+		return fmt.Errorf("write call intent: step %d: %w", rec.Step, err)
+	}
+
 	res, err := tx.ExecContext(ctx, writeCallIntentSQLPostgres,
 		workflowID, rec.Step, rec.EventType, nullStr(rec.Service), nullStr(rec.Op),
-		nullStr(rec.Request), s.tenantID, workerID, generation)
+		nullStr(stored.Request), s.tenantID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("write call intent: step %d: %w", rec.Step, err)
 	}
@@ -182,6 +194,20 @@ func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID strin
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// See WriteCallIntent: one encoding for every writer. The payload and the
+	// checksum are the CALLER's, built from the plaintext record, and stay
+	// that way -- encodePayloadForStorage encrypts what it is given rather
+	// than rebuilding it, so the checksum the caller computed still matches
+	// what VerifyWorkflowEvents recomputes from the decrypted row.
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
+	if err != nil {
+		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
+	}
+	storedPayload, err := encodePayloadForStorage(string(payload), s.encryption, s.encryptSensitivePayloads)
+	if err != nil {
+		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE event_history
 		SET response = $3, error = $4, payload = $5, checksum = $6, intent_at = NULL
@@ -190,7 +216,7 @@ func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID strin
 		  AND ($8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
 		  ))
-	`, workflowID, rec.Step, rec.Response, nullStr(rec.Err), nullStr(string(payload)),
+	`, workflowID, rec.Step, stored.Response, nullStr(stored.Err), storedPayload,
 		checksum, s.tenantID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
@@ -513,6 +539,20 @@ func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string
 	}
 	checksum := computeEventChecksum(rec, prev)
 
+	// See WriteCallIntent: one encoding for every writer. The payload and the
+	// checksum are the CALLER's, built from the plaintext record, and stay
+	// that way -- encodePayloadForStorage encrypts what it is given rather
+	// than rebuilding it, so the checksum the caller computed still matches
+	// what VerifyWorkflowEvents recomputes from the decrypted row.
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
+	}
+	storedPayload, err := encodePayloadForStorage(string(payload), s.encryption, s.encryptSensitivePayloads)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE event_history
 		SET response = $3, error = $4, payload = $5, checksum = $6, intent_at = NULL
@@ -521,7 +561,7 @@ func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string
 		  AND ($8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
 		  ))
-	`, workflowID, rec.Step, rec.Response, nullStr(rec.Err), nullStr(string(payload)),
+	`, workflowID, rec.Step, stored.Response, nullStr(stored.Err), storedPayload,
 		checksum, s.tenantID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)

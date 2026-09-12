@@ -139,13 +139,37 @@ func encodeEventForStorage(rec EventRecord, enc *PayloadEncryption, encrypt bool
 		*f.dst = ciphertext
 	}
 
-	if out.Payload.Valid {
-		encrypted, err := enc.EncryptJSON([]byte(out.Payload.String))
-		if err != nil {
-			return storedEvent{}, fmt.Errorf("encode event for storage: encrypt payload: %w", err)
-		}
-		out.Payload = sql.NullString{String: string(encrypted), Valid: true}
+	out.Payload, err = encodePayloadForStorage(out.Payload.String, enc, encrypt)
+	if err != nil {
+		return storedEvent{}, fmt.Errorf("encode event for storage: %w", err)
 	}
 
 	return out, nil
+}
+
+// encodePayloadForStorage is the payload half of encodeEventForStorage, split
+// out for the call-intent path.
+//
+// That path does not build its own payload: CompleteCallIntent and
+// ResolveCallIntent are handed one by the caller, which built it from the same
+// plaintext record it computed the checksum from. So they need this and not
+// the whole of encodeEventForStorage, and taking it from here rather than
+// writing `if enc != nil && on { EncryptJSON }` at each site is the whole
+// point of the file -- there were five copies of that before #1380.
+//
+// An empty payload stays empty and invalid rather than becoming the ciphertext
+// of nothing, which is what every writer stored before encryption existed and
+// is what decryptPayloadJSON's own `payloadStr != ""` guard expects.
+func encodePayloadForStorage(payload string, enc *PayloadEncryption, encrypt bool) (sql.NullString, error) {
+	if payload == "" {
+		return sql.NullString{}, nil
+	}
+	if !encrypt || enc == nil {
+		return sql.NullString{String: payload, Valid: true}, nil
+	}
+	encrypted, err := enc.EncryptJSON([]byte(payload))
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("encrypt payload: %w", err)
+	}
+	return sql.NullString{String: string(encrypted), Valid: true}, nil
 }
