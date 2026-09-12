@@ -61,6 +61,7 @@ import (
 var dropTenantDefiningMigrations = []string{
 	"032_drop_tenant_deletes_tenant_data.sql",
 	"059_a_dropped_tenants_definitions_go_with_it.sql",
+	"066_a_dropped_tenants_plugin_rows_go_with_it.sql",
 }
 
 // apply032DropTenantMigration installs the CURRENT admin.drop_tenant by

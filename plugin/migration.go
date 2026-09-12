@@ -381,6 +381,26 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 				return fmt.Errorf("plugin %s migration v%d tenant scoping: %w", name, m.Version, err)
 			}
 
+			// And record them, in the same transaction and for the same
+			// reason: admin.drop_tenant reads admin.plugin_tables to find
+			// the plugin tables a dropped tenant owns rows in, so a table
+			// that has a policy but no registry row is one whose rows
+			// survive the tenant that owns them -- unreadable, because the
+			// policy names a tenant that no longer exists, and undeleted.
+			// cleat#1289.
+			//
+			// This is what admin.plugin_tables was built for in
+			// 001_schema.sql and never got: RegisterPluginTables has
+			// existed to fill it since then with no production caller, and
+			// its doc still describes a call from plugin Init that does not
+			// happen. TenantScoped is the declaration that is actually
+			// maintained, because a policy depends on it, so it is the one
+			// worth deriving from.
+			if err := registerTenantScopedTables(ctx, tx.ExecContext, dialect, cfg.schema, name, m.TenantScoped); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("plugin %s migration v%d register tables: %w", name, m.Version, err)
+			}
+
 			if _, err := tx.ExecContext(ctx,
 				insertPluginMigrationSQL(dialect),
 				name, m.Version); err != nil {
@@ -413,8 +433,20 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 }
 
 // RegisterPluginTables inserts entries into admin.plugin_tables so that
-// the tenant provisioning system knows which tables to GRANT.
-// Called during plugin Init after migrations run.
+// admin.grant_plugin_to_tenant and admin.revoke_plugin_from_tenant know which
+// tables to GRANT on.
+//
+// It has no production caller. The line that used to sit here -- "Called
+// during plugin Init after migrations run" -- described a call that has never
+// existed, which is how a registry with no producer read as a registry that
+// was being filled. cleat#1277 records the same about admin.plugin_tables
+// itself.
+//
+// Registration for TENANT DELETION is separate and does happen:
+// registerTenantScopedTables writes the tables a migration declares
+// TenantScoped, in the migration's own transaction, and admin.drop_tenant
+// reads those rows. That path derives from a declaration something else
+// already depends on, rather than from a call someone has to remember.
 func RegisterPluginTables(ctx context.Context, db *sql.DB, pluginName string, tableNames []string) error {
 	for _, tableName := range tableNames {
 		_, err := db.ExecContext(ctx,
@@ -471,6 +503,41 @@ func applyTenantScoping(ctx context.Context, exec func(ctx context.Context, quer
 			if _, err := exec(ctx, stmt); err != nil {
 				return fmt.Errorf("%s: %w", stmt, err)
 			}
+		}
+	}
+	return nil
+}
+
+// registerTenantScopedTables records each tenant-scoped table in
+// admin.plugin_tables, so admin.drop_tenant can find it.
+//
+// PostgreSQL only, matching applyTenantScoping: on the other two dialects
+// TenantScoped installs no policy and admin.plugin_tables does not exist, so
+// there is nothing to register and nothing that would read it.
+//
+// The schema is recorded alongside the name because --schema puts plugin
+// tables somewhere other than public while admin.plugin_tables stays in the
+// admin schema, and because admin.drop_tenant carries no search_path of its
+// own (cleat#1363) -- an unqualified name there would resolve against the
+// caller's.
+//
+// ON CONFLICT ... DO UPDATE rather than DO NOTHING: a plugin that adds
+// TenantScoped to a table in a later migration version must be able to flip
+// an existing row, which a registration made for GRANT purposes would
+// otherwise pin at false.
+func registerTenantScopedTables(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), dialect Dialect, schema, pluginName string, tables []string) error {
+	if len(tables) == 0 || dialect != DialectPostgres {
+		return nil
+	}
+	for _, table := range tables {
+		if !isPlainIdentifier(table) {
+			return fmt.Errorf("tenant-scoped table %q is not a plain identifier", table)
+		}
+		if _, err := exec(ctx, `INSERT INTO admin.plugin_tables (plugin_name, schema_name, table_name, tenant_scoped)
+			VALUES ($1, $2, $3, true)
+			ON CONFLICT (plugin_name, schema_name, table_name) DO UPDATE SET tenant_scoped = true`,
+			pluginName, schema, table); err != nil {
+			return fmt.Errorf("register %s.%s: %w", schema, table, err)
 		}
 	}
 	return nil
