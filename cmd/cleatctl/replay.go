@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // runReplay replays a workflow's event history to diagnose issues.
@@ -16,7 +17,7 @@ import (
 // Reads the workflow instance, its WASM binary, and its event history, then
 // replays through the engine and reports results. This is a diagnostic tool
 // for debugging stuck or unexpectedly-failed workflows.
-func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
+func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d dialect, args []string) {
 	flags := parseReplayFlags(args)
 	if flags == nil {
 		return // usage already printed
@@ -27,7 +28,7 @@ func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args
 	verbose := flags.verbose
 
 	// Load the workflow instance from the database.
-	inst, err := loadWorkflowInstance(ctx, db, workflowID)
+	inst, err := loadWorkflowInstance(ctx, db, d, workflowID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading workflow instance %q: %v\n", workflowID, err)
 		osExit(1)
@@ -198,8 +199,62 @@ Examples:
 `)
 }
 
+// loadWorkflowInstanceSQL reads one instance, per dialect.
+//
+// A FUNCTION RATHER THAN A PACKAGE-LEVEL VAR, and not for style.
+// TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate keys its allowlist
+// on "<file>:<enclosing Go function>#<digest of the SQL>", so a statement at
+// package level has no function to attach a reason to and the guard says so
+// outright. Wrapping it gives the exemption somewhere to live -- and the digest
+// half means it stops covering this statement the moment the statement changes.
+//
+// Only two columns need an arm, and both are a TYPE difference rather than a
+// syntax one -- which is why this is a plugin.Query with explicit arms and not
+// a rebind. plugin.Rebind rewrites placeholders and now(); it cannot know that
+// `result` is JSONB here, JSON there and NVARCHAR(MAX) on the third, and a
+// rewrite that silently did nothing would hand Scan a []byte it cannot put in
+// a string field.
+//
+//	          result             tenant_id
+//	postgres  JSONB   ::text     UUID              ::text
+//	mysql     JSON    (as-is)    CHAR(36)          (as-is)
+//	mssql     NVARCHAR(MAX)      UNIQUEIDENTIFIER  CONVERT(NVARCHAR(36), ...)
+//
+// The CONVERT form is the one auth/tenant_store.go already uses for the same
+// column on the same dialect, rather than a second spelling of one idea.
+func loadWorkflowInstanceSQL() plugin.Query {
+	return plugin.Query{
+		Default: `
+		SELECT id, def_name, def_version, status, input,
+		       COALESCE(result::text, ''), COALESCE(error_msg, ''),
+		       COALESCE(error_code, ''), COALESCE(error_op, ''),
+		       COALESCE(assigned_to, ''), next_wake_at, tenant_id::text,
+		       created_at, generation
+		FROM workflow_instances
+		WHERE id = $1`,
+		MySQL: `
+		SELECT id, def_name, def_version, status, input,
+		       COALESCE(result, ''), COALESCE(error_msg, ''),
+		       COALESCE(error_code, ''), COALESCE(error_op, ''),
+		       COALESCE(assigned_to, ''), next_wake_at, tenant_id,
+		       created_at, generation
+		FROM workflow_instances
+		WHERE id = $1`,
+		MSSQL: `
+		SELECT id, def_name, def_version, status, input,
+		       COALESCE(result, ''), COALESCE(error_msg, ''),
+		       COALESCE(error_code, ''), COALESCE(error_op, ''),
+		       COALESCE(assigned_to, ''), next_wake_at,
+		       CONVERT(NVARCHAR(36), tenant_id),
+		       created_at, generation
+		FROM workflow_instances
+		WHERE id = $1`,
+	}
+}
+
 // loadWorkflowInstance loads a single workflow instance by ID from the database.
-func loadWorkflowInstance(ctx context.Context, db *sql.DB, id string) (*engine.WorkflowInstance, error) {
+func loadWorkflowInstance(ctx context.Context, db *sql.DB, d dialect, id string) (*engine.WorkflowInstance, error) {
+
 	// FOUR things were wrong with this statement, and it had never run.
 	// cleat#1208.
 	//
@@ -226,15 +281,7 @@ func loadWorkflowInstance(ctx context.Context, db *sql.DB, id string) (*engine.W
 	// property of a workflow DEFINITION, nothing downstream of this function
 	// reads it, and joining workflow_defs to populate a field neither command
 	// prints would be inventing a requirement to justify a column name.
-	row := db.QueryRowContext(ctx, `
-		SELECT id, def_name, def_version, status, input,
-		       COALESCE(result::text, ''), COALESCE(error_msg, ''),
-		       COALESCE(error_code, ''), COALESCE(error_op, ''),
-		       COALESCE(assigned_to, ''), next_wake_at, tenant_id::text,
-		       created_at, generation
-		FROM workflow_instances
-		WHERE id = $1
-	`, id)
+	row := db.QueryRowContext(ctx, d.rebind(loadWorkflowInstanceSQL().For(d.query)), id)
 
 	var inst engine.WorkflowInstance
 	err := row.Scan(

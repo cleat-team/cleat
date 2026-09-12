@@ -126,7 +126,7 @@ func makeEventRecord(step int, eventType engine.EventType) engine.EventRecord {
 
 func TestParseDebugFlags_NoArgs(t *testing.T) {
 	stderr := withExitPanic(t, func() {
-		runDebug(context.Background(), nil, nil, []string{})
+		runDebug(context.Background(), nil, nil, dialectPostgres, []string{})
 	})
 	if !strings.Contains(stderr, "Usage:") {
 		t.Errorf("expected usage in stderr, got: %s", stderr)
@@ -135,7 +135,7 @@ func TestParseDebugFlags_NoArgs(t *testing.T) {
 
 func TestParseDebugFlags_MissingWorkflowID(t *testing.T) {
 	stderr := withExitPanic(t, func() {
-		runDebug(context.Background(), nil, nil, []string{"--entry-point", "HandleLead"})
+		runDebug(context.Background(), nil, nil, dialectPostgres, []string{"--entry-point", "HandleLead"})
 	})
 	if !strings.Contains(stderr, "Usage:") {
 		t.Errorf("expected usage in stderr, got: %s", stderr)
@@ -144,7 +144,7 @@ func TestParseDebugFlags_MissingWorkflowID(t *testing.T) {
 
 func TestParseDebugFlags_MissingEntryPointValue(t *testing.T) {
 	stderr := withExitPanic(t, func() {
-		runDebug(context.Background(), nil, nil, []string{"wf-123", "--entry-point"})
+		runDebug(context.Background(), nil, nil, dialectPostgres, []string{"wf-123", "--entry-point"})
 	})
 	if !strings.Contains(stderr, "error: --entry-point requires a value") {
 		t.Errorf("expected 'error: --entry-point requires a value', got: %s", stderr)
@@ -153,7 +153,7 @@ func TestParseDebugFlags_MissingEntryPointValue(t *testing.T) {
 
 func TestParseDebugFlags_MissingEntryPointStepThrough(t *testing.T) {
 	stderr := withExitPanic(t, func() {
-		runDebug(context.Background(), nil, nil, []string{"wf-123"})
+		runDebug(context.Background(), nil, nil, dialectPostgres, []string{"wf-123"})
 	})
 	if !strings.Contains(stderr, "error: --entry-point is required for step-through mode") {
 		t.Errorf("expected entry-point required error, got: %s", stderr)
@@ -178,7 +178,7 @@ func TestParseDebugFlags_WatchModeNoEntryPoint(t *testing.T) {
 	// The watch loop handles ctx.Done(), so it will exit.
 	// But note: osExit might get called on error from store, so we use a non-failing store.
 	stdout, stderr := captureOutputs(t, func() {
-		runDebug(ctx, store, nil, []string{"wf-123", "--watch"})
+		runDebug(ctx, store, nil, dialectPostgres, []string{"wf-123", "--watch"})
 	})
 	if !strings.Contains(stdout, "Watching") {
 		t.Errorf("expected 'Watching' in stdout, got: %s", stdout)
@@ -359,7 +359,7 @@ func TestDebugStep_WorkflowNotFound(t *testing.T) {
 	defer db.Close()
 
 	stderr := withExitPanic(t, func() {
-		runDebug(context.Background(), nil, db, []string{"nonexistent-wf", "--entry-point", "Main"})
+		runDebug(context.Background(), nil, db, dialectPostgres, []string{"nonexistent-wf", "--entry-point", "Main"})
 	})
 	if !strings.Contains(stderr, "error loading workflow instance") {
 		t.Errorf("expected 'error loading workflow instance', got: %s", stderr)
@@ -385,7 +385,7 @@ func TestDebugStep_LoadEventHistoryError(t *testing.T) {
 	}
 
 	stderr := withExitPanic(t, func() {
-		runDebug(context.Background(), store, db, []string{"wf-123", "--entry-point", "Main"})
+		runDebug(context.Background(), store, db, dialectPostgres, []string{"wf-123", "--entry-point", "Main"})
 	})
 	if !strings.Contains(stderr, "error loading event history") {
 		t.Errorf("expected 'error loading event history', got: %s", stderr)
@@ -411,7 +411,7 @@ func TestDebugStep_NoEvents(t *testing.T) {
 	}
 
 	stdout, stderr := captureOutputs(t, func() {
-		runDebug(context.Background(), store, db, []string{"wf-123", "--entry-point", "Main"})
+		runDebug(context.Background(), store, db, dialectPostgres, []string{"wf-123", "--entry-point", "Main"})
 	})
 	if !strings.Contains(stdout, "No events in history") {
 		t.Errorf("expected 'No events in history', got stdout=%s stderr=%s", stdout, stderr)
@@ -440,7 +440,7 @@ func TestDebugStep_LoadWASMError(t *testing.T) {
 	}
 
 	stderr := withExitPanic(t, func() {
-		runDebug(context.Background(), store, db, []string{"wf-123", "--entry-point", "Main"})
+		runDebug(context.Background(), store, db, dialectPostgres, []string{"wf-123", "--entry-point", "Main"})
 	})
 	if !strings.Contains(stderr, "error loading WASM") {
 		t.Errorf("expected 'error loading WASM', got: %s", stderr)
@@ -539,7 +539,7 @@ func TestMainDebugDispatch(t *testing.T) {
 
 	// Test with no workflow ID — should print usage without panic.
 	stderr := withExitPanic(t, func() {
-		runDebug(context.Background(), nil, nil, []string{})
+		runDebug(context.Background(), nil, nil, dialectPostgres, []string{})
 	})
 	if !strings.Contains(stderr, "Usage:") {
 		t.Errorf("expected usage, got: %s", stderr)

@@ -33,8 +33,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-
-	"github.com/cleat-team/cleat/engine"
 )
 
 // osExit is replaced in tests to intercept os.Exit calls.
@@ -42,15 +40,18 @@ var osExit = os.Exit
 
 func main() {
 	dsn := flag.String("db", "",
-		"PostgreSQL DSN for a role that is a superuser or has BYPASSRLS "+
-			"-- NOT the cleat_app role cleat-worker requires (default: $CLEAT_DB_URL)")
+		"database DSN for a role that is a superuser or has BYPASSRLS "+
+			"-- NOT the cleat_app role cleat-worker requires (default: $CLEAT_DB_URL). "+
+			"PostgreSQL, MySQL and SQL Server are recognised from the DSN's shape")
+	driver := flag.String("driver", "",
+		"postgres, mysql or mssql. Inferred from --db when unset")
 	flag.Parse()
 
 	if *dsn == "" {
 		*dsn = os.Getenv("CLEAT_DB_URL")
 	}
 	if *dsn == "" {
-		fmt.Fprintln(os.Stderr, "error: the --db flag or CLEAT_DB_URL environment variable must be set to a PostgreSQL connection string")
+		fmt.Fprintln(os.Stderr, "error: the --db flag or CLEAT_DB_URL environment variable must be set to a database connection string")
 		flag.Usage()
 		osExit(1)
 	}
@@ -61,9 +62,21 @@ func main() {
 		osExit(1)
 	}
 
-	db, err := sql.Open("postgres", *dsn)
+	// The dialect is settled BEFORE the connection is opened, because the
+	// driver name is part of opening it -- and before the subcommand runs,
+	// because some subcommands are not ported and must refuse rather than
+	// fail partway through (see requirePortedFor).
+	d := detectDialect(*dsn)
+	if *driver != "" {
+		var derr error
+		if d, derr = dialectByName(*driver); derr != nil {
+			log.Fatalf("--driver: %v", derr)
+		}
+	}
+
+	db, err := sql.Open(d.driver, *dsn)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v — check the --db flag or CLEAT_DB_URL environment variable", err)
+		log.Fatalf("failed to connect to %s database: %v — check the --db flag or CLEAT_DB_URL environment variable", d.name, err)
 	}
 	defer db.Close()
 
@@ -78,7 +91,10 @@ func main() {
 	// stderr rather than something to find after a wrong answer. cleat#1184.
 	warnIfTenantScoped(ctx, db)
 
-	factory := engine.NewPostgresStoreFactory(db, "public")
+	factory, err := d.openStoreFactory(db, *dsn, "public")
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
 	store, closer, err := factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
 		log.Fatalf("failed to open database store: %v — check that the database is accessible and the public schema exists", err)
@@ -86,6 +102,12 @@ func main() {
 	defer closer.Close()
 
 	cmd := args[0]
+
+	// Before the subcommand runs: some are not written for this dialect, and
+	// the refusal has to precede the first statement rather than follow a
+	// partial one.
+	requirePortedFor(cmd, d)
+
 	switch cmd {
 	case "versions":
 		runVersions(ctx, store, args[1:])
@@ -94,11 +116,11 @@ func main() {
 	case "cost":
 		runCost(args[1:])
 	case "replay":
-		runReplay(ctx, store, db, args[1:])
+		runReplay(ctx, store, db, d, args[1:])
 	case "debug":
-		runDebug(ctx, store, db, args[1:])
+		runDebug(ctx, store, db, d, args[1:])
 	case "check-db":
-		runCheckDB(ctx, db, args[1:])
+		runCheckDB(ctx, db, d, args[1:])
 	case "drop-tenant":
 		runDropTenant(ctx, db, args[1:])
 	case "revoke-api-key":

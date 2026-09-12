@@ -227,6 +227,32 @@ func inlineStatements(t *testing.T) []inlineStatement {
 			t.Fatalf("parse %s: %v", rel, err)
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
+			// A plugin.Query's MySQL and MSSQL arms are never sent to
+			// PostgreSQL, so PREPAREing them here asks the wrong database a
+			// question it cannot answer: `SELECT TOP 1` is a syntax error on
+			// PostgreSQL and correct on SQL Server, and CONVERT(NVARCHAR(36),
+			// ...) likewise. Four such arms arrived with cleat#1316.
+			//
+			// Pruned by KEY rather than by recognising the SQL, because the
+			// alternative is a heuristic that has to know every construct the
+			// other two dialects have -- a list that can only be incomplete,
+			// and whose incompleteness shows up as a confident failure about a
+			// statement that is correct.
+			//
+			// This narrows what the guard covers and the narrowing is stated
+			// rather than hidden: the Default arm is still PREPAREd, so the
+			// statements this package actually sends to PostgreSQL are still
+			// checked, and the other arms are covered structurally by
+			// TestEveryDialectArmBindsItsOwnPlaceholders. Nothing yet PREPAREs
+			// them against a MySQL or SQL Server instance; that is a real gap
+			// and it is smaller than the one it replaces.
+			if kv, ok := n.(*ast.KeyValueExpr); ok {
+				if key, ok := kv.Key.(*ast.Ident); ok &&
+					(key.Name == "MySQL" || key.Name == "MSSQL") {
+					return false
+				}
+			}
+
 			lit, ok := n.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
 				return true
