@@ -264,11 +264,23 @@ func ExerciseHostCall(h cleat.HostCalls, input string) (string, error) {
 		// Twice, for the same reason PluginCall exercises both paths: a row
 		// that only ever sees `true` cannot tell a decoded bit from a
 		// hardcoded one.
-		first, err := h.AcquireLock("harness-lock", 60000)
+		//
+		// 60*time.Second, not 60000. This read `60000` until cleat#1331, which
+		// is SIXTY MICROSECONDS -- AcquireLock takes a time.Duration and an
+		// untyped constant becomes nanoseconds. The three sibling fixtures all
+		// got it right in their own idiom (acquireLockMs(..., 60000) in
+		// AssemblyScript and Java, Duration::from_secs(60) in Rust), so this
+		// one file disagreed with the row's other three implementations.
+		//
+		// It changed nothing observable, which is exactly why it survived: the
+		// harness's lock is re-entrant for the same holder, as this row's own
+		// `why` says, so both acquisitions return true at any TTL. A units
+		// mistake that the assertion cannot see is the kind that stays.
+		first, err := h.AcquireLock("harness-lock", 60*time.Second)
 		if err != nil {
 			return bad(req.Call, err)
 		}
-		second, err := h.AcquireLock("harness-lock", 60000)
+		second, err := h.AcquireLock("harness-lock", 60*time.Second)
 		if err != nil {
 			return bad(req.Call, err)
 		}

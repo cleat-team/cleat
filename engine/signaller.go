@@ -261,6 +261,35 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 		}
 	}
 
+	// A 0ms await has no deadline to expire, so it must not suspend. cleat#1331.
+	//
+	// The suspension below sets Until = nowMs + timeoutMs, which for 0 is a
+	// deadline of NOW: the run is immediately re-claimable, wakes, replays to
+	// this step and suspends again -- about fourteen claims a second forever,
+	// with event_history constant and reclaim_count 0, because each cycle is a
+	// legitimate claim rather than a stall.
+	//
+	// GUARDED HERE AS WELL AS IN THE SDK, and that is the point rather than
+	// belt-and-braces. cleat/runtime_signals.go guards Go guests only; this
+	// function is on the public interface and reached over a shared ABI, so a
+	// Rust, Java, Python or AssemblyScript guest that computes a sub-
+	// millisecond timeout arrives here with 0 and has nothing between it and
+	// the livelock.
+	//
+	// Timed out rather than an error, matching DurableSleep, where 0ms means
+	// "do not wait" and is both harmless and what was asked. Placed AFTER the
+	// signal-store check above, so a 0ms await still reports a signal that is
+	// already waiting -- it degrades to PollSignals rather than to nothing.
+	//
+	// Records NO event. A loop of these would otherwise append a row per
+	// iteration, trading a livelock that writes nothing for one that grows
+	// event_history without bound. Replay is unaffected: the branch above
+	// consumes await records written before this fix, and a call that records
+	// nothing and returns a constant is reproducible by construction.
+	if timeoutMs <= 0 {
+		return packAwaitSignalsResult(0, 0, true, 0)
+	}
+
 	// Record await and suspend.
 	rec := EventRecord{
 		Step:        s.stepCount,

@@ -1457,7 +1457,30 @@ func (h *HostCallsImpl) AwaitCondition(predicate func() bool, pollInterval, time
 		if h.Now().After(deadline) {
 			return false
 		}
-		h.AwaitSignals([]string{"__condition_poll"}, pollInterval)
+		// CLAMPED, not passed through. cleat#1331.
+		//
+		// pollInterval is this function's public parameter, and
+		// AwaitCondition(pred, 100*time.Microsecond, time.Minute) is an
+		// entirely reasonable thing to write -- a tight poll on a cheap
+		// predicate. Passed through, it used to livelock the workflow: the
+		// deadline check above never ran again because the body never
+		// returned.
+		//
+		// With AwaitSignals now guarding its converted value, an unclamped
+		// sub-millisecond interval would merely stop suspending -- the loop
+		// would terminate at the deadline, but spin in the guest for the whole
+		// wait instead of yielding the worker. Clamping to the durable wait's
+		// 1ms resolution is what the caller asked for, as closely as the
+		// mechanism can express it.
+		//
+		// No error is returned because this function has no error channel; it
+		// answers bool. Returning false for a predicate that would have become
+		// true is the worse silence of the two.
+		interval := pollInterval
+		if interval.Milliseconds() <= 0 {
+			interval = time.Millisecond
+		}
+		h.AwaitSignals([]string{"__condition_poll"}, interval)
 	}
 }
 
