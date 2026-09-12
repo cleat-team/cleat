@@ -18,9 +18,15 @@ import (
 // `already_started`, what the caller should do next depends on something the
 // response did not carry:
 //
-//	winner running   -> poll or wait
-//	winner done      -> fetch the result, it is available now
-//	winner failed    -> surface it; waiting will not improve it
+//	winner not finished -> poll or wait
+//	winner done         -> fetch the result, it is available now
+//	winner failed       -> surface it; waiting will not improve it
+//
+// "not finished" rather than "running", and the difference is cleat#1325: this
+// header said `winner running` and every case below supplied `running` or
+// `done`, so the arm a real retry usually lands on was covered nowhere. A
+// workflow parked in a durable sleep is `ready`. See
+// TestADuplicateStartSaysTheWinnerIsSleeping.
 //
 // Measured before this change, with the run confirmed terminal in between, the
 // two responses were BYTE-IDENTICAL. So every caller needed a second request to
@@ -99,6 +105,77 @@ func TestADuplicateStartSaysTheWinnerIsStillRunning(t *testing.T) {
 	// answering from something other than the key.
 	if len(k.seen) != 2 || k.seen[0] != "K" || k.seen[1] != "K" {
 		t.Errorf("the store was handed %v, want [K K]", k.seen)
+	}
+}
+
+// The common case, and it had no test anywhere. cleat#1325.
+//
+// `ready` is not an edge case that happens to be uncovered -- it is the value a
+// retrying caller most often sees. A suspending segment is finalized with
+// status "ready" and a next_wake_at (migrations/postgres/003_procedures.sql,
+// `WHEN 'ready' THEN ... SET status = 'ready', assigned_to = NULL,
+// next_wake_at = p_next_wake_at`), so any workflow that sleeps, awaits a child,
+// waits on a signal or backs off a retry is `ready` for nearly all of its life.
+// `running` covers only the slices when a worker actually holds it. Measured on
+// a run whose single act is an 8s DurableSleepMs, polled every 500ms: twenty
+// consecutive `ready` samples, then `done`. Not one `running`.
+//
+// WHY THE GAP SURVIVED, which is the part worth keeping. Every case in this
+// file supplies the winner through a mock, so the handler and the test agree
+// about which statuses occur BY CONSTRUCTION -- the same belief wrote both, and
+// a double cannot disagree with the code it was written from. The gap was found
+// against a real run in cleat-ports, not here, and the contract comment this
+// file's header quoted named `running` too.
+//
+// This test asserts the pass-through rather than a mapping: `status` is
+// workflow_instances.status verbatim, so a value the handler has never heard of
+// must arrive unaltered rather than be flattened into a known one.
+func TestADuplicateStartSaysTheWinnerIsSleeping(t *testing.T) {
+	api, _ := winnerStore(t, &engine.WorkflowInstance{Status: "ready"})
+
+	startWithKey(api, "K")
+	dup := decodeStart(t, startWithKey(api, "K"))
+
+	if dup["already_started"] != "true" {
+		t.Fatalf("the retry was not recognised as a duplicate: %v", dup)
+	}
+	if dup["status"] != "ready" {
+		t.Errorf("a duplicate start whose winner is sleeping reports status %q, want "+
+			"\"ready\".\n\nA workflow parked in a durable sleep is `ready`, not `running`, "+
+			"and that is the state a retrying caller most often finds. Reporting anything "+
+			"else -- including flattening it to `running` -- tells the caller something "+
+			"the run row does not say (cleat#1325).", dup["status"])
+	}
+	// Non-terminal, so no result and no error: both would be the cleat#1115
+	// ambiguity, a field present but meaningless.
+	if _, present := dup["error"]; present {
+		t.Errorf("a sleeping winner carried an error field: %v", dup)
+	}
+}
+
+// A status this handler has never been told about must pass through unchanged.
+//
+// The four terminal values and `terminating` are all reachable here and none is
+// enumerated in the handler; the response is a copy. This pins that, so a later
+// change that switches on a known set -- and silently maps everything else to
+// one bucket -- goes red rather than quietly narrowing the vocabulary. It is
+// the guard the `running`-only coverage above needed and did not have.
+func TestADuplicateStartDoesNotNarrowTheStatusVocabulary(t *testing.T) {
+	for _, status := range []string{"terminating", "terminated", "dead_lettered"} {
+		t.Run(status, func(t *testing.T) {
+			api, _ := winnerStore(t, &engine.WorkflowInstance{Status: status})
+
+			startWithKey(api, "K")
+			dup := decodeStart(t, startWithKey(api, "K"))
+
+			if dup["status"] != status {
+				t.Errorf("a duplicate start reports status %q for a winner in %q.\n\n"+
+					"`status` is workflow_instances.status verbatim; a value missing from "+
+					"the response, or mapped onto a neighbour, is the handler inventing a "+
+					"vocabulary the lifecycle document does not have (cleat#1325).",
+					dup["status"], status)
+			}
+		})
 	}
 }
 
