@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 )
@@ -21,6 +20,11 @@ type TenantPools struct {
 	pools    map[string]*sql.DB
 	connStr  string // base connection string (without user/password — we add per-tenant)
 	maxConns int    // max open connections per tenant pool
+
+	// secret derives each tenant's password. Nothing per-tenant is stored:
+	// see TenantRolePassword and cleat#1307. Empty means no tenant pool can be
+	// opened, which For() reports rather than working around.
+	secret []byte
 }
 
 // NewTenantPools creates a TenantPools manager.
@@ -28,7 +32,11 @@ type TenantPools struct {
 // baseDSN is a connection string template like:
 // "host=localhost port=5432 dbname=cleat sslmode=disable"
 // The user and password are added per tenant.
-func NewTenantPools(ownerDB *sql.DB, baseDSN string, maxConns int) *TenantPools {
+// secret is the worker's tenant-role key; each tenant's password is
+// HMAC-SHA256(secret, tenant_id). It must be at least
+// TenantRoleSecretMinBytes; a shorter or absent one makes For() fail rather
+// than silently hand back the owner pool.
+func NewTenantPools(ownerDB *sql.DB, baseDSN string, maxConns int, secret []byte) *TenantPools {
 	if maxConns <= 0 {
 		maxConns = 25
 	}
@@ -37,6 +45,7 @@ func NewTenantPools(ownerDB *sql.DB, baseDSN string, maxConns int) *TenantPools 
 		pools:    make(map[string]*sql.DB),
 		maxConns: maxConns,
 		connStr:  baseDSN,
+		secret:   secret,
 	}
 }
 
@@ -57,17 +66,38 @@ func (tp *TenantPools) For(ctx context.Context, tenantID string) (*sql.DB, error
 		return pool, nil
 	}
 
-	// Look up tenant credentials from admin schema.
-	var roleName, password string
+	// FAIL CLOSED, and this is the change that matters most in cleat#1307.
+	//
+	// This used to fall back to tp.OwnerDB on sql.ErrNoRows with a log line:
+	// "no role for tenant %s — falling back to owner pool (single-tenant
+	// mode)". That was harmless while TenantPools could not be constructed at
+	// all. The moment it IS the isolation mechanism, it is a privilege
+	// escalation: a tenant whose role was never provisioned silently gets the
+	// OWNER connection, which sees every tenant's rows. The failure mode of a
+	// missing row must be "no isolation available", not "isolation waived".
+	//
+	// Single-tenant deployments are unaffected because they never reach here:
+	// tenantID == "" returns the owner pool above, which is the documented
+	// single-tenant path.
+	var roleName string
 	err := tp.OwnerDB.QueryRowContext(ctx,
-		`SELECT role_name, password FROM admin.tenant_roles WHERE tenant_id = $1`,
-		tenantID).Scan(&roleName, &password)
+		`SELECT role_name FROM admin.tenant_roles WHERE tenant_id = $1`,
+		tenantID).Scan(&roleName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			log.Printf("tenant pool: no role for tenant %s — falling back to owner pool (single-tenant mode)", tenantID)
-			return tp.OwnerDB, nil
+			return nil, fmt.Errorf(
+				"tenant pool: tenant %s has no provisioned role. Refusing to fall back to "+
+					"the owner connection, which would see every tenant's rows. Provision it "+
+					"with admin.create_tenant_role(tenant_id, password)", tenantID)
 		}
-		return nil, fmt.Errorf("tenant pool: no role for tenant %s: %w", tenantID, err)
+		return nil, fmt.Errorf("tenant pool: look up role for tenant %s: %w", tenantID, err)
+	}
+
+	// The password is DERIVED, never read: admin.tenant_roles has no password
+	// column since cleat#1307.
+	password, err := TenantRolePassword(tp.secret, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("tenant pool: derive password for tenant %s: %w", tenantID, err)
 	}
 
 	// Build DSN for the tenant.

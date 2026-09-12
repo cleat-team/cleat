@@ -78,9 +78,15 @@ func TestARoleNamedSchemaDoesNotCaptureTheMigrations(t *testing.T) {
 	// And the call-time half, which is the part CI caught and local runs did
 	// not. This connection is not the runner's, and its search_path still puts
 	// the role-named schema first.
+	// Two arguments since cleat#1307: the password is derived by the caller
+	// (plugin.TenantRolePassword) and no longer generated or stored, and the
+	// one-argument form is dropped rather than overloaded. A literal of the
+	// right length is enough here -- this test is about search_path, not about
+	// the derivation, and the function only checks the length.
 	var created string
-	if err := db.QueryRowContext(ctx, `SELECT admin.create_tenant_role($1)`,
-		"00000000-0000-0000-0000-000000000000").Scan(&created); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT admin.create_tenant_role($1, $2)`,
+		"00000000-0000-0000-0000-000000000000",
+		strings.Repeat("0", 64)).Scan(&created); err != nil {
 		t.Fatalf("create_tenant_role on a connection whose search_path is %q: %v\n\n"+
 			"The function resolves names with the caller's search_path unless "+
 			"it carries one of its own. `SET search_path FROM CURRENT` on the "+

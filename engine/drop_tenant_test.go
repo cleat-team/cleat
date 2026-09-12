@@ -30,6 +30,7 @@ package engine
 // calls out by name).
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"os"
@@ -38,6 +39,7 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // dropTenantDefiningMigrations lists, in order, every migration that defines
@@ -311,7 +313,17 @@ func dropTenantFixture(t *testing.T, ctx context.Context, adminDB *sql.DB, tenan
 	if withRole {
 		// admin.tenant_roles + a real role/schema, exercising the DROP ROLE
 		// path (and the DROP OWNED BY fix for it -- see 032's comment).
-		if _, err := adminDB.ExecContext(ctx, `SELECT admin.create_tenant_role($1)`, tenant); err != nil {
+		// Two arguments since cleat#1307: the password is DERIVED by the caller
+		// and no longer generated or stored. The one-argument form was dropped
+		// rather than overloaded, so a stale call here fails with "function
+		// does not exist" -- which is how this call site was found.
+		pw, err := plugin.TenantRolePassword(
+			bytes.Repeat([]byte("k"), plugin.TenantRoleSecretMinBytes), tenant)
+		if err != nil {
+			t.Fatalf("derive tenant password(%s): %v", tag, err)
+		}
+		if _, err := adminDB.ExecContext(ctx,
+			`SELECT admin.create_tenant_role($1, $2)`, tenant, pw); err != nil {
 			t.Fatalf("create_tenant_role(%s): %v", tag, err)
 		}
 	}
