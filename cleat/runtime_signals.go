@@ -219,13 +219,34 @@ func (h *HostCallsImpl) SignalWorkflow(targetRunID, signalName, payload string) 
 
 func (h *HostCallsImpl) AwaitSignals(signalNames []string, timeout time.Duration) SignalResult {
 	h.DispatchUpdates() // dispatch point; see DispatchUpdates
-	if timeout <= 0 {
+
+	// GUARD THE CONVERTED VALUE, not the Duration. cleat#1331.
+	//
+	// This used to read `if timeout <= 0`, one line above a
+	// `timeout.Milliseconds()` that truncates -- so every value in (0, 1ms),
+	// 999,999 distinct nanosecond values, walked past the guard and reached
+	// the host as exactly the 0 the guard exists to reject. The engine then
+	// suspended with a deadline of now, the run became immediately
+	// re-claimable, woke, replayed to this step and suspended again: about
+	// fourteen claims a second, forever, with event_history never advancing a
+	// row. Nothing detects that -- status alternates ready/running, both
+	// normal, and reclaim_count stays 0 because these are legitimate claim
+	// cycles rather than stalls.
+	//
+	// The message names the ROUNDING rather than asking for a positive value.
+	// The caller's value WAS positive, so "requires a positive timeout" reads
+	// as simply wrong to the person who wrote 100*time.Microsecond.
+	ms := timeout.Milliseconds()
+	if ms <= 0 {
 		return SignalResult{
 			TimedOut: true,
-			Err:      errors.New("AwaitSignals requires a positive timeout. Use PollSignals() for non-blocking signal checks."),
+			Err: fmt.Errorf("AwaitSignals: a timeout of %s rounds to 0ms, and the durable "+
+				"wait has millisecond resolution -- a 0ms await has no deadline to expire, so "+
+				"it would never return. Use at least 1ms, or PollSignals() for a non-blocking "+
+				"check.", timeout),
 		}
 	}
-	name, payload, timedOut, err := h.DurableAwaitSignals(signalNames, timeout.Milliseconds())
+	name, payload, timedOut, err := h.DurableAwaitSignals(signalNames, ms)
 	return unwrapSignalResult(SignalResult{
 		Name:     name,
 		Payload:  payload,

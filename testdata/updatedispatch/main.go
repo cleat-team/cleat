@@ -15,6 +15,7 @@ package updatedispatch
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cleat-team/cleat/cleat"
 )
@@ -30,7 +31,7 @@ func Run(h cleat.HostCalls, input string) (string, error) {
 		}, nil)
 
 	for i := 0; i < 20; i++ {
-		h.AwaitSignals([]string{"never"}, 1000)
+		h.AwaitSignals([]string{"never"}, 1000*time.Millisecond)
 	}
 	return fmt.Sprintf(`{"slices":20,"applied":%d}`, applied), nil
 }
