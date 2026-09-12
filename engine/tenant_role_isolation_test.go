@@ -42,17 +42,26 @@ func tenantRoleName(tenantID string) string {
 }
 
 func TestATenantRoleSeesOnlyItsOwnRows(t *testing.T) {
+	// NO SKIP OF OUR OWN. testutil.TestDB already gates on "was PostgreSQL
+	// requested", which is scripts/check-skips.sh case (a) and the sanctioned
+	// path; duplicating it here would be a second conditional skip guarding the
+	// same thing. Everything below runs only once TestDB has confirmed a
+	// configured dialect, so the DSN read after it cannot be empty -- and if it
+	// somehow is, that is an inconsistency worth failing on rather than
+	// skipping past.
+	admin := testutil.TestDB(t, testutil.DialectPostgres)
+	defer admin.Close()
+	testutil.SetupFullSchema(t, admin, testutil.DialectPostgres)
+
 	dsn := os.Getenv("CLEAT_TEST_POSTGRES")
 	if dsn == "" {
 		dsn = os.Getenv("CLEAT_TEST_DB")
 	}
 	if dsn == "" {
-		t.Skip("CLEAT_TEST_POSTGRES is not set")
+		t.Fatal("testutil.TestDB resolved a PostgreSQL connection but neither " +
+			"CLEAT_TEST_POSTGRES nor CLEAT_TEST_DB is set; this test rewrites the DSN's " +
+			"credential and has nothing to rewrite")
 	}
-
-	admin := testutil.TestDB(t, testutil.DialectPostgres)
-	defer admin.Close()
-	testutil.SetupFullSchema(t, admin, testutil.DialectPostgres)
 
 	const (
 		mine   = "aaaaaaaa-0000-0000-0000-00000000a001"
@@ -109,8 +118,15 @@ func TestATenantRoleSeesOnlyItsOwnRows(t *testing.T) {
 		t.Fatalf("create_tenant_role: %v", err)
 	}
 	if !role.Valid {
-		t.Skip("this connection cannot CREATE ROLE (create_tenant_role returned NULL); " +
-			"role-per-tenant isolation needs a superuser or CREATEROLE DSN")
+		// Fatal, not Skip. create_tenant_role returns NULL and RAISEs a warning
+		// when the connection cannot create roles -- and CI's PostgreSQL
+		// service runs as a superuser, so that is always satisfiable where this
+		// matters: scripts/check-skips.sh case (c). Skipping would silently
+		// remove the only test of the isolation mechanism on exactly the
+		// deployments that cannot provision it.
+		t.Fatal("admin.create_tenant_role returned NULL: this connection cannot CREATE ROLE.\n\n" +
+			"Role-per-tenant isolation is built on PostgreSQL login roles, so it needs a " +
+			"superuser or CREATEROLE connection. Point CLEAT_TEST_POSTGRES at one.")
 	}
 
 	// Re-derived rather than read back, because there is nothing to read back:
@@ -201,8 +217,13 @@ func rewriteDSNCredential(t *testing.T, dsn, user, password string) string {
 	t.Helper()
 	const scheme = "postgres://"
 	if !strings.HasPrefix(dsn, scheme) {
-		t.Skipf("CLEAT_TEST_POSTGRES is not a postgres:// URL (%q); this test rewrites the "+
-			"credential and cannot do so for a keyword DSN", dsn)
+		// Fatal for the same reason as above: every job that configures
+		// PostgreSQL here supplies a postgres:// URL, so a keyword DSN is a
+		// misconfiguration to report rather than a reason to skip the only test
+		// of this mechanism.
+		t.Fatalf("CLEAT_TEST_POSTGRES is not a postgres:// URL; this test rewrites the "+
+			"credential and cannot do so for a keyword DSN. Got a %d-character value "+
+			"beginning %q", len(dsn), dsn[:min(8, len(dsn))])
 	}
 	rest := dsn[len(scheme):]
 	if at := strings.Index(rest, "@"); at >= 0 {
