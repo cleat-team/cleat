@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 
 	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/plugin"
@@ -73,6 +75,36 @@ func (a *SQLDBAdapter) tenantTx(ctx context.Context) (*sql.Tx, error) {
 func beginTenantTx(ctx context.Context, db *sql.DB, dialect plugin.Dialect, opts *sql.TxOptions) (*sql.Tx, error) {
 	if dialect != plugin.DialectPostgres {
 		return nil, nil
+	}
+	// The bypass is tested BEFORE the tenant, so that marking a context which
+	// already carries one widens rather than narrows. See the note at the end
+	// of plugin.AcrossAllTenants: an admin endpoint that rebuilds an index for
+	// every tenant runs on a request context, and resolving that the other way
+	// would quietly scope the sweep to whoever called it. cleat#1278.
+	if reason, ok := tenantctx.CrossTenant(ctx); ok {
+		if strings.TrimSpace(reason) == "" {
+			// Not a bypass, and not the fail-closed path either. Falling
+			// through to the tenant branch here would produce
+			// "cleat.tenant_id is not set" from a sweep that has no tenant to
+			// set, sending its author after the wrong thing entirely.
+			return nil, fmt.Errorf(
+				"plugin: AcrossAllTenants needs a reason; the empty string is not one")
+		}
+		tx, err := db.BeginTx(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		// Transaction-local, like the tenant below, so the exemption cannot
+		// follow the connection back into the pool. The policy tests this
+		// setting for EMPTINESS rather than presence, because a reverted
+		// is_local setting reads as "" and not as NULL -- migration 034 is the
+		// same PostgreSQL behaviour, found the same way.
+		if _, err := tx.ExecContext(ctx,
+			`SELECT set_config('cleat.cross_tenant', $1, true)`, reason); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		return tx, nil
 	}
 	tid, ok := tenantctx.From(ctx)
 	if !ok {

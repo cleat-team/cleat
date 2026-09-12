@@ -370,7 +370,16 @@ func applyTenantScoping(ctx context.Context, exec func(ctx context.Context, quer
 			fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", table),
 			fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY", table),
 			fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s", policy, table),
-			fmt.Sprintf("CREATE POLICY %s ON %s FOR ALL USING (tenant_id = cleat.assert_tenant_set())",
+			// cleat.tenant_row_is_visible rather than the inline
+			// `tenant_id = cleat.assert_tenant_set()` this used to emit.
+			// Same answer when no bypass is named, including the RAISE on an
+			// unset tenant; it additionally admits a sweep that named itself
+			// through plugin.AcrossAllTenants. Defined in
+			// migrations/postgres/063, which is a CORE migration and so has
+			// already run by the time any plugin migration does --
+			// cmd/cleat-worker/main.go runs migration.Runner at :680 and
+			// plugin.RunMigrations at :686. cleat#1278.
+			fmt.Sprintf("CREATE POLICY %s ON %s FOR ALL USING (cleat.tenant_row_is_visible(tenant_id))",
 				policy, table),
 		} {
 			if _, err := exec(ctx, stmt); err != nil {

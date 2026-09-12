@@ -199,6 +199,26 @@ cross-tenant reads go through `admin.claim_workflows`, a `SECURITY DEFINER` func
 `BYPASSRLS` role, so the widening is a deliberate grant rather than a missing predicate. Plugin
 sweeps should go through something of the same shape.
 
+> **Decided, and this last sentence is where it diverged.** The explicit named bypass shipped as
+> `plugin.AcrossAllTenants(ctx, reason)` plus `cleat.tenant_row_is_visible` in
+> `migrations/postgres/063`. It is *not* of the same shape as `admin.claim_workflows`, and working
+> out why is the substance of the decision.
+>
+> The engine's construction is bounded by two fixed function bodies. A plugin's cross-tenant
+> statements are arbitrary SQL written by the plugin author, so the only faithful translation is a
+> function *per sweep*, created by that plugin's own migration. That fails on ownership: the
+> exemption comes from the role that owns the function, plugin migrations run as the application
+> role, and letting them create functions owned by `cleat_dispatcher` requires granting the
+> application role membership in it — which hands the role that runs every plugin's DDL a general
+> power to create RLS-exempt functions with any body. The bound evaporates, and the result looks
+> stronger than the GUC while being weaker.
+>
+> So what shipped is honest about what it is: a guard against a **forgotten** tenant predicate, not
+> a boundary against a hostile plugin — which a Go plugin compiled into the worker binary could
+> never have anyway. Its one real property is that cross-tenant access cannot be reached by
+> omission. It has to be typed, with a written reason, at a call site a reviewer can grep for.
+> The full argument is in migration 063's header. — #1278
+
 ### 3.3 Make the arms checkable
 
 A test that parses `plugins/*/migrations.go` with `go/parser`, evaluates the concatenated string

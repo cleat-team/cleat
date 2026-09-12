@@ -35,3 +35,34 @@ func From(ctx context.Context) (uuid.UUID, bool) {
 	tid, ok := ctx.Value(tenantIDKey{}).(uuid.UUID)
 	return tid, ok
 }
+
+type crossTenantKey struct{}
+
+// WithCrossTenant marks ctx as a deliberate cross-tenant operation, carrying
+// the reason it is one.
+//
+// This is the context half of plugin.AcrossAllTenants; plugins call that, and
+// it lives there because plugins cannot import an internal package. The value
+// is read by the plugin database adapter in engine, which is why the key has
+// to sit below both -- the same cycle that put the tenant key here.
+//
+// The reason is not decoration. It is written to cleat.cross_tenant for the
+// duration of the transaction, so an incident can ask a misbehaving session
+// which sweep it is running rather than only that it is exempt.
+func WithCrossTenant(ctx context.Context, reason string) context.Context {
+	return context.WithValue(ctx, crossTenantKey{}, reason)
+}
+
+// CrossTenant reports whether ctx names a deliberate cross-tenant operation,
+// and the reason given.
+//
+// The boolean distinguishes "not marked" from "marked with an empty reason",
+// and the caller is expected to treat the second as an error rather than as
+// the first. Collapsing them would make an empty string mean "no bypass",
+// which is a silent downgrade to the fail-closed path: the sweep would fail
+// with "cleat.tenant_id is not set" and its author would go looking for a
+// missing tenant rather than for the empty argument they actually passed.
+func CrossTenant(ctx context.Context) (string, bool) {
+	reason, ok := ctx.Value(crossTenantKey{}).(string)
+	return reason, ok
+}

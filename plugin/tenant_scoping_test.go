@@ -32,7 +32,14 @@ func TestTenantScopingEmitsEnableForceAndPolicy(t *testing.T) {
 		// owner, which is whoever ran the migration -- so a suite connecting
 		// as the owner would pass against an unprotected table.
 		"ALTER TABLE kv_store FORCE ROW LEVEL SECURITY",
-		"cleat.assert_tenant_set()",
+		// cleat.tenant_row_is_visible, not the inline
+		// `tenant_id = cleat.assert_tenant_set()` this asserted before
+		// #1278. The function gives the same answer when no bypass is
+		// named -- including the RAISE on an unset tenant -- and
+		// additionally admits a sweep that named itself through
+		// plugin.AcrossAllTenants. Asserting the call rather than the
+		// comparison is what keeps the two from being written twice.
+		"USING (cleat.tenant_row_is_visible(tenant_id))",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("emitted DDL does not contain %q:\n%s", want, joined)
