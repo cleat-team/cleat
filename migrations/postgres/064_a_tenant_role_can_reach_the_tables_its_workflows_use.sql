@@ -91,6 +91,25 @@ $$ LANGUAGE plpgsql SECURITY DEFINER
 -- schema these tables were created in.
 SET search_path FROM CURRENT;
 
+-- THE ONE-ARGUMENT FORM MUST GO, and this line was lost once already.
+--
+-- PostgreSQL overloads on signature, so CREATE OR REPLACE of the two-argument
+-- form leaves create_tenant_role(uuid) installed with 001's body -- which
+-- INSERTs into admin.tenant_roles.password, a column this file drops. Any
+-- caller still passing one argument then fails with
+--
+--   pq: column "password" of relation "tenant_roles" does not exist (42703)
+--
+-- which is what migration/TestARoleNamedSchemaDoesNotCaptureTheMigrations
+-- reported. Measured on a fully migrated database: both signatures present,
+-- the one-argument body still 001's.
+--
+-- The DROP was in this file's first draft and disappeared when the file was
+-- rewritten to be schema-relative -- a rewrite that regenerated the function
+-- from 001 and did not carry the surrounding statement with it. Nothing
+-- announced the loss; the guard did.
+DROP FUNCTION IF EXISTS admin.create_tenant_role(UUID);
+
 CREATE OR REPLACE FUNCTION admin.create_tenant_role(p_tenant_id UUID, p_password TEXT)
 RETURNS TEXT AS $$
 DECLARE
