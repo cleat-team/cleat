@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -266,8 +265,7 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, int64(1<<10)) // 1 KB
+	{
 		// The error was DISCARDED here until cleat#1337, and this is the only
 		// request-body decode in the worker that did not branch on it. The
 		// consequence was not that the operator's note went missing: it is that
@@ -287,12 +285,12 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 		// truncated body is io.ErrUnexpectedEOF, which errors.Is(err, io.EOF)
 		// does NOT match -- verified, because the whole fix turns on those two
 		// being distinguishable.
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			// 400 rather than 413 for the oversized case, deliberately. Whether
-			// an oversized body should be a 413 here is cleat#1338's decision
-			// and it covers seven other sites with this exact shape; answering
-			// it for one endpoint would make that decision twice.
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
+		// cleat#1338 has since answered the status question for all sixteen
+		// bounded bodies, so the 1 KB cap and the io.EOF carve-out both live
+		// in decodeOptionalJSONBody now: an oversized body is a 413 naming the
+		// limit, a truncated one is still a 400, and an empty one is still a
+		// supported call.
+		if !s.decodeOptionalJSONBody(w, r, terminateBodyLimit(), &req) {
 			return
 		}
 	}

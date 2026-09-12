@@ -380,21 +380,34 @@ the compacted state.
 
 General endpoints use this limit.
 
-**Three endpoints do not, and this flag does not move them.** `POST
-/api/workflows/:id/signal`, `POST /api/workflows/:id/cancel` and `POST
-/api/workflows/:id/update/:name` are capped at a fixed **64 KB**
-(`signalMaxBodySize` in `cmd/cleat-worker/server.go`, a compile-time constant).
-Raising `--max-body-size` has no effect on any of the three.
+**Five endpoints do not, and this flag does not move any of them.** There are
+four ceilings in total:
+
+| limit | endpoints | moved by |
+|---|---|---|
+| `--max-body-size`, 1 MiB default | everything not listed below | this flag |
+| **64 KB**, fixed | `POST /api/workflows/:id/signal`, `POST /api/workflows/:id/cancel`, `POST /api/workflows/:id/update/:name` | nothing |
+| **10 MiB**, fixed | `POST /api/definitions` (WASM upload) | nothing |
+| **1 KB**, fixed | `POST /api/dead-letters/:id/terminate` | nothing |
 
 This line named only "signal endpoints" until cleat#1332, so cancel was
 undocumented — and cancel is the one most likely to be reached in practice,
-because its field is a free-text `reason`.
+because its field is a free-text `reason`. It then said "which of the two it
+is" until cleat#1338 established that there were four.
 
-The `413` response names the limit it hit and says which of the two it is, so a
-request that fails does not need this page to explain itself:
+**Every one of them answers an oversized body with `413`**, naming the limit
+and the knob, so a request that fails does not need this page to explain
+itself:
 
     {"error":"request body too large: the limit is 1048576 bytes, set by --max-body-size"}
     {"error":"request body too large: the limit is 65536 bytes, fixed for the signal, cancel and update endpoints and not changed by --max-body-size"}
+    {"error":"request body too large: the limit is 10485760 bytes, fixed for the definition upload endpoint and not changed by --max-body-size"}
+
+Seven of the sixteen bounded endpoints used to answer `400 {"error":"invalid
+JSON: http: request body too large"}` instead — a status asserting the body was
+malformed, on a body that was never read. cleat#1338 made all sixteen agree;
+that is a status-code change for those seven, and clients branching on `400`
+for an oversized body need to handle `413`.
 
 ---
 

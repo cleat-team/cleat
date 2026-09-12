@@ -156,12 +156,8 @@ func (s *apiServer) handleAdminForceComplete(w http.ResponseWriter, r *http.Requ
 		Generation int64  `json:"generation"`
 		Result     string `json:"result"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
 	}
 
 	op := operatorFromContext(r)
@@ -184,12 +180,8 @@ func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request,
 		ErrorMsg   string `json:"error_message"`
 		ErrorCode  string `json:"error_code"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
 	}
 
 	op := operatorFromContext(r)
@@ -219,12 +211,8 @@ func (s *apiServer) handleAdminResolveStep(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Response string `json:"response"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
 	}
 
 	op := operatorFromContext(r)
@@ -245,12 +233,8 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 	var req struct {
 		Generation int64 `json:"generation"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
 	}
 
 	op := operatorFromContext(r)
