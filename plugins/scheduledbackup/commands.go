@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -104,7 +103,14 @@ func (p *Plugin) cliBackupRun(cmds []string) error {
 	fmt.Printf("Starting backup %s for config %q...\n", historyID, name)
 
 	// Execute pg_dump.
-	dumpPath := filepath.Join(*dumpDir, filename)
+	//
+	// SafeDumpPath rather than a bare Join (cleat#1305). Like the cron sweep,
+	// this reads the name back out of backup_config and never passes through an
+	// HTTP handler, so route-level validation does not reach it.
+	dumpPath, err := SafeDumpPath(*dumpDir, filename)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(*dumpDir, 0755); err != nil {
 		return fmt.Errorf("create dump dir: %w", err)
 	}

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/cleat-team/cleat/auth"
@@ -119,6 +118,13 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 
 	if req.Name == "" {
 		p.writeError(w, 400, "name is required")
+		return
+	}
+	// cleat#1305: the name is interpolated into a dump filename that reaches
+	// `pg_dump -f`, so an unconstrained one directs a full cross-tenant dump
+	// outside DumpDir.
+	if !ValidConfigName(req.Name) {
+		p.writeError(w, 400, configNameRule)
 		return
 	}
 	if req.Cron == "" {
@@ -320,6 +326,13 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	argIdx := 1
 
 	if req.Name != nil {
+		// Validated here as well as on create (cleat#1305). Checking only the
+		// create route would leave the hole open through a rename: make a
+		// benign config, rename it, run it.
+		if !ValidConfigName(*req.Name) {
+			p.writeError(w, 400, configNameRule)
+			return
+		}
 		query += fmt.Sprintf(", name = $%d", argIdx)
 		args = append(args, *req.Name)
 		argIdx++
@@ -536,10 +549,16 @@ func (p *Plugin) handleRunBackup(w http.ResponseWriter, r *http.Request) {
 
 // runBackupAsync executes pg_dump and records the result in backup_history.
 func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filename string) {
-	dumpPath := filepath.Join(p.config.DumpDir, filename)
+	dumpPath, err := SafeDumpPath(p.config.DumpDir, filename)
+	if err != nil {
+		p.logger.Error("scheduledbackup: refusing backup", "config_id", configID,
+			"history_id", historyID, "error", err)
+		p.markBackupFailed(historyID, err.Error())
+		return
+	}
 
 	var stderr bytes.Buffer
-	err := runPgDump(context.Background(), p.config.DSN.Reveal(), dumpPath, &stderr)
+	err = runPgDump(context.Background(), p.config.DSN.Reveal(), dumpPath, &stderr)
 	if err != nil {
 		errMsg := stderr.String()
 		if errMsg == "" {
@@ -548,10 +567,7 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 		p.logger.Error("scheduledbackup: pg_dump failed",
 			"config_id", configID, "history_id", historyID, "error", errMsg,
 		)
-		p.db.Exec(context.Background(), plugin.Rebind(`
-			UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
-			WHERE id = $2
-		`, p.dialect), errMsg, historyID)
+		p.markBackupFailed(historyID, errMsg)
 		return
 	}
 
@@ -590,5 +606,21 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 				WHERE id = $2
 			`, p.dialect), now, configID)
 		}
+	}
+}
+
+// markBackupFailed records a failed backup attempt in backup_history.
+//
+// Factored out when SafeDumpPath gained a refusal path (cleat#1305): a refused
+// backup must leave the same trail as a failed one. Recording only the pg_dump
+// failure would leave a history row stuck at 'running' forever for a config
+// whose name the path check rejects -- which reads as a hung backup rather than
+// a refused one, and is the state an operator would escalate.
+func (p *Plugin) markBackupFailed(historyID uuid.UUID, errMsg string) {
+	if _, err := p.db.Exec(context.Background(), plugin.Rebind(`
+		UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
+		WHERE id = $2
+	`, p.dialect), errMsg, historyID); err != nil {
+		p.logger.Error("scheduledbackup: recording backup failure", "history_id", historyID, "error", err)
 	}
 }
