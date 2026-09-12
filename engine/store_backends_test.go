@@ -575,6 +575,20 @@ func TestCascadeDelete(t *testing.T) {
 //   - MySQL: 4 tables have FKs (drop+re-add), concurrency_keys has none (add fresh).
 //   - MSSQL: 4 tables have inline REFERENCES (auto-named, IF EXISTS skips them),
 //     ADD CONSTRAINT creates named CASCADE FK alongside. concurrency_keys has no FK.
+//
+// mysqlCascadeChildTables are the five tables migrations/mysql/001_schema.sql
+// declares with a FOREIGN KEY to workflow_instances ON DELETE CASCADE.
+// Re-derive with:
+//
+//	grep -c "REFERENCES workflow_instances(id) ON DELETE CASCADE" migrations/mysql/001_schema.sql
+var mysqlCascadeChildTables = []string{
+	"event_history",
+	"workflow_signals",
+	"workflow_promises",
+	"workflow_update_requests",
+	"concurrency_keys",
+}
+
 func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 	t.Helper()
 
@@ -606,42 +620,55 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 		exec(`ALTER TABLE workflow_update_requests ADD CONSTRAINT fk_test_cascade_wu FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
 
 	case testutil.DialectMySQL:
-		// The inline FK in CREATE TABLE already has ON DELETE CASCADE for
-		// event_history, workflow_signals, workflow_promises, and
-		// workflow_update_requests. Drop and re-add them idempotently.
-		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'event_history' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE event_history DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
-		exec(`PREPARE stmt FROM @sql`)
-		exec(`EXECUTE stmt`)
-		exec(`DEALLOCATE PREPARE stmt`)
-		exec(`ALTER TABLE event_history ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
-
-		// workflow_signals
-		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'workflow_signals' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE workflow_signals DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
-		exec(`PREPARE stmt FROM @sql`)
-		exec(`EXECUTE stmt`)
-		exec(`DEALLOCATE PREPARE stmt`)
-		exec(`ALTER TABLE workflow_signals ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
-
-		// workflow_promises
-		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'workflow_promises' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE workflow_promises DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
-		exec(`PREPARE stmt FROM @sql`)
-		exec(`EXECUTE stmt`)
-		exec(`DEALLOCATE PREPARE stmt`)
-		exec(`ALTER TABLE workflow_promises ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
-
-		// workflow_update_requests
-		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'workflow_update_requests' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE workflow_update_requests DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
-		exec(`PREPARE stmt FROM @sql`)
-		exec(`EXECUTE stmt`)
-		exec(`DEALLOCATE PREPARE stmt`)
-		exec(`ALTER TABLE workflow_update_requests ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
-
-		// concurrency_keys: add FK (skips if already exists with a different name)
-		db.Exec(`ALTER TABLE concurrency_keys ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
+		// NOTHING IS ADDED HERE, AND NOTHING IS REMOVED LATER. cleat#1364.
+		//
+		// migrations/mysql/001_schema.sql declares all five of these foreign
+		// keys with ON DELETE CASCADE already -- which is exactly what this
+		// test needs, so there was never anything to add. What the code here
+		// used to do was drop each shipped constraint and re-add an equivalent,
+		// and removeCascadeFKs then dropped it again on the way out, leaving
+		// the test database permanently without the constraints its own schema
+		// ships. Measured on a database created empty: 5 before
+		// TestCascadeDelete, 0 after, with the test PASSING.
+		//
+		// The damage landed on other tests. MySQL's DeleteCompletedWorkflows
+		// and DeleteDeadLetteredWorkflows rely on that cascade for five child
+		// tables, deliberately and documented as such, so
+		// TestRetentionDeletesEveryChildRowOnPostgresAndMySQL failed its MySQL
+		// arm on every full-suite run and passed in isolation.
+		//
+		// PostgreSQL and SQL Server are different and their arms are correct:
+		// there the constraints are genuinely test-only (fk_test_cascade_* and
+		// fk_*_workflow), added here and dropped by name afterwards. Only
+		// MySQL's were the shipped ones, and only MySQL's teardown searched for
+		// "any constraint referencing workflow_instances" rather than naming
+		// what it had created.
+		//
+		// VERIFIED RATHER THAN RECREATED. A test that silently proceeds when
+		// its precondition is absent proves nothing, so this asserts the shape
+		// it depends on instead of imposing it -- and if a migration ever drops
+		// one of these, this fails here with the table named rather than
+		// somewhere downstream.
+		for _, tbl := range mysqlCascadeChildTables {
+			var rule string
+			err := db.QueryRow(`
+				SELECT rc.DELETE_RULE
+				FROM information_schema.REFERENTIAL_CONSTRAINTS rc
+				WHERE rc.CONSTRAINT_SCHEMA = DATABASE()
+				  AND rc.TABLE_NAME = ?
+				  AND rc.REFERENCED_TABLE_NAME = 'workflow_instances'`, tbl).Scan(&rule)
+			if err != nil {
+				t.Fatalf("%s has no foreign key to workflow_instances: %v\n\n"+
+					"migrations/mysql/001_schema.sql declares one with ON DELETE CASCADE, "+
+					"and MySQL's retention sweeps depend on it. If a test dropped it, that "+
+					"test is the defect (cleat#1364); if a migration did, this test is "+
+					"reporting a real schema change.", tbl, err)
+			}
+			if rule != "CASCADE" {
+				t.Fatalf("%s foreign key to workflow_instances has DELETE_RULE %q, want CASCADE",
+					tbl, rule)
+			}
+		}
 
 	case testutil.DialectMSSQL:
 		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_event_history_workflow') ALTER TABLE dbo.event_history DROP CONSTRAINT fk_event_history_workflow`)
@@ -805,23 +832,12 @@ func removeCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 		exec(`ALTER TABLE concurrency_keys DROP CONSTRAINT IF EXISTS fk_test_cascade_ck`)
 		exec(`ALTER TABLE workflow_update_requests DROP CONSTRAINT IF EXISTS fk_test_cascade_wu`)
 	case testutil.DialectMySQL:
-		for _, tbl := range []string{"event_history", "workflow_signals", "workflow_promises", "workflow_update_requests", "concurrency_keys"} {
-			cnameQuery := "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = '" + tbl + "' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances'"
-			rows, err := db.Query(cnameQuery)
-			if err != nil {
-				t.Logf("remove MySQL CASCADE FK for %s (non-fatal): %v", tbl, err)
-				continue
-			}
-			var cname string
-			for rows.Next() {
-				if err := rows.Scan(&cname); err != nil {
-					t.Logf("remove MySQL CASCADE FK for %s (non-fatal): %v", tbl, err)
-					break
-				}
-				exec("ALTER TABLE " + tbl + " DROP FOREIGN KEY " + cname)
-			}
-			rows.Close()
-		}
+		// Deliberately empty. addCascadeFKs adds nothing on this dialect -- the
+		// shipped schema already provides the cascade -- so there is nothing to
+		// take away, and the version of this arm that searched for "any
+		// constraint referencing workflow_instances" was dropping the shipped
+		// ones (cleat#1364).
+
 	case testutil.DialectMSSQL:
 		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_event_history_workflow') ALTER TABLE event_history DROP CONSTRAINT fk_event_history_workflow`)
 		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_signals_workflow') ALTER TABLE workflow_signals DROP CONSTRAINT fk_signals_workflow`)
