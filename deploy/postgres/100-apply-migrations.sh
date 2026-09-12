@@ -49,8 +49,10 @@ if [ "$CLEAT_SCHEMA" != "public" ]; then
 	psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
 		-c "CREATE SCHEMA IF NOT EXISTS \"$CLEAT_SCHEMA\""
 fi
-# pg_temp last, because four SECURITY DEFINER functions are created with
-# `SET search_path FROM CURRENT` and freeze this value onto themselves.
+# pg_temp last, because the SECURITY DEFINER functions created with
+# `SET search_path FROM CURRENT` freeze this value onto themselves.
+# (No count: this said "four" and there are three. Five migration files carry
+# the statement, and 040's admin.claim_workflows is superseded by 055's.)
 # PostgreSQL searches pg_temp first when it is not named, which inside a
 # function holding an RLS exemption is a shadowing hazard.
 export PGOPTIONS="--search_path=$CLEAT_SCHEMA,pg_temp"

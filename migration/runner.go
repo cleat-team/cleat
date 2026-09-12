@@ -136,10 +136,19 @@ func (r *Runner) schemaIdent() string {
 // searchPath is what the runner sets on its connection: the configured schema
 // followed by pg_temp.
 //
-// The trailing pg_temp is not decoration. Four SECURITY DEFINER functions in
-// migrations/postgres/ carry `SET search_path FROM CURRENT`, which freezes
-// whatever this value is onto the function at creation time -- that is how
-// they follow --schema without any substitution step. PostgreSQL searches
+// The trailing pg_temp is not decoration. The SECURITY DEFINER functions in
+// migrations/postgres/ that carry `SET search_path FROM CURRENT` freeze
+// whatever this value is onto themselves at creation time -- that is how they
+// follow --schema without any substitution step.
+//
+// No count, deliberately. This said "four" and there were three: five files
+// contain the statement and 040's admin.claim_workflows is superseded by
+// 055's, so counting statements over-reports the functions by one. Both
+// numbers are also a census of a growing population. Re-derive if you need
+// the set, deduping by name so the last definition wins:
+//
+//	grep -rln 'SET search_path FROM CURRENT' migrations/postgres/ PostgreSQL searches
+//
 // pg_temp FIRST when it is not named explicitly, so a captured path of
 // "cleat_prod" alone would let a temporary table shadow a real one inside a
 // function that holds an RLS exemption. Naming it last is the standard
