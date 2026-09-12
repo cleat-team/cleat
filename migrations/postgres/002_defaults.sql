@@ -44,11 +44,38 @@ END $$;
 -- This fixes a mismatch that occurs when the database is dropped and recreated:
 -- the roles persist at the server level with old passwords, but the migration
 -- regenerates passwords and stores new ones in admin.tenant_roles.
+--
+-- GUARDED ON THE COLUMN EXISTING, because migration 064 drops it: tenant role
+-- passwords are derived from the worker's key (plugin.TenantRolePassword)
+-- rather than stored, so there is no longer a value to sync from.
+--
+-- The guard is not cosmetic. On a FRESH database this block still runs -- 002
+-- executes long before 064 -- and on an existing one 002 is already recorded
+-- and never re-runs. The case it exists for is anything that re-applies the
+-- whole set against a database where 064 HAS run, which is what
+-- engine/testutil's SetupFullSchema does on every test that asks for a
+-- PostgreSQL schema. Without this, dropping the column turns one migration
+-- into a failure in several hundred tests (cleat#1307).
+--
+-- Derivation makes the drift this block repairs self-healing anyway: a worker
+-- re-derives from its key and re-ALTERs, so a dropped-and-recreated database
+-- converges at the next boot rather than needing a stored value to converge
+-- towards.
 DO $$
 DECLARE
     r record;
 BEGIN
-    FOR r IN SELECT role_name, password FROM admin.tenant_roles
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'admin' AND table_name = 'tenant_roles'
+          AND column_name = 'password'
+    ) THEN
+        RAISE NOTICE 'password sync: admin.tenant_roles.password is absent; passwords are '
+            'derived (see migration 064) -- nothing to sync';
+        RETURN;
+    END IF;
+
+    FOR r IN EXECUTE 'SELECT role_name, password FROM admin.tenant_roles'
     LOOP
         BEGIN
             EXECUTE format('ALTER ROLE %I WITH PASSWORD %L', r.role_name, r.password);
