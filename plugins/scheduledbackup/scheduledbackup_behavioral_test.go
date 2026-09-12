@@ -1106,6 +1106,13 @@ func newSBPlugin(t *testing.T) (*Plugin, *sbDB, *sql.DB) {
 		mux:    http.NewServeMux(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	// A real dump directory, which this harness never set (cleat#1305).
+	//
+	// It mattered as soon as SafeDumpPath started refusing an unconfigured one:
+	// `filepath.Join("", name)` is a RELATIVE path, so the previous behaviour
+	// was `pg_dump -f manual_x.dump` into the worker's working directory. One
+	// test at :2016 already set this; the shared harness did not.
+	p.config.DumpDir = t.TempDir()
 	if err := p.RegisterRoutes(p.mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
@@ -1802,11 +1809,24 @@ func TestSB_RunBackup_Success(t *testing.T) {
 	if !exists {
 		t.Fatal("history entry should exist in DB")
 	}
-	if h.status != "running" {
-		t.Errorf("expected status 'running', got %q", h.status)
-	}
+	// NOT asserting h.status here, and the reason is the point.
+	//
+	// The handler returns 202 and then runs the backup in a goroutine, so the
+	// row's status is whatever that goroutine has got to by the time this line
+	// reads it -- `running` if it has not started, `failed` once pg_dump or the
+	// path check has rejected it. Asserting `running` is asserting that a
+	// background goroutine has NOT finished yet, which is a race with no
+	// synchronisation and was passing only because the failure path used to be
+	// slow (cleat#1305 made it instant, and CI went red while the same tree
+	// stayed green locally under -race).
+	//
+	// What the handler does synchronously, and what this test is actually
+	// about, is creating the row with its filename before answering 202.
 	if h.filename == "" {
 		t.Error("expected non-empty filename")
+	}
+	if h.configID == "" {
+		t.Error("expected the history row to name its config")
 	}
 }
 

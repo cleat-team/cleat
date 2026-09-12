@@ -12258,3 +12258,80 @@ That mutation is the one this parser was most likely to get wrong, because funct
 name section count imports first and ignoring them shifts every attribution by a constant — producing
 a plausible report rather than an error. The first attempt at it **did not compile** (`declared and
 not used: importedFuncs`) and was rewritten to keep the tree building.
+
+---
+
+### 3.436 A backup config's name reached `pg_dump -f` unvalidated — ✅ fixed
+
+**cleat#1305.** `plugins/scheduledbackup` checked a config's `name` only for non-emptiness, then
+interpolated it into a dump filename joined to `DumpDir` and passed to `pg_dump -f`. An
+**authenticated tenant** could direct a full **cross-tenant** database dump outside the dump
+directory, as the worker's OS user. The plugin is compiled into the shipped worker.
+
+#### The exploit is narrower than it first reads, and that shaped the fix
+
+The originating review gave `"name": "../../../../var/spool/cron/crontabs/root"` as writing a dump
+over the crontab. Run through the real expression, it does not:
+
+| name | resolves to |
+|---|---|
+| `../../../../var/spool/cron/crontabs/root` | `/var/lib/var/spool/cron/crontabs/root_2026….dump` |
+| `../../../../../../srv/www/html/leak` | `/srv/www/html/leak_2026….dump` |
+| `/etc/passwd` | `/var/lib/cleat/dumps/manual_/etc/passwd_2026….dump` |
+
+Three constraints: the `manual_` prefix eats one traversal level (`manual_..` is a literal directory
+name); the `_<timestamp>.dump` suffix is always appended, so no exact filename can be landed on; and
+a leading `/` does not escape, because `filepath.Join` treats it as relative.
+
+What remains is still HIGH: **a complete database dump written into any directory the worker's user
+can write, under an attacker-chosen prefix.** A web root, a shared volume, anywhere world-readable.
+That is a data-exfiltration primitive and an unbounded disk fill, not a tidiness bug.
+
+#### Two more doors than the issue named
+
+| | |
+|---|---|
+| `routes.go:322` — the **UPDATE** route | took a new name with no validation at all. Validating only on create leaves the hole open through a rename. |
+| `commands.go:94` — the **CLI command** | a third filename construction site, reading the name back out of `backup_config`. |
+
+So three construction sites — `background.go:172` (cron), `commands.go:94`, `routes.go:514` — and
+two of the three never pass through an HTTP handler.
+
+#### That is why the fix is two guards, not one
+
+**`ValidConfigName`** at both doors, matching the charset `engine/memory.go`'s `validServiceName`
+already enforces. `.` and `..` are rejected **explicitly**: both are made entirely of allowed
+characters, so a charset-only rule admits the exact payload — an allowlist that looks complete and
+is not.
+
+**`SafeDumpPath`** at the join, shared by all three sites. This is the half that covers **rows
+already stored** with a traversing name, which input validation cannot reach and which the cron
+sweep executes on a schedule with nobody watching. It compares against `base + separator`, so a
+sibling directory sharing the prefix — `/var/lib/cleat/dumps-evil` against `/var/lib/cleat/dumps` —
+is not accepted by a bare `HasPrefix`.
+
+A refused backup now records `failed` through `markBackupFailed` rather than leaving a
+`backup_history` row at `running` forever, which would read as a hung backup rather than a refused
+one.
+
+#### Falsification
+
+| mutation | what failed |
+|---|---|
+| drop the explicit `.`/`..` rejection, leaving the charset | `ValidConfigName("..") = true, want false` |
+| `HasPrefix(full, base)` without the separator | *"accepted a sibling directory sharing the dump directory's prefix"* |
+| revert the cron path to a bare `filepath.Join` | *"background.go:192 joins a filename to the dump directory directly"* |
+
+The third is the completeness guard: it reads the source, so a **fourth** call site added later
+fails rather than shipping unchecked — which is how three sites came to exist with one check.
+
+The control matters here more than usual: every assertion above is satisfied by a `SafeDumpPath`
+that refuses everything, which would break backups rather than secure them. `nightly`, `prod-db`,
+`tenant_42` and `v1.2.3-weekly` are asserted to pass, because a rename that starts failing for a
+legitimate name is a worse outcome for an existing operator than the bug.
+
+#### Credit where due
+
+This is **not** command injection. Arguments are array-passed via `exec.CommandContext`, and the
+database password is deliberately kept out of `argv` and passed through `PGPASSWORD`, with a comment
+explaining the `/proc/*/cmdline` reasoning. That part was already right.

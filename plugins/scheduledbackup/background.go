@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -183,7 +182,19 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 	}
 
 	// Execute pg_dump.
-	dumpPath := filepath.Join(p.config.DumpDir, filename)
+	//
+	// SafeDumpPath rather than a bare Join (cleat#1305). This path never passes
+	// through an HTTP handler, so the name validation on the create and update
+	// routes does not reach it: a row already in backup_config with a
+	// traversing name is executed from here on a schedule, by the worker, with
+	// nobody watching. This is the guard that covers those rows.
+	dumpPath, err := SafeDumpPath(p.config.DumpDir, filename)
+	if err != nil {
+		p.logger.Error("scheduledbackup: refusing scheduled backup",
+			"config_id", configID, "history_id", historyID, "error", err)
+		p.markBackupFailed(historyID, err.Error())
+		return
+	}
 	var stderr bytes.Buffer
 	err = runPgDump(ctx, p.config.DSN.Reveal(), dumpPath, &stderr)
 	if err != nil {
