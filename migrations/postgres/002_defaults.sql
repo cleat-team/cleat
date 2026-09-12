@@ -32,6 +32,18 @@ BEGIN
     FOR t IN SELECT tenant_id FROM admin.tenants LOOP
         IF NOT EXISTS (SELECT 1 FROM admin.tenant_roles WHERE tenant_id = t.tenant_id) THEN
             BEGIN
+                -- The ONE-ARGUMENT form, which migration 064 drops: passwords
+                -- are derived by the caller now, and 002 has no key to derive
+                -- with. On a fresh database this still runs -- 002 executes
+                -- long before 064 -- and on an existing one 002 never re-runs.
+                --
+                -- Re-applied against a post-064 database it raises
+                -- "function admin.create_tenant_role(uuid) does not exist",
+                -- which the handler below turns into a WARNING and a skip. That
+                -- is the right outcome rather than a papered-over one:
+                -- provisioning moves to the worker, which has the key, so a
+                -- backfill here would have nothing to offer. The warning is
+                -- expected on such a run and is not a fault (cleat#1307).
                 PERFORM admin.create_tenant_role(t.tenant_id);
             EXCEPTION WHEN OTHERS THEN
                 RAISE WARNING 'create_tenant_role failed for tenant % (SQLSTATE: %) -- skipping (single-tenant mode)', t.tenant_id, SQLSTATE;

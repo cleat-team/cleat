@@ -368,8 +368,11 @@ func TestResetSettingsFixtureClearsTheChildrenThatDoNotCascade(t *testing.T) {
 			child:      "admin.tenant_roles",
 			tenant:     "cccccccc-0000-0000-0000-00000000000c",
 			constraint: "tenant_roles_tenant_id_fkey",
-			seed: `INSERT INTO admin.tenant_roles (tenant_id, role_name, password)
-			       VALUES ($1, $2, 'not-a-real-password')`,
+			// No password column since cleat#1307: tenant role passwords are
+			// derived from the worker's key (plugin.TenantRolePassword) rather
+			// than stored, so there is nothing here to write.
+			seed: `INSERT INTO admin.tenant_roles (tenant_id, role_name)
+			       VALUES ($1, $2)`,
 			args: func(id string) []any { return []any{id, "cleat_test_reset_fixture_role"} },
 		},
 		{
