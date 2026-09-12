@@ -76,6 +76,40 @@ The name survives in three places, and none of them make it a status:
 Every status is a string literal, in both Go and SQL. There is no `engine.StatusReady`. A typo in
 a status string is caught by a failing test, if one covers that path, and not by the compiler.
 
+### The HTTP API returns this column verbatim
+
+A duplicate start — `POST /api/workflows/<name>/start` re-sent with the same `Idempotency-Key` —
+answers `200` with:
+
+```json
+{"already_started": "true", "workflow_id": "e39ede1b-…", "status": "ready"}
+```
+
+**`status` is `workflow_instances.status` copied, not a separate API vocabulary.** Every value in
+the table above can appear, plus one that is not a workflow status at all:
+
+| value | meaning |
+|---|---|
+| any of the seven above | the winner's current lifecycle status |
+| `unknown` | the winner could not be read. Stated rather than omitted, so a caller can tell "I cannot tell you" from "I forgot to tell you". |
+
+`unknown` is reachable on a correct tree: a start that is *rejected* records an `idempotency_keys`
+row carrying an `error_msg` and no surviving instance, which is why that column carries no foreign
+key to `workflow_instances`.
+
+**Branch on terminal versus non-terminal, not on `running`.** A retrying caller is, by definition,
+asking about work that may still be outstanding — and outstanding work is usually `ready`, not
+`running`. Anything that sleeps, awaits a child, waits on a signal or backs off a retry is `ready`
+for nearly all of its life; `running` covers only the slices when a worker holds it. Measured on a
+run whose single act is an 8-second `DurableSleepMs`, polled every 500 ms: twenty consecutive
+`ready` samples, then `done` — not one `running` (cleat#1325).
+
+A client that needs to separate "never claimed" from "sleeping" must read `next_wake_at`; the
+status alone does not distinguish them, per the `ready` row above. That conflation has already
+cost one test its discriminating power: a case written to hold a winner open kept passing when its
+sleep parameter went unbound, because a 50 ms run and a 20 s sleep are both `ready`.
+
+
 ---
 
 ## The state machine

@@ -729,11 +729,38 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		//
 		// The point of an idempotency key is to make a retry safe when the
 		// caller does not know whether the first attempt landed -- and on
-		// being told `already_started` the right next action differs: poll a
-		// running winner, fetch a finished one's result, surface a failed
-		// one rather than wait for a result that will never improve. These
-		// three answers were byte-identical, so every caller needed a second
-		// request to tell them apart and one that skipped it was wrong.
+		// being told `already_started` the right next action differs: wait
+		// for a winner that has not finished, fetch a finished one's result,
+		// surface a failed one rather than wait for a result that will never
+		// improve. These answers were byte-identical, so every caller needed
+		// a second request to tell them apart and one that skipped it was
+		// wrong.
+		//
+		// BRANCH ON TERMINAL vs NON-TERMINAL, NOT ON `running` (cleat#1325).
+		// `status` is workflow_instances.status copied verbatim -- see
+		// docs/reference/workflow-lifecycle.md for the full table -- and this
+		// comment used to state the contract as a three-way `running` / `done`
+		// / `failed` decision. That named the WRONG non-terminal value. A
+		// workflow parked in a durable sleep is `ready`, not `running`: the
+		// worker finalizes a suspending segment with finalStatus "ready" and a
+		// next_wake_at, which is the documented model and was measured at
+		// twenty consecutive `ready` samples across an 8s DurableSleepMs,
+		// none of them `running`.
+		//
+		// So `ready` is the value a retrying caller MOST OFTEN sees -- any
+		// workflow that sleeps, awaits a child, waits on a signal or backs off
+		// a retry is `ready` for nearly all of its life, and `running` covers
+		// only the slices when a worker holds it. The three-way table had no
+		// branch for the common case.
+		//
+		//	terminal (done, failed, terminated, dead_lettered)
+		//	    -> the outcome is final; fetch it or surface it
+		//	non-terminal (ready, running, terminating)
+		//	    -> still outstanding; poll or wait. `ready` here means either
+		//	       "not yet claimed" or "sleeping until next_wake_at", and
+		//	       next_wake_at is what distinguishes them.
+		//	unknown
+		//	    -> the winner could not be read; see below
 		//
 		// READ FROM THE RUN, not from idempotency_keys.error_msg. That column
 		// is written at start time and has no production reader; the run row
