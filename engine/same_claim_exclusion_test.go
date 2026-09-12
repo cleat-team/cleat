@@ -158,7 +158,12 @@ func TestReleasingAClaimTwiceDoesNotResurrectIt_MultiBackend(t *testing.T) {
 			// A different worker picks it up.
 			second, err := store.ClaimWorkflow(ctx, "worker-2")
 			if err != nil || second == nil {
-				t.Fatalf("the released workflow was not re-claimable: wf=%v err=%v", second, err)
+				// The row dump is the point: ClaimWorkflow returns (nil, nil)
+				// when its predicate matches nothing, so without it this
+				// failure names none of the five clauses that could have
+				// excluded the row. cleat#1391 is this failure, intermittent.
+				t.Fatalf("the released workflow was not re-claimable: wf=%v err=%v%s",
+					second, err, describeUnclaimableRows(t, store))
 			}
 			if second.ID != first.ID {
 				t.Fatalf("claimed %s, expected the released %s", second.ID, first.ID)
