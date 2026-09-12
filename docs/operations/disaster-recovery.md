@@ -488,10 +488,26 @@ SELECT pg_is_in_recovery(), pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn();
 In normal operation, the standby region runs workers in a **read-only** mode.
 They connect to the standby database but do not claim or execute workflows:
 
+**There is no `--read-only` flag.** This block used to show
+`cleat-worker --db "$STANDBY_DATABASE_URL" --read-only`; the worker defines no
+such flag and rejects unknown flags at startup, so the command exits (cleat#1311).
+Nor is there any other switch that makes a worker connect without claiming —
+`cleat-worker --help | grep read` finds nothing.
+
+A worker that reaches the standby database *will* claim and execute whatever it
+finds there. The two ways to have a standby that does not execute:
+
 ```bash
-# Standby region workers (read-only monitoring)
-cleat-worker --db "$STANDBY_DATABASE_URL" --read-only
+# Run no workers against the standby at all -- the simplest, and the default
+# if you simply do not start them.
+
+# Or point them at a task queue nothing is enqueued to, so there is
+# nothing for them to claim:
+cleat-worker --db "$STANDBY_DATABASE_URL" --task-queue standby-idle
 ```
+
+The second keeps a process alive for health checks and metrics. It is not a
+safety mechanism: anything enqueued to that queue will run.
 
 In read-only mode, workers:
 
@@ -814,10 +830,11 @@ echo "Smoke queries: OK"
 
 # Simulate workflow replay: start a worker in dry-run mode against the test DB
 # and verify the reaper reclaims stale instances
+# NOTE: neither --dry-run nor --timeout exists on cleat-worker (cleat#1311).
+# A worker started against the restored copy executes for real -- which is the
+# point of the drill, since the copy is disposable and is dropped below.
 cleat-worker --db "postgres://localhost/${TEST_DB}?sslmode=disable" \
-    --concurrency=2 \
-    --dry-run \
-    --timeout=30s 2>&1 | head -20
+    --concurrency=2 2>&1 | head -20
 echo "Replay simulation: OK"
 
 # Clean up
@@ -868,9 +885,10 @@ For CI/CD integration, validate backups automatically:
 createdb cleat_drill_$(date +%Y%m%d)
 pg_restore -d cleat_drill_$(date +%Y%m%d) latest-backup.dump
 
-# Start a worker in dry-run mode to verify replay
+# Start a worker to verify replay. There is no dry-run mode (cleat#1311); this
+# executes against the restored copy, which is why the copy is dropped below.
 cleat-worker --db "postgres://user:pass@localhost/cleat_drill_$(date +%Y%m%d)" \
-    --concurrency 1 --dry-run
+    --concurrency 1
 
 # Clean up
 dropdb cleat_drill_$(date +%Y%m%d)

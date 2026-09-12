@@ -163,7 +163,8 @@ is not captured during replay.
 The following packages are **allowed** and safe to use in workflow code. This
 list is not exhaustive — any package not explicitly forbidden is available, but
 be aware that many packages work via determinism-sensitive mechanisms
-(e.g., `sort` uses reflection in some paths, producing W001/W002 warnings).
+(e.g., `sort` uses reflection in some paths, producing W002 warnings; map
+iteration is E021 and is an **error**, not a warning).
 
 ### Always Safe
 
@@ -190,8 +191,8 @@ be aware that many packages work via determinism-sensitive mechanisms
 
 | Package | Warning | Notes |
 |---------|---------|-------|
-| `encoding/json` | W001 (map iteration) | Deterministic if not used with maps. Can add 1-2 MB to WASM binary. |
-| `maps` | W001 | Iteration order over maps is non-deterministic; use sorted keys |
+| `encoding/json` | E021 (map iteration) — an **error** | Deterministic if not used with maps. Can add 1-2 MB to WASM binary. |
+| `maps` | E021 — an **error** | Iteration order over maps is non-deterministic; use sorted keys |
 | `slices` | — | Safe; deterministic |
 | `sync` (only `sync.Once`) | — | `sync.Once` is safe for one-time initialization patterns |
 | `crypto/aes`, `crypto/cipher` | — | Pure computation, deterministic |
@@ -294,10 +295,10 @@ type OrderRef struct {
 func CancelOrder(h cleat.HostCalls, ref OrderRef) error { // binds by field
 ```
 
-### Map Iteration (W001)
+### Map Iteration (E021 — an error, not a warning)
 
 ```go
-for k, v := range myMap { // WARNING: W001
+for k, v := range myMap { // ERROR: E021 -- this fails the build
 ```
 
 **Why**: Map iteration order is intentionally random in Go, producing different
@@ -341,7 +342,7 @@ for _, k := range keys {
 | E017 | Error | `crypto/rand` | Package import |
 | E018 | Error | `math/rand/v2` | Package import |
 | E020 | Error | Durable calls in `init()` | Package structure |
-| W001 | Warning | Map iteration | Language construct |
+| E021 | **Error** | Map iteration | Language construct |
 | W002 | Warning | Float in control flow | Language construct |
 | W003 | Warning | Entry point takes one `string` | Entry-point signature |
 
