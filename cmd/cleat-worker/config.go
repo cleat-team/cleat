@@ -67,8 +67,16 @@ var (
 			"to start on a connection that bypasses RLS, because --require-auth defaults "+
 			"true; it only warns if --require-auth=false. \"require\" always refuses, "+
 			"\"off\" skips the check. PostgreSQL only.")
-	driver                = flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
-	concurrency           = flag.Int("concurrency", 10, "Max concurrent workflow executions")
+	driver      = flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
+	concurrency = flag.Int("concurrency", 10, "Max concurrent workflow executions")
+	// 200 is twenty workers' worth at the default --concurrency of 10, per
+	// tick, and the reaper ticks at most every 10s -- so an ordinary failure
+	// (one worker, or several) is reclaimed in a single tick and never
+	// notices this. It binds only when the stale set is far larger than any
+	// plausible number of simultaneous worker deaths, which is the signature
+	// of a stall rather than of workers dying. cleat#1320.
+	maxReclaimPerTick = flag.Int("max-reclaim-per-tick", 200,
+		"Max stale instances the reaper reclaims per tick (0 = unbounded; see --help for why bounding matters)")
 	maxQueued             = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")
 	heartbeatInterval     = flag.Duration("heartbeat", 5*time.Second, "Heartbeat interval")
 	pollInterval          = flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")

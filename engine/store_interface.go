@@ -236,9 +236,32 @@ type WorkflowStore interface {
 	GetChildCompletedAtMs(ctx context.Context, runID string) (completedAtMs int64, ok bool, err error)
 
 	// ReapStaleInstances reclaims workflow instances that have been running
-	// but whose heartbeat has not been updated within the given timeout.
-	// Returns the number of instances reclaimed.
-	ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error)
+	// but whose heartbeat has not been updated within the given timeout,
+	// oldest heartbeat first, at most limit of them. A limit <= 0 is
+	// unbounded. Returns the number of instances reclaimed.
+	//
+	// THE LIMIT IS A PARAMETER RATHER THAN A STORE FIELD, deliberately: a
+	// field defaults to zero on a dialect that forgets to set it, and zero
+	// here means unbounded -- the exact behaviour the bound exists to prevent,
+	// arrived at silently. As a parameter the compiler makes every
+	// implementation answer for it.
+	//
+	// WHY BOUND IT AT ALL. The reaper reclaims anything whose heartbeat
+	// predates max(2*heartbeat, 10s). Any stall that outlasts that window --
+	// a migration holding ACCESS EXCLUSIVE at boot, a failover, a paused
+	// volume -- ages EVERY running instance past it at once, because they all
+	// heartbeat through the same table. On release the sweep reclaims the
+	// whole running set in one statement and every in-flight workflow replays
+	// simultaneously, against a database that has just finished whatever
+	// stalled it. No data is lost -- fencing sees to that -- and the cost is a
+	// self-inflicted thundering herd at the moment the database can least
+	// absorb one. cleat#1320.
+	//
+	// Ordering by heartbeat_at is what makes the bound safe in the other
+	// direction: if workers really have died, the longest-stale are reclaimed
+	// first and the rest follow on later ticks. The bound changes the RATE of
+	// recovery, never whether it happens.
+	ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error)
 
 	// GetQueryState returns the query state for a workflow instance key.
 	GetQueryState(ctx context.Context, workflowID, key string) (string, error)

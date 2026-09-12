@@ -1452,7 +1452,7 @@ func (s *stubWorkflowStore) StartChildWorkflowAtomic(ctx context.Context, childI
 func (s *stubWorkflowStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	return ChildOutcome{}, nil
 }
-func (s *stubWorkflowStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (s *stubWorkflowStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (s *stubWorkflowStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
@@ -2621,7 +2621,7 @@ func (m *mockCollectMetricsStore) StartChildWorkflowAtomic(ctx context.Context, 
 func (m *mockCollectMetricsStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	return ChildOutcome{}, nil
 }
-func (m *mockCollectMetricsStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockCollectMetricsStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (m *mockCollectMetricsStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
@@ -2813,7 +2813,7 @@ func (m *mockCheckStaleStore) StartChildWorkflowAtomic(ctx context.Context, chil
 func (m *mockCheckStaleStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	return ChildOutcome{}, nil
 }
-func (m *mockCheckStaleStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockCheckStaleStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (m *mockCheckStaleStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
@@ -3002,7 +3002,7 @@ func (m *mockGCStore) StartChildWorkflowAtomic(ctx context.Context, childID, par
 func (m *mockGCStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	return ChildOutcome{}, nil
 }
-func (m *mockGCStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockGCStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (m *mockGCStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
@@ -3181,7 +3181,7 @@ func (m *mockPurgeStore) StartChildWorkflowAtomic(ctx context.Context, childID, 
 func (m *mockPurgeStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	return ChildOutcome{}, nil
 }
-func (m *mockPurgeStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockPurgeStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (m *mockPurgeStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {

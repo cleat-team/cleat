@@ -361,7 +361,7 @@ func (m *mockShardStore) GetChildResult(ctx context.Context, runID string) (Chil
 	return ChildOutcome{}, nil
 }
 
-func (m *mockShardStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockShardStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	m.recordCall("ReapStaleInstances")
 	if m.reapStaleInstancesFn != nil {
 		return m.reapStaleInstancesFn(ctx, timeout)
@@ -2252,7 +2252,7 @@ func TestReapStaleInstances_Success(t *testing.T) {
 	mocks[1].reapStaleInstancesFn = func(ctx context.Context, timeout time.Duration) (int, error) { return 2, nil }
 	mocks[2].reapStaleInstancesFn = func(ctx context.Context, timeout time.Duration) (int, error) { return 1, nil }
 
-	total, err := ss.ReapStaleInstances(context.Background(), time.Minute)
+	total, err := ss.ReapStaleInstances(context.Background(), time.Minute, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances failed: %v", err)
 	}
@@ -2265,7 +2265,7 @@ func TestReapStaleInstances_ShardError(t *testing.T) {
 	ss, mocks := makeShardedStore(t, 2)
 	mocks[1].err = errors.New("shard down")
 
-	_, err := ss.ReapStaleInstances(context.Background(), time.Minute)
+	_, err := ss.ReapStaleInstances(context.Background(), time.Minute, 0)
 	if err == nil {
 		t.Fatal("expected error")
 	}

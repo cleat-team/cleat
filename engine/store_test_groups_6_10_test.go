@@ -614,7 +614,7 @@ func TestReapStaleInstances(t *testing.T) {
 
 			// Reap with a 1-nanosecond timeout. The just-claimed workflow's
 			// heartbeat_at should already be stale at this granularity.
-			count, err := store.ReapStaleInstances(ctx, time.Nanosecond)
+			count, err := store.ReapStaleInstances(ctx, time.Nanosecond, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances(1ns): %v", err)
 			}
@@ -623,7 +623,7 @@ func TestReapStaleInstances(t *testing.T) {
 			}
 
 			// Reap with a zero timeout (reclaim any running workflow).
-			count, err = store.ReapStaleInstances(ctx, 0)
+			count, err = store.ReapStaleInstances(ctx, 0, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances(0): %v", err)
 			}

@@ -38,7 +38,7 @@ func TestWriteCallIntent_FenceLost(t *testing.T) {
 			}
 			staleGeneration := wfA.Generation
 
-			reaped, err := store.ReapStaleInstances(ctx, -1*time.Second)
+			reaped, err := store.ReapStaleInstances(ctx, -1*time.Second, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances: %v", err)
 			}
@@ -122,7 +122,7 @@ func TestCompleteCallIntent_FenceLost(t *testing.T) {
 				t.Fatalf("WriteCallIntent: %v", err)
 			}
 
-			reaped, err := store.ReapStaleInstances(ctx, -1*time.Second)
+			reaped, err := store.ReapStaleInstances(ctx, -1*time.Second, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances: %v", err)
 			}

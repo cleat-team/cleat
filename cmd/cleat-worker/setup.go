@@ -916,6 +916,7 @@ type Worker struct {
 	crossTenantSchedulesUnsupportedOnce sync.Once
 
 	concurrency          int
+	maxReclaimPerTick    int
 	maxQueued            int
 	heartbeatInterval    time.Duration
 	pollInterval         time.Duration
@@ -2097,7 +2098,7 @@ func (w *Worker) reaperLoop() {
 			// before it is considered stale — otherwise a slow heartbeat
 			// could cause false-positive reaping.
 			staleTimeout := max(w.heartbeatInterval*2, 10*time.Second)
-			reaped, err := w.store.ReapStaleInstances(w.ctx, staleTimeout)
+			reaped, err := w.store.ReapStaleInstances(w.ctx, staleTimeout, w.maxReclaimPerTick)
 			if err != nil {
 				if isConnectionError(err) {
 					w.logger.WarnContext(w.ctx, "Reaper: DB appears down", "worker_id", w.id)
@@ -2111,6 +2112,20 @@ func (w *Worker) reaperLoop() {
 			if reaped > 0 {
 				w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
 				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "reaper", int64(reaped))
+			}
+			// A full tick is the signal worth surfacing, and it is the only
+			// place this is observable: the sweep bounded at the limit looks
+			// exactly like a sweep that found precisely that many. An
+			// ordinary failure does not fill a tick -- 200 is twenty workers'
+			// worth at the default concurrency -- so this means either a
+			// stall aged the whole running set past the threshold at once, or
+			// there is more to reclaim than one tick can carry. Both want an
+			// operator's attention, and neither is visible from the count
+			// alone. cleat#1320.
+			if w.maxReclaimPerTick > 0 && reaped >= w.maxReclaimPerTick {
+				w.logger.WarnContext(w.ctx, "Reaper: hit the per-tick reclaim limit; more instances remain stale",
+					"worker_id", w.id, "count", reaped, "limit", w.maxReclaimPerTick,
+					"hint", "a whole-set stall (a boot migration holding a lock, a failover, a paused volume) ages every heartbeat at once; recovery continues on later ticks")
 			}
 			w.expireDeferPhases()
 			w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "ok")

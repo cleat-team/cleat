@@ -70,7 +70,7 @@ func TestReclaimCountAdvancesOnReclaimAndNotOnAnOrdinaryClaim(t *testing.T) {
 			const reclaims = 2
 			for i := 0; i < reclaims; i++ {
 				claimByID(t, ctx, store, "reclaim-worker", id)
-				n, err := store.ReapStaleInstances(ctx, -1*time.Second)
+				n, err := store.ReapStaleInstances(ctx, -1*time.Second, 0)
 				if err != nil {
 					t.Fatalf("ReapStaleInstances on cycle %d: %v", i+1, err)
 				}

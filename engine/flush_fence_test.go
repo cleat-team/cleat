@@ -61,7 +61,7 @@ func TestFlushEvent_FenceLost(t *testing.T) {
 			// Reclaim unconditionally -- see buildZombieWriterScenario's
 			// comment on why the timeout is negative rather than the setup
 			// being timed.
-			reaped, err := store.ReapStaleInstances(ctx, -1*time.Second)
+			reaped, err := store.ReapStaleInstances(ctx, -1*time.Second, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances: %v", err)
 			}
@@ -252,7 +252,7 @@ func TestFlushEvent_FenceLost_SameWorkerReclaim(t *testing.T) {
 			}
 			staleGeneration := wf1.Generation
 
-			reaped, err := store.ReapStaleInstances(ctx, -1*time.Second)
+			reaped, err := store.ReapStaleInstances(ctx, -1*time.Second, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances: %v", err)
 			}

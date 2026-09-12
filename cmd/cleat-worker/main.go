@@ -987,6 +987,7 @@ func main() {
 		taskQueues:                       taskQueues,
 		claimAcrossTenants:               *claimAcrossTenants,
 		concurrency:                      *concurrency,
+		maxReclaimPerTick:                *maxReclaimPerTick,
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,
 		pollInterval:                     *pollInterval,

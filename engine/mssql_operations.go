@@ -10,11 +10,11 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 )
 
-func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	var out int
 	err := withRollbackGuaranteedRetry(ctx, "reap stale instances", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		var err error
-		out, err = s.reapStaleInstancesOnce(ctx, timeout)
+		out, err = s.reapStaleInstancesOnce(ctx, timeout, limit)
 		return err
 	})
 	if err != nil {
@@ -23,7 +23,7 @@ func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 	return out, nil
 }
 
-func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Duration) (int, error) {
+func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: begin: %w", err)
@@ -34,16 +34,22 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 	// goes back to 'terminating', because its terminal outcome is already
 	// decided and calling it 'ready' would undo the distinction D6 created the
 	// status to make.
+	// TOP (@p3) inside the subquery, because SQL Server's UPDATE TOP takes no
+	// ORDER BY and the order is the point -- see the interface doc.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
 		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
-		WHERE status = 'running'
-		  AND heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME())
-		  AND tenant_id = @p2
-	`, -int(timeout.Seconds()), s.tenantID)
+		WHERE id IN (
+		    SELECT TOP (@p3) id FROM workflow_instances
+		    WHERE status = 'running'
+		      AND heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME())
+		      AND tenant_id = @p2
+		    ORDER BY heartbeat_at
+		)
+	`, -int(timeout.Seconds()), s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
