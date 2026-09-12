@@ -105,7 +105,9 @@ $$;
 --
 -- SELECT and UPDATE only. The body reads candidates and marks them running; it
 -- has no reason to insert or delete, and the grant should not imply it can.
-GRANT USAGE ON SCHEMA public TO cleat_dispatcher;
+DO $do$ BEGIN
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO cleat_dispatcher', current_schema());
+END $do$;
 GRANT SELECT, UPDATE ON workflow_instances TO cleat_dispatcher;
 
 -- Dropped before it is created, for the reason 003_procedures.sql documents at
@@ -152,7 +154,7 @@ SECURITY DEFINER
 -- Pinned so the body cannot be redirected by a caller's search_path. Standard
 -- hardening for SECURITY DEFINER, and not optional when the function holds an
 -- RLS exemption.
-SET search_path = public, pg_temp
+SET search_path FROM CURRENT
 AS $$
     WITH candidates AS (
         SELECT w.id FROM workflow_instances w

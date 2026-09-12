@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,7 @@ type Runner struct {
 	db            *sql.DB
 	dialect       Dialect
 	migrationsDir string
+	schema        string
 }
 
 // migration represents a single versioned SQL migration file.
@@ -78,17 +80,13 @@ const migrationsLockKey int64 = 7215842093104561
 // dialect.
 //
 // On PostgreSQL it is schema-qualified, and that qualification is load-bearing
-// rather than stylistic. The migration files begin with
-//
-//	SET search_path = public;
-//
-// (see the header of migrations/postgres/001_schema.sql for why). A bare SET
-// is session-scoped, not transaction-scoped, so it outlives the transaction
-// that applyMigration runs the file in and changes name resolution for every
-// later statement on that pooled connection -- including this runner's own
-// bookkeeping. Unqualified, the tracking table was created under the default
-// search_path ("$user", public) before any migration ran, and then looked up
-// under the changed one afterwards:
+// rather than stylistic. A bare SET is session-scoped, not
+// transaction-scoped, so a migration file that changed search_path would
+// outlive the transaction applyMigration runs it in and change name
+// resolution for every later statement on this pinned connection -- including
+// the runner's own bookkeeping. Unqualified, the tracking table was created
+// under one search_path before any migration ran and then looked up under
+// another afterwards:
 //
 //	[migration] applying 001_schema.sql
 //	ERROR: relation "schema_migrations" does not exist (42P01)
@@ -96,16 +94,58 @@ const migrationsLockKey int64 = 7215842093104561
 //
 // which aborted the transaction, rolled 001 back, and failed the worker's
 // boot outright. Qualifying the name makes the runner independent of whatever
-// the migration files do to search_path.
+// a migration file does to search_path -- which matters less now that the
+// files no longer set it (cleat#1287, see WithSchema) and is kept because
+// "no file does this today" is not a property anything checks.
 //
-// SET LOCAL is not an alternative: the same files are also applied by
-// docker-entrypoint-initdb.d via psql, where each statement runs in its own
-// implicit transaction and a LOCAL setting would be discarded immediately.
+// What the qualifier IS depends on the configured schema. It was the literal
+// public until cleat#1287; with --schema it has to follow, or the runner
+// records its bookkeeping in a different schema from the one it is building
+// into and every boot re-applies every migration.
+//
+// SET LOCAL is not an alternative to the session-level SET in session(): the
+// same files are also applied by docker-entrypoint-initdb.d via psql
+// (deploy/postgres/100-apply-migrations.sh), where each statement runs in its
+// own implicit transaction and a LOCAL setting would be discarded
+// immediately. That path sets search_path through PGOPTIONS instead.
 func (r *Runner) trackingTable() string {
 	if r.dialect == DialectPostgres {
-		return "public.schema_migrations"
+		return r.schemaIdent() + ".schema_migrations"
 	}
 	return "schema_migrations"
+}
+
+// schemaIdent is the PostgreSQL schema this runner builds into, ready to
+// interpolate. It defaults to public, which is what every caller that does not
+// call WithSchema gets and what cleat has always done.
+//
+// Interpolated rather than parameterised because a schema name cannot be a
+// bind parameter in SET or in a qualified table name. WithSchema is what makes
+// that safe: it rejects anything that is not a plain identifier at
+// construction time, so the value reaching here is [A-Za-z_][A-Za-z0-9_]* and
+// needs no quoting. An invalid name fails the Run rather than being escaped
+// into something that would work -- a schema called "my schema" is far more
+// likely to be a mistake than an intention.
+func (r *Runner) schemaIdent() string {
+	if r.schema == "" {
+		return "public"
+	}
+	return r.schema
+}
+
+// searchPath is what the runner sets on its connection: the configured schema
+// followed by pg_temp.
+//
+// The trailing pg_temp is not decoration. Four SECURITY DEFINER functions in
+// migrations/postgres/ carry `SET search_path FROM CURRENT`, which freezes
+// whatever this value is onto the function at creation time -- that is how
+// they follow --schema without any substitution step. PostgreSQL searches
+// pg_temp FIRST when it is not named explicitly, so a captured path of
+// "cleat_prod" alone would let a temporary table shadow a real one inside a
+// function that holds an RLS exemption. Naming it last is the standard
+// hardening and is the whole reason it is here rather than in schemaIdent.
+func (r *Runner) searchPath() string {
+	return r.schemaIdent() + ", pg_temp"
 }
 
 // NewRunner creates a migration runner that reads .sql files from the
@@ -117,6 +157,48 @@ func NewRunner(db *sql.DB, dialect Dialect, dir string) *Runner {
 		migrationsDir: dir,
 	}
 }
+
+// WithSchema directs the runner at a PostgreSQL schema other than public,
+// which is what cmd/cleat-worker's --schema flag names.
+//
+// WHY THIS IS NOT JUST A PREFIX ON THE TRACKING TABLE. Before cleat#1287 the
+// schema every migration built into was a literal: nineteen of the files in
+// migrations/postgres/ opened with `SET search_path = public;` and this
+// package's tracking table was hardcoded public.schema_migrations. The other
+// twenty-five files did not pin, so they ran under whatever the connection
+// carried -- and with --schema set, that is the configured schema. The core
+// schema was therefore built across two schemas at once and the run died
+// partway:
+//
+//	migration 020_event_intent.sql: execute: pq: relation "event_history"
+//	does not exist (42P01)
+//
+// 020 is simply the first file in version order that does not pin. So the
+// runner owns search_path now and the files no longer state it, which is the
+// only arrangement where the answer cannot depend on which file you are in.
+//
+// WHY THE LITERAL WAS THERE AND WHAT STILL DEFENDS AGAINST IT. The default
+// search_path is "$user", public, so an unqualified CREATE lands in a schema
+// named after the connecting role whenever one exists -- and 001_schema.sql
+// creates a schema called "cleat" while docker-compose.cluster.yml connects as
+// POSTGRES_USER=cleat, so the entire schema was once built inside "cleat"
+// instead of public. Setting search_path explicitly, to public or to anything
+// else, still defeats that. What is gone is the assumption that the answer is
+// always public.
+//
+// An empty schema, or "public", leaves the runner exactly as it was.
+func (r *Runner) WithSchema(schema string) *Runner {
+	r.schema = schema
+	return r
+}
+
+// plainIdentifier matches a PostgreSQL identifier that needs no quoting.
+//
+// Declared here rather than shared with plugin.isPlainIdentifier because this
+// package is deliberately a leaf -- see the Dialect comment above for what
+// importing upward costs in test-only import cycles. The duplication is four
+// tokens of regexp; the cycle is not.
+var plainIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Run applies all pending migrations in version order within individual
 // transactions. It creates the schema_migrations tracking table if it
@@ -201,6 +283,12 @@ func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
 		return r.db, func() {}, nil
 	}
 
+	if r.schema != "" && !plainIdentifier.MatchString(r.schema) {
+		return nil, nil, fmt.Errorf(
+			"schema %q is not a plain identifier; --schema takes an unquoted "+
+				"PostgreSQL schema name", r.schema)
+	}
+
 	conn, err := r.db.Conn(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("acquire migration lock: connection: %w", err)
@@ -210,12 +298,44 @@ func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
 		conn.Close()
 		return nil, nil, fmt.Errorf("acquire migration lock: %w", err)
 	}
+	// The schema has to exist before search_path can usefully point at it.
+	// SET against a schema that does not exist is NOT an error in PostgreSQL
+	// -- resolution is lazy -- so skipping this would surface much later and
+	// much less clearly, as "no schema has been selected to create in" from
+	// the first CREATE TABLE. Creating it here rather than relying on
+	// PostgresStoreFactory (engine/db.go) is deliberate: the runner is the
+	// first thing that needs the schema and runs before the factory builds
+	// anything, so depending on the factory would make boot order load-bearing.
+	if r.schemaIdent() != "public" {
+		if _, err := conn.ExecContext(ctx,
+			"CREATE SCHEMA IF NOT EXISTS "+r.schemaIdent()); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("create schema %s: %w", r.schemaIdent(), err)
+		}
+	}
+	// Pin the creation target for every unqualified name in every migration
+	// file. This is the statement the files used to carry themselves; see
+	// WithSchema for why it moved here.
+	if _, err := conn.ExecContext(ctx, "SET search_path = "+r.searchPath()); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("pin search_path to %s: %w", r.schemaIdent(), err)
+	}
 	return conn, func() {
+		free := context.WithoutCancel(ctx)
+		// Undo the pin before letting go. *sql.Conn.Close() RETURNS the
+		// connection to the pool rather than closing it, so the session-level
+		// SET above would otherwise ride back into the pool and leave one
+		// connection resolving unqualified names differently from every other
+		// one in it -- a difference that only shows up under load, when that
+		// particular connection happens to be the one handed out.
+		// TestRunner_LeavesSearchPathUnchanged is the regression test, and it
+		// caught exactly this when the pin moved here from the files.
+		_, _ = conn.ExecContext(free, "RESET search_path")
 		// Closing the connection releases the lock on its own, but unlocking
 		// explicitly returns it promptly even if the driver keeps the
 		// connection around. WithoutCancel so release still works when the
 		// run was cut short by a cancelled context.
-		_, _ = conn.ExecContext(context.WithoutCancel(ctx),
+		_, _ = conn.ExecContext(free,
 			"SELECT pg_advisory_unlock($1)", migrationsLockKey)
 		conn.Close()
 	}, nil
@@ -370,14 +490,21 @@ func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migra
 		}
 	}
 
-	// Undo any session-level SET the migration file performed, so that this
-	// connection goes back into the pool configured the same way as every
-	// other one. The files do set search_path (see trackingTable), and a pool
-	// where one connection resolves unqualified names differently from the
-	// rest is a source of failures that only reproduce under load.
+	// Restore the runner's search_path, in case the migration file changed it.
+	// A bare SET in a file is session-scoped, not transaction-scoped, so it
+	// outlives this transaction and would change name resolution for every
+	// later file on this pinned connection.
+	//
+	// This used to be RESET, and RESET is the wrong instruction now: it
+	// returns the connection to the value from the startup packet, which for a
+	// pool opened without search_path in its DSN is the default "$user",
+	// public -- so from the second file onward the runner would be building
+	// into a role-named schema again, which is the original cleat#1287 defect
+	// wearing a different hat. Setting it back to the configured value is what
+	// makes "which file am I in" stop mattering.
 	if r.dialect == DialectPostgres {
-		if _, err := tx.ExecContext(ctx, "RESET search_path"); err != nil {
-			return fmt.Errorf("reset search_path: %w", err)
+		if _, err := tx.ExecContext(ctx, "SET search_path = "+r.searchPath()); err != nil {
+			return fmt.Errorf("restore search_path: %w", err)
 		}
 	}
 

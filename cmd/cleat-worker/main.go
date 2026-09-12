@@ -697,7 +697,12 @@ func main() {
 		migrateDB = mdb
 	}
 
-	migrator := migration.NewRunner(migrateDB, migration.Dialect(factory.Dialect()), "migrations")
+	// WithSchema, or every unqualified CREATE in migrations/postgres/ lands in
+	// public while the runtime pool -- opened through dsnWithSchema above --
+	// looks in --schema. That was cleat#1287: the migration run did not even
+	// finish, because nineteen files pinned public and twenty-five did not.
+	migrator := migration.NewRunner(migrateDB, migration.Dialect(factory.Dialect()), "migrations").
+		WithSchema(*schemaName)
 	if err := migrator.Run(ctx); err != nil {
 		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges (see --migrate-db)", "worker_id", workerID, "error", err)
 		os.Exit(1)
@@ -740,7 +745,8 @@ func main() {
 				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
-			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), "migrations")
+			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), "migrations").
+				WithSchema(*schemaName)
 			if terr = tm.Run(ctx); terr != nil {
 				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)

@@ -35,11 +35,11 @@
 -- all-zero tenant, which is what a single-tenant deployment already writes
 -- under, so existing locks keep working across the upgrade.
 
--- Pin the creation target; see the note in 001_schema.sql. The default
--- search_path is "$user", public, and 001 creates a schema called "cleat"
--- while the shipped compose connects as POSTGRES_USER=cleat, so unqualified
--- names below would resolve against the wrong schema.
-SET search_path = public;
+-- Unqualified names below resolve through search_path, which migration.Runner
+-- sets to the configured schema before applying this file (and which
+-- deploy/postgres/100-apply-migrations.sh sets through PGOPTIONS on the psql
+-- path). This file used to pin it to the literal `public` itself; see the
+-- WithSchema comment in migration/runner.go for why that had to stop.
 
 DO $$
 DECLARE
@@ -49,7 +49,7 @@ BEGIN
     FROM pg_constraint c
     JOIN pg_class t ON t.oid = c.conrelid
     JOIN pg_namespace n ON n.oid = t.relnamespace
-    WHERE n.nspname = 'public'
+    WHERE n.nspname = current_schema()
       AND t.relname = 'concurrency_keys'
       AND c.contype = 'p';
 

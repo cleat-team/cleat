@@ -25,8 +25,6 @@
 -- (tenant_id, name, version) there is nothing to adjudicate. The read side of
 -- that window is the policy clause at the bottom of this file.
 
-SET search_path = public;
-
 -- ── 1. Drop the foreign keys that point at the old key ───────────────────────
 --
 -- Found through the catalogue rather than named literally. PostgreSQL
@@ -45,7 +43,7 @@ BEGIN
         JOIN pg_class ref ON ref.oid = con.confrelid
         JOIN pg_namespace n ON n.oid = cl.relnamespace
         WHERE con.contype = 'f'
-          AND n.nspname = 'public'
+          AND n.nspname = current_schema()
           AND ref.relname = 'workflow_defs'
     LOOP
         EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', c.relname, c.conname);
@@ -64,7 +62,7 @@ BEGIN
     FROM pg_constraint c
     JOIN pg_class t ON t.oid = c.conrelid
     JOIN pg_namespace n ON n.oid = t.relnamespace
-    WHERE n.nspname = 'public'
+    WHERE n.nspname = current_schema()
       AND t.relname = 'workflow_defs'
       AND c.contype = 'p';
 

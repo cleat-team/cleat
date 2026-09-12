@@ -40,14 +40,14 @@
 -- cascade is unaffected by the policy below -- asserted rather than assumed, in
 -- engine/tenant_settings_rls_test.go.
 
--- Pin the creation target, exactly as 001_schema.sql through 004 do, and for
--- the reason 001's own header gives: the default search_path is
--- `"$user", public`, so every unqualified CREATE lands in a schema named after
--- the connecting role whenever such a schema exists. 001 creates a schema
--- called "cleat" (it holds assert_tenant_set), and ci.yml's cluster and Tier 1
--- jobs -- like docker-compose.cluster.yml -- connect as role "cleat". Without
--- this line the table below is created in the "cleat" schema while all fifteen
--- of its neighbours sit in public.
+-- WHERE THE TABLE BELOW LANDS, recorded because it was measured rather than
+-- reasoned about. Every unqualified CREATE lands in the first schema of
+-- search_path. Under the default `"$user", public` that is a schema named
+-- after the connecting role whenever one exists -- 001 creates a schema called
+-- "cleat" (it holds assert_tenant_set), and ci.yml's cluster and Tier 1 jobs,
+-- like docker-compose.cluster.yml, connect as role "cleat". Unpinned, this
+-- table was created in the "cleat" schema while all fifteen of its neighbours
+-- sat in public.
 --
 -- Measured 2026-09-03 against a database owned by role "cleat", before the line
 -- was added, and deterministic across two fresh databases:
@@ -60,11 +60,15 @@
 -- ran. 001's header records the same trap costing "the shipped cluster
 -- deployment is broken by nothing more than its own username".
 --
+-- This file carried `SET search_path = public;` for that reason until
+-- cleat#1287. migration.Runner sets search_path now, to the configured schema
+-- rather than to the literal public, so the hazard is still defeated and the
+-- answer is no longer fixed. See WithSchema in migration/runner.go.
+--
 -- Only three PostgreSQL migrations create a table -- 001, 032 and this one --
 -- which is why 006..038 get away without it: ALTER on an unqualified name
 -- falls through "cleat" (where no such table exists) to public, while CREATE
 -- stops at the first entry.
-SET search_path = public;
 
 CREATE TABLE IF NOT EXISTS tenant_settings (
     tenant_id                  UUID PRIMARY KEY

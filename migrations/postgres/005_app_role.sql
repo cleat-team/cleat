@@ -48,8 +48,13 @@
 -- take --migrate-db (CLEAT_MIGRATE_DATABASE_URL) for that, and use --db for
 -- everything after. See cmd/cleat-worker.
 
--- Pin the creation target; see the note in 001_schema.sql.
-SET search_path = public;
+-- Unqualified names below resolve through search_path, set by the runner
+-- rather than by this file since cleat#1287; see 001_schema.sql's header.
+--
+-- The GRANTs further down cannot be written that way -- GRANT ... ON SCHEMA
+-- takes a name, not a search order -- so they ask for it with
+-- current_schema() inside a DO block. That works in every applier of these
+-- files without any of them having to substitute anything.
 
 DO $$
 BEGIN
@@ -69,20 +74,28 @@ ALTER ROLE cleat_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 
 -- Schema access. USAGE only: no CREATE, so the role cannot come to own
 -- anything in these schemas later.
-GRANT USAGE ON SCHEMA public TO cleat_app;
+DO $do$ BEGIN
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO cleat_app', current_schema());
+END $do$;
 GRANT USAGE ON SCHEMA admin TO cleat_app;
 GRANT USAGE ON SCHEMA cleat TO cleat_app;
 
 -- Data access. DML on everything the engine reads or writes, and nothing
 -- structural.
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO cleat_app;
+DO $do$ BEGIN
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO cleat_app', current_schema());
+END $do$;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA admin TO cleat_app;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO cleat_app;
+DO $do$ BEGIN
+    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO cleat_app', current_schema());
+END $do$;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA admin TO cleat_app;
 
 -- Stored procedures: finalize_workflow_status, flush_event_step,
 -- batch_flush_events, cleat.assert_tenant_set and the admin.* helpers.
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO cleat_app;
+DO $do$ BEGIN
+    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %I TO cleat_app', current_schema());
+END $do$;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA admin TO cleat_app;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA cleat TO cleat_app;
 
@@ -91,13 +104,16 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA cleat TO cleat_app;
 -- system the first time a plugin adds a table. DEFAULT PRIVILEGES apply to
 -- objects created by the role running this statement, which is the same owner
 -- role that runs every migration.
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO cleat_app;
+DO $do$ BEGIN
+    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO cleat_app', current_schema());
+END $do$;
 ALTER DEFAULT PRIVILEGES IN SCHEMA admin
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO cleat_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT USAGE, SELECT ON SEQUENCES TO cleat_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT EXECUTE ON FUNCTIONS TO cleat_app;
+DO $do$ BEGIN
+    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO cleat_app', current_schema());
+END $do$;
+DO $do$ BEGIN
+    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT EXECUTE ON FUNCTIONS TO cleat_app', current_schema());
+END $do$;
 ALTER DEFAULT PRIVILEGES IN SCHEMA admin
     GRANT EXECUTE ON FUNCTIONS TO cleat_app;

@@ -42,8 +42,22 @@ Selects the database backend. Must match the `--db` URL scheme.
 | string | `"public"` | -- |
 
 PostgreSQL schema for cleat tables. Sets `search_path` on connections; runs
-`CREATE SCHEMA IF NOT EXISTS` on startup. Enables multiple isolated worker
-pools on a single database cluster.
+`CREATE SCHEMA IF NOT EXISTS` on startup.
+
+**Core tables honour this as of [#1287](https://github.com/cleat-team/cleat/issues/1287); two things
+still do not.** Before that fix the flag set where the runtime connection *looked* and not where the
+migrations *built*, so a non-default value did not degrade — the worker could not finish its core
+migrations at all. What it now covers, and what it does not:
+
+| | follows `--schema` |
+|---|---|
+| core tables, indexes, procedures, `schema_migrations` | yes |
+| plugin tables | **no** — plugin migrations still pin `public`; see #1287 |
+| the `admin` and `cleat` schemas | no — those names are fixed, so two pools in one database share them |
+
+So "multiple isolated worker pools on a single database cluster" is not yet a claim this flag
+supports. Until the plugin half lands, a non-default `--schema` gives a worker whose core schema is
+isolated and whose plugins are not.
 
 ---
 
