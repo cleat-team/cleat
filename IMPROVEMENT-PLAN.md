@@ -12011,3 +12011,75 @@ deserves its own decision.
 
 The completeness guard here is written to require a limit in every site that **does** return 413,
 not to require a 413 at every `MaxBytesReader` — so it does not fail for the reason it is not about.
+### 3.433 Dead-letter terminate discarded its decode error, erasing the failure it was recording — ✅ fixed
+
+**cleat#1337.** `handleDeadLetterTerminate` called `json.NewDecoder(r.Body).Decode(&req)` and threw
+the result away. A body it could not read left `req.Reason` empty, the terminate proceeded, and the
+caller got `200 {"status":"terminated"}`.
+
+#### The damage is not the missing note
+
+`TerminateWorkflow` writes `reason` into `workflow_instances.error_msg` **unconditionally, in both
+of its branches** — the defer-phase transition and the direct one. So an empty reason is an
+**overwrite**, not a no-op, and what it overwrites is the message recording why the run
+dead-lettered. Measured on one row by the session that filed the issue:
+
+| | |
+|---|---|
+| before | `dead_lettered`, `error_msg` 270 bytes — `"host: workflow a0493c8a-…: execution failed: …"` |
+| request | a **25-byte** truncated-JSON body → `200 {"status":"terminated"}` |
+| after | `terminated`, `error_msg` **0 bytes** |
+
+with a short-reason control landing in the column intact, so the zero means something.
+
+**Twenty-five bytes, against a 1 KB cap.** The issue was first framed as "over 1 KB or malformed",
+which reads as two symptoms of one limit and invites a fix that raises or documents the cap. Any
+decode failure does this; the cap is one way in, not the defect.
+
+#### It was the only one
+
+    grep -nE '^\s*json\.NewDecoder\([^)]*\)\.Decode\(' cmd/cleat-worker/*.go
+
+One hit. Every other request-body decode in the worker assigns the error and branches, usually to
+`400 "invalid JSON: …"`. A lone deviation from the file's own pattern, which is why the fix is to
+match the pattern rather than invent one.
+
+#### The naive fix is a regression, and that is the interesting part
+
+Branching on *every* error breaks a supported call: **a terminate with no body at all**.
+`TestHandleDeadLetterTerminate_Success` has posted a nil body and asserted `200` since before this
+handler had any error handling.
+
+`http.NoBody` decodes to exactly `io.EOF`; a truncated body decodes to `io.ErrUnexpectedEOF`, which
+`errors.Is(err, io.EOF)` does **not** match. Measured before relying on it, because the whole fix
+turns on those two being distinguishable:
+
+| body | error | `errors.Is(err, io.EOF)` |
+|---|---|---|
+| `""` | `EOF` | **true** |
+| `"   "` | `EOF` | **true** |
+| `{"reason": "trunc` | `unexpected EOF` | **false** |
+| `{"reason":"r"}` | `nil` | — |
+
+So the carve-out is `err != nil && !errors.Is(err, io.EOF)`, and it is load-bearing: replacing
+`io.EOF` with an unrelated sentinel turns both the new empty-body control **and** the pre-existing
+`TestHandleDeadLetterTerminate_Success` red.
+
+#### The test asserts the store is not reached, not that the status is non-200
+
+A handler that returned `400` *after* calling `TerminateWorkflow` would satisfy a status-only check
+and destroy the column just the same. Falsified by reinstating the original defect — and the first
+mutation attempt did not compile (`"io" imported and not used`, `undefined: err`), which is the
+trap CLAUDE.md names: a filtered read of that output looks like a pass. Rewritten to keep the tree
+compiling, all four bad-body cases go red with `status = 200 "terminated"` and *"TerminateWorkflow
+was called with reason ""*.
+
+Both controls stay green under that mutation, correctly — they are what stops "never reaches the
+store" being satisfied by a handler that reaches it never.
+
+#### 400 rather than 413, deliberately
+
+Whether an oversized body should be a `413` here is [§3.432](#3432)'s neighbour, cleat#1338, which
+covers **seven** other sites with this exact shape. Answering it for one endpoint would make that
+decision twice, and the second time by accident. If #1338 lands as 413, this site gets it with the
+others.
