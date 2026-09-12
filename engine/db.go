@@ -1506,6 +1506,20 @@ func (s *PostgresStore) deleteDeadLetteredWorkflowsBatch(ctx context.Context, ol
 		return 0, fmt.Errorf("delete dead-lettered workflows: delete event_history: %w", err)
 	}
 
+	// idempotency_keys is the same shape as event_history: no FK, so nothing
+	// removes it when the instance goes. cleat#1255 fixed this in the completed
+	// sweep and left the dead-letter sweep -- which deletes event_history here
+	// for exactly the same stated reason -- untouched (cleat#1324).
+	//
+	// The dead-letter case is the worse of the two. A key that outlives its run
+	// answers every retry `already_started` with a workflow_id that 404s, and a
+	// dead-lettered run is precisely the one a caller has reason to retry: the
+	// work did not happen. There is no request that gets it done under that
+	// token for as long as the row lives.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM idempotency_keys WHERE workflow_id = ANY($1)`, pq.Array(ids)); err != nil {
+		return 0, fmt.Errorf("delete dead-lettered workflows: delete idempotency_keys: %w", err)
+	}
+
 	result, err := tx.ExecContext(ctx, `DELETE FROM workflow_instances WHERE id = ANY($1)`, pq.Array(ids))
 	if err != nil {
 		return 0, fmt.Errorf("delete dead-lettered workflows: delete instances: %w", err)
