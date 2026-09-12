@@ -450,16 +450,37 @@ This can happen when:
    cleatctl versions gc             # remove it
    ```
 
-   `gcVersions` reads only `--dry-run` and then calls
-   `engine.DefaultGCOptions()`, so the policy is compiled in:
+   There is a second surface, and it behaves identically:
+
+   ```
+   POST /api/versions/gc?dry_run=true
+   ```
+
+   **Retention is not configurable from either one.** `gcVersions`
+   (`cmd/cleatctl/versions.go`) reads only `--dry-run`, and `runGC`
+   (`engine/version_handler.go`) reads only `dry_run`; both then take
+   `engine.DefaultGCOptions()`, so the policy is compiled in at
    `MinVersionsToKeep = 3` and `MaxVersionAge = 30 days`
    (`engine/version_gc.go`). Changing either is a code change.
 
-   **Nothing runs it on a schedule** — `engine.GarbageCollectVersions` has
-   exactly one non-test caller, `cmd/cleatctl/versions.go`. So a version
-   disappeared because somebody ran that command, not because a background
-   loop reached it; if the timing is a mystery, that is the thing to go and
-   ask about. Whether GC *should* run automatically is open in cleat#1315.
+   **Nothing runs it on a schedule.** Re-derive rather than trusting this
+   paragraph — an earlier version of it named one caller when there are two,
+   and a count of callers is exactly the kind of claim that goes stale:
+
+   ```bash
+   git grep -n GarbageCollectVersions -- '*.go' | grep -v _test
+   ```
+
+   Every hit should be a definition or an explicit invocation by a person —
+   a CLI subcommand or an HTTP endpoint. A hit inside a ticker, a scheduler
+   or a worker loop would mean GC had become automatic, and this paragraph
+   would then be wrong.
+
+   So a version disappeared because somebody ran the command or called the
+   endpoint, not because a background loop reached it; if the timing is a
+   mystery, that is the thing to go and ask about. Whether GC *should* run
+   automatically, and whether its retention should be configurable, are the
+   two open questions in cleat#1315.
 
 3. **Rollback scenario.**
    If you need to replay an instance against a different version after a
