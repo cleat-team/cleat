@@ -12335,3 +12335,63 @@ legitimate name is a worse outcome for an existing operator than the bug.
 This is **not** command injection. Arguments are array-passed via `exec.CommandContext`, and the
 database password is deliberately kept out of `argv` and passed through `PGPASSWORD`, with a comment
 explaining the `/proc/*/cmdline` reasoning. That part was already right.
+### 3.437 A panic in any plugin background goroutine killed the worker — ✅ fixed (the process-death half)
+
+**cleat#1304.** `cmd/cleat-worker/main.go` spawned each plugin's background loop in a bare goroutine
+with no `recover()`. An unrecovered panic in a goroutine cannot be caught by its parent, so **one
+panic in one plugin terminated the whole worker process**, taking every workflow in flight on it.
+
+Twelve plugins ship a `background.go` and none of them contains a `recover()`:
+
+    auditlog  blobstore  datadogexport  eventstore  eventtriggers  jobqueue
+    kafkaconnect  notifications  ratelimiter  scheduledbackup  scheduler  webhookingest
+
+**The asymmetry is the finding.** The worker is hardened against *its own* loops panicking —
+`withPanicRecovery` at `setup.go:875`, applied at `:1127` and `:3369` to every one — and was not
+hardened against the loops it runs **on behalf of third-party code**, which is the weaker trust
+assumption of the two.
+
+#### The suggested fix was not available as written
+
+The issue asked to route the spawn through `withPanicRecovery`. That is a method on `*Worker`, and
+both lines are inside `func main()`:
+
+    main.go:825   go func(bg plugin.HasBackground) { ... bg.Run(ctx) ... }
+    main.go:951   w := &Worker{
+
+**The Worker does not exist yet when the plugin loops start.** So `withPanicRecovery`,
+`healthTracker.recordPanic` and `Metrics.RecordBackgroundLoop` are all out of reach at the spawn
+site, and reaching them requires the plugin loops to be started *by* the Worker — a startup-ordering
+change whose risk is that something between those two lines assumes plugin background work is
+already running.
+
+So this fixes the half that needs no decision: **the process survives**. Health-tracker integration,
+metrics and watchdog restart are tracked separately, together with the backoff question the issue
+already raises — a loop that panics every iteration must not spin.
+
+#### Extracted into a named function so it can be tested
+
+`runPluginBackground` rather than an inline closure. A closure inside `main()` cannot be driven by a
+test, and **a guard nothing exercises is how the gap lasted** — the machinery to prevent this
+existed for a year and was applied everywhere except here.
+
+#### Falsification, and it is unusually blunt
+
+Removing the `recover` does not make the test fail. It **crashes the test binary**, exactly as it
+crashed the worker:
+
+    panic: plugin background loop exploded
+    …runPluginBackground(…)  main.go:1335
+    created by …TestAPluginBackgroundPanicDoesNotKillTheWorker in goroutine 25
+    FAIL  github.com/cleat-team/cleat/cmd/cleat-worker
+
+That is the defect reproduced verbatim, which is why the panicking case is driven through a real
+goroutine rather than called directly.
+
+Two further assertions, because surviving is not sufficient:
+
+- **the panic is logged with its stack and the plugin's name.** Recovering silently would pass the
+  test above and leave an operator with a plugin whose background work has stopped and nothing
+  saying so — trading a loud failure for a silent one, which is not obviously the better trade.
+- **the control**: an ordinary `Run` error still reaches the log and is *not* reported as a panic.
+  Without it, "the goroutine returns" is satisfied by a `runPluginBackground` that never calls `Run`.
