@@ -1759,11 +1759,28 @@ func TestGCVersions_ArgsNotDryRun(t *testing.T) {
 		},
 	}
 
-	stdout := captureStdout(t, func() {
+	// An unrecognised argument is now REFUSED rather than ignored (cleat#1315).
+	//
+	// This test asserted that such an argument does not turn dry-run on, which
+	// remains true and is stronger now: the sweep does not run at all. It had to
+	// change because `versions gc` grew a policy -- --min-versions and
+	// --max-age -- and silently dropping a typo like `--min-verzions=5` would
+	// run a DESTRUCTIVE sweep under the default policy while printing "GC
+	// complete". Tolerating unknown arguments was harmless while --dry-run was
+	// the only one; it is not harmless now.
+	//
+	// Note what this failure looked like before the test was updated: gcVersions
+	// called the real osExit, so `go test` reported a PACKAGE-level failure with
+	// zero test failures and no build error -- a third cause for that signature
+	// beyond the two CLAUDE.md lists.
+	stderr := withExitPanic(t, func() {
 		gcVersions(context.Background(), store, []string{"--some-other-flag"})
 	})
-	if strings.Contains(stdout, "dry run") {
-		t.Errorf("should not contain 'dry run': %s", stdout)
+	if !strings.Contains(stderr, "unknown argument") {
+		t.Errorf("an unrecognised argument was not refused: %s", strings.TrimSpace(stderr))
+	}
+	if strings.Contains(stderr, "dry run") {
+		t.Errorf("should not have enabled dry run: %s", stderr)
 	}
 }
 func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {

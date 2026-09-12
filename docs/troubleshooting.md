@@ -439,48 +439,63 @@ This can happen when:
    If the version GC removed older versions, in-flight instances cannot find
    their WASM binary. Check `cleatctl versions list`.
 
-   **Version GC is manual and its retention is not configurable.** This step
-   used to say to "adjust the GC retention policy" with
-   `cleat-worker --gc-min-versions 5 --gc-max-age 60d`; neither flag exists on
-   any binary (cleat#1315), and neither does any equivalent. The whole of the
-   surface is:
+   **Version GC is opt-in, and its retention is configurable.** Three flags,
+   added in cleat#1315; before that the policy was compiled in and unreachable
+   from any interface, and this step told you to adjust it with
+   `cleat-worker --gc-min-versions 5 --gc-max-age 60d` — two flags that have
+   never existed on any binary.
 
    ```bash
-   cleatctl versions gc --dry-run   # report what would be removed
-   cleatctl versions gc             # remove it
+   cleat-worker --version-gc-interval 24h --version-gc-min-versions 5 --version-gc-max-age 1440h
    ```
 
-   There is a second surface, and it behaves identically:
+   | flag | default | meaning |
+   |---|---|---|
+   | `--version-gc-interval` | **0 — off** | how often the sweep runs. 0 disables it entirely |
+   | `--version-gc-min-versions` | 3 | versions retained per workflow regardless of age or activity |
+   | `--version-gc-max-age` | 720h (30d) | age at which a **deprecated** version becomes eligible |
+
+   **`--version-gc-interval` defaults to 0 on purpose**, for the same reason
+   `--completed-workflow-retention-days` does: GC deletes workflow definitions
+   permanently, and this failure — an in-flight instance that cannot find its
+   WASM binary — is what that costs. An operator opts in having decided how
+   long their own replays need old versions reachable.
+
+   **So if a version disappeared, ask which of three things ran**, because the
+   answer changes what you do next:
+
+   ```bash
+   cleatctl versions gc --dry-run                       # report only
+   cleatctl versions gc --min-versions=5 --max-age=720h # with a policy
+   ```
 
    ```
-   POST /api/versions/gc?dry_run=true
+   POST /api/versions/gc?dry_run=true&min_versions=5&max_age=720h
    ```
 
-   **Retention is not configurable from either one.** `gcVersions`
-   (`cmd/cleatctl/versions.go`) reads only `--dry-run`, and `runGC`
-   (`engine/version_handler.go`) reads only `dry_run`; both then take
-   `engine.DefaultGCOptions()`, so the policy is compiled in at
-   `MinVersionsToKeep = 3` and `MaxVersionAge = 30 days`
-   (`engine/version_gc.go`). Changing either is a code change.
+   plus the scheduled sweep, if `--version-gc-interval` is set. The worker logs
+   `version gc swept` on every pass **including the ones that remove nothing**,
+   with the policy it used — so "the sweep ran and found nothing" and "the sweep
+   is disabled" are distinguishable in the log rather than both being silence.
 
-   **Nothing runs it on a schedule.** Re-derive rather than trusting this
-   paragraph — an earlier version of it named one caller when there are two,
-   and a count of callers is exactly the kind of claim that goes stale:
+   Both manual surfaces **refuse** a policy they cannot parse rather than
+   falling back to the default, including `0`: the sweep treats a zero
+   `min_versions` or `max_age` as unset and substitutes 3 and 30 days, so
+   accepting 0 would run under a policy you did not ask for and report success.
+   `--max-age=7` is refused too — a bare number is 7 **nanoseconds** to Go, not
+   seven days.
+
+   Re-derive rather than trusting this paragraph; an earlier version of it named
+   one caller when there were two:
 
    ```bash
    git grep -n GarbageCollectVersions -- '*.go' | grep -v _test
    ```
 
-   Every hit should be a definition or an explicit invocation by a person —
-   a CLI subcommand or an HTTP endpoint. A hit inside a ticker, a scheduler
-   or a worker loop would mean GC had become automatic, and this paragraph
-   would then be wrong.
-
-   So a version disappeared because somebody ran the command or called the
-   endpoint, not because a background loop reached it; if the timing is a
-   mystery, that is the thing to go and ask about. Whether GC *should* run
-   automatically, and whether its retention should be configurable, are the
-   two open questions in cleat#1315.
+   Three non-test hits now: the definition, `cmd/cleatctl/versions.go`, and
+   `cmd/cleat-worker/setup.go`'s `runVersionGCSweep`. `engine/version_handler.go`
+   reaches it through the same definition. A hit anywhere else means a fourth
+   caller nobody has documented.
 
 3. **Rollback scenario.**
    If you need to replay an instance against a different version after a
