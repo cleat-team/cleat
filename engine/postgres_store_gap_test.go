@@ -339,6 +339,7 @@ func TestGap_LoadEventHistoryPaginated(t *testing.T) {
 				nil, nil, nil, nil, nil, nil, // deferDesc, deferID, childName, childInput, runID, newInput
 				nil, nil, nil, nil, nil, // pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr
 				nil,                // payload
+				nil,                // payload_encoding (NULL = pre-cleat#1319 row)
 				nil, nil, nil, nil, // promiseName, promiseID, promiseResult, promiseError
 				nil, // createdAt
 			}},

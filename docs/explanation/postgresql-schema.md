@@ -214,6 +214,7 @@ CREATE TABLE event_history (
     promise_error TEXT,
     tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     payload JSONB,
+    payload_encoding SMALLINT,
     checksum TEXT,
     thread_id TEXT NOT NULL DEFAULT 'main',
     local_step INTEGER NOT NULL DEFAULT 0,

@@ -1662,10 +1662,70 @@ func (s *PostgresStore) deleteCompletedWorkflowsBatch(ctx context.Context, older
 	return n, tx.Commit()
 }
 
+// Payload encodings recorded in event_history.payload_encoding.
+//
+// The column is NULLABLE and NULL is a real state, not a missing value: it
+// means the row predates cleat#1319 and its encoding is genuinely unknown, so
+// the read falls back to guessing. 1 and 0 are answers; NULL is the absence of
+// one, and the difference is the whole point of the column.
+const (
+	payloadEncodingPlaintext int16 = 0
+	payloadEncodingBase64    int16 = 1
+)
+
+// decodePayload turns a stored request/response back into its original bytes,
+// using the recorded encoding rather than inferring one.
+//
+// cleat#1319: inference does not work, and the reason is not a bug in
+// tryDecodeBase64 -- it is that the question has no answer from the value
+// alone. base64.StdEncoding accepts any string whose length is a multiple of 4
+// and whose bytes are all in [A-Za-z0-9+/] with valid padding, so EVERY
+// four-character alphanumeric string decodes:
+//
+//	"test" -> "µë-"   "user" -> "ºÇ«"   "true" -> "¶»"
+//	"abcd" -> "i·"   "1234" -> "×mø"      "null" -> "ée"
+//
+// Six of nine ordinary short values, and it is a structural property rather
+// than a sample: the rule generates the set.
+//
+// A `b64:` prefix on the value was considered and rejected. It does not remove
+// the ambiguity, it relocates it -- "does this legacy value happen to start
+// with b64:" is a rarer guess, still a guess, and still silently wrong when it
+// lands. It also costs 8 bytes per row on PostgreSQL and MySQL and 16 on SQL
+// Server, where these columns are UTF-16, against 0-1 byte for a nullable
+// column that sits in a null bitmap the row already has.
+func decodePayload(stored string, encoding sql.NullInt16) string {
+	if stored == "" {
+		return stored
+	}
+	if encoding.Valid {
+		switch encoding.Int16 {
+		case payloadEncodingBase64:
+			decoded, err := base64.StdEncoding.DecodeString(stored)
+			if err != nil {
+				// Recorded as base64 and not decodable: the row is damaged
+				// rather than ambiguous. Returning it raw is the same
+				// best-effort the fallback gives and keeps a bad row readable.
+				return stored
+			}
+			return string(decoded)
+		case payloadEncodingPlaintext:
+			return stored
+		}
+	}
+	// NULL, or a value this build does not know: the row predates the column,
+	// so this is the historical guess and it is wrong for the values above.
+	// It cannot be improved -- the information was never written down.
+	return tryDecodeBase64(stored)
+}
+
 // tryDecodeBase64 attempts to base64-decode s. If decoding fails (e.g. the
 // value is a legacy plaintext that was never encoded), it returns s as-is.
-// This provides backward compatibility for events stored before base64
-// encoding was introduced.
+//
+// ONLY FOR ROWS WITH payload_encoding NULL. New code should call decodePayload,
+// which consults the recorded encoding; this is the guess it falls back to for
+// rows written before cleat#1319 added the column, and it is wrong for any
+// legacy plaintext that happens to be valid base64.
 func tryDecodeBase64(s string) string {
 	if s == "" {
 		return s

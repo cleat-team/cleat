@@ -196,15 +196,21 @@ func TestPostgresStore_StartChildWorkflowAtomic_WithChecksumChain(t *testing.T) 
 // LoadEventHistoryPaginated tests
 // ---------------------------------------------------------------------------
 
-// loadHistoryRow builds a 29-column mock row for LoadEventHistoryPaginated.
+// loadHistoryRow builds a 30-column mock row for LoadEventHistoryPaginated.
 // Columns: step, event_type, service, operation, request, response, error,
 //
 //	duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 //	defer_description, defer_id, child_name, child_input, run_id, new_input,
 //	plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
-//	payload, promise_name, promise_id, promise_result, promise_error, created_at
+//	payload, payload_encoding, promise_name, promise_id, promise_result,
+//	promise_error, created_at
+//
+// payload_encoding (index 24) is nil here, which is the truthful default for a
+// mock: NULL means "written before cleat#1319 recorded the encoding", so the
+// read falls back to the historical guess. Every caller below sets indices at
+// or under 7, so widening did not shift anything they address.
 func loadHistoryRow(step int, eventType string) []driver.Value {
-	row := make([]driver.Value, 29)
+	row := make([]driver.Value, 30)
 	row[0] = int64(step)
 	row[1] = eventType
 	// All other columns are nil (NULL) by default in Go
@@ -311,18 +317,28 @@ func TestPostgresStore_LoadEventHistoryPaginated_SecondPage(t *testing.T) {
 // same row and that expression was the one that silently truncated the replay
 // clock to whole seconds.
 func fullHistoryRow(step int, eventType string) []driver.Value {
-	row := make([]driver.Value, 30)
+	// 31 columns since cleat#1319 inserted payload_encoding after payload.
+	// It stays nil: NULL is the truthful default for a mock of a row written
+	// before the encoding was recorded, and it keeps these tests exercising
+	// the historical fallback rather than the new path.
+	row := make([]driver.Value, 31)
 	row[0] = int64(step)
 	row[1] = eventType
-	row[29] = false // pending — must be non-nil (scanned into bool)
+	row[30] = false // pending — must be non-nil (scanned into bool)
 	return row
 }
 
-// shadowHistoryRow builds a row for the 17-column shadow-column query in
+// shadowHistoryRow builds a row for the shadow-column query in
 // verifyShadowColumns: step, event_type, service, operation, duration_ms,
 // signal_names, timeout_ms, signal_name, defer_description, defer_id,
 // child_name, run_id, plugin_name, plugin_func, promise_name, promise_id,
 // payload.
+// shadowHistoryRow builds a mock row for the shadow-history SELECT that
+// VerifyWorkflowEvents issues.
+//
+// The shadow query is UNCHANGED by cleat#1319: it selects the columns that
+// duplicate the payload JSON, and request/response are not among them, so it
+// never needed the encoding.
 func shadowHistoryRow(step int, eventType, service, op, payload string) []driver.Value {
 	row := make([]driver.Value, 17)
 	row[0] = int64(step)

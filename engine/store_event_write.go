@@ -55,8 +55,8 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 				defer_description, defer_id, child_name, child_input, run_id, new_input,
 				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				promise_name, promise_id, promise_result, promise_error, payload,
-				created_at, checksum, tenant_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
+				created_at, checksum, tenant_id, payload_encoding)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
 			ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL
 		`)
 		if err != nil {
@@ -123,8 +123,8 @@ func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflow
 			defer_description, defer_id, child_name, child_input, run_id, new_input,
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error, payload,
-			created_at, checksum, tenant_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
+			created_at, checksum, tenant_id, payload_encoding)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
 		ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL
 	`, workflowID, rec.Step, rec.EventType,
 		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
@@ -136,7 +136,7 @@ func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflow
 		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
 		stored.Payload,
 		time.UnixMilli(rec.TimestampMs),
-		checksum, s.tenantID)
+		checksum, s.tenantID, stored.Encoding)
 	if err != nil {
 		return fmt.Errorf("append one event: exec step %d: %w", rec.Step, err)
 	}
@@ -160,7 +160,7 @@ func (s *PostgresStore) execEventStmt(ctx context.Context, stmt *sql.Stmt, workf
 		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
 		stored.Payload,
 		time.UnixMilli(rec.TimestampMs),
-		checksum, s.tenantID)
+		checksum, s.tenantID, stored.Encoding)
 	if err != nil {
 		return fmt.Errorf("exec event stmt: step %d: %w", rec.Step, err)
 	}

@@ -127,11 +127,11 @@ const insertEventSQL = `
 		defer_description, defer_id, child_name, child_input, run_id, new_input,
 		plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		promise_name, promise_id, promise_result, promise_error, payload,
-		checksum, created_at, tenant_id)
+		checksum, created_at, tenant_id, payload_encoding)
 	SELECT $1, $2, $3, $4, $5, $6, $7, $8,
 		$9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
 		$20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
-		$30, $34, $31
+		$30, $34, $31, $35
 	WHERE ($32 = '' OR EXISTS (
 		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $32 AND generation = $33
 	))
@@ -344,7 +344,8 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
 			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
-			payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec))
+			payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec),
+			stored.Encoding)
 		if err != nil {
 			return fmt.Errorf("flush event (quota): %w", err)
 		}
@@ -362,7 +363,8 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
 		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
 		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
-		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec)}
+		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec),
+		stored.Encoding}
 
 	// Tenanted path: the insert must carry the RLS context, which is
 	// transaction-scoped, so it needs an explicit transaction. That costs two
@@ -401,7 +403,8 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
 		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
 		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
-		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec))
+		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec),
+		stored.Encoding)
 	if err != nil {
 		return fmt.Errorf("flush event: %w", err)
 	}

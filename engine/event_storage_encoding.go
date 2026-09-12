@@ -55,6 +55,20 @@ type storedEvent struct {
 	// Payload is invalid rather than empty when the event type contributes no
 	// payload keys, which is what every writer stored before this existed.
 	Payload sql.NullString
+
+	// Encoding is the payload_encoding column value for this row: the encoding
+	// of Request and Response as they are about to be written.
+	//
+	// It lives here, on the result of the function that DID the encoding,
+	// rather than being recomputed from the plaintext record at each INSERT.
+	// Five writers call encodeEventForStorage (cleat#1380 gave them all the
+	// same encoding after four of them had drifted); a value recomputed at the
+	// call site can disagree with the bytes beside it, and nothing would fail
+	// if it did -- the read path would simply decode with the wrong rule.
+	//
+	// `any` rather than int16 because NULL is a distinct, meaningful value:
+	// see payloadEncodingFor (cleat#1319).
+	Encoding any
 }
 
 // encodeEventForStorage maps a plaintext EventRecord to the values that go
@@ -89,6 +103,7 @@ func encodeEventForStorage(rec EventRecord, enc *PayloadEncryption, encrypt bool
 	out := storedEvent{
 		Request:       tryEncodeBase64(rec.Request),
 		Response:      tryEncodeBase64(rec.Response),
+		Encoding:      payloadEncodingFor(rec),
 		Err:           rec.Err,
 		SignalPayload: rec.SignalPayload,
 		ChildInput:    rec.ChildInput,
@@ -172,4 +187,24 @@ func encodePayloadForStorage(payload string, enc *PayloadEncryption, encrypt boo
 		return sql.NullString{}, fmt.Errorf("encrypt payload: %w", err)
 	}
 	return sql.NullString{String: string(encrypted), Valid: true}, nil
+}
+
+// payloadEncodingFor is the payload_encoding value for a row being written.
+//
+// Always base64 today, because tryEncodeBase64 encodes every non-empty value
+// and EncryptString -- which replaces it when --encrypt-sensitive-payloads is
+// on -- stores base64(ciphertext). Either way the stored bytes are base64, and
+// the read path decodes before it decrypts.
+//
+// A function rather than a constant at the call sites so that the day one of
+// those stops being true, there is one place that has to be told (cleat#1319).
+func payloadEncodingFor(rec EventRecord) any {
+	if rec.Request == "" && rec.Response == "" {
+		// Nothing was encoded, so recording an encoding would be a claim about
+		// bytes that do not exist. NULL here is the same "no answer" the legacy
+		// rows carry, and decodePayload returns "" for an empty value before it
+		// consults the column at all.
+		return nil
+	}
+	return payloadEncodingBase64
 }

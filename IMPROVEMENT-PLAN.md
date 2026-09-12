@@ -12465,3 +12465,79 @@ evidently preinstalled on `ubuntu-latest` — but that install is the only thing
 *guarantees* it, and depending on a runner image's contents is how a guard stops running without
 failing. The `run:` block was extracted from the parsed YAML and executed verbatim before being
 relied on.
+
+### 3.439 The payload encoding was inferred at read time, and inference cannot work — ✅ fixed
+
+**cleat#1319.** `tryDecodeBase64` base64-decoded a stored `request`/`response` and fell back to the
+raw string when decoding **failed**. That is the wrong question. Plenty of ordinary text decodes
+successfully: `base64.StdEncoding` accepts any string whose length is a multiple of 4 whose bytes
+are all in `[A-Za-z0-9+/]` with valid padding, so **every four-character alphanumeric string
+decodes**.
+
+Publish the predicate, not the sample — the rule generates the set, and a sample can be argued with
+by choosing a different one:
+
+    "test" -> "\xb5\xeb-"   "user" -> "\xba\xc7\xab"   "true" -> "\xb6\xbb\x9e"
+    "abcd" -> "i\xb7\x1d"   "1234" -> "\xd7m\xf8"      "null" -> "\x9e\xe9e"
+
+#### Most rows were never at risk, and finding that out took a falsification
+
+The `payload` JSON column already records the encoding explicitly — `eventRecordToPayload` writes
+`request_b64`/`response_b64` — and `populateFromPayload` runs **after** the scanned columns on every
+read path. So wherever `payload` is present, the columns and `tryDecodeBase64` are shadowed.
+
+This was found by breaking the writer and watching the round-trip test **pass anyway**. A test that
+checks only that a value survives cannot see which of two paths delivered it.
+
+#### The exposure is real, ongoing, and confined to call intents
+
+Three writers in `store_intent.go` store `rec.Request` **raw** — there is no `tryEncodeBase64`
+anywhere in that file — and write **no `payload` column**. So every call intent lands in the
+vulnerable class by construction, on every durable call. Measured before the fix, identically on
+all three dialects:
+
+| request | read back |
+|---|---|
+| `true` | `\xb6\xbb\x9e` |
+| `null` | `\x9e\xe9e` |
+| `1234` | `\xd7m\xf8` |
+| `{"a":1}` | **intact** |
+
+JSON objects were never at risk: `{` and `"` are not in the base64 alphabet. A JSON **scalar** is —
+`true` and `null` are four characters drawn entirely from it. And these rows are what the ambiguity
+resolver reads **after a crash**, so the corruption surfaced during recovery.
+
+#### The column, and why NULL is a state rather than a gap
+
+`event_history.payload_encoding`, nullable, on all three dialects:
+
+| value | meaning |
+|---|---|
+| `NULL` | the row predates the column; the encoding is genuinely unknown, so the read keeps the historical guess |
+| `1` | base64 |
+| `0` | plaintext |
+
+**Deliberately not backfilled.** A backfill would have to answer, for every existing row, the exact
+question the column exists because nobody can answer. The ambiguity stays confined to rows that are
+genuinely ambiguous, and everything written from now on is unambiguous. `SMALLINT` rather than
+`BOOLEAN`: same storage, room for a future encoding without a second three-dialect migration.
+
+#### A `b64:` prefix was considered and rejected
+
+It does not remove the ambiguity, it **relocates** it — *"does this legacy value start with
+`b64:`"* is a rarer guess, still a guess, and still silently wrong when it lands. It also costs 8
+bytes per row on PostgreSQL and MySQL and **16 on SQL Server**, where these columns are UTF-16,
+against 0-1 byte for a nullable column that sits in a null bitmap the row already has.
+
+One thing that could have decided it and did not: the integrity checksum is computed over the
+**plaintext** record (`flush.go`, before `tryEncodeBase64`), so neither option disturbs replay.
+
+#### Falsification
+
+| mutation | what failed |
+|---|---|
+| intents stop recording the encoding | the corruption returns verbatim — `"true" -> "\xb6\xbb\x9e"` on all three dialects |
+| one read path reverts to `tryDecodeBase64` | the completeness guard names the file and line |
+
+The JSON-object case is the **control**: without it, "nothing was corrupted" is equally satisfied by
+a reader that stopped decoding altogether.

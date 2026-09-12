@@ -26,6 +26,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
+		       payload_encoding,
 		       promise_name, promise_id, promise_result, promise_error,
 		       created_at
 		FROM event_history
@@ -50,6 +51,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
 		var createdAt sql.NullTime
+		var payloadEnc sql.NullInt16
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -57,6 +59,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
+			&payloadEnc,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
 			&createdAt); err != nil {
 			return nil, fmt.Errorf("scan history paginated: %w", err)
@@ -64,8 +67,8 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 
 		rec.Service = service.String
 		rec.Op = op.String
-		rec.Request = tryDecodeBase64(request.String)
-		rec.Response = tryDecodeBase64(response.String)
+		rec.Request = decodePayload(request.String, payloadEnc)
+		rec.Response = decodePayload(response.String, payloadEnc)
 		rec.Err = errMsg.String
 		rec.DurationMs = durationMs.Int64
 		rec.SignalNames = signalNames.String
@@ -173,6 +176,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				       defer_description, defer_id, child_name, child_input, run_id, new_input,
 				       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				       payload,
+				       payload_encoding,
 				       promise_name, promise_id, promise_result, promise_error,
 				       created_at
 				FROM event_history
@@ -199,6 +203,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				var payload sql.NullString
 				var promiseName, promiseID, promiseResult, promiseError sql.NullString
 				var createdAt sql.NullTime
+				var payloadEnc sql.NullInt16
 
 				if err := rows.Scan(&rec.Step, &rec.EventType,
 					&service, &op, &request, &response, &errMsg,
@@ -206,6 +211,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 					&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 					&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 					&payload,
+					&payloadEnc,
 					&promiseName, &promiseID, &promiseResult, &promiseError,
 					&createdAt); err != nil {
 					rows.Close()
@@ -219,8 +225,8 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 
 				rec.Service = service.String
 				rec.Op = op.String
-				rec.Request = tryDecodeBase64(request.String)
-				rec.Response = tryDecodeBase64(response.String)
+				rec.Request = decodePayload(request.String, payloadEnc)
+				rec.Response = decodePayload(response.String, payloadEnc)
 				rec.Err = errMsg.String
 				rec.DurationMs = durationMs.Int64
 				rec.SignalNames = signalNames.String
