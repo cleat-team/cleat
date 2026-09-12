@@ -31,11 +31,21 @@ type PostgresStore struct {
 
 	// Encryption at rest for sensitive event payloads.
 	encryption *PayloadEncryption
-	// NOTE: encryption currently applies only to the per-event write path
-	// (flushEvent). The batch write path (appendEventsInTx) stores events
-	// in plaintext; adding encryption there would double-encrypt events
-	// that flow through both paths. Until the paths are unified or
-	// exclusive, full coverage requires routing all events through the per-event path.
+	// Every write path on this dialect encrypts, through the one encoding in
+	// encodeEventForStorage. This NOTE used to say the batch path stored
+	// plaintext because "adding encryption there would double-encrypt events
+	// that flow through both paths", which was the reason it stayed plaintext
+	// for as long as it did.
+	//
+	// Double-encrypting requires appendEventsInTx to be handed a record whose
+	// fields are ALREADY ciphertext, and no caller does that: flush.go
+	// encrypted into locals and never mutated rec, and FinalizeWorkflowSegment,
+	// ContinueAsNew, the defer phase, the audit writes and AppendEventHistoryBatch
+	// all pass records held in memory in plaintext. What was real, and is what
+	// the note was reaching for, is an ORDERING constraint: the payload JSON
+	// and the checksum must both be derived from the plaintext record before
+	// anything is encrypted. encodeEventForStorage holds that ordering in one
+	// place. See cleat#1306.
 	encryptSensitivePayloads bool
 	metrics                  *prometheus.Metrics
 

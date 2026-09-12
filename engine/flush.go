@@ -202,24 +202,37 @@ func setRLSOnFlushTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
 //
 // This paragraph used to say the clause declined because the row "already
 // carries a terminal response/error", which reads as though a row with no
-// outcome yet would be filled in. It would not. **No write path in this
-// repo stores the empty string in `response`** -- every one of them binds it
-// through nullStr, which maps the empty string to NULL, so the comparison
-// the clause makes is NULL against the empty string -- which is NULL, which
-// is not true. Re-derive the bind sites with
+// outcome yet would be filled in. For a row written by any of the INSERT
+// paths it would not: every one of them binds `response` through nullStr,
+// which maps the empty string to NULL, so the comparison the clause makes is
+// NULL against the empty string -- which is NULL, which is not true.
 //
-//	grep -rn "nullStr(responseStr)\|nullStr(base64.StdEncoding.EncodeToString(\[\]byte(rec.Response)))" \
-//	  --include="*.go" engine/ | grep -v _test.go
+// **The paragraph then said "no write path in this repo stores the empty
+// string in `response`", and that is false.** CompleteCallIntent
+// (engine/store_intent.go:193) binds `rec.Response` directly into
+// `SET response = $3`, with no nullStr, so a failed call -- empty response,
+// error set -- stores the empty string. Measured 2026-09-12 on PostgreSQL 16:
+// WriteCallIntent then CompleteCallIntent with Response="" leaves
+// `response` at Valid=true, String="", not NULL. So the clause CAN fire, for
+// exactly the rows the call-intent path wrote. See cleat#1379.
 //
-// -- eight sites on 2026-09-03, across all three dialects, all nullStr.
+// The predicate the original was reaching for, which does not rot as writers
+// are added: *every INSERT path binds response through nullStr.* Re-derive
+// with
 //
-// Measured the same day rather than reasoned about: appending step 0 with an
-// empty response and then appending step 0 again with `{"ok":true}` leaves
-// the stored `response` column NULL and the stored checksum unchanged. The
-// DO UPDATE never runs.
+//	grep -rn "rec.Response\|stored.Response" --include="*.go" engine/ \
+//	  | grep -v _test.go | grep -E "INSERT|nullStr|SET response"
 //
-// So this is `DO NOTHING` wearing a WHERE clause, and that is the *correct*
-// behaviour -- it is what MySQL's `INSERT IGNORE` (mysql_events.go) and SQL
+// and read the hits -- the INSERT ones go through nullStr, the call-intent
+// UPDATEs do not.
+//
+// Measured 2026-09-03: appending step 0 with an empty response and then
+// appending step 0 again with `{"ok":true}` leaves the stored `response`
+// column NULL and the stored checksum unchanged. The DO UPDATE never runs,
+// for a row that an INSERT path wrote.
+//
+// So for those rows this is `DO NOTHING` wearing a WHERE clause, and that is
+// the *correct* behaviour -- it is what MySQL's `INSERT IGNORE` (mysql_events.go) and SQL
 // Server's `WHERE NOT EXISTS` (mssql_events.go) do, so all three dialects
 // agree. Left as it is rather than simplified: rewriting the hottest write
 // path in the engine to change nothing is not worth the risk, and the shape
@@ -289,79 +302,18 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		}
 	}()
 
+	// Both of these are over the PLAINTEXT record. The checksum has to be,
+	// because VerifyWorkflowEvents recomputes it from the record it loads,
+	// which is decrypted; and the payload has to be, because
+	// populateFromPayload writes the payload's values back over the columns on
+	// read, so a payload built from an encrypted record would put ciphertext
+	// there. encodeEventForStorage preserves both orderings -- see its doc.
 	checksum := computeEventChecksum(rec, prevChecksum)
-	payloadJSON, _ := eventRecordToPayload(rec)
-	payloadArg := nullStr("")
-	if len(payloadJSON) > 0 {
-		payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
+	stored, encodeErr := encodeEventForStorage(rec, e.encryption, e.encryptSensitivePayloads)
+	if encodeErr != nil {
+		return fmt.Errorf("flush event: %w", encodeErr)
 	}
-
-	requestStr := tryEncodeBase64(rec.Request)
-	responseStr := tryEncodeBase64(rec.Response)
-	errStr := rec.Err
-	sigPayload := rec.SignalPayload
-	childInput := rec.ChildInput
-	newInput := rec.NewInput
-	pluginInput := rec.PluginInput
-	pluginOutput := rec.PluginOutput
-	promiseResult := rec.PromiseResult
-	promiseError := rec.PromiseError
-
-	// Encrypt sensitive payload fields when encryption is enabled.
-	if e.encryptSensitivePayloads && e.encryption != nil {
-		var encErr error
-		if requestStr, encErr = e.encryption.EncryptString(rec.Request); encErr != nil {
-			return fmt.Errorf("flush event: encrypt request: %w", encErr)
-		}
-		if responseStr, encErr = e.encryption.EncryptString(rec.Response); encErr != nil {
-			return fmt.Errorf("flush event: encrypt response: %w", encErr)
-		}
-		if errStr, encErr = e.encryption.EncryptString(rec.Err); encErr != nil {
-			return fmt.Errorf("flush event: encrypt err: %w", encErr)
-		}
-		if rec.SignalPayload != "" {
-			if sigPayload, encErr = e.encryption.EncryptString(rec.SignalPayload); encErr != nil {
-				return fmt.Errorf("flush event: encrypt signal_payload: %w", encErr)
-			}
-		}
-		if rec.ChildInput != "" {
-			if childInput, encErr = e.encryption.EncryptString(rec.ChildInput); encErr != nil {
-				return fmt.Errorf("flush event: encrypt child_input: %w", encErr)
-			}
-		}
-		if rec.NewInput != "" {
-			if newInput, encErr = e.encryption.EncryptString(rec.NewInput); encErr != nil {
-				return fmt.Errorf("flush event: encrypt new_input: %w", encErr)
-			}
-		}
-		if rec.PluginInput != "" {
-			if pluginInput, encErr = e.encryption.EncryptString(rec.PluginInput); encErr != nil {
-				return fmt.Errorf("flush event: encrypt plugin_input: %w", encErr)
-			}
-		}
-		if rec.PluginOutput != "" {
-			if pluginOutput, encErr = e.encryption.EncryptString(rec.PluginOutput); encErr != nil {
-				return fmt.Errorf("flush event: encrypt plugin_output: %w", encErr)
-			}
-		}
-		if rec.PromiseResult != "" {
-			if promiseResult, encErr = e.encryption.EncryptString(rec.PromiseResult); encErr != nil {
-				return fmt.Errorf("flush event: encrypt promise_result: %w", encErr)
-			}
-		}
-		if rec.PromiseError != "" {
-			if promiseError, encErr = e.encryption.EncryptString(rec.PromiseError); encErr != nil {
-				return fmt.Errorf("flush event: encrypt promise_error: %w", encErr)
-			}
-		}
-		if len(payloadJSON) > 0 && e.encryption != nil {
-			encrypted, encErr := e.encryption.EncryptJSON(payloadJSON)
-			if encErr != nil {
-				return fmt.Errorf("flush event: encrypt payload: %w", encErr)
-			}
-			payloadArg = sql.NullString{String: string(encrypted), Valid: true}
-		}
-	}
+	payloadArg := stored.Payload
 
 	fenceWorkerID, fenceGeneration := e.fenceParams()
 
@@ -385,13 +337,13 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			return fmt.Errorf("flush event: event quota exceeded (max %d)", e.maxQuotaEvents)
 		}
 		res, err := tx.ExecContext(ctx, insertEventSQL, workflowID, rec.Step, rec.EventType,
-			nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
+			nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-			nullStr(rec.SignalName), nullStr(sigPayload),
+			nullStr(rec.SignalName), nullStr(stored.SignalPayload),
 			nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-			nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
-			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
-			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
+			nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
+			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
+			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
 			payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec))
 		if err != nil {
 			return fmt.Errorf("flush event (quota): %w", err)
@@ -403,13 +355,13 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	}
 
 	args := []any{workflowID, rec.Step, rec.EventType,
-		nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-		nullStr(rec.SignalName), nullStr(sigPayload),
+		nullStr(rec.SignalName), nullStr(stored.SignalPayload),
 		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-		nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
-		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
-		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
+		nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
 		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec)}
 
 	// Tenanted path: the insert must carry the RLS context, which is
@@ -442,13 +394,13 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 
 	// Untenanted path: single INSERT auto-commits. No explicit BEGIN/COMMIT.
 	res, err := e.db.ExecContext(ctx, insertEventSQL, workflowID, rec.Step, rec.EventType,
-		nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-		nullStr(rec.SignalName), nullStr(sigPayload),
+		nullStr(rec.SignalName), nullStr(stored.SignalPayload),
 		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-		nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
-		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
-		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
+		nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
 		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec))
 	if err != nil {
 		return fmt.Errorf("flush event: %w", err)
