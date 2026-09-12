@@ -112,7 +112,7 @@ func TestAnUnparseableTerminateBodyNeverReachesTheStore(t *testing.T) {
 						"unconditionally, so this overwrites the record of why the workflow "+
 						"dead-lettered -- and the caller is told it worked.", gotReason)
 				} else {
-					t.Errorf("TerminateWorkflow was NOT called, so this case proves nothing "+
+					t.Errorf("TerminateWorkflow was NOT called, so this case proves nothing " +
 						"about refusing a bad body -- the handler is refusing everything")
 				}
 			}
