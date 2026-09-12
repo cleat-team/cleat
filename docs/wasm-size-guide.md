@@ -72,29 +72,56 @@ To help developers understand what contributes to their WASM binary size, the
 cleat build --size-report ./my-workflow/
 ```
 
-This analyzes the compiled WASM binary and outputs a breakdown by package:
+This reads the compiled WASM binary and attributes its code section to packages.
+Real output, from `./testdata/basic/` on 2026-09-12:
 
 ```
-WASM Binary: my_workflow.wasm (6,234,112 bytes)
+  ===== WASM Size Report =====
+  Binary: cancel_order.wasm (4.7 MB)
+  Target: go
+  Code section: 3.0 MB of 4.7 MB (64.5%)
 
-Size breakdown by package:
-  main                    1,024,000 bytes  (16.4%)
-  fmt                       896,000 bytes  (14.4%)
-  encoding/json             512,000 bytes  (8.2%)
-  reflect                 2,048,000 bytes  (32.8%)
-  runtime                 1,024,000 bytes  (16.4%)
-  sync                      256,000 bytes  (4.1%)
-  strconv                   192,000 bytes  (3.1%)
-  sort                       96,000 bytes  (1.5%)
-  math                      128,000 bytes  (2.1%)
-  os                         48,000 bytes  (0.8%)
-  unicode/utf8               16,000 bytes  (0.3%)
-  unicode                    8,000 bytes   (0.1%)
+  Code size by package (measured from the binary's name section;
+  the Go linker encodes '/' as '_' in these names):
+    runtime                                           1.1 MB  (24.0% of binary, 1262 funcs)
+    encoding_json_v2                                437.0 KB  (9.1% of binary, 175 funcs)
+    reflect                                         236.4 KB  (4.9% of binary, 208 funcs)
+    encoding_json_jsontext                          189.2 KB  (3.9% of binary, 123 funcs)
+    time                                            146.4 KB  (3.0% of binary, 76 funcs)
+    slices                                          123.9 KB  (2.6% of binary, 63 funcs)
+    fmt                                             110.4 KB  (2.3% of binary, 50 funcs)
+    main                                             64.5 KB  (1.3% of binary, 60 funcs)
+    ... and 52 more package(s)
+    unattributed (compiler-generated)                28.1 KB  (0.6% of binary)
+    non-code sections (data, types, names)            1.7 MB  (35.5% of binary)
 
-Recommendations:
-  - Remove "reflect" import: saves ~2 MB
-  - Replace "encoding/json" with "github.com/goccy/go-json": saves ~500 KB
+  Recommendations:
+    - reflect costs 236.4 KB (4.9%) here -- it is usually pulled in by encoding/json;
+      a hand-written marshaller removes both
+    - fmt costs 110.4 KB (2.3%) here -- h.DurableLog() and strconv avoid it
 ```
+
+**The numbers are per-binary, and the recommendations quote what this binary
+spends.** Two workflows give different answers: `testdata/minimal-wf` imports no
+JSON at all and spends 1.9% on `reflect` where the one above spends 4.9%.
+
+**Package names carry the Go linker's mangling.** `/`, `:`, `(`, `)` and `*` are
+all encoded as `_` in the WASM name section, so `internal/abi` reads as
+`internal_abi` and `encoding/json/v2` as `encoding_json_v2`. The report does not
+invert that, because the inverse is ambiguous — a package whose name genuinely
+contains `_` would be indistinguishable — and a size report that guesses at
+identifiers is worse than one that shows you what is in the file.
+
+**A stripped binary gets no breakdown, and says so.** Attribution needs the WASM
+name section; without it the report gives the total and the section sizes and
+states that the per-package breakdown is unavailable.
+
+> **Until cleat#1314 this flag did not read the binary.** It multiplied the
+> file's length by a table of hardcoded constants — `reflect` was always 25%,
+> `net/http` always 20% — so every binary produced the same shape of answer. The
+> measured figure for `reflect` on the two fixtures above is 4.9% and 1.9%. The
+> example output previously printed in this section was illustrative and did not
+> come from a build.
 
 > **Note**: The `--size-report` flag is available in cleat v0.4+.
 

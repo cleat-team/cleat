@@ -12171,3 +12171,90 @@ half — *any* helper sharing the shape becomes a deployable entry point, generi
 an API decision for whoever owns the authoring surface. Excluding generics is provably safe because
 a generic function cannot have a concrete `string` result; a marker changes how every workflow is
 written.
+
+---
+
+### 3.435 `--size-report` multiplied the file's length by hardcoded constants and printed the products as measurements — ✅ fixed
+
+**cleat#1314.** `cleat build --size-report` is documented as *"output WASM binary size breakdown by
+package"*. It did not read the binary. Every line was `totalSize × a literal`:
+
+```go
+{"runtime", int64(float64(totalSize) * 0.15)},
+knownContributions := map[string]float64{"reflect": 0.25, "encoding/json": 0.12, ...}
+```
+
+The only input from the artifact was its length, so every binary ever built got the same answer in
+different absolute numbers — and the **Recommendations** block quoted the same literals back as
+findings: *"Remove \"reflect\" import: reduces binary ~25%"*.
+
+#### How wrong the headline number was
+
+Measured on two real artifacts with the new implementation:
+
+| | `testdata/basic` | `testdata/minimal-wf` |
+|---|---|---|
+| `reflect`, as the old report claimed | 25% | 25% |
+| `reflect`, measured | **4.9%** | **1.9%** |
+| `runtime` claimed / measured | 15% / **24.0%** | 15% / **35.6%** |
+| `encoding_json_v2` | 9.1% | **absent entirely** |
+
+An author acting on the old advice would do real work to reclaim a stated quarter of the binary and
+recover a twentieth of it — with no way to tell, because the next run reports the same percentage of
+a new total.
+
+#### A fourth consequence the issue did not list: the percentages could exceed 100%
+
+`accounted` starts at 0.20 and adds a constant per matching import. The constants sum to **1.43**,
+and an ordinary import set — `reflect`, `encoding/json`, `fmt`, `net/http`, `crypto/tls`, `time`,
+`os`, `strings` — reaches **1.08**. The remainder line is guarded by `if unaccounted > 0`, so at that
+point *"other (stdlib + deps)"* silently vanishes and the reader sees per-package rows summing to
+108% of a binary, with nothing indicating anything is wrong.
+
+#### Measuring it was feasible, and that was checked rather than assumed
+
+| probe | result |
+|---|---|
+| `go tool nm <artifact>.wasm` | **fails** — `unrecognized object file` |
+| Go symbol names present in the artifact | **3332**, incl. `runtime.mapaccess1`, `reflect.ArrayOf` |
+
+The toolchain route is closed; the data is in the binary. `wasm.AnalyzeSize` parses the code
+section for per-function body sizes and the custom `name` section for symbols, and joins them.
+**99.1%** of the code section attributes to real packages on a live artifact.
+
+#### The mangling is reported, not guessed at
+
+The Go linker encodes `/`, `:`, `(`, `)` and `*` all as `_`, so `internal/abi.NoEscape` appears as
+`internal_abi.NoEscape`. This does **not** invert it. `internal_runtime_math` is provably
+`internal/runtime/math`, but the inverse is ambiguous in general, and a size report that silently
+guesses at identifiers is the genre of defect being removed. The mangled form is printed and the
+header says so.
+
+Compiler-generated families — `type_.eq.[3]string`, `go_buildid`, `gcbits_*` — are counted as
+**unattributed** rather than invented into a package named `type_`.
+
+#### The honest fallback is the load-bearing part
+
+A binary with no name section yields no attribution, and the report says so:
+
+> Per-package breakdown unavailable: this binary carries no WASM name section, so its functions
+> cannot be attributed to packages.
+
+Falling back to the constants there would put the defect back in the one path nobody exercises.
+`TestAStrippedBinaryReportsNoBreakdownRatherThanAModel` pins it, including that the bytes are still
+reported as unattributed rather than dropped.
+
+#### Falsification
+
+The acceptance property is that **different inputs produce different outputs**, which the old
+implementation could not satisfy at any input — and which a test asserting *"the report mentions
+reflect"* would have passed against it unchanged.
+
+| mutation | what failed |
+|---|---|
+| drop the import offset on function indices | exact byte counts in two tests, plus *"attributed 72 bytes to \"wrong\""* |
+
+That mutation is the one this parser was most likely to get wrong, because function indices in the
+name section count imports first and ignoring them shifts every attribution by a constant — producing
+a plausible report rather than an error. The first attempt at it **did not compile** (`declared and
+not used: importedFuncs`) and was rewritten to keep the tree building.

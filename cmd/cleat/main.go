@@ -510,129 +510,122 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 
 // printSizeReport outputs a size breakdown of the compiled WASM binary by
 // package. This helps developers identify which imports contribute the most
-// to binary size.
+
+// printSizeReport prints a MEASURED per-package breakdown of the compiled
+// artifact.
 //
-// The analysis uses the transformer's UsageInfo (which packages the workflow
-// imports) combined with typical per-package size contributions. For a more
-// precise breakdown, pipe the WASM binary through wasm-objdump or twiggy.
+// It used to print `totalSize * <a literal>` for each of twenty-odd packages --
+// reflect 0.25, net/http 0.20, and so on -- so the only input from the artifact
+// was its length and every binary got the same answer in different absolute
+// numbers. The constants could also sum past 100% (an import set of reflect,
+// encoding/json, fmt, net/http, crypto/tls, time, os and strings reached 108%),
+// at which point the "other" remainder line silently disappeared because it had
+// gone negative. cleat#1314.
+//
+// wasm.AnalyzeSize reads the code section and the custom `name` section and
+// attributes real bytes to real packages. Where that is impossible -- a binary
+// with no name section -- this says so rather than falling back to the model.
 func printSizeReport(wasmPath string, totalSize int64, result *analyzer.AnalysisResult, usage *wasm.UsageInfo, target string) {
 	fmt.Println()
 	fmt.Println("  ===== WASM Size Report =====")
 	fmt.Printf("  Binary: %s (%s)\n", filepath.Base(wasmPath), formatSize(totalSize))
 	fmt.Printf("  Target: %s\n", target)
 
-	// Estimate package contributions based on known typical sizes.
-	// These are approximate and based on measurements of Go wasip1 builds.
-	type pkgSize struct {
-		name string
-		size int64
+	wasmBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		fmt.Printf("  Breakdown unavailable: cannot read the artifact: %v\n\n", err)
+		return
 	}
-	pkgSizes := []pkgSize{
-		{"runtime", int64(float64(totalSize) * 0.15)}, // Go runtime + GC
-		{"main (workflow code)", int64(float64(totalSize) * 0.05)},
-	}
-	knownContributions := map[string]float64{
-		"reflect":         0.25,
-		"encoding/json":   0.12,
-		"fmt":             0.08,
-		"net/http":        0.20,
-		"crypto/tls":      0.15,
-		"regexp":          0.04,
-		"net/url":         0.03,
-		"time":            0.03,
-		"os":              0.04,
-		"database/sql":    0.10,
-		"text/template":   0.06,
-		"sync":            0.02,
-		"strconv":         0.02,
-		"math/rand":       0.01,
-		"crypto/rand":     0.01,
-		"encoding/hex":    0.005,
-		"encoding/base64": 0.005,
-		"unicode":         0.005,
-		"unicode/utf8":    0.005,
-		"sort":            0.01,
-		"strings":         0.01,
-		"bytes":           0.01,
-		"math":            0.02,
+	br, err := wasm.AnalyzeSize(wasmBytes)
+	if err != nil {
+		fmt.Printf("  Breakdown unavailable: %v\n\n", err)
+		return
 	}
 
-	var accounted float64
-	for _, ps := range pkgSizes {
-		accounted += float64(ps.size) / float64(totalSize)
+	fmt.Printf("  Code section: %s of %s (%.1f%%)\n",
+		formatSize(br.CodeSize), formatSize(br.TotalSize), pctOf(br.CodeSize, br.TotalSize))
+
+	if !br.HaveNames {
+		fmt.Println()
+		fmt.Println("  Per-package breakdown unavailable: this binary carries no WASM name")
+		fmt.Println("  section, so its functions cannot be attributed to packages. Build")
+		fmt.Println("  without stripping to get one.")
+		fmt.Println()
+		return
 	}
 
-	// Scan result for packages that were imported and estimate their size.
-	var extras []pkgSize
-	seenPkgs := make(map[string]bool)
-	for _, fd := range result.Funcs {
-		if fd.Pkg != nil {
-			for _, file := range fd.Pkg.Files {
-				for _, imp := range file.Imports {
-					pkg := strings.Trim(imp.Path.Value, `"`)
-					if seenPkgs[pkg] {
-						continue
-					}
-					seenPkgs[pkg] = true
-					shortName := pkg
-					if parts := strings.Split(pkg, "/"); len(parts) > 0 {
-						shortName = parts[len(parts)-1]
-						if len(parts) > 1 && parts[len(parts)-2] == "encoding" && shortName != "json" {
-							shortName = parts[len(parts)-2] + "/" + shortName
-						}
-					}
-					if frac, ok := knownContributions[pkg]; ok {
-						sz := int64(float64(totalSize) * frac)
-						extras = append(extras, pkgSize{name: pkg, size: sz})
-						accounted += frac
-					} else if frac, ok := knownContributions[shortName]; ok {
-						sz := int64(float64(totalSize) * frac)
-						extras = append(extras, pkgSize{name: pkg, size: sz})
-						accounted += frac
-					}
-				}
-			}
+	fmt.Println()
+	fmt.Println("  Code size by package (measured from the binary's name section;")
+	fmt.Println("  the Go linker encodes '/' as '_' in these names):")
+	shown := 0
+	for _, ps := range br.Packages {
+		if shown >= sizeReportTopN {
+			break
+		}
+		fmt.Printf("    %-45s %10s  (%.1f%% of binary, %d funcs)\n",
+			ps.Package, formatSize(ps.Size), pctOf(ps.Size, br.TotalSize), ps.Funcs)
+		shown++
+	}
+	if rest := len(br.Packages) - shown; rest > 0 {
+		fmt.Printf("    %-45s %10s\n", fmt.Sprintf("... and %d more package(s)", rest), "")
+	}
+	if br.Unattributed > 0 {
+		fmt.Printf("    %-45s %10s  (%.1f%% of binary)\n", "unattributed (compiler-generated)",
+			formatSize(br.Unattributed), pctOf(br.Unattributed, br.TotalSize))
+	}
+	if nonCode := br.TotalSize - br.CodeSize; nonCode > 0 {
+		fmt.Printf("    %-45s %10s  (%.1f%% of binary)\n", "non-code sections (data, types, names)",
+			formatSize(nonCode), pctOf(nonCode, br.TotalSize))
+	}
+
+	// Recommendations derived from what was MEASURED, not from a table. A
+	// suggestion that quotes a saving has to quote the number this binary
+	// actually spends, or it is the same defect in a different sentence.
+	var recs []string
+	for _, ps := range br.Packages {
+		pct := pctOf(ps.Size, br.TotalSize)
+		if pct < 1.0 {
+			continue
+		}
+		switch ps.Package {
+		case "reflect":
+			recs = append(recs, fmt.Sprintf("reflect costs %s (%.1f%%) here -- it is usually pulled in by encoding/json; a hand-written marshaller removes both",
+				formatSize(ps.Size), pct))
+		case "net_http":
+			recs = append(recs, fmt.Sprintf("net/http costs %s (%.1f%%) here -- h.DurableFetch() reaches the host instead",
+				formatSize(ps.Size), pct))
+		case "fmt":
+			recs = append(recs, fmt.Sprintf("fmt costs %s (%.1f%%) here -- h.DurableLog() and strconv avoid it",
+				formatSize(ps.Size), pct))
+		case "database_sql":
+			recs = append(recs, fmt.Sprintf("database/sql costs %s (%.1f%%) here -- h.DurableCall() reaches the host instead",
+				formatSize(ps.Size), pct))
+		case "regexp":
+			recs = append(recs, fmt.Sprintf("regexp costs %s (%.1f%%) here -- strings.Contains/HasPrefix is often enough",
+				formatSize(ps.Size), pct))
 		}
 	}
-
-	// Print all known package sizes.
-	fmt.Println()
-	fmt.Println("  Estimated size breakdown by package:")
-	for _, ps := range pkgSizes {
-		pct := float64(ps.size) * 100 / float64(totalSize)
-		fmt.Printf("    %-25s %s  (%.1f%%)\n", ps.name, formatSize(ps.size), pct)
-	}
-	for _, ps := range extras {
-		pct := float64(ps.size) * 100 / float64(totalSize)
-		fmt.Printf("    %-25s %s  (%.1f%%)\n", ps.name, formatSize(ps.size), pct)
-	}
-
-	// Unaccounted portion.
-	unaccounted := float64(totalSize) * (1.0 - accounted)
-	if unaccounted > 0 {
-		pct := unaccounted * 100 / float64(totalSize)
-		fmt.Printf("    %-25s %s  (%.1f%%)\n", "other (stdlib + deps)", formatSize(int64(unaccounted)), pct)
-	}
-
-	// Recommendations.
-	fmt.Println()
-	fmt.Println("  Recommendations:")
-	if seenPkgs["reflect"] {
-		fmt.Println("    - Remove \"reflect\" import: reduces binary ~25%")
-	}
-	if seenPkgs["net/http"] {
-		fmt.Println("    - Replace \"net/http\" with h.DurableFetch(): reduces binary ~20%")
-	}
-	if seenPkgs["database/sql"] {
-		fmt.Println("    - Replace \"database/sql\" with h.DurableCall(): reduces binary ~10%")
-	}
-	if seenPkgs["regexp"] {
-		fmt.Println("    - Replace \"regexp\" with strings.Contains/strings.HasPrefix: reduces binary ~4%")
-	}
-	if seenPkgs["fmt"] {
-		fmt.Println("    - Replace fmt.Printf/fmt.Println with h.DurableLog(): removes fmt binary overhead")
+	if len(recs) > 0 {
+		fmt.Println()
+		fmt.Println("  Recommendations:")
+		for _, r := range recs {
+			fmt.Printf("    - %s\n", r)
+		}
 	}
 	fmt.Println()
+	_ = usage
+	_ = result
+}
+
+// sizeReportTopN bounds the package list. A build pulls in well over a hundred
+// packages and the tail is all sub-0.1% noise.
+const sizeReportTopN = 15
+
+func pctOf(part, whole int64) float64 {
+	if whole == 0 {
+		return 0
+	}
+	return float64(part) * 100 / float64(whole)
 }
 
 func runVet(pattern string, jsonOut bool, ciOut bool) int {
