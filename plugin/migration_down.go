@@ -50,7 +50,23 @@ type DownResult struct {
 // Every reversal runs in its own transaction, with the tracking row deleted in
 // the same one: a Down that succeeds and a tracking row that survives would
 // make the migration un-re-appliable, and the reverse would make it run twice.
-func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target *LoadedPlugin, others []*LoadedPlugin) (*DownResult, error) {
+// ON A PINNED SESSION, exactly as RunMigrations runs. cleat#1307/#1362.
+//
+// The first version used db.QueryRowContext and db.BeginTx directly, on
+// whatever pool connection came back. That was wrong in a way local runs could
+// not show: RunMigrations does its work on a session with
+// `SET search_path = <schema>, pg_temp`, so plugin_migrations and every plugin
+// table live in the CONFIGURED schema -- while a pool connection resolves
+// `"$user", public`. Locally the role is postgres with no schema of that name,
+// so the two coincide. In CI the role is `cleat` against a database with a
+// `cleat` schema, so this read a different plugin_migrations, found nothing
+// applied, and returned "nothing to do" -- which is why all three tests failed
+// with the reversal silently doing nothing rather than with an error.
+//
+// Using the same helper rather than repeating the pin also inherits the
+// advisory lock, so a reversal cannot interleave with another worker applying
+// migrations.
+func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target *LoadedPlugin, others []*LoadedPlugin, opts ...MigrationOption) (*DownResult, error) {
 	if db == nil {
 		return nil, fmt.Errorf("plugin: RunDownMigrations needs a database")
 	}
@@ -58,6 +74,27 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 		return nil, fmt.Errorf("plugin: RunDownMigrations needs a plugin")
 	}
 	name := target.Plugin.Info().Name
+
+	var cfg migrationOptions
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	// Defaulted and validated exactly as RunMigrations does. Passing an empty
+	// schema through makes pluginMigrationSession emit
+	// `CREATE SCHEMA IF NOT EXISTS ` and fail with a syntax error at column 29
+	// -- which is how this omission announced itself.
+	if cfg.schema == "" {
+		cfg.schema = "public"
+	}
+	if !plainIdentifier.MatchString(cfg.schema) {
+		return nil, fmt.Errorf(
+			"plugin: schema %q is not a plain identifier", cfg.schema)
+	}
+	session, release, err := pluginMigrationSession(ctx, db, dialect, cfg.schema)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	// HasMigrations, the same assertion RunMigrations makes. A plugin without
 	// it declares no schema, so there is nothing to reverse and that is not an
@@ -82,7 +119,7 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 	var applied []Migration
 	for _, m := range migs {
 		var exists bool
-		if err := db.QueryRowContext(ctx, checkPluginMigrationSQL(dialect), name, m.Version).Scan(&exists); err != nil {
+		if err := session.QueryRowContext(ctx, checkPluginMigrationSQL(dialect), name, m.Version).Scan(&exists); err != nil {
 			return nil, fmt.Errorf("plugin %s: check migration %d: %w", name, m.Version, err)
 		}
 		if exists {
@@ -164,27 +201,23 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 		// Untrack a no-DDL migration without executing anything: there is no
 		// Down to run, and leaving the row would make it un-re-appliable.
 		if !declaresDDL(m) {
-			if _, err := db.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
+			if _, err := session.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
 				return res, fmt.Errorf("plugin %s: untracking %d: %w", name, m.Version, err)
 			}
 			res.Reversed = append(res.Reversed, m.Version)
 			continue
 		}
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return res, fmt.Errorf("plugin %s: begin reversal of %d: %w", name, m.Version, err)
-		}
-		if _, err := tx.ExecContext(ctx, m.Down); err != nil {
-			tx.Rollback()
+		// Down and its untracking go through the SESSION, not a fresh
+		// transaction from the pool: a pool transaction would resolve
+		// unqualified names against a different search_path and drop nothing,
+		// which is the bug this whole function had. RunMigrations applies each
+		// migration on the session for the same reason.
+		if _, err := session.ExecContext(ctx, m.Down); err != nil {
 			return res, fmt.Errorf("plugin %s: reversing %d: %w\n\nVersions already reversed: %v",
 				name, m.Version, err, res.Reversed)
 		}
-		if _, err := tx.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
-			tx.Rollback()
+		if _, err := session.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
 			return res, fmt.Errorf("plugin %s: untracking %d: %w", name, m.Version, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return res, fmt.Errorf("plugin %s: commit reversal of %d: %w", name, m.Version, err)
 		}
 		res.Reversed = append(res.Reversed, m.Version)
 		res.TenantScopedTables = append(res.TenantScopedTables, m.TenantScoped...)
