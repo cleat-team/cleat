@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -267,7 +268,33 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 	}
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, int64(1<<10)) // 1 KB
-		json.NewDecoder(r.Body).Decode(&req)
+		// The error was DISCARDED here until cleat#1337, and this is the only
+		// request-body decode in the worker that did not branch on it. The
+		// consequence was not that the operator's note went missing: it is that
+		// the note is written straight into workflow_instances.error_msg by
+		// TerminateWorkflow, unconditionally and in both of its branches, so an
+		// empty reason OVERWRITES the failure message recording why the run
+		// dead-lettered in the first place. Measured on one row: 270 bytes of
+		// host error before, 0 after, and a 200 in between.
+		//
+		// The body that did it was 25 bytes of truncated JSON, nowhere near the
+		// 1 KB cap above -- the cap is one way in, not the defect.
+		//
+		// io.EOF is carved out because an EMPTY body is a supported call: a
+		// terminate with no reason at all. TestHandleDeadLetterTerminate_NoBody
+		// has asserted 200 for a nil body since before this handler had any
+		// error handling, and http.NoBody decodes to exactly io.EOF. A
+		// truncated body is io.ErrUnexpectedEOF, which errors.Is(err, io.EOF)
+		// does NOT match -- verified, because the whole fix turns on those two
+		// being distinguishable.
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			// 400 rather than 413 for the oversized case, deliberately. Whether
+			// an oversized body should be a 413 here is cleat#1338's decision
+			// and it covers seven other sites with this exact shape; answering
+			// it for one endpoint would make that decision twice.
+			s.writeError(w, 400, "invalid JSON: "+err.Error())
+			return
+		}
 	}
 	if err := st.TerminateWorkflow(r.Context(), id, req.Reason); err != nil {
 		// 3.92: the store now reports a terminate that matched nothing rather
