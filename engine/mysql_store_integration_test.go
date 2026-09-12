@@ -1015,7 +1015,7 @@ func TestMySQLIntegration_ReapStaleInstances(t *testing.T) {
 
 	// Reap with a very short timeout -- should reclaim our workflow since no
 	// heartbeat was sent after claim.
-	reaped, err := s.ReapStaleInstances(ctx, 1*time.Nanosecond)
+	reaped, err := s.ReapStaleInstances(ctx, 1*time.Nanosecond, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}

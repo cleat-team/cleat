@@ -81,7 +81,7 @@ func TestARunRecordsWhenAWorkerFirstBeganExecutingIt(t *testing.T) {
 			// The row returns to 'ready' and is claimed again, so the claim's
 			// UPDATE runs a second time against a row that already has a
 			// started_at.
-			if _, err := store.ReapStaleInstances(ctx, -1*time.Second); err != nil {
+			if _, err := store.ReapStaleInstances(ctx, -1*time.Second, 0); err != nil {
 				t.Fatalf("ReapStaleInstances: %v", err)
 			}
 			claimByID(t, ctx, store, "worker-2", id)

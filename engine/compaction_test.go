@@ -502,7 +502,7 @@ func (m *mockCompactStore) StartChildWorkflowAtomic(ctx context.Context, childID
 func (m *mockCompactStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	return ChildOutcome{}, nil
 }
-func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (m *mockCompactStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {

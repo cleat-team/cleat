@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -1075,7 +1076,19 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 // If defVersion > 0, that version is used explicitly; otherwise the latest
 // non-deprecated version is used (SELECT MAX(version)).
 
-func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+// reapLimitArg turns the interface's "limit <= 0 is unbounded" into a value a
+// LIMIT clause accepts on every dialect. math.MaxInt32 rather than NULL: NULL
+// means unbounded to PostgreSQL's LIMIT and means "no rows" to MySQL's, and a
+// sweep that silently reclaimed nothing is the failure this whole bound exists
+// to make visible.
+func reapLimitArg(limit int) int {
+	if limit <= 0 {
+		return math.MaxInt32
+	}
+	return limit
+}
+
+func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: begin: %w", err)
@@ -1089,15 +1102,25 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	// keeps the status honest: a workflow whose terminal outcome is already
 	// decided is not runnable work, and reporting it as 'ready' would undo
 	// exactly the distinction D6 created the status to make.
+	//
+	// The inner SELECT is what bounds the sweep -- see the interface doc for
+	// why it is bounded at all. ORDER BY heartbeat_at reclaims the
+	// longest-stale first, so a bound that binds delays the freshest rather
+	// than picking arbitrarily.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
 		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
-		WHERE status = 'running'
-		  AND heartbeat_at < now() - $1::interval
-	`, fmt.Sprintf("%d seconds", int(timeout.Seconds())))
+		WHERE id IN (
+		    SELECT id FROM workflow_instances
+		    WHERE status = 'running'
+		      AND heartbeat_at < now() - $1::interval
+		    ORDER BY heartbeat_at
+		    LIMIT $2
+		)
+	`, fmt.Sprintf("%d seconds", int(timeout.Seconds())), reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}

@@ -1111,21 +1111,32 @@ func (s *MySQLStore) RetryWorkflow(ctx context.Context, workflowID string) error
 // ReapStaleInstances reclaims workflow instances that have been running
 // but whose heartbeat has not been updated within the given timeout.
 // Returns the number of instances reclaimed.
-func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	// See PostgresStore.ReapStaleInstances: a workflow reaped mid-defer-phase
 	// goes back to 'terminating', because its terminal outcome is already
 	// decided and calling it 'ready' would undo the distinction D6 created the
 	// status to make.
+	// The derived table is not decoration: MySQL rejects a LIMIT inside an
+	// IN subquery ("This version of MySQL doesn't yet support 'LIMIT & IN/ALL/
+	// ANY/SOME subquery'"), and wrapping it in SELECT ... FROM (...) t is the
+	// documented way round. See the interface doc for why the sweep is bounded.
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
 		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
-		WHERE status = 'running'
-		  AND heartbeat_at < NOW(6) - INTERVAL ? SECOND
-		  AND tenant_id = ?
-	`, int(timeout.Seconds()), s.tenantID)
+		WHERE id IN (
+		    SELECT id FROM (
+		        SELECT id FROM workflow_instances
+		        WHERE status = 'running'
+		          AND heartbeat_at < NOW(6) - INTERVAL ? SECOND
+		          AND tenant_id = ?
+		        ORDER BY heartbeat_at
+		        LIMIT ?
+		    ) t
+		)
+	`, int(timeout.Seconds()), s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}

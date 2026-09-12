@@ -102,6 +102,43 @@ configured.
 
 ---
 
+### --max-reclaim-per-tick
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `200` | Maximum stale instances the reaper reclaims per tick (`0` = unbounded) |
+
+The reaper reclaims any instance whose heartbeat predates
+`max(2 × --heartbeat-interval, 10s)`. **Any stall that outlasts that window ages
+every running instance past it at once**, because they all heartbeat through the
+same table — a migration holding `ACCESS EXCLUSIVE` at worker boot, a database
+failover, a paused volume. Without a bound, the sweep after the stall reclaims
+the entire running set in one statement and every in-flight workflow replays
+simultaneously, against a database that has just finished whatever stalled it.
+
+No data is lost — fencing guarantees that — but it is a self-inflicted
+thundering herd at the moment the database can least absorb one. See
+[cleat#1320](https://github.com/cleat-team/cleat/issues/1320).
+
+The bound changes the **rate** of recovery, never whether it happens: the sweep
+is ordered by heartbeat age, so the longest-stale are reclaimed first and the
+rest follow on later ticks. At the default `--concurrency` of 10, `200` is
+twenty workers' worth per tick and the reaper ticks at most every 10s, so an
+ordinary failure — one worker, or several — is reclaimed in a single tick and
+never reaches this limit.
+
+When it does bind, the worker logs at WARN:
+
+    Reaper: hit the per-tick reclaim limit; more instances remain stale
+      count=200 limit=200
+
+That line is the only place a whole-set stall is visible: a bounded sweep and a
+sweep that happened to find exactly that many look identical in the count alone.
+
+`0` disables the bound and restores the previous behaviour.
+
+---
+
 ### --task-queue
 
 | Type | Default | Description |

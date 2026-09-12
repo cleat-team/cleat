@@ -280,7 +280,7 @@ func TestPostgresStore_ReapStaleInstances(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	n, err := store.ReapStaleInstances(testCtx, 30*time.Second)
+	n, err := store.ReapStaleInstances(testCtx, 30*time.Second, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}

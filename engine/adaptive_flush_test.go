@@ -566,7 +566,7 @@ func TestPartitionFencedBatch_HeldAndLost(t *testing.T) {
 	}
 	staleGeneration := staleWF.Generation
 
-	reaped, err := store.ReapStaleInstances(ctx, -1*time.Second)
+	reaped, err := store.ReapStaleInstances(ctx, -1*time.Second, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}
@@ -622,7 +622,7 @@ func TestFlushAndNotify_PartialFence(t *testing.T) {
 	}
 	staleGeneration := staleWF.Generation
 
-	reaped, err := store.ReapStaleInstances(ctx, -1*time.Second)
+	reaped, err := store.ReapStaleInstances(ctx, -1*time.Second, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}

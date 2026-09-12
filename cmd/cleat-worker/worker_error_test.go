@@ -209,7 +209,7 @@ func TestReaperLoop_ConnectionErrorNoPanic(t *testing.T) {
 
 	// Verify the store contract directly (the 30s ticker makes
 	// a full loop test impractical).
-	n, err := ms.ReapStaleInstances(context.Background(), 30*time.Second)
+	n, err := ms.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if err == nil {
 		t.Error("expected error from mock, got nil")
 	}
@@ -227,7 +227,7 @@ func TestReaperLoop_NonConnectionErrorNoPanic(t *testing.T) {
 		return 0, errors.New("reap failed: constraint violation")
 	}
 
-	n, err := ms.ReapStaleInstances(context.Background(), 30*time.Second)
+	n, err := ms.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if err == nil {
 		t.Error("expected error from mock, got nil")
 	}
@@ -242,7 +242,7 @@ func TestReaperLoop_ReturnsCount(t *testing.T) {
 		return 5, nil
 	}
 
-	n, err := ms.ReapStaleInstances(context.Background(), 30*time.Second)
+	n, err := ms.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

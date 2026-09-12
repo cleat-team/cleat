@@ -742,7 +742,7 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 
 			// Reap stale instances from store A.
-			reaped, err := storeA.ReapStaleInstances(ctx, 1*time.Nanosecond)
+			reaped, err := storeA.ReapStaleInstances(ctx, 1*time.Nanosecond, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances on store A: %v", err)
 			}
@@ -776,7 +776,7 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 			}
 
 			// Verify storeB's own reaper also works (own-tenant reaping).
-			reapedB, err := storeB.ReapStaleInstances(ctx, 1*time.Nanosecond)
+			reapedB, err := storeB.ReapStaleInstances(ctx, 1*time.Nanosecond, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances on store B: %v", err)
 			}

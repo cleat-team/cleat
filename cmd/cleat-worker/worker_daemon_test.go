@@ -302,7 +302,7 @@ func (m *mockStore) GetChildResult(ctx context.Context, runID string) (engine.Ch
 	return engine.ChildOutcome{}, nil
 }
 
-func (m *mockStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	if m.reapStaleInstancesFn != nil {
 		return m.reapStaleInstancesFn(ctx, timeout)
 	}
@@ -1217,7 +1217,7 @@ func TestReaperLoop_CallsReap(t *testing.T) {
 	//
 	// Instead we test the behaviour by directly calling the _inner_ portion:
 	// we verify the store method signature and default timeout.
-	_, _ = w.store.ReapStaleInstances(context.Background(), 30*time.Second)
+	_, _ = w.store.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if !reapCalled {
 		t.Fatal("store.ReapStaleInstances did not reach the mock")
 	}
@@ -1252,7 +1252,7 @@ func TestReaperLoop_HandlesResults(t *testing.T) {
 
 	// Since we can't easily wait for the 30s ticker, we verify the
 	// store.ReapStaleInstances contract directly.
-	reapedCount, err := ms.ReapStaleInstances(context.Background(), 30*time.Second)
+	reapedCount, err := ms.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1268,7 +1268,7 @@ func TestReaperLoop_DBErrorNoCrash(t *testing.T) {
 	}
 
 	// Verify the store method handles errors gracefully (no panic).
-	n, err := ms.ReapStaleInstances(context.Background(), 30*time.Second)
+	n, err := ms.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if err == nil {
 		t.Error("expected error from mock, got nil")
 	}
@@ -1291,7 +1291,7 @@ func TestReaperLoop_DefaultInterval(t *testing.T) {
 	}
 
 	// Call the method directly to verify the signature.
-	_, _ = ms.ReapStaleInstances(context.Background(), 30*time.Second)
+	_, _ = ms.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if capturedTimeout != 30*time.Second {
 		t.Errorf("expected timeout 30s, got %v", capturedTimeout)
 	}

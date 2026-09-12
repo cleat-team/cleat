@@ -249,7 +249,7 @@ func (m *mockStore) GetChildResult(ctx context.Context, runID string) (engine.Ch
 	return engine.ChildOutcome{}, nil
 }
 
-func (m *mockStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	if m.reapStaleInstancesFn != nil {
 		return m.reapStaleInstancesFn(ctx, timeout)
 	}

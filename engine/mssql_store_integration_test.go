@@ -1997,7 +1997,7 @@ func TestMSSQLIntegration_ReapStaleInstances(t *testing.T) {
 	}
 
 	// Reap with 1-hour timeout should catch the stale one.
-	reaped, err := store.ReapStaleInstances(ctx, 1*time.Hour)
+	reaped, err := store.ReapStaleInstances(ctx, 1*time.Hour, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}

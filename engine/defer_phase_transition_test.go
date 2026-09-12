@@ -500,7 +500,7 @@ func TestReapingADeferPhaseReturnsItToTerminating(t *testing.T) {
 
 			backdateHeartbeat(t, store, wfID, 600)
 			backdateHeartbeat(t, store, ordinaryID, 600)
-			if _, err := store.ReapStaleInstances(ctx, 60*time.Second); err != nil {
+			if _, err := store.ReapStaleInstances(ctx, 60*time.Second, 0); err != nil {
 				t.Fatalf("ReapStaleInstances: %v", err)
 			}
 

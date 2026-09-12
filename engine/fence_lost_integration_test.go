@@ -118,7 +118,7 @@ func buildZombieWriterScenario(t *testing.T, ctx context.Context, store Workflow
 	// `ReapStaleInstances reclaimed 0 instances`. Staleness is not what this
 	// test is about -- it needs the child reclaimed, not reclaimed for a
 	// particular reason -- so the timing is removed rather than widened.
-	reaped, err := store.ReapStaleInstances(ctx, -1*time.Second)
+	reaped, err := store.ReapStaleInstances(ctx, -1*time.Second, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}

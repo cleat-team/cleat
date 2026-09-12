@@ -653,13 +653,17 @@ func (s *ShardedStore) GetChildResult(ctx context.Context, runID string) (ChildO
 }
 
 // ReapStaleInstances runs on every shard and returns the total reclaimed count.
-func (s *ShardedStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (s *ShardedStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	total := 0
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
 	for _, shard := range shards {
-		n, err := shard.Store.ReapStaleInstances(ctx, timeout)
+		// PER SHARD, not divided across them: each shard is its own database
+		// with its own stall, and a shard that is fine should not have its
+		// recovery slowed because a sibling is not. The worst case is
+		// limit*len(shards) in one tick, which is the bound this is for.
+		n, err := shard.Store.ReapStaleInstances(ctx, timeout, limit)
 		if err != nil {
 			return total, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
 		}

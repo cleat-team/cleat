@@ -155,7 +155,7 @@ func TestFaultReapStaleInstances(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Reap with a short timeout.
-	reaped, err := store.ReapStaleInstances(ctx, 10*time.Second)
+	reaped, err := store.ReapStaleInstances(ctx, 10*time.Second, 0)
 	if err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
