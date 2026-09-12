@@ -1357,12 +1357,37 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 }
 
 // DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
-// whose completed_at is older than the cutoff. Child rows (event_history, signals,
-// promises, concurrency_keys, update_requests) are automatically deleted via
-// ON DELETE CASCADE.
+// whose completed_at is older than the cutoff. The five FK'd child rows
+// (event_history, signals, promises, concurrency_keys, update_requests) are
+// automatically deleted via ON DELETE CASCADE. idempotency_keys is not one of
+// them and is deleted explicitly below -- see cleat#1324.
 func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
+		// idempotency_keys has no FK to workflow_instances on any dialect, so
+		// nothing removes it when the instance goes. cleat#1255 fixed this in
+		// DeleteCompletedWorkflows below and left this method -- the sibling
+		// with the same shape -- behind (cleat#1324). The doc comment above was
+		// accurate about the five tables it named; idempotency_keys is simply
+		// outside the set it listed.
+		//
+		// The dead-letter case is the worse of the two: a dead-lettered run is
+		// precisely the one a caller has reason to retry, and a surviving key
+		// answers that retry `already_started` with a workflow_id that 404s.
+		//
+		// Deleted FIRST and by join, matching DeleteCompletedWorkflows: once the
+		// instance row is gone there is nothing left to select the key by.
+		if _, err := s.db.ExecContext(ctx, `
+			DELETE k FROM idempotency_keys k
+			INNER JOIN workflow_instances w ON w.id = k.workflow_id
+			WHERE w.status = 'dead_lettered'
+			  AND w.completed_at IS NOT NULL
+			  AND w.completed_at < ?
+			  AND w.tenant_id = ?
+			  AND k.tenant_id = ?
+		`, olderThan, s.tenantID, s.tenantID); err != nil {
+			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: delete idempotency_keys: %w", err)
+		}
 		result, err := s.db.ExecContext(ctx, `
 			DELETE w FROM workflow_instances w
 			INNER JOIN (
