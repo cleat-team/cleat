@@ -28,8 +28,20 @@ import (
 //go:embed web/dist
 var webDist embed.FS
 
-// signalMaxBodySize is the maximum request body size for signal and update
-// endpoints (64 KB). General endpoints use the configurable --max-body-size.
+// signalMaxBodySize is the maximum request body size for the signal, cancel
+// and update endpoints (64 KB). General endpoints use the configurable
+// --max-body-size.
+//
+// CANCEL was missing from this list until cleat#1332, and from the operator
+// documentation too, while being the site most likely to be hit in practice:
+// its field is a free-text `reason`. Three call sites, all in this file --
+// handleSignal, handleCancel, handleWorkflowUpdate.
+//
+// This is a compile-time const and --max-body-size is a flag, so raising the
+// flag does NOT move this. That is a real asymmetry rather than an oversight
+// to paper over, which is why bodyTooLargeFixed below says so in the response:
+// an operator who raised the flag and still gets a 413 here can otherwise only
+// discover it by reading this line.
 const signalMaxBodySize = 65536
 
 // globalWorker is set during worker startup for access from HTTP handlers
@@ -187,6 +199,32 @@ func (s *apiServer) writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (s *apiServer) writeError(w http.ResponseWriter, status int, msg string) {
 	s.writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// bodyTooLargeConfigured and bodyTooLargeFixed write the 413 for an oversized
+// request body, naming the limit that was exceeded and which knob moves it.
+//
+// Both said only "request body too large" until cleat#1332. TWO different
+// ceilings are in play on this server -- the configurable --max-body-size and
+// the fixed signalMaxBodySize -- and a caller could not tell from the response
+// which one it had hit, what its value was, or whether anything they control
+// would change it. The worst case is not the missing number: it is an operator
+// who raises --max-body-size, still gets 413 from /signal, and has no reason
+// to suspect that endpoint does not use the flag.
+//
+// Two functions rather than one taking a description, so the choice of limit
+// and the sentence describing it cannot drift apart at a call site. Getting
+// that pairing wrong would be worse than saying nothing, because a caller who
+// learns the body names the knob will believe it.
+func (s *apiServer) bodyTooLargeConfigured(w http.ResponseWriter) {
+	s.writeError(w, 413, fmt.Sprintf(
+		"request body too large: the limit is %d bytes, set by --max-body-size", s.maxBodySize))
+}
+
+func (s *apiServer) bodyTooLargeFixed(w http.ResponseWriter) {
+	s.writeError(w, 413, fmt.Sprintf(
+		"request body too large: the limit is %d bytes, fixed for the signal, cancel and "+
+			"update endpoints and not changed by --max-body-size", int64(signalMaxBodySize)))
 }
 
 func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -559,7 +597,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			var maxErr *http.MaxBytesError
 			if errors.As(err, &maxErr) {
-				s.writeError(w, 413, "request body too large")
+				s.bodyTooLargeConfigured(w)
 				return
 			}
 			s.writeError(w, 400, "invalid JSON: "+err.Error())
@@ -957,7 +995,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			var maxErr *http.MaxBytesError
 			if errors.As(err, &maxErr) {
-				s.writeError(w, 413, "request body too large")
+				s.bodyTooLargeFixed(w)
 				return
 			}
 			s.writeError(w, 400, "invalid JSON: "+err.Error())
@@ -1049,7 +1087,7 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			var maxErr *http.MaxBytesError
 			if errors.As(err, &maxErr) {
-				s.writeError(w, 413, "request body too large")
+				s.bodyTooLargeFixed(w)
 				return
 			}
 			s.writeError(w, 400, "invalid JSON: "+err.Error())
@@ -1649,7 +1687,7 @@ func (s *apiServer) handleSetAllowedSignals(w http.ResponseWriter, r *http.Reque
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			s.writeError(w, 413, "request body too large")
+			s.bodyTooLargeConfigured(w)
 			return
 		}
 		s.writeError(w, 400, "invalid JSON body")
@@ -1707,7 +1745,7 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			s.writeError(w, 413, "request body too large")
+			s.bodyTooLargeConfigured(w)
 			return
 		}
 		s.writeError(w, 400, "invalid JSON: "+err.Error())
@@ -1744,7 +1782,7 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			s.writeError(w, 413, "request body too large")
+			s.bodyTooLargeConfigured(w)
 			return
 		}
 		s.writeError(w, 400, "invalid JSON: "+err.Error())
@@ -1849,7 +1887,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 		if rErr != nil {
 			var maxErr *http.MaxBytesError
 			if errors.As(rErr, &maxErr) {
-				s.writeError(w, 413, "request body too large")
+				s.bodyTooLargeFixed(w)
 				return
 			}
 			s.writeError(w, 400, "failed to read request body")
@@ -1993,7 +2031,7 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			s.writeError(w, 413, "request body too large")
+			s.bodyTooLargeConfigured(w)
 			return
 		}
 		s.writeError(w, 400, "invalid JSON: "+err.Error())

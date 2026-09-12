@@ -362,7 +362,23 @@ the compacted state.
 |------|---------|-------------|
 | int64 | `1048576` (1 MiB) | Maximum request body size in bytes |
 
-General endpoints use this limit. Signal endpoints have a fixed 64 KB limit.
+General endpoints use this limit.
+
+**Three endpoints do not, and this flag does not move them.** `POST
+/api/workflows/:id/signal`, `POST /api/workflows/:id/cancel` and `POST
+/api/workflows/:id/update/:name` are capped at a fixed **64 KB**
+(`signalMaxBodySize` in `cmd/cleat-worker/server.go`, a compile-time constant).
+Raising `--max-body-size` has no effect on any of the three.
+
+This line named only "signal endpoints" until cleat#1332, so cancel was
+undocumented — and cancel is the one most likely to be reached in practice,
+because its field is a free-text `reason`.
+
+The `413` response names the limit it hit and says which of the two it is, so a
+request that fails does not need this page to explain itself:
+
+    {"error":"request body too large: the limit is 1048576 bytes, set by --max-body-size"}
+    {"error":"request body too large: the limit is 65536 bytes, fixed for the signal, cancel and update endpoints and not changed by --max-body-size"}
 
 ---
 

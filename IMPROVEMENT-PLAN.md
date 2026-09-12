@@ -11935,3 +11935,79 @@ Three comments described the old world and would have misled the next reader:
 - `tests/plugin-harness/sdk_import_names_test.go` opened the Python baseline with a **count** of its
   entries; three of them were bound within days and the sentence has been wrong ever since. Replaced
   with a pointer to the list, per CLAUDE.md's rule about censuses of growing populations.
+
+---
+
+### 3.432 A `413` that named neither the limit nor which knob moves it — ✅ fixed
+
+**cleat#1332.** This server enforces **two** body ceilings — the configurable `--max-body-size` and
+the compile-time `signalMaxBodySize` — and all eight `413` sites in `cmd/cleat-worker/server.go`
+said only `"request body too large"`. A caller could not tell which one had refused them, what its
+value was, or whether anything they control would change it.
+
+**The expensive case is not the missing number.** It is an operator who raises `--max-body-size`,
+still gets `413` from `/signal`, and has nothing in the response to suggest that endpoint does not
+use the flag. `signalMaxBodySize` is a `const`; the flag does not move it.
+
+#### The doc named two of the three endpoints
+
+`docs/reference/worker-config.md` read *"Signal endpoints have a fixed 64 KB limit."* The constant
+guards **three** handlers — `handleSignal`, `handleCancel`, `handleWorkflowUpdate` — and the
+constant's own comment made the same omission, saying "signal and update endpoints". Cancel was
+missing from both while being the one most likely to be reached in practice: its field is a
+free-text `reason`.
+
+#### Eight sites, not the three the issue described
+
+The issue named three. There are eight, and five guard the *other* limit:
+
+| limit | sites |
+|---|---|
+| `signalMaxBodySize` (64 KB, const) | `handleSignal`, `handleCancel`, `handleWorkflowUpdate` |
+| `s.maxBodySize` (configurable) | `handleStartWorkflow`, `handleSetAllowedSignals`, `handleResolvePromise`, `handleRejectPromise`, `handleCreateSchedule` |
+
+Fixing only three would leave the other five silent while their neighbours name a limit, which is
+worse than uniform silence — a caller who learns the body carries the limit would reasonably read
+its absence as meaning something.
+
+#### Two helpers rather than one with a description parameter
+
+`bodyTooLargeConfigured` and `bodyTooLargeFixed`. One function taking a sentence would let the
+choice of limit and the sentence describing it drift apart at a call site, and **naming the wrong
+knob is worse than naming none**: a caller who learns the response identifies the knob will act on
+it.
+
+#### The test asserts the PAIRING, which is what makes it falsifiable
+
+Checking that *a* limit appears passes against a handler naming the wrong one. So each case pins
+the value **and** requires the other limit's knob to be absent. Falsified three ways, each red for
+its own reason:
+
+| mutation | what failed |
+|---|---|
+| swap the helper at the `cancel` site | all three assertions — wrong value, missing knob, *and* "contains the OTHER limit's knob" |
+| revert one site to the bare string | the completeness guard, at both its bare-string count and its per-helper floor |
+| shrink the general limit to 1 byte | the **control** — "an 53-byte body was refused with 413, so the oversized assertion below would prove nothing" |
+
+The control runs first in every case. Without it, "an oversized body is 413" passes equally against
+a handler that answers 413 to everything, which is exactly what a misconfigured `MaxBytesReader`
+produces.
+
+#### What this deliberately does not decide
+
+Whether `signalMaxBodySize` should track `--max-body-size` is a product call. The doc fix makes the
+asymmetry **visible**; a code change would paper over the question instead of putting it to whoever
+owns it.
+
+#### Not fixed here, and filed separately
+
+**Seven `MaxBytesReader` sites have no `MaxBytesError` branch at all** — three in `server.go`
+(`handleSetRoutingRule`, `handleSetWorkflowTag`, `handleCreateDefinition`) and four in
+`api_admin.go`. An oversized body there is a **400** whose text begins `"invalid JSON"`, for the
+same condition that is a 413 everywhere else. `handleCreateDefinition` is the WASM upload endpoint,
+where an oversized body is the most legitimate 413 in the API, and its ceiling is a *fourth*
+distinct value — `10*1024*1024` written inline. That is a status-code change on live endpoints and
+deserves its own decision.
+
+The completeness guard here is written to require a limit in every site that **does** return 413,
+not to require a 413 at every `MaxBytesReader` — so it does not fail for the reason it is not about.
