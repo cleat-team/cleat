@@ -12083,3 +12083,91 @@ Whether an oversized body should be a `413` here is [§3.432](#3432)'s neighbour
 covers **seven** other sites with this exact shape. Answering it for one endpoint would make that
 decision twice, and the second time by accident. If #1338 lands as 413, this site gets it with the
 others.
+
+---
+
+### 3.434 A generic function was classified as a workflow entry point, and one of them shipped — ✅ fixed
+
+**cleat#1313.** `IsEntryPoint` was purely structural: exported, not a method, first parameter
+`cleat.HostCalls`. A **generic** function matching that shape was classified as an entry point, so
+`testdata/generics` — the repository's own generics fixture — reported **3 entry points where it
+intends 1** and did not survive `cleat build`.
+
+#### Two functions, caught two different ways, and only one was caught at all
+
+| function | signature | what happened |
+|---|---|---|
+| `Process[T]` | `(h, item T) (T, error)` | `verifyEntryPointResults` rejected it — the **right refusal for the wrong reason**: the problem is that it is not an entry point, not that `T` is not a `string` |
+| `GenericLeaf[T]` | `(h, items []T) error` | returns `error` alone, so the result check cannot see it — classified as an entry point and **exported**, silently |
+
+The second is why the fix belongs in `IsEntryPoint` rather than in the result verifier. An entry
+point is exported with a concrete signature — `wasm/exports.go` declares `var __r string` and emits
+`return []byte(__r)` — so there is nothing to instantiate `T` with.
+
+Both fixture functions say what they are in their own doc comments: *"Process is a generic workflow
+helper … in the durable closure (called by EntryPoint)"* and *"GenericLeaf demonstrates a generic
+durable leaf"*.
+
+After: **1 entry point**, threading OK, `entry_point.wasm` (3.1 MB) written.
+
+#### Why five tests referencing the fixture all passed
+
+None ran the stage that fails. `wasm/generics_build_test.go` calls `BuildOutputs` directly, which
+skips `VerifyThreading`; the other four stop earlier. And no CI job runs `cleat build` on a **Go**
+example — `git grep 'cleat build' .github/workflows/` finds only `--target rust` and
+`--target python`.
+
+**The gap was already documented at the site.** `internal/closure/threading.go` says *"nothing in CI
+runs `cleat build` on a Go example"*, and saying so changed nothing for weeks. A comment cannot go
+red. That is the argument for the guard below over a better comment.
+
+#### The guard is a table of expected outcomes, not "they must all build"
+
+`testdata/errors` exists to be **rejected** — its package comment says it *"contains deliberately
+invalid workflow code to test the transformer's validation rules"*. A blanket must-build rule could
+only accommodate it by skipping it, which is how a fixture stops being checked.
+
+Kept as an entry with an expected *reason*, it becomes the guard's **known-positive**: the one case
+proving the test can report a failure at all. A version asserting only success passes equally
+against a checker that has stopped checking — the defect this issue is about, one level up.
+
+The population is **discovered** from `testdata/` rather than listed twice, so a new fixture that is
+not in the table fails rather than being silently uncovered, and an entry naming a fixture that no
+longer exists fails too.
+
+#### The first draft of the guard was wrong, and a fixture caught it
+
+It modelled "does this build" as "`VerifyThreading` returned no errors", and `testdata/autothread`
+went red. `VerifyThreading` reports the **pre-transform** state deliberately, and `cmd/cleat` calls
+`dropAutoThreaded` before deciding — failing on those once made `cleat build` reject packages the
+next stage was designed to repair ([§3.229](#3229)). The predicate is the CLI's whole decision, not
+its first half.
+
+#### Falsification
+
+| mutation | what failed |
+|---|---|
+| revert the generics exclusion | both guards — `Process is a workflow entry point returning T` |
+| wrong expected reason on `errors` | *"rejected, but not for the expected reason"* |
+| drop `spin` from the table | *"testdata/spin holds Go files and is not in goFixtureExpectations"* |
+
+**The third mutation was a no-op on its first attempt** — a `sed` with hardcoded whitespace that
+`gofmt` had realigned, so the file was unchanged and the test passed. That reads exactly like a
+guard that does not work. Re-run with an assertion that the edit applied, it fails as intended. A
+mutation that does not apply is not a falsification, and it fails in the flattering direction.
+
+#### Two measurement errors worth recording, both caught by controls
+
+- `cleat build … | tail` reported **exit 0**; `$?` after a pipeline is the last command's. Redirected,
+  it is 1 for generics and 0 for basic.
+- A sweep over `testdata/*/` reported **21 of 21 failing**, because the loop omitted the `./` prefix
+  and every invocation died as a bad package pattern rather than a build failure. Only a
+  known-good control from ninety seconds earlier caught it.
+
+#### Out of scope
+
+Replacing signature-based detection with an explicit marker. The issue raises it for the quieter
+half — *any* helper sharing the shape becomes a deployable entry point, generic or not — and that is
+an API decision for whoever owns the authoring surface. Excluding generics is provably safe because
+a generic function cannot have a concrete `string` result; a marker changes how every workflow is
+written.
