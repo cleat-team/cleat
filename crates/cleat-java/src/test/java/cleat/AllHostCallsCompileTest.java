@@ -52,6 +52,7 @@ class AllHostCallsCompileTest {
         h.scheduleInvoke("svc", "op", "{}", 1L);
         h.scheduleInvokeMs("svc", "op", "{}", 1000L);
         h.runDetached("wf", "{}");
+        h.startDetached("wf", "{}");
 
         // ---- sleep, identity, logging ----
         h.cleatSleep(1L);

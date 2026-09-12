@@ -633,13 +633,39 @@ var adapterDefs = map[string]adapterDef{
 			{"name", "string"},
 			{"inputJSON", "string"},
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since cleat#1154. Without it the sentinel -- bit 31,
+		// which the host sets to refuse new work in a defer segment -- was read
+		// by the line below as errCode = 0x80000000, so a refused Go guest got
+		// "cleat_run_detached: error 2147483648" instead of ErrSuspend and could
+		// carry on. See stopSurfaces["runDetached"] for how the stale exemption
+		// that hid this survived two changes.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return fmt.Errorf("cleat_run_detached: error %d", errCode)`,
 			"}",
 			"return nil",
+		),
+	},
+	// StartDetached is RunDetached that hands back the run id (cleat#1154).
+	// Both decoders test the sentinel, because both calls reach the same
+	// stopBeforeNewWork in the shared runDetached body -- the entry above
+	// gained its check in the same change, having gone without one since #806.
+	"StartDetached": {
+		FieldName:  "StartDetached",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"name", "string"},
+			{"inputJSON", "string"},
 		},
+		ResultStmts: withSuspendCheck(
+			"runIDLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return "", fmt.Errorf("cleat_start_detached: %s", hostErrMessage(runIDBuf[:], runIDLen))`,
+			"}",
+			"return unsafe.String(&runIDBuf[0], int(runIDLen)), nil",
+		),
 	},
 	"SetQueryState": {
 		FieldName: "SetQueryState",

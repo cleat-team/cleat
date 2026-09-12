@@ -38,6 +38,7 @@ fn exercise_every_host_call(h: &HostCalls) {
     let _ = h.schedule_invoke("svc", "op", "{}", d);
     let _ = h.schedule_invoke_ms("svc", "op", "{}", 1000);
     let _ = h.run_detached("wf", "{}");
+    let _ = h.start_detached("wf", "{}");
 
     // ---- sleep, log, identity ----
     let _ = h.cleat_sleep(d);

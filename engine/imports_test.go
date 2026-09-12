@@ -139,6 +139,9 @@ func (h *stubHostHandler) ListState(_ context.Context, _ api.Module, _ string, _
 	return 0
 }
 func (h *stubHostHandler) RunDetached(_ context.Context, _ api.Module, _, _ string) int64 { return 0 }
+func (h *stubHostHandler) StartDetached(_ context.Context, _ api.Module, _, _ string, _, _ uint32) int64 {
+	return 0
+}
 func (h *stubHostHandler) Fetch(_ context.Context, _ api.Module, _, _, _, _ string, _, _ uint32) int64 {
 	return 0
 }

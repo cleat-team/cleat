@@ -163,21 +163,21 @@ workflow is over"; it means "this call must not happen".
 **The same bit, on every host call that can start fresh work.** It is not specific to
 `cleat_call`:
 
-**Eighteen host calls can return it, in six result layouts.** The last column is the one an SDK
+**Nineteen host calls can return it, in six result layouts.** The last column is the one an SDK
 acts on: it names the field bit 31 lands inside, which is the field a decoder misreads if it
 fills its fields before testing the sentinel.
 
 | host call | result layout | bit 31 lands in |
 |---|---|---|
 | `cleat_call`, `cleat_call_retry`, `cleat_call_heartbeat`, `plugin_call`, `plugin_call_streaming` | `responseLen` 40-63, `callErrorCode` 8-39, `errCode` 0-7 | `callErrorCode` |
-| `cleat_child_workflow`, `cleat_child_workflow_with_options`, `cleat_side_effect`, `cleat_fetch`, `cleat_schedule_cron` | upper field 32-63, `errCode` 0-31 | `errCode` (top bit) |
+| `cleat_child_workflow`, `cleat_child_workflow_with_options`, `cleat_side_effect`, `cleat_fetch`, `cleat_schedule_cron`, `cleat_start_detached` | upper field 32-63, `errCode` 0-31 | `errCode` (top bit) |
 | `cleat_await_signals` | `sigNameLen` 48-63, `payloadLen` 32-47, `timedOut` 16-31, `errCode` 0-15 | `timedOut` |
 | `cleat_send`, `cleat_schedule_invoke`, `cleat_signal_workflow`, `cleat_run_detached`, `cleat_complete_update` | `errCode` 0-31 | `errCode` (top bit) |
 | `cleat_poll_update` | `written` 32-63, `found` bit 8, `errCode` 0-7 | no field |
 | `cleat_acquire_lock` | `acquired` bit 8, `errCode` 0-7 | no field |
 
 Four of the six layouts put bit 31 inside a live field, so "check the sentinel first" is load
-bearing for sixteen of the eighteen calls, not just for `cleat_await_signals`.
+bearing for seventeen of the nineteen calls, not just for `cleat_await_signals`.
 
 The two `no field` rows are not exceptions to the rule. Bit 31 being unoccupied there is a
 property of today's layouts, not a guarantee to decode against — and both calls still return the
@@ -193,7 +193,7 @@ this table is a copy of it. The rows above were reconstructed this way on 2026-0
 table listed seven calls in four layouts and named two of them by a binding name no guest can
 import (see the changelog row for this date):
 
-    # every host call that can return the sentinel, by WASM import name -> 18
+    # every host call that can return the sentinel, by WASM import name -> 19
     python3 - <<'EOF'
     import re, glob
     bodies = {}
@@ -222,7 +222,12 @@ import (see the changelog row for this date):
     EOF
 
 `cleat_sleep` is the negative control and must not appear; `cleat_call_heartbeat` is the
-known-positive, and deleting the sentinel from `DurableCallWithHeartbeat` must drop it to 17.
+known-positive, and deleting the sentinel from `DurableCallWithHeartbeat` must drop it to 18.
+
+The transitive closure is what puts `cleat_start_detached` on the list (cleat#1154): its
+`StartDetached` reaches `callSuspendSentinel` only through the shared `runDetached` body, exactly
+as the two child-workflow calls reach it through `childWorkflowWithVersion`. A one-level scan
+misses all three.
 
 **Check the sentinel before reading any field, not after.** This is a hard ordering requirement,
 not a style preference. In the `cleat_await_signals` layout bit 31 falls inside the timed-out
@@ -807,6 +812,47 @@ Run a detached child workflow (fire-and-forget, no result expected).
 | Bits | Meaning |
 |---|---|
 | 0-31 | `errCode` — 0 = success |
+
+#### 2.24a `cleat_start_detached`
+
+`cleat_run_detached` that hands back the run id, so a caller has a handle for
+the work it started — status, result and cancellation all address a run by id,
+and without one a detached run is unaddressable from the guest that began it
+(cleat#1154).
+
+**Both calls exist and `cleat_run_detached` is unchanged.** A host call's arity
+is part of its import type, and an arity mismatch is a hard link error that
+stops a module instantiating at all — not a failure of the one call. Every
+workflow binary already deployed imports `cleat_run_detached` with four
+parameters, so widening it in place would stop all of them loading. See §3.55 in
+`IMPROVEMENT-PLAN.md`, which measured exactly that for `cleat_create_promise`.
+
+```
+(func (import "env" "cleat_start_detached")
+  (param i32 i32 i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `name_ptr` | `i32` | Child workflow definition name pointer |
+| `name_len` | `i32` | Child workflow name length |
+| `input_ptr` | `i32` | Input JSON pointer |
+| `input_len` | `i32` | Input JSON length |
+| `run_id_ptr` | `i32` | Output buffer for the run id |
+| `run_id_max_len` | `i32` | Output buffer capacity |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-31 | `errCode` — 0 = success |
+| 32-63 | `written` — bytes written to the run id buffer |
+
+**On replay the id comes from the recorded event, not from a fresh start.** Both
+calls record the same `run_detached` event and match on it, so a workflow whose
+history was written by `cleat_run_detached` replays correctly after being
+recompiled to call this one.
 
 ### Query and update handlers
 
@@ -1731,7 +1777,10 @@ every `*_max_len` parameter in this document.
 
 To add support for a new language, you need:
 
-1. **Host function declarations** — Declare the 50 `env` imports with correct WASM types.
+1. **Host function declarations** — Declare every `env` import with correct WASM types. The count
+   moves — 59 → 58 → 52 → 54 over three months, each value correct when written — so re-derive it
+   rather than quoting one: `grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sort -u | grep -c .`
+   Do not put `cleat_` in that pattern: three exports are unprefixed.
 2. **String helpers** — Read/write strings from linear memory at `(ptr, len)` pairs.
 3. **Bit-packing decode** — Extract result values from packed `i64` returns per the tables above.
 4. **Export wrapper** — A function with signature `(args_ptr, args_len, out_ptr, max_out_len) -> i64` that deserializes JSON args, calls the workflow, serializes the result, and encodes the packed return.
@@ -1745,6 +1794,7 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
+| — | 2026-09-11 | **Added `cleat_start_detached`** (§2.24a), which is `cleat_run_detached` with the run id written back — `engine/children.go` already computed it and discarded it, leaving a detached run unaddressable from the guest that started it (cleat#1154). **`cleat_run_detached` is unchanged and both stay registered**, because a host call's arity is part of its import type: widening the existing one is a hard link error that stops every already-deployed binary instantiating, measured for `cleat_create_promise` in IMPROVEMENT-PLAN §3.55. Same shape as `cleat_poll_update`/`cleat_complete_update` in #868. Documented count 52 → **54 exports total**. Both calls share one host body, so a history written by either replays against the other, and on replay the id comes from the recorded `run_detached` event rather than a fresh start. The stop-sentinel table in §2 goes 18 → **19**: `StartDetached` reaches `callSuspendSentinel` only through the shared body, so the transitive closure in that section's query is what finds it — a one-level scan would miss it exactly as it missed both child-workflow calls. Bound in Go, Rust (`start_detached`), Java (`startDetached`) and AssemblyScript (`startDetached`); **not Python**, because a string return cannot use the `-> u64` WIT shape `durable-run-detached` has and an out-pointer does not survive component dispatch, which writes into a host buffer — recorded in `sdkUnreachedBaseline`. |
 | — | 2026-09-07 | **Corrected the stop-sentinel table in §2, which was wrong in both directions.** It named `cleat_plugin_call` and `cleat_plugin_call_streaming` — neither is a WASM import name. The imports are `plugin_call` and `plugin_call_streaming`, unprefixed, as §2.49 and §2.50 have always said; the `cleat_`-prefixed forms are the *Rust* function names in `crates/cleat-sdk/src/host_calls.rs`, which carry `#[link_name = "plugin_call"]`. A binding written from that table alone fails to instantiate. This is the prefix assumption CLAUDE.md §Build warns about, reaching a document whose own headings had it right. And the table was incomplete: **18** host calls return the sentinel across **six** result layouts, not the 7 across 4 that were listed. The eleven missing were `cleat_call_heartbeat`, `cleat_send`, `cleat_schedule_invoke`, `cleat_run_detached`, `cleat_poll_update`, `cleat_complete_update`, `cleat_side_effect`, `cleat_fetch`, `cleat_acquire_lock`, `cleat_schedule_cron` and `cleat_signal_workflow` — and bit 31 falls inside a live field for all but two of the eighteen, so the "check the sentinel first" ordering requirement applied to sixteen calls while being stated for one. Six layouts independently matches `engine/memory.go`, which states the free window over "all six layouts that can start fresh work" with `packSleepResult` as the seventh. §2 now carries the query that regenerates the list, with a negative control (`cleat_sleep`) and a known-positive (deleting the sentinel from `DurableCallWithHeartbeat` must drop 18 to 17); the first draft of that query read one level of function body and returned **16**, silently missing both child-workflow calls, whose sentinel is reached only through `childWorkflowWithVersion`. Also retired the note claiming seven entries describe removed host calls — true when written, false since #767 and #582, and cited by a `grep -c` that counts retractions. |
 | — | 2026-09-05 | **Removed the durable-state family** — `cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`, `cleat_list_state` (was §2.28-§2.33) — together with the `cleat:host-calls/durable-stream-state` component interface. Neither Temporal nor DBOS has state scoped beyond a single workflow; only Restate does, and cleat's was run-scoped, so it looked like Restate's and behaved like a local variable. Within a run the API was exactly equivalent to one, because replay re-executes the workflow and rebuilds either. Documented count 58 → **52 exports total**, of which **49 are `cleat_`-prefixed**. Both numbers are true and they will be quoted interchangeably unless a doc says which it means: `plugin_call`, `plugin_call_streaming` and `set_query_state` carry no prefix, so a `grep 'cleat_'` over this surface undercounts by three and any table driven off that prefix silently omits them. Count with `grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sort -u | grep -c .` **§2.28-§2.33 are left vacant rather than renumbering**, per the §2.21 precedent. `set_query_state` is unaffected and remains the queryable-state mechanism (the DBOS `setEvent` equivalent), as does the `set_scope`/`get_scope` family, which acquires a concurrency key and is not a state feature. `EventCodeStateMutation = 16` is RETIRED, not reused: the compaction decoder has no default case, so reusing the number would make pre-existing histories decode silently into empty records. See IMPROVEMENT-PLAN §3.216. |
 | — | 2026-09-02 | **Removed `cleat_child_workflow_in_schema`** (was §2.21) and the `cleat:host-calls/durable-extended-children` component interface that wrapped it. It wrote a child workflow row directly into another PostgreSQL schema, which made the other deployment's schema part of this one's API and had no settled answer for whose tenant the child belonged to. Cross-pool work goes through the other pool's API instead. Documented count 59 → 58 on both backends. No `CurrentABIVersion` bump: nothing that remains changed shape, and there are no deployed guests importing it. **§2.21 is left vacant rather than renumbering §2.22-§2.59**, because the numbers are referenced from commit messages and IMPROVEMENT-PLAN entries; a gap is cheaper to read than a shift. See IMPROVEMENT-PLAN §3.78. |

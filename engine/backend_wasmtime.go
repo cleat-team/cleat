@@ -1243,6 +1243,9 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatRunDetached(linker); err != nil {
 		return err
 	}
+	if err := b.registerCleatStartDetached(linker); err != nil {
+		return err
+	}
 	if err := b.registerCleatFetch(linker); err != nil {
 		return err
 	}

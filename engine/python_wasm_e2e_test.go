@@ -558,6 +558,24 @@ var pythonUnboundBaseline = []string{
 	// explicitly denied for Python.
 	"cleat_json_parse",
 	"cleat_json_stringify",
+
+	// A real gap, and the only one here (cleat#1154). cleat_start_detached is
+	// bound by Go, Rust, Java and AssemblyScript. Python needs more than a
+	// binding: the call returns a STRING, so its WIT cannot be the `-> u64`
+	// that durable-run-detached uses, and an out-pointer addresses the guest's
+	// own linear memory while component dispatch writes into a HOST buffer --
+	// the same defect stopSurfaces records as OPEN for durable-await-signals,
+	// which is declared with out-pointers and has therefore never worked on a
+	// component. So it needs
+	// `durable-start-detached: func(...) -> result<string, call-failure>`, a
+	// dispatcher in component_cgo.go, and regenerated componentize-py bindings
+	// -- and per 3.253 the regeneration must first reproduce the unmodified
+	// tree byte-identically, which needs componentize-py installed.
+	//
+	// Declaring the u64 form anyway would compile and be WORSE than nothing:
+	// the guest would read whatever sat at OUTPUT_OFFSET and return it as a
+	// run id.
+	"cleat_start_detached",
 }
 
 // NOTE: this baseline and sdkUnreachedBaseline in

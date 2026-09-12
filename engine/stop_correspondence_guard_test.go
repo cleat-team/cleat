@@ -188,15 +188,29 @@ var stopSurfaces = map[string]stopSurface{
 		adapterWhy: reasonNoGoAdapter,
 		wit:        []string{"fetch"},
 	},
-	"RunDetached": {
-		// No Go adapter and no WIT function: `cleat_run_detached` is imported by
-		// the Rust, Java and AssemblyScript SDKs only. Go's cleat.HostCalls has a
-		// RunDetached, but it is a different thing -- it runs a closure with a
-		// HostCalls that ignores cancellation, and never touches this import.
-		adapters:   nil,
-		adapterWhy: reasonNoGoAdapter,
-		wit:        nil,
-		witWhy:     reasonNotInTheComponentWorld,
+	// The detached-run site, reached by TWO host calls: cleat_run_detached and
+	// cleat_start_detached, which is the same work returning the run id
+	// (cleat#1154). engine.execSession.RunDetached and .StartDetached both
+	// delegate to the unexported runDetached, which is where
+	// stopBeforeNewWork is consulted -- so the key is the shared body and both
+	// adapters are named.
+	//
+	// This entry carried `adapterWhy: reasonNoGoAdapter` and
+	// `witWhy: reasonNotInTheComponentWorld` until cleat#1154, and by then BOTH
+	// exemptions were stale. They were true when written: Go's RunDetached took
+	// a closure, which cannot cross the ABI, and Python had no binding. #806
+	// changed the Go signature and added the wasm/usage.go row; §3.253 added
+	// durable-run-detached to cleat.wit and wired the Python method. Neither
+	// change removed the exemption, and nothing failed -- an exemption is only
+	// ever read when something is missing, so a stale one silently covers
+	// whatever arrives at that line next. What it covered here was a real
+	// defect: the RunDetached adapter did not test the sentinel, so a Go guest
+	// refused mid-segment read bit 31 as errCode=0x80000000 and got an ordinary
+	// error rather than ErrSuspend.
+	"runDetached": {
+		adapters: []string{"RunDetached", "StartDetached"},
+		wit:      []string{"durable-run-detached"},
+		py:       []string{"run_detached"},
 	},
 	// The two update calls. Both consult stopBeforeNewWork for the same reason
 	// DurableAwaitSignals does: delivering an update runs guest code that can

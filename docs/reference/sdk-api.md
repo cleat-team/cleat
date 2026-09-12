@@ -406,6 +406,27 @@ in every compiled workflow.
 ---
 
 ```go
+StartDetached(name, inputJSON string) (runID string, err error)
+```
+
+The same work as `RunDetached`, returning the run id of the workflow it started
+so the caller has a handle to it — to poll it, signal it, or record it
+somewhere durable. `RunDetached` computes the same id and discards it.
+
+Bound in Go, Rust (`start_detached`), Java (`startDetached`) and
+AssemblyScript (`startDetached`). **Not in Python**: the component path needs a
+WIT function returning `result<string, call-failure>` and a dispatcher to match,
+because an out-pointer addresses the guest's linear memory and component
+dispatch writes into a host buffer. Tracked in
+`sdkUnreachedBaseline` in `tests/plugin-harness/sdk_import_names_test.go`.
+
+`cleat_run_detached` is unchanged and both calls stay registered. A host call's
+arity is part of its import type, so widening the existing one would stop every
+already-deployed binary instantiating — see ABI.md §2.24a.
+
+---
+
+```go
 WorkflowID() string
 RunID() string
 ```

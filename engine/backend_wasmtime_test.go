@@ -2237,6 +2237,30 @@ func TestClosure_ChildWorkflow(t *testing.T) {
 	s.expectCall(t, "ChildWorkflow")
 }
 
+// TestClosure_StartDetached exercises the wasmtime registration of
+// cleat_start_detached (cleat#1154). The functype is declared here as six i32
+// parameters and asserted by the module actually linking: an arity mismatch
+// between this declaration and registerCleatStartDetached is a LINK error, not
+// a wrong answer, so a shape regression fails here loudly.
+func TestClosure_StartDetached(t *testing.T) {
+	// cleat_start_detached: (namePtr,nameLen, inputPtr,inputLen, runIDPtr,runIDMaxLen) -> i64
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
+	s := newClosureSetup(t, []struct {
+		name string
+		ft   []byte
+	}{{"cleat_start_detached", ft}}, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
+		return b.registerCleatStartDetached(l)
+	})
+
+	s.writeString(50, "child-wf")
+	s.writeString(100, `{"in":"put"}`)
+	got := s.call(t, "test_cleat_start_detached", i32(50), i32(8), i32(100), i32(12), i32(200), i32(64))
+	if got != 0 {
+		t.Errorf("got %v, want 0", got)
+	}
+	s.expectCall(t, "StartDetached")
+}
+
 func TestClosure_AwaitChild(t *testing.T) {
 	// cleat_await_child: (runIDPtr,runIDLen, resultPtr,resultMaxLen) -> i64
 	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})

@@ -393,18 +393,18 @@ var sdkUnreachedBaseline = map[string][]string{
 		"cleat_uuid",
 	},
 
-	// Python: five unreached, but only THREE are gaps.
+	// Python. The entries below are the list; the sentence that used to open
+	// this comment gave a count of them and was wrong within two days of being
+	// written, because await_any_child, poll_child and run_detached were all
+	// bound shortly after (IMPROVEMENT-PLAN 3.253). Read the list.
 	//
-	// The first version of this comment said all five were real, "unlike Go's,
-	// none of these has a native or composed substitute". That was wrong about
-	// the json pair for exactly the reason it is wrong for Go: Python has the
-	// `json` module -- host_calls.py imports it three times -- and
-	// engine/lifecycle.go's JsonParse/JsonStringify are pure (unmarshal,
-	// re-marshal, write; no recordEvent, no store), so a guest using its own
-	// JSON diverges from nothing.
-	//
-	// Real gaps: await_any_child and poll_child are child-workflow control
-	// flow, run_detached is a lifecycle primitive. Nothing composes those.
+	// An earlier version also claimed "unlike Go's, none of these has a native
+	// or composed substitute", which was wrong about the json pair for exactly
+	// the reason it is wrong for Go: Python has the `json` module --
+	// host_calls.py imports it three times -- and engine/lifecycle.go's
+	// JsonParse/JsonStringify are pure (unmarshal, re-marshal, write; no
+	// recordEvent, no store), so a guest using its own JSON diverges from
+	// nothing.
 	//
 	// Note this is the WIT rewrite table (host-side), not python-sdk's own
 	// bindings. The two were compared on 2026-09-07 and agree on all 44 names
@@ -420,6 +420,28 @@ var sdkUnreachedBaseline = map[string][]string{
 		// because Go's row here does not exist.
 		"cleat_json_parse",
 		"cleat_json_stringify",
+
+		// A real gap, and the only one here. cleat_start_detached (cleat#1154)
+		// is bound by Go, Rust, Java and AssemblyScript; Python is not, and the
+		// reason is that it needs more than a table row.
+		//
+		// It returns a STRING, so its WIT cannot be the `-> u64` that
+		// durable-run-detached uses. A core-ABI guest receives the run id
+		// through an out-pointer into its own linear memory; the component
+		// dispatch writes into a HOST buffer, so out-pointers do not survive
+		// the crossing -- that is the same defect stopSurfaces records as OPEN
+		// for durable-await-signals, which is declared with out-pointers and
+		// has therefore never worked on a component. So the Python binding
+		// needs `durable-start-detached: func(...) -> result<string,
+		// call-failure>`, a dispatcher in component_cgo.go, and regenerated
+		// componentize-py bindings -- and regeneration must first reproduce the
+		// unmodified tree byte-identically, as 3.253 did, which needs
+		// componentize-py installed.
+		//
+		// Declaring the u64 form instead would compile and be worse than
+		// nothing: the guest would read whatever happened to sit at
+		// OUTPUT_OFFSET and return it as a run id.
+		"cleat_start_detached",
 	},
 
 	// assemblyscript: deliberately absent. It reaches every workflow-facing

@@ -530,6 +530,40 @@ func (b *wasmtimeBackend) registerCleatRunDetached(linker *wasmtime.Linker) erro
 	})
 }
 
+// registerCleatStartDetached is cleat_run_detached with the run id written back
+// (cleat#1154).
+//
+// BOTH ARE REGISTERED. The old name cannot simply grow two parameters: an
+// arity mismatch is a hard link error on this backend, measured in
+// IMPROVEMENT-PLAN 3.55 as `incompatible import type for
+// env::cleat_create_promise`, and every deployed workflow binary imports
+// cleat_run_detached with four. hostabi_runtime_parity_test.go requires this
+// registration to match engine/imports.go's.
+func (b *wasmtimeBackend) registerCleatStartDetached(linker *wasmtime.Linker) error {
+	if b.skipIfNotNeeded("cleat_start_detached") {
+		return nil
+	}
+
+	return b.hostFunc(linker, "env", "cleat_start_detached", func(caller *wasmtime.Caller,
+		namePtr, nameLen, inputPtr, inputLen, runIDPtr, runIDMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		name, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
+		if !ok {
+			return errBadParamInt64
+		}
+		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
+		if !ok {
+			return errBadParamInt64
+		}
+		return h.StartDetached(ctxWithMem(context.Background(), buf), nil, name, inputJSON,
+			uint32(runIDPtr), uint32(runIDMaxLen))
+	})
+}
+
 func (b *wasmtimeBackend) registerCleatPollChild(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_poll_child") {
 		return nil

@@ -269,6 +269,17 @@ mod imports {
         // cleat_run_detached - ABI 2.36, two strings in
         pub fn cleat_run_detached(name_ptr: *const u8, name_len: u32, input_ptr: *const u8, input_len: u32) -> i64;
 
+        // cleat_start_detached - ABI 2.24a, two strings in, one string out.
+        // The same work as cleat_run_detached, returning the run id. A separate
+        // import rather than a wider cleat_run_detached because arity is part
+        // of an import's type: widening one stops every already-deployed
+        // binary INSTANTIATING, not just that call.
+        pub fn cleat_start_detached(
+            name_ptr: *const u8, name_len: u32,
+            input_ptr: *const u8, input_len: u32,
+            run_id_ptr: *mut u8, run_id_max_len: u32,
+        ) -> i64;
+
         // The cron family. Present on the host since ABI 2.31 and bound by the
         // AssemblyScript and Python SDKs; Rust and Java declared no cron surface
         // at all, which is the stated reason tiers.yaml holds
@@ -1472,21 +1483,20 @@ impl HostCalls {
     /// This does NOT mirror Go's `RunDetached`, though it used to say so. The
     /// two take different things and are not ports of each other:
     ///
+    /// It did not mirror Go's for a long time, and this comment recorded the
+    /// divergence: Go's took `fn func(h HostCalls) error`, a closure, which
+    /// cannot cross the ABI, so Go's method was never wired to the import and
+    /// its unwired branch returned nil -- a silent success. #806 changed Go's
+    /// exported signature to `RunDetached(name, inputJSON string) error`, so
+    /// the three agree now:
+    ///
     /// ```text
     /// Rust    run_detached(name: &str, input_json: &str) -> Result<(), String>
     /// engine  cleat_run_detached(name, inputJSON)
-    /// Go      RunDetached(fn func(h HostCalls) error) error
+    /// Go      RunDetached(name, inputJSON string) error
     /// ```
     ///
-    /// This signature is the one that matches the host call. Go's takes a
-    /// closure, which cannot cross the ABI, so Go's method is never wired to
-    /// `cleat_run_detached` at all -- its unwired branch is `return nil`, a
-    /// silent success. Reconciling them means changing Go's exported signature,
-    /// which is a public API decision and is tracked separately.
-    ///
-    /// The claim mattered because it was the only cross-SDK statement in this
-    /// file, and someone porting a Go workflow would reasonably read it as
-    /// "same call, different spelling".
+    /// See [`Self::start_detached`] for the form that hands back the run id.
     pub fn run_detached(&self, name: &str, input_json: &str) -> Result<(), String> {
         let result = unsafe {
             imports::cleat_run_detached(
@@ -1507,6 +1517,39 @@ impl HostCalls {
             return Err(format!("run_detached(name=\"{}\") failed: host error code {}. Check that the workflow name is correct.", name, err_code));
         }
         Ok(())
+    }
+
+    /// Start a detached workflow and return its run id.
+    ///
+    /// Identical to [`Self::run_detached`] except that the run id the host
+    /// already computes is written back, so the caller has a handle to the run
+    /// -- to poll it, signal it, or record it somewhere durable. `run_detached`
+    /// computes the same id and discards it.
+    ///
+    /// The started workflow is NOT a child: this workflow does not await it, is
+    /// not its parent, and completing or being cancelled does not affect it.
+    pub fn start_detached(&self, name: &str, input_json: &str) -> Result<String, String> {
+        let mut run_id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_start_detached(
+                name.as_ptr(), name.len() as u32,
+                input_json.as_ptr(), input_json.len() as u32,
+                run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        // The host refuses new work in a defer segment and marks the refusal
+        // with bit 31 (IMPROVEMENT-PLAN 3.111). Ask BEFORE decoding: this call
+        // decodes as a simple result, in which bit 31 is not a field, so a stop
+        // read field-first is an err_code of 0 -- a SUCCESS.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
+
+        let (run_id_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(memory::host_message_or(&run_id_buf, run_id_len, format!("start_detached(name=\"{}\") failed: host error code {}. Check that the workflow name is correct.", name, err_code)));
+        }
+        Ok(memory::read_result(&run_id_buf, run_id_len))
     }
 
     /// Await all children workflows. Returns aggregated JSON results.

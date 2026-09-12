@@ -105,7 +105,13 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	//	# 0 0 0 1
 	{"side_effect", "SideEffect"},
 	{"cleat_fetch", "Fetch"},
-	{"run_detached", "RunDetached"},
+	// Both detached entry points name the UNEXPORTED runDetached, which is
+	// where stopBeforeNewWork is consulted; RunDetached and StartDetached are
+	// thin wrappers over it and consult nothing themselves (cleat#1154).
+	// TestEverySDKCoversEveryHostStopSite checks that the name in this column
+	// really is a host stop site, and it caught both of these named wrong.
+	{"run_detached", "runDetached"},
+	{"start_detached", "runDetached"},
 }
 
 var rustCallsThatMustNotCheck = map[string]string{

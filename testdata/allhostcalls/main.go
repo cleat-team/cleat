@@ -142,6 +142,10 @@ func Entry(h cleat.HostCalls, input string) (string, error) {
 	// changed to match cleat_run_detached and every other SDK; the closure form
 	// could not be wired at all, so this fixture had nothing to exercise.
 	_ = h.RunDetached("detached-child", "{}")
+	// The same work, returning the run id (cleat#1154). A separate import
+	// rather than a wider cleat_run_detached: arity is part of an import's
+	// type, so widening one stops every already-deployed binary instantiating.
+	_, _ = h.StartDetached("detached-child", "{}")
 
 	// ---- logging ----
 	h.Log("m")

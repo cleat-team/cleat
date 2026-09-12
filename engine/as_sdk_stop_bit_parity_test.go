@@ -100,7 +100,13 @@ var asCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"sideEffect", "SideEffect"},
 	{"scheduleCron", "ScheduleCron"},
 	{"cleatFetch", "Fetch"},
-	{"runDetached", "RunDetached"},
+	// Both detached entry points name the UNEXPORTED runDetached, which is
+	// where stopBeforeNewWork is consulted; RunDetached and StartDetached are
+	// thin wrappers over it and consult nothing themselves (cleat#1154).
+	// TestEverySDKCoversEveryHostStopSite checks that the name in this column
+	// really is a host stop site, and it caught both of these named wrong.
+	{"runDetached", "runDetached"},
+	{"startDetached", "runDetached"},
 }
 
 var asCallsThatMustNotCheck = map[string]string{

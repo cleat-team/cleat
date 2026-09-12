@@ -436,6 +436,7 @@ func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
 		PollUpdate:                    e.pollUpdateImpl,
 		CompleteUpdate:                e.completeUpdateImpl,
 		RunDetached:                   e.runDetachedImpl,
+		StartDetached:                 e.startDetachedImpl,
 		PluginCall:                    e.pluginCallImpl,
 		DurableSend:                   e.durableSendImpl,
 		ScheduleInvoke:                e.durableScheduleInvokeImpl,
@@ -1543,10 +1544,31 @@ func (e *TestEnv) runDetachedImpl(name, inputJSON string) error {
 	return nil
 }
 
-// DetachedRun is one RunDetached request captured by the test environment.
+// startDetachedImpl records the request and returns the run id it recorded.
+//
+// The id is synthetic -- cleattest starts nothing, exactly as runDetachedImpl
+// above does not. It is returned rather than left empty so that the one thing
+// this call adds over RunDetached is testable: the id a workflow receives is
+// the id DetachedRuns reports, and a test can follow it. A fake that handed
+// back "" would let a workflow which ignores the id pass while one that uses it
+// fails only in production.
+func (e *TestEnv) startDetachedImpl(name, inputJSON string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	runID := fmt.Sprintf("detached-%s-%d", name, len(e.detachedRuns))
+	e.detachedRuns = append(e.detachedRuns, DetachedRun{Name: name, Input: inputJSON, RunID: runID})
+	return runID, nil
+}
+
+// DetachedRun is one RunDetached or StartDetached request captured by the test
+// environment.
 type DetachedRun struct {
 	Name  string
 	Input string
+	// RunID is set only by StartDetached. RunDetached does not compute an id
+	// for the guest, so it is empty for those -- which is the distinction, not
+	// a gap.
+	RunID string
 }
 
 // DetachedRuns returns the detached workflows this run requested, in order.
