@@ -149,75 +149,101 @@ Before applying a migration, the worker or migration tool runs sanity checks:
 If a migration fails, the worker logs the error and exits. Fix the migration
 and restart.
 
-### Migration 007: Foreign Key CASCADE
+### Lock risk: set `lock_timeout` yourself, because no migration sets it
 
-Migration 007 adds `ON DELETE CASCADE` to all foreign keys referencing
-`workflow_instances(id)`. This affects five child tables: `event_history`,
-`workflow_signals`, `workflow_promises`, `concurrency_keys`, and
-`workflow_update_requests`.
+**Nothing in this repo sets `lock_timeout` or `lock_wait_timeout`.** A session
+value you set before running the migrations is the only thing bounding how long
+a migration waits for its lock — and how long your writers queue behind it.
 
-**What changes**: Each FK is dropped and re-added with `ON DELETE CASCADE`.
-In MySQL, `concurrency_keys` also receives its FK constraint for the first
-time (it was missing in the original schema).
+Re-derive rather than trusting this paragraph; it is the kind of claim that
+rots, and the version of this section before cleat#1334 asserted the opposite:
 
-**Why**: Without CASCADE, deleting a workflow instance required manually
-deleting child rows first. The `DeleteDeadLetteredWorkflows` reaper did this,
-but other code paths that deleted workflow instances could leave orphaned
-rows in child tables.
+```
+git grep -c lock_timeout -- migrations/ migration/ '*.go' plugins/
+# no matches. Every occurrence in the repo is prose.
+```
 
-**Lock risk — HIGH**: Each `ALTER TABLE ... DROP CONSTRAINT ... ADD CONSTRAINT`
-takes an `ACCESS EXCLUSIVE` lock (Postgres) or equivalent on the child table.
-On large `event_history` tables (millions of rows), this blocks all writes for
-the duration of the constraint validation scan.
+**Which migrations are exposed**: every one that runs `ALTER TABLE`. Do not work
+from a list — it grows with each release, and the risk is not confined to the
+expensive statements. `docs/schema-partitioning-design.md` measures a
+*metadata-only* `ALTER` queued behind a single 10-second open reader at
+`0.08s → 9.43s`, with `SELECT`s arriving after it blocked for 7.8–8.4s:
+
+> Outage length is set by your longest open transaction, not by the DDL.
+
+So an `ADD COLUMN` with no default is exposed on the same terms as a constraint
+rebuild. List them for a given release with:
+
+```
+git diff --name-only <previous-tag>..<this-tag> -- migrations/ |
+  while read -r f; do grep -l 'ALTER TABLE' "$f"; done
+```
 
 **Mitigation**:
-- The Postgres migration itself uses `SET LOCAL lock_timeout = '30s'` within the
-  DO block, which overrides any session-level `lock_timeout` you may have set.
-  If you want a shorter timeout for the migration, you must edit the migration
-  SQL (the `SET LOCAL` inside the DO block takes precedence).
-- Set `lock_timeout` before running for the migration runner's other statements:
-  `SET lock_timeout = '5s';` (Postgres) or `SET SESSION lock_wait_timeout = 5;`
-  (MySQL)
-- Run during a maintenance window or off-peak hours
-- For Postgres, the entire DO block runs in a single transaction; no intermediate
-  states are visible to other sessions
-- For MySQL, ALTER TABLE implicitly commits, creating a brief no-FK window between
-  DROP and re-ADD on each table. Run during a quiet period
-- Pre-validate by checking for orphaned rows:
-  ```sql
-  SELECT COUNT(*) FROM event_history eh
-  LEFT JOIN workflow_instances wi ON eh.workflow_id = wi.id
-  WHERE wi.id IS NULL;
+- **Set the timeout on the connection the migration tool makes, not in a `psql`
+  session.** This is the protection, not a supplement to one — and the
+  distinction is the part that is easy to get wrong. Migrations are applied by
+  the worker at startup (`cleat-worker --db "$DATABASE_URL"`), which opens its
+  own connection from the DSN; a `SET lock_timeout = '5s';` you type into a
+  separate `psql` session has no effect on it whatsoever. Put it in the DSN or
+  the environment:
+
   ```
-  This should return 0 on a healthy installation.
-- Estimated time: proportional to the largest child table. On a table with 10M
-  rows, expect 30-120 seconds per ALTER.
+  # Postgres. lib/pq forwards `options` in the startup packet and reads
+  # PGOPTIONS (connector.go: `Options string `postgres:"options" env:"PGOPTIONS"``).
+  DATABASE_URL='postgres://.../cleat?options=-c%20lock_timeout%3D5s'
+  # or, equivalently:
+  PGOPTIONS='-c lock_timeout=5s' cleat-worker --db "$DATABASE_URL"
 
-**MySQL orphan check for concurrency_keys**: Before the migration, verify there
-are no orphaned `concurrency_keys` rows:
-```sql
-SELECT COUNT(*) FROM concurrency_keys ck
-LEFT JOIN workflow_instances wi ON ck.workflow_id = wi.id
-WHERE wi.id IS NULL;
-```
-If this returns > 0, clean up orphaned rows first:
-```sql
-DELETE ck FROM concurrency_keys ck
-LEFT JOIN workflow_instances wi ON ck.workflow_id = wi.id
-WHERE wi.id IS NULL;
-```
+  # MySQL. go-sql-driver sends unrecognised DSN parameters as session
+  # system variables on connect (dsn.go: `Params map[string]string`).
+  DATABASE_URL='user:pw@tcp(host:3306)/cleat?lock_wait_timeout=5'
+  ```
 
-**Re-running the migration**: The migration runner prevents re-execution via
-`schema_migrations` tracking. If manually re-applied: the Postgres DO block is
-idempotent (DROP + re-ADD arrives at the same state); MSSQL `IF EXISTS` guards
-make it idempotent; MySQL re-application would fail on the `ADD FOREIGN KEY`
-step for concurrency_keys (FK already exists). Do not re-apply migration 007
-manually.
+  A migration that cannot take its lock then fails fast and can be retried,
+  instead of holding the write queue open behind it.
+- **Check for long-running transactions first**, since they are what the
+  timeout is protecting you from:
+  ```sql
+  SELECT pid, state, now() - xact_start AS age, query
+  FROM pg_stat_activity
+  WHERE xact_start IS NOT NULL AND now() - xact_start > interval '30 seconds'
+  ORDER BY age DESC;
+  ```
+- Run during a maintenance window or off-peak hours.
+- On Postgres each migration file runs in a single transaction, so a failed
+  migration leaves no intermediate state visible to other sessions.
+- On MySQL, `ALTER TABLE` implicitly commits. A migration that rebuilds a
+  foreign key therefore has a brief window with no constraint in force, and a
+  failure part-way through leaves the earlier statements applied.
 
-**Rollback**: Migration 007 has no automatic rollback. Once CASCADE is applied,
-deletes are silently destructive. To undo, re-apply the constraints without
-`ON DELETE CASCADE` (reverse of the migration DDL). Contact support for a
-rollback script if needed.
+**What this section used to say, recorded because it was actively harmful.**
+Until cleat#1334 this was headed "Migration 007: Foreign Key CASCADE" and told
+operators that the Postgres migration set `SET LOCAL lock_timeout = '30s'`
+inside a `DO` block, that this *overrode* any session value they set, and that
+shortening it meant editing the migration SQL.
+
+Every part of that was false. There is no migration 007 on either dialect
+(`ls migrations/postgres/007*`), the five `ON DELETE CASCADE` foreign keys it
+claimed to add are declared in `001_schema.sql` from the beginning, and no
+migration has ever set `lock_timeout`. The cost was not the missing guard on its
+own: an operator who did the right thing was told their setting was inert, which
+is a gap plus a reason not to look for it.
+
+**Its second bullet was inert too, which is why this section is rewritten rather
+than patched.** That one read "Set `lock_timeout` before running for the
+migration runner's *other* statements: `SET lock_timeout = '5s';`" — correct
+advice in the wrong place twice over. It scoped the setting to the statements
+the phantom `DO` block supposedly did not cover, and it named a bare `SET`,
+which applies to whichever session runs it. The migration runner connects from
+the DSN, so a value set anywhere else never reaches it. Both bullets pointed an
+operator away from the only thing that works.
+
+Three further paragraphs went with it -- a pre-migration orphan check for
+`concurrency_keys`, a "do not re-apply migration 007 manually" warning citing
+the idempotency of its Postgres `DO` block and its MSSQL `IF EXISTS` guards, and
+a rollback procedure for undoing the CASCADE. All three described the same
+migration, so all three were instructions about a file that is not there.
 
 ## Running old and new workers side by side
 
