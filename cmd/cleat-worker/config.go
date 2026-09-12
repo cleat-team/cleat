@@ -123,7 +123,27 @@ var (
 	// Server rather than emitting PostgreSQL SQL at them, because RETURNING has
 	// no MySQL equivalent and SQL Server spells it OUTPUT. That refusal is the
 	// correct behaviour and this flag surfaces it verbatim.
-	createTenantNamed       = flag.String("create-tenant", "", "Create a tenant with the given name, print its UUID, and exit (PostgreSQL only)")
+	createTenantNamed = flag.String("create-tenant", "", "Create a tenant with the given name, print its UUID, and exit (PostgreSQL only)")
+
+	// Migration.Down finally has a caller. cleat#1290.
+	//
+	// A one-shot administrative flag, like --create-tenant above and
+	// --generate-api-key below, and for the same reason: cleat-worker is the
+	// only binary that links the plugin registry, so it is the only one that
+	// can read a plugin's Down SQL. `cleat plugin uninstall` deprecates a
+	// version and never touches tables, which its own help text says.
+	//
+	// --dry-run FIRST in the usage text on purpose: this executes SQL that
+	// plugin authors wrote to drop their own tables, and nothing in cleat has
+	// ever run it before.
+	uninstallPlugin = flag.String("uninstall-plugin", "",
+		"Reverse a plugin's applied migrations by running its Down SQL, newest first, and "+
+			"exit. Refuses rather than partly reversing if an applied version declares no "+
+			"Down, or if another loaded plugin declares one of the same tables. Pair with "+
+			"--uninstall-dry-run first.")
+	uninstallDryRun = flag.Bool("uninstall-dry-run", false,
+		"With --uninstall-plugin, report what would be reversed and exit without executing "+
+			"any Down SQL.")
 	createTenantDisplayName = flag.String("tenant-display-name", "", "Display name for --create-tenant (defaults to the name)")
 	maxBodySize             = flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
 	httpReadTimeout         = flag.Duration("http-read-timeout", 30*time.Second, "HTTP read timeout")

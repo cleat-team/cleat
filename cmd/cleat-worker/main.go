@@ -153,6 +153,90 @@ func main() {
 		logger.InfoContext(context.Background(), "checksum verification enabled", "worker_id", workerID)
 	}
 
+	// Handle --uninstall-plugin (standalone mode: reverse migrations and exit).
+	//
+	// cleat#1290. Migration.Down is populated by 18 plugins across 29 sites and
+	// was read by nothing; this is its caller. Placed before --create-tenant
+	// only because both are one-shot modes and this one is the most
+	// destructive, so a reader scanning for "what can this binary do besides
+	// run" meets it first.
+	//
+	// cleat-worker rather than `cleat plugin uninstall` because this is the
+	// only binary that links the plugin registry -- plugin.Discover() returns
+	// nothing in the others -- and a plugin's Down SQL lives in its compiled
+	// Go, not in the database.
+	if *uninstallPlugin != "" {
+		dbURL := *dbURL
+		if dbURL == "" {
+			dbURL = os.Getenv("DATABASE_URL")
+		}
+		if dbURL == "" {
+			logger.ErrorContext(context.Background(), "--db or DATABASE_URL required for --uninstall-plugin", "worker_id", workerID)
+			os.Exit(1)
+		}
+		udb, err := sql.Open(sqlDriverName(*driver), dsnWithSchema(dbURL, *schemaName))
+		if err != nil {
+			logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+		defer udb.Close()
+
+		all, dErr := plugin.Discover()
+		if dErr != nil {
+			logger.ErrorContext(context.Background(), "failed to discover plugins", "worker_id", workerID, "error", dErr)
+			os.Exit(1)
+		}
+		var target *plugin.LoadedPlugin
+		names := make([]string, 0, len(all))
+		for _, lp := range all {
+			names = append(names, lp.Plugin.Info().Name)
+			if lp.Plugin.Info().Name == *uninstallPlugin {
+				target = lp
+			}
+		}
+		if target == nil {
+			// The available set is printed because a typo is the likeliest
+			// reason to land here, and "not found" alone does not help.
+			logger.ErrorContext(context.Background(), "no such plugin", "worker_id", workerID,
+				"requested", *uninstallPlugin, "available", strings.Join(names, ", "))
+			os.Exit(1)
+		}
+
+		if *uninstallDryRun {
+			// Reports the DECISION without executing, which is the whole point:
+			// RunDownMigrations refuses before touching anything, so a dry run
+			// that reaches the same refusal tells an operator the real answer.
+			fmt.Printf("\n=== DRY RUN: %s ===\n", *uninstallPlugin)
+			for _, m := range target.Plugin.(plugin.HasMigrations).Migrations() {
+				state := "no Down declared"
+				if strings.TrimSpace(m.Down) != "" {
+					state = "reversible"
+				}
+				fmt.Printf("  v%-4d %s\n", m.Version, state)
+			}
+			fmt.Printf("\nNothing was changed. Re-run without --uninstall-dry-run to reverse.\n\n")
+			os.Exit(0)
+		}
+
+		res, uErr := plugin.RunDownMigrations(context.Background(), udb,
+			plugin.Dialect(*driver), target, all)
+		if uErr != nil {
+			// Surfaced as-is. RunDownMigrations' errors name which version or
+			// which colliding plugin stopped it, and say that nothing changed;
+			// this layer cannot improve on that.
+			logger.ErrorContext(context.Background(), "uninstall refused", "worker_id", workerID,
+				"plugin", *uninstallPlugin, "error", uErr)
+			os.Exit(1)
+		}
+		fmt.Printf("\n=== UNINSTALLED %s ===\n", *uninstallPlugin)
+		fmt.Printf("Versions reversed (newest first): %v\n", res.Reversed)
+		if len(res.TenantScopedTables) > 0 {
+			fmt.Printf("Tables those migrations declared: %s\n", strings.Join(res.TenantScopedTables, ", "))
+		}
+		fmt.Printf("\n")
+		os.Exit(0)
+	}
+
 	// Handle --create-tenant (standalone mode: create a tenant and exit).
 	//
 	// Placed before --generate-api-key because that is the order they are used
