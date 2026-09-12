@@ -7,7 +7,7 @@
 ### Transformer pipeline (Phases 1-8)
 - Package loading, type resolution, entry point detection
 - Call graph construction with durable leaf identification
-- Transitive closure computation and construct validation (E001-E007, W001)
+- Transitive closure computation and construct validation (E001-E021, W002-W003)
 - HostCalls threading verification (E010) including global var h pattern
 - Auto-threading transform (context object to param injection)
 - WASM import/export/adapter code generation

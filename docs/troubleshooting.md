@@ -759,9 +759,13 @@ Monitor cache metrics:
 
 **Fix: How to resolve**
 
-1. **Adjust cache limits**: Configure the maximum entries and total bytes:
+1. **Adjust cache limits**: Configure the maximum entries and total size.
+   The flags are `--wasm-cache-max-entries` and `--wasm-cache-max-mb`; this
+   step named `--wasm-cache-size` and `--wasm-cache-bytes`, neither of which
+   exists, and the worker rejects unknown flags at startup (cleat#1311). Note
+   the unit: megabytes, not a size suffix.
    ```bash
-   cleat-worker --wasm-cache-size 500 --wasm-cache-bytes 2GB
+   cleat-worker --wasm-cache-max-entries 500 --wasm-cache-max-mb 2048
    ```
 
 2. **GC old versions**: Remove deprecated workflow versions that are no longer
@@ -848,7 +852,7 @@ These codes are emitted by the `cleat build` pipeline's static analyser
 | E018 | Error | `math/rand/v2` import | `h.Random()` |
 | E020 | Error | Durable calls in `init()` | Move to entry point |
 | E021 | Error | Non-deterministic map iteration | Sort keys before iterating |
-| W001 | Warning | Map iteration in non-critical path | Use sorted keys |
+| E021 | **Error** | Map iteration (`range` over a map) | Use sorted keys |
 | W002 | Warning | Float in control flow | Use `math.Float64bits()` |
 | W003 | Warning | Entry point takes a single `string`, so it receives the whole input JSON | Add a second parameter, or take a struct |
 

@@ -74,7 +74,7 @@ The docs already reference a `--target go` option but it was never implemented.
 
 ### Exp 7: Can we drop the manual JSON helpers?
 - Standard Go `encoding/json` works in wasip1
-- But the vet checker blocks `encoding/json` (W001 warning) and `reflect` (E011 error)
+- But the vet checker blocks `encoding/json` (E021 on map iteration -- an error, not a warning) and `reflect` (E011 error)
 - Decision: keep manual helpers for TinyGo compat, but standard Go can use real JSON
 
 ## Implementation Plan

@@ -500,7 +500,7 @@ experience — it's the difference between "write Go with restrictions" and
    - `E009`: Function value call (closures as values)
    - `E010`: `*HostCalls` not threaded to durable function
    - `E011`: Import of WASM-incompatible package
-   - `W001`: Map iteration with order-dependent control flow
+   - `E021`: Map iteration with order-dependent control flow (shipped as an ERROR, not the warning this plan proposed)
    - `W002`: Floating-point used in control flow condition
 
 9.2 **Each error includes:**
