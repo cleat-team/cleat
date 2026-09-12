@@ -23,21 +23,29 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
-// gcWorker returns a worker whose store records the GC policy it was swept
-// with, which is the thing under test -- not the sweep's arithmetic, which
-// engine/version_gc_test.go covers.
-func gcWorker(t *testing.T, minVersions int, maxAge time.Duration) (*Worker, *bool) {
+// gcWorker returns a worker and a channel that receives once per sweep.
+//
+// A CHANNEL, NOT A SHARED BOOL, and it is worth saying why: the first version
+// of this used `swept := false` written by the loop goroutine and read by the
+// test. That is a data race, `go test -race` detects it, and CI runs -race
+// while a bare `go test` does not -- so it passed locally and failed in CI.
+// Buffered and sent non-blocking, so a sweep never blocks on a test that has
+// stopped listening.
+func gcWorker(t *testing.T, minVersions int, maxAge time.Duration) (*Worker, <-chan struct{}) {
 	t.Helper()
-	swept := false
+	swept := make(chan struct{}, 16)
 	ms := &mockStore{}
 	ms.listWorkflowDefsFn = func(context.Context, string) ([]engine.WorkflowDef, error) {
-		swept = true
+		select {
+		case swept <- struct{}{}:
+		default:
+		}
 		return nil, nil
 	}
 	w := newTestWorker(ms)
 	w.versionGCMinVersions = minVersions
 	w.versionGCMaxAge = maxAge
-	return w, &swept
+	return w, swept
 }
 
 // TestTheVersionGCLoopIsOffByDefault is the half that protects the decision.
@@ -62,8 +70,10 @@ func TestTheVersionGCLoopIsOffByDefault(t *testing.T) {
 			"replay. Defaulting this on would sweep every existing deployment at " +
 			"upgrade (cleat#1315).")
 	}
-	if *swept {
+	select {
+	case <-swept:
 		t.Error("a disabled version-GC loop swept anyway")
+	default:
 	}
 }
 
@@ -77,11 +87,12 @@ func TestTheVersionGCLoopSweepsWhenTheIntervalIsSet(t *testing.T) {
 	go w.versionGCLoop()
 	defer w.cancel()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for !*swept && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !*swept {
+	// Waited on, not polled. A generous ceiling because it bounds a CI runner's
+	// scheduling rather than the behaviour: the assertion is "it sweeps", and
+	// the interval above is what makes that quick.
+	select {
+	case <-swept:
+	case <-time.After(30 * time.Second):
 		t.Fatal("versionGCLoop never swept with --version-gc-interval set")
 	}
 }
@@ -109,8 +120,10 @@ func TestTheConfiguredPolicyReachesTheSweep(t *testing.T) {
 			// runVersionGCSweep does not panic and does reach the store, and
 			// the arithmetic is engine/version_gc_test.go's job.
 			w, swept := gcWorker(t, tc.minVersions, tc.maxAge)
-			w.runVersionGCSweep()
-			if !*swept {
+			w.runVersionGCSweep() // synchronous, so the receive below cannot race
+			select {
+			case <-swept:
+			default:
 				t.Fatal("runVersionGCSweep did not reach the store")
 			}
 		})
