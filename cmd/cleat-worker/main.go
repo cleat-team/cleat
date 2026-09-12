@@ -447,17 +447,36 @@ func main() {
 			db.SetConnMaxLifetime(5 * time.Minute)
 			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel).WithLogger(logger)
 
-			// Create per-tenant database connection pools for tenant-scoped operations.
-			// PostgreSQL uses set_config('cleat.tenant_id', ...) per transaction for RLS,
-			// which works on the owner pool — separate tenant pools are unnecessary.
-			// MySQL and MSSQL use per-tenant databases or session context, so pools
-			// are only created for those drivers.
-			if *driver != "postgres" && *requireAuth {
-				baseDSN := baseDSNFromURL(*dbURL)
-				if baseDSN != "" {
-					tenantPools = plugin.NewTenantPools(db, baseDSN, *tenantPoolMaxConns)
-				}
-			}
+			// NO PER-TENANT POOLS ARE BUILT HERE, ON ANY DIALECT, AND THAT IS
+			// CORRECT. cleat#1307.
+			//
+			// PostgreSQL does not need them: set_config('cleat.tenant_id', ...)
+			// per transaction gives RLS what it needs on the owner pool.
+			//
+			// MySQL does not get them because it is single-tenant by decision --
+			// tiers.yaml, "DECIDED 2026-09-03: MySQL is single-tenant only, and a
+			// second, very different implementation of multi-tenancy is not worth
+			// building", enforced by migrations/mysql/038_single_tenant_guard.sql.
+			//
+			// WHAT USED TO BE HERE, because the obvious repair is the dangerous
+			// one. This block read
+			//
+			//	if *driver != "postgres" && *requireAuth { tenantPools = ... }
+			//
+			// inside this `case "postgres":` arm, so reaching it required
+			// *driver == "postgres" while it tested the opposite: unreachable, and
+			// tenantPools was nil on every dialect. The tempting fix is to move it
+			// out of the switch so MySQL and MSSQL reach it. That would be worse
+			// than the dead code, because plugin.TenantPools is PostgreSQL-ONLY in
+			// its implementation -- plugin/tenant_db.go opens `sql.Open("postgres",
+			// ...)` against a libpq keyword DSN with $1 placeholders. A MySQL
+			// worker would get a postgres connection builder.
+			//
+			// So the guard selected one dialect and the body served the other, and
+			// the comment above it asserted a third thing. Whether to build tenant
+			// pools for PostgreSQL, or retire plugin.TenantPools, is open in
+			// cleat#1307; it is not something this line can decide.
+			// TestTheWorkerBuildsNoTenantPools pins the current answer.
 
 			// Create plugin-dedicated connection pool.
 			if *maxPluginConnections > 0 {

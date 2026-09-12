@@ -2281,26 +2281,6 @@ func TestDispatchLoop_ClaimWorkflowsFallback(t *testing.T) {
 	}
 }
 
-func TestBaseDSNFromURL_EdgeCases(t *testing.T) {
-	tests := []struct {
-		url  string
-		want string
-	}{
-		{"", "host= port=5432 dbname= sslmode=disable"},
-		{"not-a-url", "host= port=5432 dbname=not-a-url sslmode=disable"},
-		{"postgres://", "host= port=5432 dbname= sslmode=disable"},
-		{"postgres://user:pass@host:5432/db?sslmode=require", "host=host port=5432 dbname=db sslmode=require"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.url, func(t *testing.T) {
-			got := baseDSNFromURL(tt.url)
-			if got != tt.want {
-				t.Errorf("baseDSNFromURL(%q) = %q, want %q", tt.url, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestBaseDSNFromDSN_EdgeCases(t *testing.T) {
 	tests := []struct {
 		dsn  string

@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"net/url"
 	"os"
 	"runtime/debug"
 	"sort"
@@ -492,27 +491,6 @@ func baseDSNFromDSN(dsn string) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
-}
-
-// baseDSNFromURL parses a PostgreSQL connection URL and returns the base
-// connection DSN in key=value format (without user/password) for creating
-// per-tenant databases.
-func baseDSNFromURL(dbURL string) string {
-	u, err := url.Parse(dbURL)
-	if err != nil {
-		return ""
-	}
-	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		port = "5432"
-	}
-	dbname := strings.TrimPrefix(u.Path, "/")
-	sslmode := u.Query().Get("sslmode")
-	if sslmode == "" {
-		sslmode = "disable"
-	}
-	return fmt.Sprintf("host=%s port=%s dbname=%s sslmode=%s", host, port, dbname, sslmode)
 }
 
 // ---------------------------------------------------------------------------
