@@ -52,12 +52,14 @@ migrations at all. What it now covers, and what it does not:
 | | follows `--schema` |
 |---|---|
 | core tables, indexes, procedures, `schema_migrations` | yes |
-| plugin tables | **no** — plugin migrations still pin `public`; see #1287 |
-| the `admin` and `cleat` schemas | no — those names are fixed, so two pools in one database share them |
+| plugin tables and `plugin_migrations` | yes |
+| the `admin` and `cleat` schemas | **no** — those names are fixed, so two pools in one database share them |
 
-So "multiple isolated worker pools on a single database cluster" is not yet a claim this flag
-supports. Until the plugin half lands, a non-default `--schema` gives a worker whose core schema is
-isolated and whose plugins are not.
+So a worker's own tables are isolated. "Multiple isolated worker pools on a single database cluster"
+is a stronger claim than that and is **not** yet supported: `admin` and `cleat` are shared, and the
+`SECURITY DEFINER` functions in `admin` have not been examined for what they do when two pools use
+them. Treat `--schema` as "put this worker's tables somewhere other than public", not as a tenancy
+boundary.
 
 ---
 

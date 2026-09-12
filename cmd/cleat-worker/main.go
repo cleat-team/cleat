@@ -708,7 +708,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := plugin.RunMigrations(ctx, migrateDB, plugin.Dialect(factory.Dialect()), nil, plugList); err != nil {
+	// WithSchema, or plugin tables land in public while the runtime pool --
+	// opened through dsnWithSchema -- looks in --schema, and every plugin's
+	// first query fails with "relation ... does not exist". cleat#1287.
+	if err := plugin.RunMigrations(ctx, migrateDB, plugin.Dialect(factory.Dialect()), nil, plugList,
+		plugin.WithSchema(*schemaName)); err != nil {
 		logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
 		os.Exit(1)
 	}
@@ -751,7 +755,8 @@ func main() {
 				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
-			if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList); terr != nil {
+			if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList,
+				plugin.WithSchema(*schemaName)); terr != nil {
 				logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}

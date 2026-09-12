@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -166,7 +167,7 @@ type migrationSession interface {
 // (GET_LOCK, sp_getapplock) and no schema of this shape, but cleat ships no
 // multi-worker topology for them and untested code here would be worse than
 // none. There this returns the pool unchanged.
-func pluginMigrationSession(ctx context.Context, db *sql.DB, dialect Dialect) (migrationSession, func(), error) {
+func pluginMigrationSession(ctx context.Context, db *sql.DB, dialect Dialect, schema string) (migrationSession, func(), error) {
 	if dialect != DialectPostgres {
 		return db, func() {}, nil
 	}
@@ -178,28 +179,98 @@ func pluginMigrationSession(ctx context.Context, db *sql.DB, dialect Dialect) (m
 		conn.Close()
 		return nil, nil, fmt.Errorf("plugin: acquire migration lock: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx, "SET search_path = public"); err != nil {
+	if schema != "public" {
+		// Core migrations create it (migration.Runner.session), and they run
+		// first at boot -- but plugin migrations are also run directly by
+		// tests and by plugins/plugintest, so not depending on that ordering
+		// is cheaper than documenting it.
+		if _, err := conn.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS "+schema); err != nil {
+			_, _ = conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", pluginMigrationsLockKey)
+			conn.Close()
+			return nil, nil, fmt.Errorf("plugin: create schema %s: %w", schema, err)
+		}
+	}
+	// pg_temp last, matching migration.Runner.searchPath: PostgreSQL searches
+	// pg_temp FIRST when it is not named, and naming it last is the standard
+	// hardening. Plugin DDL is unqualified, so this is what decides where
+	// every plugin table lands.
+	if _, err := conn.ExecContext(ctx, "SET search_path = "+schema+", pg_temp"); err != nil {
 		_, _ = conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", pluginMigrationsLockKey)
 		conn.Close()
-		return nil, nil, fmt.Errorf("plugin: pin search_path: %w", err)
+		return nil, nil, fmt.Errorf("plugin: pin search_path to %s: %w", schema, err)
 	}
 	return conn, func() {
 		// Reset before releasing so the connection returns to the pool
 		// configured like every other one.
 		free := context.WithoutCancel(ctx)
+		// *sql.Conn.Close() RETURNS the connection to the pool rather than
+		// closing it, so the pin above would otherwise ride back into the pool
+		// and leave one connection resolving unqualified names differently
+		// from every other one in it.
 		_, _ = conn.ExecContext(free, "RESET search_path")
 		_, _ = conn.ExecContext(free, "SELECT pg_advisory_unlock($1)", pluginMigrationsLockKey)
 		conn.Close()
 	}, nil
 }
 
+// MigrationOption configures a RunMigrations call.
+type MigrationOption func(*migrationOptions)
+
+type migrationOptions struct {
+	schema string
+}
+
+// WithSchema directs plugin migrations at a PostgreSQL schema other than
+// public, which is what cmd/cleat-worker's --schema flag names. cleat#1287.
+//
+// It mirrors migration.Runner.WithSchema, and for the same reason: until
+// #1287 the schema was a literal here too -- pluginMigrationSession pinned
+// `SET search_path = public` unconditionally, with no reference to any
+// configuration. Core migrations stopped doing that in #1353; this is the
+// other half, and without it a non-default --schema puts core tables in the
+// configured schema and plugin tables in public, where the plugin's own
+// queries -- unqualified, on a runtime pool whose DSN carries search_path --
+// cannot see them.
+//
+// An empty schema, or "public", leaves the behaviour exactly as it was.
+//
+// A variadic option rather than a parameter because RunMigrations has some
+// forty call sites, all but two of them tests that want the default. The cost
+// of that choice is that forgetting the call is silent, and what it silently
+// restores is this bug -- so cmd/cleat-worker has a guard test asserting every
+// call there passes it, in the same shape as the one #1353 added for
+// migration.NewRunner.
+func WithSchema(schema string) MigrationOption {
+	return func(o *migrationOptions) { o.schema = schema }
+}
+
+// plainIdentifier matches a PostgreSQL identifier that needs no quoting.
+//
+// Declared here as well as in the migration package: the two are peers, not a
+// shared layer, and a dependency between them exists only to avoid four tokens
+// of regexp.
+var plainIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // RunMigrations runs core migrations and plugin migrations in order.
 // Core migrations are run first, then plugins in dependency order.
 // Each plugin's migrations are tracked in a plugin_migrations table
 // so they run only once.
-func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrations []Migration, plugins []*LoadedPlugin) error {
+func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrations []Migration, plugins []*LoadedPlugin, opts ...MigrationOption) error {
 	if db == nil {
 		return nil
+	}
+
+	var cfg migrationOptions
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if cfg.schema == "" {
+		cfg.schema = "public"
+	}
+	if !plainIdentifier.MatchString(cfg.schema) {
+		return fmt.Errorf(
+			"plugin: schema %q is not a plain identifier; --schema takes an "+
+				"unquoted PostgreSQL schema name", cfg.schema)
 	}
 
 	// Serialise against other processes doing the same thing. Every worker
@@ -213,7 +284,7 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 	// which is fatal to worker startup. Same defect, same shape, and the same
 	// fix as migration.Runner -- see migrationsLockKey there. The key differs
 	// so that core and plugin migrations do not block each other needlessly.
-	session, release, err := pluginMigrationSession(ctx, db, dialect)
+	session, release, err := pluginMigrationSession(ctx, db, dialect, cfg.schema)
 	if err != nil {
 		return err
 	}
@@ -315,6 +386,21 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 				name, m.Version); err != nil {
 				_ = tx.Rollback()
 				return fmt.Errorf("plugin %s migration v%d record: %w", name, m.Version, err)
+			}
+
+			// Restore the pin before the next migration. A bare SET inside a
+			// plugin's own SQL is session-scoped, so it would outlive this
+			// transaction and decide where every later plugin's tables land --
+			// and the plugin_migrations bookkeeping is unqualified, so it
+			// would move too. The core runner does the same after each file
+			// and for the same reason; see migration/runner.go.
+			if dialect == DialectPostgres {
+				if _, err := tx.ExecContext(ctx,
+					"SET search_path = "+cfg.schema+", pg_temp"); err != nil {
+					_ = tx.Rollback()
+					return fmt.Errorf("plugin %s migration v%d restore search_path: %w",
+						name, m.Version, err)
+				}
 			}
 
 			if err := tx.Commit(); err != nil {
