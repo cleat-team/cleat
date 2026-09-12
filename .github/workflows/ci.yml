@@ -433,6 +433,28 @@ jobs:
       - name: Workflow integrity guards
         run: scripts/check-workflow-guards.py
 
+      # Dependabot coverage. Two directions, both silent without this: an entry
+      # naming a directory that does not exist is skipped by Dependabot with no
+      # error at all, and a manifest in no entry gets security updates only.
+      # `renovate.json` sat in this repository configuring a bot that had opened
+      # zero PRs here, which is the first failure mode at whole-file scale
+      # (cleat#1321).
+      #
+      # Placed HERE, after "Workflow files parse", for the reason the step above
+      # gives: that step installs pyyaml and this guard imports it. Note the
+      # Required-context guard at step 4 also imports yaml and passes today, so
+      # pyyaml is evidently preinstalled on ubuntu-latest -- but the install is
+      # the only thing in this file that GUARANTEES it, and depending on a
+      # runner image's contents is how a guard stops running without failing.
+      #
+      # --self-test first, and it is two KNOWN-POSITIVES rather than a clean
+      # run: doctored configs the guard must report. A guard that passes a good
+      # tree has demonstrated nothing, because every broken version does that.
+      - name: Dependabot coverage guard
+        run: |
+          python3 scripts/check_dependabot_coverage.py --self-test
+          python3 scripts/check_dependabot_coverage.py
+
       # Ruff, promoted back into this required job on 2026-08-08. It ran here
       # before under `continue-on-error: true`, which meant it could not fail a
       # build and -- worse -- reported `success` in the REST jobs API, so the
