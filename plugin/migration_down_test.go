@@ -65,14 +65,36 @@ func loaded(name string, migs ...Migration) *LoadedPlugin {
 }
 
 // tableExists is the observation that separates "refused" from "partly done".
+//
+// RESOLVED BY search_path, NOT BY current_schema(). The first version asked
+//
+//	WHERE table_schema = current_schema()
+//
+// and passed locally while failing CI's Tier 1 gate with "PRECONDITION FAILED:
+// the migrations did not create their tables" -- my own assertion, reporting
+// that RunMigrations had run without error and created nothing findable.
+//
+// It had created them, in `public`. RunMigrations pins `SET search_path =
+// <schema>, pg_temp` on ITS OWN connection (schema defaults to public, see
+// pluginMigrationSession), and plugin DDL is unqualified, so that pin decides
+// where the tables land. This query runs on a POOL connection, whose
+// current_schema() is the first entry of its own search_path -- `"$user",
+// public`. Locally the role is postgres and no schema of that name exists, so
+// current_schema() falls through to public and the two agree by accident. In
+// CI the role is `cleat` against a database where 001 created a schema called
+// `cleat`, so current_schema() returns `cleat` and the tables are invisible.
+//
+// That is the same call-time-versus-migration-time trap cleat#1287 records on
+// admin.create_tenant_role, arriving in a test rather than in a function.
+// to_regclass resolves the unqualified name the way an unqualified query would,
+// which is the question this test actually means to ask.
 func tableExists(t *testing.T, db *sql.DB, name string) bool {
 	t.Helper()
-	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM information_schema.tables
-		WHERE table_schema = current_schema() AND table_name = $1`, name).Scan(&n); err != nil {
+	var found bool
+	if err := db.QueryRow(`SELECT to_regclass($1) IS NOT NULL`, name).Scan(&found); err != nil {
 		t.Fatalf("check table %s: %v", name, err)
 	}
-	return n > 0
+	return found
 }
 
 func TestRunDownMigrationsReversesNewestFirst(t *testing.T) {
