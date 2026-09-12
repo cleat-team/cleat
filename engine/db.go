@@ -136,6 +136,21 @@ func (s *PostgresStore) WithNotifyChannel(channel string) *PostgresStore {
 // (Decrypt); otherwise it is treated as a base64-encoded ciphertext
 // (DecryptString).
 func (s *PostgresStore) decryptField(encrypted, fieldName, workflowID string, step int, useBytesDecrypt bool) string {
+	// An empty stored value was never produced by the encryptor, so there is
+	// nothing here to decrypt and nothing to report. EncryptString always
+	// returns at least a nonce and a GCM tag, so it cannot return "" --
+	// TestAnEmptyFieldIsNotADecryptionFailure asserts that, because this
+	// guard is only correct while it holds.
+	//
+	// Without it the read path disagrees with the write path, which skips
+	// seven of these ten fields when they are empty (engine/flush.go). The
+	// disagreement is not a corner case: a plain call event leaves all seven
+	// empty, so every ordinary event in every history came back carrying
+	// seven false reports of data loss. See cleat#1377.
+	if encrypted == "" {
+		return ""
+	}
+
 	var decrypted string
 	var err error
 	if useBytesDecrypt {
