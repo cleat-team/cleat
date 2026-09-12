@@ -224,6 +224,39 @@ max_client_conn = 200
 default_pool_size = 25
 ```
 
+> **Migrations must not go through a transaction-mode pooler.** `pool_mode =
+> transaction` hands each transaction whichever server backend is free, so
+> session state does not persist across statements — and the migration path
+> depends on exactly that:
+>
+> | session-scoped thing | where |
+> |---|---|
+> | `pg_advisory_lock`, serialising migrations across workers | `migration/runner.go:209`, `plugin/migration.go:177` |
+> | `SET search_path = public`, held across the plugin run | `plugin/migration.go:181` |
+>
+> The lock is taken on one backend and the unlock may land on another, so the
+> serialisation is silently absent — at **every worker boot**, on the path that
+> applies schema changes, which is the one place two workers must not proceed
+> at once. Nothing errors; the lock simply does not lock.
+>
+> **Use `--migrate-db`, which already exists for this shape of problem.** Point
+> `--db` at PgBouncer and `--migrate-db` at a direct connection:
+>
+> ```bash
+> cleat-worker \
+>     --db "postgres://cleat@pgbouncer:6432/cleat" \
+>     --migrate-db "postgres://cleat@postgres:5432/cleat"
+> ```
+>
+> Steady-state traffic keeps its pooling; the migration connection gets the
+> session it requires. (`--migrate-db` was added for privilege separation — an
+> unprivileged `--db` role with a DDL-capable migration role — and serves both
+> purposes.)
+>
+> `session` pooling does not have this problem, and `statement` pooling is worse.
+> Verify with `git grep -n pg_advisory -- migration/ plugin/` before assuming
+> this note is still current; cleat#1310.
+
 Then connect workers to PgBouncer:
 
 ```bash
