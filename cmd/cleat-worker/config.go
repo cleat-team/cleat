@@ -155,53 +155,81 @@ var (
 	// "retention" is not what bounds them.
 	retentionDays                  = flag.Int("retention-days", 30, "Days after which the compaction state of completed/failed workflows is cleared (0 disables). This does NOT bound event_history: its event arm selects done/failed runs, whose events finalize_workflow_status already deleted at terminal time, so that arm cannot match. Events of 'terminated' and 'dead_lettered' runs are bounded only by --completed-workflow-retention-days and --dead-letter-retention-days, both off by default. See cleat#1016.")
 	completedWorkflowRetentionDays = flag.Int("completed-workflow-retention-days", 0, "Days to retain workflow_instances rows for terminal workflows (done/failed/terminated) before permanently deleting them, along with any remaining event_history. 0 (default) disables this -- unlike --retention-days, this deletes the workflow record itself (status, result, error, def_name), not just its step-by-step history, so it is opt-in rather than on by default. dead_lettered workflows are never touched by this flag.")
-	deadLetterRetentionDays        = flag.Int("dead-letter-retention-days", 0, "Days to retain dead-lettered workflow_instances rows before permanently deleting them, along with their event_history, signals and promises. 0 (default) disables this. Separate from --completed-workflow-retention-days, which never touches dead-lettered workflows: a dead-lettered run is the one an operator most wants to inspect afterwards, so it has its own lifecycle and its own knob rather than being swept up with completed work.")
-	wasmCacheMaxEntries            = flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
-	wasmCacheMaxMB                 = flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
-	schemaName                     = flag.String("schema", "public", "PostgreSQL schema for cleat tables (default \"public\"). Sets search_path on connections; CREATE SCHEMA IF NOT EXISTS on startup.")
-	disableChecksumVerification    = flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
-	wasmMemoryMaxMB                = flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
-	wasmCumulativeAllocationMaxMB  = flag.Int("wasm-cumulative-allocation-max-mb", 0, "Max cumulative WASM linear memory across all concurrent executions in MB (default 0 = unlimited)")
-	wasmInstructionLimit           = flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit). Enforced via wasmtime fuel (SetConsumeFuel/SetFuel).")
-	wasmDeferBudget                = flag.Duration("wasm-defer-budget", engine.DefaultWasmtimeDeferBudget, "Max wall-clock time for the cleanup pass the host runs on a workflow it killed -- the defers of a workflow stopped by --wasm-instance-timeout, --wasm-instruction-limit, or an unrecoverable guest runtime failure. This is EXTRA execution granted to a workflow the fence already stopped, so the worst case a runaway workflow can occupy a worker is --wasm-instance-timeout plus this. 0 uses the built-in default.")
-	wasmInstanceTimeout            = flag.Duration("wasm-instance-timeout", 30*time.Second, "Max GUEST EXECUTION time for a single WASM invocation (one fresh execution or one replay pass) before it is forcibly interrupted. Enforced via wasmtime epoch interruption, which bounds even a WASM module stuck in a tight loop that never calls back into the host. Time the guest spends blocked in a host call -- a service call, a plugin call, a retry backoff -- is NOT charged against it; use --wasm-wall-clock-ceiling to bound that. 0 disables it and is NOT recommended.")
-	wasmWallClockCeiling           = flag.Duration("wasm-wall-clock-ceiling", 5*time.Minute, "Max WALL-CLOCK time for a single WASM invocation, including time spent waiting inside host calls. This is the bound that stops a workflow blocked on an unresponsive service from holding a worker slot indefinitely; --wasm-instance-timeout bounds the guest's own execution and does not cover waiting. Must be >= --wasm-instance-timeout to mean anything. 0 falls back to --wasm-instance-timeout, which is the pre-3.90 behaviour of one value doing both jobs.")
-	hostRetryBudget                = flag.Duration("host-retry-budget", engine.DefaultHostRetryBudget, "CEILING on how much worst-case backoff a retry policy may carry and still be run on the host, inside one segment, holding the worker slot. A policy above this is refused (callErrorCode 6, RetryPolicyTooLong); the guest then runs it itself, suspending between attempts, which releases the slot. A tenant may set a LOWER value in tenant_settings and it is clamped to this; it can never raise it. This is ALSO the boundary at which a backoff survives a worker loss: on the host path the wait is worker-local and a crash discards its remainder (decided, cleat#1111), while the guest's own loop backs off with a durable sleep and resumes. Moving this flag moves policies between those two behaviours as well as between holding a slot and suspending. Keep it well below --wasm-wall-clock-ceiling: that ceiling covers the whole invocation, so a budget near it lets one retry policy consume everything the workflow had. 0 uses the built-in default.")
-	noPerStepFlush                 = flag.Bool("no-per-step-flush", false, "Skip per-step event flush; rely on batch finalization for persistence (higher throughput, weaker crash safety)")
-	writeAheadIntentOps            = flag.String("write-ahead-intent-ops", "", "Comma-separated service.operation pairs that must use write-ahead call intent: the engine commits a pending event before dispatching, so a crash mid-call is reported as ambiguous on replay instead of silently repeating the side effect. Costs one extra synchronous round trip per call, so declare only operations that are not safe to repeat (a card charge, not a GET). Independent of --no-per-step-flush, which does not defer these writes.")
-	batchFlushDisabled             = flag.Bool("batch-flush-disabled", false, "Disable adaptive batch flushing (always use direct per-step flush)")
-	batchFlushMaxWaitMs            = flag.Int("batch-flush-max-wait-ms", 8, "Max milliseconds to wait accumulating events in batch mode")
-	batchFlushMaxSize              = flag.Int("batch-flush-max-size", 200, "Max events per batch flush transaction")
-	batchFlushEnterRate            = flag.Int("batch-flush-enter-rate", 500, "Steps/sec threshold to enter adaptive batch mode")
-	batchFlushExitRate             = flag.Int("batch-flush-exit-rate", 250, "Steps/sec threshold to exit batch mode (hysteresis, must be < enter-rate)")
-	batchFlushMaxConns             = flag.Int("batch-flush-max-connections", 50, "Max DB connections for adaptive flusher's dedicated pool")
-	syncCommitOff                  = flag.Bool("synchronous-commit-off", false, "SET LOCAL synchronous_commit = off in finalize transactions (higher throughput, weaker durability)")
-	wasmOutputBufferSize           = flag.Int("wasm-output-buffer-size", 32768, "WASM output buffer size in bytes (default 32 KB)")
-	wasmMaxStringLen               = flag.Int("wasm-max-string-len", 65536, "Maximum WASM string parameter length in bytes (default 64 KB)")
-	wasmCacheDir                   = flag.String("wasm-cache-dir", "", "Directory for disk-backed compiled WASM module cache (empty disables)")
-	wasmDiskCacheMaxFiles          = flag.Int("wasm-disk-cache-max-files", 100, "Max files in the disk-backed compiled WASM module cache (LRU eviction)")
-	redactPatternsFile             = flag.String("redact-patterns-file", "", "Path to file with custom redaction patterns (one per line)")
-	childBindingOverride           = flag.String("child-binding-override", "", "Override child binding policy: 'latest' to always use latest child versions (for debugging). Also read from CLEAT_CHILD_BINDING_OVERRIDE env var.")
-	dbCredentialProvider           = flag.String("db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
-	dbCredentialPath               = flag.String("db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
-	encryptionKeyFile              = flag.String("encryption-key-file", "", "Path to file containing base64-encoded AES-256-GCM encryption key (32 bytes after decode)")
-	encryptSensitivePayloads       = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
-	maxQuotaEvents                 = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
-	maxQuotaChildren               = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
-	maxQuotaConcurrencyKeys        = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
-	maxQuotaSchedules              = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
-	claimAcrossTenants             = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. Requires a database-side grant; see migrations/postgres/023_cross_tenant_claim.sql and migrations/mssql/012_admin_role.sql")
-	maxWorkflowDuration            = flag.Duration("max-workflow-duration", 0, "Maximum wall-clock duration per workflow execution (0 = no limit). Workflows exceeding this are cancelled and fail with a timeout error.")
-	healthCheckInterval            = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
-	maxPluginConnections           = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
-	otelEndpoint                   = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
-	otelDisabled                   = flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
-	benchSvcURL                    = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
-	tenantPoolMaxConns             = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool (MySQL/MSSQL only)")
-	logLevel                       = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-	enableAdminAPI                 = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
-	verifyBackend                  = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
-	listPlugins                    = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
+	// VERSION GC. Three flags: one switch and two policy knobs. cleat#1315.
+	//
+	// --version-gc-interval is the switch and defaults to 0 (off), for the same
+	// reason --completed-workflow-retention-days does: GC permanently deletes
+	// workflow DEFINITIONS, and an in-flight instance whose version is gone
+	// cannot find its WASM binary to replay against. That is a materially more
+	// destructive thing to ship silently-on than clearing compaction state.
+	//
+	// Until this flag existed, GC ran only when a person invoked it --
+	// `cleatctl versions gc` or POST /api/versions/gc -- and its policy was
+	// engine.DefaultGCOptions(), compiled in and unreachable from either
+	// surface. So an operator could neither schedule it nor tune it, and
+	// docs/troubleshooting.md told them to adjust a retention policy with two
+	// flags that did not exist.
+	versionGCInterval = flag.Duration("version-gc-interval", 0,
+		"Interval between automatic workflow-version garbage collection sweeps. "+
+			"0 (default) disables the sweep entirely -- GC then runs only when invoked "+
+			"through 'cleatctl versions gc' or POST /api/versions/gc. Opt-in because GC "+
+			"deletes workflow definitions permanently, and an in-flight instance whose "+
+			"version has been collected cannot replay.")
+	versionGCMinVersions = flag.Int("version-gc-min-versions", engine.DefaultMinVersionsToKeep,
+		"Minimum number of recent versions to retain per workflow during GC, regardless "+
+			"of age or activity. Applies to the scheduled sweep; 'cleatctl versions gc' and "+
+			"POST /api/versions/gc take their own overrides.")
+	versionGCMaxAge = flag.Duration("version-gc-max-age", engine.DefaultMaxVersionAge,
+		"Maximum age of a DEPRECATED version before it becomes eligible for GC. A version "+
+			"that is not deprecated is never collected whatever its age.")
+
+	deadLetterRetentionDays       = flag.Int("dead-letter-retention-days", 0, "Days to retain dead-lettered workflow_instances rows before permanently deleting them, along with their event_history, signals and promises. 0 (default) disables this. Separate from --completed-workflow-retention-days, which never touches dead-lettered workflows: a dead-lettered run is the one an operator most wants to inspect afterwards, so it has its own lifecycle and its own knob rather than being swept up with completed work.")
+	wasmCacheMaxEntries           = flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
+	wasmCacheMaxMB                = flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
+	schemaName                    = flag.String("schema", "public", "PostgreSQL schema for cleat tables (default \"public\"). Sets search_path on connections; CREATE SCHEMA IF NOT EXISTS on startup.")
+	disableChecksumVerification   = flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
+	wasmMemoryMaxMB               = flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
+	wasmCumulativeAllocationMaxMB = flag.Int("wasm-cumulative-allocation-max-mb", 0, "Max cumulative WASM linear memory across all concurrent executions in MB (default 0 = unlimited)")
+	wasmInstructionLimit          = flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit). Enforced via wasmtime fuel (SetConsumeFuel/SetFuel).")
+	wasmDeferBudget               = flag.Duration("wasm-defer-budget", engine.DefaultWasmtimeDeferBudget, "Max wall-clock time for the cleanup pass the host runs on a workflow it killed -- the defers of a workflow stopped by --wasm-instance-timeout, --wasm-instruction-limit, or an unrecoverable guest runtime failure. This is EXTRA execution granted to a workflow the fence already stopped, so the worst case a runaway workflow can occupy a worker is --wasm-instance-timeout plus this. 0 uses the built-in default.")
+	wasmInstanceTimeout           = flag.Duration("wasm-instance-timeout", 30*time.Second, "Max GUEST EXECUTION time for a single WASM invocation (one fresh execution or one replay pass) before it is forcibly interrupted. Enforced via wasmtime epoch interruption, which bounds even a WASM module stuck in a tight loop that never calls back into the host. Time the guest spends blocked in a host call -- a service call, a plugin call, a retry backoff -- is NOT charged against it; use --wasm-wall-clock-ceiling to bound that. 0 disables it and is NOT recommended.")
+	wasmWallClockCeiling          = flag.Duration("wasm-wall-clock-ceiling", 5*time.Minute, "Max WALL-CLOCK time for a single WASM invocation, including time spent waiting inside host calls. This is the bound that stops a workflow blocked on an unresponsive service from holding a worker slot indefinitely; --wasm-instance-timeout bounds the guest's own execution and does not cover waiting. Must be >= --wasm-instance-timeout to mean anything. 0 falls back to --wasm-instance-timeout, which is the pre-3.90 behaviour of one value doing both jobs.")
+	hostRetryBudget               = flag.Duration("host-retry-budget", engine.DefaultHostRetryBudget, "CEILING on how much worst-case backoff a retry policy may carry and still be run on the host, inside one segment, holding the worker slot. A policy above this is refused (callErrorCode 6, RetryPolicyTooLong); the guest then runs it itself, suspending between attempts, which releases the slot. A tenant may set a LOWER value in tenant_settings and it is clamped to this; it can never raise it. This is ALSO the boundary at which a backoff survives a worker loss: on the host path the wait is worker-local and a crash discards its remainder (decided, cleat#1111), while the guest's own loop backs off with a durable sleep and resumes. Moving this flag moves policies between those two behaviours as well as between holding a slot and suspending. Keep it well below --wasm-wall-clock-ceiling: that ceiling covers the whole invocation, so a budget near it lets one retry policy consume everything the workflow had. 0 uses the built-in default.")
+	noPerStepFlush                = flag.Bool("no-per-step-flush", false, "Skip per-step event flush; rely on batch finalization for persistence (higher throughput, weaker crash safety)")
+	writeAheadIntentOps           = flag.String("write-ahead-intent-ops", "", "Comma-separated service.operation pairs that must use write-ahead call intent: the engine commits a pending event before dispatching, so a crash mid-call is reported as ambiguous on replay instead of silently repeating the side effect. Costs one extra synchronous round trip per call, so declare only operations that are not safe to repeat (a card charge, not a GET). Independent of --no-per-step-flush, which does not defer these writes.")
+	batchFlushDisabled            = flag.Bool("batch-flush-disabled", false, "Disable adaptive batch flushing (always use direct per-step flush)")
+	batchFlushMaxWaitMs           = flag.Int("batch-flush-max-wait-ms", 8, "Max milliseconds to wait accumulating events in batch mode")
+	batchFlushMaxSize             = flag.Int("batch-flush-max-size", 200, "Max events per batch flush transaction")
+	batchFlushEnterRate           = flag.Int("batch-flush-enter-rate", 500, "Steps/sec threshold to enter adaptive batch mode")
+	batchFlushExitRate            = flag.Int("batch-flush-exit-rate", 250, "Steps/sec threshold to exit batch mode (hysteresis, must be < enter-rate)")
+	batchFlushMaxConns            = flag.Int("batch-flush-max-connections", 50, "Max DB connections for adaptive flusher's dedicated pool")
+	syncCommitOff                 = flag.Bool("synchronous-commit-off", false, "SET LOCAL synchronous_commit = off in finalize transactions (higher throughput, weaker durability)")
+	wasmOutputBufferSize          = flag.Int("wasm-output-buffer-size", 32768, "WASM output buffer size in bytes (default 32 KB)")
+	wasmMaxStringLen              = flag.Int("wasm-max-string-len", 65536, "Maximum WASM string parameter length in bytes (default 64 KB)")
+	wasmCacheDir                  = flag.String("wasm-cache-dir", "", "Directory for disk-backed compiled WASM module cache (empty disables)")
+	wasmDiskCacheMaxFiles         = flag.Int("wasm-disk-cache-max-files", 100, "Max files in the disk-backed compiled WASM module cache (LRU eviction)")
+	redactPatternsFile            = flag.String("redact-patterns-file", "", "Path to file with custom redaction patterns (one per line)")
+	childBindingOverride          = flag.String("child-binding-override", "", "Override child binding policy: 'latest' to always use latest child versions (for debugging). Also read from CLEAT_CHILD_BINDING_OVERRIDE env var.")
+	dbCredentialProvider          = flag.String("db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
+	dbCredentialPath              = flag.String("db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
+	encryptionKeyFile             = flag.String("encryption-key-file", "", "Path to file containing base64-encoded AES-256-GCM encryption key (32 bytes after decode)")
+	encryptSensitivePayloads      = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
+	maxQuotaEvents                = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
+	maxQuotaChildren              = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
+	maxQuotaConcurrencyKeys       = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
+	maxQuotaSchedules             = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
+	claimAcrossTenants            = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. Requires a database-side grant; see migrations/postgres/023_cross_tenant_claim.sql and migrations/mssql/012_admin_role.sql")
+	maxWorkflowDuration           = flag.Duration("max-workflow-duration", 0, "Maximum wall-clock duration per workflow execution (0 = no limit). Workflows exceeding this are cancelled and fail with a timeout error.")
+	healthCheckInterval           = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
+	maxPluginConnections          = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
+	otelEndpoint                  = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
+	otelDisabled                  = flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
+	benchSvcURL                   = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
+	tenantPoolMaxConns            = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool (MySQL/MSSQL only)")
+	logLevel                      = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	enableAdminAPI                = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
+	verifyBackend                 = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
+	listPlugins                   = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
 )
 
 func applyChildBindingOverrideEnv() {

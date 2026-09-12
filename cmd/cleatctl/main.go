@@ -18,7 +18,8 @@
 //	versions restore <name> <v>     — mark a version active
 //	versions purge <name> <v>       — permanently delete a version
 //	versions active [<name>]        — show active instance counts by version
-//	versions gc [--dry-run]         — run garbage collection on deprecated versions
+//	versions gc [--dry-run] [--min-versions=N] [--max-age=DURATION]
+//	                                — run garbage collection on deprecated versions
 //	deploy workflow <name> <wasm>    — deploy a new workflow WASM binary
 //	deploy plugin <name> <wasm>      — deploy a plugin WASM binary
 //	drop-tenant <tenant-id>          — permanently delete a tenant and all its data
@@ -121,6 +122,7 @@ Commands:
   versions purge <name> <v>       permanently delete a version
   versions active [<name>]        show active instance counts by version
   versions gc [--dry-run]         run garbage collection on deprecated versions
+      [--min-versions=N] [--max-age=DURATION]
   deploy workflow <name> <wasm>   deploy a new workflow WASM binary
   deploy plugin <name> <wasm>     deploy a plugin WASM binary
   cost [flags]                    estimate monthly operational costs

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -227,16 +228,55 @@ func activeInstances(ctx context.Context, store engine.WorkflowStore, args []str
 	fmt.Printf("\nGrand total active instances: %d\n", grandTotal)
 }
 
+// gcVersions runs one garbage-collection pass.
+//
+// RETENTION IS OVERRIDABLE HERE. Until cleat#1315 this read only --dry-run and
+// then took engine.DefaultGCOptions() wholesale, so MinVersionsToKeep=3 and
+// MaxVersionAge=30d were compiled in and unreachable -- an operator could not
+// tune the policy from any interface, while docs/troubleshooting.md told them
+// to adjust it with two flags that did not exist.
+//
+// Parsed by hand rather than with a FlagSet to match the rest of this file,
+// where every subcommand reads its own args. An unrecognised argument is
+// REFUSED rather than ignored: silently dropping --min-versions=5 would run a
+// destructive sweep under a policy the caller did not ask for, which is the
+// failure this change exists to remove.
 func gcVersions(ctx context.Context, store engine.WorkflowStore, args []string) {
-	dryRun := false
+	opts := engine.DefaultGCOptions()
 	for _, a := range args {
-		if a == "--dry-run" {
-			dryRun = true
+		switch {
+		case a == "--dry-run":
+			opts.DryRun = true
+		case strings.HasPrefix(a, "--min-versions="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--min-versions="))
+			// >= 1, not >= 0: GarbageCollectVersions normalises <= 0 back to
+			// the default, so accepting 0 would run under a policy of 3 while
+			// reporting success -- the silent substitution being removed here.
+			if err != nil || n < 1 {
+				fmt.Fprintf(os.Stderr, "invalid --min-versions: %q (want an integer >= 1; "+
+					"0 is treated as unset and substitutes %d)\n",
+					strings.TrimPrefix(a, "--min-versions="), engine.DefaultMinVersionsToKeep)
+				osExit(1)
+				return
+			}
+			opts.MinVersionsToKeep = n
+		case strings.HasPrefix(a, "--max-age="):
+			d, err := time.ParseDuration(strings.TrimPrefix(a, "--max-age="))
+			if err != nil || d <= 0 {
+				fmt.Fprintf(os.Stderr, "invalid --max-age: %q (want a positive Go duration "+
+					"such as 720h; 0 is treated as unset and substitutes %s)\n",
+					strings.TrimPrefix(a, "--max-age="), engine.DefaultMaxVersionAge)
+				osExit(1)
+				return
+			}
+			opts.MaxVersionAge = d
+		default:
+			fmt.Fprintf(os.Stderr, "unknown argument for `versions gc`: %q\n"+
+				"usage: cleatctl versions gc [--dry-run] [--min-versions=N] [--max-age=DURATION]\n", a)
+			osExit(1)
+			return
 		}
 	}
-
-	opts := engine.DefaultGCOptions()
-	opts.DryRun = dryRun
 
 	result, err := engine.GarbageCollectVersions(ctx, store, opts)
 	if err != nil {
@@ -245,11 +285,16 @@ func gcVersions(ctx context.Context, store engine.WorkflowStore, args []string) 
 	}
 
 	mode := ""
-	if dryRun {
+	if opts.DryRun {
 		mode = " (dry run)"
 	}
 
 	fmt.Printf("GC complete%s:\n", mode)
+	// The policy is echoed because it is now overridable. A run that removed
+	// nothing under --min-versions=50 and one that removed nothing under the
+	// default 3 are different answers, and the counts alone cannot say which.
+	fmt.Printf("  Policy:            keep >= %d versions, deprecated older than %s\n",
+		opts.MinVersionsToKeep, opts.MaxVersionAge)
 	fmt.Printf("  Versions removed:  %d\n", result.VersionsRemoved)
 	fmt.Printf("  Versions skipped:  %d\n", result.VersionsSkipped)
 	if len(result.Errors) > 0 {

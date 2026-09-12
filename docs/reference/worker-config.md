@@ -572,7 +572,9 @@ appears in `ListWorkflows` or the admin dashboard, and its outcome (result,
 error, status) is gone. Off by default -- an operator opts in after deciding
 how long their own audit/compliance requirements need a workflow's outcome
 retrievable. `dead_lettered` workflows are never affected by this flag; they
-have their own (separate, currently unwired) deletion path. On the Go SDK a
+have their own deletion path, `--dead-letter-retention-days`, which cleat#1023
+wired and which is also off by default. (This sentence said "currently unwired"
+until cleat#1315 noticed it while adding the flags below.) On the Go SDK a
 workflow reaches that state only by exhausting a retry policy short enough to
 have run on the host (see `cleat.hostRetryBudget`); a long-backoff policy
 retries via durable sleep and produces a terminal error the worker's
@@ -582,6 +584,67 @@ dead-letter predicate does not match. See
 Any remaining `event_history` for a purged workflow is deleted in the same
 pass. See `docs/operations/workflow-retention.md` for the full design
 (default rationale, FK/cascade behavior per dialect, batching, metrics).
+
+---
+
+### --version-gc-interval
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `0` (disabled) | Interval between automatic workflow-version garbage collection sweeps |
+
+**This is the switch, and it is off.** Version GC permanently deletes workflow
+*definitions*. An in-flight instance whose version has been collected cannot
+find the WASM binary to replay against — the module cache is keyed by
+`def_name:def_version`, so the failure lands on a running workflow rather than
+at the point of deletion. That is materially more destructive than clearing
+compaction state, which is why `--retention-days` ships on at 30 and this ships
+off, on the same reasoning `--completed-workflow-retention-days` records above.
+
+With this unset, GC still runs when a person invokes it — `cleatctl versions gc`
+or `POST /api/versions/gc` — and those take their own policy overrides. Before
+cleat#1315 those two were the *only* surfaces and neither could change the
+policy.
+
+Unlike `retentionLoop`, this loop is **tick-first**: it does not sweep before
+its first tick. Retention pre-runs because a deploy cadence under its 24-hour
+period would disable it entirely (cleat#1002); that argument does not transfer
+to an opt-in destructive sweep, where a pre-run would make every worker restart
+delete definitions immediately and turn a rolling deploy into a burst of sweeps.
+
+Every pass logs `version gc swept` with the policy it used, **including passes
+that remove nothing** — so "ran and found nothing" and "disabled" are
+distinguishable in the log.
+
+---
+
+### --version-gc-min-versions
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `3` | Minimum recent versions retained per workflow, regardless of age or activity |
+
+Applies to the scheduled sweep. `cleatctl versions gc --min-versions=N` and
+`POST /api/versions/gc?min_versions=N` override it per invocation.
+
+**`0` is refused** on both manual surfaces. `engine.GarbageCollectVersions`
+treats a non-positive value as *unset* and substitutes the default, so accepting
+0 would run under a policy of 3 while reporting success.
+
+---
+
+### --version-gc-max-age
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `720h` (30 days) | Age at which a **deprecated** version becomes eligible for collection |
+
+A version that is not deprecated is never collected, whatever its age.
+`cleatctl versions gc --max-age=DURATION` and
+`POST /api/versions/gc?max_age=DURATION` override it per invocation.
+
+Go duration syntax, so `720h` rather than `30d` — and a bare number is refused:
+`--max-age=7` is seven *nanoseconds* to Go, not seven days.
 
 ---
 

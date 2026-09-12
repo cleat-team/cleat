@@ -948,6 +948,13 @@ type Worker struct {
 	retentionInterval       time.Duration
 	deadLetterRetentionDays int
 
+	// Version GC. versionGCInterval is the switch: 0 means the sweep never
+	// runs and GC is reachable only through cleatctl or the HTTP endpoint.
+	// cleat#1315.
+	versionGCInterval    time.Duration
+	versionGCMinVersions int
+	versionGCMaxAge      time.Duration
+
 	memoryController                 *MemoryController
 	maxRetries                       int
 	memorySampleRetention            int
@@ -1125,6 +1132,7 @@ func (w *Worker) Run() {
 	initLoopCtx("memory_reload")
 	initLoopCtx("memory_cleanup")
 	initLoopCtx("retention")
+	initLoopCtx("version_gc")
 	initLoopCtx("compaction")
 
 	// Background heartbeat goroutine.
@@ -1162,6 +1170,13 @@ func (w *Worker) Run() {
 	// Retention loop.
 	w.registerLoopFunc("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays, w.deadLetterRetentionDays) })
 	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays, w.deadLetterRetentionDays) })
+
+	// Version GC. Separate loop rather than a fourth arm of retentionLoop:
+	// its interval is its own flag, it is off by default while --retention-days
+	// is on, and the health tracker reports per-loop -- folding it in would
+	// make "retention is running" mean two different things.
+	w.registerLoopFunc("version_gc", w.versionGCLoop)
+	w.launchLoop("version_gc", w.versionGCLoop)
 
 	// Compaction loop.
 	//
@@ -2581,6 +2596,77 @@ func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays, de
 			w.runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays)
 		}
 	}
+}
+
+// versionGCLoop collects deprecated workflow-definition versions on a ticker.
+// cleat#1315.
+//
+// OFF BY DEFAULT, and the reason is the same one --completed-workflow-retention-days
+// gives for defaulting to 0: this deletes workflow DEFINITIONS permanently, and
+// an in-flight instance whose version has been collected cannot find the WASM
+// binary to replay against. The module cache is keyed by def_name:def_version,
+// so the failure lands on a running workflow rather than at the point of
+// deletion. That is materially more destructive than clearing compaction state,
+// which is why --retention-days ships on and this does not.
+//
+// Until this loop existed GC ran only when a person invoked it, through
+// `cleatctl versions gc` or POST /api/versions/gc, and its policy was
+// engine.DefaultGCOptions() -- compiled in and unreachable from either surface.
+//
+// TICK-FIRST, NOT SWEEP-FIRST, which is the opposite of retentionLoop and
+// deliberate. retentionLoop pre-runs because its 24-hour period means a deploy
+// cadence under a day would disable it entirely (cleat#1002). That argument
+// does not transfer: this sweep is opt-in, so an operator who set the flag
+// chose the cadence, and a pre-run would make every worker restart delete
+// definitions immediately -- turning a rolling deploy into a burst of
+// destructive sweeps, on a knob whose whole point is that the operator controls
+// when it fires.
+func (w *Worker) versionGCLoop() {
+	defer w.wg.Done()
+	if w.versionGCInterval <= 0 {
+		return
+	}
+	w.healthTracker.setInterval("version_gc", w.versionGCInterval)
+	ticker := time.NewTicker(w.versionGCInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.getLoopCtx("version_gc").Done():
+			return
+		case <-ticker.C:
+			w.healthTracker.recordRun("version_gc")
+			w.runVersionGCSweep()
+		}
+	}
+}
+
+// runVersionGCSweep runs one GC pass with the worker's configured policy.
+// Split out of versionGCLoop so a test can call it without waiting on the
+// ticker, the same seam runRetentionSweep provides for retention.
+func (w *Worker) runVersionGCSweep() {
+	opts := engine.DefaultGCOptions()
+	if w.versionGCMinVersions > 0 {
+		opts.MinVersionsToKeep = w.versionGCMinVersions
+	}
+	if w.versionGCMaxAge > 0 {
+		opts.MaxVersionAge = w.versionGCMaxAge
+	}
+	result, err := engine.GarbageCollectVersions(w.ctx, w.store, opts)
+	if err != nil {
+		w.logger.ErrorContext(w.ctx, "version gc failed", "worker_id", w.id, "error", err)
+		return
+	}
+	// Logged even at zero, because "the sweep ran and found nothing" and "the
+	// sweep is disabled" are the two states an operator most needs to tell
+	// apart -- the distinction cleat#1315's troubleshooting entry exists for.
+	w.logger.InfoContext(w.ctx, "version gc swept",
+		"worker_id", w.id,
+		"versions_removed", result.VersionsRemoved,
+		"versions_skipped", result.VersionsSkipped,
+		"min_versions_to_keep", opts.MinVersionsToKeep,
+		"max_version_age", opts.MaxVersionAge.String(),
+	)
 }
 
 // runRetentionSweep runs one iteration of both retention sweeps. Split out
