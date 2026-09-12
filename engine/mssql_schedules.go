@@ -69,12 +69,32 @@ func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 // the whole of the isolation on the connection this actually runs on. See the
 // note above ClaimDueSchedule.
 func (s *MSSQLStore) DeleteSchedule(ctx context.Context, name string) error {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM workflow_schedules WHERE name = @p1 AND tenant_id = @p2`,
+		name, s.tenantID).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrScheduleNotFound
+	}
+
 	_, err := s.db.ExecContext(ctx,
 		`DELETE FROM workflow_schedules WHERE name = @p1 AND tenant_id = @p2`, name, s.tenantID)
 	return err
 }
 
 func (s *MSSQLStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM workflow_schedules WHERE name = @p1 AND tenant_id = @p2`,
+		name, s.tenantID).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrScheduleNotFound
+	}
+
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_schedules SET enabled = @p2 WHERE name = @p1 AND tenant_id = @p3
 	`, name, enabled, s.tenantID)

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -221,8 +222,23 @@ func (s *execSession) DeleteCron(ctx context.Context, m api.Module, scheduleID s
 	var err error
 	if store := s.engine.workflowStore; store != nil {
 		// Deleting a schedule that is not there is the success a retry should
-		// see, and the stores already report no error for zero rows.
+		// see: workflow execution is at-least-once, so a replayed delete of a
+		// schedule the first attempt already removed must not fail the
+		// workflow.
+		//
+		// This used to hold by accident. The stores discarded the statement
+		// result, so zero rows matched was indistinguishable from one and
+		// every delete reported success -- including a delete of a name that
+		// never existed, which is what cleat#1297 fixed for the HTTP API.
+		// Now that the store reports it, the idempotence is DELIBERATE and
+		// stated here, which is where it belongs: the store's job is to say
+		// what happened, and the caller's job is to decide what it means.
+		// The same not-found that is a 404 to an operator who mistyped a name
+		// is a success to a retry that already did the work.
 		err = store.DeleteSchedule(ctx, scheduleID)
+		if errors.Is(err, ErrScheduleNotFound) {
+			err = nil
+		}
 	} else {
 		err = fmt.Errorf("no workflow store configured: workflow %s cannot delete schedule %q", s.workflowID, scheduleID)
 	}

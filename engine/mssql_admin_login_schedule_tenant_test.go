@@ -40,6 +40,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -146,8 +147,14 @@ func TestAdminLoginDeleteScheduleCannotCrossTenants(t *testing.T) {
 		t.Fatalf("fixture is broken: tenant A cannot see the schedule it just created")
 	}
 
-	if err := storeB.DeleteSchedule(context.Background(), name); err != nil {
-		t.Fatalf("tenant B DeleteSchedule: %v", err)
+	// Not-found, not nil. Until cleat#1297 this expected a nil error, which
+	// is what pinned the wrong report in place: the row was correctly
+	// untouched and tenant B was told "deleted" anyway. The isolation
+	// property below is unchanged; only the report is.
+	if err := storeB.DeleteSchedule(context.Background(), name); !errors.Is(err, ErrScheduleNotFound) {
+		t.Errorf("tenant B DeleteSchedule returned %v, want ErrScheduleNotFound.\n\n"+
+			"A nil error here tells tenant B its delete succeeded. The row survives "+
+			"either way, so nothing downstream notices the difference.", err)
 	}
 
 	if scheduleNamed(t, storeA, name) == nil {
@@ -165,8 +172,11 @@ func TestAdminLoginSetScheduleEnabledCannotCrossTenants(t *testing.T) {
 	const name = "tenant-a-billing-sweep"
 	mustCreateSchedule(t, storeA, name)
 
-	if err := storeB.SetScheduleEnabled(context.Background(), name, false); err != nil {
-		t.Fatalf("tenant B SetScheduleEnabled: %v", err)
+	// See the deletion case above: not-found is the correct report, and the
+	// nil this expected until cleat#1297 is what made the API answer
+	// 200 {"status":"disabled"} to a tenant that changed nothing.
+	if err := storeB.SetScheduleEnabled(context.Background(), name, false); !errors.Is(err, ErrScheduleNotFound) {
+		t.Errorf("tenant B SetScheduleEnabled returned %v, want ErrScheduleNotFound", err)
 	}
 
 	got := scheduleNamed(t, storeA, name)
