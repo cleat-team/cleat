@@ -318,18 +318,57 @@ The entire system runs on a single PostgreSQL database (plus Patroni for HA). Po
 
 **Resilience** is achieved through synchronous streaming replication (no lost commits), Patroni for automatic failover (~30s MTTR), WAL archiving to S3 for point-in-time recovery (protection against operator error), and application-level restricted database users (the worker app has `INSERT` and `UPDATE` permissions only — no `DROP`, `TRUNCATE`, or `DELETE`).
 
-**Multiple cleat instances share one PostgreSQL cluster.** Because cleat is
-stateless workers connecting to YOUR database, multiple worker pools can share
-a single Postgres cluster. The `--schema` flag assigns each worker pool its own
-PostgreSQL schema, providing full table-level isolation:
-`team_a.workflow_instances` is a separate table from
-`team_b.workflow_instances`.
-Each schema gets its own migration state, so schema changes are rolled out per
-pool, not globally.
+**Multiple cleat instances can share one PostgreSQL server — one DATABASE per
+pool. This is a future feature and cleat does not expose it yet.** Because
+cleat is stateless workers connecting to YOUR database, multiple worker pools
+can share a server by taking a database each. Nothing in cleat provisions that
+arrangement today, and the constraint below is enforced nowhere.
+
+This paragraph described schema-per-pool via `--schema`, with "full table-level
+isolation", until cleat#1363. That was wrong in three ways and none of them was
+about tables:
+
+  * `admin` and `cleat` are *schemas inside a database*, so two pools sharing a
+    database share them — including `admin.tenants`, which `tenant_settings`
+    cascades off, so dropping a tenant in one pool deletes the other pool's
+    settings rows.
+  * Migrations `CREATE OR REPLACE` routines in those fixed schemas
+    (`cleat.assert_tenant_set`, `admin.claim_workflows`, `admin.drop_tenant`),
+    so a pool upgrading rewrites functions another pool is executing while that
+    pool's own migration state still reads the older version. "Rolled out per
+    pool" was true of tables and false of behaviour — cleat#1368.
+  * The documented deploy path could not build the configuration at all:
+    migration 033's `CREATE EXTENSION IF NOT EXISTS pg_trgm` no-ops for the
+    second pool, and the GIN index then fails because `gin_trgm_ops` is not on
+    its `search_path` — cleat#1366.
+
+Database-per-pool dissolves all three by construction, because PostgreSQL has
+no cross-database references: `admin` and `cleat` exist once per database, the
+cascade cannot span databases, and extensions are database-scoped.
+
+**The constraint that does NOT dissolve: a tenant id must belong to exactly one
+pool.** Roles are cluster-global while everything else is per-database, and
+`admin.create_tenant_role` writes to that global namespace. Registering the
+same tenant in two pools silently invalidates the first pool's stored
+credential — its own password is then refused — and `admin.drop_tenant` for
+that tenant afterwards aborts on the role's remaining dependencies rather than
+deleting anything. The abort is loud; the credential invalidation is not.
+
+Two things are **measured** and two are **not**, and the difference is kept
+deliberately. Measured: the schema sharing above, and that separate databases
+do not share it. Not measured: per-pool migration state under
+database-per-pool (the fixture applied the files with `psql` rather than
+through `migration.Runner`), and whether each tenant role's
+`CONNECTION LIMIT 10` — a per-role and therefore cross-pool budget — matters in
+practice.
+
+`--schema` is not the mechanism for any of this. It puts one worker's tables
+somewhere other than `public`; see `docs/reference/worker-config.md` for what
+does and does not follow it.
 
 Pools do **not** cooperate through the database. A worker pool reads and writes
-its own schema and nothing else; cross-pool work goes through the other pool's
-API, the same way any two services talk. A host call that wrote a child workflow
+its own database and nothing else; cross-pool work goes through the other
+pool's API, the same way any two services talk. A host call that wrote a child workflow
 directly into a peer schema existed until 2026-09-02 and was removed — see
 IMPROVEMENT-PLAN §3.78 for why.
 
