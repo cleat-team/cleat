@@ -1,0 +1,10 @@
+# The skip ledger is append-only lines that are independent of each other, so a
+# union merge is correct where a conflict carries no information (cleat#1333).
+# Its one bad case -- two streams editing one line, which union duplicates --
+# is caught by the duplicate check in scripts/check-skip-budget.sh rather than
+# left to trust.
+#
+# Deliberately NOT applied to IMPROVEMENT-PLAN.md, which conflicts the same way
+# and must keep doing so: union there would interleave two prose sections and
+# silently accept two headings claiming the same section number.
+scripts/skip-ledger.tsv merge=union

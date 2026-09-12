@@ -22,8 +22,25 @@
 #
 # and a job's budget is the SUM of its lines. There is no total to edit, which
 # is the point: two streams each adding a skipping test add two distinct lines
-# and git merges them. Each line is also checked on its own, so a line that
-# matches nothing is a grant covering something that is not there.
+# rather than racing to edit one number. Each line is also checked on its own,
+# so a line that matches nothing is a grant covering something that is not
+# there.
+#
+# Git does NOT merge those two appends on its own, and this comment claimed it
+# did until cleat#1333. Both land at end-of-file with no surrounding context to
+# order them by, so every concurrent append conflicts -- measured twice in one
+# hour on #1329, each time with this ledger as the ONLY conflicting file and
+# each resolution purely additive. The second one evicted a green PR from the
+# merge queue, which is the expensive part.
+#
+# What makes them merge is the `merge=union` attribute on this file in
+# .gitattributes: git keeps the lines from both sides. Union is right for an
+# append-only ledger of independent lines and has exactly one bad case -- two
+# streams EDITING one line, which union turns into two lines rather than a
+# conflict. That case is not hypothetical; the __UNATTRIBUTED__ line shrinks
+# as tests get attributed. So it is checked for below rather than trusted
+# away: a duplicated key inflates the budget silently, and silently is the one
+# way a ceiling must not move.
 #
 # A budget is a ceiling on a job that is expected to skip *nothing* once its
 # services are up. Zero is the goal for any job that provisions everything its
@@ -95,6 +112,26 @@ if [ -z "$lines" ]; then
   echo "ledger is one whose skips can grow without anyone seeing it." >&2
   exit 1
 fi
+# A duplicated (job key, test regex) is what `merge=union` produces when two
+# streams edit the SAME ledger line instead of adding different ones. Both
+# copies survive, the budget SUM silently gains the extra count, and the
+# ceiling this script exists to hold moves without anyone deciding to move it.
+# The __UNATTRIBUTED__ line makes it worse than a doubled grant: line 140 reads
+# the FIRST match while the sum reads every one, so the two would disagree.
+dupes="$(echo "$lines" | awk -F'\t' '{print $1 "\t" $3}' | sort | uniq -d)"
+if [ -n "$dupes" ]; then
+  echo "ERROR: $LEDGER has more than one line for the same job and test regex:" >&2
+  while IFS= read -r dupe; do
+    printf '    %s\n' "$dupe" >&2
+  done <<< "$dupes"
+  echo "" >&2
+  echo "This is what a union merge leaves behind when two branches EDIT one" >&2
+  echo "ledger line rather than each adding their own (cleat#1333). Both copies" >&2
+  echo "are counted, so the budget is higher than either branch intended." >&2
+  echo "Keep the line whose count and justification are current; delete the other." >&2
+  exit 1
+fi
+
 budget="$(echo "$lines" | awk -F'\t' '{n+=$2} END{print n+0}')"
 
 # The skipped test NAMES, which is what lets each line be checked on its own
