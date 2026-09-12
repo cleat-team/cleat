@@ -144,6 +144,9 @@ var hostFunctions = []HostFunction{
 	// literal in a comment is counted as a row and disagrees with the row count
 	// taken from the slice itself.
 	{"cleat_run_detached", "RunDetached"},
+	// cleat#1154: the same work, returning the run id. Separate import name
+	// because arity is part of an import's type -- see ABI.md 2.24a.
+	{"cleat_start_detached", "StartDetached"},
 	// Heartbeat variants
 	{"cleat_call_heartbeat", "DurableCallTypedWithHeartbeat"},
 	// Time

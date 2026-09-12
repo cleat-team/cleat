@@ -11842,3 +11842,96 @@ repair CLAUDE.md prescribes for exactly this.
 The **wait** is still worker-local (§3.317, cleat#1111): a resumed policy fires immediately rather
 than re-waiting the remainder of its backoff. That was a decision and it stands. This changes only
 which attempt it resumes at.
+
+---
+
+### 3.431 `RunDetached` discarded the run id it already computed — ✅ fixed
+
+**cleat#1154.** A workflow that starts a detached run got back nothing but a status, so it had no
+handle to what it started: it could not poll it, signal it, or record the id anywhere durable. The
+id was not missing — `engine/children.go` computes it from `StartChildWorkflow` and throws it away.
+
+#### Why a new host call rather than a wider one
+
+`cleat_run_detached` is **unchanged**, and both calls stay registered. A host call's arity is part
+of its import type, and a mismatch is a **hard link error** that stops a module instantiating at
+all — not a failure of the one call. §3.55 measured that here, through the production path:
+
+    incompatible import type for `env::cleat_create_promise`
+    types incompatible: expected type `(func (param i32 i32 i32 i32) (result i64))`,
+                           found type `(func (param i32 i32 i32 i32 i64) (result i64))`
+
+Every deployed binary imports the four-parameter form, including in-flight runs pinned to an older
+version that `tests/upgrade` exists to protect. So the capability arrives as `cleat_start_detached`,
+which is how `cleat_poll_update` and `cleat_complete_update` arrived in #868.
+
+`RunDetached` and `StartDetached` share one body (`runDetached`) rather than being two
+implementations, because a detached run's **replay** behaviour has to be identical whichever call
+the guest used: a workflow with `run_detached` events already in its history, recompiled to call the
+new one, must replay against that history. Both record and match `EventTypeRunDetached`, and on
+replay the id comes from the record — starting it again would be a second run.
+
+#### The test, and why "non-empty" would have proved nothing
+
+`TestStartDetachedReturnsTheIDThatAddressesTheRun` does the round trip the issue asked for: it takes
+the returned id back to the store and asserts the run behind it is the run that was started, on all
+three dialects.
+
+That is not fussiness. `children.go` mints a fallback id — `fmt.Sprintf("detached-%s-%d", name,
+s.stepCount)` — whenever the store call produces nothing, and that string is non-empty,
+well-formed, and **addresses nothing at all**. Falsified two ways, both red on all three dialects:
+
+| mutation | what the test said |
+|---|---|
+| stop writing the id (`wantID=false`) | *"wrote 0 bytes, so it reported success and handed back nothing"* |
+| skip the store, take the fallback | *"returned `detached-detached-reconcile-0`, which is the fallback id"* |
+
+A test asserting only that a non-empty string came back passes the second mutation.
+
+#### Three guards fired, and one had been covering a real defect
+
+| guard | what it caught |
+|---|---|
+| `check-doc-consistency.sh` | the export was registered and undocumented — red until `ABI.md` §2.24a |
+| `TestEverySDKReachesEveryHostExport` | named all four SDKs that could not reach the new call |
+| `TestTheThreeStopSurfacesAgree` | the stop site moved to the shared body, **and** the entry covering it was stale |
+
+The third is the one worth reading. `stopSurfaces["RunDetached"]` carried
+`adapterWhy: reasonNoGoAdapter` and `witWhy: reasonNotInTheComponentWorld`, and **both exemptions
+were true when written and false by now**: #806 gave Go a real signature and a `wasm/usage.go` row,
+and §3.253 added `durable-run-detached` to `cleat.wit` and wired the Python method. Neither change
+removed the exemption, and nothing failed — because an exemption is only ever consulted when
+something is missing.
+
+What it was covering was a live defect: the `RunDetached` Go adapter did **not** call
+`withSuspendCheck`, so a guest refused mid-segment read bit 31 as `errCode = 0x80000000` and got
+`cleat_run_detached: error 2147483648` instead of `ErrSuspend` — an ordinary error a workflow may
+well swallow, in the defer segment that refusal exists to protect. Fixed here, with the entry
+re-keyed to the shared body and both adapters named.
+
+#### Python is the one gap, and it is recorded rather than papered over
+
+Bound in Go, Rust, Java and AssemblyScript. **Not Python**, and the reason is structural rather than
+effort: `cleat_start_detached` returns a string, so its WIT cannot be the `-> u64` that
+`durable-run-detached` uses. A core-ABI guest receives the id through an out-pointer into its own
+linear memory; component dispatch writes into a **host** buffer, so out-pointers do not survive the
+crossing — the same defect `stopSurfaces` already records as OPEN for `durable-await-signals`, which
+is declared with out-pointers and has therefore never worked on a component.
+
+Declaring the `u64` form anyway would compile and be **worse than nothing**: the guest would read
+whatever happened to sit at `OUTPUT_OFFSET` and return it as a run id. So the entry is in
+`sdkUnreachedBaseline`, which is shrink-only, with that reasoning written at it.
+
+#### Stale prose corrected in passing
+
+Three comments described the old world and would have misled the next reader:
+
+- `engine/run_detached_stop_test.go` said *"Go guests cannot reach `cleat_run_detached` at all"*.
+  Measured false by generating the imports for `testdata/allhostcalls`: both detached calls are
+  emitted, with `cleat_fetch` as the negative control, which is not — matching its own baseline
+  entry.
+- `crates/cleat-sdk/src/host_calls.rs` documented Go's signature as `RunDetached(fn func(h
+  HostCalls) error)`, which #806 replaced.
+- `tests/plugin-harness/sdk_import_names_test.go` opened the Python baseline with a **count** of its
+  entries; three of them were bound within days and the sentence has been wrong ever since. Replaced
+  with a pointer to the list, per CLAUDE.md's rule about censuses of growing populations.

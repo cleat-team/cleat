@@ -426,6 +426,24 @@ export declare function import_cleat_run_detached(
   inputLen: i32,
 ): i64;
 
+/**
+ * 30a. cleat_start_detached: cleat_run_detached, returning the run id.
+ * (import "env" "cleat_start_detached") (param i32 i32 i32 i32 i32 i32) (result i64)
+ *
+ * A separate import rather than two more parameters on the one above: arity is
+ * part of an import's type, so widening it stops every already-deployed binary
+ * instantiating, not just that one call. See ABI.md 2.24a.
+ */
+@external("env", "cleat_start_detached")
+export declare function import_cleat_start_detached(
+  namePtr: i32,
+  nameLen: i32,
+  inputPtr: i32,
+  inputLen: i32,
+  runIdPtr: i32,
+  runIdMaxLen: i32,
+): i64;
+
 
 
 
@@ -2978,6 +2996,57 @@ export class HostCalls {
       return "runDetached(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 34a. startDetached — runDetached, returning the run id
+  // ────────────────────────────────────────────
+
+  /**
+   * Start a detached (fire-and-forget) workflow and return its run ID.
+   *
+   * Identical to runDetached except that the run ID the host already computes
+   * is handed back, so the caller has a handle to the run — to poll it, signal
+   * it, or record it somewhere durable. runDetached computes the same ID and
+   * discards it.
+   *
+   * The started workflow is NOT a child: this workflow does not await it, is
+   * not its parent, and completing or being cancelled does not affect it.
+   *
+   * @param name      - The workflow definition name to start.
+   * @param inputJson - Input JSON for the detached workflow.
+   * @returns The run ID on success, or an error message.
+   */
+  startDetached(name: string, inputJson: string): DurableResult<string> {
+    let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
+    let inputOffset: usize = SCRATCH_BASE + nameLen;
+    let remaining: i32 = OUT_BUF_SIZE - nameLen;
+    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
+
+    let result: i64 = import_cleat_start_detached(
+      SCRATCH_BASE as i32,
+      nameLen,
+      inputOffset as i32,
+      inputLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    // Before decoding, for the reason runDetached above gives.
+    if (stopRequested(result)) {
+      return new DurableResult<string>("", "cleat: host refused this call -- the workflow is running its defer phase");
+    }
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return new DurableResult<string>(
+        "",
+        "startDetached(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
+      );
+    }
+
+    let runId: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+    return new DurableResult<string>(runId, null);
   }
 
   // ────────────────────────────────────────────

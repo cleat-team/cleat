@@ -311,6 +311,16 @@ type Lifecycle interface {
 	// nothing in every compiled workflow.
 	RunDetached(name, inputJSON string) error
 
+	// StartDetached is RunDetached that returns the run id of the workflow it
+	// started, so a caller has a handle to it -- to poll it, signal it, or
+	// record it somewhere durable. RunDetached computes the same id and
+	// discards it; this hands it back (cleat#1154).
+	//
+	// It is a second host call, not a wider RunDetached: a host call's arity is
+	// part of its import type, and widening one stops every already-deployed
+	// binary instantiating. See ABI.md 2.24a.
+	StartDetached(name, inputJSON string) (runID string, err error)
+
 	// Version returns the current workflow version number for schema evolution.
 	Version() int
 
@@ -770,6 +780,7 @@ type HostCallsImpl struct {
 	// dispatchingUpdates is the reentrancy guard for DispatchUpdates; see there.
 	dispatchingUpdates bool
 	runDetached        func(name, inputJSON string) error
+	startDetached      func(name, inputJSON string) (string, error)
 	now                func() int64
 	random             func() int64
 	newUUID            func() string
@@ -849,6 +860,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		completeUpdate:                opts.CompleteUpdate,
 		handleUpdate:                  opts.HandleUpdate,
 		runDetached:                   opts.RunDetached,
+		startDetached:                 opts.StartDetached,
 		now:                           opts.Now,
 		random:                        opts.Random,
 		newUUID:                       opts.NewUUID,
@@ -942,6 +954,7 @@ type HostCallsOptions struct {
 	CompleteUpdate                func(requestID, resultJSON, errMsg string) error
 	HandleUpdate                  func(name, payload string) (string, error)
 	RunDetached                   func(name, inputJSON string) error
+	StartDetached                 func(name, inputJSON string) (string, error)
 	Now                           func() int64
 	Random                        func() int64
 	NewUUID                       func() string

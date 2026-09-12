@@ -770,17 +770,65 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 	return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
 }
 
+// RunDetached starts a detached run and returns nothing but a status.
+//
+// KEPT UNCHANGED, and deliberately. StartDetached below does the same work and
+// hands back the run id, which is what cleat#1154 asked for -- but a host call's
+// arity is part of its import type, and an arity mismatch is a HARD LINK ERROR
+// that stops a module instantiating at all, not a failure of the one call.
+// IMPROVEMENT-PLAN 3.55 measured that here, through the production path:
+//
+//	incompatible import type for `env::cleat_create_promise`
+//	types incompatible: expected type `(func (param i32 i32 i32 i32) (result i64))`,
+//	                       found type `(func (param i32 i32 i32 i32 i64) (result i64))`
+//
+// Every workflow binary already deployed imports cleat_run_detached with four
+// parameters, including in-flight runs pinned to an older version that
+// tests/upgrade exists to protect. Widening this one in place would stop all of
+// them loading. So the new capability is a new name, which is also how
+// cleat_poll_update and cleat_complete_update arrived (#868).
 func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, inputJSON string) int64 {
+	_, code := s.runDetached(ctx, m, name, inputJSON, 0, 0, false)
+	return code
+}
+
+// StartDetached is RunDetached plus the run id, written to the guest buffer.
+//
+// The two share runDetached below rather than duplicating it, because a detached
+// run's REPLAY behaviour has to be identical whichever call the guest used: a
+// workflow with run_detached events already in its history, recompiled to call
+// this one, must replay against that history. Both record and match
+// EventTypeRunDetached, so it does.
+func (s *execSession) StartDetached(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64 {
+	written, code := s.runDetached(ctx, m, name, inputJSON, runIDPtr, runIDMaxLen, true)
+	if code != 0 {
+		return code
+	}
+	return packSimpleResult(0, written)
+}
+
+// runDetached is the shared body. wantID controls only whether the run id is
+// written back; everything durable -- the event, its step, the replay match --
+// is the same either way.
+func (s *execSession) runDetached(ctx context.Context, m api.Module, name, inputJSON string,
+	runIDPtr, runIDMaxLen uint32, wantID bool) (written uint32, code int64) {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
+				return 0, 0
 			}
 			if rec.EventType != EventTypeRunDetached || rec.DetachedName != name {
-				return 1
+				return 0, 1
 			}
-			return 0
+			// The id comes back from the RECORD on replay, not from a fresh
+			// StartChildWorkflow: the run was started on the original
+			// execution and starting it again would be a second run.
+			if wantID {
+				n, _ := s.writeResult(ctx, m, runIDPtr, rec.DetachedRunID, runIDMaxLen)
+				return n, 0
+			}
+			return 0, 0
 		}
 		s.exitReplay()
 	}
@@ -795,7 +843,7 @@ func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, input
 	// After the replay return, because a refusal records no event and a replay
 	// that reached this would find nothing where an event should be.
 	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
+		return 0, callSuspendSentinel
 	}
 
 	// Resolve child version using the same policy logic as childWorkflowWithVersion.
@@ -820,5 +868,9 @@ func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, input
 		DetachedRunID: runID,
 	}
 	s.recordEvent(rec)
-	return 0
+	if wantID {
+		n, _ := s.writeResult(ctx, m, runIDPtr, runID, runIDMaxLen)
+		return n, 0
+	}
+	return 0, 0
 }

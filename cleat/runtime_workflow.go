@@ -302,6 +302,19 @@ func (h *HostCallsImpl) RunDetached(name, inputJSON string) error {
 	return h.runDetached(name, inputJSON)
 }
 
+// StartDetached starts a detached workflow and returns its run id.
+//
+// The uninitialized case returns an error for the same reason RunDetached's
+// does: a nil return would report success from a compiled workflow where the
+// field was never wired, and here it would additionally hand back "" as if it
+// were a run id.
+func (h *HostCallsImpl) StartDetached(name, inputJSON string) (string, error) {
+	if h.startDetached == nil {
+		return "", errors.New("durable: StartDetached can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	}
+	return h.startDetached(name, inputJSON)
+}
+
 func (h *HostCallsImpl) DurableFetch(url, method string, headers map[string]string, body string) (responseJSON string, statusCode int, err error) {
 	requestMap := map[string]interface{}{
 		"url":     url,

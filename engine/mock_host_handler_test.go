@@ -276,6 +276,10 @@ func (h *mockHostHandler) RunDetached(ctx context.Context, m api.Module, name, i
 	h.record("RunDetached", name, inputJSON)
 	return h.ret
 }
+func (h *mockHostHandler) StartDetached(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64 {
+	h.record("StartDetached", name, inputJSON)
+	return h.ret
+}
 func (h *mockHostHandler) Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64 {
 	h.record("Fetch", method, url, headersJSON, body)
 	return h.ret

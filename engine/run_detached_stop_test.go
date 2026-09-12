@@ -15,12 +15,18 @@ import (
 // workflow's cleanup pass could still create live work, through the identical
 // call, by asking for it under the other name.
 //
-// This is a direct session test rather than a WASM fixture on purpose: Go
-// guests cannot reach cleat_run_detached at all. It is imported by the Rust,
-// Java and AssemblyScript SDKs only -- cleat.HostCalls.RunDetached is a
-// different thing that runs a closure and never touches the import -- so there
-// is no Go entry point to write a fixture against, and a fixture in another
-// language would put a tier-2 toolchain between this assertion and the defect.
+// This is a direct session test rather than a WASM fixture on purpose: it
+// asserts a HOST-side refusal, and a fixture would put a compiler, a linker and
+// a guest decoder between the assertion and the thing being asserted.
+//
+// The reason given here until cleat#1154 was different and is no longer true:
+// "Go guests cannot reach cleat_run_detached at all ... cleat.HostCalls.RunDetached
+// is a different thing that runs a closure and never touches the import." That
+// was correct when written and stopped being correct when #806 changed the Go
+// signature to (name, inputJSON) and added the wasm/usage.go row. Measured by
+// generating the imports for testdata/allhostcalls: cleat_run_detached and
+// cleat_start_detached are both emitted, with cleat_fetch as the negative
+// control, which is not -- matching its entry in sdkUnreachedBaseline.
 func TestADeferSegmentDoesNotStartADetachedWorkflow(t *testing.T) {
 	ctx := context.Background()
 

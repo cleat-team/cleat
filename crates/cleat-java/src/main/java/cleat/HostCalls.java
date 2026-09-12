@@ -282,6 +282,13 @@ public class HostCalls {
     @Import(module = "env", name = "cleat_run_detached")
     private static native long cleatRunDetachedRaw(int namePtr, int nameLen, int inputPtr, int inputLen);
 
+    // cleat_start_detached is cleat_run_detached with the run id written back
+    // (ABI 2.24a). A separate import rather than a sixth parameter on the one
+    // above: arity is part of an import's type, so widening it stops every
+    // already-deployed binary instantiating.
+    @Import(module = "env", name = "cleat_start_detached")
+    private static native long cleatStartDetachedRaw(int namePtr, int nameLen, int inputPtr, int inputLen, int runIdPtr, int runIdMaxLen);
+
 
 
 
@@ -2187,6 +2194,42 @@ public class HostCalls {
             return CleatResult.err("runDetached failed with code " + errCode);
         }
         return CleatResult.ok(null);
+    }
+
+    /**
+     * Start a detached workflow and return its run ID.
+     * <p>
+     * Identical to {@link #runDetached(String, String)} except that the run ID
+     * the host already computes is handed back, so the caller has a handle to
+     * the run -- to poll it, signal it, or record it somewhere durable.
+     * {@code runDetached} computes the same ID and discards it.
+     * <p>
+     * The started workflow is NOT a child: this workflow does not await it, is
+     * not its parent, and completing or being cancelled does not affect it.
+     *
+     * @param workflowName the workflow definition name to start
+     * @param inputJSON    the input JSON for the detached workflow
+     * @return the run ID of the started workflow, or an error description
+     */
+    public CleatResult<String> startDetached(String workflowName, String inputJSON) {
+        int[] p = packStrings(workflowName, inputJSON);
+        int nameOff = p[0], inOff = p[1];
+        int nameLen = p[2], inLen = p[3];
+
+        long result = cleatStartDetachedRaw(
+            nameOff, nameLen,
+            inOff, inLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // Before decoding, for the reason runDetached above gives.
+        Memory.throwIfStopped(result);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int runIdLen = Memory.decodeSimpleExtra(result);
+        if (errCode != 0) {
+            return CleatResult.err(hostMessageOr(runIdLen, "startDetached(name=\"" + workflowName + "\") failed: host returned error code " + errCode + ". Check that the workflow name is correct."));
+        }
+        return CleatResult.ok(readOutput(runIdLen));
     }
 
     // ========================================================================

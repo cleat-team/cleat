@@ -268,6 +268,18 @@ var importDefs = map[string]importDef{
 			{"inputJSON", kindInString},
 		},
 	},
+	// cleat_start_detached is cleat_run_detached with the run id written back
+	// (cleat#1154). A separate import rather than a third parameter on the one
+	// above: a host call's arity is part of its import type, so widening it
+	// stops every already-deployed binary instantiating. See ABI.md 2.24a.
+	"cleat_start_detached": {
+		ImportName: "cleat_start_detached",
+		Params: []paramSpec{
+			{"name", kindInString},
+			{"inputJSON", kindInString},
+			{"runID", kindOutString},
+		},
+	},
 	"set_query_state": {
 		ImportName: "set_query_state",
 		Params: []paramSpec{

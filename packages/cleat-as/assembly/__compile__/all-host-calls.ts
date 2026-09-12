@@ -35,6 +35,7 @@ function exerciseEveryHostCall(h: HostCalls): void {
   h.scheduleInvoke("svc", "op", "{}", 1);
   h.scheduleInvokeMs("svc", "op", "{}", 1000);
   h.runDetached("wf", "{}");
+  h.startDetached("wf", "{}");
 
   // ---- sleep, identity, logging ----
   h.cleatSleep(1);

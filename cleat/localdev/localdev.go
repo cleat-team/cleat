@@ -256,6 +256,7 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		AwaitPromise:                  r.awaitPromiseImpl,
 		RegisterUpdateHandler:         r.registerUpdateHandler,
 		RunDetached:                   r.runDetached,
+		StartDetached:                 r.startDetached,
 		PluginCall:                    r.pluginCallImpl,
 		AcquireLock:                   r.acquireLockImpl,
 		ReleaseLock:                   r.releaseLockImpl,
@@ -734,6 +735,24 @@ func (r *LocalRunner) runDetached(name, inputJSON string) error {
 	r.mu.Unlock()
 	r.logEvent("[%.3fs] run_detached %s", r.elapsed().Seconds(), name)
 	return nil
+}
+
+// startDetached records the request and returns a synthetic run id.
+//
+// Synthetic because localdev starts nothing, for the reason runDetached above
+// gives. The id is shaped like the engine's own fallback so a developer reading
+// the event log sees the same thing either way, and it is recorded in the event
+// so that following it is possible here too.
+func (r *LocalRunner) startDetached(name, inputJSON string) (string, error) {
+	r.mu.Lock()
+	runID := fmt.Sprintf("detached-%s-%d", name, len(r.events))
+	r.events = append(r.events, Event{
+		Type:    "run_detached",
+		Message: "detached workflow requested: " + name + " -> " + runID,
+	})
+	r.mu.Unlock()
+	r.logEvent("[%.3fs] start_detached %s -> %s", r.elapsed().Seconds(), name, runID)
+	return runID, nil
 }
 
 func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) (string, bool, error) {

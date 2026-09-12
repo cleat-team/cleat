@@ -127,6 +127,13 @@ type HostHandler interface {
 	// Detached execution (Stream R)
 	RunDetached(ctx context.Context, m api.Module, name, inputJSON string) int64
 
+	// StartDetached is RunDetached that hands back the run id (cleat#1154).
+	// A separate name rather than a wider RunDetached: an arity mismatch is a
+	// hard link error, so widening the existing import would stop every
+	// already-deployed workflow binary instantiating. See the doc comment on
+	// execSession.RunDetached.
+	StartDetached(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64
+
 	// HTTP fetch (Stream R)
 	Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64
 
@@ -749,6 +756,26 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		}
 		return uint64(h.RunDetached(ctx, m, name, inputJSON))
 	}).Export("cleat_run_detached")
+
+	// cleat_start_detached: (ptr,len x2, ptr,maxLen) -> i64
+	//
+	// cleat_run_detached with the run id written back. Both stay registered:
+	// the old name is what every deployed binary imports, and its arity is part
+	// of that import's type.
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		namePtr, nameLen, inputPtr, inputLen, runIDPtr, runIDMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		name, ok := readServiceName(mem, namePtr, nameLen)
+		if !ok {
+			return errBadParam
+		}
+		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		return uint64(h.StartDetached(ctx, m, name, inputJSON, runIDPtr, runIDMaxLen))
+	}).Export("cleat_start_detached")
 
 	// cleat_fetch: (ptr,len x4, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
