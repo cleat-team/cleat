@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -134,42 +137,112 @@ func TestA413NamesTheLimitItHitAndWhichKnobMovesIt(t *testing.T) {
 	}
 }
 
-// TestEveryBodyLimitSiteThatRefusesWithA413NamesItsLimit is the completeness
-// half, and it exists because the test above can only cover the handlers it
-// enumerates.
+// TestEveryBoundedBodyGoesThroughTheHelper is the completeness half, and it
+// replaces a weaker guard that counted calls to two now-deleted responders.
 //
-// A new handler with a MaxBytesReader and a bare "request body too large" would
-// pass everything above by not being listed. This reads the source instead, so
-// the omission is what fails.
+// The old one said, deliberately:
 //
-// It deliberately does NOT require every MaxBytesReader to have a 413 branch.
-// Seven sites have none at all -- three in this file and four in api_admin.go
-// -- and an oversized body there is a 400 whose text begins "invalid JSON".
-// That is a status-code change on live endpoints, tracked separately; asserting
-// it here would make this guard fail for a reason it is not about.
-func TestEveryBodyLimitSiteThatRefusesWithA413NamesItsLimit(t *testing.T) {
-	raw, err := os.ReadFile("server.go")
+//	It deliberately does NOT require every MaxBytesReader to have a 413 branch.
+//	Seven sites have none at all [...] That is a status-code change on live
+//	endpoints, tracked separately.
+//
+// cleat#1338 made that change, so the exemption is gone and this asserts the
+// stronger property instead: EVERY bounded body goes through decodeBody or
+// readBody. That subsumes both halves of the old guard -- a bare "request body
+// too large" and a missing 413 arm are both impossible when one function
+// writes both -- and it is the thing that stops an eighth handler repeating
+// the omission, which seven copies of a hand-written branch could not.
+//
+// It parses rather than greps. A line-oriented scan cannot tell a call from a
+// comment about a call, and this file is full of comments about
+// MaxBytesReader.
+func TestEveryBoundedBodyGoesThroughTheHelper(t *testing.T) {
+	out, err := exec.Command("git", "ls-files", "*.go").Output()
 	if err != nil {
-		t.Fatalf("reading server.go: %v", err)
+		t.Fatalf("git ls-files: %v", err)
 	}
-	src := string(raw)
+	// git ls-files, not filepath.Glob: a scratch worktree or an editor backup
+	// under this directory would otherwise be scanned as if it were the
+	// package, and a guard gets MORE permissive as the tree gets messier.
+	var files []string
+	for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if f != "" && !strings.HasSuffix(f, "_test.go") {
+			files = append(files, f)
+		}
+	}
+	if len(files) == 0 {
+		t.Fatal("PRECONDITION FAILED: git ls-files matched no non-test Go files")
+	}
 
-	bare := strings.Count(src, `writeError(w, 413, "request body too large")`)
-	if bare != 0 {
-		t.Errorf("%d 413 site(s) still write a bare \"request body too large\".\n\n"+
-			"Use bodyTooLargeConfigured or bodyTooLargeFixed, whichever matches the "+
-			"MaxBytesReader above it.", bare)
+	allowed := map[string]bool{"decodeBody": true, "readBody": true}
+	found := 0
+	fset := token.NewFileSet()
+	for _, file := range files {
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", file, err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			fn, ok := n.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				return true
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "MaxBytesReader" {
+					return true
+				}
+				found++
+				if !allowed[fn.Name.Name] {
+					t.Errorf("%s bounds a request body directly (%s:%d).\n\n"+
+						"Use s.decodeJSONBody / s.decodeOptionalJSONBody / s.readBody instead. "+
+						"Seven handlers bounded their own bodies and never translated "+
+						"*http.MaxBytesError, so an oversized body came back as "+
+						"400 \"invalid JSON: http: request body too large\" -- a status saying "+
+						"the body was malformed, on a body that was never read. cleat#1338.",
+						fn.Name.Name, file, fset.Position(call.Pos()).Line)
+				}
+				return true
+			})
+			return true
+		})
 	}
 
-	fixed := strings.Count(src, "s.bodyTooLargeFixed(w)")
-	configured := strings.Count(src, "s.bodyTooLargeConfigured(w)")
-	// A floor per helper rather than on the total: a total is satisfied by the
-	// wrong mix, and the whole point is that the two do not get confused.
-	if fixed < 3 {
-		t.Errorf("found %d bodyTooLargeFixed call(s), want at least 3 "+
-			"(signal, cancel, update)", fixed)
+	// A floor, because "every MaxBytesReader is in the helper" is also
+	// satisfied by finding none at all -- which is what a broken scan returns.
+	if found < 2 {
+		t.Errorf("found %d MaxBytesReader call(s) across %d files, want at least 2 "+
+			"(decodeBody and readBody); the scan is not looking at the package",
+			found, len(files))
 	}
-	if configured < 5 {
-		t.Errorf("found %d bodyTooLargeConfigured call(s), want at least 5", configured)
+}
+
+// TestEveryBodyLimitNamesTheKnobThatMovesIt is the other half of what the old
+// guard did, expressed against the type that replaced the two responders: a
+// bodyLimit whose help is empty produces "the limit is N bytes, " and names
+// nothing, which is the cleat#1332 defect with extra punctuation.
+func TestEveryBodyLimitNamesTheKnobThatMovesIt(t *testing.T) {
+	api := &apiServer{maxBodySize: 4096}
+	for _, c := range []struct {
+		name string
+		lim  bodyLimit
+	}{
+		{"configured", api.configuredBodyLimit()},
+		{"signal", signalBodyLimit()},
+		{"definition", definitionBodyLimit()},
+		{"terminate", terminateBodyLimit()},
+	} {
+		if c.lim.max <= 0 {
+			t.Errorf("%s limit is %d, which bounds nothing", c.name, c.lim.max)
+		}
+		if strings.TrimSpace(c.lim.help) == "" {
+			t.Errorf("%s limit names no knob, so its 413 reads "+
+				"\"the limit is %d bytes, \" and tells the caller nothing actionable",
+				c.name, c.lim.max)
+		}
 	}
 }

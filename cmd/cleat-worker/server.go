@@ -216,15 +216,132 @@ func (s *apiServer) writeError(w http.ResponseWriter, status int, msg string) {
 // and the sentence describing it cannot drift apart at a call site. Getting
 // that pairing wrong would be worse than saying nothing, because a caller who
 // learns the body names the knob will believe it.
-func (s *apiServer) bodyTooLargeConfigured(w http.ResponseWriter) {
-	s.writeError(w, 413, fmt.Sprintf(
-		"request body too large: the limit is %d bytes, set by --max-body-size", s.maxBodySize))
+// bodyLimit is a request-body ceiling together with the sentence that tells a
+// client how to change it.
+//
+// A type rather than an int64 because the second half is the part that makes a
+// 413 actionable -- cleat#1332 -- and there are three different answers: a
+// flag, a constant that the flag deliberately does not move, and the
+// definition upload's own ceiling. A bare number in the message leaves the
+// caller to guess which knob applies.
+type bodyLimit struct {
+	max int64
+	// help completes "request body too large: the limit is N bytes, <help>".
+	help string
 }
 
-func (s *apiServer) bodyTooLargeFixed(w http.ResponseWriter) {
-	s.writeError(w, 413, fmt.Sprintf(
-		"request body too large: the limit is %d bytes, fixed for the signal, cancel and "+
-			"update endpoints and not changed by --max-body-size", int64(signalMaxBodySize)))
+// definitionMaxBodySize is the ceiling on a workflow definition upload.
+//
+// Named because cleat#1332's message has to name the thing that sets the
+// limit, and this was an inline 10*1024*1024 with no name anywhere -- not in
+// the flags, not in the docs, and not in the 400 it used to produce.
+const definitionMaxBodySize int64 = 10 * 1024 * 1024
+
+// terminateMaxBodySize is the ceiling on a dead-letter terminate's reason.
+// Also previously an unnamed inline literal (int64(1<<10)).
+const terminateMaxBodySize int64 = 1 << 10
+
+func (s *apiServer) configuredBodyLimit() bodyLimit {
+	return bodyLimit{s.maxBodySize, "set by --max-body-size"}
+}
+
+func signalBodyLimit() bodyLimit {
+	return bodyLimit{int64(signalMaxBodySize), "fixed for the signal, cancel and " +
+		"update endpoints and not changed by --max-body-size"}
+}
+
+func definitionBodyLimit() bodyLimit {
+	return bodyLimit{definitionMaxBodySize, "fixed for the definition upload endpoint and " +
+		"not changed by --max-body-size"}
+}
+
+func terminateBodyLimit() bodyLimit {
+	return bodyLimit{terminateMaxBodySize, "fixed for the dead-letter terminate endpoint and " +
+		"not changed by --max-body-size"}
+}
+
+// decodeJSONBody bounds the request body, decodes it into dst, and writes the
+// response itself when either fails. It reports whether the caller should
+// carry on.
+//
+// ONE FUNCTION BECAUSE SIXTEEN COPIES DRIFTED. Every handler bounded its body
+// and then hand-wrote the translation from *http.MaxBytesError to a status.
+// Seven of the sixteen never wrote the *http.MaxBytesError arm at all, so an
+// oversized body came back as
+//
+//	400 {"error":"invalid JSON: http: request body too large"}
+//
+// -- a status saying the body was malformed, on a body that was never read,
+// with the real reason buried in a string asserting the opposite. Among the
+// seven was the WASM upload, which is the most legitimate 413 in the API and
+// which additionally said "body too large" under a 400, contradicting itself
+// in one response. cleat#1338.
+//
+// Seven more copies of the arm would have left the eighth handler free to make
+// the same omission. TestEveryBoundedBodyGoesThroughTheHelper fails if a
+// MaxBytesReader call appears outside this function.
+func (s *apiServer) decodeJSONBody(w http.ResponseWriter, r *http.Request, lim bodyLimit, dst any) bool {
+	return s.decodeBody(w, r, lim, dst, false)
+}
+
+// decodeOptionalJSONBody is decodeJSONBody where an EMPTY body is a supported
+// call rather than a malformed one.
+//
+// Only the dead-letter terminate needs it: a terminate with no reason is
+// legitimate and TestHandleDeadLetterTerminate_NoBody has asserted 200 for a
+// nil body since before that handler had any error handling at all. http.NoBody
+// decodes to exactly io.EOF; a TRUNCATED body is io.ErrUnexpectedEOF, which
+// errors.Is(err, io.EOF) does not match -- cleat#1337 turns on those two being
+// distinguishable, so the carve-out is for io.EOF only and stays that way.
+func (s *apiServer) decodeOptionalJSONBody(w http.ResponseWriter, r *http.Request, lim bodyLimit, dst any) bool {
+	return s.decodeBody(w, r, lim, dst, true)
+}
+
+// readBody bounds the request body and returns it unparsed, writing the
+// response itself when the bound is exceeded.
+//
+// For the one endpoint that takes an opaque payload rather than JSON. It
+// shares the bound and the 413 translation with decodeJSONBody and nothing
+// else -- parsing that body would change what the signal carries.
+func (s *apiServer) readBody(w http.ResponseWriter, r *http.Request, lim bodyLimit) ([]byte, bool) {
+	if r.Body == nil {
+		return nil, true
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, lim.max)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf(
+				"request body too large: the limit is %d bytes, %s", lim.max, lim.help))
+			return nil, false
+		}
+		s.writeError(w, 400, "failed to read request body")
+		return nil, false
+	}
+	return body, true
+}
+
+func (s *apiServer) decodeBody(w http.ResponseWriter, r *http.Request, lim bodyLimit, dst any, allowEmpty bool) bool {
+	if r.Body == nil {
+		return true
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, lim.max)
+	err := json.NewDecoder(r.Body).Decode(dst)
+	switch {
+	case err == nil:
+		return true
+	case allowEmpty && errors.Is(err, io.EOF):
+		return true
+	}
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf(
+			"request body too large: the limit is %d bytes, %s", lim.max, lim.help))
+		return false
+	}
+	s.writeError(w, 400, "invalid JSON: "+err.Error())
+	return false
 }
 
 func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -592,17 +709,8 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		WasmWallClockCeilingMs int64 `json:"wasm_wall_clock_ceiling_ms"`
 		HostRetryBudgetMs      int64 `json:"host_retry_budget_ms"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				s.bodyTooLargeConfigured(w)
-				return
-			}
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &input) {
+		return
 	}
 	if input.Input == nil {
 		input.Input = json.RawMessage("{}")
@@ -990,17 +1098,8 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		SignalName string `json:"signal_name"`
 		Payload    string `json:"payload"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, signalMaxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				s.bodyTooLargeFixed(w)
-				return
-			}
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, signalBodyLimit(), &req) {
+		return
 	}
 	if req.SignalName == "" {
 		s.writeError(w, 400, "signal_name is required")
@@ -1082,17 +1181,8 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, signalMaxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				s.bodyTooLargeFixed(w)
-				return
-			}
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, signalBodyLimit(), &req) {
+		return
 	}
 	if err := st.RequestCancellation(r.Context(), id, req.Reason); err != nil {
 		s.writeError(w, 500, err.Error())
@@ -1252,12 +1342,8 @@ func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request,
 		TargetVersion int      `json:"target_version"`
 		Weight        *float64 `json:"weight"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
 	}
 	if req.TargetVersion <= 0 {
 		s.writeError(w, 400, "target_version is required and must be positive")
@@ -1387,12 +1473,8 @@ func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request,
 		Tag     string `json:"tag"`
 		Version int    `json:"version"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
 	}
 	if req.Tag == "" {
 		s.writeError(w, 400, "tag is required")
@@ -1683,14 +1765,7 @@ func (s *apiServer) handleSetAllowedSignals(w http.ResponseWriter, r *http.Reque
 	var req struct {
 		AllowedSignals []string `json:"allowed_signals"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			s.bodyTooLargeConfigured(w)
-			return
-		}
-		s.writeError(w, 400, "invalid JSON body")
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
 		return
 	}
 	for _, c := range req.AllowedSignals {
@@ -1741,14 +1816,7 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 	var req struct {
 		Result string `json:"result"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			s.bodyTooLargeConfigured(w)
-			return
-		}
-		s.writeError(w, 400, "invalid JSON: "+err.Error())
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
 		return
 	}
 	// The route names a workflow AND a promise, so the pairing is a claim this
@@ -1778,14 +1846,7 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			s.bodyTooLargeConfigured(w)
-			return
-		}
-		s.writeError(w, 400, "invalid JSON: "+err.Error())
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
 		return
 	}
 	// Verified against the workflow named in the route, as in
@@ -1880,21 +1941,14 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Parse the request body as the update payload.
-	var payload string
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, signalMaxBodySize)
-		body, rErr := io.ReadAll(r.Body)
-		if rErr != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(rErr, &maxErr) {
-				s.bodyTooLargeFixed(w)
-				return
-			}
-			s.writeError(w, 400, "failed to read request body")
-			return
-		}
-		payload = string(body)
+	// Not decodeJSONBody: this endpoint takes the body as an opaque signal
+	// payload rather than as JSON, so it must not be parsed. readBody shares
+	// the bound and the 413 translation and stops there.
+	body, ok := s.readBody(w, r, signalBodyLimit())
+	if !ok {
+		return
 	}
+	payload := string(body)
 	if payload == "" {
 		payload = "{}"
 	}
@@ -2027,14 +2081,7 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		CatchUp    int             `json:"catch_up_limit"`
 		Overlap    string          `json:"overlap_policy"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			s.bodyTooLargeConfigured(w)
-			return
-		}
-		s.writeError(w, 400, "invalid JSON: "+err.Error())
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
 		return
 	}
 	if req.Name == "" || req.Cron == "" || req.DefName == "" {
@@ -2222,16 +2269,11 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body too large"})
-		return
-	}
-
+	// This one said "body too large" under a 400 -- the message and the status
+	// contradicting each other in a single response, on the WASM upload, which
+	// is the most legitimate 413 in the API. cleat#1338.
 	var req createDefRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+	if !s.decodeJSONBody(w, r, definitionBodyLimit(), &req) {
 		return
 	}
 

@@ -62,8 +62,14 @@ func TestAnUnparseableTerminateBodyNeverReachesTheStore(t *testing.T) {
 			wantStatus: 400, wantCalled: false,
 		},
 		{
+			// 413 since cleat#1338, which answered the status question this
+			// handler's comment deferred, for all sixteen bounded bodies at
+			// once. The property THIS test exists for is unchanged and is the
+			// wantCalled column: the store must not be reached. Only the code
+			// the caller sees moved, from a 400 asserting the body was
+			// malformed to a 413 naming the limit it exceeded.
 			name: "over the 1 KB cap", body: `{"reason":"` + strings.Repeat("x", oversized) + `"}`,
-			wantStatus: 400, wantCalled: false,
+			wantStatus: 413, wantCalled: false,
 		},
 		{
 			name: "control: a valid reason still arrives", body: `{"reason":"disk full, not retryable"}`,
