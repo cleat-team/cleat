@@ -56,6 +56,10 @@ type wasmtimeBackend struct {
 	engine  *wasmtime.Engine
 	handler HostHandler // current execution session
 
+	// wasiMonotonicNs backs the synthetic CLOCK_MONOTONIC handed to WASI.
+	// Per-execution, same as handler above, and monotonic by construction.
+	wasiMonotonicNs int64
+
 	// budget bounds GUEST EXECUTION rather than wall clock. Per-execution, and
 	// safe here only because Execute runs on a PerExecution() backend.
 	// IMPROVEMENT-PLAN 3.90; see engine/wasmtime_hostbudget.go.
@@ -1099,6 +1103,11 @@ const (
 func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string, needsWasi bool, abortTy *wasmtime.FuncType) error {
 	if needsWasi {
 		if err := b.registerWasiStubs(linker); err != nil {
+			return err
+		}
+		// AFTER the stubs: DefineWasi binds clock_time_get and random_get, and
+		// these two replace them. cleat#1300.
+		if err := b.registerWasiDeterminism(linker); err != nil {
 			return err
 		}
 	}

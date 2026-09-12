@@ -106,10 +106,15 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	r := &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second, MemoryLimitPages: memoryLimitPages, fuelLimit: instructionLimit}
 
 	// WASI is required by Go wasip1 modules for goroutine/stack management.
-	// We build WASI with clock_time_get and random_get stubbed out so that
-	// workflow code calling time.Now() or crypto/rand through WASI panics
-	// instead of silently breaking determinism. Workflows must use h.Now()
-	// and h.Random() (imported as cleat_now / cleat_random).
+	//
+	// This comment used to say clock_time_get and random_get were "stubbed out
+	// so that workflow code calling time.Now() or crypto/rand through WASI
+	// panics". Neither was true: the next two statements export the standard
+	// WASI functions, random_get was never touched, and nothing panicked.
+	// cleat#1300. Determinism for those two is applied to the GUEST's module
+	// config in InstantiateModuleNamed, which is where wazero reads the clock
+	// from -- imports/wasi_snapshot_preview1/clock.go resolves it from the
+	// CALLING module's sys context, not from this one's.
 	wasiBuilder := rt.NewHostModuleBuilder(wasi_snapshot_preview1.ModuleName)
 	wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasiBuilder)
 	// Register reset_adapter_state, which is required by core modules
@@ -120,11 +125,16 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	wasiBuilder.NewFunctionBuilder().WithFunc(
 		func(ctx context.Context, m api.Module) {},
 	).Export("reset_adapter_state")
-	// Instantiate WASI with a fake Sys context that returns fixed (zero) time.
-	// This prevents the wazero nil pointer panic in clock_time_get (which
-	// accesses mod.Sys for walltime/nanotime) while keeping the Go WASM
-	// runtime's GC/goroutine scheduler from accessing real wall clock time.
-	// Workflow logic uses h.Now() (cleat_now) for deterministic time.
+	// Instantiate WASI with a Sys context so clock_time_get has something to
+	// read rather than panicking on a nil mod.Sys.
+	//
+	// IT DOES NOT MAKE THE GUEST DETERMINISTIC and never did -- the guest is a
+	// different module instance and supplies its own sys context. Keeping the
+	// zero values here because this module's clock is never consulted by
+	// anything; moving them onto the guest is what would be wrong, since a
+	// monotonic clock that returns zero makes the Go runtime throw
+	// "fatal error: nanotime returning zero" before user code runs (measured,
+	// cleat#1300). The guest's real configuration is in InstantiateModuleNamed.
 	wasiCompiled, err := wasiBuilder.Compile(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("host: compiling WASI module: %w", err)
@@ -205,6 +215,7 @@ func (r *Runtime) InstantiateModuleNamed(ctx context.Context, compiled wazero.Co
 		WithStdout(&r.stdout).
 		WithStderr(&r.stderr).
 		WithStartFunctions()
+	config = withDeterministicClockAndEntropy(ctx, config)
 	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
 }
 
