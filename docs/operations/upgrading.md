@@ -99,26 +99,34 @@ INFO[0000] Applied schema migration 002_add_promises_table  duration=12ms
 INFO[0000] Schema is up to date at version 003
 ```
 
-### Manual migration
+### There is no separate migration command
 
-If you prefer to apply migrations outside the worker startup path, run the
-migration tool directly:
+**Migrations are applied by the worker at startup, and there is no other way to
+run them.** `cmd/cleat-worker/main.go` builds the runner and applies every
+pending migration before the worker begins claiming work.
+
+This section previously offered `cleat migrate up` and `cleat migrate status`.
+Neither exists — there is no `migrate` subcommand on `cleat` or on `cleatctl`
+(cleat#1315), and `cleat migrate --help` prints the usage text. Check the
+surface rather than trusting this paragraph:
 
 ```bash
-# Apply all pending migrations
-cleat migrate up --db "$DATABASE_URL"
-
-# Check migration status
-cleat migrate status --db "$DATABASE_URL"
-
-# Output:
-# Migration 001_initial_schema ........ applied (2025-01-15)
-# Migration 002_add_promises_table ... applied (2025-02-01)
-# Migration 003_add_concurrency_keys . pending
+cleat 2>&1 | grep 'Valid commands'
 ```
 
-Migrations are idempotent. Running `cleat migrate up` multiple times only
-applies migrations that have not yet been applied.
+Migrations are idempotent: the runner records each applied version in
+`schema_migrations` and skips it thereafter, so starting a worker repeatedly
+applies nothing twice.
+
+**To see what has been applied**, read the tracking table directly:
+
+```sql
+SELECT version, applied_at FROM schema_migrations ORDER BY version;
+```
+
+**To apply migrations without starting a worker that takes work**, start one
+against an empty task queue and stop it once it is up; the migrations run
+before the claim loop does.
 
 ### Migration files
 
@@ -327,28 +335,40 @@ kubectl rollout undo deployment/cleat-worker --to-revision=3
 kubectl rollout status deployment/cleat-worker
 ```
 
-### Rolling back a schema migration
+### Rolling back a schema migration — there is no down path
 
-If a database migration is the source of the problem, you can roll it back
-using the down migration:
+**Schema migrations are one-way. Nothing in cleat reverses them**, and the
+answer to "the migration is the problem" is not a command:
 
-```bash
-# Rollback the last migration
-cleat migrate down --db "$DATABASE_URL"
+| | |
+|---|---|
+| `*.down.sql` files in the tree | **0** (`git ls-files 'migrations/**/*.down.sql'`) |
+| a `Down` function in `migration/runner.go` | none |
+| a `migrate` subcommand on `cleat` or `cleatctl` | none |
 
-# Rollback to a specific version
-cleat migrate down --db "$DATABASE_URL" --target 001
-```
+This section used to prescribe `cleat migrate down --db "$DATABASE_URL"` and
+`--target 001`. The command, the flag and the migration files are all absent
+(cleat#1315), so an operator reaching for the documented way back was reaching
+for something that has never existed — at the moment they could least afford
+the detour.
 
-After the migration rollback, start the old worker binary:
+**What to do instead**, in order of preference:
 
-```bash
-cleat-worker-v1 --db "$DATABASE_URL"
-```
+1. **Roll the worker binary back and leave the schema forward.** This is the
+   supported path for a minor or patch upgrade, because those schema changes
+   are backward compatible by policy — see *Database schema compatibility*
+   below. An older worker runs against a newer schema.
+2. **Restore from backup** if the schema change itself must be undone. Take the
+   backup *before* the upgrade; this is the only way back from a major-version
+   schema change, and it is why the checklist asks for one.
+3. **Write a forward migration** that undoes what the previous one did, if the
+   database cannot be taken offline for a restore. It is a new numbered file,
+   not a rollback.
 
-**Important**: Rolling back a migration may cause data loss if the rolled-back
-migration added columns or tables that are now in use. Down migrations should
-be tested in a staging environment before production use.
+Removing a column or table by hand is not on this list. The schema is reached
+by procedures as well as by Go (`finalize_workflow_status` and its siblings),
+so a hand-edited schema can satisfy every Go query and still break at a call
+this document cannot enumerate.
 
 ## Rolling back a workflow definition version
 

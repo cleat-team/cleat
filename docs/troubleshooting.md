@@ -437,12 +437,29 @@ This can happen when:
 
 2. **Workflow definitions were garbage collected.**
    If the version GC removed older versions, in-flight instances cannot find
-   their WASM binary. Check `cleatctl versions list` and adjust the GC
-   retention policy:
+   their WASM binary. Check `cleatctl versions list`.
+
+   **Version GC is manual and its retention is not configurable.** This step
+   used to say to "adjust the GC retention policy" with
+   `cleat-worker --gc-min-versions 5 --gc-max-age 60d`; neither flag exists on
+   any binary (cleat#1315), and neither does any equivalent. The whole of the
+   surface is:
+
    ```bash
-   cleat-worker --gc-min-versions 5 --gc-max-age 60d
+   cleatctl versions gc --dry-run   # report what would be removed
+   cleatctl versions gc             # remove it
    ```
-   See [version_gc.go](engine/version_gc.go) for GC configuration.
+
+   `gcVersions` reads only `--dry-run` and then calls
+   `engine.DefaultGCOptions()`, so the policy is compiled in:
+   `MinVersionsToKeep = 3` and `MaxVersionAge = 30 days`
+   (`engine/version_gc.go`). Changing either is a code change.
+
+   **Nothing runs it on a schedule** — `engine.GarbageCollectVersions` has
+   exactly one non-test caller, `cmd/cleatctl/versions.go`. So a version
+   disappeared because somebody ran that command, not because a background
+   loop reached it; if the timing is a mystery, that is the thing to go and
+   ask about. Whether GC *should* run automatically is open in cleat#1315.
 
 3. **Rollback scenario.**
    If you need to replay an instance against a different version after a
