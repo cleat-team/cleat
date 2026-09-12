@@ -650,92 +650,29 @@ func payloadJSONRaw(v interface{}) interface{} {
 }
 
 func (af *AdaptiveFlusher) prepareEntry(workflowID string, rec EventRecord, checksum string) (batchEntry, error) {
-	payloadJSON, _ := eventRecordToPayload(rec)
-	payloadArg := nullStr("")
-	if len(payloadJSON) > 0 {
-		payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
-	}
-
-	requestStr := tryEncodeBase64(rec.Request)
-	responseStr := tryEncodeBase64(rec.Response)
-	errStr := rec.Err
-	sigPayload := rec.SignalPayload
-	childInput := rec.ChildInput
-	newInput := rec.NewInput
-	pluginInput := rec.PluginInput
-	pluginOutput := rec.PluginOutput
-	promiseResult := rec.PromiseResult
-	promiseError := rec.PromiseError
-
 	af.mu.Lock()
 	encrypt := af.encryptSensitivePayloads
 	enc := af.encryption
 	af.mu.Unlock()
 
-	if encrypt && enc != nil {
-		var encErr error
-		if requestStr, encErr = enc.EncryptString(rec.Request); encErr != nil {
-			return batchEntry{}, fmt.Errorf("prepare entry: encrypt request: %w", encErr)
-		}
-		if responseStr, encErr = enc.EncryptString(rec.Response); encErr != nil {
-			return batchEntry{}, fmt.Errorf("prepare entry: encrypt response: %w", encErr)
-		}
-		if errStr, encErr = enc.EncryptString(rec.Err); encErr != nil {
-			return batchEntry{}, fmt.Errorf("prepare entry: encrypt err: %w", encErr)
-		}
-		if rec.SignalPayload != "" {
-			if sigPayload, encErr = enc.EncryptString(rec.SignalPayload); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt signal_payload: %w", encErr)
-			}
-		}
-		if rec.ChildInput != "" {
-			if childInput, encErr = enc.EncryptString(rec.ChildInput); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt child_input: %w", encErr)
-			}
-		}
-		if rec.NewInput != "" {
-			if newInput, encErr = enc.EncryptString(rec.NewInput); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt new_input: %w", encErr)
-			}
-		}
-		if rec.PluginInput != "" {
-			if pluginInput, encErr = enc.EncryptString(rec.PluginInput); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt plugin_input: %w", encErr)
-			}
-		}
-		if rec.PluginOutput != "" {
-			if pluginOutput, encErr = enc.EncryptString(rec.PluginOutput); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt plugin_output: %w", encErr)
-			}
-		}
-		if rec.PromiseResult != "" {
-			if promiseResult, encErr = enc.EncryptString(rec.PromiseResult); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt promise_result: %w", encErr)
-			}
-		}
-		if rec.PromiseError != "" {
-			if promiseError, encErr = enc.EncryptString(rec.PromiseError); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt promise_error: %w", encErr)
-			}
-		}
-		if len(payloadJSON) > 0 && enc != nil {
-			encrypted, encErr := enc.EncryptJSON(payloadJSON)
-			if encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt payload: %w", encErr)
-			}
-			payloadArg = sql.NullString{String: string(encrypted), Valid: true}
-		}
+	// The checksum is computed by the caller over the plaintext record, and the
+	// payload is built from it here for the same reason -- see
+	// encodeEventForStorage, which is the single encoding all five writers use.
+	stored, err := encodeEventForStorage(rec, enc, encrypt)
+	if err != nil {
+		return batchEntry{}, fmt.Errorf("prepare entry: %w", err)
 	}
+	payloadArg := stored.Payload
 
 	params := []interface{}{
 		workflowID, rec.Step, rec.EventType,
-		nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-		nullStr(rec.SignalName), nullStr(sigPayload),
+		nullStr(rec.SignalName), nullStr(stored.SignalPayload),
 		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-		nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
-		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
-		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
+		nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
 		payloadArg, checksum, af.tenantID,
 	}
 	return batchEntry{
