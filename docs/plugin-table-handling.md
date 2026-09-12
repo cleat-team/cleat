@@ -115,6 +115,21 @@ SET search_path = cleat_prod;  SELECT count(*) FROM kv_store;
 Related to #1279, which reports the documentation claim. This is the runtime consequence: on any
 deployment with a non-default `--schema`, every plugin is broken.
 
+> **Fixed, and the premise of (b) was wrong in the direction that made it bigger.** #1353 and #1362
+> landed on 2026-09-12; plugin tables and `plugin_migrations` now follow `--schema`.
+>
+> *"Core tables honour `--schema`"* was not true either. Nineteen of the forty-four files in
+> `migrations/postgres/` opened with `SET search_path = public;` and twenty-five did not, so a
+> non-default value split the core schema against itself and the run died at
+> `020_event_intent.sql` — before plugin migrations were reached at all. The symptom described
+> above therefore could not occur: nothing was recorded as applied, because the worker exited at
+> boot.
+>
+> Worth keeping as a method note rather than deleting. The measurement above reproduces what the
+> two code paths *do* — a `CREATE TABLE` on one connection, a `SELECT` on another — and is faithful
+> to the lines it was built from. Running the real `migration.Runner` over the real `migrations/`
+> directory is what showed the system never reaches that state. — #1287
+
 **(c) A flat namespace plus `IF NOT EXISTS` means a collision is silent.** The 27 names include
 `kv_store`, `task_queue`, `schedules`, `backup_config`, `webhook_config`, `rate_limits`,
 `event_stream` — names a third-party plugin would plausibly also choose. No collisions exist among

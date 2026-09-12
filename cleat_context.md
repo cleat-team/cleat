@@ -12,7 +12,11 @@ The WASM compilation step is primarily about decoupling workflow code lifecycle 
 ### Cleat connects to YOUR PostgreSQL — zero new stateful services
 Workflow steps are NOT independent queue messages. Replay requires full ordered event history. Compensation needs data from prior steps. Branching is data-dependent. A pure message queue per step doesn't work. Cleat uses **your existing PostgreSQL** for four roles: blob store (WASM), state store (event_history), work queue (SKIP LOCKED on workflow_instances), timer service (next_wake_at). You own the database — cleat is just a client, exactly like your application. Add Redis only at phase 4 if queue throughput becomes the bottleneck.
 
-**Multi-instance by design:** Run several independent cleat worker pools against the same PostgreSQL cluster. Each pool gets its own schema via the `--schema` flag. Pools do not cooperate through the database — cross-pool work goes through the other pool's API. There is no centralized cleat control plane — just PostgreSQL and your worker processes.
+**Multi-instance by design, and today that means one database per pool — not one schema per pool.** Several independent cleat worker pools can share a PostgreSQL *server*, each with its own database. Pools do not cooperate through the database — cross-pool work goes through the other pool's API. There is no centralized cleat control plane, just PostgreSQL and your worker processes.
+
+**This is a future feature: cleat does not expose it yet.** Nothing automates provisioning a pool, and the one hard constraint is enforced nowhere — **a tenant id must belong to exactly one pool.** PostgreSQL roles are cluster-global while databases are not, and `admin.create_tenant_role` writes to that global namespace, so registering the same tenant in two pools invalidates the first pool's stored credential and then blocks its tenant deletion.
+
+`--schema` is *not* the mechanism. It puts one worker's tables somewhere other than `public`; it is not a boundary between pools. See `docs/reference/worker-config.md` for what does and does not follow it, and cleat#1363.
 
 ### Replay model, not checkpoint serialization
 The system uses Temporal's replay approach — re-execute workflow from step 0, but return cached results for already-completed durable calls. This avoids serializing all local variables at each checkpoint. The tradeoff is that replay re-does computation between API calls; for I/O-bound workflows (API calls are the bottleneck), this is negligible.
