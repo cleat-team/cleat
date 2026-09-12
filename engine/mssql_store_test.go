@@ -2116,6 +2116,7 @@ func TestMSSQLStore_LoadEventHistory_Success(t *testing.T) {
 			"",                    // plugin_output
 			"",                    // plugin_error
 			"",                    // payload
+			nil,                   // payload_encoding (NULL = pre-cleat#1319 row)
 			"",                    // promise_name
 			"",                    // promise_id
 			"",                    // promise_result

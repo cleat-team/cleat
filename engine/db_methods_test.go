@@ -1556,6 +1556,7 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 					"",               // plugin_output
 					"",               // plugin_error
 					[]byte(nil),      // payload (nil = no payload)
+					nil,              // payload_encoding (NULL = pre-cleat#1319 row)
 					"",               // promise_name
 					"",               // promise_id
 					"",               // promise_result
@@ -1574,6 +1575,7 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 					"", "", "", "",
 					"", "", "", "", "",
 					[]byte(`{"duration_ms":5000}`), // payload
+					nil,                            // payload_encoding (NULL = pre-cleat#1319 row)
 					"", "", "", "",
 					nil,   // created_at
 					false, // pending
@@ -3132,7 +3134,7 @@ func TestPostgresStore_StreamEventHistory_SuccessWithPageSizeZero(t *testing.T) 
 	// pageSize <= 0 should default to 1000
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT step, event_type", data: [][]driver.Value{
-			{int64(0), "call", "", "", `{"req":"data"}`, `{"resp":"ok"}`, "", int64(0), "", int64(0), "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", nil},
+			{int64(0), "call", "", "", `{"req":"data"}`, `{"resp":"ok"}`, "", int64(0), "", int64(0), "", "", "", "", "", "", "", "", "", "", "", "", "", "", nil, "", "", "", "", nil},
 		}},
 	}, nil)
 	defer db.Close()

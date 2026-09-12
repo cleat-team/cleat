@@ -142,10 +142,52 @@ func intentFenceOrNotPending(ctx context.Context, hb func(ctx context.Context, w
 // target list without explicit casts, checked against a real PostgreSQL
 // instance rather than assumed. An empty $8 is the "fencing not requested"
 // escape hatch; see callIntentStore's doc.
+// THE THREE INTENT INSERTS BELOW DO NOT AGREE ABOUT payload_encoding, AND THAT
+// IS CORRECT RATHER THAN AN OVERSIGHT. #1383 routed WriteCallIntent through
+// encodeEventForStorage on PostgreSQL ONLY, matching #1380's scope, so:
+//
+//	postgres   binds stored.Encoding -- the request is base64 now
+//	mysql      literal 0 -- still nullStr(rec.Request), genuinely plaintext
+//	mssql      literal 0 -- likewise
+//
+// Recording a literal 0 on the postgres arm was correct when written and became
+// WRONG the moment #1383 landed, in a way worse than the NULL it replaced: a
+// NULL sends decodePayload to tryDecodeBase64, which guesses, whereas an explicit
+// 0 over base64 bytes does not guess -- it hands the caller the base64 TEXT,
+// deterministically, on every read. Falsified rather than reasoned about:
+// reverting the postgres arm to the literal round-trips "true" as "dHJ1ZQ==",
+// while mysql and mssql pass, which is the split above stated as a test result.
+//
+// The structural guard cannot see this. It asserts the column is NAMED, and it
+// was. Only the behavioural round trip can tell a truthful encoding from a lie
+// about one, which is why that test writes a request chosen to be valid base64.
+//
+// # WHY THIS COLUMN IS LOAD BEARING HERE AND NOWHERE ELSE
+//
+// An intent row writes no `payload` column. Every other writer populates
+// `payload`, whose JSON carries request_b64/response_b64 and whose
+// populateFromPayload runs AFTER the scanned columns, so those rows are shadowed
+// and the column disagreeing with them is harmless. Intent rows are not
+// shadowed: until CompleteCallIntent fills `payload` in, the request column is
+// the only copy, and before this the reader guessed at its encoding.
+//
+// Measured on all three dialects, writing an intent and loading it back, when
+// the request was stored raw and the reader guessed:
+//
+//	"true"    -> "\xb6\xbb\x9e"   "1234" -> "\xd7m\xf8"
+//	"null"    -> "\x9e\xe9e"       {"a":1} -> intact
+//
+// JSON objects are safe because `{` and `"` are not in the base64 alphabet. A
+// JSON SCALAR request is not: `true` and `null` are four characters drawn
+// entirely from it. And these rows are what the ambiguity resolver reads after a
+// crash, so the corruption surfaced exactly during recovery.
+//
+// CompleteCallIntent leaves its 0 alone on purpose: it writes rec.Response raw
+// on every dialect, so plaintext stays the truthful answer for that row.
 const writeCallIntentSQLPostgres = `
 	INSERT INTO event_history (workflow_id, step, event_type, service, operation, request,
-		created_at, intent_at, tenant_id)
-	SELECT $1, $2, $3, $4, $5, $6, now(), now(), $7
+		created_at, intent_at, tenant_id, payload_encoding)
+	SELECT $1, $2, $3, $4, $5, $6, now(), now(), $7, $10
 	WHERE ($8 = '' OR EXISTS (
 		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
 	))`
@@ -171,7 +213,7 @@ func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, 
 
 	res, err := tx.ExecContext(ctx, writeCallIntentSQLPostgres,
 		workflowID, rec.Step, rec.EventType, nullStr(rec.Service), nullStr(rec.Op),
-		nullStr(stored.Request), s.tenantID, workerID, generation)
+		nullStr(stored.Request), s.tenantID, workerID, generation, stored.Encoding)
 	if err != nil {
 		return fmt.Errorf("write call intent: step %d: %w", rec.Step, err)
 	}
@@ -272,8 +314,8 @@ func (s *MySQLStore) WriteCallIntent(ctx context.Context, workflowID string, rec
 	// for the fence check's own reference to the same value.
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request,
-			created_at, intent_at, tenant_id)
-		SELECT ?, ?, ?, ?, ?, ?, NOW(6), NOW(6), ?
+			created_at, intent_at, tenant_id, payload_encoding)
+		SELECT ?, ?, ?, ?, ?, ?, NOW(6), NOW(6), ?, 0
 		WHERE (? = '' OR EXISTS (
 			SELECT 1 FROM workflow_instances WHERE id = ? AND assigned_to = ? AND generation = ?
 		))
@@ -365,8 +407,8 @@ func (s *MSSQLStore) WriteCallIntent(ctx context.Context, workflowID string, rec
 	// MSSQL query in this file already does.
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request,
-			created_at, intent_at, tenant_id)
-		SELECT @p1, @p2, @p3, @p4, @p5, @p6, SYSUTCDATETIME(), SYSUTCDATETIME(), @p7
+			created_at, intent_at, tenant_id, payload_encoding)
+		SELECT @p1, @p2, @p3, @p4, @p5, @p6, SYSUTCDATETIME(), SYSUTCDATETIME(), @p7, 0
 		WHERE (@p8 = '' OR EXISTS (
 			SELECT 1 FROM workflow_instances WHERE id = @p9 AND assigned_to = @p10 AND generation = @p11
 		))

@@ -19,7 +19,13 @@ type batchEntry struct {
 	workflowID string
 	step       int
 	done       chan error
-	params     []interface{} // 31 values matching insertEventSQL parameter order
+	params     []interface{} // matches insertEventSQL parameter order
+
+	// payloadEncoding is what request/response were encoded as, recorded at
+	// write time rather than inferred when they are read back (cleat#1319).
+	// nil for an event carrying neither payload, so the column never makes a
+	// claim about bytes that do not exist.
+	payloadEncoding any
 
 	// createdAt is the EVENT's timestamp, not the moment of the write. The
 	// column is what LoadEventHistory reconstructs TimestampMs from, and
@@ -350,6 +356,11 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			"checksum":          p[29],
 			"tenant_id":         p[30],
 			"created_at":        entry.createdAt,
+			// cleat#1319: what the request/response bytes ARE, rather than a
+			// guess made when they are read back. NULL for an event that
+			// carries neither, so the column never claims something about
+			// bytes that do not exist.
+			"payload_encoding": entry.payloadEncoding,
 		}
 	}
 
@@ -376,7 +387,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			defer_id, child_name, child_input, run_id, new_input,
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error,
-			payload, created_at, checksum, tenant_id
+			payload, created_at, checksum, tenant_id, payload_encoding
 		)
 		SELECT
 			workflow_id, step, event_type, service, operation,
@@ -385,7 +396,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			defer_id, child_name, child_input, run_id, new_input,
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error,
-			payload, created_at, checksum, tenant_id
+			payload, created_at, checksum, tenant_id, payload_encoding
 		FROM jsonb_populate_recordset(NULL::event_history, $1::jsonb), cfg
 		ON CONFLICT (workflow_id, step) DO UPDATE
 			SET response = EXCLUDED.response, error = EXCLUDED.error
@@ -590,7 +601,7 @@ func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte
 				defer_id, child_name, child_input, run_id, new_input,
 				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				promise_name, promise_id, promise_result, promise_error,
-				payload, created_at, checksum, tenant_id
+				payload, created_at, checksum, tenant_id, payload_encoding
 			)
 			SELECT
 				workflow_id, step, event_type, service, operation,
@@ -599,7 +610,7 @@ func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte
 				defer_id, child_name, child_input, run_id, new_input,
 				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				promise_name, promise_id, promise_result, promise_error,
-				payload, created_at, checksum, tenant_id
+				payload, created_at, checksum, tenant_id, payload_encoding
 			FROM jsonb_populate_recordset(NULL::event_history, $1::jsonb), cfg
 			ON CONFLICT (workflow_id, step) DO UPDATE
 				SET response = EXCLUDED.response, error = EXCLUDED.error
@@ -676,10 +687,11 @@ func (af *AdaptiveFlusher) prepareEntry(workflowID string, rec EventRecord, chec
 		payloadArg, checksum, af.tenantID,
 	}
 	return batchEntry{
-		workflowID: workflowID,
-		step:       rec.Step,
-		params:     params,
-		createdAt:  eventCreatedAt(rec),
+		workflowID:      workflowID,
+		step:            rec.Step,
+		params:          params,
+		createdAt:       eventCreatedAt(rec),
+		payloadEncoding: stored.Encoding,
 	}, nil
 }
 

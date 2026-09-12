@@ -46,6 +46,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
+		       payload_encoding,
 		       promise_name, promise_id, promise_result, promise_error,
 		       created_at,
 		       (intent_at IS NOT NULL AND checksum IS NULL) AS pending
@@ -70,6 +71,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
 		var createdAt sql.NullTime
+		var payloadEnc sql.NullInt16
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -77,6 +79,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
+			&payloadEnc,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
 			&createdAt, &rec.Pending); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
@@ -87,8 +90,8 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		}
 		rec.Service = service.String
 		rec.Op = op.String
-		rec.Request = tryDecodeBase64(request.String)
-		rec.Response = tryDecodeBase64(response.String)
+		rec.Request = decodePayload(request.String, payloadEnc)
+		rec.Response = decodePayload(response.String, payloadEnc)
 		rec.Err = errMsg.String
 		rec.DurationMs = durationMs.Int64
 		rec.SignalNames = signalNames.String
