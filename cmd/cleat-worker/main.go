@@ -26,6 +26,7 @@ import (
 	_ "net/http/pprof" //nolint:gosec // G108: registers /debug/pprof on DefaultServeMux, which this worker never serves. The API listener builds its own http.NewServeMux; pprof gets a separate opt-in listener behind --pprof-addr, empty by default. See the comment at the pprof server below.
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -826,9 +827,7 @@ func main() {
 			bgWg.Add(1)
 			go func(bg plugin.HasBackground) {
 				defer bgWg.Done()
-				if berr := bg.Run(ctx); berr != nil {
-					logger.ErrorContext(context.Background(), "plugin background worker exited", "worker_id", workerID, "plugin", bg.Info().Name, "error", berr)
-				}
+				runPluginBackground(ctx, logger, workerID, bg)
 			}(p)
 		}
 	}
@@ -1302,4 +1301,46 @@ func main() {
 		logger.WarnContext(context.Background(), "timed out waiting for background workers after 30s", "worker_id", workerID)
 	}
 	logger.InfoContext(context.Background(), "shutdown complete", "worker_id", workerID)
+}
+
+// runPluginBackground runs one plugin's background loop and recovers a panic
+// from it.
+//
+// A panic here used to take the PROCESS with it, and every workflow in flight
+// on the worker (cleat#1304). An unrecovered panic in a goroutine cannot be
+// caught by the parent, so the recover has to live in the function the
+// goroutine runs -- which is why this is a named function rather than an inline
+// closure: a closure inside main() cannot be driven by a test, and a guard
+// nothing exercises is how the gap lasted.
+//
+// The worker is hardened against ITS OWN loops panicking -- withPanicRecovery
+// at setup.go:875, applied to every one -- and was not hardened against the
+// loops it runs on behalf of third-party plugin code, which is the weaker trust
+// assumption of the two. Twelve plugins ship a background.go and none contains a
+// recover().
+//
+// NOT routed through withPanicRecovery, and that is a scope decision rather than
+// an oversight: that is a method on *Worker, and the Worker is constructed well
+// after this spawn in main(). Health-tracker integration, metrics and watchdog
+// restart all need it, and getting them requires the plugin loops to be started
+// BY the Worker -- a startup-ordering change, tracked separately. This is the
+// half that stops the process dying, and it needs nobody to decide anything.
+//
+// The loop is NOT restarted here. A plugin that panics every iteration would
+// spin, and choosing the backoff is part of the same deferred decision. Stopping
+// one plugin's background work is a real loss and it is logged as one; losing
+// the worker is a larger one.
+func runPluginBackground(ctx context.Context, logger *slog.Logger, workerID string, bg plugin.HasBackground) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.ErrorContext(context.Background(),
+				"PANIC in plugin background worker — this plugin's background work has stopped; the worker continues",
+				"worker_id", workerID, "plugin", bg.Info().Name,
+				"error", r, "stack", string(debug.Stack()))
+		}
+	}()
+	if err := bg.Run(ctx); err != nil {
+		logger.ErrorContext(context.Background(), "plugin background worker exited",
+			"worker_id", workerID, "plugin", bg.Info().Name, "error", err)
+	}
 }
