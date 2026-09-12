@@ -10,8 +10,9 @@ import (
 	"testing"
 )
 
-// Every migration.NewRunner the worker builds has to be told the configured
-// schema. cleat#1287.
+// Every migration entry point the worker uses has to be told the configured
+// schema: migration.NewRunner for core migrations, plugin.RunMigrations for
+// plugin ones. cleat#1287.
 //
 // WHY A GUARD FOR TWO CALL SITES. WithSchema defaults to public when it is not
 // called, which is deliberate -- the twenty-odd NewRunner call sites in tests
@@ -38,21 +39,37 @@ func TestEveryMigrationRunnerGetsTheConfiguredSchema(t *testing.T) {
 		examined++
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
-			if !ok || !isSelector(call.Fun, "migration", "NewRunner") {
+			if !ok {
 				return true
 			}
-			checked++
-			// The result must be the receiver of a .WithSchema(...) call.
-			// ast.Inspect walks outside-in, so the enclosing chain is not
-			// available here; find it by looking for a WithSchema call whose
-			// receiver is this NewRunner call instead.
-			if !hasWithSchema(f, call) {
-				pos := fset.Position(call.Pos())
-				t.Errorf("%s:%d: migration.NewRunner(...) is not followed by "+
-					".WithSchema(*schemaName).\n\n"+
-					"Without it this runner builds into public while the "+
-					"runtime pool looks in --schema, which is cleat#1287.",
-					pos.Filename, pos.Line)
+			switch {
+			case isSelector(call.Fun, "migration", "NewRunner"):
+				checked++
+				// The result must be the receiver of a .WithSchema(...) call.
+				// ast.Inspect walks outside-in, so the enclosing chain is not
+				// available here; find it by looking for a WithSchema call
+				// whose receiver is this NewRunner call instead.
+				if !hasWithSchema(f, call) {
+					pos := fset.Position(call.Pos())
+					t.Errorf("%s:%d: migration.NewRunner(...) is not followed by "+
+						".WithSchema(*schemaName).\n\n"+
+						"Without it this runner builds into public while the "+
+						"runtime pool looks in --schema, which is cleat#1287.",
+						pos.Filename, pos.Line)
+				}
+			case isSelector(call.Fun, "plugin", "RunMigrations"):
+				checked++
+				// Here the schema arrives as a variadic option rather than a
+				// chained call, so the shape to look for is an argument.
+				if !hasSchemaOption(call) {
+					pos := fset.Position(call.Pos())
+					t.Errorf("%s:%d: plugin.RunMigrations(...) is not passed "+
+						"plugin.WithSchema(*schemaName).\n\n"+
+						"Without it plugin tables land in public while the "+
+						"runtime pool looks in --schema, and every plugin's "+
+						"first query fails. cleat#1287.",
+						pos.Filename, pos.Line)
+				}
 			}
 			return true
 		})
@@ -64,10 +81,14 @@ func TestEveryMigrationRunnerGetsTheConfiguredSchema(t *testing.T) {
 	if examined == 0 {
 		t.Fatal("parsed no non-test Go files in this package")
 	}
-	if checked == 0 {
-		t.Fatalf("found no migration.NewRunner call in %d file(s); either the "+
+	// Two NewRunner calls and two RunMigrations calls as of cleat#1287; the
+	// floor is deliberately "more than one of each shape" rather than a count,
+	// because the population grows and a census would go stale. What it has to
+	// exclude is a scan that found nothing.
+	if checked < 2 {
+		t.Fatalf("found %d migration entry point(s) in %d file(s); either the "+
 			"worker no longer runs migrations, or this scan is looking in the "+
-			"wrong place", examined)
+			"wrong place", checked, examined)
 	}
 }
 
@@ -90,6 +111,18 @@ func hasWithSchema(f *ast.File, target *ast.CallExpr) bool {
 		return true
 	})
 	return found
+}
+
+// hasSchemaOption reports whether plugin.WithSchema(...) is among the call's
+// arguments.
+func hasSchemaOption(call *ast.CallExpr) bool {
+	for _, arg := range call.Args {
+		inner, ok := arg.(*ast.CallExpr)
+		if ok && isSelector(inner.Fun, "plugin", "WithSchema") {
+			return true
+		}
+	}
+	return false
 }
 
 func isSelector(e ast.Expr, pkg, name string) bool {
