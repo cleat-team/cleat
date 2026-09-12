@@ -492,10 +492,20 @@ jobs:
         #     | python3 -c "import json,sys; [print(t['name'], t['manifest_digest']) \
         #       for t in json.load(sys.stdin)['tags'] if t['name']=='latest']"
         #
-        # This is a pin to be bumped deliberately, not a fossil: renovate.json
-        # extends config:recommended, whose github-actions manager reads service
-        # image fields, so a newer digest arrives as a reviewable PR that must go
-        # green before it lands -- which is the whole difference from `:latest`.
+        # This is a pin to be bumped DELIBERATELY AND BY HAND, and nothing
+        # automates it. This comment used to say renovate.json's
+        # config:recommended would deliver a newer digest as a reviewable PR;
+        # Renovate has never run in this repository (0 PRs ever) and the file
+        # was deleted in cleat#1321, so that has never been true.
+        #
+        # Nor does Dependabot's github-actions ecosystem substitute for it:
+        # measured 2026-09-12, no Dependabot PR has ever touched a file under
+        # .github/workflows/, and the digest below has been unchanged since
+        # 2026-08-07. Re-derive with
+        #   git log -1 --format=%cs -S '<digest>' -- <this file>
+        #
+        # The pin is still right -- it is the whole difference from `:latest`,
+        # which changes under you. It just needs a human to move it.
         #
         # The larger version of the same problem was mcr.microsoft.com/mssql/
         # server:2022-latest, which this comment used to record as not done.

@@ -1,3 +1,31 @@
+# Dependency updates.
+#
+# THIS FILE IS THE ONLY ONE THAT RUNS. `renovate.json` sat beside it
+# configuring Renovate, which has never opened a pull request in this
+# repository -- 0 ever, against 29 from Dependabot:
+#
+#   gh api "search/issues?q=repo:cleat-team/cleat+is:pr+author:app/renovate" --jq .total_count
+#   gh api "search/issues?q=repo:cleat-team/cleat+is:pr+author:app/dependabot" --jq .total_count
+#
+# It has been deleted rather than left in place. A well-formed config that
+# nothing reads is worse than no config: it is a plausible answer to "how are
+# dependencies managed here", and it survived an internal review that read it
+# as live (cleat#1321).
+#
+# WHAT THIS CHANGES. Before it, `github-actions` was the only ecosystem with a
+# schedule. Every Go module, every npm package and every crate got updates only
+# when a Dependabot SECURITY alert fired -- which needs an advisory to exist, to
+# be in GitHub's database, and to match the pinned version's range. Routine
+# patch releases, including ones that fix a problem before an advisory is
+# published, arrived never. That is how #1033 (grpc) and #1064 (vitest) are the
+# only non-Actions dependency PRs in the repository's history: both are security
+# updates, and both landed in directories this file did not cover.
+#
+# SCOPE. The directories below are the ones that ship. Deliberately excluded:
+# examples/, testdata/, tests/ and benchmarks/ -- fixtures pinned on purpose,
+# where a version bump is churn rather than a release. Security updates still
+# reach them regardless of this file, which is exactly how #1033 arrived in
+# tests/cross-language.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -6,3 +34,86 @@ updates:
       interval: "weekly"
     labels:
       - "area/ci"
+      - "dependencies"
+
+  # Go modules. The main module is where wasmtime lives, which is the
+  # dependency this repository most needs a schedule for: it is a large C
+  # library on the sandbox boundary, so a patch release is a security event
+  # rather than a chore.
+  - package-ecosystem: "gomod"
+    directories:
+      - "/"
+      - "/cleat"
+      - "/cleat/backendkit"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "go"
+    open-pull-requests-limit: 10
+    groups:
+      # wasmtime is deliberately NOT grouped with everything else. Burying it in
+      # a twenty-module batch is how its advisory cadence stops being visible,
+      # which is the complaint in cleat#1321.
+      wasmtime:
+        patterns:
+          - "github.com/bytecodealliance/wasmtime-go*"
+      go-minor-and-patch:
+        exclude-patterns:
+          - "github.com/bytecodealliance/wasmtime-go*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The admin dashboard and the AssemblyScript SDK.
+  - package-ecosystem: "npm"
+    directories:
+      - "/web"
+      - "/packages/cleat-as"
+      - "/packages/cleat-as/transform"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "javascript"
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The Rust SDK crates.
+  - package-ecosystem: "cargo"
+    directories:
+      - "/crates/cleat-sdk"
+      - "/crates/cleat-macro"
+      - "/crates/cleat-test"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The Python SDK.
+  - package-ecosystem: "pip"
+    directory: "/python-sdk"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 10
+    groups:
+      pip-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"

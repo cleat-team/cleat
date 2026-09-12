@@ -240,10 +240,16 @@ jobs:
         #   grep -rn 'mcr.microsoft.com/mssql/server' .github/workflows/ \
         #     docker-compose.cluster.yml docker-compose.dev.yml
         #
-        # This is a pin to be bumped deliberately, not a fossil: renovate.json
-        # extends config:recommended, whose github-actions manager reads service
-        # image fields, so a newer digest arrives as a reviewable PR that has to
-        # go green before it lands. That is the whole difference from a tag.
+        # This is a pin to be bumped DELIBERATELY AND BY HAND, and nothing
+        # automates it. This comment used to credit renovate.json's
+        # config:recommended with delivering a newer digest as a reviewable PR;
+        # Renovate has never run in this repository (0 PRs ever) and the file
+        # was deleted in cleat#1321, so that has never been true. No Dependabot
+        # PR has ever touched a workflow file either, measured 2026-09-12, and
+        # this digest is unchanged since 2026-08-07.
+        #
+        # The pin is still right -- it is the whole difference from a tag, which
+        # changes under you. It just needs a human to move it.
         image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
         env:
           ACCEPT_EULA: Y

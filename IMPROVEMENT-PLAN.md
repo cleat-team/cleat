@@ -12395,3 +12395,73 @@ Two further assertions, because surviving is not sufficient:
   saying so — trading a loud failure for a silent one, which is not obviously the better trade.
 - **the control**: an ordinary `Run` error still reaches the log and is *not* reported as a panic.
   Without it, "the goroutine returns" is satisfied by a `runPluginBackground` that never calls `Run`.
+
+---
+
+### 3.438 `renovate.json` configured a bot that had never run; Dependabot now covers what ships — ✅ fixed
+
+**cleat#1321.** The issue asked for a `wasmtime-go` rule in `renovate.json`, on the argument that
+the config gave a grouping and a schedule to wazero — removed as the worker backend in #459 — and
+none to the only production WASM backend. The argument is right. **The fix it implies is a no-op.**
+
+    gh api "search/issues?q=repo:cleat-team/cleat+is:pr+author:app/renovate"   --jq .total_count  ->  0
+    gh api "search/issues?q=repo:cleat-team/cleat+is:pr+author:app/dependabot" --jq .total_count  -> 29
+
+Renovate has never opened a pull request in this repository. Adding a rule to that file would have
+changed nothing observable and read, to the next person, as the gap having been closed.
+
+#### What was actually running
+
+`.github/dependabot.yml` covered **`github-actions` only**. Every Go module, every npm package and
+every crate got updates solely when a Dependabot **security** alert fired — which needs an advisory
+to exist, to be in GitHub's database, and to match the pinned version's range. Routine patch
+releases, including ones that fix a problem before an advisory is published, arrived never.
+
+That is why #1033 (grpc, in `tests/cross-language`) and #1064 (vitest, in `web`) are the only
+non-Actions dependency PRs in the repository's history. Both are security updates, and both landed
+in directories the config did not mention — which is also the evidence that excluding a directory
+costs no advisory coverage.
+
+#### The decision, and what it covers
+
+`renovate.json` **deleted**, `dependabot.yml` extended to `gomod`, `npm`, `cargo` and `pip` across
+**11 directories**. wasmtime gets its own group rather than being batched, because burying it in a
+twenty-module PR is how its advisory cadence stops being visible — which is the issue's real point.
+
+Deliberately excluded: `examples/`, `testdata/`, `tests/`, `benchmarks/`, `cmd/cleat/templates/` —
+fixtures pinned on purpose, where a bump is churn rather than a release.
+
+#### The guard, because both failure directions are silent
+
+`scripts/check_dependabot_coverage.py`, wired into `lint`:
+
+| direction | why nothing would say so |
+|---|---|
+| an entry names a directory with no manifest | Dependabot skips it with no error — the `renovate.json` failure at entry scale |
+| a shipped manifest is in no entry | it gets security updates only, which looks like coverage until an advisory is late |
+
+`--self-test` runs **two known-positives** — doctored configs the guard must report — rather than a
+clean run, which every broken version of a guard also passes. Falsified against the real config
+both ways: dropping `/cleat` reports *"has a go.mod and is in no gomod entry"*; adding
+`/crates/does-not-exist` reports *"which has no Cargo.toml"*.
+
+It uses `git ls-files` rather than a filesystem walk, so `.claude/worktrees/` — a second copy of the
+repository — cannot contribute a manifest.
+
+#### Two stale claims corrected, and they were the same defect one level down
+
+`plugin-harness-ci.yml` and `tier1-gate.yml` both justified a pinned service-image digest with
+*"renovate.json extends config:recommended … so a newer digest arrives as a reviewable PR"*. That
+was never true, and measurably so: **no Dependabot PR has ever touched a file under
+`.github/workflows/`**, and the SQL Server digest has been unchanged since 2026-08-07. The pins are
+still right — they are the whole difference from `:latest` — but a human has to move them, and the
+comments now say so.
+
+#### One thing checked rather than assumed
+
+The guard imports `yaml`, and the step is placed **after** `Workflow files parse`, which installs
+pyyaml. The `Required-context guard` at step 4 also imports yaml and passes today, so pyyaml is
+evidently preinstalled on `ubuntu-latest` — but that install is the only thing in the file which
+*guarantees* it, and depending on a runner image's contents is how a guard stops running without
+failing. The `run:` block was extracted from the parsed YAML and executed verbatim before being
+relied on.
