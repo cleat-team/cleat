@@ -382,6 +382,42 @@ Waits for all child workflows concurrently. Results match the input order.
 ---
 
 ```go
+PollChild(runID string) (status string, result string, err error)
+```
+
+Checks a run's status without blocking. `status` is `running`, `completed` or
+`failed`; `result` carries the run's result on `completed`.
+
+```go
+status, result, _ := h.PollChild(runID)
+```
+
+**It is not restricted to your children, despite the name.** `PollChild` takes
+**any run id in the calling workflow's tenant** and answers for it. Nothing
+filters by parentage — not the guest call, not the ABI binding, and not the
+store query, which is `WHERE id = ?` on all three dialects. A probe on
+postgres, MySQL and SQL Server returned an unrelated workflow's full result
+body (cleat#1120).
+
+So the `child` in the name describes the common case, not a boundary. **The
+boundary is the tenant**, which is where cleat draws every other isolation line;
+run ids are UUIDs, so this is not an enumeration surface. If you want to observe
+a run you did not spawn — the thing `retrieve_workflow(id)` does in DBOS — this
+is the call, and you do not need to be its parent.
+
+`AwaitChild` reads through the same store path and is unrestricted in the same
+way, but it *blocks* until the run is terminal, so awaiting an unrelated
+long-running workflow parks the caller.
+
+**An unknown run id reports `running`, not an error.** A row that does not exist
+and a row that has not finished are indistinguishable here: the lookup returns
+an empty outcome with no error, and anything not complete is reported `running`.
+Do not treat `running` as proof a run exists, and do not poll a mistyped id
+expecting a failure -- it will report `running` forever.
+
+---
+
+```go
 ChildWorkflowTyped(name string, request interface{}) (runID string, err error)
 AwaitChildTyped(runID string, result interface{}) error
 ```
