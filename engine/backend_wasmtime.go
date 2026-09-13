@@ -734,7 +734,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// can store the workflow result and the Execute method can retrieve
 	// it even when the module subsequently traps (e.g. via proc_exit).
 	var completeResult, completeErr string
-	if err := b.registerAllImports(linker, &completeResult, &completeErr, needsWasi, abortImportType(module)); err != nil {
+	if err := b.registerAllImports(linker, &completeResult, &completeErr, needsWasi, module); err != nil {
 		return nil, fmt.Errorf("host: register imports: %w", err)
 	}
 
@@ -1147,7 +1147,7 @@ const (
 
 // registerAllImports registers all host function imports on the given linker.
 // Extracted so the core-module and native-component paths share the same setup.
-func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string, needsWasi bool, abortTy *wasmtime.FuncType) error {
+func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string, needsWasi bool, module *wasmtime.Module) error {
 	if needsWasi {
 		if err := b.registerWasiStubs(linker); err != nil {
 			return err
@@ -1157,8 +1157,14 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 		if err := b.registerWasiDeterminism(linker); err != nil {
 			return err
 		}
+		// LAST, so it is the final word: DefineWasi binds the stock surface and
+		// the determinism overrides replace two of them; this refuses the rest.
+		// cleat#1381.
+		if err := b.registerWasiPolicy(linker, module); err != nil {
+			return err
+		}
 	}
-	if err := b.registerEnvStubs(linker, abortTy); err != nil {
+	if err := b.registerEnvStubs(linker, abortImportType(module)); err != nil {
 		return err
 	}
 	if err := b.registerTeavmStubs(linker); err != nil {
