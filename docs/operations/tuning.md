@@ -201,12 +201,39 @@ cleat-worker \
 
 ## Database connection pool
 
-Each concurrent workflow holds one database connection. The worker also uses a
-few connections for housekeeping (reaper, compactor, health checks).
+**A worker opens several independent pools, not one.** `concurrency + 5` is the
+core pool alone, and sizing from it under-provisions a default worker by a
+factor of five.
+
+Per pool, with the gate each sits behind (cleat#1470):
+
+| pool | size | default | opened when |
+|---|---|---|---|
+| core | `--concurrency + 5` | **15** | always |
+| plugin | `--max-plugin-connections` | **10** | that flag `> 0` |
+| adaptive flusher | `--batch-flush-max-connections` | **50** | unless `--batch-flush-disabled` *or* `--no-per-step-flush` |
+| shard | 15 **per shard** | — | only when sharding is configured |
+| migrate | 2 | — | only with `--migrate-db`, and only at boot |
+| tenant | `--tenant-pool-max-conns` **per tenant** | 25 × *T* | only with `--tenant-isolation=role` |
 
 ```
-total_db_connections ≈ concurrency + 5 (housekeeping)
+default single-node worker, no sharding, no --migrate-db:
+    15 (core) + 10 (plugin) + 50 (flusher) = 75
 ```
+
+**The adaptive flusher's 50 is default-on and is two thirds of that.** Both of
+its gates — `--batch-flush-disabled` and `--no-per-step-flush` — default to
+`false`, so it reads like an opt-in feature and is not one. If you size for
+`concurrency + 5` you will be short by 60 per worker, and the symptom is
+connection exhaustion under load.
+
+**The tenant pool is unbounded in tenant count.** With
+`--tenant-isolation=role` a worker opens a pool per tenant it has touched and
+does not release them, so there is no fixed total to quote — see cleat#1470.
+Budget for the tenants a worker will actually serve.
+
+Nothing in the worker sums these or logs the total at startup, so the
+arithmetic above is the only place it exists.
 
 If you run multiple workers, multiply by the worker count. Use PgBouncer in
 transaction mode between workers and PostgreSQL to reduce the total connection

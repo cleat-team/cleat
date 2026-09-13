@@ -214,6 +214,13 @@ db.SetMaxIdleConns(5)
 db.SetConnMaxLifetime(5 * time.Minute)
 ```
 
+This is the **core** pool only. A worker also opens a plugin pool
+(`--max-plugin-connections`, default 10) and an adaptive-flusher pool
+(`--batch-flush-max-connections`, default 50 and **default-on**), plus a
+per-shard pool when sharding is configured and a pool per tenant under
+`--tenant-isolation=role`. A default single-node worker opens 75, not 15 —
+`docs/operations/tuning.md` has the table and the gates. cleat#1470.
+
 ### Connection Failure Handling
 
 When the engine detects a database connection error:
