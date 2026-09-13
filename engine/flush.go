@@ -251,43 +251,55 @@ func setRLSOnFlushTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
 // NULL against the empty string -- which is NULL, which is not true.
 //
 // **The paragraph then said "no write path in this repo stores the empty
-// string in `response`", and that is false.** CompleteCallIntent
-// (engine/store_intent.go:193) binds `rec.Response` directly into
-// `SET response = $3`, with no nullStr, so a failed call -- empty response,
-// error set -- stores the empty string. Measured 2026-09-12 on PostgreSQL 16:
-// WriteCallIntent then CompleteCallIntent with Response="" leaves
-// `response` at Valid=true, String="", not NULL. So the clause CAN fire, for
-// exactly the rows the call-intent path wrote. See cleat#1379.
+// string in `response`", that was false for a day, and it is true again.**
+// CompleteCallIntent and ResolveCallIntent bound `rec.Response` directly into
+// `SET response = $3` with no nullStr, so a call that completed with an empty
+// response stored the empty string. Measured 2026-09-12 on PostgreSQL 16:
+// WriteCallIntent then CompleteCallIntent with Response="" left `response` at
+// Valid=true, String="".
 //
-// The predicate the original was reaching for, which does not rot as writers
-// are added: *every INSERT path binds response through nullStr.* Re-derive
-// with
+// That was not a cosmetic difference, and it is why cleat#1379 part 1 changed
+// it rather than documenting it. The clause could never fire for the rows it
+// was written for -- a row written without a result has response NULL, and
+// `NULL = ”` is not true -- so the ONLY rows it could fire on were finished
+// call-intent rows that completed with an empty response, which are exactly
+// the rows it exists to leave alone. Inverted relative to this comment.
+// Measured before the fix, completing an intent with an empty response and
+// then appending the same step with a different one:
+//
+//	after re-append   response="eyJs…"  checksum UNCHANGED  payload UNCHANGED
+//	VerifyWorkflowEvents -> checksum mismatch
+//
+// The firing was never self-healing; it could only corrupt, and `response` is
+// not in shadowFields, so nothing but the checksum could see it. All six
+// call-intent binds now go through nullStr.
+//
+// The predicate, which does not rot as writers are added: *every write path
+// binds response through nullStr.* Re-derive with
 //
 //	grep -rn "rec.Response\|stored.Response" --include="*.go" engine/ \
 //	  | grep -v _test.go | grep -E "INSERT|nullStr|SET response"
-//
-// and read the hits -- the INSERT ones go through nullStr, the call-intent
-// UPDATEs do not.
 //
 // Measured 2026-09-03: appending step 0 with an empty response and then
 // appending step 0 again with `{"ok":true}` leaves the stored `response`
 // column NULL and the stored checksum unchanged. The DO UPDATE never runs,
 // for a row that an INSERT path wrote.
 //
-// So for those rows this is `DO NOTHING` wearing a WHERE clause, and that is
+// So this is `DO NOTHING` wearing a WHERE clause -- for every row now, not
+// only for the ones an INSERT path wrote -- and that is
 // the *correct* behaviour -- it is what MySQL's `INSERT IGNORE` (mysql_events.go) and SQL
 // Server's `WHERE NOT EXISTS` (mssql_events.go) do, so all three dialects
 // agree. Left as it is rather than simplified: rewriting the hottest write
 // path in the engine to change nothing is not worth the risk, and the shape
 // is load-bearing documentation of what the other two do.
 //
-// It matters that it cannot fire, because if it ever did it would leave a
-// stale checksum: the row's stored checksum was computed over the record as
-// first written, and the DO UPDATE changes `response` without recomputing
-// it. That is IMPROVEMENT-PLAN 3.88's defect class exactly. A legacy row
-// holding the empty string rather than NULL -- written by some earlier
-// version, if one ever did -- is the only way to reach it, and none was
-// found.
+// It matters that it cannot fire, because when it did it left a stale
+// checksum: the row's stored checksum was computed over the record as first
+// written, and the DO UPDATE changes `response` without recomputing it. That
+// is IMPROVEMENT-PLAN 3.88's defect class exactly, and cleat#1379 measured it
+// happening rather than reasoning about it. A legacy row written by an older
+// version holding the empty string rather than NULL is now the only way to
+// reach it.
 //
 // On fence loss this returns ErrFenceLost rather than silently dropping the
 // write. It does not abort the workflow's execution session itself -- that
