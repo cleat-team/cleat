@@ -193,7 +193,18 @@ func (s *Selector) Select() string {
 
 			result := s.h.AwaitSignals(names, timeout)
 			if result.Err != nil {
-				return result.Name
+				// RECORD IT. This returned result.Name and nothing else, and
+				// on the error path result.Name is "" -- so a caller switching
+				// over the winners it added fell through every case, with
+				// Err() still nil and no way to learn anything had gone wrong
+				// (cleat#1404).
+				//
+				// Returning "" is kept: there is no winner, and inventing one
+				// would put a caller into a branch whose future never
+				// resolved. The empty string plus a non-nil Err() is the
+				// distinguishable pair; the empty string alone was not.
+				s.err = result.Err
+				return ""
 			}
 			if !result.TimedOut {
 				for i := range s.signals {
