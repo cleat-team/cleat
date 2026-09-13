@@ -70,7 +70,11 @@ ever runs in the worker process address space.
 
 **Do this:** Compile workflow code to WASM, execute it in the sandboxed
 wasmtime backend, and route all external interactions through the HostCall
-imports on the `env` module (52 as of 2026-09-06 -- `ABI.md` §2).
+imports on the `env` module -- `ABI.md` §2 enumerates them, and
+`scripts/check-doc-consistency.sh` fails CI if that list and `engine/imports.go`
+disagree. No count is quoted here on purpose: this one read 52 from 2026-09-06
+and was 54 by 09-13, and a number a reader takes on trust is worse than a
+pointer they can re-derive.
 
 **Not that:** Load user code as a native Go plugin (`plugin.Open`), execute it
 via shared library FFI, or embed a scripting language interpreter in the worker

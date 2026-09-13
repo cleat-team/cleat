@@ -27,11 +27,12 @@
 Any language must:
 1. **Compile to `wasm32-wasip1` (or `wasm32-unknown-unknown`)** — produce a `.wasm` shared library
 2. **Export functions** with the cleat ABI: `(args_ptr, args_len, out_ptr, max_out_len) -> i64`
-3. **Import host functions** from the `"env"` module with `(ptr, len)` string protocol — 59
-   as of 2026-08-09 (`ABI.md` §2; re-derived via `engine/imports.go`), though a given SDK
-   may only need a subset (Python's WIT world declares 52 — the two Go-`wasip1`-specific
-   dispatch functions, `cleat_poll_work` and `cleat_complete`, don't apply to a
-   component-model SDK)
+3. **Import host functions** from the `"env"` module with `(ptr, len)` string protocol —
+   `ABI.md` §2 enumerates them and `scripts/check-doc-consistency.sh` holds that list to
+   `engine/imports.go`. A given SDK may need only a subset: Python's WIT world omits the
+   two Go-`wasip1`-specific dispatch functions, `cleat_poll_work` and `cleat_complete`,
+   which don't apply to a component-model SDK. No count is quoted here because it moves —
+   this line read 59 from 2026-08-09 and was five short by 09-13
 4. **Read/write linear memory** at a 10 MiB scratch offset for string I/O
 5. **Return the suspend sentinel** `(1 << 62)` for sleep/await-signals
 
@@ -45,7 +46,7 @@ The host runtime doesn't know or care what language produced the WASM bytes.
 
 **How:** `clang --target=wasm32-wasip1` produces standalone WASM. No runtime needed.
 
-**SDK:** A `cleat.h` header declaring the 59 `extern` imports (see ABI.md §2) plus inline memory
+**SDK:** A `cleat.h` header declaring one `extern` per host call (see ABI.md §2) plus inline memory
 helpers (`read_string`, `write_string`, `encode_export_result`). ~200 lines.
 
 **Transformer:** None needed. The user `#include`s the header and writes `extern "C"`
@@ -68,7 +69,7 @@ for all compiled languages.
 simpler toolchain setup than C — no clang/WASI sysroot needed.
 
 **SDK:** A `cleat.zig` module with comptime-generated import wrappers and memory
-helpers. Zig's `comptime` could auto-generate the 59 import declarations (see ABI.md §2). ~150 lines.
+helpers. Zig's `comptime` could auto-generate the import declarations (see ABI.md §2). ~150 lines.
 
 **Transformer:** None needed, but Zig's comptime reflection could generate export
 wrappers at compile time without needing a separate proc-macro. Zero build-step

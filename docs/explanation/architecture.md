@@ -129,9 +129,11 @@ Go `embed.FS`. The UI provides:
 > and wazero "the pure-Go, CGO-less fallback". **There is no fallback and no
 > second backend**: `engine/backend_wazero.go` was deleted in #459
 > (2026-08-10), a `CGO_ENABLED=0` build constructs no backend at all, and
-> `cleat-worker` exits 1 at startup. The host-function count is corrected in
-> the same pass, from 59 to 52 — see the note under the list below, and
-> `docs/explanation/security-model.md` for what wazero still does.
+> `cleat-worker` exits 1 at startup. The host-function count was corrected in
+> the same pass, from 59 to 52; it was 54 by 2026-09-13, so that pass removed
+> the number rather than correcting it a third time (cleat#1414). See the note
+> under the list below, and `docs/explanation/security-model.md` for what
+> wazero still does.
 
 Execution uses [wasmtime](https://wasmtime.dev/), which is the only WASM
 backend cleat has. It requires CGO. Key characteristics:
@@ -140,10 +142,12 @@ backend cleat has. It requires CGO. Key characteristics:
   logs "wasmtime is the only WASM backend cleat has, there is no fallback"
   and exits 1. Check any worker with `cleat-worker --verify-backend`.
 - It implements the `wasip1` preview 1 ABI required by Go's WASM target.
-- 52 host functions registered on the `env` module (`cleat_call`,
+- Host functions registered on the `env` module (`cleat_call`,
   `cleat_call_heartbeat`, `cleat_sleep`, `cleat_now`, etc. -- full list in
-  `ABI.md` §2). Measured 2026-09-06 (49 `cleat_*` plus `plugin_call`,
-  `plugin_call_streaming`, `set_query_state`):
+  `ABI.md` §2, held to `engine/imports.go` by
+  `scripts/check-doc-consistency.sh`). Exactly three carry no `cleat_` prefix --
+  `plugin_call`, `plugin_call_streaming`, `set_query_state` -- which is why a
+  prefix-anchored scan silently under-counts:
 
       python3 -c "import re;print(len(set(re.findall(r'\.Export\("([^"]+)"\)',
         open('engine/imports.go').read()))))"

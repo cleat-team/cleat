@@ -141,9 +141,13 @@ fingerprint is available on the GitHub security advisories page.
 > compiled WASM modules", named the wazero runtime as the trust boundary and as
 > the enforcer of memory bounds, and gave the host-function count as 15. A
 > worker has not executed a workflow on wazero since #459 (2026-08-10) deleted
-> the wazero backend, and the count is 52. Getting this wrong in *this* file is
-> the costliest place to get it wrong: it tells a security researcher which
-> runtime to look at, and it named one that a production worker does not run.
+> the wazero backend. Getting this wrong in *this* file is the costliest place
+> to get it wrong: it tells a security researcher which runtime to look at, and
+> it named one that a production worker does not run.
+>
+> The count was corrected to 52 in that pass and was 54 by 2026-09-13, so
+> 2026-09-13 removed it rather than correcting it again (cleat#1414). `ABI.md`
+> §2 is the enumeration, and it is the one place a guard checks.
 
 Cleat uses [wasmtime](https://wasmtime.dev/) to execute compiled WASM modules on
 a worker. It is the only WASM backend cleat has; a build without CGO constructs
@@ -152,9 +156,10 @@ threat model assumes:
 
 - **Trust boundary**: The wasmtime backend and the host worker process are
   trusted. The WASM module is untrusted.
-- **Capabilities**: WASM modules have access only to the 52 cleat host function
-  imports (`cleat_call`, `cleat_sleep`, etc. -- `ABI.md` §2 lists them; measured
-  2026-09-06). They cannot access the filesystem, network, environment
+- **Capabilities**: WASM modules have access only to the cleat host function
+  imports (`cleat_call`, `cleat_sleep`, etc. -- `ABI.md` §2 lists them, and
+  `scripts/check-doc-consistency.sh` fails CI if that list and
+  `engine/imports.go` disagree). They cannot access the filesystem, network, environment
   variables, or system clock except through these host functions.
 - **Memory isolation**: Each WASM module has its own linear memory. The wasmtime
   store enforces memory bounds (32 MiB per module by default,
