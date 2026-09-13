@@ -352,19 +352,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 			}
 		}
 		if fnErr == nil {
-			// Inject call context (tenant ID + workflow ID) for plugin functions.
-			callCtx := ctx
-			cc := &plugin.CallContext{}
-			if s.tenantID != "" {
-				cc.TenantID = s.tenantID
-			}
-			if s.workflowID != "" {
-				cc.WorkflowID = s.workflowID
-			}
-			if s.engine.db != nil {
-				cc.DB = s.engine.db
-			}
-			callCtx = plugin.WithCallContext(callCtx, cc)
+			callCtx := s.pluginCallContext(ctx)
 
 			// Actually call the plugin.
 			step := s.stepCount
@@ -514,19 +502,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 		}
 	}
 
-	// Inject call context.
-	callCtx := ctx
-	cc := &plugin.CallContext{}
-	if s.tenantID != "" {
-		cc.TenantID = s.tenantID
-	}
-	if s.workflowID != "" {
-		cc.WorkflowID = s.workflowID
-	}
-	if s.engine.db != nil {
-		cc.DB = s.engine.db
-	}
-	callCtx = plugin.WithCallContext(callCtx, cc)
+	callCtx := s.pluginCallContext(ctx)
 
 	// Call the streaming plugin function and collect chunks.
 	chunkCh, err := fn(callCtx, inputJSON)

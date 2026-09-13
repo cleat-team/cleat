@@ -32,13 +32,20 @@ import (
 // closed on contact, because nothing would be setting the value they filter
 // on.
 //
-// WHY IT IS GATED ON THE CONTEXT CARRYING A TENANT. A tenant reaches a plugin
-// on exactly one path -- the HTTP middleware at cmd/cleat-worker/main.go,
-// the only non-test caller of auth.WithTenantID. Host calls and background
-// loops have none, and a scheduler sweeping every tenant's due rows is
-// legitimately cross-tenant. Scoping only when a tenant is present leaves
-// those paths exactly as they were, which is what keeps this change from
-// reaching code it has no business reaching.
+// WHY IT IS GATED ON THE CONTEXT CARRYING A TENANT. Two paths supply one:
+// the HTTP middleware at cmd/cleat-worker/main.go, and -- since cleat#1278 --
+// the host-call boundary, where engine.pluginCallContext bridges the workflow's
+// own tenant into tenantctx before invoking a plugin function. What still has
+// no tenant is a background loop, and a scheduler sweeping every tenant's due
+// rows is legitimately cross-tenant. Scoping only when a tenant is present
+// leaves those paths exactly as they were, which is what keeps this change
+// from reaching code it has no business reaching.
+//
+// THAT SENTENCE USED TO READ "a tenant reaches a plugin on exactly one path
+// ... host calls and background loops have none", and it was the justification
+// for the gate rather than a passing remark -- which is why it is rewritten
+// here rather than left for the next reader to discover is false. cleat#1278
+// is the issue that sentence named as future work.
 //
 // POSTGRESQL ONLY, AND THE FIELD SAYS SO. MySQL has no row-level security at
 // all. SQL Server scopes a tenant at the CONNECTOR (tenantSessionConnector in
@@ -68,10 +75,19 @@ func (a *SQLDBAdapter) tenantTx(ctx context.Context) (*sql.Tx, error) {
 // transaction; nil gives the default read-write.
 //
 // Returns (nil, nil) when no scoping applies -- a dialect without row-level
-// security, or a context with no tenant. Both are ordinary states, not
-// errors: host calls and background loops legitimately have no tenant, and
-// scoping them to the zero UUID would match nothing and read as an empty
-// table.
+// security, or a context with no tenant. Both are ordinary states rather than
+// errors: a background loop legitimately has no tenant. (Until cleat#1278 this
+// sentence also named host calls, which now carry one.)
+//
+// "No tenant" means tenantctx.From returned !ok, and that is NOT the same as
+// the zero UUID. This comment used to say scoping to the zero UUID "would
+// match nothing and read as an empty table", which was already wrong when it
+// was written: 00000000-0000-0000-0000-000000000000 is engine.DefaultTenantUUID,
+// it is a real row in admin.tenants, and it is the column default for
+// workflow_instances.tenant_id -- so in a single-tenant deployment it is the
+// tenant every row carries. Scoping to it matches everything that exists, which
+// is correct there and is why pluginCallContext bridges it like any other
+// value. Verified against a migrated database rather than reasoned about.
 func beginTenantTx(ctx context.Context, db *sql.DB, dialect plugin.Dialect, opts *sql.TxOptions) (*sql.Tx, error) {
 	if dialect != plugin.DialectPostgres {
 		return nil, nil
