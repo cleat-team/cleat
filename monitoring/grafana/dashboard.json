@@ -1840,7 +1840,7 @@
         "name": "workflow_name",
         "options": [],
         "query": {
-          "query": "label_values(cleat_workflows_claimed_total{namespace=~\"$namespace\"}, workflow_name)",
+          "query": "label_values(cleat_workflows_started_total{namespace=~\"$namespace\"}, workflow_name)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
