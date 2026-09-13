@@ -30,14 +30,6 @@ func TestAParkedRowIsClaimedByAnotherWorker(t *testing.T) {
 			defer teardown()
 			ctx := context.Background()
 
-			releaser, ok := store.(interface {
-				ReleaseWorkflow(ctx context.Context, workflowID, workerID string,
-					generation int64, nextWakeAt time.Time) error
-			})
-			if !ok {
-				t.Skipf("%T has no ReleaseWorkflow", store)
-			}
-
 			id := newIntentWorkflow(t, ctx, store, "parked-then-claimed")
 
 			// Worker A claims it, then parks it with a wake time ALREADY PAST --
@@ -48,7 +40,7 @@ func TestAParkedRowIsClaimedByAnotherWorker(t *testing.T) {
 			if err != nil {
 				t.Fatalf("worker-A claim: %v", err)
 			}
-			if err := releaser.ReleaseWorkflow(ctx, id, "worker-A", first.Generation,
+			if err := store.ReleaseWorkflow(ctx, id, "worker-A", first.Generation,
 				time.Now().Add(-time.Second)); err != nil {
 				t.Fatalf("park (the DurableSleep release): %v", err)
 			}
@@ -89,7 +81,7 @@ func TestAParkedRowIsClaimedByAnotherWorker(t *testing.T) {
 			if err != nil {
 				t.Fatalf("worker-A claim (control): %v", err)
 			}
-			if err := releaser.ReleaseWorkflow(ctx, asleep, "worker-A", sleeper.Generation,
+			if err := store.ReleaseWorkflow(ctx, asleep, "worker-A", sleeper.Generation,
 				time.Now().Add(time.Hour)); err != nil {
 				t.Fatalf("park the control an hour out: %v", err)
 			}
