@@ -195,6 +195,58 @@ if [ ${#bad_group[@]} -gt 0 ]; then
     fail=1
 fi
 
+# --- 3. a comment must not evict a push's check --------------------------
+# Second eviction from the same file, measured 2026-09-13. A workflow triggered
+# by BOTH issue_comment and pull_request(_target), keyed on the PR number, puts
+# a comment on a PR into the same concurrency group as that PR's push. The
+# comment's run reports against develop; the push's run reports against the PR
+# head. Evict the second and the required context never attaches to the commit,
+# so the PR reads BLOCKED with zero failing and zero pending checks -- one short
+# of the total, which looks like nothing is wrong at all.
+#
+# Only cla-assistant.yml has both triggers today. The check is here because the
+# combination is what makes it possible, not because the file is special.
+bad_event_group=()
+ce_scanned=0
+
+for f in .github/workflows/*.yml; do
+    grep -qE '^[[:space:]]*issue_comment:' "$f" || continue
+    grep -qE '^[[:space:]]*pull_request(_target)?:' "$f" || continue
+    ce_scanned=$((ce_scanned + 1))
+
+    grep -qE '^concurrency:' "$f" || continue
+    n_group=$(grep -cE '^[[:space:]]*group:' "$f")
+    [ "$n_group" -eq 1 ] || continue        # already reported as ambiguous
+
+    # The group must separate the two triggers. github.event_name does it
+    # directly; head.sha does it as a side effect, being null on issue_comment.
+    group=$(grep -E '^[[:space:]]*group:' "$f")
+    case "$group" in
+        *github.event_name*|*pull_request.head.sha*) ;;
+        *) bad_event_group+=("$f") ;;
+    esac
+done
+
+if [ "$ce_scanned" -eq 0 ]; then
+    echo "ERROR: no workflow triggers on both issue_comment and pull_request(_target)." >&2
+    echo "cla-assistant.yml did when this check was written; if that changed on purpose," >&2
+    echo "delete this check rather than leaving it matching nothing." >&2
+    exit 1
+fi
+
+if [ ${#bad_event_group[@]} -gt 0 ]; then
+    echo "ERROR: these workflows run on both issue_comment and pull_request(_target)" >&2
+    echo "but do not separate the two in their concurrency group:" >&2
+    printf '    %s\n' "${bad_event_group[@]}" >&2
+    echo >&2
+    echo "A comment then shares a group with that PR's push and can evict it. The" >&2
+    echo "comment's run reports on the base branch, so the required context never" >&2
+    echo "attaches to the PR head and the PR is BLOCKED with nothing red. cleat#1426." >&2
+    echo >&2
+    echo "Add github.event_name, or key on github.event.pull_request.head.sha." >&2
+    fail=1
+fi
+
 if [ ${#ambiguous[@]} -gt 0 ]; then
     echo "ERROR: these workflows have zero or several 'group:' lines, so this guard" >&2
     echo "cannot tell which concurrency expression governs the run:" >&2

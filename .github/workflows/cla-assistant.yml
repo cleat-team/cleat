@@ -84,8 +84,39 @@ on:
 #
 # branch-naming.yml is the control -- same `merge_group` trigger, keyed on
 # `github.ref`, and it succeeded on every queue branch the same day.
+# KEY ON WHAT THE RUN REPORTS A STATUS FOR. That is the rule this expression
+# encodes, and each operand is the answer for one of the three triggers.
+#
+#   pull_request_target  reports on the PR HEAD SHA   -> head.sha
+#   issue_comment        reports on develop           -> issue.number
+#   merge_group          reports on the queue ref     -> github.ref
+#
+# Two distinct evictions came from getting this wrong, both measured 2026-09-13,
+# both with jobs=0 on the victim -- evicted from the concurrency queue before a
+# runner picked it up, which is not a run that failed and not one killed
+# mid-flight.
+#
+#   merge_group: pull_request.number and issue.number are BOTH null there, so
+#   every queue entry shared the constant group "CLA Assistant-". Each arriving
+#   entry evicted an earlier one's pending run; the queue HEAD loses, having
+#   waited longest. Ten PRs stalled ~40 minutes behind a head sitting at
+#   AWAITING_CHECKS with its other nine checks green.
+#
+#   pull_request_target vs issue_comment: keyed on the PR NUMBER, a comment on a
+#   PR lands in the same group as that PR's push. Commenting 17 seconds after
+#   pushing evicted the push's run -- and the comment's run reports against
+#   develop, not the PR head, so the required context never attached to the
+#   commit. The PR reads BLOCKED with 0 failing and 0 pending checks, one short
+#   of the total, which looks like nothing at all is wrong.
+#
+# head.sha rather than the PR number for pushes because each push needs its own
+# status: keyed on the number, three pushes in quick succession evict the
+# middle one and the newest commit is the one left without a check.
+#
+# github.event_name is first so the three triggers can never share a group even
+# if two operands ever coincide. cleat#1426.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.event.issue.number || github.ref }}
   cancel-in-progress: false
 
 permissions:
