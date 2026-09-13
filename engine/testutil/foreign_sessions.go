@@ -46,14 +46,39 @@ import (
 // reports "nobody" for that, which is a false all-clear.
 //
 // Two samples do not close the gap -- a process that arrives and leaves between
-// them is still invisible -- but they cover the common shape, a peer's suite
-// running throughout, at a cost of one query per dialect per process. Anything
-// that closed the gap properly would mean watching continuously, which is a
-// price a permanently-enabled probe should not pay.
+// them is still invisible -- at a cost of one query per dialect per process.
+//
+// THE PARAGRAPH ABOVE USED TO CLAIM they "cover the common shape, a peer's
+// suite running throughout." That was wrong, and it was wrong in the direction
+// that makes the probe useless. A peer reproduced cleat#982's signature with a
+// known cause -- two short `go test -run` invocations against one database --
+// and THIS PROBE FIRED ELEVEN TIMES AND REPORTED "none", at both sample points.
+//
+// It could not have said anything else. The two sample instants are exactly the
+// ones a short-lived interloper falls between: at the first it has not started,
+// because a human starts it later reacting to something; by the second it has
+// exited. So the sampler is most confident precisely for the SHORTEST-lived
+// offenders -- and short-lived is the likely kind, because nobody starts a
+// second full suite by accident, but a fifteen-second sanity check does not feel
+// like "running the suite."
+//
+// Hence the gate below. The fix is asymmetry: the incumbent cannot see a process
+// that has not started, but a NEWCOMER can always see the incumbent, because a
+// suite holds its connections for its whole run. The sampling call already runs
+// at the newcomer's first TestDB, so the observation was being taken at the
+// right moment and merely not acted on. The two-sample report stays as the
+// fallback for the one case the gate cannot cover -- an interloper that attaches
+// AFTER this process starts.
 var (
-	atStartOnce  sync.Map // Dialect -> *sync.Once
-	atStartCount sync.Map // Dialect -> string
+	atStartOnce    sync.Map // Dialect -> *sync.Once
+	atStartCount   sync.Map // Dialect -> string
+	atStartForeign sync.Map // Dialect -> []string
 )
+
+// AllowForeignSessionsEnv names the hazard being accepted, not the check being
+// skipped: someone reading a CI file or a shell history should see WHAT was
+// waived. A name like SKIP_CHECK records only that somebody got past it.
+const AllowForeignSessionsEnv = "CLEAT_TEST_ALLOW_FOREIGN_SESSIONS"
 
 // SampleForeignSessionsAtStart records, once per dialect per process, who else
 // was attached before this process did any work.
@@ -69,6 +94,7 @@ func SampleForeignSessionsAtStart(dialect Dialect) {
 		default:
 			atStartCount.Store(dialect, fmt.Sprintf("%d session(s): %s",
 				len(foreign), strings.Join(foreign, "; ")))
+			atStartForeign.Store(dialect, foreign)
 		}
 	})
 }
@@ -303,4 +329,79 @@ func orUnknown(s string) string {
 
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// RefuseIfForeignSessionsAtStart stops this process when another client was
+// already attached to the test database at its first TestDB call.
+//
+// THE ASYMMETRY IS THE WHOLE POINT. An incumbent suite cannot see a process that
+// has not started yet, so asking it to detect interference is asking for the one
+// observation it cannot make. A newcomer can always see an incumbent, because a
+// suite holds its connections for its entire run. Checking here converts
+// "confusing failures minutes later in the wrong process" into a refusal at the
+// moment of the mistake.
+//
+// WHY REFUSE RATHER THAN WARN. A warning printed into the scrollback of a run
+// that then passes is read by nobody; this repo already settled that argument
+// when it deleted its "Warn on skipped tests" steps, on the grounds that a
+// warning on a green job is not a signal. And the case a warning would be
+// gentler on -- "I only ran a quick sanity check while the suite was going" --
+// is precisely the case that corrupts the incumbent. There is no safe version of
+// it, so there is nothing for a warning to permit.
+//
+// The interloper almost never needs THIS database specifically; any database
+// would do. That is why redirecting it is nearly free and why refusing costs
+// less than it looks.
+//
+// The case the override exists for is the reverse: a CRASHED run's leaked pool
+// rather than a live suite. Then the newcomer is the legitimate process and this
+// refusal is in its way -- so the message names the sessions, which is what lets
+// a reader tell a live peer from a corpse.
+//
+// Takes an interface rather than *testing.T so the refusal itself can be
+// tested. A gate that cannot fire is the same class of defect as a probe that
+// cannot report, which is what this replaces -- so "it refuses when it should"
+// has to be an assertion, not an assumption.
+type foreignSessionReporter interface {
+	Helper()
+	Logf(format string, args ...any)
+	Fatalf(format string, args ...any)
+}
+
+func RefuseIfForeignSessionsAtStart(t foreignSessionReporter, dialect Dialect) {
+	t.Helper()
+
+	v, ok := atStartForeign.Load(dialect)
+	if !ok {
+		return // nobody else was attached, or the probe could not tell
+	}
+	foreign, _ := v.([]string)
+	if len(foreign) == 0 {
+		return
+	}
+	if os.Getenv(AllowForeignSessionsEnv) != "" {
+		t.Logf("cleat#982: %d foreign session(s) on the %s test database, allowed by %s:\n  %s",
+			len(foreign), dialect, AllowForeignSessionsEnv, strings.Join(foreign, "\n  "))
+		return
+	}
+
+	// Fatal rather than Skip. A skip is a green run, and a green run that
+	// silently tested nothing is the outcome this whole file exists to prevent.
+	t.Fatalf(`cleat#982: another client is already attached to the %s test database.
+
+%d foreign session(s):
+  %s
+
+This process is the NEWCOMER, so it can see the incumbent; the incumbent could
+not have seen it. Two processes sharing one test database delete each other's
+fixtures -- every registeredBackends Setup runs an unqualified DELETE FROM across
+every table -- and the damage surfaces as unreproducible failures in whichever
+test was unlucky, usually in the OTHER process.
+
+Point this run at its own database. It almost certainly does not need this one
+specifically.
+
+If the sessions above are a crashed run's leaked connections rather than a live
+suite, this refusal is in the way of the legitimate process: set %s=1 to proceed.`,
+		dialect, len(foreign), strings.Join(foreign, "\n  "), AllowForeignSessionsEnv)
 }

@@ -513,6 +513,10 @@ func TestDB(t *testing.T, dialect Dialect) *sql.DB {
 	}
 	SetupMinimalSchema(t, db, dialect)
 	SampleForeignSessionsAtStart(dialect)
+	// Order matters: refuse BEFORE arranging the at-failure report. If another
+	// client was already here, this run's failures are not evidence about this
+	// run, so there is nothing worth reporting on them (cleat#982).
+	RefuseIfForeignSessionsAtStart(t, dialect)
 	ReportForeignSessionsOnFailure(t, dialect)
 	return db
 }
