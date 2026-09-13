@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -112,6 +114,77 @@ func ForeignSessionsAtStart(dialect Dialect) string {
 // reported as foreign -- the positive control. Without one, "no foreign
 // sessions" is what a broken query returns too.
 var selfPID = os.Getpid
+
+// selfPPID reports this process's parent. A variable for the same reason
+// selfPID is: a test has to be able to claim a different lineage.
+var selfPPID = os.Getppid
+
+// isSiblingTestProcess reports whether pid belongs to another package binary of
+// the SAME `go test` invocation.
+//
+// WHY THIS IS NOT AN EXEMPTION HOLE. `go test ./plugins/...` runs each package's
+// test binary as a SEPARATE OS PROCESS, up to -p of them at once (default
+// NumCPU). Every sibling therefore looks exactly like a foreign client to the
+// gate, and whichever starts second is refused -- so `go test ./plugins/...`
+// became flaky the moment cleat#1469 landed, with 2 failures in 3 runs on a
+// clean develop. `-p 1` passes every time, which is the discriminator:
+// package parallelism, not the tests. Found by WS-3, who ran develop three
+// times rather than assume it was their branch.
+//
+// THE ASYMMETRY THAT JUSTIFIED THE NEWCOMER CHECK DOES NOT REACH HERE. "A suite
+// holds its connections for the whole run, so the newcomer can always see the
+// incumbent" is true of two people sharing a database. It is not true of one
+// invocation spanning several packages, where the incumbent is a sibling doing
+// exactly what it should.
+//
+// Siblings share a parent -- the `go` driver -- and have distinct pids;
+// measured directly rather than assumed. A second `go test` gets its own driver
+// and therefore a different parent, so the case the gate exists for still
+// fires.
+//
+// Fails CLOSED: if the pid cannot be resolved -- a client on another host, a
+// process that has already exited -- this returns false and the session counts
+// as foreign. An unresolvable pid is the one we know least about, and this gate
+// refuses rather than warns.
+func isSiblingTestProcess(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	if pid == selfPID() {
+		return true
+	}
+	//nolint:gosec // G204: fixed binary ("ps"), arguments as an array, no shell. The
+	// only variable is strconv.Itoa of an int, so no string reaches the command
+	// line and there is nothing to inject. Same shape as credentials.go's vault
+	// and aws providers, with a narrower input than either.
+	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	ppid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false
+	}
+	// Guard against a reparented orphan: init (1) is every orphan's parent, so
+	// matching on it would exempt anything whose real parent has died.
+	if ppid <= 1 {
+		return false
+	}
+	return ppid == selfPPID()
+}
+
+// pidFromTag recovers the pid from a cleat-test-<pid> application_name, or 0.
+func pidFromTag(tag string) int {
+	const prefix = "cleat-test-"
+	if !strings.HasPrefix(tag, prefix) {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(tag, prefix))
+	if err != nil {
+		return 0
+	}
+	return n
+}
 
 // testProcessTag identifies THIS process to the database server. Two `go test`
 // invocations on one machine have different OS pids, which is exactly the
@@ -236,6 +309,11 @@ func ForeignSessions(dialect Dialect) (foreign []string, basis string, ok bool) 
 			if err := rows.Scan(&app, &addr, &state, &query); err != nil {
 				continue
 			}
+			// A sibling package binary of this same `go test` is not a
+			// stranger. Its tag carries its pid; see isSiblingTestProcess.
+			if isSiblingTestProcess(pidFromTag(app)) {
+				continue
+			}
 			foreign = append(foreign, fmt.Sprintf("application_name=%q from %s [%s] %s",
 				app, orUnknown(addr), state, oneLine(query)))
 		}
@@ -261,6 +339,9 @@ func ForeignSessions(dialect Dialect) (foreign []string, basis string, ok bool) 
 			var id int64
 			var host, cmd, cpid string
 			if err := rows.Scan(&id, &host, &cmd, &cpid); err != nil {
+				continue
+			}
+			if n, err := strconv.Atoi(strings.TrimSpace(cpid)); err == nil && isSiblingTestProcess(n) {
 				continue
 			}
 			foreign = append(foreign, fmt.Sprintf("connection %d from %s, client pid %s [%s]",
@@ -307,6 +388,9 @@ func ForeignSessions(dialect Dialect) (foreign []string, basis string, ok bool) 
 			var sid, hpid int64
 			var host, prog, status string
 			if err := rows.Scan(&sid, &host, &hpid, &prog, &status); err != nil {
+				continue
+			}
+			if isSiblingTestProcess(int(hpid)) {
 				continue
 			}
 			foreign = append(foreign, fmt.Sprintf("session %d from %s, client pid %d, program %q [%s]",
