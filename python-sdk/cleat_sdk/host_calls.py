@@ -27,10 +27,19 @@ Usage::
     run_id = host.child_workflow("order_processor", {"order_id": "ord-42"})
     result = host.await_child(run_id)
 
-**MVP note:** The 29 module-level ``_import_*`` functions are stubs that raise
-:exc:`NotImplementedError`.  They are replaced by actual WASM FFI functions
-when the SDK runs inside a cleat WASM runtime.  The stubs allow the SDK to be
-imported and tested without WASM.
+**Import stubs.** The module binds 48 host functions from the WIT bindings in
+a ``try`` at the top of this file, and defines ``NotImplementedError`` stubs in
+the matching ``except ImportError:`` so the SDK can be imported and tested
+without WASM.
+
+This note said "the 29 module-level ``_import_*`` functions" until 2026-09-13
+and every part of that was wrong. There are **7** module-level ``_import_*``
+definitions, not 29, and being module-level is a defect rather than the design:
+six of the seven shadow an import that succeeded higher up the file, so those
+six host calls raise ``NotImplementedError`` even inside the WASM runtime. See
+cleat#1432. The stubs that are correct are the indented ones inside the
+``except`` block; ``_import_cleat_extend_timeout`` is the only module-level one
+that shadows nothing.
 """
 
 from __future__ import annotations
