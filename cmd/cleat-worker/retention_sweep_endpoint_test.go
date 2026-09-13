@@ -137,7 +137,27 @@ func TestTheSweepDeletesOnlyWithTheOverride(t *testing.T) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	s := &apiServer{worker: w}
 
-	newCompletedRun := func(t *testing.T) string {
+	// newCompletedRun seeds a terminal run whose completed_at is the instant
+	// given, bound as a PARAMETER from Go's clock.
+	//
+	// It read `completed_at = now()` until cleat#1244, and that is the
+	// DATABASE's clock. The sweep's cutoff is computed host-side --
+	// runRetentionSweepWindow does `sweptAt := time.Now()` and binds
+	// sweptAt.Add(-window) as $1 -- so the assertion below compared two clocks
+	// with a 1ns margin, and failed whenever the container's was ahead of the
+	// host's at that moment. It failed on a developer machine and passed in CI
+	// on the same SHA, then flipped both ways on one machine within an hour.
+	//
+	// The mechanism, reproduced deterministically 2026-09-13 by seeding
+	// `now() + interval '5 seconds'` on the unfixed test -- the reported
+	// failure message, exactly, and only on the override arm:
+	//
+	//	--- FAIL: TestTheSweepDeletesOnlyWithTheOverride/override_reaches_it
+	//	    the run survived a sweep with older_than=1ns.
+	//
+	// One clock removes the class. Widening 1ns to a second would have made it
+	// rarer and left it a two-clock comparison.
+	newCompletedRun := func(t *testing.T, completedAt time.Time) string {
 		t.Helper()
 		const def = "retention-sweep-endpoint"
 		if err := store.DeployWorkflowDef(ctx, &engine.WorkflowDef{
@@ -151,11 +171,12 @@ func TestTheSweepDeletesOnlyWithTheOverride(t *testing.T) {
 			engine.DefaultTenantUUID, 0); err != nil {
 			t.Fatalf("StartNewRun: %v", err)
 		}
-		// Terminal and completed now. Set through the same columns
-		// DeleteCompletedWorkflows selects on, against the schema the migrations
-		// built -- not a table invented for this test.
+		// Terminal, completed at the instant asked for. Set through the same
+		// columns DeleteCompletedWorkflows selects on, against the schema the
+		// migrations built -- not a table invented for this test.
 		if _, err := db.ExecContext(ctx,
-			`UPDATE workflow_instances SET status = 'done', completed_at = now() WHERE id = $1`, id); err != nil {
+			`UPDATE workflow_instances SET status = 'done', completed_at = $2 WHERE id = $1`,
+			id, completedAt); err != nil {
 			t.Fatalf("mark completed: %v", err)
 		}
 		return id
@@ -170,8 +191,11 @@ func TestTheSweepDeletesOnlyWithTheOverride(t *testing.T) {
 		return n > 0
 	}
 
+	// Still `time.Now()`: this arm is the one whose claim NEEDS a run that
+	// completed moments ago, and it was never the fragile one -- its margin is
+	// the configured 30 days, not a nanosecond.
 	t.Run("no override cannot reach a fresh run", func(t *testing.T) {
-		id := newCompletedRun(t)
+		id := newCompletedRun(t, time.Now())
 		if got := sweepReq(t, s, "").Code; got != 200 {
 			t.Fatalf("sweep answered %d, want 200", got)
 		}
@@ -183,8 +207,26 @@ func TestTheSweepDeletesOnlyWithTheOverride(t *testing.T) {
 		}
 	})
 
+	// An hour, not a nanosecond, and the arm proves the override is what moved
+	// it rather than borrowing that from the sub-test above.
+	//
+	// This arm needs a row the 30-day configuration spares and the override
+	// reaches, which is any instant between now-30d and now-1ns. An hour is
+	// comfortably inside both bounds, so no reading of either clock can put it
+	// on the wrong side. Making the row older is the only thing here that could
+	// be said to weaken the arm -- it is no longer "completed moments ago" --
+	// and the no-override request answers that directly: the same row survives
+	// the configured sweep and does not survive the override.
 	t.Run("override reaches it", func(t *testing.T) {
-		id := newCompletedRun(t)
+		id := newCompletedRun(t, time.Now().Add(-time.Hour))
+		if got := sweepReq(t, s, "").Code; got != 200 {
+			t.Fatalf("configured sweep answered %d, want 200", got)
+		}
+		if !exists(t, id) {
+			t.Fatalf("the CONFIGURED sweep deleted a run completed an hour ago, " +
+				"with a 30-day window. This arm is then vacuous: it cannot show " +
+				"the override reached anything the configuration would not.")
+		}
 		if got := sweepReq(t, s, `{"older_than":"1ns"}`).Code; got != 200 {
 			t.Fatalf("sweep answered %d, want 200", got)
 		}
