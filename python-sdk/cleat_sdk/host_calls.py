@@ -3637,30 +3637,66 @@ def _import_cleat_extend_timeout(additional_ms: int) -> int:
 # -- durable-scope.set-scope ---------------------------------------------------
 
 
-def _import_set_scope(obj_type: str, inst_key: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_set_scope")``."""
-    raise NotImplementedError("set_scope can only be called within a cleat WASM runtime.")
+# THE SIX BLOCKS BELOW ARE GUARDED, AND WERE NOT UNTIL cleat#1432.
+#
+# They sat at module level, so they ran unconditionally and REBOUND names the
+# try block at the top of this file had already bound to the real WIT imports.
+# Python binds in file order and these defs are ~3,400 lines below the import,
+# so the stub won: six host calls raised NotImplementedError inside the WASM
+# runtime, where they are supposed to work.
+#
+# Measured under Python 3.12 with the bindings present, before the fix:
+#
+#     _import_cleat_call                 -> the real WIT function   <- control
+#     _import_set_scope                  -> NotImplementedError
+#     _import_get_scope                  -> NotImplementedError
+#     _import_uuid                       -> NotImplementedError
+#     _import_side_effect                -> NotImplementedError
+#     _import_fetch                      -> NotImplementedError
+#     _import_continue_as_new_versioned  -> NotImplementedError
+#
+# The control is what makes the six mean anything: _import_cleat_call reaches
+# the real function through the same mechanism, so these are not "the bindings
+# were absent".
+#
+# `if not _USING_WASM:` is what the other 39 stubs in this file already do;
+# these six were the exception. DELETING them instead would leave the names
+# unbound when the import fails, turning a clear NotImplementedError into a
+# NameError on the very path the fallback exists for.
+#
+# _import_cleat_extend_timeout stays unguarded at module level, deliberately:
+# it is never imported, so it shadows nothing and is a genuine stub.
+
+if not _USING_WASM:
+
+    def _import_set_scope(obj_type: str, inst_key: str) -> str:
+        """Stub for WASM import ``(import "env" "cleat_set_scope")``."""
+        raise NotImplementedError("set_scope can only be called within a cleat WASM runtime.")
 
 
 # -- durable-scope.get-scope ---------------------------------------------------
 
 
-def _import_get_scope(
-    obj_type_ptr: int,
-    obj_type_max_len: int,
-    inst_key_ptr: int,
-    inst_key_max_len: int,
-) -> int:
-    """Stub for WASM import ``(import "env" "cleat_get_scope")``."""
-    raise NotImplementedError("get_scope can only be called within a cleat WASM runtime.")
+if not _USING_WASM:
+
+    def _import_get_scope(
+        obj_type_ptr: int,
+        obj_type_max_len: int,
+        inst_key_ptr: int,
+        inst_key_max_len: int,
+    ) -> int:
+        """Stub for WASM import ``(import "env" "cleat_get_scope")``."""
+        raise NotImplementedError("get_scope can only be called within a cleat WASM runtime.")
 
 
 # -- durable-scope.uuid --------------------------------------------------------
 
 
-def _import_uuid(seed: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_uuid")``."""
-    raise NotImplementedError("uuid can only be called within a cleat WASM runtime.")
+if not _USING_WASM:
+
+    def _import_uuid(seed: str) -> str:
+        """Stub for WASM import ``(import "env" "cleat_uuid")``."""
+        raise NotImplementedError("uuid can only be called within a cleat WASM runtime.")
 
 
 # -- durable-stream-state.set-state --------------------------------------------
@@ -3684,26 +3720,32 @@ def _import_uuid(seed: str) -> str:
 # -- durable-extended-lifecycle.continue-as-new-versioned ----------------------
 
 
-def _import_continue_as_new_versioned(input: str, new_version: int) -> int:
-    """Stub for WASM import ``(import "env" "cleat_continue_as_new_versioned")``."""
-    raise NotImplementedError(
-        "continue_as_new_versioned can only be called within a cleat WASM runtime."
-    )
+if not _USING_WASM:
+
+    def _import_continue_as_new_versioned(input: str, new_version: int) -> int:
+        """Stub for WASM import ``(import "env" "cleat_continue_as_new_versioned")``."""
+        raise NotImplementedError(
+            "continue_as_new_versioned can only be called within a cleat WASM runtime."
+        )
 
 
 # -- durable-extended-lifecycle.side-effect ------------------------------------
 
 
-def _import_side_effect(result: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_side_effect")``."""
-    raise NotImplementedError(
-        "side_effect can only be called within a cleat WASM runtime."
-    )
+if not _USING_WASM:
+
+    def _import_side_effect(result: str) -> str:
+        """Stub for WASM import ``(import "env" "cleat_side_effect")``."""
+        raise NotImplementedError(
+            "side_effect can only be called within a cleat WASM runtime."
+        )
 
 
 # -- durable-fetch.fetch -------------------------------------------------------
 
 
-def _import_fetch(method: str, url: str, headers: str, body: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_fetch")``."""
-    raise NotImplementedError("fetch can only be called within a cleat WASM runtime.")
+if not _USING_WASM:
+
+    def _import_fetch(method: str, url: str, headers: str, body: str) -> str:
+        """Stub for WASM import ``(import "env" "cleat_fetch")``."""
+        raise NotImplementedError("fetch can only be called within a cleat WASM runtime.")

@@ -77,6 +77,37 @@ def wit_funcs(src: str) -> set[str]:
     return set(re.findall(r"^\s*([a-z0-9-]+)\s*:\s*func", clean, re.M))
 
 
+def shadowed_imports(src: str) -> list[str]:
+    """Names bound from the WIT bindings and then re-bound at MODULE level.
+
+    cleat#1432. Six stubs sat unguarded at module level, so they ran whatever
+    the import did and rebound the name ~3,400 lines below it. Python binds in
+    file order, so the stub won and six host calls raised NotImplementedError
+    inside the WASM runtime.
+
+    MODULE LEVEL is the whole predicate. The file has 39 stubs under
+    `if not _USING_WASM:` and those are correct -- they bind only when the
+    import failed. `tree.body` sees the unguarded ones and not the guarded
+    ones, which is exactly the distinction, and is why this walks the top level
+    rather than ast.walk.
+    """
+    tree = ast.parse(src)
+    aliased = {
+        a.asname
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ImportFrom)
+        for a in n.names
+        if a.asname and a.asname.startswith("_import_")
+    }
+    top_level = {
+        n.name
+        for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name.startswith("_import_")
+    }
+    return sorted(aliased & top_level)
+
+
 def stated(src: str, pattern: str) -> list[int]:
     """Every number a document states for a claim matching `pattern`."""
     return [int(m) for m in re.findall(pattern, src)]
@@ -105,6 +136,45 @@ def self_test() -> int:
             "stub -- the parse is inert"
         )
 
+    # KNOWN-POSITIVE for cleat#1432: an import re-bound at module level.
+    shadow_src = (
+        "try:\n"
+        "    from wit_world.imports.a import set_scope as _import_set_scope\n"
+        "except ImportError:\n"
+        "    pass\n"
+        "def _import_set_scope(a, b):\n"
+        "    raise NotImplementedError\n"
+    )
+    if shadowed_imports(shadow_src) != ["_import_set_scope"]:
+        failures.append(
+            "shadowed_imports missed a module-level def rebinding an import: "
+            f"{shadowed_imports(shadow_src)}"
+        )
+
+    # KNOWN-NEGATIVE, and the one that makes the check usable: the SAME stub
+    # under `if not _USING_WASM:` is the correct pattern, used 39 times in the
+    # real file. A guard that flagged those would be deleted the day it landed.
+    guarded_src = (
+        "try:\n"
+        "    from wit_world.imports.a import set_scope as _import_set_scope\n"
+        "except ImportError:\n"
+        "    pass\n"
+        "if not _USING_WASM:\n"
+        "    def _import_set_scope(a, b):\n"
+        "        raise NotImplementedError\n"
+    )
+    if shadowed_imports(guarded_src):
+        failures.append(
+            "shadowed_imports flagged a correctly guarded stub: "
+            f"{shadowed_imports(guarded_src)}"
+        )
+
+    # KNOWN-NEGATIVE: a module-level stub for a name that is NOT imported
+    # shadows nothing -- _import_cleat_extend_timeout is exactly this.
+    unimported_src = "def _import_cleat_extend_timeout(ms):\n    raise NotImplementedError\n"
+    if shadowed_imports(unimported_src):
+        failures.append("shadowed_imports flagged a stub that shadows no import")
+
     # KNOWN-POSITIVE for the WIT side: a commented-out func is not declared.
     wsrc = "interface x {\n  real-func: func() -> string;\n  // ghost-func: func();\n}\n"
     wgot = wit_funcs(wsrc)
@@ -121,7 +191,7 @@ def self_test() -> int:
         for f in failures:
             print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
         return 1
-    print("self-test passed: 5 cases (two known-positive, one denial, two vacuity)")
+    print("self-test passed: 8 cases (three known-positive, three known-negative, two vacuity)")
     return 0
 
 
@@ -147,6 +217,23 @@ def main() -> int:
         return 2
 
     fail = 0
+
+    # cleat#1432, checked before the documented numbers because a shadowed
+    # import is a live defect while a stale number is a wrong sentence.
+    shadowed = shadowed_imports(HOST_CALLS.read_text())
+    if shadowed:
+        print("ERROR: these names are imported from the WIT bindings and then re-bound "
+              "by a MODULE-LEVEL stub, which wins because Python binds in file order. "
+              "They will raise NotImplementedError inside the WASM runtime:",
+              file=sys.stderr)
+        for n in shadowed:
+            print(f"    {n}", file=sys.stderr)
+        print("\nPut the stub under `if not _USING_WASM:`, as the other 39 in that file "
+              "are. Do not delete it -- the name would be unbound when the import fails, "
+              "turning NotImplementedError into NameError on the path the fallback exists "
+              "for. cleat#1432.", file=sys.stderr)
+        fail = 1
+
     readme = (ROOT / "python-sdk" / "README.md").read_text()
     witmd = (ROOT / "python-sdk" / "wit" / "README.md").read_text()
 
