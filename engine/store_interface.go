@@ -279,6 +279,13 @@ type WorkflowStore interface {
 	// and swept again -> reclaim_count still 1. Timeout 0 both times, so
 	// nothing is excluded by age and the status arm is the only thing deciding.
 	//
+	// THERE IS NO TEST HOLDING THIS RIGHT NOW, and that is the honest state.
+	// #1436 landed one and it was reverted the same day: it passed alone on all
+	// three dialects and failed inside the full engine suite on SQL Server,
+	// turning develop red. cleat#1447 has what is established and what is ruled
+	// out. Treat this comment as a description, not a guarantee, until a test
+	// is back.
+	//
 	// reclaim_count rather than status is the discriminator, and status cannot
 	// serve: reclaiming sets status back to 'ready', which is exactly where
 	// parking already put the row, so it reads 'ready' either way. Under a
