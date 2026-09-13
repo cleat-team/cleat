@@ -194,11 +194,38 @@ func ForeignSessions(dialect Dialect) (foreign []string, basis string, ok bool) 
 					"database and this cannot say whose they are",
 				ourApp, tag, total), false
 		}
+		// backend_type = 'client backend' is load-bearing, not tidiness.
+		// PostgreSQL's own background workers are rows in pg_stat_activity like
+		// anything else, and an autovacuum WORKER running inside a database
+		// carries that database's datname, an empty application_name and a NULL
+		// client_addr -- so it satisfied every predicate here and was reported
+		// as a stranger. The launcher does not, because its datname is NULL,
+		// which is why this survived the tests: the false positive exists only
+		// while a worker is actually running.
+		//
+		// That made the gate nondeterministic across every PR, and worst on the
+		// suites that create the most schemas -- ANALYZE on pg_catalog.pg_attribute
+		// is precisely what a schema-creating test suite provokes. So the failure
+		// rate correlated with the suites using this probe most, which reads as
+		// "those suites are flaky" rather than "the guard is wrong". Found by
+		// WS-2 when it failed an unrelated PR that touches neither testutil nor
+		// the plugin it failed in.
+		//
+		// The predicate keeps every real competitor -- another go test, a psql,
+		// a human -- and drops autovacuum, the checkpointer, the walwriter, the
+		// background writer and the logical replication launcher, none of which
+		// can delete a fixture. Parallel workers go too, correctly: they belong
+		// to some client's query rather than being a client.
+		//
+		// PostgreSQL 10+. On anything older the column does not exist, the query
+		// errors, and ForeignSessions returns ok=false -- "could not tell" rather
+		// than a refusal, which is the safe direction.
 		rows, err := db.Query(
 			`SELECT coalesce(application_name,''), coalesce(host(client_addr),''), coalesce(state,''), coalesce(left(query, 120),'')
 			   FROM pg_stat_activity
 			  WHERE datname = current_database()
 			    AND pid <> pg_backend_pid()
+			    AND backend_type = 'client backend'
 			    AND coalesce(application_name,'') <> $1`, tag)
 		if err != nil {
 			return nil, fmt.Sprintf("could not list pg_stat_activity (%v)", err), false
