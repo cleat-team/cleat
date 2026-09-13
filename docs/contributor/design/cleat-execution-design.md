@@ -1213,12 +1213,23 @@ ALTER TABLE workflow_instances ADD COLUMN query_state JSONB DEFAULT '{}'::jsonb;
 **Host API:**
 
 ```
-GET /api/v1/workflows/{workflow_id}/query
-Response: {"status": "awaiting_approval", "reservation_id": "resv_abc123", ...}
-
-GET /api/v1/workflows/{workflow_id}/query?key=status
-Response: "awaiting_approval"
+GET /api/workflows/{workflow_id}/query?key=status
+Response: {"key": "status", "value": "awaiting_approval"}
 ```
+
+**The key is required, and there is no keyless form.** This block used to show a
+keyless `GET .../query` returning the whole map. No such endpoint exists, and the
+question of whether one should was answered NO in cleat#1119, at the owner's
+direction — published state is a contract with callers that know what to ask
+for, not a bag whose shape is discovered at runtime. `docs/how-to/common-patterns.md`,
+"Reading a key you do not know", carries the reasoning and points at
+`cleatctl debug` for the operator case.
+
+Omitting `key` is a **400** as of cleat#1224. It previously answered
+`200 {"key":"","value":""}`, which is what made this documented call look real.
+
+The prefix was also wrong: the server trims `/api/workflows/`, and no `/api/v1`
+route exists anywhere (`cmd/cleat-worker/server.go:513`).
 
 The optional `key` parameter returns the value for a single key. If the key is absent from the snapshot, the endpoint returns `404`.
 

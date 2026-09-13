@@ -1654,6 +1654,38 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 	if !s.runExists(w, r, st, id) {
 		return
 	}
+	// An ABSENT key is a malformed request, not a lookup of "".
+	//
+	// The comment above already notes that an empty value carries three
+	// meanings in one response. Omitting ?key= folded in a fourth, and it is
+	// the one the documented design forbids: docs/how-to/common-patterns.md,
+	// "Reading a key you do not know", says every reader takes the key as a
+	// REQUIRED argument, decided in cleat#1119 at the owner's direction. A
+	// required argument that is silently accepted as empty is not required.
+	//
+	// Has, not Get: they are different questions and Get cannot tell them
+	// apart.
+	//
+	//	?key=counter   lookup of "counter"
+	//	?key=          lookup of ""        <- legitimate, see below
+	//	(absent)       400                 <- this change
+	//
+	// ?key= stays a lookup because "" is a storable key. Nothing validates the
+	// key on the write path -- HostCallsImpl.SetQueryState passes it straight
+	// to the import (cleat/runtime_workflow.go:110), and set_query_state
+	// forwards it unchecked (engine/imports.go:372) -- and the column can hold
+	// it: measured 2026-09-13 on PostgreSQL 16,
+	//
+	//	'{"":"v","a":"b"}'::jsonb ->> ''   -> 'v'
+	//
+	// so a workflow that published under "" is readable only by asking for it.
+	// Rejecting ?key= would make that key unreachable, which is a different
+	// and larger change than making a required argument required.
+	if !r.URL.Query().Has("key") {
+		s.writeError(w, 400, "the key query parameter is required; "+
+			"this endpoint reads one published key and cannot list them (cleat#1119)")
+		return
+	}
 	key := r.URL.Query().Get("key")
 	value, err := st.GetQueryState(r.Context(), id, key)
 	if err != nil {
