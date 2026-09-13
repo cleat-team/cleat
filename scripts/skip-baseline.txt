@@ -117,6 +117,7 @@ engine/testutil	TestDB	4
 internal/transform	TestUpdateCallSitesSkipsWhenHAlreadyFirstArg	1
 migration	TestAnExtensionIsPerDatabaseNotPerSchema	1
 migration	TestIdempotencyTenantMigrationPreservesExistingKeys	1
+migration	TestTheSharedSchemaSurfaceIsADeclaredList	1
 migration	mssqlCredentials	2
 migration	mssqlDSNAs	1
 migration	mssqlDSNAsSA	1
