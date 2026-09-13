@@ -39,11 +39,49 @@
 #       group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
 #       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 #
+# THE SAME MECHANISM APPLIES TO `merge_group`, and this guard could not see it
+# until cleat#1426. A merge queue creates one `gh-readonly-queue/...` ref per
+# entry, so several entries are in flight at once -- exactly the condition (2)
+# describes, with queue entries in place of pushes. cla-assistant.yml keyed its
+# group on `github.event.pull_request.number || github.event.issue.number`, and
+# BOTH are null on `merge_group`, so every entry collapsed into one group named
+# "CLA Assistant-" and each new entry evicted an earlier one's pending run. The
+# queue HEAD loses, having waited longest; `Contributor License Agreement` is a
+# required context; so the head sat at AWAITING_CHECKS with its nine other
+# checks green and everything behind it read UNMERGEABLE. Ten PRs, ~40 minutes,
+# 2026-09-13, jobs=0 on the evicted run.
+#
+# NOTE THE CRITERION INVERTS BETWEEN THE TWO TRIGGERS, which is why this needs a
+# second loop rather than a wider pattern. On push, `github.ref` is
+# refs/heads/develop for every merge and therefore does NOT distinguish runs. On
+# merge_group it is the per-entry queue ref and therefore DOES. A single rule
+# covering both would have to reject `github.ref` for one and require it for the
+# other.
+#
 # Re-derive what this reads:
 #   grep -l 'push:' .github/workflows/*.yml
+#   grep -l 'merge_group:' .github/workflows/*.yml
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# Extract THE group expression, or say we cannot. cleat#1426 review (WS-3):
+# `grep '^\s*group:' | head -1` silently assumes one top-level concurrency
+# block per file. Add a job-level block and head -1 analyses whichever came
+# first, so the guard checks the wrong expression and passes -- a PARTIAL skip,
+# which neither vacuity control below can see because they only fire at zero.
+#
+# Measured 2026-09-13: 9 merge_group workflows, all with a single top-level
+# block, 0 job-level blocks anywhere. So this is unreached today and is here to
+# stay unreached: it turns a future silent misread into a loud refusal.
+# NOTE THE SHAPE: the count happens in the LOOP's shell, not in a helper called
+# through $(...). The first version of this was a group_expr() function that
+# appended to `ambiguous` and was invoked as `group=$(group_expr "$f")` -- a
+# command substitution runs in a SUBSHELL, so every append was discarded and the
+# guard passed a deliberately ambiguous tree. Caught by the known-positive
+# below, which is the whole argument for having one: the refusal was written,
+# reviewed, and inert.
+ambiguous=()
 
 bad_cancel=()
 bad_group=()
@@ -66,10 +104,48 @@ for f in .github/workflows/*.yml; do
 
     # The group must vary per commit on a push. github.sha and github.run_id
     # both do; github.ref alone does not.
-    group=$(grep -E '^\s*group:' "$f" | head -1)
+    n_group=$(grep -cE '^[[:space:]]*group:' "$f")
+    if [ "$n_group" -ne 1 ]; then
+        ambiguous+=("$f ($n_group group: lines)")
+        continue
+    fi
+    group=$(grep -E '^[[:space:]]*group:' "$f")
     case "$group" in
         *github.sha*|*github.run_id*) ;;
         *) bad_group+=("$f") ;;
+    esac
+done
+
+bad_queue_group=()
+mg_scanned=0
+mg_with_concurrency=0
+
+for f in .github/workflows/*.yml; do
+    grep -qE '^\s*merge_group:' "$f" || continue
+    mg_scanned=$((mg_scanned + 1))
+
+    grep -qE '^concurrency:' "$f" || continue
+    mg_with_concurrency=$((mg_with_concurrency + 1))
+
+    # The group must contain something that differs between queue entries.
+    # github.ref is the per-entry gh-readonly-queue ref, so it qualifies here
+    # even though it does not on push. A group built only from
+    # github.event.pull_request.* or github.event.issue.* is the cleat#1426
+    # defect: both are null on merge_group, so the expression is a constant.
+    n_group=$(grep -cE '^[[:space:]]*group:' "$f")
+    if [ "$n_group" -ne 1 ]; then
+        ambiguous+=("$f ($n_group group: lines)")
+        continue
+    fi
+    group=$(grep -E '^[[:space:]]*group:' "$f")
+    # github.ref is the per-entry gh-readonly-queue ref here, so it qualifies on
+    # merge_group even though it does not on push. github.run_id also passes,
+    # but note WHY: it is unique per run, so it satisfies this by making the
+    # concurrency block inert. That is safe, not good -- this is a list of keys
+    # that cannot collapse, not a list of recommendations.
+    case "$group" in
+        *github.ref*|*github.sha*|*github.run_id*|*merge_group.head_sha*) ;;
+        *) bad_queue_group+=("$f") ;;
     esac
 done
 
@@ -86,6 +162,18 @@ fi
 if [ "$with_concurrency" -eq 0 ]; then
     echo "ERROR: no push-triggered workflow declares a concurrency block." >&2
     echo "The group check below matched nothing and would pass whatever they said." >&2
+    exit 1
+fi
+
+if [ "$mg_scanned" -eq 0 ]; then
+    echo "ERROR: no merge_group-triggered workflows found in .github/workflows/." >&2
+    echo "Every required context has to report in queue context, so zero here means" >&2
+    echo "this guard is reading the wrong files rather than the tree being clean." >&2
+    exit 1
+fi
+if [ "$mg_with_concurrency" -eq 0 ]; then
+    echo "ERROR: no merge_group-triggered workflow declares a concurrency block." >&2
+    echo "The queue-group check matched nothing and would pass whatever they said." >&2
     exit 1
 fi
 
@@ -107,6 +195,82 @@ if [ ${#bad_group[@]} -gt 0 ]; then
     fail=1
 fi
 
+# --- 3. a comment must not evict a push's check --------------------------
+# Second eviction from the same file, measured 2026-09-13. A workflow triggered
+# by BOTH issue_comment and pull_request(_target), keyed on the PR number, puts
+# a comment on a PR into the same concurrency group as that PR's push. The
+# comment's run reports against develop; the push's run reports against the PR
+# head. Evict the second and the required context never attaches to the commit,
+# so the PR reads BLOCKED with zero failing and zero pending checks -- one short
+# of the total, which looks like nothing is wrong at all.
+#
+# Only cla-assistant.yml has both triggers today. The check is here because the
+# combination is what makes it possible, not because the file is special.
+bad_event_group=()
+ce_scanned=0
+
+for f in .github/workflows/*.yml; do
+    grep -qE '^[[:space:]]*issue_comment:' "$f" || continue
+    grep -qE '^[[:space:]]*pull_request(_target)?:' "$f" || continue
+    ce_scanned=$((ce_scanned + 1))
+
+    grep -qE '^concurrency:' "$f" || continue
+    n_group=$(grep -cE '^[[:space:]]*group:' "$f")
+    [ "$n_group" -eq 1 ] || continue        # already reported as ambiguous
+
+    # The group must separate the two triggers. github.event_name does it
+    # directly; head.sha does it as a side effect, being null on issue_comment.
+    group=$(grep -E '^[[:space:]]*group:' "$f")
+    case "$group" in
+        *github.event_name*|*pull_request.head.sha*) ;;
+        *) bad_event_group+=("$f") ;;
+    esac
+done
+
+if [ "$ce_scanned" -eq 0 ]; then
+    echo "ERROR: no workflow triggers on both issue_comment and pull_request(_target)." >&2
+    echo "cla-assistant.yml did when this check was written; if that changed on purpose," >&2
+    echo "delete this check rather than leaving it matching nothing." >&2
+    exit 1
+fi
+
+if [ ${#bad_event_group[@]} -gt 0 ]; then
+    echo "ERROR: these workflows run on both issue_comment and pull_request(_target)" >&2
+    echo "but do not separate the two in their concurrency group:" >&2
+    printf '    %s\n' "${bad_event_group[@]}" >&2
+    echo >&2
+    echo "A comment then shares a group with that PR's push and can evict it. The" >&2
+    echo "comment's run reports on the base branch, so the required context never" >&2
+    echo "attaches to the PR head and the PR is BLOCKED with nothing red. cleat#1426." >&2
+    echo >&2
+    echo "Add github.event_name, or key on github.event.pull_request.head.sha." >&2
+    fail=1
+fi
+
+if [ ${#ambiguous[@]} -gt 0 ]; then
+    echo "ERROR: these workflows have zero or several 'group:' lines, so this guard" >&2
+    echo "cannot tell which concurrency expression governs the run:" >&2
+    printf '    %s\n' "${ambiguous[@]}" >&2
+    echo >&2
+    echo "Refusing rather than analysing the first one, which would check the wrong" >&2
+    echo "expression and pass. Teach this script about job-level concurrency blocks." >&2
+    fail=1
+fi
+
+if [ ${#bad_queue_group[@]} -gt 0 ]; then
+    echo "ERROR: these workflows run on merge_group and put every queue entry in one group:" >&2
+    printf '    %s\n' "${bad_queue_group[@]}" >&2
+    echo >&2
+    echo "github.event.pull_request.* and github.event.issue.* are BOTH null on a" >&2
+    echo "merge_group event, so a group built only from those is a constant. Queue" >&2
+    echo "entries then evict each other's pending runs and the queue HEAD -- which" >&2
+    echo "has waited longest -- can never satisfy a required context. cleat#1426." >&2
+    echo >&2
+    echo "Add a per-entry term; github.ref is the gh-readonly-queue ref and works:" >&2
+    echo "    group: \${{ github.workflow }}-\${{ github.event.pull_request.number || github.event.issue.number || github.ref }}" >&2
+    fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
     cat >&2 <<'MSG'
 
@@ -121,3 +285,4 @@ fi
 
 echo "OK: $scanned push-triggered workflows ($with_concurrency with a concurrency group);"
 echo "    none cancels a running run, none shares a group across pushes."
+echo "    $mg_scanned merge_group-triggered ($mg_with_concurrency with a group); none shares a group across queue entries."
