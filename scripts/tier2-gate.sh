@@ -174,7 +174,21 @@ PY
 # discarding the one line a reader needed.
 if [ "${1:-}" = "--self-test" ]; then
   command -v python3 >/dev/null || { echo "tier2-gate: python3 required" >&2; exit 2; }
-  TD="$(mktemp -d -t tier2selftest)"
+  # Same portability rule as the JUDGE temp file below -- and note this line had
+  # the same bug, so the self-test could not have caught it: it shared the defect.
+  TD="$(mktemp -d "${TMPDIR:-/tmp}/tier2selftest.XXXXXX")"
+  # Guarded, and the guard is not paranoia -- it is the one case measured.
+  #
+  # With the old `mktemp -d -t tier2selftest`, GNU mktemp fails, TD is EMPTY,
+  # and "$TD/judge.py" resolves to "/judge.py" -- which a root container can
+  # write. So the self-test wrote the judge to the filesystem root, ran it, and
+  # reported "5 cases pass, rc=0" ON THE BROKEN TREE, with mktemp's complaint
+  # on stderr where nothing reads it. A self-test that shares the defect it is
+  # meant to catch cannot catch it; this makes the empty path loud instead.
+  if [ -z "$TD" ] || [ ! -d "$TD" ]; then
+    echo "tier2-gate: SELF-TEST: could not create a temp dir -- not a pass" >&2
+    exit 2
+  fi
   trap 'rm -rf "$TD"' EXIT
   J="$TD/judge.py"; write_judge "$J"
 
@@ -386,9 +400,28 @@ done
 
 # --- 4. Judge --------------------------------------------------------------------------
 
-JUDGE="$(mktemp -t tier2judge)"
+# `mktemp "$dir/name.XXXXXX"`, NOT `mktemp -t name`. BSD mktemp appends the
+# random suffix for you; GNU mktemp refuses -- "too few X's in template" -- and
+# this script runs `set -uo pipefail` WITHOUT -e, so the failure does not abort.
+# JUDGE is then empty, `python3 ""` writes an error into the verdict, and the
+# gate reports "could not parse the run" with a stderr dump of the go output
+# that has nothing to do with the cause. Measured 2026-09-13:
+#
+#   macOS (BSD)   mktemp -t tier2judge   ->  /var/folders/.../tier2judge.Y9rQGHBKHu
+#   ubuntu:24.04  mktemp -t tier2judge   ->  too few X's in template, exit 1
+#
+# Local self-test green, CI red, on the same script.
+JUDGE="$(mktemp "${TMPDIR:-/tmp}/tier2judge.XXXXXX")"
 trap 'rm -f "$JUDGE"' EXIT
+if [ -z "$JUDGE" ] || [ ! -f "$JUDGE" ]; then
+  echo "tier2-gate: could not create a temp file for the judge" >&2
+  exit 2
+fi
 write_judge "$JUDGE"
+if [ ! -s "$JUDGE" ]; then
+  echo "tier2-gate: the judge was written empty -- refusing to run it" >&2
+  exit 2
+fi
 python3 "$JUDGE" "$JSON" "$PKGS" > "$REPO_ROOT/.tier2-verdict" 2>&1
 
 VERDICT="$REPO_ROOT/.tier2-verdict"
