@@ -24,7 +24,18 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if err := scope.Register(plugin.FuncOptions{Name: "upsert"}, p.upsert); err != nil {
 		return err
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "delete", Idempotent: true}, p.delete); err != nil {
+	// NOT Idempotent, and the flag's name is why it once was. Idempotent is
+	// read by the engine's REPLAY path: a function marked so has its recorded
+	// output DISCARDED and is called live again on every replay
+	// (engine/plugins.go). That needs "returns the same value on replay", and
+	// the flag says "safe to re-invoke" -- two different properties, and this
+	// function has neither.
+	//
+	// It runs `DELETE FROM pgvector_embeddings`. Idempotent in the HTTP sense
+	// (deleting twice leaves the same end state) and re-executed on every
+	// replay, so a replay re-deletes rows the workflow may legitimately have
+	// re-created since. cleat#1318.
+	if err := scope.Register(plugin.FuncOptions{Name: "delete"}, p.delete); err != nil {
 		return err
 	}
 	return nil
