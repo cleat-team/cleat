@@ -47,9 +47,11 @@ func downTestDB(t *testing.T, name string) *sql.DB {
 	//
 	// which reads as a fixture problem rather than a missing precondition.
 	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
-	if _, err := db.Exec(createPluginMigrationsTableSQL(DialectPostgres)); err != nil {
-		t.Fatalf("create plugin_migrations: %v", err)
-	}
+	// NO plugin_migrations CREATED HERE. Doing it on this pool handle put the
+	// table in whatever schema the pool resolves -- and RunMigrations and
+	// RunDownMigrations both create it on their own pinned session. A second
+	// copy in a different schema is what made CI fail while three local
+	// databases passed (cleat#1290).
 	return db
 }
 

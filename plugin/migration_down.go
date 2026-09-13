@@ -96,6 +96,26 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 	}
 	defer release()
 
+	// The tracking table is created ON THE SESSION, exactly as RunMigrations
+	// does it, and for a reason CI found and three local reproductions did not.
+	//
+	// A caller that creates plugin_migrations itself does so on a POOL
+	// connection, which resolves `"$user", public`. Where a schema named after
+	// the connecting role exists -- and migration 001 creates one called
+	// `cleat`, which is also CI's database and role name -- the pool writes
+	// cleat.plugin_migrations while this session reads public, and the check
+	// below fails with
+	//
+	//	pq: relation "plugin_migrations" does not exist (42P01)
+	//
+	// Creating it here means the table this function reads is the table this
+	// function made, in the schema it pinned. It also makes a never-applied
+	// plugin a genuine no-op rather than an error, which is what
+	// RunDownMigrations promises for one.
+	if err := execSQLStatements(ctx, session.ExecContext, createPluginMigrationsTableSQL(dialect)); err != nil {
+		return nil, fmt.Errorf("plugin: create migrations table: %w", err)
+	}
+
 	// HasMigrations, the same assertion RunMigrations makes. A plugin without
 	// it declares no schema, so there is nothing to reverse and that is not an
 	// error.
