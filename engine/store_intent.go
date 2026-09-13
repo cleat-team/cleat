@@ -229,6 +229,43 @@ func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, 
 	return nil
 }
 
+// WHY response IS BOUND THROUGH nullStr HERE AND IN ResolveCallIntent, on all
+// three dialects. cleat#1379 part 1.
+//
+// It used to be bound raw, so a call that completed with an EMPTY response
+// stored the empty string where every INSERT path stores NULL. That is not a
+// cosmetic difference: engine/flush.go's insertEventSQL carries
+//
+//	ON CONFLICT (workflow_id, step) DO UPDATE
+//	  SET response = EXCLUDED.response, error = EXCLUDED.error
+//	  WHERE event_history.response = '' AND event_history.error IS NULL
+//
+// whose stated purpose is to COMPLETE a row that was written without a result
+// while leaving finished rows immutable. A row written without a result has
+// response NULL, and `NULL = ”` is not true -- so the clause could never fire
+// for the rows it was written for. The only rows it COULD fire on were
+// finished call-intent rows that completed with an empty response, which are
+// exactly the rows it was meant to leave alone. The behaviour was inverted
+// relative to its own comment.
+//
+// Measured on PostgreSQL 16 before the change, completing an intent with an
+// empty response and no error and then appending the same step again with a
+// different one:
+//
+//	after Complete (empty, no err)  response=""      checksum="chk2"  payload={... no response_b64 ...}
+//	after re-append w/ response     response="eyJs…" checksum="chk2"  payload=UNCHANGED
+//	VerifyWorkflowEvents -> checksum mismatch (expected chk2, got f54d6dfd…)
+//
+// The DO UPDATE fired, overwrote the column, and left the payload and the
+// checksum alone -- so the row's displayed response disagreed with the payload
+// replay reads, and the workflow was permanently unverifiable. `response` is
+// not in shadowFields (it is redacted and encrypted, so it cannot be compared),
+// which is why verifyShadowColumns cannot see that divergence and only the
+// checksum catches it.
+//
+// So the firing this closes was never self-healing; it could only corrupt.
+// With NULL the clause is false for these rows too, which is what
+// engine/flush.go's comment has always claimed it is for every row.
 func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string, workerID string, generation int64) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -258,7 +295,7 @@ func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID strin
 		  AND ($8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
 		  ))
-	`, workflowID, rec.Step, stored.Response, nullStr(stored.Err), storedPayload,
+	`, workflowID, rec.Step, nullStr(stored.Response), nullStr(stored.Err), storedPayload,
 		checksum, s.tenantID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
@@ -348,7 +385,7 @@ func (s *MySQLStore) CompleteCallIntent(ctx context.Context, workflowID string, 
 		  AND (? = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = ? AND assigned_to = ? AND generation = ?
 		  ))
-	`, rec.Response, nullStr(rec.Err), nullStr(string(payload)), checksum,
+	`, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)), checksum,
 		workflowID, rec.Step, s.tenantID, workerID, workflowID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
@@ -441,7 +478,7 @@ func (s *MSSQLStore) CompleteCallIntent(ctx context.Context, workflowID string, 
 		  AND (@p8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = @p9 AND assigned_to = @p10 AND generation = @p11
 		  ))
-	`, workflowID, rec.Step, rec.Response, nullStr(rec.Err), nullStr(string(payload)),
+	`, workflowID, rec.Step, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)),
 		checksum, s.tenantID, workerID, workflowID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
@@ -603,7 +640,7 @@ func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string
 		  AND ($8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
 		  ))
-	`, workflowID, rec.Step, stored.Response, nullStr(stored.Err), storedPayload,
+	`, workflowID, rec.Step, nullStr(stored.Response), nullStr(stored.Err), storedPayload,
 		checksum, s.tenantID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
@@ -657,7 +694,7 @@ func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, r
 		  AND (? = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = ? AND assigned_to = ? AND generation = ?
 		  ))
-	`, rec.Response, nullStr(rec.Err), nullStr(string(payload)), checksum,
+	`, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)), checksum,
 		workflowID, rec.Step, s.tenantID, workerID, workflowID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
@@ -711,7 +748,7 @@ func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, r
 		  AND (@p8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = @p9 AND assigned_to = @p10 AND generation = @p11
 		  ))
-	`, workflowID, rec.Step, rec.Response, nullStr(rec.Err), nullStr(string(payload)),
+	`, workflowID, rec.Step, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)),
 		checksum, s.tenantID, workerID, workflowID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
