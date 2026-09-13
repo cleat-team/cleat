@@ -71,19 +71,46 @@ func TestTheReaperDoesNotReclaimASleepingWorkflow(t *testing.T) {
 			if _, err := claimSpecific(t, ctx, store, wfID, "w-dead"); err != nil {
 				t.Fatalf("claim while running: %v", err)
 			}
-			n1, err := store.ReapStaleInstances(ctx, 0, 100)
-			if err != nil {
-				t.Fatalf("ReapStaleInstances (running): %v", err)
+			// RETRY, because timeout 0 means "heartbeat strictly in the past"
+			// and the claim just wrote one. The comparison is
+			// `heartbeat_at < now()`, evaluated server-side against a clock
+			// whose effective granularity is not guaranteed to be finer than
+			// the gap between the claim and this call -- so a heartbeat written
+			// microseconds ago is not yet in the past, and the sweep correctly
+			// declines it. That is the engine behaving as specified; relying on
+			// an instant being strictly past was this test's bug.
+			//
+			// It cost a CI cycle to learn: green on all three dialects locally
+			// (mssql subtest 1.59s, so the clock had moved) and red on CI's
+			// SQL Server, where the same two calls landed inside one tick.
+			// Retrying converges the moment the clock advances and asserts
+			// nothing about how long that takes -- as opposed to a fixed sleep,
+			// which is a guess, or a negative timeout, which would move the
+			// threshold into the future and sweep unrelated rows in a shared
+			// database.
+			var n1 int
+			var rc1 int64
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				var err error
+				n1, err = store.ReapStaleInstances(ctx, 0, 100)
+				if err != nil {
+					t.Fatalf("ReapStaleInstances (running): %v", err)
+				}
+				rc1 = mustGetWorkflow(t, ctx, store, wfID).ReclaimCount
+				if rc1 > 0 || time.Now().After(deadline) {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
 			}
-			rc1 := mustGetWorkflow(t, ctx, store, wfID).ReclaimCount
 			t.Logf("running: swept %d, this row reclaim_count=%d", n1, rc1)
 
 			// The control, and it is now about THIS row rather than a sibling.
 			if rc1 != 1 {
 				t.Fatalf("the reaper did not reclaim this workflow while it was "+
-					"status='running' with a stale heartbeat (reclaim_count=%d, "+
-					"swept %d). Nothing below measures anything until this holds.",
-					rc1, n1)
+					"status='running' with a stale heartbeat, after retrying for "+
+					"10s (reclaim_count=%d, swept %d). Nothing below measures "+
+					"anything until this holds.", rc1, n1)
 			}
 
 			// STATE 2: the same row, parked by ReleaseWorkflow the way a
