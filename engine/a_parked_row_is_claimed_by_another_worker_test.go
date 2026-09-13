@@ -85,7 +85,21 @@ func TestAParkedRowIsClaimedByAnotherWorker(t *testing.T) {
 				time.Now().Add(time.Hour)); err != nil {
 				t.Fatalf("park the control an hour out: %v", err)
 			}
-			for i := 0; i < 20; i++ {
+			// DRAIN the queue, and fail if the bound is hit rather than stopping
+			// quietly. The first version looped a fixed 20 times and treated
+			// running out of iterations the same as running out of rows -- so in
+			// a database holding more claimable work than the bound, it would
+			// exit without ever reaching this row and the assertion below would
+			// hold trivially. The control would pass having tested nothing.
+			//
+			// That is the shape cleat#1447 is chasing next door: a sweep bounded
+			// at TOP (100) over a row that sorts last. Setup truncates, so on a
+			// clean database two iterations suffice -- but "it is clean today" is
+			// the assumption, not the guarantee, and the bound must say which
+			// case it is in.
+			const maxDrain = 200
+			drained := 0
+			for ; drained < maxDrain; drained++ {
 				got, err := store.ClaimWorkflow(ctx, "worker-B")
 				if err != nil {
 					t.Fatalf("control claim: %v", err)
@@ -99,6 +113,14 @@ func TestAParkedRowIsClaimedByAnotherWorker(t *testing.T) {
 						"proves nothing about resumption timing (workflow %s)", asleep)
 				}
 			}
+			if drained == maxDrain {
+				t.Fatalf("drained %d claimable rows without emptying the queue, so this "+
+					"control never established that %s was unreachable -- it ran out of "+
+					"iterations, which is not the same as running out of rows",
+					maxDrain, asleep)
+			}
+			t.Logf("control: queue drained after %d claim(s); the future-parked row was "+
+				"never offered", drained)
 		})
 	}
 }
