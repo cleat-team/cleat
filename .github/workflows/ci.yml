@@ -455,6 +455,14 @@ jobs:
           python3 scripts/check_dependabot_coverage.py --self-test
           python3 scripts/check_dependabot_coverage.py
 
+      # The skip-budget guard's own controls. It runs per test job against that
+      # job's report; this runs its two KNOWN CASES -- a build failure must be
+      # reported as one, and a healthy report must still report a ledger
+      # shortfall -- so that a change breaking either is caught here rather
+      # than by a confusing message on someone else's PR (cleat#1388).
+      - name: Skip budget guard self-test
+        run: scripts/check-skip-budget.sh --self-test
+
       # Ruff, promoted back into this required job on 2026-08-08. It ran here
       # before under `continue-on-error: true`, which meant it could not fail a
       # build and -- worse -- reported `success` in the REST jobs API, so the
