@@ -782,6 +782,53 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			// with specific import counts.
 			b.writeWorkToFixedMemory(mem, store, entryPoint, []byte(input))
 
+			// REFUSED BEFORE THE GUEST RUNS, not after it fails.
+			//
+			// Both delivery paths truncate: writeWorkToFixedMemory clamps to
+			// fixedWorkMaxInput and cleat_poll_work clamps to the buffer the
+			// guest advertises, and BOTH report the clamped length, so neither
+			// the guest nor a later reader can tell a complete input from a
+			// prefix of a larger one.
+			//
+			// Checking after execution is not good enough, and that is measured
+			// rather than assumed: a guest handed a truncated envelope does not
+			// politely report a JSON error, it dies -- `exit status 2`, a Go
+			// fatal runtime failure, whose message blames out-of-memory or
+			// stack exhaustion. That return path leaves before any host-side
+			// post-mortem, so a check placed after the call never runs on the
+			// case it exists for.
+			//
+			// Refusing up front also means the workflow never observes a
+			// half-delivered input at all, which is the difference between a
+			// failed run and a run on the wrong arguments (cleat#1312).
+			// BOTH lengths are checked, because the two delivery paths carry
+			// DIFFERENT payloads and the larger one is not the obvious one.
+			// writeWorkToFixedMemory copies the raw input; cleat_poll_work
+			// hands over b.workInput, the {"inputJSON":...} envelope, which is
+			// bigger than the input it wraps and grows further with every
+			// character JSON has to escape. So an input comfortably under the
+			// limit can still produce an envelope over it, and checking only
+			// the raw length would let exactly that case through -- silently,
+			// which is the property being fixed.
+			if n := len(input); n > fixedWorkMaxInput {
+				return nil, &GuestReturnedError{
+					Err: fmt.Errorf("host: export %q was started with %d bytes of input "+
+						"but the guest can receive %d, so %d bytes were not delivered. "+
+						"Refused rather than run on a prefix of its own arguments "+
+						"(cleat#1312)",
+						entryPoint, n, fixedWorkMaxInput, n-fixedWorkMaxInput),
+				}
+			}
+			if n := len(b.workInput); n > fixedWorkMaxInput {
+				return nil, &GuestReturnedError{
+					Err: fmt.Errorf("host: export %q was started with %d bytes of input, "+
+						"which the dispatch envelope grows to %d -- more than the %d the "+
+						"guest can receive, so %d bytes were not delivered. Refused rather "+
+						"than run on a prefix of its own arguments (cleat#1312)",
+						entryPoint, len(input), n, fixedWorkMaxInput, n-fixedWorkMaxInput),
+				}
+			}
+
 			var startErr error
 			func() {
 				defer func() {
