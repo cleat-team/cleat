@@ -177,7 +177,7 @@ func TestDropTenantDeletesAPluginsTenantRows(t *testing.T) {
 		t.Fatalf("PRECONDITION FAILED: the bystander has %d plugin rows before the drop, want 1", got)
 	}
 
-	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1)`, victim); err != nil {
+	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1, 'public')`, victim); err != nil {
 		t.Fatalf("admin.drop_tenant(victim): %v", err)
 	}
 
@@ -247,7 +247,7 @@ func TestDropTenantSurvivesARegistryRowWhoseTableIsGone(t *testing.T) {
 			"case is not being exercised", *exists)
 	}
 
-	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1)`, victim); err != nil {
+	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1, 'public')`, victim); err != nil {
 		t.Fatalf("admin.drop_tenant aborted on a registry row whose table is gone: %v\n\n"+
 			"That blocks deletion of every tenant, not just this one, until somebody finds and "+
 			"removes the row by hand.", err)

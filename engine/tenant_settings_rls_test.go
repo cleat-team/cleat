@@ -269,7 +269,7 @@ func TestDroppingATenantDropsItsSettings(t *testing.T) {
 		t.Fatalf("seeding the settings row: %v", err)
 	}
 
-	if _, err := owner.Exec(`SELECT admin.drop_tenant($1)`, id); err != nil {
+	if _, err := owner.Exec(`SELECT admin.drop_tenant($1, 'public')`, id); err != nil {
 		t.Fatalf("admin.drop_tenant: %v", err)
 	}
 

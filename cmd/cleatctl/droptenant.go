@@ -121,12 +121,23 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 	var tenantID string
 	dryRun := false
 	yes := false
+	// Defaults to "public", matching cleat-worker's --schema flag. The value is
+	// passed to admin.drop_tenant EXPLICITLY rather than left to search_path;
+	// see the call below and cleat#1363.
+	schema := "public"
 	for _, a := range args {
-		switch a {
-		case "--dry-run":
+		switch {
+		case a == "--dry-run":
 			dryRun = true
-		case "--yes":
+		case a == "--yes":
 			yes = true
+		case strings.HasPrefix(a, "--schema="):
+			schema = strings.TrimPrefix(a, "--schema=")
+			if schema == "" {
+				fmt.Fprintln(os.Stderr, "--schema= requires a value")
+				printDropTenantUsage()
+				osExit(1)
+			}
 		default:
 			if strings.HasPrefix(a, "-") {
 				fmt.Fprintf(os.Stderr, "unknown flag: %s\n", a)
@@ -162,6 +173,25 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 		fmt.Fprintf(os.Stderr, "error: refusing to drop the default tenant (%s) -- it is shared by "+
 			"every single-tenant deployment and by plugin_defs, which is not tenant-owned data\n",
 			engine.DefaultTenantUUID)
+		osExit(1)
+	}
+
+	// Pin search_path to the SAME schema that is passed to admin.drop_tenant
+	// below, so the preview the operator confirms describes the tables that are
+	// actually about to be deleted.
+	//
+	// Without this, --schema would change what is DELETED and not what is
+	// COUNTED, and the confirmation prompt would show the row counts of a
+	// different schema -- an operator approving a number that refers to
+	// somewhere else. A preview that does not describe the action is worse than
+	// no preview.
+	//
+	// quote_ident and a bind parameter rather than string interpolation: the
+	// statement is static, so it needs no exemption from the inline-SQL parse
+	// test, and a schema name needing quotes is handled by the server.
+	if _, err := db.ExecContext(ctx,
+		`SELECT set_config('search_path', quote_ident($1), false)`, schema); err != nil {
+		fmt.Fprintf(os.Stderr, "error selecting schema %q: %v\n", schema, err)
 		osExit(1)
 	}
 
@@ -207,7 +237,7 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 		}
 	}
 
-	if _, err := db.ExecContext(ctx, `SELECT admin.drop_tenant($1)`, tenantID); err != nil {
+	if _, err := db.ExecContext(ctx, `SELECT admin.drop_tenant($1, $2)`, tenantID, schema); err != nil {
 		fmt.Fprintf(os.Stderr, "error dropping tenant: %v\n", err)
 		osExit(1)
 	}
@@ -222,7 +252,7 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 }
 
 func printDropTenantUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: cleatctl drop-tenant <tenant-id> [--dry-run] [--yes]
+	fmt.Fprintf(os.Stderr, `Usage: cleatctl drop-tenant <tenant-id> [--dry-run] [--yes] [--schema=NAME]
 
 Permanently delete a tenant and every row of its data: workflow_instances,
 event_history, workflow_signals, workflow_promises, concurrency_keys,
@@ -230,6 +260,12 @@ workflow_update_requests, workflow_schedules, workflow_tags,
 workflow_routing, idempotency_keys, tenant_settings, workflow_defs,
 admin.tenant_api_keys, admin.tenant_roles, admin.tenants, plus the tenant's
 plugin schema and Postgres role.
+
+--schema names the schema holding this deployment's cleat tables; it defaults
+to "public" and must match cleat-worker's --schema. It is passed to
+admin.drop_tenant explicitly rather than inferred, so the deletion cannot be
+redirected by the connection's search_path (cleat#1363), and it also selects
+the schema the row counts above are read from.
 
 workflow_defs holds the tenant's uploaded WASM and IS tenant-owned -- its
 primary key is (tenant_id, name, version). It used to be left behind; see

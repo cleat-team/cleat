@@ -111,7 +111,7 @@ func TestATenantRoleCannotDropAnotherTenant(t *testing.T) {
 	}
 
 	// (3) The attack itself.
-	_, err := attackerDB.ExecContext(ctx, `SELECT admin.drop_tenant($1)`, victim)
+	_, err := attackerDB.ExecContext(ctx, `SELECT admin.drop_tenant($1, 'public')`, victim)
 	if err == nil {
 		t.Error("a tenant login role successfully called admin.drop_tenant() on " +
 			"ANOTHER tenant.\n\n" +
@@ -138,7 +138,7 @@ func TestATenantRoleCannotDropAnotherTenant(t *testing.T) {
 	// (2) The known-good call: the capability still exists for a caller that
 	//     holds the grant. Without this, a database in which drop_tenant is
 	//     broken for everyone passes everything above.
-	if _, err := db.ExecContext(ctx, `SELECT admin.drop_tenant($1)`, victim); err != nil {
+	if _, err := db.ExecContext(ctx, `SELECT admin.drop_tenant($1, 'public')`, victim); err != nil {
 		t.Fatalf("the owner can no longer drop a tenant either: %v\n\n"+
 			"065 narrows the grant; it must not remove the capability.", err)
 	}

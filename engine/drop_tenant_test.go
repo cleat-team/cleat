@@ -62,6 +62,7 @@ var dropTenantDefiningMigrations = []string{
 	"032_drop_tenant_deletes_tenant_data.sql",
 	"059_a_dropped_tenants_definitions_go_with_it.sql",
 	"066_a_dropped_tenants_plugin_rows_go_with_it.sql",
+	"069_drop_tenant_takes_the_schema_it_deletes_from.sql",
 }
 
 // apply032DropTenantMigration installs the CURRENT admin.drop_tenant by
@@ -84,6 +85,16 @@ func apply032DropTenantMigration(t *testing.T, db *sql.DB) {
 
 // resetToOriginal001DropTenant reinstalls 001_schema.sql's admin.drop_tenant,
 // undoing 032's CREATE OR REPLACE regardless of database history.
+//
+// THE THREE TESTS THAT CALL THIS USE THE ONE-ARGUMENT FORM DELIBERATELY, and it
+// looks like an oversight next to every other call site in this package. 069
+// gave the current function a second parameter (the schema, cleat#1363) and
+// DROPped the one-argument form, but this helper re-creates it -- so after a
+// reset BOTH arities exist, and the arity is what selects between the historical
+// function and the current one. Adding the schema argument at those call sites
+// silently retargets them at the CURRENT function, which does not have the bug
+// they exist to pin down, and all three then fail claiming the old version
+// worked correctly.
 //
 // testutil.applyPostgresSchemaFile (behind SetupFullSchema) fingerprints the
 // combined contents of the files it applies and skips re-running them against a
@@ -557,12 +568,12 @@ func TestDropTenant_DeletesAllTenantData(t *testing.T) {
 	}
 
 	// Default-tenant guard.
-	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1)`, DefaultTenantUUID); err == nil {
+	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1, 'public')`, DefaultTenantUUID); err == nil {
 		t.Fatalf("admin.drop_tenant(default tenant) succeeded -- it must refuse, since that UUID is " +
 			"shared by every single-tenant deployment and by workflow_defs")
 	}
 
-	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1)`, tenantA); err != nil {
+	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1, 'public')`, tenantA); err != nil {
 		t.Fatalf("admin.drop_tenant(tenant A): %v", err)
 	}
 
