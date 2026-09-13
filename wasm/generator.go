@@ -424,8 +424,14 @@ var importDefs = map[string]importDef{
 // cleat#1312 cites it as the guest's output buffer size. It is not: nothing
 // reads it. Verified by setting it to 777777 and regenerating -- the emitted
 // gen_host_adapter.go and gen_main_stub.go were unchanged. The live constants
-// are _cleatOutBufSize, emitted by adapter_component.go, and argsBuf in
-// build.go's main stub.
+// are _cleatOutBufFloor / _cleatOutBufCeiling / _cleatOutBufCap, emitted by
+// adapter_component.go, and argsBufSize in build.go's main stub.
+//
+// (Named _cleatOutBufSize until cleat#1384 made the output buffer adaptive --
+// it starts at the floor and doubles toward the ceiling as the host reports
+// truncation. This comment kept the old name for a while, which is the exact
+// failure it exists to warn about: a reader greps for the constant it names
+// and finds nothing.)
 //
 // An unreferenced package-level const is legal Go, so nothing has ever
 // complained, and a reader who changes this to fix a truncation bug will

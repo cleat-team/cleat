@@ -77,8 +77,15 @@ func TestErrBadParamIsNotDecodableByGuest(t *testing.T) {
 	}
 }
 
-// _cleatDefaultOutBufSize mirrors _cleatOutBufSize in the generated host
-// adapter (wasm/adapter_component.go).
+// _cleatDefaultOutBufSize mirrors _cleatOutBufFloor in the generated host
+// adapter (wasm/adapter_component.go) -- the size the guest's output buffer
+// STARTS at.
+//
+// The floor and not the ceiling, deliberately. Since cleat#1384 the buffer
+// grows toward _cleatOutBufCeiling as the host reports truncation, but the
+// hazard asserted below is about the FIRST call, which is served from the
+// floor. Mirroring the ceiling here would make the assertion vacuous:
+// responseLen would fit, and the test would stop describing anything.
 const _cleatDefaultOutBufSize = 65536
 
 // TestCallErrorInvalidRequestMatchesGuestTable keeps the engine-local copy of
