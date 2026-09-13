@@ -55,15 +55,206 @@ fail() { echo "tier2-gate: FAIL: $*" >&2; FAILED=1; }
 note() { echo "tier2-gate: $*"; }
 FAILED=0
 
+#
+# The judge is written to a file rather than piped straight in, so that
+# --self-test drives THIS code rather than a second copy of it. A self-test
+# against a reimplementation tests the reimplementation; CLAUDE.md's
+# duplicates_of in check-migration-versions.sh is the same move.
+write_judge() {
+  cat > "$1" <<'PY'
+
+import json, sys, collections
+
+path = sys.argv[1]
+# Declared patterns, e.g. "./examples/..." -> prefix "examples/". A pattern that names a
+# single package ("./migration") maps to that exact path.
+patterns = [p.strip() for p in sys.argv[2].splitlines() if p.strip()]
+MOD = "github.com/cleat-team/cleat/"
+
+def prefix_of(pat):
+    s = pat.lstrip("./")
+    return s[:-3].rstrip("/") if s.endswith("...") else s
+
+results = {}          # (pkg, test) -> action
+outputs = collections.defaultdict(list)   # (pkg, test) -> its own output lines
+pkg_tests = collections.defaultdict(int)
+pkg_seen = set()
+malformed = 0
+
+# Keep this many lines per failing test, split head/tail when it overflows.
+# Head because a Fatalf prints where it fires -- which for the case that
+# prompted this (cleat#1428) is a compiler message at the very top -- and tail
+# because an assertion failure is usually the last thing a chatty test says.
+# Nothing is dropped silently: the marker says how many lines went.
+KEEP_HEAD, KEEP_TAIL = 30, 30
+
+with open(path) as fh:
+    for line in fh:
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        pkg = (ev.get("Package") or "").replace(MOD, "")
+        act = ev.get("Action")
+        test = ev.get("Test")
+        if pkg:
+            pkg_seen.add(pkg)
+        # Output is attributed to the test that produced it when the test
+        # produced it, and carries no Test field when the PACKAGE produced it
+        # (a build failure outside any test). Measured on the cleat#1428
+        # reproduction: 7 events with a Test field, 2 without, and the compiler
+        # message in the former, because workerFlagSet shells out to `go build`
+        # from inside the test body.
+        if act == "output" and test and "/" not in test:
+            outputs[(pkg, test)].append(ev.get("Output", ""))
+        if test and act in ("pass", "fail", "skip"):
+            # Subtests report separately; count only the top-level test for identity, but
+            # let a failing subtest fail its parent (go test already does this).
+            if "/" in test:
+                continue
+            results[(pkg, test)] = act
+            pkg_tests[pkg] += 1
+
+# "Must run", evaluated per declared pattern rather than per package -- see the header.
+# A pattern that ran nothing means the whole suite is absent, which is the failure worth
+# catching; a stub package inside a live suite is not.
+empty_patterns = []
+for pat in patterns:
+    pre = prefix_of(pat)
+    ran = sum(n for p, n in pkg_tests.items() if p == pre or p.startswith(pre + "/"))
+    if ran == 0:
+        empty_patterns.append(pat)
+
+def excerpt(key):
+    lines = "".join(outputs.get(key, [])).rstrip("\n").split("\n")
+    # The === RUN and --- FAIL framing is already in the name we print beside
+    # this, so it is noise here.
+    lines = [l for l in lines
+             if not l.startswith("=== RUN") and not l.lstrip().startswith("--- FAIL")]
+    lines = [l for l in lines if l.strip()]
+    if len(lines) <= KEEP_HEAD + KEEP_TAIL:
+        return lines
+    dropped = len(lines) - KEEP_HEAD - KEEP_TAIL
+    return (lines[:KEEP_HEAD]
+            + [f"... {dropped} line(s) elided from the middle of this test's output ..."]
+            + lines[-KEEP_TAIL:])
+
+out = {
+    "failed_output": {f"{p}::{t}": excerpt((p, t))
+                      for (p, t), a in results.items() if a == "fail"},
+    "malformed": malformed,
+    "packages_seen": sorted(pkg_seen),
+    "empty_patterns": empty_patterns,
+    "failed": sorted(f"{p}::{t}" for (p, t), a in results.items() if a == "fail"),
+    "passed": sorted(f"{p}::{t}" for (p, t), a in results.items() if a == "pass"),
+    "skipped": sorted(f"{p}::{t}" for (p, t), a in results.items() if a == "skip"),
+    "counts": {
+        "tests": len(results),
+        "pass": sum(1 for a in results.values() if a == "pass"),
+        "fail": sum(1 for a in results.values() if a == "fail"),
+        "skip": sum(1 for a in results.values() if a == "skip"),
+    },
+}
+print(json.dumps(out))
+PY
+}
+
+# --- 0. --self-test --------------------------------------------------------------------
+#
+# Drives write_judge's REAL code on a synthetic go test -json stream. The case that
+# matters is a known-positive: a new failure whose NAME does not describe what broke.
+#
+# A negative control alone would not do here. "the gate passes a clean tree" is
+# satisfied by a reporter that prints nothing ever, which is exactly the bug
+# cleat#1428 is about -- the gate was green-or-red correctly for months while
+# discarding the one line a reader needed.
+if [ "${1:-}" = "--self-test" ]; then
+  command -v python3 >/dev/null || { echo "tier2-gate: python3 required" >&2; exit 2; }
+  # Same portability rule as the JUDGE temp file below -- and note this line had
+  # the same bug, so the self-test could not have caught it: it shared the defect.
+  TD="$(mktemp -d "${TMPDIR:-/tmp}/tier2selftest.XXXXXX")"
+  # Guarded, and the guard is not paranoia -- it is the one case measured.
+  #
+  # With the old `mktemp -d -t tier2selftest`, GNU mktemp fails, TD is EMPTY,
+  # and "$TD/judge.py" resolves to "/judge.py" -- which a root container can
+  # write. So the self-test wrote the judge to the filesystem root, ran it, and
+  # reported "5 cases pass, rc=0" ON THE BROKEN TREE, with mktemp's complaint
+  # on stderr where nothing reads it. A self-test that shares the defect it is
+  # meant to catch cannot catch it; this makes the empty path loud instead.
+  if [ -z "$TD" ] || [ ! -d "$TD" ]; then
+    echo "tier2-gate: SELF-TEST: could not create a temp dir -- not a pass" >&2
+    exit 2
+  fi
+  trap 'rm -rf "$TD"' EXIT
+  J="$TD/judge.py"; write_judge "$J"
+
+  # A failing test whose output is a COMPILER error from another package, which is
+  # the cleat#1428 shape: tests/manifests shells out to `go build ./cmd/cleat-worker`.
+  cat > "$TD/in.json" <<'JSON'
+{"Action":"run","Package":"github.com/cleat-team/cleat/tests/manifests","Test":"TestDeploymentManifestsUseFlagsTheWorkerAccepts"}
+{"Action":"output","Package":"github.com/cleat-team/cleat/tests/manifests","Test":"TestDeploymentManifestsUseFlagsTheWorkerAccepts","Output":"=== RUN   TestDeploymentManifestsUseFlagsTheWorkerAccepts\n"}
+{"Action":"output","Package":"github.com/cleat-team/cleat/tests/manifests","Test":"TestDeploymentManifestsUseFlagsTheWorkerAccepts","Output":"    manifests_test.go:118: building cleat-worker: exit status 1\n"}
+{"Action":"output","Package":"github.com/cleat-team/cleat/tests/manifests","Test":"TestDeploymentManifestsUseFlagsTheWorkerAccepts","Output":"        cmd/cleat-worker/main.go:518:26: not enough arguments in call to dsnWithSchema\n"}
+{"Action":"output","Package":"github.com/cleat-team/cleat/tests/manifests","Test":"TestDeploymentManifestsUseFlagsTheWorkerAccepts","Output":"--- FAIL: TestDeploymentManifestsUseFlagsTheWorkerAccepts (0.61s)\n"}
+{"Action":"fail","Package":"github.com/cleat-team/cleat/tests/manifests","Test":"TestDeploymentManifestsUseFlagsTheWorkerAccepts"}
+{"Action":"output","Package":"github.com/cleat-team/cleat/tests/manifests","Test":"TestSomethingThatPasses","Output":"ok\n"}
+{"Action":"pass","Package":"github.com/cleat-team/cleat/tests/manifests","Test":"TestSomethingThatPasses"}
+JSON
+
+  python3 "$J" "$TD/in.json" "./tests/..." > "$TD/verdict.json" 2>&1 || {
+    echo "SELF-TEST FAIL: the judge errored:" >&2; cat "$TD/verdict.json" >&2; exit 1; }
+
+  st_fails=0
+  st() { # <label> <expr-result 0|1>
+    [ "$2" = "0" ] || { echo "SELF-TEST FAIL: $1" >&2; st_fails=$((st_fails + 1)); }
+  }
+  has() { python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+ex=d.get('failed_output',{}).get('tests/manifests::TestDeploymentManifestsUseFlagsTheWorkerAccepts')
+sys.exit(0 if ex is not None and any(sys.argv[2] in l for l in ex) else 1)" "$TD/verdict.json" "$1"; }
+
+  # KNOWN-POSITIVE: the compiler message must survive into the verdict.
+  has "not enough arguments in call to dsnWithSchema"; st "the compiler message is dropped -- this is cleat#1428 itself" "$?"
+  has "building cleat-worker"; st "the Fatalf line is dropped" "$?"
+
+  # The framing lines are noise beside a name we print anyway.
+  if has "=== RUN"; then st "=== RUN leaked into the excerpt" 1; fi
+  if has "--- FAIL"; then st "--- FAIL leaked into the excerpt" 1; fi
+
+  # VACUITY: an excerpt keyed on a PASSING test would mean the map is keyed wrong.
+  python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+fo=d.get('failed_output')
+if fo is None: print('no failed_output key at all'); sys.exit(1)
+if 'tests/manifests::TestSomethingThatPasses' in fo: print('a passing test has an excerpt'); sys.exit(1)
+if len(fo)!=1: print('expected exactly one excerpt, got', len(fo)); sys.exit(1)
+" "$TD/verdict.json"; st "failed_output is keyed wrong or absent" "$?"
+
+  if [ "$st_fails" -gt 0 ]; then
+    echo "tier2-gate: SELF-TEST: $st_fails case(s) failed" >&2; exit 1
+  fi
+  echo "tier2-gate: SELF-TEST: 5 cases pass (two known-positive, three vacuity/noise)"
+  exit 0
+fi
+
 [ -f "$TIERS" ] || { echo "tier2-gate: $TIERS not found" >&2; exit 2; }
 command -v python3 >/dev/null || { echo "tier2-gate: python3 is required to read go test -json" >&2; exit 2; }
 
 # --- 1. CGO must be on --------------------------------------------------------------
 # Same reason as tier 1, and it applies here too: CGO_ENABLED=0 removes
-# NewWasmtimeBackend (//go:build cgo) from the build entirely and silently runs
-# everything on wazero. tier2 names wazero as its own component precisely because it is
-# NOT the backend of record, so a tier-2 run on wazero-by-accident measures the wrong
-# component and says nothing about the others.
+# NewWasmtimeBackend (//go:build cgo) from the build entirely, leaving NO WASM backend
+# at all -- the //go:build !cgo stub returns ErrWasmtimeCGOUnavailable and cleat-worker
+# exits 1. This comment said "silently runs everything on wazero" until 2026-09-13; that
+# stopped being true when the wazero BACKEND was deleted in #459, and it is the opposite
+# of what happens now. engine.Runtime is still a wazero runtime and still executes guest
+# code for the CLI and dev tooling, so "wazero is gone" would be wrong too -- see
+# CLAUDE.md, "One WASM backend, and a wazero runtime that is not it".
 if [ "${CGO_ENABLED:-1}" = "0" ]; then
   fail "CGO_ENABLED=0 -- this removes the wasmtime backend entirely and silently
        substitutes wazero. Unset it or set it to 1."
@@ -208,73 +399,30 @@ for md in $MODDIRS; do
 done
 
 # --- 4. Judge --------------------------------------------------------------------------
-python3 - "$JSON" "$PKGS" <<'PY' > "$REPO_ROOT/.tier2-verdict" 2>&1
-import json, sys, collections
 
-path = sys.argv[1]
-# Declared patterns, e.g. "./examples/..." -> prefix "examples/". A pattern that names a
-# single package ("./migration") maps to that exact path.
-patterns = [p.strip() for p in sys.argv[2].splitlines() if p.strip()]
-MOD = "github.com/cleat-team/cleat/"
-
-def prefix_of(pat):
-    s = pat.lstrip("./")
-    return s[:-3].rstrip("/") if s.endswith("...") else s
-
-results = {}          # (pkg, test) -> action
-pkg_tests = collections.defaultdict(int)
-pkg_seen = set()
-malformed = 0
-
-with open(path) as fh:
-    for line in fh:
-        line = line.strip()
-        if not line or not line.startswith("{"):
-            continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            malformed += 1
-            continue
-        pkg = (ev.get("Package") or "").replace(MOD, "")
-        act = ev.get("Action")
-        test = ev.get("Test")
-        if pkg:
-            pkg_seen.add(pkg)
-        if test and act in ("pass", "fail", "skip"):
-            # Subtests report separately; count only the top-level test for identity, but
-            # let a failing subtest fail its parent (go test already does this).
-            if "/" in test:
-                continue
-            results[(pkg, test)] = act
-            pkg_tests[pkg] += 1
-
-# "Must run", evaluated per declared pattern rather than per package -- see the header.
-# A pattern that ran nothing means the whole suite is absent, which is the failure worth
-# catching; a stub package inside a live suite is not.
-empty_patterns = []
-for pat in patterns:
-    pre = prefix_of(pat)
-    ran = sum(n for p, n in pkg_tests.items() if p == pre or p.startswith(pre + "/"))
-    if ran == 0:
-        empty_patterns.append(pat)
-
-out = {
-    "malformed": malformed,
-    "packages_seen": sorted(pkg_seen),
-    "empty_patterns": empty_patterns,
-    "failed": sorted(f"{p}::{t}" for (p, t), a in results.items() if a == "fail"),
-    "passed": sorted(f"{p}::{t}" for (p, t), a in results.items() if a == "pass"),
-    "skipped": sorted(f"{p}::{t}" for (p, t), a in results.items() if a == "skip"),
-    "counts": {
-        "tests": len(results),
-        "pass": sum(1 for a in results.values() if a == "pass"),
-        "fail": sum(1 for a in results.values() if a == "fail"),
-        "skip": sum(1 for a in results.values() if a == "skip"),
-    },
-}
-print(json.dumps(out))
-PY
+# `mktemp "$dir/name.XXXXXX"`, NOT `mktemp -t name`. BSD mktemp appends the
+# random suffix for you; GNU mktemp refuses -- "too few X's in template" -- and
+# this script runs `set -uo pipefail` WITHOUT -e, so the failure does not abort.
+# JUDGE is then empty, `python3 ""` writes an error into the verdict, and the
+# gate reports "could not parse the run" with a stderr dump of the go output
+# that has nothing to do with the cause. Measured 2026-09-13:
+#
+#   macOS (BSD)   mktemp -t tier2judge   ->  /var/folders/.../tier2judge.Y9rQGHBKHu
+#   ubuntu:24.04  mktemp -t tier2judge   ->  too few X's in template, exit 1
+#
+# Local self-test green, CI red, on the same script.
+JUDGE="$(mktemp "${TMPDIR:-/tmp}/tier2judge.XXXXXX")"
+trap 'rm -f "$JUDGE"' EXIT
+if [ -z "$JUDGE" ] || [ ! -f "$JUDGE" ]; then
+  echo "tier2-gate: could not create a temp file for the judge" >&2
+  exit 2
+fi
+write_judge "$JUDGE"
+if [ ! -s "$JUDGE" ]; then
+  echo "tier2-gate: the judge was written empty -- refusing to run it" >&2
+  exit 2
+fi
+python3 "$JUDGE" "$JSON" "$PKGS" > "$REPO_ROOT/.tier2-verdict" 2>&1
 
 VERDICT="$REPO_ROOT/.tier2-verdict"
 python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$VERDICT" 2>/dev/null || {
@@ -333,10 +481,42 @@ fi
 if [ -n "$NEWFAIL" ]; then
   echo
   note "NEW failures, not in tier2.known_failures:"
-  printf '%s' "$NEWFAIL" | while IFS= read -r f; do [ -n "$f" ] && note "    $f"; done
+  # WHY THE OUTPUT AND NOT JUST THE NAME. cleat#1428. A name alone is not always
+  # a description of what broke, and the worst case is not a rare one:
+  # tests/manifests' workerFlagSet shells out to `go build ./cmd/cleat-worker`
+  # to enumerate real flags, so ANY compile error anywhere in that package lands
+  # on TestDeploymentManifestsUseFlagsTheWorkerAccepts -- a name about
+  # deployment manifests.
+  #
+  # A reader meeting that with no detail has a plausible story ("the manifests
+  # test is flaky in the queue") and a SANCTIONED mechanism for acting on it:
+  # tier 2's contract invites adding a new failure to known_failures with a
+  # justification. Taking it would bury a compile error behind a ledger entry --
+  # CLAUDE.md's "a documented failure mode absorbs every instance of its
+  # symptom", with the known-failures list as the absorber.
+  #
+  # The gate already had the answer. The verdict builder parses every event and
+  # discarded Action == "output". Measured on the reproduction: the compiler
+  # message is present, and attributed to the test rather than the package,
+  # because the build runs inside the test body.
+  #
+  # KNOWN failures stay quiet, deliberately. They are expected, there can be
+  # dozens, and printing their output would bury the new one -- which is this
+  # item's own failure mode, one level up.
+  printf '%s' "$NEWFAIL" | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    note "    $f"
+    python3 -c "
+import json,sys
+d=json.load(open('$VERDICT'))
+for line in d.get('failed_output', {}).get(sys.argv[1], []):
+    print('        ' + line)" "$f" | while IFS= read -r l; do note "$l"; done
+  done
   fail "the failures above are regressions. Fix them, or add them to
        tier2.known_failures with an item reference and an owner and say in the PR why
-       the list is growing -- tier2.contract requires a written justification for that."
+       the list is growing -- tier2.contract requires a written justification for that.
+       Read the output printed under each name first: a failure here is not always
+       about the thing the test is named after (cleat#1428)."
 fi
 
 # 4c. Every known failure must still fail. This is what makes "can only shrink" real.
