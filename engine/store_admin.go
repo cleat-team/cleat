@@ -279,6 +279,38 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 	}
 	defer tx.Rollback()
 
+	// Does this workflow owe a defer phase? cleat#1152, and the query is
+	// TerminateWorkflow's verbatim -- same predicate, same FOR UPDATE holding
+	// the row for the UPDATE below, so the status read is the status marked.
+	//
+	// deferPhaseOwed is false for 'terminating', so force-resolving a workflow
+	// that is ALREADY in its defer phase takes the one-phase arm below and
+	// clears the marker, cutting the cleanup short. That is not an oversight:
+	// it is exactly what a second TerminateWorkflow does, and the alternative
+	// -- restarting the phase clock on every operator action -- is the one
+	// deferPhaseOwed's comment rejects.
+	var curStatus string
+	var hasDefers, compacted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       EXISTS(SELECT 1 FROM event_history e
+		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
+		       w.compaction_state IS NOT NULL
+		FROM workflow_instances w
+		WHERE w.id = $1 AND w.tenant_id = $2
+		FOR UPDATE
+	`, workflowID, s.tenantID).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return adminNotFound(a.action, workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: read: %w", a.action, err)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers, compacted) {
+		return s.adminForceMark(ctx, tx, workflowID, generation, a)
+	}
+
 	var res sql.Result
 	if a.action == adminActionForceComplete {
 		res, err = tx.ExecContext(ctx, `
@@ -318,6 +350,64 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 
 	releaseWorkflowResources(s.log(), s, workflowID)
 	s.enforceParentClosePolicy(context.Background(), workflowID)
+	return nil
+}
+
+// adminForceMark is phase 1 for a force-resolve: record the operator's outcome
+// and let the defer phase run, rather than applying the outcome now. cleat#1152.
+//
+// The operator's outcome goes into pending_terminal_status and the payload
+// columns go in with it. FinalizeDeferPhase applies `status =
+// pending_terminal_status` and does NOT touch result or error_msg, so writing
+// them here is what makes force-COMPLETE expressible in a mechanism built for
+// terminate, which only ever needed a reason string.
+//
+// No releaseWorkflowResources and no enforceParentClosePolicy, for the reason
+// TerminateWorkflow's mark arm gives: both belong to the terminal transition,
+// and this workflow is not terminal yet. Releasing here is the defect the
+// two-phase path exists to fix -- the host dropping the locks the defer was
+// going to release, in the wrong order.
+func (s *PostgresStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflowID string, generation int64, a adminForce) error {
+	var res sql.Result
+	var err error
+	deadline := int(deferPhaseTimeout.Seconds())
+	if a.action == adminActionForceComplete {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = $5, pending_terminal_status = 'done', result = $3,
+			    error_msg = NULL, error_code = NULL, error_op = NULL,
+			    defer_phase_deadline = now() + ($6 * interval '1 second'),
+			    next_wake_at = now(), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = $1 AND tenant_id = $2 AND generation = $4
+		`, workflowID, s.tenantID, a.result, generation, statusTerminating, deadline)
+	} else {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = $6, pending_terminal_status = 'failed',
+			    error_msg = $3, error_code = $4, error_op = 'admin_force_fail',
+			    defer_phase_deadline = now() + ($7 * interval '1 second'),
+			    next_wake_at = now(), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = $1 AND tenant_id = $2 AND generation = $5
+		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation, statusTerminating, deadline)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: mark defer phase: %w", a.action, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("admin %s: rows affected: %w", a.action, err)
+	}
+	if n == 0 {
+		return s.adminResolveMiss(ctx, tx, workflowID, generation, a.action)
+	}
+	if err := s.adminAppendAudit(ctx, tx, workflowID, a); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin %s: commit: %w", a.action, err)
+	}
 	return nil
 }
 
@@ -399,6 +489,30 @@ func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, g
 	}
 	defer tx.Rollback()
 
+	// Does this workflow owe a defer phase? cleat#1152. FOR UPDATE holds the
+	// row for the UPDATE that follows, as on the other two dialects.
+	var curStatus string
+	var hasDefers, compacted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       EXISTS(SELECT 1 FROM event_history e
+		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
+		       w.compaction_state IS NOT NULL
+		FROM workflow_instances w
+		WHERE w.id = ? AND w.tenant_id = ?
+		FOR UPDATE
+	`, workflowID, s.tenantID).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return adminNotFound(a.action, workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: read: %w", a.action, err)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers, compacted) {
+		return s.adminForceMark(ctx, tx, workflowID, generation, a)
+	}
+
 	var res sql.Result
 	if a.action == adminActionForceComplete {
 		res, err = tx.ExecContext(ctx, `
@@ -438,6 +552,53 @@ func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, g
 
 	releaseWorkflowResources(s.log(), s, workflowID)
 	s.enforceParentClosePolicy(context.Background(), workflowID)
+	return nil
+}
+
+// adminForceMark is MySQL's phase 1 for a force-resolve. See the PostgreSQL
+// sibling for why the payload columns are written here and why neither
+// releaseWorkflowResources nor enforceParentClosePolicy runs. cleat#1152.
+func (s *MySQLStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflowID string, generation int64, a adminForce) error {
+	var res sql.Result
+	var err error
+	deadline := int(deferPhaseTimeout.Seconds())
+	if a.action == adminActionForceComplete {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = ?, pending_terminal_status = 'done', result = ?,
+			    error_msg = NULL, error_code = NULL, error_op = NULL,
+			    defer_phase_deadline = DATE_ADD(NOW(6), INTERVAL ? SECOND),
+			    next_wake_at = NOW(6), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = ? AND tenant_id = ? AND generation = ?
+		`, statusTerminating, a.result, deadline, workflowID, s.tenantID, generation)
+	} else {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = ?, pending_terminal_status = 'failed',
+			    error_msg = ?, error_code = ?, error_op = 'admin_force_fail',
+			    defer_phase_deadline = DATE_ADD(NOW(6), INTERVAL ? SECOND),
+			    next_wake_at = NOW(6), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = ? AND tenant_id = ? AND generation = ?
+		`, statusTerminating, a.errorMsg, a.errorCode, deadline, workflowID, s.tenantID, generation)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: mark defer phase: %w", a.action, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("admin %s: rows affected: %w", a.action, err)
+	}
+	if n == 0 {
+		return s.adminResolveMiss(ctx, tx, workflowID, generation, a.action)
+	}
+	if err := s.adminAppendAudit(ctx, tx, workflowID, a); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin %s: commit: %w", a.action, err)
+	}
 	return nil
 }
 
@@ -516,6 +677,30 @@ func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID strin
 	}
 	defer tx.Rollback()
 
+	// Does this workflow owe a defer phase? cleat#1152. UPDLOCK/HOLDLOCK is
+	// SQL Server's FOR UPDATE -- the other two dialects spell it that way.
+	var curStatus string
+	var hasDefers, compacted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       CASE WHEN EXISTS(SELECT 1 FROM event_history e
+		                        WHERE e.workflow_id = w.id AND e.event_type = 'defer')
+		            THEN 1 ELSE 0 END,
+		       CASE WHEN w.compaction_state IS NOT NULL THEN 1 ELSE 0 END
+		FROM workflow_instances w WITH (UPDLOCK, HOLDLOCK)
+		WHERE w.id = @p1 AND w.tenant_id = @p2
+	`, workflowID, s.tenantID).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return adminNotFound(a.action, workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: read: %w", a.action, err)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers, compacted) {
+		return s.adminForceMark(ctx, tx, workflowID, generation, a)
+	}
+
 	var res sql.Result
 	if a.action == adminActionForceComplete {
 		res, err = tx.ExecContext(ctx, `
@@ -555,6 +740,52 @@ func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID strin
 
 	releaseWorkflowResources(s.log(), s, workflowID)
 	s.enforceParentClosePolicy(context.Background(), workflowID)
+	return nil
+}
+
+// adminForceMark is SQL Server's phase 1 for a force-resolve. See the
+// PostgreSQL sibling for the reasoning. cleat#1152.
+func (s *MSSQLStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflowID string, generation int64, a adminForce) error {
+	var res sql.Result
+	var err error
+	deadline := int(deferPhaseTimeout.Seconds())
+	if a.action == adminActionForceComplete {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = @p5, pending_terminal_status = 'done', result = @p3,
+			    error_msg = NULL, error_code = NULL, error_op = NULL,
+			    defer_phase_deadline = DATEADD(SECOND, @p6, SYSUTCDATETIME()),
+			    next_wake_at = SYSUTCDATETIME(), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = @p1 AND tenant_id = @p2 AND generation = @p4
+		`, workflowID, s.tenantID, a.result, generation, statusTerminating, deadline)
+	} else {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = @p6, pending_terminal_status = 'failed',
+			    error_msg = @p3, error_code = @p4, error_op = 'admin_force_fail',
+			    defer_phase_deadline = DATEADD(SECOND, @p7, SYSUTCDATETIME()),
+			    next_wake_at = SYSUTCDATETIME(), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = @p1 AND tenant_id = @p2 AND generation = @p5
+		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation, statusTerminating, deadline)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: mark defer phase: %w", a.action, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("admin %s: rows affected: %w", a.action, err)
+	}
+	if n == 0 {
+		return s.adminResolveMiss(ctx, tx, workflowID, generation, a.action)
+	}
+	if err := s.adminAppendAudit(ctx, tx, workflowID, a); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin %s: commit: %w", a.action, err)
+	}
 	return nil
 }
 
