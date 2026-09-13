@@ -34,15 +34,6 @@ func TestEveryCallOptionsFieldIsHonouredSomewhere(t *testing.T) {
 	honoured := map[string]string{
 		"Retry": "cleat/runtime.go DurableCallWithOptions (host import cleat_call_retry, " +
 			"or the SDK loop when the host refuses the policy) and cleat/localdev",
-
-		// cleat#1424: declared, documented, and read by nothing. Its own
-		// comment cites outBufSize as the cap, and wasm/generator.go documents
-		// outBufSize as DEAD -- the live buffer is adaptive since cleat#1384
-		// (_cleatOutBufFloor/_cleatOutBufCeiling/_cleatOutBufCap), chosen by
-		// generated code that never sees CallOptions. Left in place here
-		// rather than removed because removing it is a separate decision from
-		// the one cleat#1006 recorded; the census is what keeps it visible.
-		"MaxResponseSize": "NO READER -- see cleat#1424",
 	}
 
 	var got []string
