@@ -156,43 +156,7 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 	// completion via cleatCompleteImport.  If no work is available
 	// (entryLen == 0, e.g. wazero backend), main() returns immediately
 	// and the backend calls exports directly instead.
-	mainStub := `package main
-
-import "unsafe"
-
-func main() {
-	var entryNameBuf [256]byte
-	var argsBuf [65536]byte
-	ret := cleatPollWorkImport(
-		unsafe.Pointer(&entryNameBuf[0]), 256,
-		unsafe.Pointer(&argsBuf[0]), 65536,
-	)
-	entryNameLen := uint32(ret >> 32)
-	argsLen := uint32(ret)
-	if entryNameLen == 0 {
-		return
-	}
-	entryName := string(entryNameBuf[:entryNameLen])
-	args := argsBuf[:argsLen]
-	result := cleatDispatch(entryName, args)
-	if result == nil {
-		// nil means cleatDispatch did not recognise entryName. That is a
-		// FAILURE and must be reported on the error channel; it used to be
-		// returned as a result reading {"error":"unknown entry point: ..."},
-		// which arrived here and was completed with status 0 -- success. The
-		// host routes by entry-point name and had no other way to tell a name
-		// the guest never heard of from one that ran, which is how every defer
-		// in every Go WASM workflow did nothing while the host recorded
-		// success. IMPROVEMENT-PLAN 3.70.
-		errStr := encodeJSONString("unknown entry point: " + entryName)
-		errPtr, errLen := stringPtr(errStr)
-		cleatCompleteImport(1, errPtr, errLen)
-		return
-	}
-	resultPtr, resultLen := stringPtr(string(result))
-	cleatCompleteImport(0, resultPtr, resultLen)
-}
-`
+	mainStub := MainStubSource()
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
 	}
@@ -626,4 +590,60 @@ func usesPackage(src, pkg string) bool {
 		return true
 	})
 	return found
+}
+
+// MainStubSource is the gen_main_stub.go this package emits for a Go guest.
+//
+// Exported so that engine/guest_buffer_matches_the_host_test.go can assert the
+// input buffer it declares equals engine.DefaultOutBufSize. The dependency only
+// runs one way -- engine imports wasm -- so the guest cannot reference the
+// host's constant and nothing but that test relates the two numbers.
+//
+// Returning the SOURCE rather than the size is deliberate: what ships is this
+// string, and a stub that stopped using its declared size would still satisfy
+// an assertion about a size constant.
+func MainStubSource() string {
+	return `package main
+
+import "unsafe"
+
+const argsBufSize = 65536
+
+func main() {
+	var entryNameBuf [256]byte
+
+	// THE INPUT BUFFER STAYS AT 64 KiB, AND THAT IS A MEASURED DECISION
+	// RATHER THAN AN OVERSIGHT -- see the long note on argsBufSize below.
+	var argsBuf [argsBufSize]byte
+
+	ret := cleatPollWorkImport(
+		unsafe.Pointer(&entryNameBuf[0]), 256,
+		unsafe.Pointer(&argsBuf[0]), argsBufSize,
+	)
+	entryNameLen := uint32(ret >> 32)
+	argsLen := uint32(ret)
+	if entryNameLen == 0 {
+		return
+	}
+	entryName := string(entryNameBuf[:entryNameLen])
+	args := argsBuf[:argsLen]
+	result := cleatDispatch(entryName, args)
+	if result == nil {
+		// nil means cleatDispatch did not recognise entryName. That is a
+		// FAILURE and must be reported on the error channel; it used to be
+		// returned as a result reading {"error":"unknown entry point: ..."},
+		// which arrived here and was completed with status 0 -- success. The
+		// host routes by entry-point name and had no other way to tell a name
+		// the guest never heard of from one that ran, which is how every defer
+		// in every Go WASM workflow did nothing while the host recorded
+		// success. IMPROVEMENT-PLAN 3.70.
+		errStr := encodeJSONString("unknown entry point: " + entryName)
+		errPtr, errLen := stringPtr(errStr)
+		cleatCompleteImport(1, errPtr, errLen)
+		return
+	}
+	resultPtr, resultLen := stringPtr(string(result))
+	cleatCompleteImport(0, resultPtr, resultLen)
+}
+`
 }

@@ -441,3 +441,23 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 func (u *UsageInfo) Count() int {
 	return len(u.Funcs)
 }
+
+// AllUsage returns a UsageInfo naming every host function this package knows
+// how to generate an adapter for.
+//
+// Exported for engine/guest_buffer_matches_the_host_test.go, which asserts that
+// every adapter allocating an output buffer also grows it (cleat#1312). That
+// check has to see ALL of them: generating from one fixture's usage would
+// silently exempt whatever that fixture happens not to call, which is the shape
+// of gap the test exists to close.
+func AllUsage() *UsageInfo {
+	u := &UsageInfo{Used: map[string]bool{}, Children: map[string]bool{}}
+	for _, fn := range hostFunctions {
+		if u.Used[fn.ImportName] {
+			continue
+		}
+		u.Used[fn.ImportName] = true
+		u.Funcs = append(u.Funcs, fn)
+	}
+	return u
+}

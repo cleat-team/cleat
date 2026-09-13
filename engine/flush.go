@@ -18,8 +18,10 @@ import (
 func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32, val string, maxLen uint32) (uint32, error) {
 	if rawBuf, ok := ctx.Value(wasmMemBufKey{}).([]byte); ok && rawBuf != nil {
 		data := []byte(val)
+		truncated := false
 		if uint32(len(data)) > maxLen {
 			data = data[:maxLen]
+			truncated = true
 		}
 		// ptr comes from the guest. Unchecked, `rawBuf[ptr:]` panics for any
 		// ptr past the end of linear memory -- reachable from guest code by
@@ -42,6 +44,12 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 				len(data), ptr, len(rawBuf))
 		}
 		n := copy(rawBuf[ptr:], data)
+		if truncated {
+			// The prefix is still written; see writeWasmString for why. The
+			// signal is additive, so a caller that does not yet propagate it
+			// behaves exactly as it did before cleat#1312.
+			return uint32(n), &OutputTruncatedError{Needed: len(val), Capacity: int(maxLen)}
+		}
 		return uint32(n), nil
 	}
 	if m != nil {
@@ -50,6 +58,41 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 		}
 	}
 	return 0, nil
+}
+
+// writeOut is writeResult with the truncation signal turned into an errCode
+// the caller can pack.
+//
+// EVERY host call whose success path would otherwise return errCode 0 goes
+// through this, because that is the population where truncation was invisible:
+// writeResult cut the value to the guest's buffer and returned only the bytes
+// it wrote, so the guest got a short value and a success code and had nothing
+// to compare against (cleat#1312).
+//
+// Sites whose errCode is ALREADY non-zero deliberately do not use it. Those
+// write a human-readable error message into the output buffer alongside a real
+// failure code; a truncated message is cosmetic, and overwriting the actual
+// error with "output truncated" would replace a diagnosis with a symptom.
+//
+// A helper rather than errors.As at each of forty-odd call sites: the point of
+// one expression is that the next site added cannot get it subtly different.
+func (s *execSession) writeOut(ctx context.Context, m api.Module, ptr uint32, val string, maxLen uint32) (uint32, byte) {
+	n, err := s.writeResult(ctx, m, ptr, val, maxLen)
+	code, ok := asTruncation(err)
+	if !ok {
+		return n, 0
+	}
+	// The nil check is not defensive dressing. writeResult never touched
+	// s.engine, so a great many sessions in this package are constructed
+	// without one -- TestAwaitSignals_ReportsBytesWrittenNotPayloadLength builds
+	// an execSession directly and segfaulted here the moment writeOut started
+	// logging. Reaching through the session for a logger is a new dependency
+	// and it has to tolerate what the old code never needed.
+	if s.engine != nil {
+		s.engine.log().WarnContext(ctx, "host call output truncated",
+			"workflow_id", s.workflowID, "needed", len(val), "capacity", maxLen)
+	}
+	return n, code
 }
 
 // insertEventSQL is the shared INSERT statement for both fast and quota paths.

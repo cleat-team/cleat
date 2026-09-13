@@ -148,8 +148,8 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 			written, _ := s.writeResult(ctx, m, responsePtr, err.Error(), responseMaxLen)
 			return packDurableCallResult(int(written), callFailureCode, 1)
 		}
-		written, _ := s.writeResult(ctx, m, responsePtr, resp, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 0)
+		written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
+		return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 	}
 
 	resp, err := s.callService(callCtx, service, operation, requestJSON, step)
@@ -180,8 +180,8 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		return packDurableCallResult(int(written), callFailureCode, 1)
 	}
 
-	written, _ := s.writeResult(ctx, m, responsePtr, resp, responseMaxLen)
-	return packDurableCallResult(int(written), 0, 0)
+	written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
+	return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 }
 
 // replayRetryAttempts consumes the call_attempt_failed events at the head of
@@ -271,8 +271,8 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 				if s.engine.Metrics != nil {
 					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "resolved"))
 				}
-				written, _ := s.writeResult(ctx, m, responsePtr, resp, responseMaxLen)
-				return packDurableCallResult(int(written), 0, 0)
+				written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
+				return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 			}
 
 			// Record the condition structurally before writing the message.
@@ -300,8 +300,8 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 			return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
 		}
 
-		written, _ := s.writeResult(ctx, m, responsePtr, rec.Response, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 0)
+		written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.Response, responseMaxLen)
+		return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 	}
 
 	// Past recorded history — switch to fresh execution.
@@ -501,8 +501,8 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			}
 			s.recordEvent(rec)
 
-			written, _ := s.writeResult(ctx, m, responsePtr, resp, responseMaxLen)
-			return packDurableCallResult(int(written), 0, 0)
+			written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
+			return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 		}
 
 		lastErr = callErr
@@ -730,8 +730,8 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 				s.deferrals[deferID] = desc
 				s.mu.Unlock()
 
-				written, _ := s.writeResult(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
-				return packSimpleResult(0, written)
+				written, writtenEC := s.writeOut(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
+				return packSimpleResult(writtenEC, written)
 			}
 		}
 		s.exitReplay()
@@ -751,8 +751,8 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 	s.deferrals[deferID] = description
 	s.mu.Unlock()
 
-	written, _ := s.writeResult(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) DurableLog(ctx context.Context, m api.Module, message string) int64 {

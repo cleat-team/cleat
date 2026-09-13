@@ -508,6 +508,21 @@ const (
 	// for free. Re-issuing cleat_call_retry would be refused again on
 	// identical grounds and loop forever -- see ABI.md, "Retry refusal".
 	CallErrorRetryPolicyTooLong // non-retryable
+
+	// CallErrorOutputTruncated means the host had more to write than the
+	// buffer this guest supplied could hold. The response you received is a
+	// prefix of the real one.
+	//
+	// Before cleat#1312 this was not reported at all: the host cut the value to
+	// the buffer's size and returned only how many bytes it had written, so a
+	// truncated response and a genuinely short one were the same thing from
+	// here. The symptom was a JSON unmarshal error pointing at the response
+	// body, which sends you to debug the service you called.
+	//
+	// Non-retryable, like RetryPolicyTooLong: reissuing the identical call with
+	// the identical buffer fails identically. The fix is a bigger buffer or a
+	// smaller payload, and both are the caller's.
+	CallErrorOutputTruncated // non-retryable
 )
 
 // CallError is a structured error returned by DurableCall and its variants.

@@ -17,9 +17,13 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				if !s.advanceReplayStep(ctx, &rec) {
 					return 0
 				}
-				written, _ := s.writeResult(ctx, m, sigNamePtr, rec.SignalName, sigNameMaxLen)
-				payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, rec.SignalPayload, payloadMaxLen)
-				return packAwaitSignalsResult(written, payloadWritten, false, 0)
+				written, writtenEC := s.writeOut(ctx, m, sigNamePtr, rec.SignalName, sigNameMaxLen)
+				payloadWritten, payloadEC := s.writeOut(ctx, m, payloadPtr, rec.SignalPayload, payloadMaxLen)
+				// Either write can overflow, and the first non-zero code wins: a
+				// caller that sees one truncation does not need to know there were
+				// two, and reporting success because only the payload was cut would
+				// be the defect this replaces.
+				return packAwaitSignalsResult(written, payloadWritten, false, uint32(firstNonZero(writtenEC, payloadEC)))
 			}
 			if rec.EventType == EventTypeAwaitSignals {
 				if !s.advanceReplayStep(ctx, &rec) {
@@ -32,9 +36,13 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 						if !s.advanceReplayStep(ctx, &nextRec) {
 							return 0
 						}
-						written, _ := s.writeResult(ctx, m, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
-						payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
-						return packAwaitSignalsResult(written, payloadWritten, false, 0)
+						written, writtenEC := s.writeOut(ctx, m, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
+						payloadWritten, payloadEC := s.writeOut(ctx, m, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
+						// Either write can overflow, and the first non-zero code wins: a
+						// caller that sees one truncation does not need to know there were
+						// two, and reporting success because only the payload was cut would
+						// be the defect this replaces.
+						return packAwaitSignalsResult(written, payloadWritten, false, uint32(firstNonZero(writtenEC, payloadEC)))
 					}
 					// History CONTINUES past this await with something that is
 					// not a delivery, so the original execution reached that
@@ -124,9 +132,13 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 							}
 							s.recordEvent(sigRec)
 							s.consumeDelivered(ctx, name, d)
-							written, _ := s.writeResult(ctx, m, sigNamePtr, name, sigNameMaxLen)
-							payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, d.Payload, payloadMaxLen)
-							return packAwaitSignalsResult(written, payloadWritten, false, 0)
+							written, writtenEC := s.writeOut(ctx, m, sigNamePtr, name, sigNameMaxLen)
+							payloadWritten, payloadEC := s.writeOut(ctx, m, payloadPtr, d.Payload, payloadMaxLen)
+							// Either write can overflow, and the first non-zero code wins: a
+							// caller that sees one truncation does not need to know there were
+							// two, and reporting success because only the payload was cut would
+							// be the defect this replaces.
+							return packAwaitSignalsResult(written, payloadWritten, false, uint32(firstNonZero(writtenEC, payloadEC)))
 						}
 					}
 				}
@@ -254,9 +266,13 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				s.recordEvent(rec)
 				s.consumeDelivered(ctx, name, d)
 
-				written, _ := s.writeResult(ctx, m, sigNamePtr, name, sigNameMaxLen)
-				payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, d.Payload, payloadMaxLen)
-				return packAwaitSignalsResult(written, payloadWritten, false, 0)
+				written, writtenEC := s.writeOut(ctx, m, sigNamePtr, name, sigNameMaxLen)
+				payloadWritten, payloadEC := s.writeOut(ctx, m, payloadPtr, d.Payload, payloadMaxLen)
+				// Either write can overflow, and the first non-zero code wins: a
+				// caller that sees one truncation does not need to know there were
+				// two, and reporting success because only the payload was cut would
+				// be the defect this replaces.
+				return packAwaitSignalsResult(written, payloadWritten, false, uint32(firstNonZero(writtenEC, payloadEC)))
 			}
 		}
 	}
@@ -523,4 +539,17 @@ func (s *execSession) consumeDeliveredFrom(ctx context.Context, workflowID, name
 		s.engine.log().ErrorContext(ctx, "consume_signal failed; the delivery may be handed out again",
 			"workflow_id", workflowID, "tenant_id", s.tenantID, "signal_name", name, "signal_id", d.ID, "error", err)
 	}
+}
+
+// firstNonZero returns the first non-zero errCode, or 0.
+//
+// For host calls that write two values into two guest buffers: either can
+// overflow, and the call has failed if either did.
+func firstNonZero(codes ...byte) byte {
+	for _, c := range codes {
+		if c != 0 {
+			return c
+		}
+	}
+	return 0
 }

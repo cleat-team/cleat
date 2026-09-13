@@ -139,7 +139,7 @@ Make a recorded API call to an external service.
 
 | Bits | Meaning |
 |---|---|
-| 0-7 | `errCode` — 0 = success, 1 = error |
+| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation") |
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
@@ -252,6 +252,44 @@ An SDK that does not implement this reads the sentinel as an ordinary result —
 silently continue past the stop. The host therefore refuses to run a defer segment for any guest
 language not known to decode it.
 
+##### Output truncation — `errCode` 7, on every call that writes a value
+
+**Added 2026-09-12, cleat#1312.**
+
+When the host has more to write than the guest's output buffer can hold, it writes the prefix and
+returns an error result classified as truncation:
+
+| field | value |
+|---|---|
+| `errCode` (0-7) | `7` — `OutputTruncated`; the call **failed** |
+| `callErrorCode` (8-15), durable-call layouts only | `7` — `OutputTruncated` |
+| the output buffer | holds a **prefix** of the value; do not use it |
+
+**Before this the truncation was invisible.** `writeResult` cut the value to `maxLen` and returned
+only how many bytes it had written — never how many there were — so a truncated response and a
+genuinely short one were the same observation from the guest. The usual symptom was a JSON
+unmarshal error pointing at the response body, which sends the author to debug the service they
+called.
+
+**Why `7` in both fields rather than a value in each.** A guest recognising this failure would
+otherwise have to know which result layout it was decoding first. Seven is free in both spaces: the
+simple-result `errCode` byte uses 0, 1, 3, 4 and 5, and `guestCallErrorCodes` ends at 6 with
+`RetryPolicyTooLong`.
+
+**Why a classification and not a sentinel bit** — the same reasoning as retry refusal below, and it
+applies more strongly. Truncation can come from *any* call that writes a value, so a bit would need
+to be free in every layout, which is the constraint that made the stop sentinel expensive. An SDK
+that does not know code 7 reads a generic call error and fails loudly, rather than proceeding on a
+prefix.
+
+**`OutputTruncated` must be non-retryable.** Re-issuing the identical call with the identical buffer
+fails identically. The remedy is a larger buffer or a smaller payload, and both belong to the
+caller.
+
+**The prefix is still written, deliberately.** A host call site that has not been taught to
+propagate the code behaves exactly as it did before, so introducing the signal could not itself
+change what any guest received.
+
 ##### Retry refusal — `cleat_call_retry` only, and NOT a sentinel bit
 
 **Decided 2026-09-03, IMPROVEMENT-PLAN §3.94 step 1; implemented 2026-09-03 in step 4.**
@@ -344,7 +382,7 @@ Server-side retry variant of `cleat_call`. Retries happen inside the host; one e
 
 | Bits | Meaning |
 |---|---|
-| 0-7 | `errCode` — 0 = success, 1 = error |
+| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation") |
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
@@ -376,7 +414,7 @@ There is no progress channel here and there never has been. The Go and Python SD
 
 | Bits | Meaning |
 |---|---|
-| 0-7 | `errCode` — 0 = success, 1 = error |
+| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation") |
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 

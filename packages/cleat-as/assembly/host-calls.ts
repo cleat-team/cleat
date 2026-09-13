@@ -42,6 +42,10 @@ function errorCodeName(code: u32): string {
     case 3: return "not_found";
     case 4: return "invalid_request";
     case 5: return "permission_denied";
+    // 6 and 7 were missing until cleat#1312, so a guest that hit either printed
+    // "unknown_code" and the operator had a number and nothing else.
+    case 6: return "retry_policy_too_long";
+    case 7: return "output_truncated";
     default: return "unknown_code";
   }
 }

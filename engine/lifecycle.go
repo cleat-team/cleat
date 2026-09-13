@@ -298,8 +298,8 @@ func (s *execSession) UUID(ctx context.Context, m api.Module, seed string, uuidP
 	uuidStr := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		hash[0:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
 
-	written, _ := s.writeResult(ctx, m, uuidPtr, uuidStr, uuidMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, uuidPtr, uuidStr, uuidMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) SideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
@@ -324,8 +324,8 @@ func (s *execSession) freshSideEffect(ctx context.Context, m api.Module, compute
 	}
 	s.recordEvent(rec)
 
-	written, _ := s.writeResult(ctx, m, respPtr, computedResult, respMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, respPtr, computedResult, respMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
@@ -361,8 +361,8 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, comput
 			return packSimpleResult(1, written)
 		}
 
-		written, _ := s.writeResult(ctx, m, respPtr, rec.SideEffectResult, respMaxLen)
-		return packSimpleResult(0, written)
+		written, writtenEC := s.writeOut(ctx, m, respPtr, rec.SideEffectResult, respMaxLen)
+		return packSimpleResult(writtenEC, written)
 	}
 
 	s.exitReplay()
@@ -375,8 +375,8 @@ func (s *execSession) WorkflowID(ctx context.Context, m api.Module, idPtr, idMax
 	if id == "" {
 		id = "unknown"
 	}
-	written, _ := s.writeResult(ctx, m, idPtr, id, idMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, idPtr, id, idMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) RunID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {
@@ -385,8 +385,8 @@ func (s *execSession) RunID(ctx context.Context, m api.Module, idPtr, idMaxLen u
 	if runID == "" {
 		runID = "unknown"
 	}
-	written, _ := s.writeResult(ctx, m, idPtr, runID, idMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, idPtr, runID, idMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64 {
@@ -432,8 +432,8 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 				written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
 				return packSimpleResult(1, written)
 			}
-			written, _ := s.writeResult(ctx, m, responsePtr, rec.FetchResponse, responseMaxLen)
-			return packSimpleResult(0, written)
+			written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.FetchResponse, responseMaxLen)
+			return packSimpleResult(writtenEC, written)
 		}
 		s.exitReplay()
 	}
@@ -491,8 +491,8 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 		return packSimpleResult(1, written)
 	}
 
-	written, _ := s.writeResult(ctx, m, responsePtr, response, responseMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, responsePtr, response, responseMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 // JsonParse validates and canonicalises input using the host's encoding/json.
