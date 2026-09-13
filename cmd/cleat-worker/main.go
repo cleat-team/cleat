@@ -194,7 +194,7 @@ func main() {
 			logger.ErrorContext(context.Background(), "--db or DATABASE_URL required for --uninstall-plugin", "worker_id", workerID)
 			os.Exit(1)
 		}
-		udb, err := sql.Open(sqlDriverName(*driver), dsnWithSchema(dbURL, *schemaName))
+		udb, err := sql.Open(sqlDriverName(*driver), dsnWithSchema(dbURL, *schemaName, *driver))
 		if err != nil {
 			logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err)
 			os.Exit(1)
@@ -583,7 +583,7 @@ func main() {
 		}
 
 		sqlDriver := sqlDriverName(*driver)
-		dbDSN := dsnWithSchema(*dbURL, *schemaName)
+		dbDSN := dsnWithSchema(*dbURL, *schemaName, *driver)
 
 		var err error
 		switch *driver {
@@ -855,7 +855,7 @@ func main() {
 	// run DDL. Falls back to db so an unsplit deployment behaves as before.
 	migrateDB := db
 	if *migrateDBURL != "" {
-		mdb, mErr := sql.Open(sqlDriverName(*driver), dsnWithSchema(*migrateDBURL, *schemaName))
+		mdb, mErr := sql.Open(sqlDriverName(*driver), dsnWithSchema(*migrateDBURL, *schemaName, *driver))
 		if mErr != nil {
 			logger.ErrorContext(context.Background(), "failed to connect to the migration database (--migrate-db)", "worker_id", workerID, "error", mErr)
 			os.Exit(1)
@@ -1140,7 +1140,7 @@ func main() {
 	if !*batchFlushDisabled && !*noPerStepFlush {
 		// Open a dedicated DB pool for the adaptive flusher so batch flushes
 		// never queue behind workflow claims, history loads, or finalizations.
-		flusherDB, err = sql.Open(sqlDriverName(*driver), dsnWithSchema(*dbURL, *schemaName))
+		flusherDB, err = sql.Open(sqlDriverName(*driver), dsnWithSchema(*dbURL, *schemaName, *driver))
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to open flusher DB pool", "worker_id", workerID, "error", err)
 			os.Exit(1)
