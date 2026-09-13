@@ -680,8 +680,27 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_workflow_duration_seconds",
 		metric.WithDescription("Total workflow execution duration (wall clock)"),
 		metric.WithUnit("s"),
+		// THE TOP BUCKET WAS 300s, AND THIS IS A DURABLE-EXECUTION ENGINE.
+		//
+		// Every workflow longer than five minutes landed in +Inf, so a p95 or
+		// p99 over DurableSleep, a multi-day signal wait or a human-approval
+		// step could not be computed at all -- the quantile saturates at the
+		// top finite bucket and reports 300 forever. That is worse than
+		// reporting nothing, because it looks like a number and a dashboard
+		// will draw it. cleat#1309.
+		//
+		// The old set was a REQUEST-LATENCY distribution wearing this metric's
+		// name: eight buckets below one second and none above five minutes.
+		// The workloads this engine exists for live at the other end.
+		//
+		// 0.010 and 0.050 are dropped to pay for the additions, which keeps the
+		// series count near where it was (13 -> 16 per label combination). A
+		// workflow that completes in under 50ms is not a durable-execution
+		// concern and is below the engine's own claim-and-persist overhead
+		// anyway; a workflow that takes a week is exactly what this is for.
 		metric.WithExplicitBucketBoundaries(
-			0.010, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000, 10.000, 30.000, 60.000, 120.000, 300.000,
+			0.100, 0.250, 0.500, 1.000, 2.500, 5.000, 10.000, 30.000, 60.000,
+			120.000, 300.000, 900.000, 3600.000, 21600.000, 86400.000, 604800.000,
 		),
 	)
 	if err != nil {
@@ -797,11 +816,34 @@ func (m *Metrics) RecordWorkflowCompleted(ctx context.Context, workflowName stri
 }
 
 // RecordWorkflowFailed increments the workflows-failed counter.
-// workflowName, error, and taskQueue are recorded as labels.
-func (m *Metrics) RecordWorkflowFailed(ctx context.Context, workflowName string, errMsg string, taskQueue string, extraAttrs ...attribute.KeyValue) {
+// workflowName and taskQueue are recorded as labels.
+//
+// THERE IS DELIBERATELY NO ERROR LABEL, and re-adding one as free text would
+// be a defect rather than an improvement. cleat#1309.
+//
+// It used to take an `errMsg string` and record it as `attribute.String("error",
+// errMsg)`. An arbitrary error message as a Prometheus label value is unbounded
+// cardinality -- error strings carry run ids, payload fragments, service URLs
+// and timestamps -- which is the standard way to exhaust a Prometheus server's
+// memory.
+//
+// It was never live: the single non-test caller
+// (cmd/cleat-worker/setup.go) passed "". What made it worth removing rather
+// than leaving is that the SIGNATURE AND THE DOC COMMENT BOTH INVITED IT --
+// the parameter was named errMsg and the comment said "error ... recorded as
+// a label", so the next person wiring a richer failure path would fill it in.
+//
+// And the value waiting to be filled in is worse than a generic message: a
+// divergence error embeds up to two 4 KB payload snapshots (maxPayloadLen,
+// engine/durablecalls.go). That would be a cardinality explosion and a payload
+// leak into the metrics pipeline in one line.
+//
+// If a failure BREAKDOWN is wanted, it needs a bounded classification -- an
+// error code or a small closed enum -- decided on its merits, not a string
+// parameter that happens to be empty today.
+func (m *Metrics) RecordWorkflowFailed(ctx context.Context, workflowName string, taskQueue string, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(append([]attribute.KeyValue{
 		attribute.String("workflow_name", workflowName),
-		attribute.String("error", errMsg),
 		attribute.String("task_queue", taskQueue),
 	}, extraAttrs...)...)
 	m.workflowsFailed.Add(ctx, 1, metric.WithAttributes(attrs...))
