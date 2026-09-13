@@ -66,8 +66,26 @@ on:
   # MERGES -- with no check going red. There are 32 required contexts on
   # develop and every one of them has to report here.
   merge_group:
+# cleat#1426. `github.ref` is the fallback, and it is what makes this correct
+# under `merge_group`. The two operands before it are BOTH null on that event --
+# the note at the top of the job below already says so about the job body, and
+# it is just as true here, where nothing was guarding against it. The group
+# therefore collapsed to the constant "CLA Assistant-" for every queue entry at
+# once; with cancel-in-progress false a run arriving at a busy group waits, and
+# GitHub keeps only one waiting run per group, so each new entry evicted an
+# earlier one's CLA run. The queue HEAD loses that race, having waited longest,
+# and `Contributor License Agreement` is a required context -- so the head sat
+# at AWAITING_CHECKS with its other nine queue checks green while every entry
+# behind it read UNMERGEABLE. Ten PRs, ~40 minutes, on 2026-09-13.
+#
+# The tell was `gh run view <id> --json jobs --jq '.jobs | length'` returning 0:
+# evicted from a concurrency queue before a runner ever picked it up, which is a
+# different thing from a run killed mid-flight and is not a failing check.
+#
+# branch-naming.yml is the control -- same `merge_group` trigger, keyed on
+# `github.ref`, and it succeeded on every queue branch the same day.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: false
 
 permissions:
