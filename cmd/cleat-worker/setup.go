@@ -915,8 +915,19 @@ type Worker struct {
 	// whichever failed first.
 	crossTenantSchedulesUnsupportedOnce sync.Once
 
-	concurrency          int
-	maxReclaimPerTick    int
+	concurrency       int
+	maxReclaimPerTick int
+
+	// bgPlugins are the plugins implementing plugin.HasBackground, started by
+	// Run once the health tracker and metrics exist. cleat#1347.
+	bgPlugins []plugin.HasBackground
+
+	// bgWg is main()'s waitgroup, NOT w.wg, and the difference is load
+	// bearing. w.wg is awaited by Run itself with no timeout; bgWg is awaited
+	// after Run returns, under a 30-second cap. A plugin loop is third-party
+	// code that may not honour ctx promptly, and putting one on w.wg would let
+	// it block shutdown indefinitely.
+	bgWg                 *sync.WaitGroup
 	maxQueued            int
 	heartbeatInterval    time.Duration
 	pollInterval         time.Duration
@@ -1124,6 +1135,14 @@ func (w *Worker) Run() {
 	w.loopFuncs = make(map[string]func())
 	w.loopCtxMap = make(map[string]*loopContext)
 
+	// Here rather than at the end of Run, and rather than in main() where it
+	// used to be. It has to be after the health tracker exists, and it should
+	// be as early after that as possible: the loops previously started ~124
+	// lines earlier in main(), so they had a head start over the dispatch loop.
+	// Starting them before the worker loops launch keeps that ordering as close
+	// to what it was as the health tracker allows. cleat#1347.
+	w.startPluginBackground()
+
 	initLoopCtx := w.initLoopCtx
 	initLoopCtx("heartbeat")
 	initLoopCtx("reaper")
@@ -1210,6 +1229,70 @@ func (w *Worker) Run() {
 	// Graceful shutdown: wait for in-flight workflows.
 	w.logger.InfoContext(w.ctx, "waiting for in-flight workflows to complete", "worker_id", w.id)
 	w.wg.Wait()
+}
+
+// startPluginBackground starts each plugin's background loop, here rather than
+// in main(), so that a panic in one reaches the health tracker and the
+// background-loop metric. cleat#1347.
+//
+// They were started 124 lines before the *Worker existed, which put them
+// outside all three of withPanicRecovery, healthTracker.recordPanic and
+// Metrics.RecordBackgroundLoop -- so a panicking plugin loop stopped that
+// plugin's background work, logged, and was invisible to /healthz and to
+// monitoring. An operator found out by reading logs.
+//
+// DELIBERATELY NOT REGISTERED WITH initLoopCtx OR THE WATCHDOG, and this is
+// the part that needs stating rather than looking like an omission.
+//
+// Staleness is a heartbeat model: isStale falls back to registeredAt when a
+// loop has no lastRun entry and calls it stale after 120s, and recordRun is
+// what clears it. plugin.HasBackground.Run(ctx) has no access to the health
+// tracker, so it can never call recordRun -- a registered plugin loop would be
+// permanently stale from 120 seconds after startup however healthy it is.
+// With --health-check-interval defaulting to 30s the watchdog would then
+// cancel its context and restart it twice a minute, forever. A plugin that
+// sleeps between iterations -- scheduledbackup, scheduler -- would be
+// interrupted mid-sleep and re-entered, which is a worse failure than the
+// blindness this fixes, arriving as the fix.
+//
+// So a stopped plugin loop is still not restarted. Making that work needs
+// plugins to be able to heartbeat, which is an addition to plugin.Environment
+// and an obligation on plugin authors: a design decision, not a follow-through.
+//
+// The metric name is prefixed rather than bare, so a plugin cannot collide
+// with a worker loop -- "dispatch" is taken.
+func (w *Worker) startPluginBackground() {
+	for _, bg := range w.bgPlugins {
+		bg := bg
+		name := "plugin:" + bg.Info().Name
+		if w.bgWg != nil {
+			w.bgWg.Add(1)
+		}
+		go func() {
+			if w.bgWg != nil {
+				defer w.bgWg.Done()
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					w.healthTracker.recordPanic(name)
+					if w.Metrics != nil {
+						w.Metrics.RecordBackgroundLoop(context.Background(), name, "panic")
+					}
+					w.logger.ErrorContext(context.Background(),
+						"PANIC in plugin background worker — this plugin's background work has stopped; the worker continues",
+						"worker_id", w.id, "plugin", bg.Info().Name,
+						"error", r, "stack", string(debug.Stack()))
+				}
+			}()
+			if err := bg.Run(w.ctx); err != nil {
+				if w.Metrics != nil {
+					w.Metrics.RecordBackgroundLoop(context.Background(), name, "error")
+				}
+				w.logger.ErrorContext(context.Background(), "plugin background worker exited",
+					"worker_id", w.id, "plugin", bg.Info().Name, "error", err)
+			}
+		}()
+	}
 }
 
 // maxIdleTicks caps the dispatch loop's progressive idle backoff at
