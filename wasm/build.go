@@ -497,7 +497,22 @@ func propagateReplaces(projectRoot, outDir, modPath string, wroteSDKReplaces boo
 		if wroteSDKReplaces && (r.Old.Path == SDKModulePath || r.Old.Path == RootModulePath) {
 			continue
 		}
-		absReplace, err := filepath.Abs(filepath.Join(projectRoot, r.New.Path))
+		// filepath.Join does NOT special-case an already-absolute second
+		// argument -- Join("/proj", "/abs/dep") is "/proj/abs/dep" -- so
+		// joining unconditionally nested an absolute replace under the project
+		// and produced a path that does not exist. `go mod edit
+		// -replace=foo=/abs/path` writes exactly that form, and it is the
+		// natural one in a monorepo; the failure surfaced as an opaque `go mod
+		// tidy` error about a module it could not find. cleat#1322.
+		//
+		// A RELATIVE path must still resolve against projectRoot, which is what
+		// the join was for and what a naive fix would break. Both cases are
+		// pinned in absolute_replace_is_not_nested_test.go.
+		newPath := r.New.Path
+		if !filepath.IsAbs(newPath) {
+			newPath = filepath.Join(projectRoot, newPath)
+		}
+		absReplace, err := filepath.Abs(newPath)
 		if err != nil {
 			continue
 		}
