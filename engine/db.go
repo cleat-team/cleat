@@ -415,7 +415,8 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		var nextWakeAt, createdAt sql.NullTime
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID, &wf.ReclaimCount); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID, &wf.ReclaimCount,
+			&wf.CancellationRequested); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		if nextWakeAt.Valid {
@@ -484,13 +485,15 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 		       assigned_to, heartbeat_at, next_wake_at, completed_at, started_at, result #>> '{}', error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
 		       COALESCE(trace_id, ''), tenant_id, continued_from, reclaim_count, parent_workflow_id,
-		       created_at, COALESCE(pending_terminal_status, '')
+		       created_at, COALESCE(pending_terminal_status, ''),
+		       COALESCE(cancellation_requested, false), COALESCE(cancellation_reason, '')
 		FROM workflow_instances WHERE id = $1 AND tenant_id = $2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
 		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
-		&wf.CreatedAt, &wf.PendingTerminalStatus)
+		&wf.CreatedAt, &wf.PendingTerminalStatus,
+		&wf.CancellationRequested, &wf.CancellationReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}

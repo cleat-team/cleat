@@ -162,7 +162,8 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		var traceID sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &traceID, &wf.ReclaimCount); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &traceID, &wf.ReclaimCount,
+			&wf.CancellationRequested); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		wf.TraceID = traceID.String
@@ -203,13 +204,19 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       -- fails the build without it.
 		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id,
 		       continued_from, reclaim_count, parent_workflow_id,
-		       created_at, COALESCE(pending_terminal_status, '')
+		       created_at, COALESCE(pending_terminal_status, ''),
+		       -- CONVERT to BIT, not the raw column: SQL Server has no boolean,
+		       -- so cancellation_requested is a BIT and go-mssqldb scans it into
+		       -- a Go bool directly. COALESCE keeps a NULL from a pre-migration
+		       -- row reading as cancelled.
+		       COALESCE(cancellation_requested, 0), COALESCE(cancellation_reason, '')
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
 		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
-		&wf.CreatedAt, &wf.PendingTerminalStatus)
+		&wf.CreatedAt, &wf.PendingTerminalStatus,
+		&wf.CancellationRequested, &wf.CancellationReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

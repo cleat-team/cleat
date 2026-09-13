@@ -605,12 +605,14 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       CAST(result AS CHAR), error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
 		       COALESCE(trace_id, ''), tenant_id, continued_from, reclaim_count, parent_workflow_id,
-		       created_at, COALESCE(pending_terminal_status, '')
+		       created_at, COALESCE(pending_terminal_status, ''),
+		       COALESCE(cancellation_requested, false), COALESCE(cancellation_reason, '')
 		FROM workflow_instances WHERE id = ? AND tenant_id = ?
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg,
 		&errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID, &tenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
-		&wf.CreatedAt, &wf.PendingTerminalStatus)
+		&wf.CreatedAt, &wf.PendingTerminalStatus,
+		&wf.CancellationRequested, &wf.CancellationReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
