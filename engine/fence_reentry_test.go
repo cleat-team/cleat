@@ -111,7 +111,7 @@ func newReentryRig(t *testing.T, wasmBytes []byte, timeout time.Duration,
 	var completeResult, completeErr string
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerAllImports(linker, &completeResult, &completeErr,
-		needsWasi, abortImportType(module)); err != nil {
+		needsWasi, module); err != nil {
 		t.Fatalf("registerAllImports: %v", err)
 	}
 

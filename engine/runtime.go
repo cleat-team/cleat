@@ -135,6 +135,20 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	// monotonic clock that returns zero makes the Go runtime throw
 	// "fatal error: nanotime returning zero" before user code runs (measured,
 	// cleat#1300). The guest's real configuration is in InstantiateModuleNamed.
+	// Compiled TWICE, deliberately. The first compile is the stock surface and
+	// exists only to read each function's declared signature; applyWasiPolicyWazero
+	// then re-exports the refused ones as traps carrying those exact types, and
+	// the second compile is the module the guest actually links against. See
+	// applyWasiPolicyWazero for why a transcribed signature would be a
+	// link-time break rather than a refusal. cleat#1381.
+	stockWasi, err := wasiBuilder.Compile(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("host: compiling WASI module: %w", err)
+	}
+	applyWasiPolicyWazero(wasiBuilder, stockWasi)
+	if err := stockWasi.Close(ctx); err != nil {
+		return nil, fmt.Errorf("host: closing the stock WASI module: %w", err)
+	}
 	wasiCompiled, err := wasiBuilder.Compile(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("host: compiling WASI module: %w", err)
