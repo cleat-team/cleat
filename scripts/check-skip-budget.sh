@@ -33,7 +33,7 @@
 # each resolution purely additive. The second one evicted a green PR from the
 # merge queue, which is the expensive part.
 #
-# What makes them merge is the `merge=union` attribute on this file in
+# What makes them merge LOCALLY is the `merge=union` attribute on this file in
 # .gitattributes: git keeps the lines from both sides. Union is right for an
 # append-only ledger of independent lines and has exactly one bad case -- two
 # streams EDITING one line, which union turns into two lines rather than a
@@ -41,6 +41,13 @@
 # as tests get attributed. So it is checked for below rather than trusted
 # away: a duplicated key inflates the budget silently, and silently is the one
 # way a ceiling must not move.
+#
+# LOCALLY is load-bearing, and this comment omitted it until cleat#1395.
+# GitHub's server-side mergeability does not consult .gitattributes, so a PR
+# appending here still goes DIRTY when another one merges -- which is the
+# friction the attribute was supposed to remove. The real fix is
+# scripts/skip-ledger.d/: one file per declaration, nothing shared to conflict
+# over. New declarations go there, and ledger_lines() reads both.
 #
 # A budget is a ceiling on a job that is expected to skip *nothing* once its
 # services are up. Zero is the goal for any job that provisions everything its
@@ -56,6 +63,61 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LEDGER="$REPO_ROOT/scripts/skip-ledger.tsv"
+LEDGER_D="$REPO_ROOT/scripts/skip-ledger.d"
+
+# ledger_lines prints every declaration, from the single file and from the
+# fragment directory, as one stream.
+#
+# THE DIRECTORY EXISTS BECAUSE A SHARED FILE IS A SHARED COUNTER.
+#
+# Two streams appending to one file conflict on every concurrent merge -- that
+# is cleat#1333, and `merge=union` in .gitattributes fixes it for `git merge`
+# and `git rebase`. It does NOT fix it on GitHub: server-side mergeability does
+# not consult .gitattributes, so a PR that appends still goes DIRTY the moment
+# another one merges. Measured on one pair of heads, all three cases
+# (cleat#1395):
+#
+#	local merge, .gitattributes present     clean
+#	local merge, .gitattributes removed     CONFLICT
+#	GitHub, the same two heads              CONFLICTING / DIRTY
+#
+# Two streams writing DIFFERENT FILES have nothing to conflict over, anywhere.
+# That removes the cause instead of the symptom, and is the same move #1333
+# made for the shared total one level up: never edit a shared counter, derive
+# it.
+#
+# The single file is still read, and deliberately not migrated. Each of its
+# lines is a deliberated declaration; rewriting them wholesale is churn with a
+# real chance of dropping one, and it would conflict with every open PR that
+# touches the ledger -- causing the exact thing being fixed. New declarations
+# go in fragments, so the conflict rate for new work is zero immediately.
+ledger_lines() {
+  # `awk 1` AND NOT `cat`, and this is the whole reason the function exists
+  # rather than being a glob at the call site.
+  #
+  # cat concatenates BYTES. A fragment whose last line has no trailing newline
+  # -- which plenty of editors produce, and which git happily commits -- is
+  # joined to the first line of the next file, and the result matches no job:
+  #
+  #   cat a.tsv b.tsv    ->  1 line,  "…no trailing newlineb<TAB>2<TAB>…"
+  #                          awk -F'\t' '$1=="b"'  ->  0 matches
+  #   awk 1 a.tsv b.tsv  ->  2 lines, both jobs visible
+  #
+  # So a missing newline in one fragment does not corrupt that fragment -- it
+  # DELETES THE NEXT ONE'S DECLARATION, silently, and the budget shrinks by a
+  # grant nobody removed. That is the failure this whole script exists to stop,
+  # arriving through its own reader. awk 1 prints every line and terminates
+  # each file, so the two cases become identical.
+  #
+  # The missing file is tolerated on purpose: a repository with no fragments
+  # yet is the normal state, and the single file makes an empty result
+  # impossible anyway.
+  awk 1 "$LEDGER" 2>/dev/null
+  if [ -d "$LEDGER_D" ]; then
+    find "$LEDGER_D" -maxdepth 1 -name '*.tsv' -type f -print0 |
+      sort -z | xargs -0 -r awk 1
+  fi
+}
 
 # --self-test runs the two controls that the build-failure discriminator below
 # needs, because "it passes on a green tree" is satisfied by every broken
@@ -94,7 +156,7 @@ FIXTURE
 FIXTURE
 
   st_fail=0
-  echo "self-test (2 controls):"
+  echo "self-test (4 controls):"
 
   out="$("$0" test-go/engine "$tmp/mixed.json" 2>&1 || true)"
   if ! grep -q "did not BUILD" <<< "$out"; then
@@ -119,11 +181,52 @@ FIXTURE
     echo "  ok  a healthy report still reports ledger shortfalls"
   fi
 
+  # THE FRAGMENT DIRECTORY IS READ AT ALL.
+  #
+  # "the script still works" is satisfied by a version that silently reads no
+  # fragments -- every existing declaration lives in the single file, so the
+  # budget would be unchanged and every test would pass while the whole point
+  # of cleat#1395 quietly did nothing. This asserts the lines actually arrive,
+  # by putting a declaration somewhere only the directory read can find.
+  frag_before="$(ledger_lines | grep -c . || true)"
+  mkdir -p "$LEDGER_D"
+  probe_frag="$LEDGER_D/zz-self-test-probe.tsv"
+  printf 'self-test-job\t1\t^TestSelfTestProbe$\twritten and removed by --self-test\n' > "$probe_frag"
+  frag_after="$(ledger_lines | grep -c . || true)"
+  rm -f "$probe_frag"
+  if [ "$frag_after" -le "$frag_before" ]; then
+    echo "  FAIL fragment read: a declaration in $LEDGER_D was not picked up" >&2
+    echo "       ($frag_before lines before, $frag_after after -- expected one more)" >&2
+    st_fail=$((st_fail + 1))
+  else
+    echo "  ok  declarations in skip-ledger.d are read alongside the single file"
+  fi
+
+  # A FRAGMENT WITHOUT A TRAILING NEWLINE MUST NOT EAT THE NEXT ONE.
+  #
+  # Under `cat` it does, and the damage lands on a DIFFERENT file than the one
+  # with the defect -- so the symptom is a budget that silently lost a grant,
+  # with nothing wrong in the file that lost it.
+  mkdir -p "$LEDGER_D"
+  nl_a="$LEDGER_D/zz-self-test-no-newline.tsv"
+  nl_b="$LEDGER_D/zz-self-test-victim.tsv"
+  printf 'self-test-job\t1\t^TestNoTrailingNewline$\tno trailing newline here' > "$nl_a"
+  printf 'self-test-victim\t1\t^TestTheNextDeclaration$\tmust survive\n' > "$nl_b"
+  victim="$(ledger_lines | awk -F'\t' '$1=="self-test-victim"' | grep -c . || true)"
+  rm -f "$nl_a" "$nl_b"
+  if [ "$victim" -ne 1 ]; then
+    echo "  FAIL newline safety: a fragment with no trailing newline swallowed the" >&2
+    echo "       declaration in the next file (found $victim, expected 1)" >&2
+    st_fail=$((st_fail + 1))
+  else
+    echo "  ok  a fragment with no trailing newline does not eat the next one"
+  fi
+
   if [ "$st_fail" -ne 0 ]; then
     echo "self-test: $st_fail control(s) failed" >&2
     exit 1
   fi
-  echo "self-test: the guard tells a build failure from a ledger violation"
+  echo "self-test: build failures are told from ledger violations, and fragments are read"
   exit 0
 fi
 
@@ -243,7 +346,7 @@ fi
 
 # The budget is the SUM of this job's ledger lines, not a number anyone edits.
 # See the header of scripts/skip-ledger.tsv for why the single number had to go.
-lines="$(awk -F'\t' -v job="$JOB" '!/^#/ && NF>=3 && $1==job' "$LEDGER")"
+lines="$(ledger_lines | awk -F'\t' -v job="$JOB" '!/^#/ && NF>=3 && $1==job')"
 if [ -z "$lines" ]; then
   echo "ERROR: no skip ledger lines for job '$JOB' in $LEDGER." >&2
   echo "Add '<job key><TAB><count><TAB><test regex><TAB><why>'. A job with no" >&2
