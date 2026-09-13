@@ -8,6 +8,14 @@ package main
 // workflow, arriving minutes later, on the path that was supposed to be
 // carrying the isolation -- and a worker that is up and cannot do its job is a
 // worse failure than one that refused.
+//
+// WORKSTREAM.md gives cmd/cleat-worker/ to WS-3, and its rule for another
+// stream adding here is to say why in the comment. The reason: the mechanism
+// this flag switches on -- plugin.TenantPools, admin.create_tenant_role and
+// the HMAC derivation -- is WS-2's, landed over cleat#1350 and cleat#1361, and
+// every one of those pieces was UNREACHABLE until something parsed a flag.
+// Leaving the flag to another stream would leave a tenant-isolation mechanism
+// shipped and unwired, which is the state cleat#1307 was filed about.
 
 import (
 	"encoding/base64"
