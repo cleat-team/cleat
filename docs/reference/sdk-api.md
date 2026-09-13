@@ -545,7 +545,16 @@ DurableLog(message string)
 LogKV(message string, kvs ...interface{})
 ```
 
-Emits structured log messages recorded in the event history.
+Emits structured log messages to the worker's logger, tagged with the workflow
+id and step, and **suppressed on replay** so a resumed run does not re-emit
+lines the original execution already wrote.
+
+**Not recorded in event history**, despite the `Durable` in the name. This
+paragraph claimed it was until cleat#1308, when the host call was in fact
+discarding the message. Everything the event needs exists -- the event type,
+its compaction code, both codec directions and the payload carrier -- and the
+recording path does not, because introducing one changes replay matching for
+runs already in flight. That is open on cleat#1308.
 
 ```go
 h.LogKV("payment processed", "amount", 5000, "currency", "USD")

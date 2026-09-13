@@ -143,9 +143,16 @@ state is not preserved across replays.
 A `fmt.Println()` call during original execution writes to the console, but during
 replay there is no event history entry for it.
 
-**What to use instead**: `h.DurableLog()` records log output in event history
-and replays it deterministically. Alternatively, use `h.DurableLog().LogKV()`
-for structured key-value logging.
+**What to use instead**: `h.DurableLog()`, or `h.DurableLog().LogKV()` for
+structured key-value logging. It writes through the worker's logger, tagged
+with the workflow id, and is **suppressed on replay** -- which is the whole
+difference from `fmt.Println`, since a replayed `fmt.Println` re-prints every
+line on every resumption.
+
+It is **not** recorded in event history. This paragraph said it was until
+cleat#1308 -- and at that point the host call discarded the message outright,
+so an author who followed this rule replaced a call that printed with one that
+did nothing at all. Whether it should become durable is open on cleat#1308.
 
 ### `log` (E015)
 

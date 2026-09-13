@@ -755,9 +755,44 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 	return packSimpleResult(0, written)
 }
 
+// DurableLog emits a guest log line. It is NOT durable, despite the name and
+// despite three documents saying otherwise. cleat#1308.
+//
+// WHAT WAS WRONG. The body was `return 0`: the message was read across the
+// WASM boundary by both backends and dropped on the floor. The comment that
+// used to sit here -- "Log output goes via the worker's stdout/stderr capture"
+// -- described something that did not happen, because nothing anywhere printed
+// the message.
+//
+// THAT IS WORSE THAN A MISSING FEATURE, because a linter rule pushes authors
+// into it. docs/workflow-go-constraints.md blocks `fmt.Println` under E015 --
+// "output to stdout/stderr is not captured reliably during replay" -- and
+// tells the author to use `h.DurableLog()` instead, on the grounds that it
+// "records log output in event history and replays it deterministically". So
+// an author following the linter replaced a call that printed with one that
+// did nothing at all, and lost their logging.
+//
+// WHAT THIS DOES NOT DO, deliberately: record an event. That is the open half
+// of cleat#1308 and it is a replay-compatibility decision, not an omission.
+// Replay matching is positional -- advanceReplayStep consumes
+// s.history[s.stepCount] -- so a workflow that logs inside a loop and is
+// replayed against a history recorded before such a change would consume the
+// wrong events from that point on. Everything else the feature needs already
+// exists (EventTypeDurableLog, its compaction code and both codec directions,
+// the Message/LogLevel/LogKV fields and their payload carrier); the missing
+// piece is a recording path that in-flight runs survive.
+//
+// isReplay is checked so a replayed run does not re-emit lines the original
+// already emitted. That is the same reason a durable call is not re-issued,
+// applied to output rather than to effects -- and it is the one determinism
+// property this call does have.
 func (s *execSession) DurableLog(ctx context.Context, m api.Module, message string) int64 {
-	// Non-durable: no event recorded, no replay matching.
-	// Log output goes via the worker's stdout/stderr capture.
+	if s.isReplay {
+		return 0
+	}
+	s.engine.log().InfoContext(ctx, message,
+		"workflow_id", s.workflowID, "tenant_id", s.tenantID,
+		"step", s.stepCount, "source", "workflow")
 	return 0
 }
 
