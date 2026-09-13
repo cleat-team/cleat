@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
@@ -39,10 +40,29 @@ func TestAPluginStatementIsScopedToTheWorkflowsTenant(t *testing.T) {
 	t.Cleanup(func() { su.Close() })
 	testutil.SetupFullSchema(t, su, testutil.DialectPostgres)
 
+	ctx := context.Background()
+
+	// SCHEMA-QUALIFIED, AND THAT IS NOT TIDINESS. The engine schema is not
+	// always `public`: a per-suite deployment migrates into its own schema and
+	// reaches it through search_path. su carries that search_path; the RLS
+	// connection is opened from a DSN and does not, so an UNQUALIFIED name
+	// created here is invisible there.
+	//
+	// Measured: CI's `Test Go (engine)` passed this test and `Cluster
+	// Integration Tests` failed it, same commit, on
+	//
+	//	pq: relation "plugin_tenant_probe_19591" does not exist (42P01)
+	//
+	// reproduced locally by migrating into a schema named sx and pointing
+	// CLEAT_TEST_POSTGRES at it with search_path=sx. Qualifying makes the two
+	// jobs ask the same question.
+	var schema string
+	if err := su.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatalf("resolving the schema the engine tables actually live in: %v", err)
+	}
 	// Named per-process: engine tests share one development database with other
 	// checkouts, so a fixed name collides with a concurrent run.
-	table := fmt.Sprintf("plugin_tenant_probe_%d", os.Getpid())
-	ctx := context.Background()
+	table := fmt.Sprintf("%s.plugin_tenant_probe_%d", schema, os.Getpid())
 	t.Cleanup(func() { su.ExecContext(ctx, `DROP TABLE IF EXISTS `+table) })
 
 	const (
@@ -54,8 +74,10 @@ func TestAPluginStatementIsScopedToTheWorkflowsTenant(t *testing.T) {
 		`CREATE TABLE ` + table + ` (tenant_id uuid NOT NULL, k text NOT NULL)`,
 		`ALTER TABLE ` + table + ` ENABLE ROW LEVEL SECURITY`,
 		`ALTER TABLE ` + table + ` FORCE ROW LEVEL SECURITY`,
-		// Verbatim the policy plugin.applyTenantScoping emits.
-		`CREATE POLICY ` + table + `_tenant_isolation ON ` + table +
+		// Verbatim the shape plugin.applyTenantScoping emits. The POLICY name
+		// is a bare identifier -- it is scoped to the table, not to a schema --
+		// so only the table reference is qualified.
+		`CREATE POLICY plugin_tenant_probe_policy ON ` + table +
 			` FOR ALL USING (cleat.tenant_row_is_visible(tenant_id))`,
 	} {
 		if _, err := su.ExecContext(ctx, stmt); err != nil {
@@ -65,9 +87,28 @@ func TestAPluginStatementIsScopedToTheWorkflowsTenant(t *testing.T) {
 
 	rls := testutil.OpenPostgresRLSTestDB(t, su)
 	t.Cleanup(func() { rls.Close() })
-	if _, err := su.ExecContext(ctx,
-		`GRANT SELECT, INSERT ON `+table+` TO `+testutil.PostgresRLSTestRole); err != nil {
-		t.Fatalf("granting the RLS role access to the fixture: %v", err)
+	// SetupPostgresRLSRole grants USAGE on public and cleat only, by name. When
+	// the engine schema is neither, the role cannot reach into it at all.
+	for _, g := range []string{
+		`GRANT USAGE ON SCHEMA ` + schema + ` TO ` + testutil.PostgresRLSTestRole,
+		`GRANT SELECT, INSERT ON ` + table + ` TO ` + testutil.PostgresRLSTestRole,
+	} {
+		if _, err := su.ExecContext(ctx, g); err != nil {
+			t.Fatalf("granting the RLS role access to the fixture: %v\n  %s", err, g)
+		}
+	}
+
+	// PRECONDITION, CHECKED RATHER THAN ASSUMED. If the RLS connection cannot
+	// resolve the fixture, everything below reports 42P01 from inside the
+	// plugin -- which reads as a finding about the tenant bridge and is not one.
+	// This is the UNMEASURED case: say so here, where the cause is visible.
+	var visible bool
+	if err := rls.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&visible); err != nil {
+		t.Fatalf("asking the RLS connection whether it can see %s: %v", table, err)
+	}
+	if !visible {
+		t.Fatalf("UNMEASURED: the RLS-role connection cannot resolve %s, so this test "+
+			"cannot observe the policy at all. Nothing below would be about cleat#1278.", table)
 	}
 
 	// One row for each tenant. THEIRS is the one the policy has to exclude; a
@@ -100,10 +141,18 @@ func TestAPluginStatementIsScopedToTheWorkflowsTenant(t *testing.T) {
 	}
 
 	if seenErr != nil {
-		t.Fatalf("the plugin's statement failed: %v\n"+
-			"  Before cleat#1278 this was exactly \"cleat.tenant_id is not set\": the\n"+
-			"  host-call path set plugin.CallContext.TenantID and nothing put the value\n"+
-			"  in tenantctx, which is the only carrier beginTenantTx reads.", seenErr)
+		// DISCRIMINATE, because the first draft of this message did not. It
+		// attributed every failure to the tenant bridge, and the failure it
+		// actually met first was a schema-resolution error -- which read as a
+		// finding about cleat#1278 and was not one.
+		hint := "  This is NOT the cleat#1278 signature. Read the error above on its own terms;\n" +
+			"  a 42P01 here means the fixture is not resolvable from the RLS connection."
+		if strings.Contains(seenErr.Error(), "cleat.tenant_id is not set") {
+			hint = "  This IS the cleat#1278 signature: the host-call path set\n" +
+				"  plugin.CallContext.TenantID and nothing put the value in tenantctx,\n" +
+				"  which is the only carrier beginTenantTx reads."
+		}
+		t.Fatalf("the plugin's statement failed: %v\n%s", seenErr, hint)
 	}
 	if seen != 1 {
 		t.Fatalf("the plugin saw %d rows, want 1.\n"+
