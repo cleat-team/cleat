@@ -137,7 +137,7 @@ Assembles the build directory and compiles:
 
    | File | Purpose |
    |------|---------|
-   | `gen_wasm_imports.go` | WASM import declarations for the host functions this package's closure actually calls (a subset of the 59 available -- `cleat build` reports the count it generated, e.g. "Generating WASM imports (9 host functions used)") |
+   | `gen_wasm_imports.go` | WASM import declarations for the host functions this package's closure actually calls (a subset of those available -- `cleat build` reports the count it generated, e.g. "Generating WASM imports (9 host functions used)") |
    | `gen_wasm_memory.go` | Memory buffer setup for string passing |
    | `gen_host_adapter.go` | Adapter code that bridges Go types to WASM i64 values |
    | `gen_wasm_exports.go` | Named WASM exports for each entry point |
@@ -193,8 +193,9 @@ the entry point -- the transformer handles the rest.
 > is the **only** backend — the wazero one was deleted in #459 (2026-08-10) —
 > and the count is 52.
 
-The WASM module imports host functions from the `env` module -- **52** as of
-2026-09-06 (`ABI.md` documents each one). Two independent registrations exist
+The WASM module imports host functions from the `env` module -- `ABI.md` §2
+documents each one, and `scripts/check-doc-consistency.sh` holds that list to
+`engine/imports.go`. Two independent registrations exist
 and are held identical by `engine/hostabi_runtime_parity_test.go`:
 
 - `engine/wasmtime_hostfuncs*.go` / `engine/backend_wasmtime.go` — the wasmtime

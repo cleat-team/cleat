@@ -54,7 +54,8 @@ and syscall boundary but not the CPU/wall-clock one.
   filesystem or network access by default.
 - **Host functions controlled**: The only way workflow code interacts with the
   outside world is through the host functions registered on the `env` module
-  (59 as of 2026-08-09 — `grep -c '\.Export("' engine/imports.go` plus the
+  (`ABI.md` §2 enumerates them; this line quoted a count until 2026-09-13, by
+  which time it was five short) plus the
   three non-`cleat_`-prefixed exports; see `ABI.md` §2). Each host function is
   a controlled Go function that validates inputs before acting.
 - **Linear memory isolation**: Each WASM module gets its own linear memory.

@@ -1309,22 +1309,27 @@ because nothing re-reads the prose. A test that asserts the blind spot is absent
 red when the blind spot returns, and it stays green — saying nothing, correctly — when it does
 not. **Prefer converting a gap into a failing test over describing it here.**
 
-**The two counts still answer different questions**, and that part survives: the engine exports
-52, of which 49 carry the `cleat_` prefix and three do not. The parity test now compares all 52 —
-it no longer compares a subset, which is what the deleted paragraph got wrong.
+**The two counts still answer different questions**, and that part survives — but state it as a
+predicate, not a census, because the census is what rotted twice already. **Exactly three exports
+are unprefixed** (`plugin_call`, `plugin_call_streaming`, `set_query_state`), and **the parity test
+compares every export rather than a prefixed subset**, which is what the deleted paragraph got
+wrong. Both were true at 50, are true at 54, and will be true at the next value. The total itself
+is a live query and is given below; do not carry it in prose, including from here.
 
 **This paragraph said 58 and 55 until 2026-09-06, and it is the sharpest example of its own
 rule.** The section exists to warn that a count in prose rots, and its count rotted: six exports
 went with the durable-state family (§3.216), and two more with the inert signal calls (§3.220) a
 few hours after this very paragraph was corrected to 52. It then rotted a third time, upward:
 `cleat_poll_update` and `cleat_complete_update` arrived with workflow updates (#868), so the run
-is 58 → 52 (#767) → 50 (#843) → **52** (#868) — four values in three days, every one correct when
-written, and the section above still said 50 on 2026-09-08. Note the direction: the first two
+is 58 → 52 (#767) → 50 (#843) → 52 (#868) → **54** (measured 2026-09-13) — five values in eight
+days, every one correct when written. The paragraph above said 52 for five of those days, which is
+the fifth time this passage has been stale about its own subject; it now states a predicate rather
+than a number, which is the only repair that survives the next export. Note the direction: the first two
 were removals and the third an addition, so "the number only goes down" is not available as a
 sanity check either. Nothing failed any of the three times, because **no test asserts these
-numbers**. `ABI.md` stayed correct over the same period —
-it and `engine/imports.go` agree on all 52 with an empty set difference — so the drift was in this
-file alone. That is no longer luck: since #952, `scripts/check-doc-consistency.sh` compares the
+numbers**. `ABI.md` stayed correct over the whole period, 52 through 54 —
+`scripts/check-doc-consistency.sh` reports it agreeing with `engine/imports.go` on every host call
+with an empty set difference — so the drift has been in this file alone, every time. That is no longer luck: since #952, `scripts/check-doc-consistency.sh` compares the
 two SETS on every CI run and fails on either difference, which is the same "convert it into a
 failing test" move as the parity filter above. Nothing yet checks the numbers in *this* file, so
 re-derive before quoting, including from here.

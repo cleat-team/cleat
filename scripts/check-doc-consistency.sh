@@ -122,6 +122,21 @@ else
   fi
 fi
 
+# --- 4. No other document restates the count ------------------------------
+# Section 3 holds ABI.md's host-call SET to the code. Nothing held any other
+# document to anything, and on 2026-09-13 that showed: eight tracked documents
+# stated a count and seven were wrong, three of them by five (cleat#1414). The
+# one that was right is the one section 3 checks.
+#
+# Delegated to Python rather than written here, because the claim wraps across
+# lines -- "HostCall imports" and the number were never on one line together, so
+# a line-oriented grep for it returned empty and was nearly published as "no
+# other occurrences". A guard for something this shape should not be a shell
+# script; see CLAUDE.md's zsh/bash section for why.
+if ! python3 scripts/check-host-call-counts.py; then
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo >&2
   echo "ABI.md is a public contract implemented by SDKs in other languages." >&2

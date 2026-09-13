@@ -1551,16 +1551,23 @@ Host-only extension for streaming plugin function calls. Same signature as `plug
 
 ### Previously undocumented functions
 
-> Added 2026-08-09, re-derived 2026-09-06. The registered set is **52** (49
-> `cleat_*` exports plus `plugin_call`, `plugin_call_streaming`,
-> `set_query_state`).
+> Added 2026-08-09, re-derived 2026-09-06 and again 2026-09-13. **Exactly three
+> exports carry no `cleat_` prefix** — `plugin_call`, `plugin_call_streaming`,
+> `set_query_state` — which is the part that does not drift, and the reason a
+> prefix-anchored scan under-counts by three while still returning a plausible
+> total. The total itself is a query, not a number; run the commands below.
 >
 > ```
 > python3 -c "import re;print(len(set(re.findall(r'\.Export\("([^"]+)"\)',
->   open('engine/imports.go').read()))))"                                  # 52
+>   open('engine/imports.go').read()))))"
 > grep -oE '"cleat_[a-zA-Z_]+"|"set_query_state"|"plugin_call[a-zA-Z_]*"' \
->   engine/wasmtime_hostfuncs*.go engine/backend_wasmtime*.go | cut -d: -f2 | sort -u | wc -l   # 52
+>   engine/wasmtime_hostfuncs*.go engine/backend_wasmtime*.go | cut -d: -f2 | sort -u | wc -l
 > ```
+>
+> The two must agree. They are the registration table and the wasmtime binding
+> site, and #452 is what happens when they do not: expected values are omitted
+> here on purpose, because a stale annotation beside a live command is read as
+> the answer and the command is not run.
 >
 > **The registered count has moved twice since this note was added**: 59 → 58
 > when #582 removed `cleat_child_workflow_in_schema` (2026-09-02) → 52 when
