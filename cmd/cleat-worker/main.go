@@ -1180,6 +1180,8 @@ func main() {
 		scheduleInterval:                 15 * time.Second,
 		compactionThreshold:              *compactionThreshold,
 		compactionInterval:               *compactionInterval,
+		stallThreshold:                   *stallThreshold,
+		metricsSweepInterval:             *metricsSweepInterval,
 		retentionInterval:                *retentionInterval,
 		versionGCInterval:                *versionGCInterval,
 		versionGCMinVersions:             *versionGCMinVersions,

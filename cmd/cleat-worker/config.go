@@ -77,16 +77,31 @@ var (
 	// of a stall rather than of workers dying. cleat#1320.
 	maxReclaimPerTick = flag.Int("max-reclaim-per-tick", 200,
 		"Max stale instances the reaper reclaims per tick (0 = unbounded; see --help for why bounding matters)")
-	maxQueued             = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")
-	heartbeatInterval     = flag.Duration("heartbeat", 5*time.Second, "Heartbeat interval")
-	pollInterval          = flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
-	notifyChannel         = flag.String("notify-channel", "cleat_dispatch", "PostgreSQL NOTIFY channel for dispatch wake-up (empty disables)")
-	apiAddr               = flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
-	pprofAddr             = flag.String("pprof-addr", "", "Go pprof HTTP listen address (e.g., :6060)")
-	taskQueuesStr         = flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
-	compactionThreshold   = flag.Int("compaction-threshold", 100, "Number of events before history compaction triggers")
-	compactionInterval    = flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
-	retentionInterval     = flag.Duration("retention-interval", 24*time.Hour, "Interval between retention sweeps")
+	maxQueued           = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")
+	heartbeatInterval   = flag.Duration("heartbeat", 5*time.Second, "Heartbeat interval")
+	pollInterval        = flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
+	notifyChannel       = flag.String("notify-channel", "cleat_dispatch", "PostgreSQL NOTIFY channel for dispatch wake-up (empty disables)")
+	apiAddr             = flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
+	pprofAddr           = flag.String("pprof-addr", "", "Go pprof HTTP listen address (e.g., :6060)")
+	taskQueuesStr       = flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
+	compactionThreshold = flag.Int("compaction-threshold", 100, "Number of events before history compaction triggers")
+	compactionInterval  = flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
+	retentionInterval   = flag.Duration("retention-interval", 24*time.Hour, "Interval between retention sweeps")
+	// SEPARATE FROM THE REAPER'S STALE TIMEOUT ON PURPOSE, though they start
+	// from the same idea. The reaper asks "has this run missed enough
+	// heartbeats that I should take it back", and answers in seconds because
+	// reclaiming early is cheap. This asks "has a run been wedged long enough
+	// that a human should look", and a human paged every ten seconds stops
+	// reading the page. cleat_workflows_stuck has always been described as
+	// "stalled beyond the configured stall threshold" and nothing configured
+	// it; this is that threshold. cleat#1317.
+	stallThreshold = flag.Duration("stall-threshold", 5*time.Minute,
+		"How long a running workflow may go without progress before it counts toward cleat_workflows_stuck. "+
+			"Independent of the reaper's reclaim timeout, which is derived from --heartbeat-interval: this one "+
+			"is an alerting threshold, not a recovery one.")
+	metricsSweepInterval = flag.Duration("metrics-sweep-interval", 60*time.Second,
+		"Interval between database sweeps that publish the gauges nothing else feeds: stuck workflows, "+
+			"event-history size and row count, and active concurrency keys. 0 disables the sweep.")
 	shardsFile            = flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
 	pluginConfigFile      = flag.String("plugin-config", "", "path to plugin config JSON file")
 	memorySoftLimit       = flag.Float64("memory-soft-limit", 0.80, "Memory soft limit fraction 0.0-1.0 (stop claiming new work)")
