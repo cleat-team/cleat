@@ -605,16 +605,11 @@ func (e *ServiceNotFoundError) Unwrap() error {
 	return e.Err
 }
 
-// CallTimeoutError is returned when a call exceeds its timeout.
-type CallTimeoutError struct {
-	Service   string
-	Operation string
-	Timeout   time.Duration
-}
-
-func (e *CallTimeoutError) Error() string {
-	return fmt.Sprintf("call %s.%s timed out after %v", e.Service, e.Operation, e.Timeout)
-}
+// There is no SDK-side CallTimeoutError. It was removed with the CallOptions
+// timeout fields in cleat#1006 -- nothing could produce it, so a workflow
+// matching on it with errors.As would never match. A timeout REPORTED BY THE
+// HOST arrives as a *CallError with Code == CallErrorTimeout, which is a real
+// signal and is retryable.
 
 // ---- Plugin and versioning types ----
 
@@ -691,18 +686,43 @@ func (p ParentClosePolicy) Valid() bool {
 
 // CallOptions provides per-call configuration.
 //
-// Timeout and StartToCloseTimeout are respected when the host-side
-// durableCallWithOptions import is populated (the normal WASM runtime path).
-// When falling back to the SDK-level retry loop these fields are advisory
-// since the underlying DurableCall import has no timeout parameter.
+// There is deliberately NO per-call timeout here. `Timeout` and
+// `StartToCloseTimeout` were removed in cleat#1006 because they were inert on
+// every path a workflow can actually run on, and the only way to make them work
+// without an ABI change would have introduced a determinism defect.
+//
+// Measured 2026-09-13, one slow call (400ms/2s) and one short timeout, with a
+// control proving the delay was really in the path in each row:
+//
+//	path                                      Timeout   StartToCloseTimeout
+//	compiled WASM (cleat build --target go)   inert     inert
+//	cleat/cleattest (unit-test harness)       inert     inert
+//	cleat/localdev (local dev runner)         inert     inert
+//	hand-built HostCalls, WithOptions nil     works     works
+//
+// The last row is cleat/runtime_test.go and nothing else, which is why the
+// tests were green for as long as the fields existed. adapterDefs has no
+// DurableCallWithOptions entry, so the generated adapter leaves the import nil
+// and the SDK fallback runs -- a goroutine racing time.After, inside a wasip1
+// guest that is blocked in a synchronous //go:wasmimport for the whole call, so
+// the timer cannot be serviced until there is nothing left to interrupt. The
+// two harnesses that DO populate the import discard the field instead.
+//
+// Making the goroutine work was not an option: time.After reads the wall clock,
+// so a timeout that fires on the original execution and not on replay is a
+// determinism failure in an engine whose contract is that replay reproduces the
+// original. A real per-call timeout needs a host-side representation the way
+// retry already has one -- cleat_call_retry carries its policy in four i64s --
+// and that is a feature with an ABI cost, to be argued on its merits.
 type CallOptions struct {
-	Retry           *RetryPolicy
-	MaxResponseSize int           // 0 = use default (64KB), capped at outBufSize
-	Timeout         time.Duration // 0 = no timeout, per-call deadline
-	// Overall deadline for the call including all retries.
-	// Unlike Timeout (per-attempt), this caps the total wall-clock time.
-	// Temporal-compatible.
-	StartToCloseTimeout time.Duration
+	Retry *RetryPolicy
+	// MaxResponseSize is read by NOTHING -- cleat#1424. The comment it used to
+	// carry ("0 = use default (64KB), capped at outBufSize") cites a constant
+	// wasm/generator.go documents as dead, and the live output buffer has been
+	// adaptive since cleat#1384. Left in place rather than removed because that
+	// is a separate decision from the one cleat#1006 recorded; the census in
+	// calloptions_census_test.go is what keeps it visible.
+	MaxResponseSize int
 }
 
 // RetryPolicy configures automatic retry behavior for durable calls.
@@ -1110,61 +1130,6 @@ func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 		return h.durableCallWithOptions(opts, service, operation, requestJSON)
 	}
 
-	// Per-call timeout enforcement.
-	// When opts.Timeout > 0, the call is wrapped in a goroutine and must
-	// complete within the deadline or a CallTimeoutError is returned.
-	if opts.Timeout > 0 {
-		type callResult struct {
-			resp string
-			err  error
-		}
-		ch := make(chan callResult, 1)
-		go func() {
-			resp, err := h.DurableCall(service, operation, requestJSON)
-			ch <- callResult{resp, err}
-		}()
-		select {
-		case r := <-ch:
-			return r.resp, r.err
-		case <-time.After(opts.Timeout):
-			return "", &CallTimeoutError{
-				Service:   service,
-				Operation: operation,
-				Timeout:   opts.Timeout,
-			}
-		}
-	}
-
-	// StartToCloseTimeout: overall deadline across all retry attempts.
-	// Unlike Timeout (per-attempt), this caps the total wall-clock time.
-	var overallDeadline time.Time
-	if opts.StartToCloseTimeout > 0 {
-		overallDeadline = time.Now().Add(opts.StartToCloseTimeout)
-
-		if opts.Retry == nil {
-			// No retry: use StartToCloseTimeout as the per-call timeout.
-			type callResult struct {
-				resp string
-				err  error
-			}
-			ch := make(chan callResult, 1)
-			go func() {
-				resp, err := h.DurableCall(service, operation, requestJSON)
-				ch <- callResult{resp, err}
-			}()
-			select {
-			case r := <-ch:
-				return r.resp, r.err
-			case <-time.After(opts.StartToCloseTimeout):
-				return "", &CallTimeoutError{
-					Service:   service,
-					Operation: operation,
-					Timeout:   opts.StartToCloseTimeout,
-				}
-			}
-		}
-	}
-
 	if opts.Retry == nil {
 		return h.DurableCall(service, operation, requestJSON)
 	}
@@ -1223,26 +1188,11 @@ func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 	rp := opts.Retry
 	var lastErr error
 	for attempt := 1; attempt <= rp.MaxAttempts; attempt++ {
-		if !overallDeadline.IsZero() && time.Now().After(overallDeadline) {
-			return "", &CallTimeoutError{
-				Service:   service,
-				Operation: operation,
-				Timeout:   opts.StartToCloseTimeout,
-			}
-		}
 		resp, err := h.DurableCall(service, operation, requestJSON)
 		if err == nil {
 			return resp, nil
 		}
 		lastErr = err
-
-		if !overallDeadline.IsZero() && time.Now().After(overallDeadline) {
-			return "", &CallTimeoutError{
-				Service:   service,
-				Operation: operation,
-				Timeout:   opts.StartToCloseTimeout,
-			}
-		}
 
 		if isNonRetryable(err, rp.NonRetryableErrors) {
 			return "", err
@@ -1252,16 +1202,6 @@ func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 			backoff := time.Duration(float64(rp.InitialInterval) * math.Pow(rp.BackoffCoefficient, float64(attempt-1)))
 			if backoff > rp.MaxInterval {
 				backoff = rp.MaxInterval
-			}
-			if !overallDeadline.IsZero() {
-				remaining := time.Until(overallDeadline)
-				if backoff > remaining {
-					return "", &CallTimeoutError{
-						Service:   service,
-						Operation: operation,
-						Timeout:   opts.StartToCloseTimeout,
-					}
-				}
 			}
 			h.DurableSleep(backoff)
 		}
@@ -1273,80 +1213,6 @@ func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 func (h *HostCallsImpl) DurableCallTypedWithOptions(opts CallOptions, service, operation string, request, result interface{}) error {
 	if h.durableCallTypedWithOptions != nil {
 		return h.durableCallTypedWithOptions(opts, service, operation, request, result)
-	}
-
-	// Per-call timeout enforcement for the typed variant.
-	if opts.Timeout > 0 {
-		type callResult struct {
-			resp string
-			err  error
-		}
-		ch := make(chan callResult, 1)
-		go func() {
-			reqBytes, marshalErr := json.Marshal(request)
-			if marshalErr != nil {
-				ch <- callResult{"", marshalErr}
-				return
-			}
-			resp, callErr := h.DurableCallWithOptions(opts, service, operation, string(reqBytes))
-			ch <- callResult{resp, callErr}
-		}()
-		select {
-		case r := <-ch:
-			if r.err != nil {
-				return r.err
-			}
-			if result != nil {
-				if err := json.Unmarshal([]byte(r.resp), result); err != nil {
-					return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
-				}
-			}
-			return nil
-		case <-time.After(opts.Timeout):
-			return &CallTimeoutError{
-				Service:   service,
-				Operation: operation,
-				Timeout:   opts.Timeout,
-			}
-		}
-	}
-
-	// StartToCloseTimeout: overall deadline across all retry attempts.
-	// When there is a retry policy, DurableCallWithOptions handles the deadline.
-	if opts.StartToCloseTimeout > 0 && opts.Retry == nil {
-		// No retry: use StartToCloseTimeout as the per-call timeout.
-		type callResult struct {
-			resp string
-			err  error
-		}
-		ch := make(chan callResult, 1)
-		go func() {
-			reqBytes, marshalErr := json.Marshal(request)
-			if marshalErr != nil {
-				ch <- callResult{"", marshalErr}
-				return
-			}
-			resp, callErr := h.DurableCall(service, operation, string(reqBytes))
-			ch <- callResult{resp, callErr}
-		}()
-		select {
-		case r := <-ch:
-			if r.err != nil {
-				return r.err
-			}
-			if result != nil {
-				if err := json.Unmarshal([]byte(r.resp), result); err != nil {
-					return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
-				}
-			}
-			return nil
-		case <-time.After(opts.StartToCloseTimeout):
-			return &CallTimeoutError{
-				Service:   service,
-				Operation: operation,
-				Timeout:   opts.StartToCloseTimeout,
-			}
-		}
 	}
 
 	reqBytes, err := json.Marshal(request)

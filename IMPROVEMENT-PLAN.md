@@ -5814,6 +5814,40 @@ possible; it did not close that leg.
 seven and needs those two answers first.
 
 
+## Resolved 2026-09-13: the option was removed, and the unmeasured half is now measured
+
+"One of two things is true and which one is not measured" above has an answer. **`opts.Timeout`
+never fires.** The timer cannot preempt a blocking `//go:wasmimport` under wasip1, so the
+divergence this section worried about was never reachable -- the defect was the quieter one, a
+silently ineffective option, which is cleat#1006.
+
+Measured with one slow call and one short timeout, each row carrying a control that proves the
+delay was really in the path:
+
+| path | `Timeout` | `StartToCloseTimeout` |
+|---|---|---|
+| compiled WASM (`cleat build --target go`), 2s call vs 50ms timeout | inert, returned at 2.00s | inert |
+| `cleat/cleattest`, 400ms call vs 20ms timeout | inert, returned at 400ms | inert |
+| `cleat/localdev`, 400ms call vs 20ms timeout | inert, returned at 401ms | inert |
+| hand-built `HostCalls`, `DurableCallWithOptions` nil | **fires at 21ms** | **fires at 20ms** |
+
+The last row is the positive control and it is `cleat/runtime_test.go` and nothing else, which is
+why every test of this field was green for as long as the field existed. Note the two middle rows:
+`cleattest` and `localdev` are the two things that DO populate the import this section is about,
+and both discard the option -- `cleattest` takes it as `_`, `localdev` reads only `Retry`. So
+emitting the adapter field would not have been the fix either; the option had no honest reader
+anywhere.
+
+Both fields are removed as of cleat#1006, along with `CallTimeoutError`, which nothing could
+produce once they were gone. A host-reported timeout still arrives, as `*CallError` with
+`Code == CallErrorTimeout`.
+
+**What survives from this section is its conclusion, not its worry.** A real per-call deadline is
+still a semantics decision before a signature one, still needs a replayable outcome recorded in the
+call event, and still needs a guest clock that advances across a suspension. Removing the field
+does not build any of that -- it stops claiming it.
+
+
 
 ### 3.226 The Go SDK cannot fail the host-call coverage guard, because its denominator is the wiring table — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
 

@@ -1324,12 +1324,12 @@ func TestDurableCallTypedWithOptionsDelegates(t *testing.T) {
 		},
 	})
 
-	err := h.DurableCallTypedWithOptions(CallOptions{Timeout: time.Second}, "svc", "op", map[string]string{}, nil)
+	err := h.DurableCallTypedWithOptions(CallOptions{MaxResponseSize: 4096}, "svc", "op", map[string]string{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if capturedOpts.Timeout != time.Second {
-		t.Errorf("expected timeout 1s, got %v", capturedOpts.Timeout)
+	if capturedOpts.MaxResponseSize != 4096 {
+		t.Errorf("expected MaxResponseSize 4096, got %d", capturedOpts.MaxResponseSize)
 	}
 }
 
@@ -1814,99 +1814,6 @@ func TestSagaAddParallelCompensatesOnFailure(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DurableCallWithOptions — Timeout paths
-// ---------------------------------------------------------------------------
-
-func TestDurableCallWithOptions_TimeoutFires(t *testing.T) {
-	started := make(chan struct{})
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			close(started)
-			time.Sleep(10 * time.Second)
-			return "ok", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	_, err := h.DurableCallWithOptions(CallOptions{Timeout: 5 * time.Millisecond}, "svc", "op", `{}`)
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	var timeoutErr *CallTimeoutError
-	if !errors.As(err, &timeoutErr) {
-		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
-	}
-	if timeoutErr.Service != "svc" || timeoutErr.Operation != "op" {
-		t.Errorf("unexpected service/operation: %s.%s", timeoutErr.Service, timeoutErr.Operation)
-	}
-	if timeoutErr.Timeout != 5*time.Millisecond {
-		t.Errorf("expected timeout %v, got %v", 5*time.Millisecond, timeoutErr.Timeout)
-	}
-}
-
-func TestDurableCallWithOptions_TimeoutDoesNotFire(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			return "quick_result", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	resp, err := h.DurableCallWithOptions(CallOptions{Timeout: time.Second}, "svc", "op", `{}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp != "quick_result" {
-		t.Errorf("expected %q, got %q", "quick_result", resp)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// DurableCallWithOptions — StartToCloseTimeout paths
-// ---------------------------------------------------------------------------
-
-func TestDurableCallWithOptions_StartToCloseTimeoutFires(t *testing.T) {
-	started := make(chan struct{})
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			close(started)
-			time.Sleep(10 * time.Second)
-			return "ok", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	_, err := h.DurableCallWithOptions(CallOptions{StartToCloseTimeout: 5 * time.Millisecond}, "svc", "op", `{}`)
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	var timeoutErr *CallTimeoutError
-	if !errors.As(err, &timeoutErr) {
-		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
-	}
-	if timeoutErr.Timeout != 5*time.Millisecond {
-		t.Errorf("expected timeout %v, got %v", 5*time.Millisecond, timeoutErr.Timeout)
-	}
-}
-
-func TestDurableCallWithOptions_StartToCloseTimeoutDoesNotFire(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			return "fast_result", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	resp, err := h.DurableCallWithOptions(CallOptions{StartToCloseTimeout: time.Second}, "svc", "op", `{}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp != "fast_result" {
-		t.Errorf("expected %q, got %q", "fast_result", resp)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // DurableCallWithOptions — host-side DurableCallWithRetry delegation
 // ---------------------------------------------------------------------------
 
@@ -2022,101 +1929,6 @@ func TestDurableCallJSONWithOptions_NotInitialized(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not initialized") {
 		t.Errorf("expected 'not initialized' error, got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// DurableCallTypedWithOptions — Timeout path
-// ---------------------------------------------------------------------------
-
-func TestDurableCallTypedWithOptions_TimeoutFires(t *testing.T) {
-	started := make(chan struct{})
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			close(started)
-			time.Sleep(10 * time.Second)
-			return "ok", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	err := h.DurableCallTypedWithOptions(CallOptions{Timeout: 5 * time.Millisecond}, "svc", "op", map[string]string{"k": "v"}, nil)
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	var timeoutErr *CallTimeoutError
-	if !errors.As(err, &timeoutErr) {
-		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
-	}
-	if timeoutErr.Timeout != 5*time.Millisecond {
-		t.Errorf("expected timeout %v, got %v", 5*time.Millisecond, timeoutErr.Timeout)
-	}
-}
-
-func TestDurableCallTypedWithOptions_TimeoutDoesNotFire(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			return `{"result":"ok"}`, nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	type MyResult struct {
-		Result string `json:"result"`
-	}
-	var res MyResult
-	err := h.DurableCallTypedWithOptions(CallOptions{Timeout: time.Second}, "svc", "op", map[string]string{"k": "v"}, &res)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.Result != "ok" {
-		t.Errorf("expected result 'ok', got %q", res.Result)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// DurableCallTypedWithOptions — StartToCloseTimeout path (no retry)
-// ---------------------------------------------------------------------------
-
-func TestDurableCallTypedWithOptions_StartToCloseTimeoutFires(t *testing.T) {
-	started := make(chan struct{})
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			close(started)
-			time.Sleep(10 * time.Second)
-			return "ok", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	err := h.DurableCallTypedWithOptions(CallOptions{StartToCloseTimeout: 5 * time.Millisecond}, "svc", "op", map[string]string{}, nil)
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	var timeoutErr *CallTimeoutError
-	if !errors.As(err, &timeoutErr) {
-		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
-	}
-}
-
-func TestDurableCallTypedWithOptions_StartToCloseTimeoutDoesNotFire(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			return `{"result":"ok"}`, nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	type MyResult struct {
-		Result string `json:"result"`
-	}
-	var res MyResult
-	err := h.DurableCallTypedWithOptions(CallOptions{StartToCloseTimeout: time.Second}, "svc", "op", map[string]string{}, &res)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.Result != "ok" {
-		t.Errorf("expected result 'ok', got %q", res.Result)
 	}
 }
 
