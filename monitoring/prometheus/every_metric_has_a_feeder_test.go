@@ -35,12 +35,16 @@ var unfedMetrics = map[string]string{
 	// WasmDiskCache exposes neither its length nor its size.
 	"SetConcurrencyKeysExpiringSoon": "NEEDS A FEEDER. The leading indicator " +
 		"for a key sweep falling behind",
-	"SetWasmCacheEntries": "NEEDS A FEEDER. Compiled-module cache occupancy",
-	"SetWasmCacheBytes":   "NEEDS A FEEDER. The byte half of the same",
 
 	// The counters and histograms. Less severe -- a counter never Added reads
 	// 0 rather than vanishing -- but still an instrument nothing writes.
-	"RecordWasmLoadLatency":       "NEEDS A CALL SITE. Module load latency",
+	"RecordWasmCompileDuration": "NEEDS A CALL SITE, and did not used to -- it " +
+		"was fed from the LOAD path, which compiles nothing, so it carried " +
+		"storage latency under a compile name (cleat#1317). Real compilation is " +
+		"Runtime.CompileModule in engine/, which has no Metrics handle; same " +
+		"blocker as RecordEncryptionError below. Deliberately left unfed rather " +
+		"than fed from the wrong measurement: an absent histogram is honest, a " +
+		"confident wrong one invites action",
 	"RecordEncryptionError":       "NEEDS A CALL SITE. Payload-encryption failures",
 	"RecordReaperInstanceClaimed": "NEEDS A CALL SITE. Reaper reclaims",
 }

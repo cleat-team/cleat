@@ -92,6 +92,22 @@ func (c *wasmLRUCache) sizeBytesLocked() int64 {
 	return total
 }
 
+// stats reports the cache's occupancy for cleat_wasm_cache_entries and
+// cleat_wasm_cache_bytes (cleat#1317). Both gauges existed, were registered and
+// described, and nothing ever called them -- so an operator sizing
+// --wasm-cache-max-mb had no way to see what the cache actually held.
+//
+// Reuses sizeBytesLocked rather than tracking a running total, because a
+// running total is a second source of truth for a number this already computes
+// and would drift silently on any future eviction path that forgot to update
+// it. The walk is over at most --wasm-cache-max-entries elements, once per
+// memory tick.
+func (c *wasmLRUCache) stats() (entries int, bytes int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.index), c.sizeBytesLocked()
+}
+
 func (c *wasmLRUCache) evictLocked() {
 	if elem := c.list.Back(); elem != nil {
 		entry := elem.Value.(*wasmLRUEntry)
@@ -1457,6 +1473,15 @@ func (w *Worker) dispatchLoop() {
 			w.Metrics.RecordWorkflowMemoryEstimate(w.ctx, key.tenantID, key.defName, bytes)
 		}
 		w.Metrics.SetQueueDepth(w.ctx, state.QueueDepth)
+
+		// Compiled-module cache occupancy, on the same tick as the other
+		// gauges. It is the observable for --wasm-cache-max-entries and
+		// --wasm-cache-max-mb, which an operator otherwise tunes blind.
+		if w.wasmCache != nil {
+			ents, cbytes := w.wasmCache.stats()
+			w.Metrics.SetWasmCacheEntries(w.ctx, int64(ents))
+			w.Metrics.SetWasmCacheBytes(w.ctx, cbytes)
+		}
 		updateThroughputGauges()
 
 		if !w.memoryController.CanClaim() {
@@ -1737,9 +1762,26 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 
 	// ---- Load WASM ----
+	//
+	// THIS MEASURES A LOAD AND USED TO FEED THE COMPILE METRIC. loadWASM checks
+	// the in-memory cache, then the disk cache, then the database, and returns
+	// []byte -- it compiles nothing. So cleat_wasm_compile_duration_seconds
+	// ("WASM compile duration by def_name") has been carrying storage latency,
+	// and cleat_wasm_load_latency_seconds ("Time to load a WASM module from
+	// storage"), which is exactly this quantity, was never fed at all
+	// (cleat#1317).
+	//
+	// An operator alerting on compile duration was therefore watching the
+	// database and the disk cache. Not a missing metric -- a confident wrong
+	// one, which is the worse of the two because it invites action.
+	//
+	// Real compilation is Runtime.CompileModule (engine/runtime.go:209), which
+	// lives in a package with no Metrics handle. Feeding the compile metric
+	// from here as well would publish one measurement under two names, which is
+	// the defect cleat#1317 already found in SetMemoryPressureRatio.
 	wasmStart := time.Now()
 	wasmBytes, err := w.loadWASM(wf.DefName, wf.DefVersion)
-	w.Metrics.RecordWasmCompileDuration(context.Background(), time.Since(wasmStart), wf.DefName)
+	w.Metrics.RecordWasmLoadLatency(context.Background(), time.Since(wasmStart), wf.DefName)
 	if err != nil {
 		w.logger.ErrorContext(context.Background(), "failed to load WASM", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		var ce *engine.CleatError
