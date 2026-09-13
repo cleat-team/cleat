@@ -264,6 +264,17 @@ jobs:
           scripts/check-python-sdk-surface.py --self-test
           scripts/check-python-sdk-surface.py
 
+      # Plugin tables share one flat, unqualified namespace, and CREATE TABLE
+      # IF NOT EXISTS checks the NAME, not the shape -- so a second plugin
+      # claiming a name is a silent no-op recorded as a successful migration,
+      # surfacing much later as "column does not exist" (cleat#1288).
+      # --self-test first: on a clean tree "no collisions" and "the scan is
+      # broken" print the same kind of success.
+      - name: Plugin table namespace guard
+        run: |
+          scripts/check-plugin-table-namespace.py --self-test
+          scripts/check-plugin-table-namespace.py
+
       # Three workstreams append sections to IMPROVEMENT-PLAN.md at once, each
       # picking the next free number against a develop that has already moved.
       # The collision exists only in the merge, and a duplicate heading renders
