@@ -94,6 +94,7 @@ does not care about retries needs no special case; one that cares reads one fiel
 | `POST /api/workflows/<name>/start` | `201 {"id":…}` | `201 {"id":…, "idempotent_replay":true, "status":…}` |
 | `POST /api/dead-letters/<id>/reprocess` | `201 {"id":…}` | `201 {"id":…, "idempotent_replay":true}` |
 | `POST /api/workflows/<id>/signal` | `200 {"status":"delivered"}` | `200 {"status":"delivered", "idempotent_replay":true}` |
+| `POST /api/schedules` | `201 {"status":"created"}` | `201 {"status":"created", "idempotent_replay":true}` |
 
 **Two things this deliberately does not change.**
 
@@ -105,10 +106,33 @@ and returning the first result would hide that.
 two callers who both send nothing do not collide, and a caller may still send the same signal twice
 on purpose. The flag is present and `false`.
 
-**Not yet uniform:** `POST /api/schedules` creates work and does not read `Idempotency-Key`. It
-deduplicates by the client-supplied name and answers `409 schedule_exists` for a collision, which is
-a different question from a retry — and without a key it cannot tell the two apart. Tracked
-separately.
+**`POST /api/schedules` answers two different questions, and the key is what separates them.**
+cleat#1495. Until it read the header it could not be asked the second one at all: a retried request
+and a genuine name collision both arrive as a second create under a taken name, and both were
+answered `409 schedule_exists` — correct for the collision, and wrong for the retry in the direction
+that makes a client give up on work it successfully submitted.
+
+| request | answer |
+|---|---|
+| `Idempotency-Key: K`, first time | `201 {"status":"created", "idempotent_replay":false}` |
+| the same request again under `K` | `201 {"status":"created", "idempotent_replay":true}` — nothing is created |
+| `K` again with a **different** request | `409 idempotency_key_input_mismatch` |
+| **no key**, name already taken | `409 schedule_exists` — unchanged |
+
+`ErrScheduleExists` was not reversed by this. It keeps answering *someone else's name is in the way*
+and stops being conscripted to answer *I am retrying my own request*, which it was never the right
+answer to.
+
+**The comparison covers the whole request, not just `input`.** Name, definition, entry point, cron
+expression, input, enabled, timezone, misfire policy, catch-up limit and overlap policy — a key
+reused with a different cron expression is a mismatch, not a replay. `next_run_at` is deliberately
+**excluded**: the server computes it from the cron expression and the clock on every request, so two
+identical retries a second apart always disagree on it, and including it would make every retry fail
+closed.
+
+**A schedule created without a key keeps no key**, and nothing is invented for it retroactively. The
+key is stored on the schedule row and lives exactly as long as the schedule; it is never returned by
+`GET /api/schedules`, because knowing a key lets a caller join or displace another caller's retry.
 
 ### The HTTP API returns this column verbatim
 

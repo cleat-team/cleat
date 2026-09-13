@@ -2239,11 +2239,36 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		CatchUpLimit:   req.CatchUp,
 		OverlapPolicy:  req.Overlap,
 	}
-	if err := st.CreateSchedule(r.Context(), sch); err != nil {
+	// The key is what lets this endpoint tell a retry from a name collision.
+	// Without one it cannot be asked the question: both arrive as a second
+	// create under a taken name, and both were answered `409 schedule_exists`
+	// -- correct for the collision and wrong for the retry. cleat#1495.
+	sch.IdempotencyKey = r.Header.Get("Idempotency-Key")
+
+	err := st.CreateSchedule(r.Context(), sch)
+	switch {
+	case err == nil:
+		s.writeJSON(w, 201, withReplayFlag(map[string]any{"status": "created"}, false))
+	case errors.Is(err, engine.ErrScheduleIdempotentReplay):
+		// THE ORIGINAL RESPONSE, not a different one. cleat#1169's policy is
+		// that a duplicate returns what the first call returned plus the flag,
+		// so a caller that never thinks about retries stays correct and one
+		// that cares opts in to noticing.
+		s.writeJSON(w, 201, withReplayFlag(map[string]any{"status": "created"}, true))
+	case errors.Is(err, engine.ErrIdempotencyKeyInputMismatch):
+		// Same `detail` string as the start handler's branch, deliberately: a
+		// client branching on it should not need to know which endpoint it
+		// called to recognise the case. cleat#1170.
+		s.writeJSON(w, 409, map[string]string{
+			"error":  err.Error(),
+			"detail": "idempotency_key_input_mismatch",
+		})
+	default:
+		// ErrScheduleExists still lands here and still means what it always
+		// meant -- somebody else's name is in the way. It is no longer
+		// conscripted to answer "I am retrying my own request".
 		s.writeScheduleError(w, r, "create", req.Name, err)
-		return
 	}
-	s.writeJSON(w, 201, map[string]string{"status": "created"})
 }
 
 // writeScheduleError classifies a schedule store failure instead of reporting

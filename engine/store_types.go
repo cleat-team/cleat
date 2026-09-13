@@ -248,6 +248,23 @@ type Schedule struct {
 	// the stores write their own s.tenantID there, so a caller cannot create a
 	// schedule for a tenant it is not scoped to.
 	TenantID string `json:"tenant_id"`
+
+	// IdempotencyKey is the caller-supplied Idempotency-Key that created this
+	// schedule, and is what lets POST /api/schedules tell a retry from a name
+	// collision. Empty means the schedule was created without one, which is a
+	// fact about it rather than a gap -- see migrations/postgres/072.
+	//
+	// WRITE-ONLY, and `json:"-"` is the point rather than tidiness. A key is a
+	// secret in the weak sense that knowing one lets a caller join or displace
+	// another caller's retry, and ListSchedules is readable by anything holding
+	// the tenant's credentials. It goes in and is never handed back.
+	//
+	// There is deliberately no InputDigest field beside it. The digest is
+	// computed by the store, over the same value the store writes to `input`,
+	// so a caller cannot present a digest that disagrees with the input it is
+	// sending -- which is the one way a mismatch check can be made to pass
+	// against input it has not seen.
+	IdempotencyKey string `json:"-"`
 }
 
 // PromiseInfo holds the state of a cleat promise.

@@ -298,9 +298,28 @@ CREATE TABLE workflow_schedules (
     catch_up_limit INTEGER NOT NULL DEFAULT 60,
     overlap_policy TEXT NOT NULL DEFAULT 'allow',
     last_run_id TEXT,
+    idempotency_key TEXT,
+    request_digest TEXT,
     PRIMARY KEY (tenant_id, name)
 );
+
+CREATE UNIQUE INDEX uq_workflow_schedules_idempotency_key
+    ON workflow_schedules (tenant_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 ```
+
+`idempotency_key` and `request_digest` are what let `POST /api/schedules` tell a retry from a
+genuine name collision (cleat#1495). They live on the schedule row rather than in
+`idempotency_keys` because that table's `workflow_id` is `NOT NULL` and a schedule has no workflow
+id — and because retention there is built for a run: cleat#1258 deletes a key with the workflow it
+names and cleat#1264 expires it on `expires_at`, neither of which has an answer for a long-lived
+schedule. On the row, the key lives exactly as long as the thing it created.
+
+**The index is partial, and on SQL Server that is required rather than tidy.** A unique index there
+treats NULLs as equal, so an unfiltered one would permit at most *one* keyless schedule per tenant
+and refuse every create from a caller that never sent a key. PostgreSQL and MySQL do not collide
+NULLs and would be correct either way; the filter is written on all three so the constraint means
+the same thing everywhere. See `migrations/postgres/072`.
 
 #### workflow_promises
 
