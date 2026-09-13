@@ -1062,7 +1062,7 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 // back, so a deadlock no longer loses the terminal write. ErrFenceLost is
 // returned before the commit and is not an mssql.Error, so the fence
 // semantics are untouched by the retry. See withRollbackGuaranteedRetry.
-func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+func (s *MSSQLStore) finalizeWorkflowSegmentInner(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	return withRollbackGuaranteedRetry(ctx, "finalize workflow segment", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		return s.finalizeWorkflowSegmentOnce(ctx, runID, workerID, generation, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
 	})
@@ -1555,4 +1555,20 @@ func (s *MSSQLStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID strin
 		}
 	}
 	return keep, nil
+}
+
+// FinalizeWorkflowSegment wraps finalizeWorkflowSegmentInner so that a backend
+// refusing a JSON value it was handed becomes a classified error rather than
+// driver text. cleat#1460.
+//
+// WRAPPED AT THE BOUNDARY, not at each return, and that is the point: this
+// function has a dozen error paths and will grow more, and a classification
+// applied at one of them is a classification the next one silently lacks.
+// wrapRejectedResult returns anything it does not recognise unchanged, so the
+// blanket wrap costs nothing and cannot mislabel an unrelated failure.
+func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	return wrapRejectedResult(
+		s.finalizeWorkflowSegmentInner(ctx, runID, workerID, generation, newEvents,
+			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
+		runID, result)
 }

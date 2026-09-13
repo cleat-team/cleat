@@ -385,7 +385,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 //
 // Fields not relevant to the chosen status are ignored.
 
-func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+func (s *PostgresStore) finalizeWorkflowSegmentInner(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	if !validFinalStatus(finalStatus) {
 		return fmt.Errorf("finalize workflow: unknown final status: %s", finalStatus)
 	}
@@ -1597,4 +1597,20 @@ func looksLikeJSONObject(result string) bool {
 		}
 	}
 	return false
+}
+
+// FinalizeWorkflowSegment wraps finalizeWorkflowSegmentInner so that a backend
+// refusing a JSON value it was handed becomes a classified error rather than
+// driver text. cleat#1460.
+//
+// WRAPPED AT THE BOUNDARY, not at each return, and that is the point: this
+// function has a dozen error paths and will grow more, and a classification
+// applied at one of them is a classification the next one silently lacks.
+// wrapRejectedResult returns anything it does not recognise unchanged, so the
+// blanket wrap costs nothing and cannot mislabel an unrelated failure.
+func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	return wrapRejectedResult(
+		s.finalizeWorkflowSegmentInner(ctx, runID, workerID, generation, newEvents,
+			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
+		runID, result)
 }

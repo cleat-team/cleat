@@ -29,6 +29,7 @@ const (
 	ErrTimeout                    // execution timeout
 	ErrAmbiguous                  // call outcome unknown after crash (replay found pending intent)
 	ErrRetriesExhausted           // retries exhausted
+	ErrResultRejected             // the store refused the workflow result as it was written
 )
 
 // String returns a human-readable representation of the error code
@@ -47,6 +48,8 @@ func (c ErrorCode) String() string {
 		return "ambiguous"
 	case ErrRetriesExhausted:
 		return "retries_exhausted"
+	case ErrResultRejected:
+		return "result_rejected_by_store"
 	default:
 		return "unknown"
 	}
