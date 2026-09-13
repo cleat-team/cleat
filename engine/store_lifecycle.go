@@ -859,6 +859,19 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 }
 
 // ReleaseWorkflow returns a workflow to the queue with a next wake time.
+//
+// This is the other end of the pair described on ReapStaleInstances, and the
+// pairing is invisible from either side alone. The row this writes -- 'ready'
+// or 'terminating', assigned_to NULL, next_wake_at set -- is UNREACHABLE BY THE
+// REAPER, which matches status='running'. That is correct: a parked workflow
+// has no owner, so losing the worker that parked it costs nothing and there is
+// nothing to reclaim. It resumes through the ordinary claim predicate at its
+// wake time, whichever worker gets there.
+//
+// Worth stating because it is routinely mistaken for crash recovery. A test
+// that kills a worker while its workflow is mid-DurableSleep is not exercising
+// the reaper at all -- the workflow was already parked and unowned before the
+// kill, and it comes back when the sleep expires (cleat#1429).
 
 func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 	tx, err := s.beginTxWithRLS(ctx)
