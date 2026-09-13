@@ -40,7 +40,9 @@ func runCost(args []string) {
 	fs.IntVar(&c.workload, "workload", c.workload, "Workflows per second")
 	fs.Float64Var(&c.avgDuration, "avg-duration", c.avgDuration, "Average workflow execution time (seconds)")
 	fs.IntVar(&c.eventsPerWF, "events-per-wf", c.eventsPerWF, "Average events per workflow execution")
-	fs.IntVar(&c.retentionDays, "retention-days", c.retentionDays, "Event history retention in days")
+	fs.IntVar(&c.retentionDays, "retention-days", c.retentionDays,
+		"Assumed event-history retention in days. NOT what the engine does -- "+
+			"see the NOTE ON STORAGE this command prints (cleat#1295)")
 	fs.IntVar(&c.replication, "replication", c.replication, "Storage replication factor (1=single, 2=multi-AZ)")
 	fs.StringVar(&c.provider, "provider", c.provider, "Cloud provider: aws, gcp, self")
 	fs.IntVar(&c.concurrency, "concurrency", c.concurrency, "Worker concurrency")
@@ -68,6 +70,38 @@ func (c *costCommand) Estimate() *CostEstimate {
 	// Compute derived values.
 	eventsPerSec := float64(c.workload * c.eventsPerWF)
 	est.EventsPerSecond = eventsPerSec
+	// THIS STORAGE MODEL DOES NOT MATCH WHAT THE ENGINE DOES. cleat#1295.
+	//
+	// It assumes every event persists for retentionDays. Verified against
+	// develop, and the errors run in BOTH directions:
+	//
+	//   finalize_workflow_status deletes a workflow's event_history at a
+	//   terminal state, but only for 'done' or 'failed' --
+	//   migrations/postgres/053_the_finalize_procedure_stops_writing_the_
+	//   result_column.sql: `IF v_rows_updated > 0 AND (p_final_status = 'done'
+	//   OR p_final_status = 'failed')`. So for the overwhelming majority of
+	//   runs those rows live for the WORKFLOW'S DURATION, and this term
+	//   over-estimates by roughly retentionDays / average duration.
+	//
+	//   'terminated' and 'dead_lettered' go the other way. Neither
+	//   TerminateWorkflow nor MoveToDeadLetterQueue calls finalize, and
+	//   DeleteExpiredEvents selects `status IN ('done','failed')` (engine/
+	//   db.go), so on default flags those events are retained INDEFINITELY.
+	//   DeleteCompletedWorkflows does cover 'terminated', but
+	//   --completed-workflow-retention-days defaults to 0, i.e. off.
+	//
+	//   workflow_instances rows are not modelled at all, and are unbounded by
+	//   default for the same reason.
+	//
+	// The two errors do not cancel, so this is not simply "too high": it is a
+	// figure computed from a retention model the engine does not implement.
+	//
+	// DELIBERATELY NOT REPLACED WITH A BETTER MODEL. An honest one needs an
+	// event term bounded by concurrent ACTIVE workflows rather than by a
+	// window, a separate term for terminal rows retained indefinitely, and a
+	// workflow_instances term. That is a modelling decision with an owner, not
+	// something to invent inside a wording fix. What this change does is stop
+	// the number claiming to be something it is not.
 	est.DailyStorageGB = eventsPerSec * 86400 * 400 / (1024 * 1024 * 1024) // 400 bytes per event
 	est.MonthlyStorageGB = est.DailyStorageGB * 30
 	est.TotalStorageGB = est.MonthlyStorageGB * float64(c.retentionDays) / 30.0 * float64(c.replication)
@@ -104,6 +138,25 @@ func (c *costCommand) Estimate() *CostEstimate {
 }
 
 // Format returns a human-readable cost estimate.
+// storageModelCaveats is printed beside the storage figures rather than only
+// in --help, because the figure is what an operator sizes a deployment from.
+// The measurements behind each line are in the note on the model in Estimate.
+// cleat#1295.
+const storageModelCaveats = `  NOTE ON STORAGE: the figures above assume every event is retained for the
+  full retention window. The engine does not behave that way, and the errors
+  run in both directions:
+    - 'done'/'failed' workflows have their event history deleted when they
+      finish, so those events live for the workflow's duration, not the
+      window. Over-estimated, by roughly (retention / avg duration).
+    - 'terminated'/'dead_lettered' workflows keep their events indefinitely on
+      default flags; no sweep selects them.
+    - workflow_instances rows are not counted at all, and are unbounded by
+      default (--completed-workflow-retention-days is 0).
+  Treat the storage figures as an upper bound on the event term, and as no
+  estimate at all for the rest. See cleat#1295.
+
+`
+
 func (c *costCommand) Format() string {
 	est := c.Estimate()
 
@@ -124,6 +177,10 @@ func (c *costCommand) Format() string {
 	b.WriteString(fmt.Sprintf("  Monthly storage:    %.2f GB\n", est.MonthlyStorageGB))
 	b.WriteString(fmt.Sprintf("  Retained storage:   %.2f GB (incl. replication %dx)\n", est.TotalStorageGB, est.Replication))
 	b.WriteString(fmt.Sprintf("  Workers needed:     %d\n\n", est.WorkerCount))
+
+	// Beside the number, not only in --help. An operator sizing a deployment
+	// reads the figure; --help reaches whoever already suspected something.
+	b.WriteString(storageModelCaveats)
 
 	b.WriteString("Cost Breakdown:\n")
 	b.WriteString(fmt.Sprintf("  DB instance (%s):     $%.0f/month\n", est.DBInstanceType, est.DBMonthlyCost))
