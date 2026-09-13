@@ -58,9 +58,21 @@ func TestForeignSessionsSeesAnotherProcess(t *testing.T) {
 				defer stranger.Close()
 				foreign, basis, ok = ForeignSessions(dialect)
 			} else {
-				restore := selfPID
-				selfPID = func() int { return restore() + 1 } // we are now "someone else"
-				defer func() { selfPID = restore }()
+				// BOTH identities move, and the second one is not decoration.
+				// MySQL and SQL Server report the client's real OS pid, so the
+				// only way to stage "another process" here is to claim we are
+				// someone else. Since cleat#1483 the probe also exempts a
+				// SIBLING -- another package binary of the same `go test`,
+				// identified by sharing our parent -- and the staged stranger
+				// is this very process, whose parent is of course our parent.
+				// Moving selfPID alone therefore made the probe classify the
+				// staged session as a sibling and report NONE, which failed
+				// this positive control on both dialects. A stranger has a
+				// different lineage, so the fixture has to give it one.
+				restorePID, restorePPID := selfPID, selfPPID
+				selfPID = func() int { return restorePID() + 1 }   // someone else...
+				selfPPID = func() int { return restorePPID() + 1 } // ...with someone else's parent
+				defer func() { selfPID, selfPPID = restorePID, restorePPID }()
 				foreign, basis, ok = ForeignSessions(dialect)
 			}
 
