@@ -93,7 +93,15 @@ func openSecondConnection(t *testing.T, dialect Dialect, appName string) *sql.DB
 		if appName != "" {
 			u, err := url.Parse(dsn)
 			if err != nil {
-				t.Skipf("PostgreSQL DSN is not a URL, so this control cannot stage a stranger")
+				// NOT a skip. By the time this runs, ForeignSessions has
+				// already confirmed it can recognise our own sessions, which
+				// on PostgreSQL means tagPostgresDSN parsed this DSN as a URL
+				// and the server echoed the tag back. So an unparseable DSN
+				// here is unreachable, and a skip would be indistinguishable
+				// from the control having run.
+				t.Fatalf("PostgreSQL DSN did not parse as a URL (%v), but ForeignSessions "+
+					"reported it could identify our own sessions by application_name -- "+
+					"those two cannot both be true", err)
 			}
 			q := u.Query()
 			q.Set("application_name", appName)
