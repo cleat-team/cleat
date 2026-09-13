@@ -92,6 +92,26 @@ const (
 	// make the mechanism right, and the mechanism is what the next reader
 	// checks. Under a function-granularity key this could not be said at all:
 	// one string covered three statements and described none of them.
+	// cleatctl, and NOT deliberatelyCrossTenant -- whose clause names cleat_admin
+	// membership checked in Go, which is the WORKER's gate and nothing cleatctl
+	// runs. Getting that distinction wrong would attach a true-sounding reason
+	// to a mechanism that does not exist on this path, which is the failure
+	// mode scopedByCompactionSweep below was written to avoid.
+	//
+	// cleatctl's gate is the CONNECTION. cmd/cleatctl/main.go requires a DSN
+	// naming a role that row-level security does not apply to -- a superuser or
+	// one with BYPASSRLS -- and warnIfTenantScoped says so on stderr when the
+	// connection cannot answer the questions cleatctl asks (cleat#1184). The
+	// worker refuses to start on exactly such a role; the two tools take
+	// opposite connections on purpose.
+	//
+	// So the id is an OPERATOR-SUPPLIED argument, not one read from a row, and
+	// a tenant predicate would defeat the command: `cleatctl replay <id>` after
+	// an incident is asked by someone who does not know which tenant the run
+	// belongs to, and is the post-incident tool for finding out (cleat#1316).
+	adminToolAcrossTenants = "deliberately cross-tenant: an operator-supplied id in cleatctl, " +
+		"whose DSN must name a BYPASSRLS role (cleat#1184)"
+
 	scopedByCompactionSweep = "scoped by the sweep that produced the id: GetCompactionCandidates " +
 		"restricts on s.tenantID and compactionLoop compacts on the same store"
 )
@@ -101,6 +121,14 @@ const (
 // statement it is true of, and a statement ADDED to a function inherits
 // nothing. See stmtExemption for what that changed.
 var tenantPredicateAllowlist = map[string]stmtExemption{
+	// cmd/cleatctl, not engine. This guard scans ../cmd/ as well, and the entry
+	// lives here because the mechanism does -- the digest is over the SQL, so
+	// this exemption stops covering the statement the moment the statement
+	// changes.
+	"replay.go:loadWorkflowInstanceSQL#cd97aca08a1e": {
+		SQL:    "select id, def_name, def_version, status, input, coalesce(result, ''), coalesc",
+		Reason: adminToolAcrossTenants,
+	},
 	"mssql_deployment.go:TraceWorkflow#22bb6cd8c42c": {
 		SQL:    "update workflow_instances set trace_id = @p2 where id = @p1",
 		Reason: scopedByCaller,

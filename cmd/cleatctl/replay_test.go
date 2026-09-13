@@ -215,7 +215,7 @@ func TestLoadWorkflowInstance_Success(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	inst, err := loadWorkflowInstance(ctx, db, "wf-test-123")
+	inst, err := loadWorkflowInstance(ctx, db, dialectPostgres, "wf-test-123")
 	if err != nil {
 		t.Fatalf("loadWorkflowInstance returned error: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestLoadWorkflowInstance_NotFound(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	inst, err := loadWorkflowInstance(ctx, db, "nonexistent")
+	inst, err := loadWorkflowInstance(ctx, db, dialectPostgres, "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for not-found workflow")
 	}

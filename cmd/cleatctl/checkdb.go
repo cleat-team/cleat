@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cleat-team/cleat/plugin"
 	"os"
 	"strings"
 	"time"
@@ -18,7 +19,52 @@ import (
 // runCheckDB verifies database connectivity and schema health.
 // It connects to the database, pings it, checks the schema migration version,
 // inspects workflow instance counts, and reports overall health status.
-func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
+
+// coreTableExistsSQL asks whether one core table exists, per dialect.
+//
+// THE TWO ARMS TAKE DIFFERENT NUMBERS OF PARAMETERS, which is unusual enough to
+// say out loud. MySQL has no schema inside a database -- the two are one
+// namespace -- so there is no schema to bind, and the right question is "in the
+// database this DSN selected", which DATABASE() answers. Asking across all
+// schemas instead would count a table of the same name in any other database on
+// the server, and report a missing table as present.
+//
+// The caller switches on an empty schema from dialect.qualifiedTable and binds
+// accordingly. Written as a plugin.Query rather than two inline strings so that
+// the MySQL-only form is STRUCTURALLY identifiable as a non-PostgreSQL arm:
+// TestEveryInlineStatementParsesOnPostgres PREPAREs every inline statement
+// against PostgreSQL, where DATABASE() does not exist, and it prunes MySQL and
+// MSSQL arms by key. A bare string literal is not something it can recognise.
+var coreTableExistsSQL = plugin.Query{
+	Default: `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`,
+	MySQL:   `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = $1`,
+}
+
+// latestMigrationSQL reads the highest applied schema version.
+//
+// `ORDER BY ... LIMIT 1` is not SQL Server syntax; it wants TOP. This is the
+// one statement in check-db where the DIALECTS DIFFER IN SYNTAX rather than in
+// schema, which is why it is a plugin.Query arm and not a rebind --
+// plugin.Rebind rewrites placeholders, now() and boolean literals, and has no
+// business rewriting a row-limiting clause.
+var latestMigrationSQL = plugin.Query{
+	Default: `
+		SELECT version, applied_at
+		FROM schema_migrations
+		ORDER BY version DESC
+		LIMIT 1`,
+	MSSQL: `
+		SELECT TOP 1 version, applied_at
+		FROM schema_migrations
+		ORDER BY version DESC`,
+}
+
+// errSizeEstimateNotPortable marks the event-history size estimate as skipped
+// rather than failed. It never reaches a user: the caller reads it only to take
+// the row-count branch, which prints a row count instead of a size.
+var errSizeEstimateNotPortable = errors.New("event history size estimate is PostgreSQL-only")
+
+func runCheckDB(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	verbose := false
 	for _, arg := range args {
 		if arg == "--verbose" || arg == "-v" {
@@ -59,12 +105,7 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 	// 2. Schema version.
 	var schemaVersion string
 	var appliedAt *time.Time
-	err := db.QueryRowContext(ctx, `
-		SELECT version, applied_at
-		FROM schema_migrations
-		ORDER BY version DESC
-		LIMIT 1
-	`).Scan(&schemaVersion, &appliedAt)
+	err := db.QueryRowContext(ctx, latestMigrationSQL.For(d.query)).Scan(&schemaVersion, &appliedAt)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		fmt.Fprintf(os.Stderr, "SCHEMA: WARNING: cannot read schema version: %v\n", err)
 		issues = append(issues, fmt.Sprintf("schema version check failed: %v", err))
@@ -140,21 +181,22 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 		// and a `tenants` in any other schema indistinguishable, so a table in
 		// the wrong schema reads as present. That mattered the moment the list
 		// stopped being purely public: four of these live in `admin`.
-		schemaName, bareName, qualified := strings.Cut(table, ".")
-		if !qualified {
-			bareName = table
-		}
+		// Which schema a core table lives in is dialect-dependent and not
+		// derivable from the PostgreSQL name: MySQL has no `admin` schema at
+		// all, SQL Server keeps `admin` but puts the rest in `dbo`. See
+		// dialect.qualifiedTable, which TestQualifiedTableMatchesEachDialects-
+		// Migrations holds to each dialect's own migration files.
+		schemaName, bareName := d.qualifiedTable(table)
 		var count int
 		var err error
-		if qualified {
-			err = db.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
-				schemaName, bareName,
-			).Scan(&count)
-		} else {
-			err = db.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1 AND table_schema NOT IN ('pg_catalog', 'information_schema')",
+		switch {
+		case schemaName == "":
+			err = db.QueryRowContext(ctx, d.rebind(coreTableExistsSQL.For(d.query)),
 				bareName,
+			).Scan(&count)
+		default:
+			err = db.QueryRowContext(ctx, d.rebind(coreTableExistsSQL.For(d.query)),
+				schemaName, bareName,
 			).Scan(&count)
 		}
 		if err != nil {
@@ -229,11 +271,27 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 	}
 
 	// 5. Event history size estimate.
+	//
+	// pg_column_size(row_to_json(...)) has no portable equivalent, and the
+	// nearest ones are not the same measurement -- MySQL's
+	// information_schema.TABLES.DATA_LENGTH and SQL Server's sp_spaceused
+	// report ALLOCATED pages including free space and indexes, not the size of
+	// the rows. Reporting either under the same label would be a different
+	// number wearing this one's name.
+	//
+	// So the query is not issued at all off PostgreSQL, rather than issued and
+	// allowed to fail into the row-count path below. The fallback exists for a
+	// query that FAILED; using it for one that was never applicable makes an
+	// error path carry an expected case, and the stderr line it prints would be
+	// reporting a defect that is not there.
 	var histSize int64
-	err = db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(pg_column_size(row_to_json(event_history.*))), 0)
-		FROM event_history
-	`).Scan(&histSize)
+	err = errSizeEstimateNotPortable
+	if d.name == "postgres" {
+		err = db.QueryRowContext(ctx, `
+			SELECT COALESCE(SUM(pg_column_size(row_to_json(event_history.*))), 0)
+			FROM event_history
+		`).Scan(&histSize)
+	}
 	if err == nil {
 		sizeMB := float64(histSize) / (1024 * 1024)
 		fmt.Printf("EVENT HISTORY: %.1f MB\n", sizeMB)
@@ -248,6 +306,7 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 			fmt.Fprintf(os.Stderr, "EVENT HISTORY: UNREADABLE: %v\n", countErr)
 			issues = append(issues, fmt.Sprintf("cannot read event_history: %v", countErr))
 		}
+		_ = histSize
 	}
 
 	// 6. Dead letters are reported by section 4 above, and were never reported

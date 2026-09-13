@@ -186,7 +186,7 @@ func runCheckDBTestNoStub(t *testing.T, script []checkDBResult, args []string) (
 	defer db.Close()
 
 	return withExitPanicOutput(t, func() {
-		runCheckDB(context.Background(), db, args)
+		runCheckDB(context.Background(), db, dialectPostgres, args)
 	})
 }
 
