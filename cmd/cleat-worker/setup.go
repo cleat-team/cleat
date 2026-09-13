@@ -463,7 +463,28 @@ func mysqlBaseDSN(dsn string) string {
 
 // dsnWithSchema appends a PostgreSQL search_path parameter to the DSN when the
 // schema is not "public".
-func dsnWithSchema(dsn, schema string) string {
+//
+// IT TAKES THE DRIVER, and that is the fix rather than a tidy-up. `search_path`
+// is a PostgreSQL concept and --schema is documented as PostgreSQL-only, but
+// two of the worker's three pools called this without checking the driver:
+// the migration pool and the adaptive flusher pool, the second of which opens
+// on every worker by default. Measured against live servers (cleat#1374):
+//
+//	root:...@tcp(...)/cleat?search_path=x   Error 1193: Unknown system variable
+//	sqlserver://...?search_path=x            accepted and SILENTLY IGNORED
+//
+// So a non-default --schema broke MySQL at the first query and did nothing at
+// all on SQL Server, while the main pool -- which got it right, inside its
+// `case "postgres":` arm -- put its tables where they were asked for. The
+// worst of the three outcomes is SQL Server's: two pools disagreeing about
+// which schema they address, with no error anywhere.
+//
+// Deciding here rather than at each call site means a new pool cannot get it
+// wrong by forgetting a check that lives somewhere else.
+func dsnWithSchema(dsn, schema, driver string) string {
+	if driver != "postgres" {
+		return dsn
+	}
 	if schema == "" || schema == "public" || strings.Contains(dsn, "search_path=") {
 		return dsn
 	}
