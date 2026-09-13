@@ -714,15 +714,29 @@ func (p ParentClosePolicy) Valid() bool {
 // original. A real per-call timeout needs a host-side representation the way
 // retry already has one -- cleat_call_retry carries its policy in four i64s --
 // and that is a feature with an ABI cost, to be argued on its merits.
+//
+// `MaxResponseSize` went the same way in cleat#1424, for the same reason and on
+// the same evidence. It was documented as "0 = use default (64KB), capped at
+// outBufSize" and BOTH halves of that were false: wasm/generator.go documents
+// outBufSize as dead, and since cleat#1384 the guest's output buffer is
+// ADAPTIVE -- _cleatOutBufFloor doubling toward _cleatOutBufCeiling as the host
+// reports truncation -- chosen by generated code that never sees a CallOptions.
+//
+// Measured 2026-09-13 through cleattest, whose DurableCallWithOptions hook IS
+// populated, with a 100,011-byte response and a ONE-BYTE cap:
+//
+//	MaxResponseSize=1      -> response 100011 bytes
+//	MaxResponseSize unset  -> response 100011 bytes
+//
+// The second row is the control; the first alone is equally consistent with a
+// stub returning whatever it likes.
+//
+// A per-call response cap remains a coherent feature. It needs a host-side
+// representation, and the adaptive buffer weakens the case for it -- so it is a
+// design to argue, not a field to leave lying around. Removing the inert one
+// does not foreclose it.
 type CallOptions struct {
 	Retry *RetryPolicy
-	// MaxResponseSize is read by NOTHING -- cleat#1424. The comment it used to
-	// carry ("0 = use default (64KB), capped at outBufSize") cites a constant
-	// wasm/generator.go documents as dead, and the live output buffer has been
-	// adaptive since cleat#1384. Left in place rather than removed because that
-	// is a separate decision from the one cleat#1006 recorded; the census in
-	// calloptions_census_test.go is what keeps it visible.
-	MaxResponseSize int
 }
 
 // RetryPolicy configures automatic retry behavior for durable calls.

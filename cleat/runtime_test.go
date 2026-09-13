@@ -1324,12 +1324,20 @@ func TestDurableCallTypedWithOptionsDelegates(t *testing.T) {
 		},
 	})
 
-	err := h.DurableCallTypedWithOptions(CallOptions{MaxResponseSize: 4096}, "svc", "op", map[string]string{}, nil)
+	// The marker is Retry because cleat#1424 removed MaxResponseSize, which
+	// this test used for the same purpose. What is asserted is DELEGATION --
+	// that the options reach the hook unchanged -- so any distinguishable
+	// value serves; it was never a claim that either field did anything.
+	marker := &RetryPolicy{MaxAttempts: 7}
+	err := h.DurableCallTypedWithOptions(CallOptions{Retry: marker}, "svc", "op", map[string]string{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if capturedOpts.MaxResponseSize != 4096 {
-		t.Errorf("expected MaxResponseSize 4096, got %d", capturedOpts.MaxResponseSize)
+	if capturedOpts.Retry == nil {
+		t.Fatalf("the hook received CallOptions with a nil Retry; the options did not survive delegation")
+	}
+	if capturedOpts.Retry.MaxAttempts != 7 {
+		t.Errorf("expected the delegated Retry.MaxAttempts to be 7, got %d", capturedOpts.Retry.MaxAttempts)
 	}
 }
 
