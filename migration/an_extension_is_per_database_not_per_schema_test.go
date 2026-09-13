@@ -1,13 +1,11 @@
-package migration
+package migration_test
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"strings"
 	"testing"
 
-	"os"
+	"github.com/cleat-team/cleat/migration"
 )
 
 // cleat#1366: a second pool migrating into its own schema in the SAME database
@@ -22,33 +20,26 @@ import (
 // first pool succeeded before this fix too, so a test that only ran one pool
 // passes against the bug.
 func TestAnExtensionIsPerDatabaseNotPerSchema(t *testing.T) {
-	// BOTH variables, and the fallback is the load-bearing half: the only CI
-	// job that runs ./migration/... is test-go/support, and it provides its
-	// PostgreSQL service as CLEAT_TEST_DB. Reading only CLEAT_TEST_POSTGRES
-	// would make this skip in the one job that runs it, and a test that always
-	// skips is strictly worse than no test.
+	// ITS OWN DATABASE, NOT ITS OWN SCHEMA IN A SHARED ONE. cleat#1479.
 	//
-	// Inlined rather than calling engine/testutil.PostgresTestDSN, which does
-	// exactly this: engine/testutil imports migration, so a test in package
-	// migration importing it is an import cycle.
-	dsn := os.Getenv("CLEAT_TEST_POSTGRES")
-	if dsn == "" {
-		dsn = os.Getenv("CLEAT_TEST_DB")
-	}
-	if dsn == "" {
-		t.Skip("no PostgreSQL DSN (CLEAT_TEST_POSTGRES or CLEAT_TEST_DB)")
-	}
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-
-	for _, s := range []string{"pool_a_1366", "pool_b_1366"} {
-		if _, err := db.Exec(fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", s)); err != nil {
-			t.Fatalf("reset %s: %v", s, err)
-		}
-	}
+	// This test deliberately migrates two pools, and a pool migration rebinds
+	// the SHARED admin functions: 001 creates them `SET search_path FROM
+	// CURRENT`, which freezes the migrating pool's schema onto them. admin is
+	// not moved by --schema -- there is one copy per DATABASE -- so the last
+	// pool to migrate owns it for everyone else in that database.
+	//
+	// Run against the engine suite's database, as this test used to be, the
+	// effect is that admin.claim_workflows starts looking for
+	// workflow_instances in pool_b_1366. It finds none and returns an empty
+	// list WITH NO ERROR, so eight cross-tenant and RLS tests in ./engine/ fail
+	// as "the rows were not there". Measured: pristine database, the eight
+	// pass, one `go test ./migration/`, the eight fail; two ALTER FUNCTION
+	// statements and they pass again.
+	//
+	// A scratch database keeps the premise exactly -- two pools still share one
+	// database, which is the thing being tested -- and confines the rebinding
+	// to a database nothing else uses.
+	db := newScratchDB(t, "cleat_ext_per_db_1366")
 
 	// EITHER pool can be the one that fails, and which one depends on state
 	// this test does not own. On a database where pg_trgm does not yet exist,
@@ -62,7 +53,7 @@ func TestAnExtensionIsPerDatabaseNotPerSchema(t *testing.T) {
 	// have sent the next reader looking in the wrong place.
 	runPool := func(schema string) {
 		t.Helper()
-		err := NewRunner(db, DialectPostgres, "../migrations").
+		err := migration.NewRunner(db, migration.DialectPostgres, "../migrations").
 			WithSchema(schema).Run(context.Background())
 		if err == nil {
 			return
