@@ -23,19 +23,19 @@ Two levels of testing are provided:
 
 ## 1. ABI Boundary Test (Static)
 
-**File:** `internal/host/python_wasm_e2e_test.go`
+**File:** `engine/python_wasm_e2e_test.go`
 **Function:** `TestPythonWasmAbiBoundary`
 
 This test verifies that every host function import the Python SDK expects is
 registered in the Go host runtime. It does not require any WASM toolchain and
-runs as part of the regular `go test ./internal/host/` suite.
+runs as part of the regular `go test ./engine/` suite.
 
 ### What it checks
 
-1. **Import name coverage** — Iterates over the 36 host-call names that the
-   Python SDK stubs (`host_calls.py`) expect under `(import "env" "<name>")`,
+1. **Import name coverage** — Iterates over the host-call names that the
+   Python SDK binds (`host_calls.py`) under `(import "env" "<name>")`,
    and verifies each one appears in the Go host's `registerHostFunctions()`
-   registrations within `internal/host/imports.go`. The source of truth for Go
+   registrations within `engine/imports.go`. The source of truth for Go
    registrations is `registeredImportNames()` in the test file.
 
 2. **Bit-packing conventions** — Five sub-tests verify that the bit layout used
@@ -68,7 +68,7 @@ runs as part of the regular `go test ./internal/host/` suite.
 ### Running
 
 ```shell
-go test ./internal/host/ -run TestPythonWasmAbiBoundary -v
+go test ./engine/ -run TestPythonWasmAbiBoundary -v
 ```
 
 No prerequisites required. This test always runs (except in short mode if
@@ -78,7 +78,7 @@ the parent test suite uses `-short`).
 
 ## 2. End-to-End Pipeline Test (Full Integration)
 
-**File:** `internal/host/python_wasm_e2e_test.go`
+**File:** `engine/python_wasm_e2e_test.go`
 **Function:** `TestPythonWasmEndToEnd`
 
 ### Pipeline steps
@@ -130,7 +130,7 @@ a canned response for `notifier.SendNotification`:
 ### Running
 
 ```shell
-go test ./internal/host/ -run TestPythonWasmEndToEnd -v
+go test ./engine/ -run TestPythonWasmEndToEnd -v
 ```
 
 ---
@@ -153,9 +153,9 @@ go test ./internal/host/ -run TestPythonWasmEndToEnd -v
 > decompose` and loaded into wazero. Decomposition was deleted in #528
 > (2026-09-01) after failing at instance 81 of 85 on the only Component Model
 > binary in the repo, and wazero is no longer a backend at all (#459,
-> 2026-08-10). The `internal/host/` path cited in the table above moved to
-> `engine/` in 3eeb74e (2026-06-01), three months before this line was last
-> read.
+> 2026-08-10). The `internal/host/` paths this document used to cite moved to
+> `engine/` in 3eeb74e (2026-06-01). They were corrected on 2026-09-13; the
+> note is kept because a reader meeting an old copy needs the mapping.
 
 `componentize-py` produces WASM Component Model binaries (wrapped in the
 component model layer). These are executed directly by the wasmtime backend's
@@ -207,7 +207,7 @@ The test correctly skips with a clear message when prerequisites are missing.
 
 4. Run the test:
    ```shell
-   go test ./internal/host/ -run TestPythonWasmEndToEnd -v
+   go test ./engine/ -run TestPythonWasmEndToEnd -v
    ```
 
 ### Short mode
@@ -247,28 +247,19 @@ The `u64` return is bit-packed:
 
 ### Host function registration
 
-The following 36 host functions are registered in `internal/host/imports.go`
-and verified by `TestPythonWasmAbiBoundary`:
+The host functions the engine registers are not listed here. A list of names
+is a census of a growing population, and this one had drifted three ways at
+once when it was checked on 2026-09-13: the sentence said 36, the list below
+it held 38, the engine exported 54, and two of the listed names
+(`cleat_reply_to_signal`, `cleat_send_signal_and_wait`) had been removed on
+2026-09-06 while 18 exports were missing. Derive it instead:
 
 ```
-cleat_call, cleat_call_retry, cleat_call_heartbeat,
-cleat_sleep, cleat_now, cleat_random,
-cleat_log, cleat_version, cleat_min_version,
-cleat_defer, cleat_poll_cancellation, cleat_poll_signal,
-cleat_continue_as_new, cleat_continue_as_new_versioned,
-cleat_child_workflow, cleat_child_workflow_with_options,
-cleat_await_child, cleat_await_signals, cleat_await_all_children,
-set_query_state, cleat_side_effect,
-plugin_call, plugin_call_streaming,
-cleat_create_promise, cleat_await_promise,
-cleat_resolve_promise, cleat_reject_promise,
-cleat_send, cleat_schedule_invoke,
-cleat_register_update_handler, cleat_register_query_handler,
-cleat_workflow_id, cleat_run_id,
-cleat_send_signal_and_wait, cleat_reply_to_signal,
-cleat_signal_workflow,
-cleat_acquire_lock, cleat_release_lock
+grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u
 ```
+
+`TestPythonWasmAbiBoundary` is what checks the SDK against that set; it reads
+the registrations rather than this document.
 
 ---
 

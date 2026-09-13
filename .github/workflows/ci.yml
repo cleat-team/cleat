@@ -253,6 +253,17 @@ jobs:
       - name: ABI doc/code consistency guard
         run: scripts/check-doc-consistency.sh
 
+      # The Python SDK's own surface, which the guard above deliberately
+      # excludes: an SDK states a different denominator from the engine's and
+      # is allowed to differ from it. Five sites stated a number for it and
+      # nothing checked any (cleat#1418). --self-test first, because on a
+      # correct tree "every number agrees" and "the extractor matched nothing"
+      # print the same kind of success.
+      - name: Python SDK surface guard
+        run: |
+          scripts/check-python-sdk-surface.py --self-test
+          scripts/check-python-sdk-surface.py
+
       # Three workstreams append sections to IMPROVEMENT-PLAN.md at once, each
       # picking the next free number against a develop that has already moved.
       # The collision exists only in the merge, and a duplicate heading renders

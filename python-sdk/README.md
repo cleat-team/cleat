@@ -52,7 +52,10 @@ The decorator generates a WASM export wrapper conforming to the Cleat ABI (`(arg
 
 ## HostCalls overview
 
-The `HostCalls` class wraps all 36 WASM host function imports grouped by category:
+The `HostCalls` class binds 48 WASM host function imports, grouped by category below.
+The number is derived, not counted by hand -- see "Deriving the surface" at the end
+of this file, because it was 36 here for long enough to be copied into three more
+places.
 
 ### Workflow Identity
 - `current_workflow_id() -> str` -- the current workflow's unique ID
@@ -792,7 +795,8 @@ Decorator similar to `@cleat_entry` but for entity workflows (virtual objects). 
 
 ### `HostCalls`
 
-Core class wrapping all 36 WASM host function imports. Each method handles the pointer+length string protocol and bit-packed `i64` result decoding per the Cleat ABI. The host runtime guarantees deterministic replay — all side effects are recorded in the event history.
+Core class binding the 48 WASM host function imports (derived -- see "Deriving the
+surface"). Each method handles the pointer+length string protocol and bit-packed `i64` result decoding per the Cleat ABI. The host runtime guarantees deterministic replay — all side effects are recorded in the event history.
 
 ### Result types
 
@@ -881,3 +885,33 @@ Typed convenience wrappers for cleat plugin host functions. Provides methods for
 
 - [Cleat project README](../../README.md) -- architecture, worker deployment, CLI reference, database schema
 - [Cleat WASM ABI specification](../../ABI.md) -- full ABI contract, bit-packing layouts, memory layout
+
+## Deriving the surface
+
+The host-call numbers in this file are derived. Do not count by hand, and do not copy
+a number from another document -- on 2026-09-13 four documents agreed at 36 and the
+figure was 48, because it was one number copied rather than four measurements.
+
+```
+python3 - <<'EOF'
+import ast, pathlib
+t = ast.parse(pathlib.Path('python-sdk/cleat_sdk/host_calls.py').read_text())
+print(len({a.asname for n in ast.walk(t) if isinstance(n, ast.ImportFrom)
+           for a in n.names if a.asname and a.asname.startswith('_import_')}))
+EOF
+```
+
+Parse, do not grep. A regex over `_import_*` returns **52**, and three of those are
+names inside comments stating the import does **not** exist:
+
+```
+# There is no _import_cleat_register_query_handler here (removed 2026-08-09).
+# There is no _import_cleat_send_signal_and_wait or
+# _import_cleat_reply_to_signal here (removed 2026-09-06, ...)
+```
+
+A text search cannot tell a binding from a sentence denying one.
+
+The WIT world in `wit/cleat.wit` declares **49** functions across 17 imported
+interfaces. The SDK binds 48 of them; the unbound one is
+`durable-register-query-handler`, matching the removal note above.
