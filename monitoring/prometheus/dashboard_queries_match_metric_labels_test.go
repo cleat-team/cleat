@@ -249,9 +249,22 @@ func TestDashboardGroupingLabelsExistOnTheMetric(t *testing.T) {
 			}
 		}
 	}
+	// Fatal, NOT Skip, and the distinction is check-skips.sh's case (c): a
+	// precondition that is always satisfiable in this repo must fail rather
+	// than skip. The dashboards demonstrably contain resolvable grouping
+	// queries -- 19 of them -- so "0 resolved" means the extractor broke, not
+	// that there is nothing to look at.
+	//
+	// A Skip here was right while the guard was being WRITTEN: it surfaced
+	// three separate defects (a regex covering 1 of 25 clauses, a non-greedy
+	// prefix matching "cleat_w", and matching raw JSON whose escaped quotes
+	// stop `[^"]*`) by reporting "nothing to check" instead of passing. Shipped,
+	// that same branch would hide those defects from CI forever. The third
+	// outcome belongs to genuinely optional preconditions; this one is not.
 	if checked == 0 {
-		t.Skip("no dashboard `sum(cleat_*{...}) by (label)` query resolved to a known metric; " +
-			"nothing to check rather than nothing wrong")
+		t.Fatal("no dashboard `sum(cleat_*{...}) by (label)` query resolved to a known " +
+			"metric. The dashboards contain 19; zero means this guard's extractor is " +
+			"broken, not that the tree is clean.")
 	}
 	t.Logf("grouping labels checked: %d", checked)
 }
