@@ -160,12 +160,19 @@ func TestHandleDeadLetterReprocess_Success(t *testing.T) {
 		t.Errorf("expected 201, got %d", w.Code)
 	}
 
-	var body map[string]string
+	// map[string]any: the response carries a real bool since cleat#1169, and a
+	// string-typed decode fails outright rather than reading it as absent.
+	var body map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if body["id"] != "new-run-abc" {
-		t.Errorf("expected id 'new-run-abc', got %q", body["id"])
+		t.Errorf("expected id 'new-run-abc', got %v", body["id"])
+	}
+	if body[idempotentReplayField] != false {
+		t.Errorf("a FIRST reprocess reports %s=%v, want false -- the flag is present on the "+
+			"original too, so a caller need not infer it from an absent field",
+			idempotentReplayField, body[idempotentReplayField])
 	}
 }
 
@@ -191,19 +198,26 @@ func TestHandleDeadLetterReprocess_AlreadyExisted(t *testing.T) {
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
+	// 201, the status the original call returned. cleat#1169 folded the
+	// duplicate into the original shape, so the status code no longer carries
+	// "this was a retry" -- the flag does.
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201, got %d", w.Code)
 	}
 
-	var body map[string]string
+	var body map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body["already_started"] != "true" {
-		t.Errorf("expected already_started=true, got %v", body)
+	if body[idempotentReplayField] != true {
+		t.Errorf("expected %s=true, got %v", idempotentReplayField, body)
 	}
-	if body["workflow_id"] != "existing-run" {
-		t.Errorf("expected workflow_id 'existing-run', got %q", body["workflow_id"])
+	if body["id"] != "existing-run" {
+		t.Errorf("expected id 'existing-run', got %v -- the duplicate names the run under "+
+			"the SAME key as the original, not workflow_id", body["id"])
+	}
+	if _, stale := body["workflow_id"]; stale {
+		t.Errorf("the duplicate still carries workflow_id: %v", body)
 	}
 }
 

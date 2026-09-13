@@ -76,14 +76,59 @@ The name survives in three places, and none of them make it a status:
 Every status is a string literal, in both Go and SQL. There is no `engine.StatusReady`. A typo in
 a status string is caught by a failing test, if one covers that path, and not by the compiler.
 
+### Duplicate calls: one policy, every endpoint
+
+**A request repeated under the same `Idempotency-Key` returns the original response — same status,
+same field names — plus one standard flag.** cleat#1169.
+
+```
+idempotent_replay: false    this is the original call
+idempotent_replay: true     this is a replay of one
+```
+
+The flag is a **boolean**, present on both, and spelled the same on every endpoint. A caller that
+does not care about retries needs no special case; one that cares reads one field.
+
+| endpoint | first call | repeated under the same key |
+|---|---|---|
+| `POST /api/workflows/<name>/start` | `201 {"id":…}` | `201 {"id":…, "idempotent_replay":true, "status":…}` |
+| `POST /api/dead-letters/<id>/reprocess` | `201 {"id":…}` | `201 {"id":…, "idempotent_replay":true}` |
+| `POST /api/workflows/<id>/signal` | `200 {"status":"delivered"}` | `200 {"status":"delivered", "idempotent_replay":true}` |
+
+**Two things this deliberately does not change.**
+
+*A key reused with a **different** payload is still refused* — `409 idempotency_key_input_mismatch`
+(cleat#1170). Replay answers "you already did this"; a changed payload means you did something else,
+and returning the first result would hide that.
+
+*A request with **no** key keeps its old behaviour.* No header means no token, not an empty one — so
+two callers who both send nothing do not collide, and a caller may still send the same signal twice
+on purpose. The flag is present and `false`.
+
+**Not yet uniform:** `POST /api/schedules` creates work and does not read `Idempotency-Key`. It
+deduplicates by the client-supplied name and answers `409 schedule_exists` for a collision, which is
+a different question from a retry — and without a key it cannot tell the two apart. Tracked
+separately.
+
 ### The HTTP API returns this column verbatim
 
 A duplicate start — `POST /api/workflows/<name>/start` re-sent with the same `Idempotency-Key` —
-answers `200` with:
+answers with **the original response plus the standard replay flag** (cleat#1169): same `201`, same
+`id` field, so a caller that never thinks about retries needs no special case.
 
 ```json
-{"already_started": "true", "workflow_id": "e39ede1b-…", "status": "ready"}
+{"id": "e39ede1b-…", "idempotent_replay": true, "status": "ready"}
 ```
+
+The first call answers the same shape with `"idempotent_replay": false`. The flag is present on
+both, so a caller can read it unconditionally rather than inferring "original" from an absent field.
+
+> **Changed in cleat#1169.** This used to answer `200` with
+> `{"already_started": "true", "workflow_id": …}` — a different status, a different marker and a
+> different name for the identifier. A caller reading only `id` got nothing back from a
+> deduplicated response and concluded its retry had started a *second* workflow, which is wrong in
+> the alarming direction. `reprocess` and the signal endpoint changed with it; all three now carry
+> `idempotent_replay`.
 
 **`status` is `workflow_instances.status` copied, not a separate API vocabulary.** Every value in
 the table above can appear, plus one that is not a workflow status at all:

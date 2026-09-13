@@ -12775,3 +12775,72 @@ the main case cannot pass vacuously.
 **Docs carried the advice that produced this.** `plugin-developer-guide.md` said *"Use
 `Idempotent: true` for read-only functions"* and, separately, recommended the flag to avoid storing
 large outputs — which never worked, since the output is recorded either way. Both corrected.
+
+---
+
+### 3.324 Three endpoints answered a duplicate call three different ways, and none of them was written down — ✅ **FIXED 2026-09-13** (cleat#1169)
+
+**Owner decision, 2026-09-10:** *"a standard policy of return-the-original-result, but with a
+standard extra flag in the result … Mostly they don't care, and shouldn't need separate code to
+handle the cached result."* The load-bearing clause is the last one: the property the old design
+lacked was **uniformity**, not information.
+
+**Refined by the owner 2026-09-13, and it changed the scope.** I proposed excluding `POST
+/api/schedules` because it takes no key and a name collision is not a retry. The answer:
+
+> if schedule stuff is creating something, then it ought to have the idempotency key, and the
+> associated idempotency replay policy should apply
+
+That **dissolves** the objection rather than trading it away. My argument was an artefact of
+schedules having no key to tell the two cases apart with; given one, `409 schedule_exists` keeps
+answering *someone else's name is in the way* and stops being conscripted to answer *I am retrying*.
+
+**Measured first, on `develop@32a8b90b`, because the issue's table is from 09-10 and #1247 landed
+since.** Three *different mistakes about one question*, not three arbitrary policies:
+
+    start       201 {"id":X}               -> 200 {"already_started":"true","workflow_id":X,"status":…}
+    reprocess   201 {"id":X}               -> 200 {"already_started":"true","workflow_id":X}
+    signal      200 {"status":"delivered"} -> 200 {"status":"already_delivered"}
+    schedules   201 {"status":"created"}   -> 409 {"detail":"schedule_exists"}
+
+`start` and `reprocess` changed status, shape **and** the identifier's field name. `signal` had the
+right status and shape but welded the marker into `status`, so one field carried *what happened* and
+*was this a replay*. `schedules` refused.
+
+**The rename was the expensive one, and its failure mode is an inversion rather than an error.** A
+caller reading only `id` gets nothing from a deduplicated response, concludes its retry started a
+**second** workflow, and may compensate, alert, or start a third. cleat's own DBOS port carries a
+shim for it, and its docstring records that the bug was found by a control rather than by reading.
+
+**The guard derives its population rather than listing it**, which is the point. #1167 was found by
+auditing endpoints one at a time; a hand-written list has the same defect — it covers what its
+author remembered. `TestEveryKeyBearingEndpointCarriesTheReplayFlag` reads the handlers that call
+`Header.Get("Idempotency-Key")` out of the source and requires each to set the flag, so a new
+endpoint is covered the day it is written. It found `handleStartWorkflow`, `handleSignal` and
+`handleDeadLetterReprocess` unaided.
+
+**Why that population and not the owner's rule.** *"Every endpoint that creates work"* is the right
+policy and cannot be decided by reading source — "creates work" is a judgement. Reading the header
+is the observable commitment, so a handler that creates work and does **not** read it is #1167's
+defect, caught by review; one that reads it and omits the flag is this one, caught mechanically.
+
+**Schedules is split out, and the split is safe because the guard grows into it.** It needs a store
+primitive that does not exist — idempotency is baked into `StartNewRun`, and
+`idempotency_keys.workflow_id` is `NOT NULL`, so a schedule name cannot go there without a migration
+and without disturbing cleat#1258's retention. Schedules does not read the header today, so it is
+legitimately outside the guard's population; the moment it gains one, the guard requires its flag
+with no edit.
+
+**One test got better by accident and it is worth recording.** `TestReprocessIsIdempotentUnderTheSameKey`
+asserted a literal `200` under the message *"a retry after a lost response must not create a second
+run"* — but the status code never established that; the id match and `starter.n == 1` did. It now
+asserts **status parity with the first call**, which is the actual contract and does not need editing
+the next time a status changes.
+
+**Flag design, stated because each part was a choice:** a **bool**, not the string `"true"`
+`already_started` used to be — a typed client reading that as a boolean gets a type error. Present
+on the **original as well as the replay**, because an absent field cannot be told from an old server
+that does not send one, so `absent means original` would be unreadable by exactly the cautious
+client most likely to check. And **not a response count**, which would mean storing how many times a
+key was replayed — new persistent state for a case the decision says callers mostly do not care
+about.

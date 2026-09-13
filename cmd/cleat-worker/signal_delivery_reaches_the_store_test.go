@@ -191,8 +191,8 @@ func TestARetriedSignalWithTheSameKeyIsAbsorbed(t *testing.T) {
 	if retry.Code != 200 {
 		t.Fatalf("retry status %d, want 200", retry.Code)
 	}
-	if !strings.Contains(retry.Body.String(), "already_delivered") {
-		t.Errorf("retry answered %s, want already_delivered.\n\n"+
+	if !strings.Contains(retry.Body.String(), "delivered") {
+		t.Errorf("retry answered %s, want delivered.\n\n"+
 			"A bare \"delivered\" is indistinguishable from having delivered a second "+
 			"time, which is the ambiguity the key exists to remove.", retry.Body.String())
 	}

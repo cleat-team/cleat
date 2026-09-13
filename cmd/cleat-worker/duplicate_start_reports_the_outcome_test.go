@@ -74,13 +74,48 @@ func winnerStore(t *testing.T, winner *engine.WorkflowInstance) (*apiServer, *ke
 	return newTestAPIServer(ms), k
 }
 
-func decodeStart(t *testing.T, rec *httptest.ResponseRecorder) map[string]string {
+// map[string]any since cleat#1169: idempotent_replay is a real bool, and a
+// map[string]string decode fails on it outright rather than reporting a wrong
+// value -- which is the better failure, but only once.
+func decodeStart(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
-	var body map[string]string
+	var body map[string]any
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode %q: %v", rec.Body.String(), err)
 	}
 	return body
+}
+
+// str reads a string field, failing rather than returning "" for a wrong type,
+// so a field that changed type is not silently read as absent.
+func str(t *testing.T, body map[string]any, key string) string {
+	t.Helper()
+	v, ok := body[key]
+	if !ok {
+		return ""
+	}
+	sv, ok := v.(string)
+	if !ok {
+		t.Fatalf("%s is %T (%v), want string", key, v, v)
+	}
+	return sv
+}
+
+// replayed reads the standard cleat#1169 flag, failing if it is absent: it is
+// present on the original as well as the replay, so absence is a defect rather
+// than a "no".
+func replayed(t *testing.T, body map[string]any) bool {
+	t.Helper()
+	v, ok := body[idempotentReplayField]
+	if !ok {
+		t.Fatalf("%s is absent from %v. It is set on BOTH the original and the replay so "+
+			"a caller can read it unconditionally.", idempotentReplayField, body)
+	}
+	b, ok := v.(bool)
+	if !ok {
+		t.Fatalf("%s is %T (%v), want bool", idempotentReplayField, v, v)
+	}
+	return b
 }
 
 func TestADuplicateStartSaysTheWinnerIsStillRunning(t *testing.T) {
@@ -92,14 +127,14 @@ func TestADuplicateStartSaysTheWinnerIsStillRunning(t *testing.T) {
 	}
 	dup := decodeStart(t, startWithKey(api, "K"))
 
-	if dup["already_started"] != "true" {
+	if !replayed(t, dup) {
 		t.Fatalf("the retry was not recognised as a duplicate: %v", dup)
 	}
-	if dup["status"] != "running" {
+	if str(t, dup, "status") != "running" {
 		t.Errorf("a duplicate start reports status %q, want \"running\".\n\n"+
 			"Without it the caller cannot tell a run it should wait for from one whose "+
 			"result is already available, and both answers were byte-identical.",
-			dup["status"])
+			str(t, dup, "status"))
 	}
 	// The double must have been asked once per call, or the handler is
 	// answering from something other than the key.
@@ -136,15 +171,15 @@ func TestADuplicateStartSaysTheWinnerIsSleeping(t *testing.T) {
 	startWithKey(api, "K")
 	dup := decodeStart(t, startWithKey(api, "K"))
 
-	if dup["already_started"] != "true" {
+	if !replayed(t, dup) {
 		t.Fatalf("the retry was not recognised as a duplicate: %v", dup)
 	}
-	if dup["status"] != "ready" {
+	if str(t, dup, "status") != "ready" {
 		t.Errorf("a duplicate start whose winner is sleeping reports status %q, want "+
 			"\"ready\".\n\nA workflow parked in a durable sleep is `ready`, not `running`, "+
 			"and that is the state a retrying caller most often finds. Reporting anything "+
 			"else -- including flattening it to `running` -- tells the caller something "+
-			"the run row does not say (cleat#1325).", dup["status"])
+			"the run row does not say (cleat#1325).", str(t, dup, "status"))
 	}
 	// Non-terminal, so no result and no error: both would be the cleat#1115
 	// ambiguity, a field present but meaningless.
@@ -185,8 +220,8 @@ func TestADuplicateStartSaysTheWinnerFinished(t *testing.T) {
 	startWithKey(api, "K")
 	dup := decodeStart(t, startWithKey(api, "K"))
 
-	if dup["status"] != "done" {
-		t.Errorf("a duplicate start reports status %q, want \"done\"", dup["status"])
+	if str(t, dup, "status") != "done" {
+		t.Errorf("a duplicate start reports status %q, want \"done\"", str(t, dup, "status"))
 	}
 	// A finished winner must not carry an error field: an empty `error` on a
 	// success is exactly the ambiguity cleat#1115 was, one layer up.
@@ -203,8 +238,8 @@ func TestADuplicateStartSurfacesAFailedWinner(t *testing.T) {
 	startWithKey(api, "K")
 	dup := decodeStart(t, startWithKey(api, "K"))
 
-	if dup["status"] != "failed" {
-		t.Fatalf("a duplicate start reports status %q, want \"failed\"", dup["status"])
+	if str(t, dup, "status") != "failed" {
+		t.Fatalf("a duplicate start reports status %q, want \"failed\"", str(t, dup, "status"))
 	}
 	if dup["error"] != "downstream refused" {
 		t.Errorf("the failed winner's error is %q, want \"downstream refused\".\n\n"+
@@ -231,33 +266,69 @@ func TestADuplicateStartSaysSoWhenTheWinnerIsGone(t *testing.T) {
 	startWithKey(api, "K")
 	dup := decodeStart(t, startWithKey(api, "K"))
 
-	if dup["already_started"] != "true" || dup["workflow_id"] == "" {
-		t.Fatalf("the duplicate lost its existing fields: %v", dup)
+	if !replayed(t, dup) || str(t, dup, "id") == "" {
+		t.Fatalf("the duplicate lost its fields: %v", dup)
 	}
-	if dup["status"] != "unknown" {
+	if str(t, dup, "status") != "unknown" {
 		t.Errorf("with the winner gone the duplicate reports status %q, want \"unknown\".\n\n"+
 			"An absent field would read as an oversight; the caller needs to be able to "+
-			"distinguish \"cannot tell\" from \"did not say\".", dup["status"])
+			"distinguish \"cannot tell\" from \"did not say\".", str(t, dup, "status"))
 	}
 }
 
-// The fields are additive: a caller reading only the two original keys is
-// unaffected. This is what keeps #1169's replay decision free to fold the
-// shape later without unpicking this one.
-func TestADuplicateStartKeepsItsOriginalFields(t *testing.T) {
+// The duplicate returns the ORIGINAL response, same field names, plus the flag.
+// cleat#1169.
+//
+// Renamed from TestADuplicateStartKeepsItsOriginalFields, which asserted the
+// thing this replaced: that the duplicate kept `workflow_id` and
+// `already_started`. Those WERE the original fields of the duplicate response,
+// and the whole defect was that they were not the original fields of the
+// ORIGINAL response -- the first call answered `{"id":X}`. A caller reading
+// only `id` got nothing back from a deduplicated call and concluded its retry
+// had started a second workflow.
+//
+// So this asserts the identifier is the SAME KEY in both, which is the property
+// that makes a retry transparent, and that the flag is what distinguishes them.
+func TestADuplicateStartReturnsTheOriginalShapePlusTheFlag(t *testing.T) {
 	api, _ := winnerStore(t, &engine.WorkflowInstance{Status: "running"})
 
-	first := decodeStart(t, startWithKey(api, "K"))
-	dup := decodeStart(t, startWithKey(api, "K"))
+	firstRec := startWithKey(api, "K")
+	dupRec := startWithKey(api, "K")
 
-	if first["id"] == "" {
+	// Same status, too. The 200/201 split used to be the duplicate signal; the
+	// flag carries it now, so a caller branching on the status code sees one
+	// answer for both.
+	if firstRec.Code != dupRec.Code {
+		t.Errorf("first start answered %d and the duplicate %d; a replay returns the "+
+			"original STATUS as well as the original body", firstRec.Code, dupRec.Code)
+	}
+
+	first := decodeStart(t, firstRec)
+	dup := decodeStart(t, dupRec)
+
+	if str(t, first, "id") == "" {
 		t.Fatalf("the first start stopped returning id: %v", first)
 	}
-	if dup["workflow_id"] != first["id"] {
-		t.Errorf("the duplicate names %q, the original created %q",
-			dup["workflow_id"], first["id"])
+	if str(t, dup, "id") != str(t, first, "id") {
+		t.Errorf("the duplicate names %q under key \"id\", the original created %q.\n\n"+
+			"Reading only `id` must work on both responses -- it did not before cleat#1169, "+
+			"and a caller that did so concluded its retry had started a SECOND workflow.",
+			str(t, dup, "id"), str(t, first, "id"))
 	}
-	if dup["already_started"] != "true" {
-		t.Errorf("already_started is %q, want \"true\"", dup["already_started"])
+	if _, gone := dup["workflow_id"]; gone {
+		t.Errorf("the duplicate still carries workflow_id: %v.\n\nThe rename is what "+
+			"cleat#1169 removed; keeping it as well would leave two names for one thing.", dup)
+	}
+	if _, gone := dup["already_started"]; gone {
+		t.Errorf("the duplicate still carries already_started: %v.\n\nIt was replaced by "+
+			"the standard flag, which is spelled the same on every endpoint.", dup)
+	}
+
+	// The flag distinguishes them, and it is present on both.
+	if replayed(t, first) {
+		t.Error("the FIRST start reports itself as a replay")
+	}
+	if !replayed(t, dup) {
+		t.Error("the duplicate does not report itself as a replay")
 	}
 }

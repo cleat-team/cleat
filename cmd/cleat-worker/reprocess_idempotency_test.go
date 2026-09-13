@@ -18,7 +18,7 @@ import (
 // repeats whatever partial side effects it left.
 //
 // Why the tests that already existed did not catch it, and could not:
-// TestHandleDeadLetterReprocess_AlreadyExisted asserts the 200/already_started
+// TestHandleDeadLetterReprocess_AlreadyExisted asserts the 201/idempotent_replay
 // branch renders, using a startNewRunFn that returns alreadyExisted=true
 // UNCONDITIONALLY and ignores its idempotencyKey argument, from a request that
 // sets no header. It passes unchanged on the code that hard-codes "" into that
@@ -73,7 +73,7 @@ func deadLetteredStore(starter *keyedRunStarter) *mockStore {
 	return ms
 }
 
-func postReprocess(t *testing.T, mux *http.ServeMux, id, key string) (int, map[string]string) {
+func postReprocess(t *testing.T, mux *http.ServeMux, id, key string) (int, map[string]any) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/dead-letters/"+id+"/reprocess", nil)
 	if key != "" {
@@ -81,7 +81,7 @@ func postReprocess(t *testing.T, mux *http.ServeMux, id, key string) (int, map[s
 	}
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
-	var body map[string]string
+	var body map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
 		t.Fatalf("decode reprocess response: %v", err)
 	}
@@ -107,14 +107,19 @@ func TestReprocessIsIdempotentUnderTheSameKey(t *testing.T) {
 	}
 
 	code2, second := postReprocess(t, mux, "wf-1", key)
-	if code2 != http.StatusOK {
-		t.Errorf("retry under the same key: got %d, want 200 -- a retry after a "+
-			"lost response must not create a second run", code2)
+	// 201, the status the FIRST call returned. cleat#1169: the duplicate is the
+	// original response plus a flag, so the status code stopped being the
+	// duplicate signal. What must not happen -- a second run -- is asserted
+	// directly below by the id and by starter.n, which is the stronger check
+	// and was always the one that mattered.
+	if code2 != code1 {
+		t.Errorf("retry under the same key answered %d, first call answered %d -- a replay "+
+			"returns the original STATUS as well as the original body", code2, code1)
 	}
-	if second["already_started"] != "true" {
-		t.Errorf("retry: already_started=%q, want \"true\" (%v)", second["already_started"], second)
+	if second[idempotentReplayField] != true {
+		t.Errorf("retry: %s=%v, want true (%v)", idempotentReplayField, second[idempotentReplayField], second)
 	}
-	if got := second["workflow_id"]; got != first["id"] {
+	if got := second["id"]; got != first["id"] {
 		t.Errorf("retry returned run %q, want the first run %q -- two ids here is "+
 			"the same failed work re-driven twice (cleat#1167)", got, first["id"])
 	}
@@ -168,12 +173,12 @@ func TestStartWorkflowUsesTheIdempotencyKey(t *testing.T) {
 	api := newTestAPIServer(ms)
 
 	const key = "client-token-91b2"
-	call := func() (int, map[string]string) {
+	call := func() (int, map[string]any) {
 		req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(`{"input":{}}`))
 		req.Header.Set("Idempotency-Key", key)
 		w := httptest.NewRecorder()
 		api.handleStartWorkflow(w, req, "my-wf")
-		var body map[string]string
+		var body map[string]any
 		json.NewDecoder(w.Body).Decode(&body)
 		return w.Code, body
 	}
@@ -183,8 +188,11 @@ func TestStartWorkflowUsesTheIdempotencyKey(t *testing.T) {
 		t.Fatalf("first start: got %d, want 200 or 201 (%v)", code1, first)
 	}
 	code2, second := call()
-	if code2 != http.StatusOK || second["already_started"] != "true" {
-		t.Errorf("retry under the same key: got %d %v, want 200 already_started=true", code2, second)
+	// 201 and the flag, not 200 and a renamed field: cleat#1169 folded the
+	// duplicate into the original's status and shape.
+	if code2 != http.StatusCreated || second[idempotentReplayField] != true {
+		t.Errorf("retry under the same key: got %d %v, want 201 with %s=true",
+			code2, second, idempotentReplayField)
 	}
 	if starter.n != 1 {
 		t.Errorf("store created %d runs under one key, want 1", starter.n)
