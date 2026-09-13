@@ -242,12 +242,16 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 		s.writeError(w, 500, serr.Error())
 		return
 	}
+	// The original response plus the flag, same as start -- cleat#1169. These
+	// two moved together on purpose: cleat#1247 gave reprocess start's exact
+	// duplicate shape rather than inventing a third, specifically so that this
+	// change would not have to reconcile them first.
 	if alreadyExisted {
-		s.writeJSON(w, 200, map[string]string{"workflow_id": runID, "already_started": "true"})
+		s.writeJSON(w, 201, withReplayFlag(map[string]any{"id": runID}, true))
 		return
 	}
 
-	s.writeJSON(w, 201, map[string]string{"id": runID})
+	s.writeJSON(w, 201, withReplayFlag(map[string]any{"id": runID}, false))
 }
 
 func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Request, id string) {

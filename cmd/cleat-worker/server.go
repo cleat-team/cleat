@@ -915,17 +915,29 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		// GetChildCount holding two definitions of "terminal" forty lines
 		// apart, only one of them deciding anything.
 		//
-		// ADDITIVE. workflow_id and already_started keep their names and
-		// meanings, so nothing reading them breaks, and cleat#1169's replay
-		// decision stays free to fold the shape later.
-		resp := map[string]string{
-			"workflow_id":     runID,
-			"already_started": "true",
+		// THE ORIGINAL RESPONSE PLUS A FLAG, which is cleat#1169's policy
+		// folding the shape this comment used to say it would fold later.
+		//
+		// `id`, not `workflow_id`: the original answered `{"id":X}` and the
+		// duplicate answered `{"workflow_id":X}`, so a caller reading only
+		// `id` got nothing from a deduplicated response and concluded its
+		// retry had started a SECOND workflow. `already_started` is gone; the
+		// standard flag says the same thing in the same place on every
+		// work-creating endpoint.
+		//
+		// The outcome fields below are a SUPERSET of the original response,
+		// not a byte-for-byte replay, and that is deliberate: the original
+		// `{"id":X}` was written before the workflow had done anything, so
+		// replaying it exactly would discard what cleat#1151 and cleat#1325
+		// added. "Return the original result" is about the shape a caller has
+		// to parse, not about withholding what is now known.
+		resp := withReplayFlag(map[string]any{
+			"id": runID,
 			// Stated, not implied by an absent field: a caller branching on
 			// status must be able to tell "I cannot tell you" from "I forgot
 			// to tell you", and an omitted key reads as the second.
 			"status": "unknown",
-		}
+		}, true)
 		// A failed lookup leaves status "unknown" rather than failing the
 		// request. The duplicate WAS correctly recognised and workflow_id is
 		// valid; turning that into a 500 because a secondary read failed
@@ -947,7 +959,10 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 				resp["error_code"] = wf.ErrorCode
 			}
 		}
-		s.writeJSON(w, 200, resp)
+		// 201, the status the ORIGINAL call returned. The 200/201 split used
+		// to be the duplicate signal; the flag carries it now, so the status
+		// can go back to describing the resource rather than the retry.
+		s.writeJSON(w, 201, resp)
 		return
 	}
 
@@ -1078,7 +1093,9 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	s.writeJSON(w, 201, map[string]string{"id": runID})
+	// The flag is on the ORIGINAL too, so a caller can read it unconditionally
+	// rather than inferring "original" from its absence. cleat#1169.
+	s.writeJSON(w, 201, withReplayFlag(map[string]any{"id": runID}, false))
 }
 
 func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id string) {
@@ -1140,16 +1157,17 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 			s.writeError(w, 500, err.Error())
 			return
 		}
-		// 200 either way, with the outcome named -- mirroring the start path's
-		// already_started. The status code cannot carry this: a retry that
-		// answered 409 would be indistinguishable from a real conflict, and one
-		// that answered a bare 200 would be indistinguishable from having
-		// delivered, which is the ambiguity this whole feature removes.
-		status := "delivered"
-		if already {
-			status = "already_delivered"
-		}
-		s.writeJSON(w, 200, map[string]string{"status": status})
+		// 200 either way, and `status` says only WHAT HAPPENED. It used to
+		// also carry whether this was a retry -- "already_delivered" -- which
+		// welded two questions into one field: a caller wanting the outcome had
+		// to parse the replay marker out of it, and one wanting the marker had
+		// to know that this endpoint spelled it differently from every other.
+		// cleat#1169 moved that to the standard flag.
+		//
+		// This path was the CLOSEST to the policy already: right status, right
+		// shape, wrong place for the marker. start and reprocess had to change
+		// their status and their field names as well.
+		s.writeJSON(w, 200, withReplayFlag(map[string]any{"status": "delivered"}, already))
 		return
 	}
 
@@ -1157,7 +1175,11 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		s.writeError(w, 500, err.Error())
 		return
 	}
-	s.writeJSON(w, 200, map[string]string{"status": "delivered"})
+	// Keyless: no token, so nothing to replay -- the caller keeps the right to
+	// send the same signal deliberately twice. The flag is still present and
+	// false, because "this is not a replay" is an answer and an absent field is
+	// not.
+	s.writeJSON(w, 200, withReplayFlag(map[string]any{"status": "delivered"}, false))
 }
 
 func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id string) {

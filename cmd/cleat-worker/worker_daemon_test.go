@@ -2549,14 +2549,14 @@ func TestAPIStartWorkflow_WithIdempotencyKey(t *testing.T) {
 	w := httptest.NewRecorder()
 	api.handleStartWorkflow(w, req, "my-wf")
 
-	if w.Code != 200 {
-		t.Errorf("expected 200 (already started), got %d", w.Code)
+	if w.Code != 201 {
+		t.Errorf("expected 201 (cleat#1169: the replay returns the original status), got %d", w.Code)
 	}
-	var resp map[string]string
+	var resp map[string]any
 	json.NewDecoder(w.Body).Decode(&resp)
 	// Body is bytes.Buffer; no Close needed.
-	if resp["already_started"] != "true" {
-		t.Error("expected already_started=true in response")
+	if resp[idempotentReplayField] != true {
+		t.Errorf("expected %s=true in response, got %v", idempotentReplayField, resp)
 	}
 }
 
