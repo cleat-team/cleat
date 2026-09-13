@@ -602,6 +602,30 @@ func redactDSN(dsn string) string {
 // callers that need a second, differently-privileged connection to the same
 // test database (see OpenPostgresRLSTestDB) can derive it without
 // duplicating the env var precedence.
+//
+// The returned DSN carries application_name, and that is load-bearing rather
+// than decoration. The #982 gate identifies our own PostgreSQL sessions by
+// application_name and nothing else, because PostgreSQL does not hand the
+// client's pid to the server (see tagPostgresDSN). A caller that opens a
+// connection from an untagged DSN is therefore reported as a stranger, and
+// that is not hypothetical: a scratch-database admin connection in
+// plugins/kvstore -- which has to attach to some OTHER database to run
+// DROP DATABASE, since you cannot drop the one you are attached to -- failed
+// Test Go (plugins) on cleat#1498, a PR touching only migration/.
+//
+// The tag sits HERE, in the constructor, rather than at the call sites,
+// because 13 files build connections from this function and every one of them
+// would otherwise have to remember. Three sites inside this package already
+// wrapped the result in tagPostgresDSN; the wrap is idempotent (it returns the
+// DSN unchanged when application_name is already set), so those keep working.
+//
+// This is deliberately NOT a new exemption in the gate's predicate. The gate
+// has now refused three legitimate connections -- an autovacuum worker
+// (cleat#1478), a sibling package binary (cleat#1483), and this -- and each
+// time the tempting fix was to widen what it ignores. Widening is how the
+// sibling fix came to swallow the probe's own positive control. Making our
+// connections identifiable keeps the predicate narrow: anything still
+// untagged really is someone else.
 func PostgresTestDSN() string {
 	dsn := os.Getenv("CLEAT_TEST_POSTGRES")
 	if dsn == "" {
@@ -610,7 +634,7 @@ func PostgresTestDSN() string {
 	if dsn == "" {
 		dsn = "postgres://localhost:5432/cleat?sslmode=disable"
 	}
-	return dsn
+	return tagPostgresDSN(dsn)
 }
 
 // PostgresRLSTestRole is a fixed, low-privilege PostgreSQL role used by
