@@ -57,6 +57,76 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LEDGER="$REPO_ROOT/scripts/skip-ledger.tsv"
 
+# --self-test runs the two controls that the build-failure discriminator below
+# needs, because "it passes on a green tree" is satisfied by every broken
+# version of a guard. Same shape as scripts/check_dependabot_coverage.py.
+#
+# The fixtures are lines COPIED FROM A REAL `go test -json` RUN -- a two-package
+# module where one package does not compile and the other has a skipping test.
+# They freeze the shape of go's output, which is a Go contract rather than
+# anything in this repo, so they cannot go stale against a change here. What
+# they cannot do is notice go changing that format; the discriminator decodes
+# the JSON rather than matching text, so a renamed field would surface as this
+# self-test failing rather than as a silent pass.
+if [ "${1:-}" = "--self-test" ]; then
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+
+  # A package that did not build, ALONGSIDE a package whose tests ran. The
+  # second half is what makes this the interesting case: the existing
+  # "no test results at all" guard does not fire, because there ARE results.
+  cat > "$tmp/mixed.json" <<'FIXTURE'
+{"ImportPath":"mixed/bad [mixed/bad.test]","Action":"build-fail"}
+{"Action":"fail","Package":"mixed/bad","Elapsed":0,"FailedBuild":"mixed/bad [mixed/bad.test]"}
+{"Action":"run","Package":"mixed/good","Test":"TestGoodSkips"}
+{"Action":"skip","Package":"mixed/good","Test":"TestGoodSkips","Elapsed":0}
+{"Action":"run","Package":"mixed/good","Test":"TestGoodPasses"}
+{"Action":"pass","Package":"mixed/good","Test":"TestGoodPasses","Elapsed":0}
+FIXTURE
+
+  # The same report with the build failure removed: a healthy run whose skips
+  # do not match this job's ledger. The guard MUST still report that.
+  cat > "$tmp/healthy.json" <<'FIXTURE'
+{"Action":"run","Package":"mixed/good","Test":"TestGoodSkips"}
+{"Action":"skip","Package":"mixed/good","Test":"TestGoodSkips","Elapsed":0}
+{"Action":"run","Package":"mixed/good","Test":"TestGoodPasses"}
+{"Action":"pass","Package":"mixed/good","Test":"TestGoodPasses","Elapsed":0}
+FIXTURE
+
+  st_fail=0
+  echo "self-test (2 controls):"
+
+  out="$("$0" test-go/engine "$tmp/mixed.json" 2>&1 || true)"
+  if ! grep -q "did not BUILD" <<< "$out"; then
+    echo "  FAIL known-positive: a build failure was not reported as one" >&2
+    st_fail=$((st_fail + 1))
+  elif grep -q "stopped skipping, or was renamed" <<< "$out"; then
+    echo "  FAIL known-positive: a build failure was ALSO blamed on the ledger" >&2
+    st_fail=$((st_fail + 1))
+  else
+    echo "  ok  a build failure reports the build, and not the ledger"
+  fi
+
+  out="$("$0" test-go/engine "$tmp/healthy.json" 2>&1 || true)"
+  if grep -q "did not BUILD" <<< "$out"; then
+    echo "  FAIL negative control: a healthy report was called a build failure" >&2
+    st_fail=$((st_fail + 1))
+  elif ! grep -q "stopped skipping, or was renamed" <<< "$out"; then
+    echo "  FAIL negative control: a genuine ledger shortfall was NOT reported;" >&2
+    echo "       the build-failure branch is swallowing the case this guard exists for" >&2
+    st_fail=$((st_fail + 1))
+  else
+    echo "  ok  a healthy report still reports ledger shortfalls"
+  fi
+
+  if [ "$st_fail" -ne 0 ]; then
+    echo "self-test: $st_fail control(s) failed" >&2
+    exit 1
+  fi
+  echo "self-test: the guard tells a build failure from a ledger violation"
+  exit 0
+fi
+
 if [ "$#" -ne 2 ]; then
   echo "usage: $0 <job-key> <test-report.json>" >&2
   exit 2
@@ -100,6 +170,74 @@ if [ "$passed" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$skipped" -eq 0 ]; then
   echo "ERROR: $REPORT contains no test results at all for job '$JOB'." >&2
   echo "Not a clean run -- a run that did not happen. First lines:" >&2
   head -5 "$REPORT" | sed 's/^/    /' >&2
+  exit 1
+fi
+
+# A PACKAGE THAT DID NOT BUILD IS NOT A LEDGER VIOLATION, AND SAYING SO IS THIS
+# CHECK'S JOB RATHER THAN THE READER'S.
+#
+# A package that fails to build produces no skips of any kind, so EVERY ledger
+# line for the job reads `got 0` at once and the loop below reports each one as
+# "the test stopped skipping, or was renamed" -- naming tests that are fine, and
+# sending the reader to scripts/skip-ledger.tsv to fix a file that is correct.
+# The repair that suggests itself there is deleting a ledger line that is doing
+# its job. Measured on `Test Go (engine) on 1.26`, run 34718764482, where the
+# real cause was a TLS handshake timeout fetching a module, eleven lines earlier
+# in a different step (cleat#1388).
+#
+# The zero-results guard above does not catch it: `go test ./engine/...` builds
+# several packages, so one failing to build still leaves the others' passes and
+# skips in the report, and `passed` is not 0.
+#
+# DECODED RATHER THAN GREPPED, deliberately. `grep '"Action":"build-fail"'`
+# would also match a test that PRINTS that text -- and this repo has tests about
+# parsing `go test -json` output, so that is not hypothetical. A decoder asks
+# whether the EVENT has that action, which is the actual question.
+build_failures="$(python3 - "$REPORT" <<'PYEOF'
+import json, sys
+
+# Two shapes mean "did not build", and both are emitted for one failure:
+#   {"ImportPath":"...","Action":"build-fail"}
+#   {"Action":"fail","Package":"...","FailedBuild":"..."}
+# Either alone is enough; reporting the union de-duplicated keeps the message
+# short when both appear.
+seen = []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(ev, dict):
+        continue
+    if ev.get("Action") == "build-fail":
+        what = ev.get("ImportPath") or ev.get("Package") or "(unnamed)"
+    elif ev.get("Action") == "fail" and ev.get("FailedBuild"):
+        what = "%s (failed to build %s)" % (ev.get("Package", "?"), ev["FailedBuild"])
+    else:
+        continue
+    if what not in seen:
+        seen.append(what)
+for w in seen:
+    print(w)
+PYEOF
+)"
+
+if [ -n "$build_failures" ]; then
+  echo "ERROR: '$JOB' did not BUILD, so it produced no skips to check." >&2
+  echo "" >&2
+  while IFS= read -r pkg; do
+    printf '    %s\n' "$pkg" >&2
+  done <<< "$build_failures"
+  echo "" >&2
+  echo "This is NOT a skip-ledger problem and $LEDGER is not the file to edit." >&2
+  echo "A package that does not compile emits no skip events, so every ledger" >&2
+  echo "line would read 'got 0' and each would be reported as a test that" >&2
+  echo "stopped skipping. Fix the build -- for a module download, that is often" >&2
+  echo "a network failure in the test step and not a code change at all" >&2
+  echo "(cleat#1388)." >&2
   exit 1
 fi
 
