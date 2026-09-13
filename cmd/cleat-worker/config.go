@@ -99,6 +99,15 @@ var (
 		"How long a running workflow may go without progress before it counts toward cleat_workflows_stuck. "+
 			"Independent of the reaper's reclaim timeout, which is derived from --heartbeat-interval: this one "+
 			"is an alerting threshold, not a recovery one.")
+	// The window for cleat_concurrency_keys_expiring_soon. Deliberately its own
+	// flag rather than a multiple of the sweep interval: it answers "how much
+	// does the key sweep still owe", and tying it to how often we LOOK would
+	// make the number move when the observer changed rather than when the
+	// system did. cleat#1317.
+	keyExpiryWindow = flag.Duration("concurrency-key-expiry-window", 5*time.Minute,
+		"How far ahead cleat_concurrency_keys_expiring_soon looks. A key inside this window "+
+			"is one the sweep owes shortly; a rising count is the leading indicator of a sweep "+
+			"falling behind.")
 	metricsSweepInterval = flag.Duration("metrics-sweep-interval", 60*time.Second,
 		"Interval between database sweeps that publish the gauges nothing else feeds: stuck workflows, "+
 			"event-history size and row count, and active concurrency keys. 0 disables the sweep.")

@@ -33,8 +33,6 @@ var unfedMetrics = map[string]string{
 	// of SetMemoryPressure rather than an unfed metric. What remains is the
 	// WASM cache pair, waiting on an accessor rather than on a caller --
 	// WasmDiskCache exposes neither its length nor its size.
-	"SetConcurrencyKeysExpiringSoon": "NEEDS A FEEDER. The leading indicator " +
-		"for a key sweep falling behind",
 
 	// The counters and histograms. Less severe -- a counter never Added reads
 	// 0 rather than vanishing -- but still an instrument nothing writes.
