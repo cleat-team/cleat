@@ -1704,7 +1704,11 @@ tier3:
 #       `extractStringFromPacked(0x80000000, buf) == ""` for the stop, and
 #       TestDispatchDurableCallFailureIsNotAResponse for the failure.
 #
-#   D10 DECIDED 2026-09-04. ADMIN FORCE-RESOLVE DOES NOT RUN THE WORKFLOW'S DEFERS.
+#   D10 DECIDED 2026-09-04. *** REVERSED 2026-09-13 -- SEE D14. *** The text below is
+#       kept as the record of what was decided and why, because D11's cost is exactly
+#       D10's objection and a reader needs both halves. Do not act on D10.
+#
+#       ADMIN FORCE-RESOLVE DOES NOT RUN THE WORKFLOW'S DEFERS.
 #       It stays a one-phase, immediate terminal transition. This is the third and last
 #       of the transitions IMPROVEMENT-PLAN 3.75 inventoried, and it is the one that is
 #       deliberately NOT converted -- so the inventory is closed at two built and one
@@ -1829,7 +1833,35 @@ tier3:
 #       postgres, mysql and mssql because the overwrite was one schema decision honoured
 #       in three syntaxes -- a fix in one dialect's clause would go green on one of them.
 #
-# D1-D4 were settled together on 2026-08-06; D5-D10 have been added since, and this
+#   D14 DECIDED 2026-09-13 (repository owner). ADMIN FORCE-RESOLVE *DOES* RUN THE
+#       WORKFLOW'S DEFERS. Reverses D10. cleat#1152, shipped in #1456.
+#
+#       force-complete and force-fail now route through MARK/FINALIZE when the workflow
+#       owes a defer phase, the same branch TerminateWorkflow takes: the operator's
+#       intended outcome goes into pending_terminal_status with the result or error
+#       beside it, and FinalizeDeferPhase applies it once the defers have run. A
+#       workflow owing no defers is still resolved in one UPDATE, so the common case is
+#       unchanged and force-resolve does not become asynchronous across the board.
+#
+#       WHAT CHANGED SINCE D10 was not the argument but the evidence. D10 reasoned that
+#       the defer phase might not work for this case; the census on cleat#1152 then
+#       measured that MARK/FINALIZE had NEVER had a defer to run -- 9,868 workflows, 47
+#       terminated, every one either never executing a body or registering none. That
+#       reads as "leave the unexercised mechanism alone" and is the opposite: the two
+#       endpoints that skipped it were the only ones that would ever exercise it, so the
+#       two-phase path was untested in production precisely BECAUSE of D10.
+#
+#       D10'S OBJECTION STANDS AND IS NOW THE DOCUMENTED COST. A defer phase needs the
+#       guest to replay, so an operator unsticking a wedged workflow -- the case where
+#       the guest is what is broken -- waits out defer_phase_deadline, up to 5 minutes
+#       (deferPhaseTimeout), before the override lands. ExpireDeferPhases then applies
+#       the recorded outcome, so there is always recourse; it is no longer instant.
+#       docs/reference/workflow-lifecycle.md carries the operator-facing table.
+#
+#       A status of 'terminating' straight after a force-complete is expected, not a
+#       failure: the row carries the outcome that will be applied.
+#
+# D1-D4 were settled together on 2026-08-06; D5-D14 have been added since, and this
 # register was still saying "all four" until D7 was recorded. New ones go here with
 # the same shape: what was decided, on what date, and what it changes about what the
 # gate enforces.

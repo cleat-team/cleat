@@ -25,7 +25,7 @@ seventh, `terminating`, gained its writer on 2026-09-04 (see the defer phase bel
 | `failed` | **yes** | The workflow failed terminally, or its parent's close policy terminated it. |
 | `terminated` | **yes** | Force-terminated by an operator through the admin API. |
 | `dead_lettered` | **yes** | Retries exhausted. On the Go SDK this is reachable only through a retry policy short enough to have run on the host — see `IMPROVEMENT-PLAN.md` §3.88. |
-| `terminating` | no | The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Written by `TerminateWorkflow` when the workflow has registered defers; cleared by `FinalizeDeferPhase` or by the deadline sweep. Schema in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
+| `terminating` | no | The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Written by `TerminateWorkflow`, by `enforceParentClosePolicy`'s TERMINATE arm, and since 2026-09-13 by force-complete and force-fail — in each case only when the workflow has registered defers; cleared by `FinalizeDeferPhase` or by the deadline sweep. Schema in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
 
 Re-derive the written set with:
 
@@ -185,25 +185,47 @@ set a terminal status with a direct `UPDATE`:
 - `enforceParentClosePolicy`'s TERMINATE arm — **same qualification, same date.** A child that
   owes cleanup goes to `terminating` carrying `pending_terminal_status = 'failed'`; a child that
   owes none is failed here as before.
-- `adminForceResolve` (`engine/store_admin.go:154`) — **and it stays that way, deliberately.**
-  `tiers.yaml` D10: force-complete and force-fail are the operator's escape hatch for a workflow
-  that is stuck, and a defer phase needs the guest to replay successfully. See the closing note
-  in the defer-phase section below.
+- `adminForceResolve` (force-complete and force-fail) — **same qualification since 2026-09-13.**
+  A workflow that owes cleanup goes to `terminating` carrying the operator's intended outcome in
+  `pending_terminal_status` (`'done'` or `'failed'`), with the result or error written at the same
+  time; `FinalizeDeferPhase` applies it once the defers have run. A workflow that owes no cleanup
+  is resolved directly, as before.
+
+  **This reverses `tiers.yaml` D10**, which decided on 2026-09-04 that force-resolve would stay
+  one-phase. The repository owner reversed it on 2026-09-13 (cleat#1152). D10's objection was not
+  wrong, and it is now the documented operator-visible cost — see "What it costs" in the
+  defer-phase section below.
 
 Re-derive with `grep -rn "SET status = '" --include='*.go' engine/ | grep -v _test` across all
 three dialects. These three are the reason the defer phase below needs a design at all: a
 workflow that reaches a terminal status this way never had a live instance, so **its registered
-defers never ran** (IMPROVEMENT-PLAN §3.75). Two of the three now run them; the third does not,
-by decision rather than by omission.
+defers never ran** (IMPROVEMENT-PLAN §3.75). All three now run them.
+
+### Which terminal transitions owe a defer phase, and why
+
+The rule is **not** operator-versus-engine, which is the natural but wrong reading. It is whether a
+guest is running to drain its defers:
+
+| | who runs the defers | takes the defer phase |
+|---|---|---|
+| guest exits — `done`, `failed`, `dead_lettered` | the guest, on its way out of the entry point | no |
+| host imposes — `terminate`, parent-close `TERMINATE`, force-complete, force-fail | nobody, unless the host replays a segment | **yes** |
+
+`MoveToDeadLetterQueue` is the case most often misread as a gap. It writes `dead_lettered` with a
+plain `UPDATE` and no defer check, and it needs none: it is called from `writeTerminalFailure`
+(`cmd/cleat-worker/setup.go`) *after* the guest has returned an error out of its entry point, so
+the defers have already drained. Asserted by
+`ports/dbos-transact-py`'s `test_a_defer_runs_on_a_propagated_failure_and_costs_the_run_its_dlq_place`
+in the cleat-ports suite.
 
 ---
 
 ## The defer phase, and the status window it introduces
 
-**Status: live for `TerminateWorkflow` (§3.112) and for the parent-close `TERMINATE` arm
-(§3.114) since 2026-09-04. `adminForceResolve` deliberately keeps its one-step transition —
-`tiers.yaml` D10.** This section describes what the first two do now, and ends with why the third
-is different.
+**Status: live for all three host-driven terminal transitions.** `TerminateWorkflow` (§3.112) and
+the parent-close `TERMINATE` arm (§3.114) since 2026-09-04; `adminForceResolve` (force-complete and
+force-fail) since 2026-09-13, when `tiers.yaml` D14 reversed D10. This section describes what they
+do, and ends with what the last one costs an operator.
 
 The durable record:
 
@@ -271,26 +293,43 @@ where that is recorded rather than something the finalize is told: `TerminateWor
 `terminated`, the parent-close arm records `failed`. One finalize, two outcomes, and nothing
 between the phases can substitute a third.
 
-### Why `adminForceResolve` is not one of them
+### `adminForceResolve` takes this path too, since 2026-09-13
 
-Force-complete and force-fail remain terminal-and-immediate, and their defers do not run.
-**That is a decision (`tiers.yaml` D10), not the transition nobody got to.**
+Force-complete and force-fail were terminal-and-immediate until `tiers.yaml` **D14** reversed
+**D10** (cleat#1152). They now mark like the other two when the workflow owes cleanup: the
+operator's intended outcome goes into `pending_terminal_status` — `'done'` or `'failed'` rather
+than `'terminated'` — with the result or error written alongside it, and `FinalizeDeferPhase`
+applies it once the defers have run. `FinalizeDeferPhase` sets `status = pending_terminal_status`
+and does not touch `result` or `error_msg`, which is what lets a mechanism built for terminate
+carry a force-*complete*'s payload.
 
-They are the operator's escape hatch for a workflow that is stuck — fenced on generation but not
-on `assigned_to`, because a workflow being force-resolved usually has no live owner. A defer phase
-requires the guest to replay successfully, so routing the escape hatch through one would make it
-depend on the thing that is already failing: an operator whose workflow is wedged would wait out
-`defer_phase_deadline` before the override took effect.
+A workflow owing no defers is still resolved in one `UPDATE`. Force-resolve has not become
+asynchronous in general — only for runs with cleanup outstanding.
 
-It is also what makes force-resolve **authoritative** over a defer phase that is already running.
-Every direct terminal `UPDATE` clears `pending_terminal_status`, so an operator can stop a cleanup
-that is itself stuck — and a workflow cannot be left terminal with a marker the deadline sweep
-would later act on.
+**What it costs, and D10 was right about it.** A defer phase requires the guest to replay, so
+routing the escape hatch through one makes it depend on the thing that may already be failing:
 
-**What it costs:** guest-side cleanup does not run on this path. A defer body that would have
-released an external lock or closed a remote session is skipped. Host-side resources are
-unaffected — concurrency keys and the sticky assignment are still released. If the workflow is
-healthy enough to run its own cleanup, terminate it rather than force-resolving it.
+| the workflow being force-resolved | when the operator's outcome lands |
+|---|---|
+| owes no defers | immediately, one `UPDATE` |
+| owes defers and can replay | after its defer segment runs — seconds |
+| owes defers and **cannot** replay | after `defer_phase_deadline`, up to 5 minutes |
+
+`ExpireDeferPhases` applies the recorded outcome once the deadline passes, so an operator always
+has recourse — it is no longer instant. **A status of `terminating` straight after a
+force-complete is expected**; the row already carries the outcome that will be applied.
+
+What was gained is the other half of D10's own argument. The cleat#1152 census found that
+MARK/FINALIZE had **never had a defer to run** — 9,868 workflows, 47 `terminated`, every one
+either never executing a body or registering none. These two endpoints were the only ones that
+would ever exercise it, so under D10 the two-phase path was untested in production precisely
+*because* of D10.
+
+**Force-resolving a workflow that is already in its defer phase** still takes the one-phase arm and
+clears the marker, cutting the cleanup short. `deferPhaseOwed` returns false for `terminating`, so
+this is the same behaviour as a second `TerminateWorkflow`, and it is what keeps force-resolve
+authoritative over a cleanup that is itself stuck. A workflow is never left terminal carrying a
+marker the deadline sweep would later act on.
 
 ---
 
