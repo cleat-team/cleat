@@ -145,11 +145,23 @@ func (s *MySQLStore) ListPromises(ctx context.Context, workflowID string) ([]Pro
 
 // CreateUpdateRequest registers an incoming update request for a workflow.
 func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
+	// A plain INSERT, not INSERT IGNORE, and this is the fix rather than a
+	// tidy-up. IGNORE discarded the row for a name already used, the result
+	// was discarded too, so RowsAffected == 0 was invisible and this returned
+	// nil -- the handler then answered 202 with a promise id for a request
+	// that had not been recorded. The caller held a promise nothing could
+	// settle. Letting the constraint speak makes this dialect agree with the
+	// other two. cleat#1330.
 	_, err := s.db.ExecContext(ctx, `
-		INSERT IGNORE INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
+		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
 		VALUES (?, ?, ?, ?, 'pending', ?)
 	`, workflowID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
 	if err != nil {
+		// (workflow_id, update_name) is the primary key, so a uniqueness
+		// violation is this name having been used on this workflow before.
+		if isDuplicateKeyError(err) {
+			return fmt.Errorf("%w: %s", ErrUpdateNameUsed, updateName)
+		}
 		return err
 	}
 

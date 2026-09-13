@@ -1963,7 +1963,15 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	}
 	for _, p := range pending {
 		if p.UpdateName == updateName {
-			s.writeError(w, 409, "update already pending with name: "+updateName)
+			// A `detail` beside the message, because this and the
+			// update_name_used case below are two different conditions with
+			// one status and a caller had no way to tell them apart: one is
+			// "wait for the in-flight one", the other is "this name is spent
+			// for the life of this workflow". cleat#1330.
+			s.writeJSON(w, 409, map[string]string{
+				"error":  "update already pending with name: " + updateName,
+				"detail": "update_already_pending",
+			})
 			return
 		}
 	}
@@ -1977,6 +1985,24 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 
 	// Create the update request in the database.
 	if err := st.CreateUpdateRequest(r.Context(), id, updateName, payload, promiseID); err != nil {
+		// The pending guard above filters status = 'pending', so it covers
+		// only the window before dispatch. Once the update has COMPLETED the
+		// guard passes and the insert runs into the primary key -- and that is
+		// the common case, since a caller retrying is far more likely to do so
+		// after the first finished than during the pending window.
+		//
+		// It answered 500 with the raw driver string. The request is
+		// well-formed and the state says no, which is what the sibling 409
+		// above is for. cleat#1330.
+		if errors.Is(err, engine.ErrUpdateNameUsed) {
+			s.writeJSON(w, 409, map[string]string{
+				"error": "update name already used on this workflow: " + updateName,
+				// Distinct from update_already_pending: that one clears when
+				// the in-flight update finishes, this one never does.
+				"detail": "update_name_used",
+			})
+			return
+		}
 		s.writeError(w, 500, err.Error())
 		return
 	}

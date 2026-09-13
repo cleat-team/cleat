@@ -498,6 +498,13 @@ func (s *MSSQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 		VALUES (@p1, @p2, @p3, @p4, 'pending', @p5)
 	`, workflowID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
 	if err != nil {
+		// (workflow_id, update_name) is the primary key, so a uniqueness
+		// violation is this name having been used on this workflow before.
+		// Detected typed, via isMSSQLDuplicateKey, and wrapped so the HTTP
+		// layer answers 409 without reading driver text. cleat#1330.
+		if isMSSQLDuplicateKey(err) {
+			return fmt.Errorf("%w: %s", ErrUpdateNameUsed, updateName)
+		}
 		return err
 	}
 

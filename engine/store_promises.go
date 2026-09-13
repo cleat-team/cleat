@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/lib/pq"
 )
 
 func (s *PostgresStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
@@ -186,6 +187,37 @@ func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]
 // AcquireConcurrencyKey tries to acquire a concurrency key for a workflow.
 // Returns true if acquired, false if already held by another workflow.
 
+// ErrUpdateNameUsed is returned by CreateUpdateRequest when this workflow has
+// already accepted an update under this name.
+//
+// workflow_update_requests is keyed PRIMARY KEY (workflow_id, update_name) on
+// all three dialects, and completion is an UPDATE ... SET status = 'completed'
+// rather than a delete, so the name is consumed for the life of the workflow.
+// Whether it SHOULD be is cleat#1330's open question and a schema change
+// either way; this exists so that all three dialects refuse the second
+// request the same way in the meantime, and so the HTTP layer can answer 409
+// without reading driver text.
+//
+// It sits beside ErrScheduleExists deliberately -- same shape, same reason,
+// and each dialect detects its own uniqueness violation while the error is
+// still TYPED (pq SQLSTATE 23505, MySQL 1062, SQL Server 2601/2627). See
+// engine/mssql_errors.go for what the string form costs.
+//
+// WHAT THIS REPLACED, per dialect, measured on develop before the fix:
+//
+//	PostgreSQL   500 {"error":"pq: duplicate key value violates unique
+//	                  constraint \"workflow_update_requests_pkey\" (23505)"}
+//	SQL Server   500, same shape with the mssql driver's text
+//	MySQL        202 + a promise_id, and NO ROW -- INSERT IGNORE discarded it
+//	             and the result was discarded too, so RowsAffected == 0 was
+//	             invisible and this returned nil
+//
+// MySQL's was the dangerous one: the caller held a promise that provably
+// cannot settle, because CompleteUpdateRequest's WHERE matches nothing and
+// failStrandedUpdates sweeps rows, of which there are none. That is the exact
+// failure cleat/runtime_updates.go names as the reason the feature exists.
+var ErrUpdateNameUsed = errors.New("update name already used")
+
 func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -203,6 +235,14 @@ func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, upd
 		VALUES ($1, $2, $3, $4, 'pending', $5)
 	`, workflowID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
 	if err != nil {
+		// 23505 is unique_violation, and (workflow_id, update_name) is the
+		// primary key, so it means this name has been used on this workflow
+		// before. Detected typed and wrapped, so nothing above the store
+		// parses a driver message. cleat#1330.
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			return fmt.Errorf("%w: %s", ErrUpdateNameUsed, updateName)
+		}
 		return err
 	}
 

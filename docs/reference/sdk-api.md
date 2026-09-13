@@ -510,6 +510,24 @@ a value to the caller:
 A caller posts `POST /api/workflows/:id/update/:name`, gets `202` with a
 `promise_id`, and waits on that promise for the handler's return value.
 
+**An update name can be used once per workflow.** `workflow_update_requests` is
+keyed `(workflow_id, update_name)` and completion marks the row rather than
+deleting it, so the name is consumed for the life of the run. A second request
+under the same name is refused with `409`, and the `detail` field says which of
+the two refusals it is:
+
+| `detail` | means | clears |
+|---|---|---|
+| `update_already_pending` | the first request has not been dispatched yet | when it is handled |
+| `update_name_used` | this name has already been handled on this workflow | never |
+
+This is recorded as the behaviour that ships, not as a contract anyone designed:
+whether a name *should* be reusable is open in
+[cleat#1330](https://github.com/cleat-team/cleat/issues/1330), and either answer
+is a schema change. Until it is settled, treat a name as single-use and use a
+distinct one per request — `bump-1`, `bump-2` — rather than relying on either
+behaviour persisting.
+
 ```go
 DispatchUpdates()
 ```
