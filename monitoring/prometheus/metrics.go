@@ -109,7 +109,6 @@ type Metrics struct {
 	// --- Float64Gauges ---
 	replayThroughput       metric.Float64Gauge
 	freshThroughput        metric.Float64Gauge
-	memoryPressureRatio    metric.Float64Gauge
 	memoryPressure         metric.Float64Gauge
 	scalingPressure        metric.Float64Gauge
 	backgroundLoopDuration metric.Float64Gauge
@@ -596,14 +595,6 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_fresh_throughput_steps_per_second: %w", err)
-	}
-
-	m.memoryPressureRatio, err = meter.Float64Gauge(
-		"cleat_memory_pressure_ratio",
-		metric.WithDescription("Current memory pressure ratio (0.0-1.0)"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("cleat_memory_pressure_ratio: %w", err)
 	}
 
 	m.memoryPressure, err = meter.Float64Gauge(
@@ -1304,12 +1295,6 @@ func (m *Metrics) SetFreshStepCount(ctx context.Context, val int64, extraAttrs .
 func (m *Metrics) SetReplayStepCount(ctx context.Context, val int64, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.replayStepCountGauge.Record(ctx, val, metric.WithAttributes(attrs...))
-}
-
-// SetMemoryPressureRatio sets the memory pressure ratio gauge.
-func (m *Metrics) SetMemoryPressureRatio(ctx context.Context, ratio float64, extraAttrs ...attribute.KeyValue) {
-	attrs := m.mergeAttrs(extraAttrs...)
-	m.memoryPressureRatio.Record(ctx, ratio, metric.WithAttributes(attrs...))
 }
 
 // SetMemoryPressure sets the memory pressure gauge.
