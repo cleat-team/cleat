@@ -151,7 +151,34 @@ func TestReleasingAClaimTwiceDoesNotResurrectIt_MultiBackend(t *testing.T) {
 			if err != nil || first == nil {
 				t.Fatalf("ClaimWorkflow: wf=%v err=%v", first, err)
 			}
-			if err := store.ReleaseWorkflow(ctx, first.ID, "worker-1", first.Generation, time.Now().UTC()); err != nil {
+			// A wake time unambiguously in the PAST, not time.Now().
+			//
+			// cleat#1391: this test wrote next_wake_at from the HOST clock and
+			// ClaimWorkflow compares it against the DATABASE clock. When the
+			// host is ahead -- which it was, by 13-15 ms in one recorded run
+			// and by 804 us in another -- next_wake_at reads later than now()
+			// and the claim below matches nothing. ClaimWorkflow returns
+			// (nil, nil) for a predicate that excludes everything, so the
+			// failure said only "wf=<nil> err=<nil>".
+			//
+			// It presented as order-dependence (fails in a full suite, passes
+			// alone) and was chased as one for days. It was neither: the offset
+			// drifts, so it fails whenever the offset happens to exceed the
+			// elapsed time between this call and the claim. CI never saw it
+			// because service containers share the runner's clock.
+			//
+			// A production caller passes a wake time meaningfully in the
+			// future -- a retry delay -- where milliseconds of skew are
+			// irrelevant. Passing time.Now() to mean "immediately" is the one
+			// case where two clocks have to agree. Both sibling tests already
+			// do it this way (a_parked_row_is_claimed_by_another_worker_test.go
+			// and stale_release_reports_a_lost_fence_test.go); this one was the
+			// outlier.
+			//
+			// Not the zero value: MySQL rejects '0000-00-00' for this column
+			// where the other two accept it.
+			if err := store.ReleaseWorkflow(ctx, first.ID, "worker-1", first.Generation,
+				time.Now().UTC().Add(-time.Minute)); err != nil {
 				t.Fatalf("the first ReleaseWorkflow failed: %v", err)
 			}
 
@@ -185,7 +212,8 @@ func TestReleasingAClaimTwiceDoesNotResurrectIt_MultiBackend(t *testing.T) {
 			// three dialects, and cannot write portable code that distinguishes
 			// them. Filed as cleat#1223 rather than settled here, because picking the
 			// winner is an API decision and this test's subject is the exclusion.
-			staleErr := store.ReleaseWorkflow(ctx, first.ID, "worker-1", first.Generation, time.Now().UTC())
+			staleErr := store.ReleaseWorkflow(ctx, first.ID, "worker-1", first.Generation,
+				time.Now().UTC().Add(-time.Minute))
 			if staleErr != nil {
 				t.Logf("stale release reported an error on this dialect (not a failure, see above): %v", staleErr)
 			}
