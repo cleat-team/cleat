@@ -34,11 +34,37 @@ const suiteQueue = "queue-upgrade-tests"
 // workflow_instances with no foreign key to workflow_defs -- see the same note
 // in tests/integrity and engine/fault_test.go.
 //
-// testutil.TestDB also fails, rather than skips, when CLEAT_TEST_DB is set but
+// SuiteTestDB, not TestDB: THIS SUITE ADDS COLUMNS AND NEVER DROPS THEM.
+// TestMigrationNoDataLoss and TestMigrationIdempotent apply a migration, which
+// is the thing they exist to test, and `ALTER TABLE ... ADD COLUMN IF NOT
+// EXISTS mig_test_col` against the SHARED database is permanent. The row
+// cleanup below has a deferred counterpart; the columns never had one.
+//
+// The cost landed on a package this one does not touch and cannot see. `engine`
+// sorts before `tests/upgrade`, so within one run the schema-doc test always
+// sees the database before the columns arrive, and on the NEXT run it always
+// sees them -- a full local suite that passes, then fails, with no code change
+// between. It names docs/explanation/postgresql-schema.md, which is correct,
+// and tells the reader to add two columns the shipped schema does not have.
+// CI never saw it because every job gets a fresh database. cleat#1281.
+//
+// Measured 2026-09-13 on a database with none of them: one `go test
+// ./tests/upgrade/` leaves event_history.mig_test_col, workflow_defs.
+// mig_test_col, workflow_instances.mig_test_col and
+// workflow_instances.idempotent_col behind, and the schema-doc test then
+// fails on all three tables.
+//
+// A deferred DROP COLUMN was the other candidate and is strictly weaker: it
+// restores the database only on the paths that reach the defer, and this
+// package is where a killed or panicking run is least surprising. A separate
+// database cannot leak into the shared one at all, which is the same reason
+// tests/crash took one -- see ensureCrashDatabase.
+//
+// SuiteTestDB also fails, rather than skips, when a DSN is set but
 // unreachable, so a database that stops arriving empties this job loudly.
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db := testutil.TestDB(t, testutil.DialectPostgres)
+	db := testutil.SuiteTestDB(t, "upgrade")
 
 	// worker_rolling_test.go inserts instances with def_name='test',
 	// def_version=1, and workflow_instances_def_name_def_version_fkey requires
