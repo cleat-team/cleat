@@ -67,6 +67,16 @@ func TestMetricsQueriesWorkUnderRLS(t *testing.T) {
 		 VALUES ('rls-metrics-wf', 1, 'call', $1)`, tenant); err != nil {
 		t.Fatalf("seed event_history: %v", err)
 	}
+	// TWO keys, one held and one already expired. A count that ignored
+	// expires_at would return 2 and look perfectly healthy, so one row of each
+	// is what makes the assertion below able to fail for the right reason.
+	if _, err := adminDB.Exec(
+		`INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+		 VALUES ('\x01'::bytea, 'held',    'rls-metrics-wf', now() + interval '1 hour', $1),
+		        ('\x02'::bytea, 'expired', 'rls-metrics-wf', now() - interval '1 hour', $1)`,
+		tenant); err != nil {
+		t.Fatalf("seed concurrency_keys: %v", err)
+	}
 
 	// Guard the fixture. Without a matching row the RLS policy is never
 	// evaluated and this test passes against the unfixed code.
@@ -107,5 +117,22 @@ func TestMetricsQueriesWorkUnderRLS(t *testing.T) {
 	// it read rows does not slip through with the other two now covered.
 	if _, err := store.EstimateEventHistorySize(ctx); err != nil {
 		t.Errorf("EstimateEventHistorySize under a non-superuser role: %v", err)
+	}
+
+	// The fourth method, added in cleat#1317. Until then PostgresStore
+	// implemented three of the four, and because ShardedStore reaches its
+	// shards through a single assertion to the whole metricsStore interface,
+	// that one gap made all four return (0, nil) on every sharded deployment.
+	// A compile-time assertion now pins the set; this pins the behaviour.
+	keys, err := store.CountActiveConcurrencyKeys(ctx)
+	if err != nil {
+		t.Errorf("CountActiveConcurrencyKeys under a non-superuser role: %v", err)
+	} else if keys != 1 {
+		t.Errorf("CountActiveConcurrencyKeys = %d, want 1 (one held key and one "+
+			"expired one were seeded).\n\n"+
+			"2 means expires_at is not being honoured: an uncollected lease is "+
+			"sweep lag, and counting it would make the gauge read high exactly "+
+			"when the key sweep falls behind. 0 means the tenant predicate or "+
+			"RLS excluded the held row too.", keys)
 	}
 }
