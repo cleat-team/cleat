@@ -153,6 +153,10 @@ func isSiblingTestProcess(pid int) bool {
 	if pid == selfPID() {
 		return true
 	}
+	//nolint:gosec // G204: fixed binary ("ps"), arguments as an array, no shell. The
+	// only variable is strconv.Itoa of an int, so no string reaches the command
+	// line and there is nothing to inject. Same shape as credentials.go's vault
+	// and aws providers, with a narrower input than either.
 	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return false
