@@ -990,7 +990,7 @@
             "uid": "$datasource"
           },
           "editorMode": "code",
-          "expr": "sum(cleat_wasm_cache_bytes{namespace=~\"$namespace\",workflow_name=~\"$workflow_name\"}) by (workflow_name)",
+          "expr": "sum(cleat_event_history_size_bytes{namespace=~\"$namespace\",workflow_name=~\"$workflow_name\"}) by (workflow_name)",
           "legendFormat": "{{workflow_name}}",
           "refId": "A"
         },
@@ -1000,7 +1000,7 @@
             "uid": "$datasource"
           },
           "editorMode": "code",
-          "expr": "sum(cleat_wasm_cache_bytes{namespace=~\"$namespace\"})",
+          "expr": "sum(cleat_event_history_size_bytes{namespace=~\"$namespace\"})",
           "legendFormat": "Total",
           "refId": "B"
         }
