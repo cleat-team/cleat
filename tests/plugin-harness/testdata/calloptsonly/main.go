@@ -12,7 +12,6 @@ package calloptsonly
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/cleat-team/cleat/cleat"
 )
@@ -28,7 +27,7 @@ type result struct {
 // Entry point: call_with_options_only
 func CallWithOptionsOnly(h cleat.HostCalls, input string) (string, error) {
 	resp, err := h.DurableCallWithOptions(
-		cleat.CallOptions{Timeout: 30 * time.Second},
+		cleat.CallOptions{},
 		"harness-service", "harness-op", `{}`)
 	out := result{Resp: resp}
 	if err != nil {

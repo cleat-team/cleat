@@ -163,25 +163,6 @@ func TestCallErrorRetryable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CallTimeoutError
-// ---------------------------------------------------------------------------
-
-func TestCallTimeoutErrorError(t *testing.T) {
-	err := &CallTimeoutError{
-		Service:   "svc",
-		Operation: "op",
-		Timeout:   5 * time.Second,
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "svc") || !strings.Contains(msg, "op") {
-		t.Errorf("expected error to contain service and operation, got %q", msg)
-	}
-	if !strings.Contains(msg, "timed out") {
-		t.Errorf("expected 'timed out' in error, got %q", msg)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // ServiceNotFoundError
 // ---------------------------------------------------------------------------
 
@@ -1941,23 +1922,6 @@ func TestHostCallsImpl_AwaitAllChildrenSuccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Error types: additional coverage
 // ---------------------------------------------------------------------------
-
-func TestCallTimeoutErrorFields(t *testing.T) {
-	err := &CallTimeoutError{
-		Service:   "svc",
-		Operation: "op",
-		Timeout:   time.Minute,
-	}
-	if err.Service != "svc" {
-		t.Errorf("expected 'svc', got %q", err.Service)
-	}
-	if err.Operation != "op" {
-		t.Errorf("expected 'op', got %q", err.Operation)
-	}
-	if err.Timeout != time.Minute {
-		t.Errorf("expected 1m, got %v", err.Timeout)
-	}
-}
 
 func TestCallErrorFields(t *testing.T) {
 	err := &CallError{
