@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -578,7 +579,35 @@ func isConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := err.Error()
+	s := strings.ToLower(err.Error())
+
+	// EOF IS MATCHED AS A WORD, NOT A SUBSTRING. cleat#1465.
+	//
+	// It used to be in the list below, and `strings.Contains` on a lowercased
+	// haystack meant it matched inside any word containing "eof" -- most
+	// importantly `typeof`, which is t-y-p-e-o-f. So a guest error like
+	//
+	//     TypeError: undefined is not a function (typeof x)
+	//
+	// classified as a connection error. cleat ships an AssemblyScript SDK and a
+	// JS-family toolchain, where `typeof` is ordinary error text rather than an
+	// exotic string.
+	//
+	// The consequence is liveness, not tidiness: at the :2127 call site a match
+	// means releaseWorkflow and a re-claim, and a TypeError in guest code
+	// reproduces deterministically, so it produces the same message every time.
+	// The run never reaches a terminal state and never records an error_code.
+	//
+	// \b before the E is what does the work: in `typeof` the preceding `p` and
+	// the `e` are both word characters, so there is no boundary and no match.
+	// The trailing `f` at end-of-input IS a boundary, which is exactly why the
+	// substring form matched and this does not.
+	if eofWord.MatchString(s) {
+		return true
+	}
+
+	// The rest stay substring matches: every one is a multi-word phrase, so the
+	// collision this fixes does not arise for them.
 	patterns := []string{
 		"connection refused",
 		"connection reset",
@@ -587,16 +616,20 @@ func isConnectionError(err error) bool {
 		"server closed the connection",
 		"connection timed out",
 		"broken pipe",
-		"EOF",
 		"driver: bad connection",
 	}
 	for _, p := range patterns {
-		if strings.Contains(strings.ToLower(s), strings.ToLower(p)) {
+		if strings.Contains(s, p) {
 			return true
 		}
 	}
 	return false
 }
+
+// eofWord matches EOF as a standalone token. Case-insensitive deliberately:
+// nothing about the collision requires being stricter about case, and a driver
+// emitting a lowercase `eof` token should still be caught.
+var eofWord = regexp.MustCompile(`\beof\b`)
 
 // ---------------------------------------------------------------------------
 // Health tracker for background loop watchdog
