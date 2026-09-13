@@ -113,40 +113,54 @@ func (h *HostCallsImpl) SetQueryState(key, value string) {
 	}
 }
 
-// SetScope enters a virtual object instance -- but NOT, in this SDK, in any
-// way the engine can see.
+// SetScope enters a virtual object instance, and a COMPILED Go workflow takes
+// the engine's lock for it.
 //
-// What the ENGINE does with a scope: freshSetScope (engine/scope.go) takes a
-// concurrency key named "vo:<objectType>:<instanceKey>" and holds it until the
-// scope is cleared or replaced, so two workflows cannot be inside the same
-// instance at once. That mutual exclusion is the whole of the remaining
-// behaviour, and it is real.
+// What the ENGINE does with a scope: freshSetScope (engine/scope.go:89) takes
+// a concurrency key named "vo:<objectType>:<instanceKey>" with a 24h TTL and
+// holds it until the scope is cleared or replaced, so two workflows cannot be
+// inside the same instance at once. That mutual exclusion is the whole of the
+// remaining behaviour, and it is real.
 //
-// What THIS implementation does: sets three local fields. There is no
-// HostCallsOptions field for scope, no row in wasm/usage.go's hostFunctions
-// table, and no entry in wasm/adapter_metadata.go -- so nothing generates a
-// call to cleat_set_scope for a Go guest and the host is never told. A Go
-// workflow calling SetScope therefore takes NO LOCK -- confirmed by compiling
-// one whose body is SetScope plus a log: the binary's imports are
-// cleat_complete, cleat_log and cleat_poll_work, and the generated adapter has
-// exactly one field, so the call is not in the binary at all. Rust, Java and
-// AssemblyScript all declare the import and call it (crates/cleat-sdk
-// host_calls.rs:943, crates/cleat-java HostCalls.java:266,
-// packages/cleat-as host-calls.ts:2053); Go is the only one that does not.
+// THIS COMMENT DESCRIBED THE OPPOSITE UNTIL 2026-09-13, and the correction is
+// worth more space than the fact. It read: "There is no HostCallsOptions field
+// for scope, no row in wasm/usage.go's hostFunctions table, and no entry in
+// wasm/adapter_metadata.go -- so nothing generates a call to cleat_set_scope
+// for a Go guest and the host is never told ... Go is the only one that does
+// not [take the lock]."
 //
-// What it used to do, and what this comment used to say: "All subsequent
-// SetState/GetState/etc calls are automatically prefixed with
-// vo:<objectType>:<instanceKey>:". Those calls were removed with the rest of
-// the durable-state family (IMPROVEMENT-PLAN 3.216), so the prefix prefixes
-// nothing either.
+// All three of those were true, and all three stopped being true in #1060
+// (c94c9620, "wire the Go SDK's scope calls to the host, closing #984").
+// HostCallsOptions.SetScope exists (runtime.go), usage.go carries the rows,
+// adapter_metadata.go carries the adapterDef -- and the call five lines below
+// this comment reaches the host. The paragraph survived the fix that falsified
+// it, sitting directly above the code that contradicts it.
 //
-// Both halves gone, the honest summary is: in the Go SDK these three methods
-// are a local variable with an interface around it. The returned string is an
-// opaque token for stack-style save/restore -- pass it back, do not parse it.
+// It was then read as current by an internal review and confirmed as a live
+// cross-SDK divergence in cleat#1322, which is what stale prose costs: not a
+// wrong sentence, but a decision queued about a problem that was already
+// fixed.
 //
-// See IMPROVEMENT-PLAN 3.223. cleat/embedded is inert for a second, separate
+// The artifact-level evidence is not this comment, and does not rot with it:
+// tests/plugin-harness/scope_wired_test.go builds a fixture whose body is
+// SetScope and asserts cleat_set_scope and cleat_get_scope are in the binary's
+// "env" imports (TestACompiledGoWorkflowImportsTheScopeCalls), then asserts it
+// reaches the host (TestACompiledGoWorkflowActuallyReachesTheHostForScope).
+// Both pass. A comment cannot fail; those can.
+//
+// WHAT IS STILL LOCAL, so this does not swing too far the other way: the
+// h.setScope == nil branch below. A hand-built HostCalls that does not supply
+// the hook keeps three local fields and takes no lock -- which is the fallback
+// path, not the compiled one. cleat/embedded is inert for a second, separate
 // reason: its setScope does not touch the in-memory lock map that its own
 // AcquireLock uses.
+//
+// And the prefixing this comment once promised really is gone: "all subsequent
+// SetState/GetState calls are automatically prefixed" went with the rest of
+// the durable-state family (IMPROVEMENT-PLAN 3.216). The returned string is an
+// opaque token for stack-style save/restore -- pass it back, do not parse it.
+//
+// See IMPROVEMENT-PLAN 3.223.
 func (h *HostCallsImpl) SetScope(objectType, instanceKey string) (previousScope string) {
 	if h.scopeSet {
 		previousScope = h.scopePrefix
