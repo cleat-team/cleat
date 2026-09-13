@@ -261,6 +261,30 @@ type WorkflowStore interface {
 	// direction: if workers really have died, the longest-stale are reclaimed
 	// first and the rest follow on later ticks. The bound changes the RATE of
 	// recovery, never whether it happens.
+	//
+	// `status = 'running'` IS THE WHOLE POPULATION, AND THAT IS DELIBERATE.
+	// The most common not-running state is not an anomaly, it is a parked row:
+	// ReleaseWorkflow writes status='ready' (or 'terminating'), assigned_to =
+	// NULL, next_wake_at = <when>, and every DurableSleep goes through it. Such
+	// a row is not owned by anyone, so there is no claim to reclaim and nothing
+	// stale about it; it is picked up by the ordinary claim predicate,
+	// `status IN ('ready','terminating') AND next_wake_at <= now()`, when its
+	// time comes. Losing the worker that parked it changes nothing.
+	//
+	// So DO NOT widen this to include 'ready' in the name of more aggressive
+	// crash recovery. It would reclaim every sleeping workflow in the system,
+	// bumping generation and reclaim_count on rows that are behaving exactly as
+	// designed. Measured on all three dialects (cleat#1429): one row parked
+	// with a 45s wake and one held by a dead worker, swept with timeout 0 so
+	// nothing is excluded by age -- reclaimed=1 on each, and reclaim_count says
+	// which: asleep=0, running=1.
+	//
+	// reclaim_count rather than status is the discriminator, and status cannot
+	// serve: reclaiming sets status back to 'ready', which is where the sleeper
+	// already was, so after a sweep both rows read 'ready' and a count of 1 is
+	// equally consistent with the reaper having taken the sleeper and left the
+	// dead one. A status-based assertion here passes on the inversion of the
+	// property it means to check.
 	ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error)
 
 	// GetQueryState returns the query state for a workflow instance key.
