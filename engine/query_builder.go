@@ -136,12 +136,31 @@ func (d Dialect) batchLimit(limitPos int) string {
 // reclaim_count on "the hottest query in the system", and it means the CLAIM
 // query. This one is a user-facing list endpoint, so the argument does not
 // reach it (cleat#1123).
+// THE CANCELLATION FLAG IS IN THE LISTING AND THE REASON IS NOT.
+//
+// A cancelled-but-still-running workflow is exactly what an operator scans a
+// list for: cleat's cancellation is COOPERATIVE, so the workflow may poll and
+// legitimately ignore the request, making that state normal and possibly
+// permanent. A listing that cannot show it cannot answer the question it is
+// opened with (cleat#1351).
+//
+// The reason stays out. It is free-text written by a human for another human,
+// and a page that may return hundreds of rows is not where it belongs -- the
+// detail read carries it. So the listing answers "which runs have been asked to
+// stop" and the single-run read answers "and why".
+//
+// COALESCE on a NOT NULL column is deliberate on the flag: SQL Server's is a
+// BIT and the other two are boolean, and a row predating any of the three
+// schemas would otherwise scan a NULL into a Go bool and fail the whole listing
+// rather than the one row.
 func (d Dialect) workflowInstanceColumns() string {
 	switch d {
 	case DialectPostgres:
-		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count"
-	case DialectMySQL, DialectMSSQL:
-		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count"
+		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, false)"
+	case DialectMySQL:
+		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, false)"
+	case DialectMSSQL:
+		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, 0)"
 	default:
 		panic("unknown dialect: " + d)
 	}
@@ -252,7 +271,7 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp,
 			&errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID,
-			&wf.ReclaimCount,
+			&wf.ReclaimCount, &wf.CancellationRequested,
 		); err != nil {
 			return err
 		}
@@ -262,7 +281,7 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&wf.Input, &wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp,
 			&errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID,
-			&wf.ReclaimCount,
+			&wf.ReclaimCount, &wf.CancellationRequested,
 		); err != nil {
 			return err
 		}

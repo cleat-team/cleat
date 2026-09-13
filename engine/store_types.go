@@ -60,6 +60,25 @@ type WorkflowInstance struct {
 	// exist without one.
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 
+	// CancellationRequested reports that someone asked this run to stop, and
+	// CancellationReason says why, when a reason was given.
+	//
+	// COOPERATIVE CANCELLATION IS WHY THESE HAVE TO BE READABLE. The workflow
+	// polls PollCancellation() and may legitimately ignore the request -- the
+	// ports suite asserts exactly that -- so "cancelled but still running" is a
+	// normal, expected and possibly permanent state. It was also the one state
+	// no read path could show: both columns have existed since the first schema
+	// on all three dialects, POST /cancel wrote them, the guest read them, and
+	// no API route returned either, so a cancelled run reported status "ready"
+	// and an operator could not tell a request that had not landed from one the
+	// workflow was deliberately ignoring (cleat#1351).
+	//
+	// The reason is omitempty and the flag is not: a false flag is the answer to
+	// "has this been cancelled", and omitting it would make "no" and "the field
+	// is missing" the same response. An absent reason means none was given.
+	CancellationRequested bool   `json:"cancellation_requested"`
+	CancellationReason    string `json:"cancellation_reason,omitempty"`
+
 	// StartedAt is when a worker FIRST began executing this run, or nil for a
 	// run that has never been claimed -- and for every run claimed before
 	// migration 055, which is not backfilled because such a run has no knowable

@@ -1419,6 +1419,7 @@ func TestMSSQLStore_ListWorkflows_Simple(t *testing.T) {
 				"wf-1", "test-wf", int64(1), "running", `{"key":"val"}`,
 				"worker-1", now, nil, nil, nil, now,
 				int64(3), int64(0), "", int64(4), // reclaim_count (cleat#1123)
+				false, // cancellation_requested (cleat#1351)
 			},
 		}},
 	}, nil)
@@ -1483,11 +1484,13 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 			now, // started_at (cleat#1090)
 			nil, nil, nil, nil,
 			int64(3), int64(0), "", DefaultTenantUUID, // tenant_id (3.99)
-			"wf-0",      // continued_from (cleat#887)
-			int64(5),    // reclaim_count (cleat#1008)
-			"wf-parent", // parent_workflow_id (cleat#1103)
-			now,         // created_at (cleat#1105)
-			"failed",    // pending_terminal_status (cleat#1105)
+			"wf-0",                             // continued_from (cleat#887)
+			int64(5),                           // reclaim_count (cleat#1008)
+			"wf-parent",                        // parent_workflow_id (cleat#1103)
+			now,                                // created_at (cleat#1105)
+			"failed",                           // pending_terminal_status (cleat#1105)
+			true,                               // cancellation_requested (cleat#1351)
+			"INCIDENT-4242 operator cancelled", // cancellation_reason (cleat#1351)
 		}}},
 	}, nil)
 	defer db.Close()

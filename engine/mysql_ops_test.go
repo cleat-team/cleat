@@ -752,6 +752,12 @@ func testWorkflowRow(id, name string, version int64, status string, assignedTo s
 	return [][]driver.Value{{
 		id, name, version, status, []byte(`{"in":1}`), assignedTo,
 		nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", int64(4),
+		// cancellation_requested, added by cleat#1351. The column list and the
+		// Scan are two separately-written lists that must agree in length, and
+		// a mock row is a third -- a mismatch here is a RUNTIME error
+		// ("expected 15 destination arguments in Scan, not 16"), not a compile
+		// one, so these rows are the part a widened SELECT breaks.
+		false,
 	}}
 }
 
@@ -855,7 +861,9 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 			int64(5),    // reclaim_count (cleat#1008)
 			"wf-parent", // parent_workflow_id (cleat#1103)
 			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), // created_at (cleat#1105)
-			"failed", // pending_terminal_status (cleat#1105)
+			"failed",                           // pending_terminal_status (cleat#1105)
+			true,                               // cancellation_requested (cleat#1351)
+			"INCIDENT-4242 operator cancelled", // cancellation_reason (cleat#1351)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")
@@ -1541,7 +1549,9 @@ func TestMySQLStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 			int64(0), // reclaim_count (never reclaimed)
 			nil,      // parent_workflow_id (NULL: top-level run)
 			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), // created_at (NOT NULL in the schema)
-			"", // pending_terminal_status (none pending)
+			"",    // pending_terminal_status (none pending)
+			false, // cancellation_requested (NOT NULL, default false)
+			"",    // cancellation_reason (COALESCE of NULL: never cancelled)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")

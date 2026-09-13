@@ -137,6 +137,12 @@ func makeEveryColumnNonZero(t *testing.T, store WorkflowStore, id string) {
 		`pending_terminal_status = 'failed'`,
 		`continued_from = 'wf-previous'`,
 		`parent_workflow_id = 'wf-parent'`,
+		// SQL Server has no boolean: cancellation_requested is a BIT there and
+		// a boolean on the other two, so the literal differs. Everything else
+		// in this list is dialect-neutral, which is why this is the only entry
+		// that needs a helper.
+		`cancellation_requested = ` + trueLiteral(store),
+		`cancellation_reason = 'INCIDENT-4242 operator cancelled'`,
 		`completed_at = ` + nowLiteral(store),
 		`started_at = ` + nowLiteral(store),
 		`next_wake_at = ` + nowLiteral(store),
@@ -145,6 +151,20 @@ func makeEveryColumnNonZero(t *testing.T, store WorkflowStore, id string) {
 	if _, err := db.Exec(stmt, id); err != nil {
 		t.Fatalf("populating every column: %v", err)
 	}
+}
+
+// trueLiteral is the dialect's spelling of boolean true.
+//
+// PostgreSQL and MySQL take `true`; SQL Server has no boolean type at all and
+// stores the flag as a BIT, which takes 1. Writing `true` there is a syntax
+// error rather than a silently wrong value, so this cannot fail quietly -- but
+// it would fail on one dialect only, which is the kind of break that reaches
+// CI rather than a laptop.
+func trueLiteral(store WorkflowStore) string {
+	if _, ok := store.(*MSSQLStore); ok {
+		return "1"
+	}
+	return "true"
 }
 
 func nowLiteral(store WorkflowStore) string {

@@ -88,6 +88,18 @@ func TestListWorkflowsReturnsEveryFieldTheRowCanHold(t *testing.T) {
 		"continued_from": "not selected by the list path. cleat#1123; #826 is " +
 			"the finding that a continue-as-new chain is unfollowable, so this " +
 			"one has a live argument for being carried",
+		// NOTE the asymmetry with cancellation_requested, which is NOT exempt:
+		// the flag is selected by the list path and this guard enforces it.
+		// A cancelled-but-still-running workflow is what an operator scans a
+		// list for -- cleat's cancellation is cooperative, so the workflow may
+		// poll and legitimately ignore the request, making that state normal
+		// and possibly permanent. The REASON is free text written by a human
+		// for another human, and a page that may return hundreds of rows is
+		// the wrong place for it; the single GET carries it. cleat#1351.
+		"cancellation_reason": "not selected by the list path, deliberately. " +
+			"Free-text supplied by an operator, and a listing may return " +
+			"hundreds of rows -- the detail read carries it. The FLAG is " +
+			"selected and enforced by this guard. cleat#1351",
 	}
 
 	for _, backend := range registeredBackends {
