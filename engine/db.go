@@ -1219,10 +1219,7 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 		result, err := tx.ExecContext(ctx, `
 			DELETE FROM event_history
 			WHERE workflow_id IN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < $1
+				SELECT id`+pgExpiredEventsWorkflows+`
 				LIMIT 10000
 			)
 		`, olderThan)
@@ -1272,11 +1269,7 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 			UPDATE workflow_instances
 			SET compaction_state = NULL, compaction_step = NULL, compacted_at = NULL
 			WHERE id IN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < $1
-				  AND compaction_state IS NOT NULL
+				SELECT id`+pgExpiredCompactionState+`
 				LIMIT 10000
 			)
 		`, olderThan)
@@ -1497,10 +1490,7 @@ func (s *PostgresStore) deleteDeadLetteredWorkflowsBatch(ctx context.Context, ol
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id FROM workflow_instances
-		WHERE status = 'dead_lettered'
-		  AND completed_at IS NOT NULL
-		  AND completed_at < $1
+		SELECT id`+pgDeadLetteredWorkflows+`
 		  AND tenant_id = $2
 		ORDER BY id
 		LIMIT 10000
@@ -1604,10 +1594,7 @@ func (s *PostgresStore) deleteCompletedWorkflowsBatch(ctx context.Context, older
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id FROM workflow_instances
-		WHERE status IN ('done', 'failed', 'terminated')
-		  AND completed_at IS NOT NULL
-		  AND completed_at < $1
+		SELECT id`+pgCompletedWorkflows+`
 		  AND tenant_id = $2
 		ORDER BY id
 		LIMIT 10000

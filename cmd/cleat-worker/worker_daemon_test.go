@@ -3324,6 +3324,22 @@ func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan t
 	}
 	return 0, nil
 }
+func (m *mockStore) CountExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) CountExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) CountDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) CountCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	if m.deleteCompletedWorkflowsFn != nil {
 		return m.deleteCompletedWorkflowsFn(ctx, olderThan)

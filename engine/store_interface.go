@@ -594,6 +594,29 @@ type WorkflowStore interface {
 	// workflow_instances rows deleted.
 	DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error)
 
+	// Count* report what the corresponding Delete/Clear above WOULD remove,
+	// without removing it. cleat#1457.
+	//
+	// Each is built from the same predicate constant as its delete -- see
+	// engine/retention_predicates.go -- so the two cannot drift into disagreeing.
+	// A preview computed by a separately-written query is a MODEL of the sweep
+	// rather than the sweep, and diverges silently and in the reassuring
+	// direction.
+	//
+	// BEST EFFORT. The count is taken at one instant against a database other
+	// workers are writing to; between the preview and the sweep that follows it,
+	// workflows complete and rows age past the cutoff. It is the right number
+	// for catching a mistyped retention window, which is what it is for, and not
+	// a promise about which rows will be deleted.
+	//
+	// On the interface rather than behind a type assertion, deliberately: an
+	// optional interface lets a store silently lack a preview and report nothing
+	// where it should report a refusal.
+	CountExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error)
+	CountExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error)
+	CountDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error)
+	CountCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error)
+
 	// StreamEventHistory loads event history for a workflow in pages, returning
 	// events through a channel. Events are fetched in pages of pageSize as the
 	// caller reads from the channel. The channel is closed when all events have

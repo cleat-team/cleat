@@ -2882,6 +2882,16 @@ type retentionSweepResult struct {
 	// failing must not stop the others -- so an empty result with no errors
 	// and no skips means the sweep ran and found nothing.
 	Errors []string `json:"errors,omitempty"`
+
+	// DryRun marks the counts above as a PREVIEW: nothing was deleted.
+	//
+	// Present and true only on a preview, so an existing caller parsing a real
+	// sweep sees the field it always saw. A reader who ignores this field reads
+	// a preview as a sweep that deleted things, which is the wrong direction to
+	// be wrong in -- hence the field rather than a separate response shape,
+	// which cleat#1457 chose so a preview and the sweep that follows it can be
+	// diffed against each other.
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 // runRetentionSweepWindow is runRetentionSweep with the window supplied rather
@@ -2943,6 +2953,77 @@ func (w *Worker) runRetentionSweepWindow(retentionDays, completedWorkflowRetenti
 		res.Skipped = append(res.Skipped, "dead_lettered (--dead-letter-retention-days is 0)")
 	}
 	w.Metrics.SetRetentionLastRunTimestamp(w.ctx, time.Now().Unix())
+	return res
+}
+
+// previewRetentionSweepWindow reports what runRetentionSweepWindow WOULD remove,
+// without removing anything. cleat#1457.
+//
+// Retention is the least reversible of cleat's destructive operations and was
+// the only one without a preview: cleatctl drop-tenant, revokeapikey, the
+// version GC and --uninstall-dry-run all have one, and none of them deletes
+// event history. The endpoint accepts an older_than override, so an operator can
+// scope a sweep to any window -- which is exactly the case where the blast
+// radius is worth seeing first, and exactly the case that had no way to see it.
+//
+// IT MIRRORS THE SWEEP ARM FOR ARM, INCLUDING THE SKIPS. A disabled arm is
+// reported in Skipped here exactly as it is there, because a preview whose zero
+// could mean either "disabled" or "nothing matched" reintroduces the ambiguity
+// retentionSweepResult's own doc comment exists to prevent -- and it would do so
+// in the report an operator reads BEFORE deciding whether to run the real thing.
+//
+// THE COUNTS ARE BEST EFFORT AND THE RESPONSE SAYS SO. They are read at one
+// instant from a database other workers are writing to; by the time the sweep
+// runs, workflows have completed and rows have aged past the cutoff. The number
+// is the right size for catching a mistyped older_than, which is what this is
+// for. It is not a promise about which rows a later sweep will delete, and an
+// operator who diffs a preview against the sweep that follows it should expect
+// them to differ by whatever the workload did in between.
+func (w *Worker) previewRetentionSweepWindow(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int, window time.Duration) retentionSweepResult {
+	res := retentionSweepResult{DryRun: true}
+	previewedAt := time.Now()
+	at := func(days int) time.Time {
+		if window > 0 {
+			return previewedAt.Add(-window)
+		}
+		return previewedAt.Add(-time.Duration(days) * 24 * time.Hour)
+	}
+	if retentionDays > 0 {
+		cutoff := at(retentionDays)
+		if n, err := w.store.CountExpiredEvents(w.ctx, cutoff); err != nil {
+			res.Errors = append(res.Errors, "events: "+err.Error())
+		} else {
+			res.EventsDeleted = n
+		}
+		if n, err := w.store.CountExpiredCompactionState(w.ctx, cutoff); err != nil {
+			res.Errors = append(res.Errors, "compaction_state: "+err.Error())
+		} else {
+			res.CompactionStateCleared = n
+		}
+	} else {
+		res.Skipped = append(res.Skipped, "events and compaction_state (--retention-days is 0)")
+	}
+	if completedWorkflowRetentionDays > 0 {
+		if n, err := w.store.CountCompletedWorkflows(w.ctx, at(completedWorkflowRetentionDays)); err != nil {
+			res.Errors = append(res.Errors, "completed_workflows: "+err.Error())
+		} else {
+			res.CompletedWorkflows = n
+		}
+	} else {
+		res.Skipped = append(res.Skipped, "completed_workflows (--completed-workflow-retention-days is 0)")
+	}
+	if deadLetterRetentionDays > 0 {
+		if n, err := w.store.CountDeadLetteredWorkflows(w.ctx, at(deadLetterRetentionDays)); err != nil {
+			res.Errors = append(res.Errors, "dead_lettered: "+err.Error())
+		} else {
+			res.DeadLetteredWorkflows = n
+		}
+	} else {
+		res.Skipped = append(res.Skipped, "dead_lettered (--dead-letter-retention-days is 0)")
+	}
+	// Deliberately NOT SetRetentionLastRunTimestamp: nothing ran. A preview that
+	// moved the last-run clock would make an operator checking a preview look
+	// like a retention pass to every dashboard reading that metric.
 	return res
 }
 
