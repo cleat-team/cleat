@@ -226,11 +226,40 @@ This is the same checkpoint/replay model used for `DurableCall`. The difference
 is that plugin functions are compiled into the worker binary rather than being
 external HTTP/gRPC services.
 
-### Idempotent Functions
+### Replay: when a function is called again
 
-If a function is marked `Idempotent: true`, the engine may call it multiple
-times during replay without recording the result in event history. This is
-appropriate for read-only functions (e.g., query state, lookups).
+By default, replay returns the output recorded on the original call. The engine
+re-invokes a function live **only** when its registration sets *both*
+properties:
+
+```go
+plugin.FuncOptions{
+    Name:              "get",
+    Idempotent:        true, // calling again has no additional effect
+    SameValueOnReplay: true, // calling again returns what the first call returned
+}
+```
+
+**Both, because they answer different questions** (cleat#1318). `Idempotent`
+asks *"is re-running safe?"*; replay asks *"should this run at all?"*. A single
+flag carried both until seven functions were registered against the weaker
+reading — including reads of state an operator can change between the original
+run and the replay, which is exactly the divergence replay exists to prevent.
+
+`SameValueOnReplay` is a claim about the **world**, not about the function. A
+perfectly deterministic function fails it if its inputs can change in between: a
+feature flag exists in order to be toggled, a vector index can be inserted into,
+a provider's model list moves. It is not purity and not determinism — the
+question is agreement with history.
+
+**Re-invoking saves nothing.** Every plugin call's output is recorded on the
+original run, so the recorded value is always available; re-invocation only
+risks returning something else. Set both properties when a function genuinely
+qualifies, not to avoid storage.
+
+Neither property is persisted in `event_history`, so replay consults the
+**current** registry. Changing a registration changes the replay semantics of
+runs recorded before the change.
 
 ## Plugin HTTP Routes
 

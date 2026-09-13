@@ -206,9 +206,39 @@ type HasHostFunctions interface {
 }
 
 // FuncOptions configures a registered host function.
+//
+// THE TWO REPLAY PROPERTIES ARE SEPARATE BECAUSE THEY ANSWER DIFFERENT
+// QUESTIONS. cleat#1318. Idempotent asks "is re-running this safe?"; replay
+// asks "should this run at all?". One boolean carried both until seven
+// functions were registered against the weaker reading, and they come apart
+// exactly where the wording is most inviting -- an idempotent WRITE reads as a
+// yes and is still a live write issued during a reconstruction of a past
+// execution.
+//
+// Replay re-invokes only when BOTH are true. Either alone is not enough:
+// re-invoking something unsafe repeats a side effect, and re-invoking something
+// safe-but-unstable hands the workflow a value it never branched on.
 type FuncOptions struct {
-	Name       string // function name (required)
-	Idempotent bool   // if true, safe to re-invoke during replay
+	Name string // function name (required)
+
+	// Idempotent reports that calling this function again has no additional
+	// effect -- no new side effects, nothing created twice. It says nothing
+	// about what the second call RETURNS.
+	//
+	// Nothing in the engine reads this for retry today; it is declarative.
+	Idempotent bool
+
+	// SameValueOnReplay reports that re-invoking during a replay yields what
+	// the original call yielded. This is the property that licenses discarding
+	// recorded output, and it is a statement about the WORLD, not about the
+	// function: a perfectly deterministic function fails it if its inputs can
+	// change between the original run and the replay. A feature flag an
+	// operator can toggle, a vector index anything can insert into, and a
+	// provider's model list all fail it.
+	//
+	// Note what it is not: not purity, and not determinism. The question is
+	// agreement with history.
+	SameValueOnReplay bool
 }
 
 // FuncRegistry lets plugins register workflow-callable functions.

@@ -306,10 +306,13 @@ func (a *hostPluginRegistryAdapter) Register(opts plugin.FuncOptions, fn plugin.
 	if a.registry.Has(a.pluginName, opts.Name) {
 		return fmt.Errorf("function %q already registered for plugin %q", opts.Name, a.pluginName)
 	}
-	if opts.Idempotent {
-		return a.registry.RegisterIdempotent(a.pluginName, opts.Name, fn)
-	}
-	return a.registry.Register(a.pluginName, opts.Name, fn)
+	// BOTH adapters must carry the split, and there are exactly two:
+	// engine/app.go and cmd/cleat-worker/setup.go. Passing only Idempotent
+	// through either would leave that path on the pre-cleat#1318 meaning --
+	// silently, because the registry would then read SameValueOnReplay as
+	// false and simply stop re-invoking, which looks exactly like the fix
+	// working.
+	return a.registry.RegisterWithPolicy(a.pluginName, opts.Name, fn, engine.ReplayPolicy{Idempotent: opts.Idempotent, SameValueOnReplay: opts.SameValueOnReplay})
 }
 
 func (a *hostPluginRegistryAdapter) RegisterStream(opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {

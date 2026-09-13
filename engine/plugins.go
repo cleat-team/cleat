@@ -13,11 +13,36 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// pluginFuncEntry stores a registered plugin function along with its
-// idempotent flag. Idempotent functions are safe to re-invoke during replay.
+// ReplayPolicy is what a registration says about re-invoking a plugin function
+// during replay. cleat#1318 split it from a single Idempotent bool, because
+// "is re-running safe?" and "should this run at all?" are different questions
+// and one boolean answered both.
+//
+// MayReInvokeOnReplay is the conjunction, and it is a method rather than a
+// third field so the two inputs cannot drift out of agreement with the
+// decision they feed.
+type ReplayPolicy struct {
+	// Idempotent: calling again has no additional effect.
+	Idempotent bool
+	// SameValueOnReplay: calling again returns what the original call returned.
+	SameValueOnReplay bool
+}
+
+// MayReInvokeOnReplay reports whether replay may discard the recorded output
+// and call the function live.
+//
+// BOTH are required. Idempotent alone permits a repeat that returns a
+// different answer -- which is the thing replay exists to prevent.
+// SameValueOnReplay alone permits repeating a side effect.
+func (p ReplayPolicy) MayReInvokeOnReplay() bool {
+	return p.Idempotent && p.SameValueOnReplay
+}
+
+// pluginFuncEntry stores a registered plugin function along with its replay
+// policy.
 type pluginFuncEntry struct {
-	fn         plugin.PluginFunc
-	idempotent bool
+	fn     plugin.PluginFunc
+	policy ReplayPolicy
 }
 
 // PluginRegistry maps plugin function names to implementations.
@@ -53,20 +78,34 @@ func (pr *PluginRegistry) Register(pluginName, funcName string, fn plugin.Plugin
 		return fmt.Errorf("plugin function %q already registered", key)
 	}
 	wrapped := plugin.RecoverPluginFunc(pluginName, pr.healthTracker, fn)
-	pr.funcs[key] = pluginFuncEntry{fn: wrapped, idempotent: false}
+	pr.funcs[key] = pluginFuncEntry{fn: wrapped}
 	return nil
 }
 
-// RegisterIdempotent registers a plugin function that is safe to re-invoke
-// during replay (e.g., read-only S3 GET operations). The function is wrapped
-// with panic recovery.
+// RegisterIdempotent registers a plugin function whose repeat invocation has no
+// additional effect.
+//
+// SINCE cleat#1318 THIS NO LONGER LICENSES RE-INVOCATION ON REPLAY, and the
+// change is deliberate rather than incidental. Idempotence says a repeat is
+// harmless; it does not say the repeat returns what the first call returned,
+// and only that second property justifies discarding recorded output. A
+// function that needs both must say so via RegisterWithPolicy.
+//
+// Kept because it is exported and because "idempotent" remains a true and
+// useful thing to record. The function is wrapped with panic recovery.
 func (pr *PluginRegistry) RegisterIdempotent(pluginName, funcName string, fn plugin.PluginFunc) error {
+	return pr.RegisterWithPolicy(pluginName, funcName, fn, ReplayPolicy{Idempotent: true})
+}
+
+// RegisterWithPolicy registers a plugin function with an explicit replay
+// policy. The function is wrapped with panic recovery.
+func (pr *PluginRegistry) RegisterWithPolicy(pluginName, funcName string, fn plugin.PluginFunc, policy ReplayPolicy) error {
 	key := lookupKey(pluginName, funcName)
 	if _, exists := pr.funcs[key]; exists {
 		return fmt.Errorf("plugin function %q already registered", key)
 	}
 	wrapped := plugin.RecoverPluginFunc(pluginName, pr.healthTracker, fn)
-	pr.funcs[key] = pluginFuncEntry{fn: wrapped, idempotent: true}
+	pr.funcs[key] = pluginFuncEntry{fn: wrapped, policy: policy}
 	return nil
 }
 
@@ -76,9 +115,14 @@ func (pr *PluginRegistry) Has(pluginName, funcName string) bool {
 	return ok
 }
 
-func (pr *PluginRegistry) Lookup(pluginName, funcName string) (plugin.PluginFunc, bool, bool) {
+// Lookup returns the function and its replay policy.
+//
+// The middle value is a ReplayPolicy rather than a bool so that a caller has to
+// say WHICH property it means. It used to be `idempotent`, and the whole of
+// cleat#1318 is what that ambiguity cost.
+func (pr *PluginRegistry) Lookup(pluginName, funcName string) (plugin.PluginFunc, ReplayPolicy, bool) {
 	entry, ok := pr.funcs[lookupKey(pluginName, funcName)]
-	return entry.fn, entry.idempotent, ok
+	return entry.fn, entry.policy, ok
 }
 
 // IsPluginHealthy reports whether the given plugin has not panicked.
@@ -222,19 +266,29 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 
+		// THE REGISTRY DECIDES, NOT THE RECORD, and rec.Idempotent is kept only
+		// for the in-process case. event_history has dedicated plugin_* columns
+		// and no idempotent one, so a record loaded from the database always
+		// reads false here however it was registered. Flipping a registration
+		// therefore changes the replay semantics of runs recorded before the
+		// change; cleat#1318 leaves that alone deliberately, there being no old
+		// data yet.
+		//
+		// Re-invocation requires BOTH properties (cleat#1318). It used to
+		// require only "idempotent", which seven functions claimed -- including
+		// reads of state an operator can change between the original run and
+		// the replay.
 		if rec.Idempotent {
-			// Safe to re-invoke during replay -- read-only operation (S3 GET).
-			// Look up the function and call it, returning fresh output.
-			// Do NOT append to newEvents (the event is already in history).
-			return s.freshPluginCallWithHistory(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+			policy := ReplayPolicy{Idempotent: true, SameValueOnReplay: rec.SameValueOnReplay}
+			if policy.MayReInvokeOnReplay() {
+				// Do NOT append to newEvents (the event is already in history).
+				return s.freshPluginCallWithHistory(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+			}
 		}
 
-		// Idempotent flag may not be persisted in DB (no event_history column).
-		// Fall back to registry lookup: if the function is currently registered
-		// as idempotent, re-invoke instead of returning cached output.
 		if s.engine.pluginRegistry != nil {
-			_, idempotent, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
-			if ok && idempotent {
+			_, policy, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
+			if ok && policy.MayReInvokeOnReplay() {
 				return s.freshPluginCallWithHistory(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 			}
 		}
@@ -284,7 +338,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
-	fn, idempotent, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
+	fn, policy, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
 
 	var outputJSON string
 	var fnErr error
@@ -334,14 +388,15 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 	// replay determinism — the history must include every call attempt.
 	if recordEvent {
 		rec := EventRecord{
-			Step:         s.stepCount,
-			EventType:    EventTypePluginCall,
-			PluginName:   pluginName,
-			PluginFunc:   functionName,
-			PluginInput:  inputJSON,
-			PluginOutput: outputJSON,
-			PluginError:  errStr,
-			Idempotent:   idempotent,
+			Step:              s.stepCount,
+			EventType:         EventTypePluginCall,
+			PluginName:        pluginName,
+			PluginFunc:        functionName,
+			PluginInput:       inputJSON,
+			PluginOutput:      outputJSON,
+			PluginError:       errStr,
+			Idempotent:        policy.Idempotent,
+			SameValueOnReplay: policy.SameValueOnReplay,
 		}
 		s.recordEvent(rec)
 

@@ -389,12 +389,12 @@ func TestNewApp_HasHostFunctions(t *testing.T) {
 	}
 
 	// Verify function was registered in the registry.
-	gotFn, idempotent, ok := app.Registry().Lookup("hf-plugin", "myFunc")
+	gotFn, policy, ok := app.Registry().Lookup("hf-plugin", "myFunc")
 	if !ok {
 		t.Fatal("expected function to be registered")
 	}
-	if idempotent {
-		t.Error("expected non-idempotent registration")
+	if policy.Idempotent || policy.SameValueOnReplay {
+		t.Errorf("expected a zero replay policy, got %+v", policy)
 	}
 
 	// The function is wrapped (recovery wrapper). Call it to verify delegation.
@@ -660,12 +660,12 @@ func TestAppFuncRegistry_Register(t *testing.T) {
 		t.Error("expected function to be registered")
 	}
 
-	gotFn, idempotent, ok := pr.Lookup("test-plugin", "myFunc")
+	gotFn, policy, ok := pr.Lookup("test-plugin", "myFunc")
 	if !ok {
 		t.Fatal("expected function to be found")
 	}
-	if idempotent {
-		t.Error("expected idempotent=false")
+	if policy.Idempotent || policy.SameValueOnReplay {
+		t.Errorf("expected a zero replay policy, got %+v", policy)
 	}
 	// The registered fn is wrapped. Call the wrapper to ensure it delegates.
 	result, err := gotFn(context.Background(), `{}`)
@@ -693,12 +693,22 @@ func TestAppFuncRegistry_RegisterIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, idempotent, ok := pr.Lookup("test-plugin", "idemFunc")
+	_, policy, ok := pr.Lookup("test-plugin", "idemFunc")
 	if !ok {
 		t.Fatal("expected function to be found")
 	}
-	if !idempotent {
-		t.Error("expected idempotent=true")
+	if !policy.Idempotent {
+		t.Error("expected Idempotent=true")
+	}
+	// AND IT MUST NOT RE-INVOKE ON REPLAY. RegisterIdempotent sets only the
+	// first half as of cleat#1318: idempotence says a repeat is harmless, not
+	// that the repeat returns what the first call returned, and only the
+	// second licenses discarding recorded output.
+	if policy.SameValueOnReplay {
+		t.Error("RegisterIdempotent must not set SameValueOnReplay")
+	}
+	if policy.MayReInvokeOnReplay() {
+		t.Error("RegisterIdempotent alone must not license re-invocation on replay")
 	}
 }
 

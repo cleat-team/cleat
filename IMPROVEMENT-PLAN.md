@@ -12703,3 +12703,75 @@ asserts every row of both tables on all three dialects, so a backend changing it
 §7.4 red instead of stale. Falsified twice, each restored by content: claiming MySQL accepts depth
 101 fails with `REJECTED on mysql, want ACCEPTED`; claiming SQL Server normalises fails on both
 normalisation cases.
+
+---
+
+### 3.323 One boolean answered two questions, so replay re-invoked seven plugin functions live — ✅ **FIXED 2026-09-13** (cleat#1318)
+
+**Decided by the repo owner: split `FuncOptions.Idempotent` into two properties.** Not "drop the
+flag", not "re-classify against the existing one".
+
+`Idempotent` was documented as *"safe to re-invoke during replay"*, and `engine/plugins.go` acted on
+it literally: on replay it discarded `rec.PluginOutput` and called the function live. So a word that
+only promises **no new side effects** was licensing a determinism claim — **returns the same value
+on replay**. They come apart exactly where the wording is most inviting.
+
+Replay now re-invokes only when a registration sets **both**:
+
+    Idempotent          calling again has no additional effect
+    SameValueOnReplay   calling again returns what the first call returned
+
+**`SameValueOnReplay` is a claim about the WORLD, not the function**, and that framing is what makes
+each registration answerable. A perfectly deterministic function fails it if its inputs can change
+in between — which is why "read-only" was the wrong predicate and why four read-only functions were
+wrong.
+
+**The classification, one stated reason each rather than a bulk assignment:**
+
+| registration | Idempotent | SameValueOnReplay | why |
+|---|---|---|---|
+| `blobstore.get` | ✅ | ✅ | write-once keys — **a convention the plugin does not enforce** |
+| `llm.embed` | ✅ | ✅ | near-deterministic for a fixed model — **"near" is doing work** |
+| `llm.list_models` | ✅ | ❌ | a provider's catalogue is not stable over a run |
+| `pgvector.search` | ✅ | ❌ | reads a mutable index |
+| `featureflags.evaluate_flag` | ✅ | ❌ | a flag exists in order to be toggled |
+| `eventtriggers.await_event` | ❌ | ❌ | selects the latest UNPROCESSED event **and writes** `registerAwaiter` |
+| `webhookingest.await_webhook` | ❌ | ❌ | an await over mutable state |
+
+The two survivors are marked with what their claim rests on, because both are assertions rather
+than properties of the code — `blobGet` takes a key and no version, and every store it targets will
+overwrite that key. If either convention fails in a deployment, those are the next wrong entries
+and they will be wrong the same way.
+
+**Three findings that changed the work, each recorded on the issue:**
+
+- **The set was seven, not eight.** #1408 had already removed `pgvector.delete` — the headline case.
+- **Re-invocation saves nothing.** Every plugin call's output is recorded on the original run;
+  only the *replay* re-invocation skips recording. So the recorded value was always available and
+  re-invoking could only ever return something else. Reported before building rather than after.
+- **The manifest path was never connected**, and I had claimed the opposite when taking this on.
+  `HostFuncDef.Idempotent` reaches `plugingen`'s IR and is read by nothing outside tests, so
+  `idempotent: true` in a manifest has always produced a registration with the field unset. That is
+  a latent trap — the opposite is the natural assumption — so it is documented on the field.
+
+**Two adapters had to carry the split**, `engine/app.go` and `cmd/cleat-worker/setup.go`. Missing
+either would have left that path on the old meaning **silently**: the registry would read
+`SameValueOnReplay` as false and simply stop re-invoking, which looks exactly like the fix working.
+
+**Falsified three ways, each restored by content:**
+
+| mutation | caught by |
+|---|---|
+| `evaluate_flag` claims `SameValueOnReplay` | both allowlist tests, the second printing the recorded argument against it |
+| the scan regex stops matching | `matched no FuncOptions literals at all … every assertion built on this scan is vacuous` |
+| `MayReInvokeOnReplay` returns `Idempotent` alone | the behavioural test, at `(1, 2)` want `(0, 0)` |
+
+**The behavioural test is written to be positive**, because *"the live function did not run"* is an
+absence and an absence is what a broken harness reports too. The live function is registered to
+**return an error**, so "recorded output used" and "live call made" are two visible outcomes rather
+than a presence and a nothing — and a control asserts the live path is reachable in that harness, so
+the main case cannot pass vacuously.
+
+**Docs carried the advice that produced this.** `plugin-developer-guide.md` said *"Use
+`Idempotent: true` for read-only functions"* and, separately, recommended the flag to avoid storing
+large outputs — which never worked, since the output is recorded either way. Both corrected.

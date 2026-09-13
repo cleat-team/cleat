@@ -9,51 +9,57 @@ import (
 	"testing"
 )
 
-// idempotentRegistrations is every plugin function whose recorded output the
-// REPLAY path throws away.
+// reInvokedOnReplay is every plugin function whose recorded output the REPLAY
+// path throws away.
 //
-// WHAT THE FLAG ACTUALLY DOES, because its name does not say so.
-// `FuncOptions.Idempotent` is documented as "safe to re-invoke during replay",
-// and engine/plugins.go acts on it literally: on replay it discards
-// rec.PluginOutput and calls the function live. That licenses a determinism
-// claim -- "returns the same value on replay" -- from a word that only promises
-// "no new side effects". They are different properties, and eight functions
-// were registered against the weaker one (cleat#1318).
+// WHAT LICENSES THAT, and it is two properties rather than one since
+// cleat#1318. `FuncOptions.Idempotent` was documented as "safe to re-invoke
+// during replay" and engine/plugins.go acted on it literally, so a word that
+// only promises "no new side effects" was licensing a determinism claim --
+// "returns the same value on replay". Seven functions were registered against
+// the weaker reading. Replay now re-invokes only when a registration sets BOTH
+// Idempotent and SameValueOnReplay.
 //
 // Two further properties of that branch make a wrong entry worse than it looks:
-// the flag is NOT persisted in event_history, so replay reads the CURRENT
+// neither flag is persisted in event_history, so replay reads the CURRENT
 // registry -- flipping a registration changes the replay semantics of runs
 // recorded before the change -- and there is no per-call override.
 //
-// So this list is an allowlist, and every entry states why replaying it live
-// cannot change what the workflow already decided. An entry whose reason is
-// "it has no side effects" is wrong by construction: that is the question the
-// flag's name asks, not the one replay needs.
-var idempotentRegistrations = map[string]string{
-	"blobstore.get": "a blob is immutable once written -- the key names a " +
-		"specific object, and overwriting it is a different operation with a " +
-		"different key in every store this plugin targets",
+// Every entry states why replaying it live cannot change what the workflow
+// already decided. An entry whose reason is "it has no side effects" is wrong
+// by construction: that is what Idempotent asks, not what replay needs.
+var reInvokedOnReplay = map[string]string{
+	"blobstore.get": "a GET has no effect, and a blob key is treated as " +
+		"write-once so a replay reads what the original read. The convention " +
+		"is NOT enforced by the plugin -- blobGet takes a key and no version " +
+		"-- so this is an assertion about how callers use keys",
 	"llm.embed": "near-deterministic for a fixed model and input, which is " +
-		"the property replay needs. Not merely side-effect-free",
+		"the property replay needs rather than mere absence of side effects. " +
+		"\"Near\" is doing work: a hosted model can change behind a stable name",
+}
 
-	// The four below are NOT defended as replay-deterministic. They are here
-	// because removing the flag changes resumption behaviour and that is a
-	// decision rather than a fix -- see the test's failure message. Each names
-	// what makes it non-deterministic, so nobody has to re-derive it.
-	"featureflags.evaluate_flag": "OPEN (cleat#1318): reads mutable state by " +
-		"definition. A workflow that branched on enabled=true, suspended, and " +
-		"replayed after an operator toggled the flag evaluates false -- the " +
-		"recorded history and the live call disagree",
-	"pgvector.search": "OPEN (cleat#1318): reads a mutable index. Inserts " +
-		"between the original call and the replay change the result set",
-	"llm.list_models": "OPEN (cleat#1318): a provider's model list is not " +
-		"stable over a workflow's lifetime",
-	"eventtriggers.await_event": "OPEN (cleat#1318): selects the latest " +
-		"UNPROCESSED event, so a replay can match a different one -- and on " +
-		"the not-found path it WRITES, calling registerAwaiter. Removing the " +
-		"flag has to answer what re-registers the awaiter after a crash",
-	"webhookingest.await_webhook": "OPEN (cleat#1318): an await over mutable " +
-		"state, same shape as await_event",
+// notReInvokedOnReplay is the other half, and it exists so the REASONS survive.
+//
+// These five were re-invoked on replay before cleat#1318 and are not any more.
+// Deleting them from this file would leave the change looking like an absence,
+// and an absence is what a broken scan reports too. Asserting them positively
+// means a regression -- someone adding SameValueOnReplay back -- fails here
+// with the argument against it already written down.
+var notReInvokedOnReplay = map[string]string{
+	"featureflags.evaluate_flag": "reads mutable state by definition. A " +
+		"workflow that branched on enabled=true, suspended, and replayed after " +
+		"an operator toggled the flag would evaluate false -- history and the " +
+		"live call disagreeing about a decision already taken",
+	"pgvector.search": "reads a mutable index. Inserts between the original " +
+		"call and the replay change the result set",
+	"llm.list_models": "a provider's model list is not stable over a " +
+		"workflow's lifetime",
+	"eventtriggers.await_event": "selects the latest UNPROCESSED event, so a " +
+		"replay can match a different one -- and on the not-found path it " +
+		"WRITES, calling registerAwaiter before returning a successful \"no " +
+		"event\" output. So it is neither idempotent nor stable",
+	"webhookingest.await_webhook": "an await over mutable state, same shape " +
+		"as await_event",
 }
 
 // TestReplayReInvokesOnlyWhatIsAllowlisted.
@@ -64,16 +70,16 @@ var idempotentRegistrations = map[string]string{
 // registration in a plugin this test does not import would be invisible. The
 // question is about the REPO, so it is asked of the tracked sources.
 func TestReplayReInvokesOnlyWhatIsAllowlisted(t *testing.T) {
-	found := scanIdempotentRegistrations(t)
+	found := scanReInvokedOnReplay(t)
 
 	var added []string
 	for k := range found {
-		if _, ok := idempotentRegistrations[k]; !ok {
+		if _, ok := reInvokedOnReplay[k]; !ok {
 			added = append(added, k)
 		}
 	}
 	var removed []string
-	for k := range idempotentRegistrations {
+	for k := range reInvokedOnReplay {
 		if _, ok := found[k]; !ok {
 			removed = append(removed, k)
 		}
@@ -82,24 +88,74 @@ func TestReplayReInvokesOnlyWhatIsAllowlisted(t *testing.T) {
 	sort.Strings(removed)
 
 	if len(added) > 0 {
-		t.Errorf("these plugin functions are registered Idempotent and are not in the "+
+		t.Errorf("these plugin functions set BOTH Idempotent and SameValueOnReplay, so the "+
+			"replay path discards their recorded output, and they are not in the "+
 			"allowlist:\n  %s\n\n"+
-			"Idempotent means the REPLAY path discards the recorded output and calls the "+
-			"function live, so it is a claim that the function RETURNS THE SAME VALUE on "+
-			"replay -- not merely that re-invoking is safe. Add an entry saying why that "+
-			"holds, or drop the flag. cleat#1318.",
+			"That pair is a claim that the function RETURNS THE SAME VALUE on replay -- not "+
+			"merely that re-invoking is safe. Add an entry saying why that holds, or drop "+
+			"SameValueOnReplay. cleat#1318.",
 			strings.Join(added, "\n  "))
 	}
 	if len(removed) > 0 {
-		t.Errorf("the allowlist names functions no longer registered Idempotent:\n  %s\n\n"+
+		t.Errorf("the allowlist names functions that no longer re-invoke on replay:\n  %s\n\n"+
 			"Delete the entries. A stale exemption silently covers whatever arrives at "+
 			"that name next.", strings.Join(removed, "\n  "))
 	}
 }
 
-// scanIdempotentRegistrations returns "<plugin>.<function>" for every
-// Register call carrying Idempotent: true.
-func scanIdempotentRegistrations(t *testing.T) map[string]bool {
+// TestTheDeliberatelyNotReInvokedStayThatWay asserts the other half POSITIVELY.
+//
+// The five below were re-invoked on replay until cleat#1318. A test that only
+// checked the allowlist would pass if they were silently restored to it and
+// someone added matching entries -- and would pass equally if the scan broke
+// and returned nothing. Naming them makes the regression loud and gives the
+// next author the argument rather than making them re-derive it.
+func TestTheDeliberatelyNotReInvokedStayThatWay(t *testing.T) {
+	found := scanReInvokedOnReplay(t)
+	registered := scanAllRegistrations(t)
+
+	for name, why := range notReInvokedOnReplay {
+		// Non-vacuity first: if the function is not registered at all, this
+		// entry is checking nothing and the scan cannot tell us otherwise.
+		if !registered[name] {
+			t.Errorf("%s is in notReInvokedOnReplay but no registration was found for it.\n\n"+
+				"Either it was renamed or removed -- in which case delete this entry -- or "+
+				"the scan is broken, in which case every other assertion here is vacuous "+
+				"too.", name)
+			continue
+		}
+		if found[name] {
+			t.Errorf("%s re-invokes on replay again.\n\n  why it must not: %s\n\n"+
+				"It sets both Idempotent and SameValueOnReplay, so replay discards its "+
+				"recorded output and calls it live. cleat#1318 removed that deliberately.",
+				name, why)
+		}
+	}
+}
+
+// scanReInvokedOnReplay returns "<plugin>.<function>" for every Register call
+// whose FuncOptions sets BOTH Idempotent and SameValueOnReplay true.
+//
+// Both, and in either order: the fields are a set, not a sequence, and a scan
+// that assumed the order in which they happen to be written today would stop
+// matching the first time someone reformatted a literal -- reporting "nothing
+// re-invokes", which reads exactly like success.
+func scanReInvokedOnReplay(t *testing.T) map[string]bool {
+	t.Helper()
+	return scanRegistrations(t, func(body string) bool {
+		return regexp.MustCompile(`Idempotent:\s*true`).MatchString(body) &&
+			regexp.MustCompile(`SameValueOnReplay:\s*true`).MatchString(body)
+	})
+}
+
+// scanAllRegistrations returns every registered "<plugin>.<function>",
+// whatever its policy. Used as the non-vacuity control.
+func scanAllRegistrations(t *testing.T) map[string]bool {
+	t.Helper()
+	return scanRegistrations(t, func(string) bool { return true })
+}
+
+func scanRegistrations(t *testing.T, keep func(body string) bool) map[string]bool {
 	t.Helper()
 	out, err := exec.Command("git", "ls-files", "../plugins").Output()
 	if err != nil {
@@ -110,10 +166,16 @@ func scanIdempotentRegistrations(t *testing.T) map[string]bool {
 		t.Fatal("no plugin sources found: the scan would pass vacuously")
 	}
 
-	// The plugin name is the directory, which is how the registry keys them.
-	re := regexp.MustCompile(`Register\(plugin\.FuncOptions\{[^}]*Name:\s*"([^"]+)"[^}]*Idempotent:\s*true[^}]*\}`)
+	// The literal runs to the closing brace of FuncOptions. [^}]* spans
+	// newlines, which multi-line registrations need -- so a COMMENT containing
+	// a brace inside one of these literals would cut the match short. None does
+	// today; if one is added, this scan quietly stops seeing that registration,
+	// which is why the non-vacuity checks below exist.
+	re := regexp.MustCompile(`Register\(plugin\.FuncOptions\{([^}]*)\}`)
+	nameRe := regexp.MustCompile(`Name:\s*"([^"]+)"`)
+
 	got := map[string]bool{}
-	var scanned int
+	var scanned, literals int
 	for _, f := range files {
 		if !strings.HasSuffix(f, ".go") || strings.HasSuffix(f, "_test.go") {
 			continue
@@ -139,11 +201,22 @@ func scanIdempotentRegistrations(t *testing.T) map[string]bool {
 			continue
 		}
 		for _, m := range re.FindAllStringSubmatch(string(b), -1) {
-			got[pluginName+"."+m[1]] = true
+			literals++
+			nm := nameRe.FindStringSubmatch(m[1])
+			if nm == nil {
+				continue
+			}
+			if keep(m[1]) {
+				got[pluginName+"."+nm[1]] = true
+			}
 		}
 	}
 	if scanned == 0 {
 		t.Fatal("scanned no plugin .go files: the scan would pass vacuously")
+	}
+	if literals == 0 {
+		t.Fatal("matched no FuncOptions literals at all: the regex has stopped " +
+			"seeing registrations, so every assertion built on this scan is vacuous")
 	}
 	return got
 }

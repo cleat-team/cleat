@@ -18,7 +18,22 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("event-triggers: nil function registry")
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "await_event", Idempotent: true}, p.awaitEvent); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "await_event",
+		// NEITHER. It selects the latest UNPROCESSED event, so a replay can
+		// match a different one -- and on the not-found path it WRITES, calling
+		// registerAwaiter before returning a successful "no event" output.
+		// That output is recorded, so under cleat#1318 a replay returns it and
+		// does not re-register.
+		//
+		// WHAT THAT GIVES UP, stated because it was load-bearing by accident:
+		// re-invoking on replay used to re-create an awaiter row that had been
+		// lost. The row is written durably on the original call, so replay does
+		// not need to redo it -- but a deployment that lost the row was being
+		// repaired by a code path whose stated purpose was something else.
+		Idempotent:        false,
+		SameValueOnReplay: false,
+	}, p.awaitEvent); err != nil {
 		return err
 	}
 	return nil

@@ -182,8 +182,11 @@ type appFuncRegistry struct {
 }
 
 func (s *appFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
-	if opts.Idempotent {
-		return s.registry.RegisterIdempotent(s.pluginName, opts.Name, fn)
-	}
-	return s.registry.Register(s.pluginName, opts.Name, fn)
+	// BOTH adapters must carry the split, and there are exactly two:
+	// engine/app.go and cmd/cleat-worker/setup.go. Passing only Idempotent
+	// through either would leave that path on the pre-cleat#1318 meaning --
+	// silently, because the registry would then read SameValueOnReplay as
+	// false and simply stop re-invoking, which looks exactly like the fix
+	// working.
+	return s.registry.RegisterWithPolicy(s.pluginName, opts.Name, fn, ReplayPolicy{Idempotent: opts.Idempotent, SameValueOnReplay: opts.SameValueOnReplay})
 }

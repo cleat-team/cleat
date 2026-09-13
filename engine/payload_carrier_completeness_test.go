@@ -86,6 +86,16 @@ var payloadExemptFields = map[string]string{
 		"the key here would change replay behaviour rather than preserve it, " +
 		"which is a decision and not a gap. compactionExemptFields carries the " +
 		"same reason.",
+	"SameValueOnReplay": "no payload key and no event_history column, for the " +
+		"same reason as Idempotent beside it and deliberately IN STEP with it " +
+		"(cleat#1318). The two are one policy split across two fields, so " +
+		"persisting one without the other would be worse than persisting " +
+		"neither: a DB-loaded record would read Idempotent true and " +
+		"SameValueOnReplay false, which is a policy nobody registered. Replay " +
+		"consults the live registry precisely so the pair stays consistent. " +
+		"Whether to persist BOTH is open and is a decision rather than a gap " +
+		"-- see cleat#1318, which left it alone on the ground that there is no " +
+		"recorded data yet. compactionExemptFields carries the same reason.",
 	"UpdatePayload": "dead field: declared on EventRecord and assigned nowhere " +
 		"in the engine. RegisterUpdateHandler (lifecycle.go) sets only " +
 		"UpdateHandlerName, and no replay path reads these three. Nothing to " +

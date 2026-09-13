@@ -24,10 +24,28 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 			return err
 		}
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "embed", Idempotent: true}, p.embed); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "embed",
+		// Near-deterministic for a fixed model and input, which is the property
+		// replay needs rather than mere absence of side effects.
+		//
+		// CAVEAT: "near". A hosted model can change behind a stable name, and
+		// re-invoking costs money -- a real cost, though not a workflow side
+		// effect. Both halves are asserted here rather than derived from the
+		// code, which is what makes this the second entry to re-examine.
+		Idempotent:        true,
+		SameValueOnReplay: true,
+	}, p.embed); err != nil {
 		return err
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "list_models", Idempotent: true}, p.listModels); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "list_models",
+		// Idempotent -- listing has no effect. NOT stable: a provider's model
+		// list is not constant over a workflow's lifetime, so a replay can
+		// return a set the workflow never branched on. cleat#1318.
+		Idempotent:        true,
+		SameValueOnReplay: false,
+	}, p.listModels); err != nil {
 		return err
 	}
 	return nil

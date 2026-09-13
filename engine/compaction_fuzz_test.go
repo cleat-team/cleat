@@ -453,6 +453,11 @@ var compactionExemptFields = map[string]string{
 		"checksum columns at load time (store_intent.go), never itself a " +
 		"persisted value, so there is nothing for a JSONB compaction snapshot " +
 		"to carry",
+	"SameValueOnReplay": "not persisted, for the same reason as Idempotent " +
+		"below and deliberately in step with it (cleat#1318): the two are one " +
+		"policy split across two fields, and persisting one without the other " +
+		"would produce a DB-loaded record claiming a policy nobody registered. " +
+		"plugins.go consults the live registry so the pair stays consistent.",
 	"Idempotent": "not persisted to the event_history table in any store " +
 		"backend as of 2026-08-09 (no such column in store_event_write.go, " +
 		"mysql_events.go, or mssql_events.go: grep -rn '\"idempotent\"' " +

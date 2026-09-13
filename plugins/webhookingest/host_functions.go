@@ -19,7 +19,13 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("webhook-ingest: nil function registry")
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "await_webhook", Idempotent: true}, p.awaitWebhook); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "await_webhook",
+		// NEITHER, same shape as eventtriggers.await_event: an await over
+		// mutable state, consuming from a queue of deliveries. cleat#1318.
+		Idempotent:        false,
+		SameValueOnReplay: false,
+	}, p.awaitWebhook); err != nil {
 		return err
 	}
 	return nil

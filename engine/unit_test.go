@@ -2304,15 +2304,15 @@ func TestPluginRegistry_Lookup(t *testing.T) {
 
 	pr.Register("plugin", "func", fn)
 
-	f, idempotent, ok := pr.Lookup("plugin", "func")
+	f, policy, ok := pr.Lookup("plugin", "func")
 	if !ok {
 		t.Fatal("Lookup should return ok=true for registered func")
 	}
 	if f == nil {
 		t.Error("Lookup should return non-nil function")
 	}
-	if idempotent {
-		t.Error("Lookup should return idempotent=false for non-idempotent func")
+	if policy.Idempotent || policy.SameValueOnReplay {
+		t.Errorf("Lookup should return a zero replay policy for a plain registration, got %+v", policy)
 	}
 
 	// Lookup missing.

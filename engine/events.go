@@ -129,7 +129,10 @@ type PluginCallEvent struct {
 	Input      string
 	Output     string
 	Err        string
-	Idempotent bool
+	// Both halves of the cleat#1318 policy, carried so an in-process replay
+	// sees what the registration said. Neither survives the database.
+	Idempotent        bool
+	SameValueOnReplay bool
 }
 
 func (e PluginCallEvent) Step() int       { return e.step }
@@ -315,6 +318,7 @@ func EventRecordFromEvent(e Event) EventRecord {
 			PluginName: ev.PluginName, PluginFunc: ev.FuncName,
 			PluginInput: ev.Input, PluginOutput: ev.Output,
 			PluginError: ev.Err, Idempotent: ev.Idempotent,
+			SameValueOnReplay: ev.SameValueOnReplay,
 		}
 	case PluginCallStreamChunkEvent:
 		return EventRecord{
@@ -431,6 +435,7 @@ func EventFromRecord(r EventRecord) Event {
 			step: r.Step, PluginName: r.PluginName, FuncName: r.PluginFunc,
 			Input: r.PluginInput, Output: r.PluginOutput,
 			Err: r.PluginError, Idempotent: r.Idempotent,
+			SameValueOnReplay: r.SameValueOnReplay,
 		}
 	case EventTypePluginCallStreamChunk:
 		return PluginCallStreamChunkEvent{
