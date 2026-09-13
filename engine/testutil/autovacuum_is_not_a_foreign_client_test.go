@@ -57,12 +57,6 @@ func TestABackgroundWorkerIsNotAForeignClient(t *testing.T) {
 	defer leader.Close()
 	leader.SetMaxOpenConns(1) // exactly one leader, so the expected count is exactly 1
 
-	if _, err := leader.Exec(`CREATE TABLE IF NOT EXISTS zz_parallel_probe AS
-		SELECT g AS i FROM generate_series(1, 200000) g`); err != nil {
-		t.Fatalf("seeding the parallel table: %v", err)
-	}
-	defer func() { _, _ = leader.Exec(`DROP TABLE IF EXISTS zz_parallel_probe`) }()
-
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -90,7 +84,13 @@ func TestABackgroundWorkerIsNotAForeignClient(t *testing.T) {
 				}
 			}
 			var n int64
-			_ = conn.QueryRowContext(t.Context(), `SELECT count(*) FROM zz_parallel_probe`).Scan(&n)
+			// A self-join on pg_attribute, so no table is created. TestNoHandWrittenSchema
+			// forbids DDL in this package for good reason -- a hand-written table here
+			// once shadowed the shipped schema -- and a scratch table would trip it.
+			// pg_attribute is also, fittingly, the relation autovacuum was ANALYZEing
+			// when this false positive was caught.
+			_ = conn.QueryRowContext(t.Context(),
+				`SELECT count(*) FROM pg_attribute a JOIN pg_attribute b ON a.attrelid = b.attrelid`).Scan(&n)
 			conn.Close()
 		}
 	}()
