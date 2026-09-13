@@ -38,10 +38,6 @@ var unfedMetrics = map[string]string{
 		"thing that would let an operator SEE unbounded growth is not fed",
 	"SetEventHistoryRowCount": "NEEDS A FEEDER. The row-count half of the " +
 		"same observable",
-	"SetMemoryPressureRatio": "NEEDS A FEEDER. The observable for the " +
-		"--memory-soft-limit/--memory-hard-limit circuit breaker. The breaker " +
-		"works; its indicator does not. Note SetMemoryPressure (no Ratio) IS " +
-		"fed, so a reader checking 'is memory observable' finds a yes",
 	"SetConcurrencyKeysTotal": "NEEDS A FEEDER. Concurrency-key inventory",
 	"SetConcurrencyKeysExpiringSoon": "NEEDS A FEEDER. The leading indicator " +
 		"for a key sweep falling behind",
@@ -50,7 +46,6 @@ var unfedMetrics = map[string]string{
 
 	// The counters and histograms. Less severe -- a counter never Added reads
 	// 0 rather than vanishing -- but still an instrument nothing writes.
-	"RecordClaimLatency":          "NEEDS A CALL SITE. Claim latency is recorded nowhere",
 	"RecordWasmLoadLatency":       "NEEDS A CALL SITE. Module load latency",
 	"RecordEncryptionError":       "NEEDS A CALL SITE. Payload-encryption failures",
 	"RecordReaperInstanceClaimed": "NEEDS A CALL SITE. Reaper reclaims",

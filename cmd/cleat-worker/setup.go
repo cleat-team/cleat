@@ -3966,6 +3966,18 @@ func (w *Worker) dueSchedules() ([]engine.Schedule, error) {
 // dialect and the deployment's grants can actually do, and those can disagree
 // on a mixed fleet.
 func (w *Worker) claimGeneral(limit int) ([]*engine.WorkflowInstance, error) {
+	// Every claim path returns through here -- cross-tenant, the fallback after
+	// ErrCrossTenantClaimUnsupported, and the scoped claim -- so one deferred
+	// record covers all three. It covers the ERROR returns too, deliberately: a
+	// claim that is slow because the database is struggling is exactly the
+	// latency an operator wants to see, and excluding it would make the metric
+	// look healthiest at the moment it matters most.
+	//
+	// The name argument is empty because a batch claim has no single workflow.
+	// RecordDispatchLatency already passes "" for the same reason. cleat#1317.
+	claimStart := time.Now()
+	defer func() { w.Metrics.RecordClaimLatency(w.ctx, time.Since(claimStart), "") }()
+
 	if w.claimAcrossTenants {
 		if xt, ok := w.store.(engine.CrossTenantClaimer); ok {
 			wfs, err := xt.ClaimWorkflowsAcrossTenants(w.ctx, w.id, limit)
