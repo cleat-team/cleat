@@ -28,17 +28,11 @@ import (
 // it. Deleting them would remove the design intent along with the defect. Each
 // entry therefore says which it is.
 var unfedMetrics = map[string]string{
-	// The gauges, which are the serious half: each is an operator's only view
-	// of a growth or stall condition, and none of them emits a series.
-	"SetWorkflowsStuck": "NEEDS A FEEDER. The stuck-workflow gauge -- a " +
-		"stalled run is precisely the condition you page on, and the series " +
-		"does not exist. Wants a sweep that counts runs past their deadline",
-	"SetEventHistorySize": "NEEDS A FEEDER. Event-history growth, the " +
-		"observable for the retention behaviour cleat#1294 documents. The " +
-		"thing that would let an operator SEE unbounded growth is not fed",
-	"SetEventHistoryRowCount": "NEEDS A FEEDER. The row-count half of the " +
-		"same observable",
-	"SetConcurrencyKeysTotal": "NEEDS A FEEDER. Concurrency-key inventory",
+	// The gauges. The four fed by metricsSweepLoop since cleat#1317 are gone
+	// from this list, and so is SetMemoryPressureRatio, which was a duplicate
+	// of SetMemoryPressure rather than an unfed metric. What remains is the
+	// WASM cache pair, waiting on an accessor rather than on a caller --
+	// WasmDiskCache exposes neither its length nor its size.
 	"SetConcurrencyKeysExpiringSoon": "NEEDS A FEEDER. The leading indicator " +
 		"for a key sweep falling behind",
 	"SetWasmCacheEntries": "NEEDS A FEEDER. Compiled-module cache occupancy",

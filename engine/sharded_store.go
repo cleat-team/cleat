@@ -1787,6 +1787,14 @@ type metricsStore interface {
 	CountActiveConcurrencyKeys(ctx context.Context) (int, error)
 }
 
+// PostgresStore must satisfy metricsStore in FULL. Every method below reaches
+// its shards through a single assertion to this interface, so one missing
+// method does not disable one metric -- it makes the assertion fail, sends
+// every shard down the `continue`, and returns (0, nil) from all four. A
+// compile-time check because the runtime symptom is a zero, and a zero is what
+// a healthy system reports.
+var _ metricsStore = (*PostgresStore)(nil)
+
 // ---------------------------------------------------------------------------
 // MetricsStore implementation (fans out to all shards and aggregates)
 // ---------------------------------------------------------------------------

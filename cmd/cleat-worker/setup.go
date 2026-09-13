@@ -1049,6 +1049,8 @@ type Worker struct {
 	compactionThreshold     int
 	compactionInterval      time.Duration
 	retentionInterval       time.Duration
+	stallThreshold          time.Duration
+	metricsSweepInterval    time.Duration
 	deadLetterRetentionDays int
 
 	// Version GC. versionGCInterval is the switch: 0 means the sweep never
@@ -1245,6 +1247,9 @@ func (w *Worker) Run() {
 	initLoopCtx("retention")
 	initLoopCtx("version_gc")
 	initLoopCtx("compaction")
+	if *metricsSweepInterval > 0 {
+		initLoopCtx("metrics_sweep")
+	}
 
 	// Background heartbeat goroutine.
 	w.registerLoopFunc("heartbeat", w.heartbeatLoop)
@@ -1288,6 +1293,20 @@ func (w *Worker) Run() {
 	// make "retention is running" mean two different things.
 	w.registerLoopFunc("version_gc", w.versionGCLoop)
 	w.launchLoop("version_gc", w.versionGCLoop)
+
+	// Metrics sweep loop.
+	//
+	// Same shape as cleat#877 below, one layer out: the four queries this
+	// publishes were written, an interface to reach them was declared in
+	// metrics_store.go -- and nothing ever called it. Everything existed
+	// except the caller, so cleat_workflows_stuck, the event-history gauges
+	// and the concurrency-key gauge emitted no series at all. An OTel gauge
+	// never Set is absent rather than zero, so an alert on any of them could
+	// never fire. cleat#1317.
+	if w.metricsSweepInterval > 0 {
+		w.registerLoopFunc("metrics_sweep", w.metricsSweepLoop)
+		w.launchLoop("metrics_sweep", w.metricsSweepLoop)
+	}
 
 	// Compaction loop.
 	//
@@ -2656,6 +2675,102 @@ func (w *Worker) scheduleLoop() {
 			w.Metrics.RecordBackgroundLoop(w.ctx, "schedule", "ok")
 			w.Metrics.SetBackgroundLoopDuration(w.ctx, "schedule", time.Since(schStart).Seconds())
 			w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "schedule", int64(len(schedules)))
+		}
+	}
+}
+
+// metricsSweepLoop publishes the four gauges that no other code path feeds.
+//
+// The queries already existed (engine/db_metrics.go) and MetricsStore already
+// declared the way to reach them. Nothing called it, so cleat_workflows_stuck,
+// cleat_event_history_size_bytes, cleat_event_history_rows and
+// cleat_concurrency_keys_total emitted NO SERIES -- an OTel gauge that is never
+// Set is absent, not zero, so an alert on any of them could never fire and a
+// panel read "No data" rather than a stale value. cleat#1317.
+//
+// ONE SWEEP FOR FOUR GAUGES rather than hanging each off a related loop. They
+// are all "ask the database a question nothing else asks", their cost is the
+// query rather than the publish, and a single interval is one thing for an
+// operator to turn down when it is too expensive. --metrics-sweep-interval 0
+// disables it, and the loop is then never registered at all.
+//
+// A FAILED SWEEP LEAVES THE PREVIOUS VALUE STANDING, which is the right
+// behaviour and worth naming: these are gauges, so not publishing is not the
+// same as publishing zero. Reporting zero stuck workflows because the count
+// query failed would be the lying-metric failure this whole area keeps paying
+// for. The error is logged and the loop reports "error" to the health tracker.
+func (w *Worker) metricsSweepLoop() {
+	defer w.wg.Done()
+	w.healthTracker.setInterval("metrics_sweep", w.metricsSweepInterval)
+	ticker := time.NewTicker(w.metricsSweepInterval)
+	defer ticker.Stop()
+
+	// Asserted ONCE, not per tick: it is a static property of the store, and
+	// the answer is worth a line in the log either way. A store that cannot
+	// answer these leaves the gauges absent, and absent is exactly what a
+	// healthy system looks like -- so an operator on a dialect that does not
+	// implement MetricsStore would otherwise have no way to tell "nothing is
+	// stuck" from "nobody is counting". MySQL and SQL Server are in that
+	// position today.
+	ms, ok := w.store.(MetricsStore)
+	if !ok {
+		w.logger.WarnContext(w.ctx,
+			"metrics sweep: this store does not implement MetricsStore, so the stuck-workflow, "+
+				"event-history and concurrency-key gauges will emit no series; alerts on them "+
+				"cannot fire and panels will read \"No data\" rather than zero",
+			"worker_id", w.id, "store", fmt.Sprintf("%T", w.store))
+		return
+	}
+
+	for {
+		select {
+		case <-w.getLoopCtx("metrics_sweep").Done():
+			return
+		case <-ticker.C:
+			w.healthTracker.recordRun("metrics_sweep")
+			sweepStart := time.Now()
+			failed := 0
+
+			if n, err := ms.CountStalledWorkflows(w.ctx, w.stallThreshold); err != nil {
+				failed++
+				w.logger.ErrorContext(w.ctx, "metrics sweep: count stalled workflows", "worker_id", w.id, "error", err)
+			} else {
+				w.Metrics.SetWorkflowsStuck(w.ctx, int64(n))
+			}
+
+			if n, err := ms.CountEventHistoryTotal(w.ctx); err != nil {
+				failed++
+				w.logger.ErrorContext(w.ctx, "metrics sweep: count event history", "worker_id", w.id, "error", err)
+			} else {
+				w.Metrics.SetEventHistoryRowCount(w.ctx, int64(n))
+			}
+
+			if b, err := ms.EstimateEventHistorySize(w.ctx); err != nil {
+				failed++
+				w.logger.ErrorContext(w.ctx, "metrics sweep: estimate event history size", "worker_id", w.id, "error", err)
+			} else {
+				// Empty workflow name: the gauge is labelled per workflow but
+				// pg_total_relation_size is whole-table, so there is no name to
+				// give it. "" is the established unlabelled value here --
+				// RecordDispatchLatency passes it for the same reason. Making
+				// this per-workflow would mean a size query per definition,
+				// which is the cost this estimator exists to avoid.
+				w.Metrics.SetEventHistorySize(w.ctx, b, "")
+			}
+
+			if n, err := ms.CountActiveConcurrencyKeys(w.ctx); err != nil {
+				failed++
+				w.logger.ErrorContext(w.ctx, "metrics sweep: count active concurrency keys", "worker_id", w.id, "error", err)
+			} else {
+				w.Metrics.SetConcurrencyKeysTotal(w.ctx, int64(n))
+			}
+
+			status := "ok"
+			if failed > 0 {
+				status = "error"
+			}
+			w.Metrics.RecordBackgroundLoop(w.ctx, "metrics_sweep", status)
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "metrics_sweep", time.Since(sweepStart).Seconds())
 		}
 	}
 }

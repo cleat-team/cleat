@@ -76,3 +76,41 @@ func (s *PostgresStore) EstimateEventHistorySize(ctx context.Context) (int64, er
 	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(pg_total_relation_size('event_history'), 0)`).Scan(&size)
 	return size, err
 }
+
+// CountActiveConcurrencyKeys counts concurrency keys that are still held.
+//
+// THE OTHER THREE METHODS IN THIS FILE WERE DEAD WITHOUT THIS ONE. ShardedStore
+// reaches its shards through a single four-method `metricsStore` assertion
+// (sharded_store.go), and PostgresStore satisfied only three of the four -- so
+// the assertion failed, every shard hit the `continue`, and CountStalledWorkflows,
+// CountEventHistoryTotal and CountActiveConcurrencyKeys each returned (0, nil).
+// Zero with no error, on every sharded deployment: not a broken metric but a
+// lying one, which is the distinction the comment at the top of this file draws.
+//
+// Counts HELD keys, not rows. A row whose expires_at has passed is a lease
+// nobody has collected yet, and reporting it as active would make the gauge
+// read high exactly when the key sweep falls behind -- turning a sweep-lag
+// signal into a phantom contention signal. The sweep's own backlog is a
+// different question and wants its own metric (cleat#1317's
+// SetConcurrencyKeysExpiringSoon).
+//
+// RLS-forced table, so beginTxWithRLS rather than s.db -- see the file header.
+func (s *PostgresStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count active concurrency keys: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only tx; Rollback returns ErrTxDone after Commit
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM concurrency_keys
+		WHERE expires_at > now() AND tenant_id = $1
+	`, s.tenantID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count active concurrency keys: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("count active concurrency keys: commit: %w", err)
+	}
+	return count, nil
+}
