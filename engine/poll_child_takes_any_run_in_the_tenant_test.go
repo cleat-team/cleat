@@ -63,20 +63,48 @@ func TestPollChildTakesAnyRunInTheTenant(t *testing.T) {
 				t.Fatalf("start child B: %v", err)
 			}
 
-			finish := func(run, result string) {
-				w, err := claimSpecific(t, ctx, store, run, "w")
-				if err != nil {
-					t.Fatalf("claim %s: %v", run, err)
-				}
-				if err := store.FinalizeWorkflowSegment(ctx, run, "w", w.Generation, nil,
-					"done", result, "", "", map[string]string{}, time0()); err != nil {
-					t.Fatalf("finalize %s: %v", run, err)
-				}
-			}
 			const resultA = `{"owner":"A"}`
 			const resultB = `{"owner":"B"}`
-			finish(childA, resultA)
-			finish(childB, resultB)
+
+			// Drain the queue ONCE and finalise whichever of the two children
+			// it offers, rather than claiming each by id.
+			//
+			// claimSpecific keeps claiming until it finds the row it wants and
+			// releases nothing on the way, so calling it twice lets the first
+			// call consume the second call's target. That is order-dependent,
+			// and the order is not the same on every dialect: postgres and
+			// mysql happened to offer childA first, SQL Server offered childB,
+			// and the second claim then reported an empty queue. Nothing about
+			// the contract under test depends on claim order, so the test must
+			// not either.
+			want := map[string]string{childA: resultA, childB: resultB}
+			for i := 0; i < 50 && len(want) > 0; i++ {
+				w, err := store.ClaimWorkflow(ctx, "w")
+				if err != nil {
+					t.Fatalf("claim: %v", err)
+				}
+				if w == nil {
+					break
+				}
+				result, ours := want[w.ID]
+				if !ours {
+					continue // a parent, or another test's row
+				}
+				if err := store.FinalizeWorkflowSegment(ctx, w.ID, "w", w.Generation, nil,
+					"done", result, "", "", map[string]string{}, time0()); err != nil {
+					t.Fatalf("finalize %s: %v", w.ID, err)
+				}
+				delete(want, w.ID)
+			}
+			if len(want) > 0 {
+				var missing []string
+				for id := range want {
+					missing = append(missing, id)
+				}
+				t.Fatalf("the queue never offered %d of the two children: %v -- "+
+					"they are not claimable, so nothing below is a statement about "+
+					"parentage", len(want), missing)
+			}
 
 			// The known-positive. A parent reading its OWN child must work, or
 			// the assertion below is being made by a broken fixture and would
