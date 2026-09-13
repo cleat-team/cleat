@@ -274,17 +274,17 @@ type WorkflowStore interface {
 	// So DO NOT widen this to include 'ready' in the name of more aggressive
 	// crash recovery. It would reclaim every sleeping workflow in the system,
 	// bumping generation and reclaim_count on rows that are behaving exactly as
-	// designed. Measured on all three dialects (cleat#1429): one row parked
-	// with a 45s wake and one held by a dead worker, swept with timeout 0 so
-	// nothing is excluded by age -- reclaimed=1 on each, and reclaim_count says
-	// which: asleep=0, running=1.
+	// designed. Measured on all three dialects (cleat#1429), one row in both
+	// states: claimed and swept -> reclaim_count 1; then parked with a 45s wake
+	// and swept again -> reclaim_count still 1. Timeout 0 both times, so
+	// nothing is excluded by age and the status arm is the only thing deciding.
 	//
 	// reclaim_count rather than status is the discriminator, and status cannot
-	// serve: reclaiming sets status back to 'ready', which is where the sleeper
-	// already was, so after a sweep both rows read 'ready' and a count of 1 is
-	// equally consistent with the reaper having taken the sleeper and left the
-	// dead one. A status-based assertion here passes on the inversion of the
-	// property it means to check.
+	// serve: reclaiming sets status back to 'ready', which is exactly where
+	// parking already put the row, so it reads 'ready' either way. Under a
+	// deliberate widening to status IN ('running','ready') the row IS reclaimed
+	// a second time and still logs status="ready" -- so a status-based
+	// assertion passes on the precise inversion of the property.
 	ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error)
 
 	// GetQueryState returns the query state for a workflow instance key.

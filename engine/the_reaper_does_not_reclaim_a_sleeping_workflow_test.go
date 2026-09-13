@@ -44,67 +44,74 @@ func TestTheReaperDoesNotReclaimASleepingWorkflow(t *testing.T) {
 			defer teardown()
 			ctx := context.Background()
 
-			reaper, ok := store.(interface {
-				ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error)
-			})
-			if !ok {
-				t.Skipf("%T has no ReapStaleInstances", store)
+			// Called straight off WorkflowStore: both ReapStaleInstances and
+			// ReleaseWorkflow are on that interface, so the defensive type
+			// assertions this started with could never fail. Two skips that
+			// cannot fire are two passes wearing a skip's clothes, and
+			// scripts/check-skips.sh is right to refuse them -- its case (c),
+			// "the precondition is always satisfiable in this repo".
+
+			// ONE ROW, BOTH STATES. An earlier version used two rows -- a
+			// sleeper and a separate running control -- and it failed on CI's
+			// SQL Server with "reclaimed 0" while passing locally on all three
+			// dialects. That shape cannot say why: the two rows differ in
+			// tenant, in heartbeat provenance, and in their position under the
+			// sweep's ORDER BY heartbeat_at / TOP(n), so any per-row difference
+			// in the environment breaks the control ambiguously.
+			//
+			// Using the SAME row in both states removes every cross-row
+			// variable. If it is reclaimable while running and not while
+			// parked, the status arm is what did it, and nothing else can be
+			// blamed. And a first sweep that fails to reclaim now says exactly
+			// one thing -- this environment cannot reap at all -- rather than
+			// leaving a difference between two rows to be guessed at.
+			wfID := newIntentWorkflow(t, ctx, store, "reaper-1429")
+
+			// STATE 1: running, owned, heartbeat stale (timeout 0).
+			if _, err := claimSpecific(t, ctx, store, wfID, "w-dead"); err != nil {
+				t.Fatalf("claim while running: %v", err)
 			}
-			releaser, ok := store.(interface {
-				ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
-			})
-			if !ok {
-				t.Skipf("%T has no ReleaseWorkflow", store)
+			n1, err := store.ReapStaleInstances(ctx, 0, 100)
+			if err != nil {
+				t.Fatalf("ReapStaleInstances (running): %v", err)
+			}
+			rc1 := mustGetWorkflow(t, ctx, store, wfID).ReclaimCount
+			t.Logf("running: swept %d, this row reclaim_count=%d", n1, rc1)
+
+			// The control, and it is now about THIS row rather than a sibling.
+			if rc1 != 1 {
+				t.Fatalf("the reaper did not reclaim this workflow while it was "+
+					"status='running' with a stale heartbeat (reclaim_count=%d, "+
+					"swept %d). Nothing below measures anything until this holds.",
+					rc1, n1)
 			}
 
-			// SUBJECT: a workflow that went to sleep.
-			asleep := newIntentWorkflow(t, ctx, store, "reaper-1429-asleep")
-			wf, err := claimSpecific(t, ctx, store, asleep, "w-sleep")
+			// STATE 2: the same row, parked by ReleaseWorkflow the way a
+			// DurableSleep parks it.
+			wf, err := claimSpecific(t, ctx, store, wfID, "w-sleep")
 			if err != nil {
-				t.Fatalf("claim the sleeper: %v", err)
+				t.Fatalf("re-claim before parking: %v", err)
 			}
-			if err := releaser.ReleaseWorkflow(ctx, asleep, "w-sleep", wf.Generation,
+			if err := store.ReleaseWorkflow(ctx, wfID, "w-sleep", wf.Generation,
 				time.Now().Add(45*time.Second)); err != nil {
 				t.Fatalf("ReleaseWorkflow (the DurableSleep park): %v", err)
 			}
+			before := mustGetWorkflow(t, ctx, store, wfID).ReclaimCount
 
-			// CONTROL: a workflow still held, whose worker died.
-			running := newIntentWorkflow(t, ctx, store, "reaper-1429-running")
-			if _, err := claimSpecific(t, ctx, store, running, "w-dead"); err != nil {
-				t.Fatalf("claim the control: %v", err)
-			}
-
-			// timeout 0: every heartbeat is stale, so nothing is excluded by age
-			// and the only thing deciding the outcome is the status predicate.
-			n, err := reaper.ReapStaleInstances(ctx, 0, 100)
+			n2, err := store.ReapStaleInstances(ctx, 0, 100)
 			if err != nil {
-				t.Fatalf("ReapStaleInstances: %v", err)
+				t.Fatalf("ReapStaleInstances (parked): %v", err)
 			}
-			t.Logf("reclaimed %d", n)
-			t.Logf("  asleep  -> status=%q", mustGetWorkflow(t, ctx, store, asleep).Status)
-			t.Logf("  running -> status=%q", mustGetWorkflow(t, ctx, store, running).Status)
+			after := mustGetWorkflow(t, ctx, store, wfID)
+			t.Logf("parked:  swept %d, this row reclaim_count %d -> %d, status=%q",
+				n2, before, after.ReclaimCount, after.Status)
 
-			// The control first: without it, "the sleeper was not reclaimed" is
-			// equally consistent with "the reaper reclaimed nothing at all".
-			if n == 0 {
-				t.Fatalf("the reaper reclaimed NOTHING, including the control that is " +
-					"status='running' with a stale heartbeat. This test measured nothing.")
-			}
-			if n != 1 {
-				t.Errorf("expected exactly the control to be reclaimed, got %d", n)
-			}
-
-			// WHICH row moved, not how many. See the header: status is blind here.
-			sleptRC := mustGetWorkflow(t, ctx, store, asleep).ReclaimCount
-			runRC := mustGetWorkflow(t, ctx, store, running).ReclaimCount
-			t.Logf("  reclaim_count: asleep=%d running=%d", sleptRC, runRC)
-			if sleptRC != 0 {
-				t.Errorf("the SLEEPING workflow was reclaimed (reclaim_count=%d); the "+
-					"reaper can see a parked row after all", sleptRC)
-			}
-			if runRC != 1 {
-				t.Errorf("the running workflow's reclaim_count is %d, want 1 -- the "+
-					"count of 1 above was not this row", runRC)
+			// Status cannot carry this: reclaiming sets status to 'ready', which
+			// is exactly where parking already put it, so the row reads "ready"
+			// either way. Only reclaim_count distinguishes them.
+			if after.ReclaimCount != before {
+				t.Errorf("the PARKED workflow was reclaimed (reclaim_count %d -> %d); "+
+					"the reaper can see a parked row after all", before, after.ReclaimCount)
 			}
 		})
 	}
