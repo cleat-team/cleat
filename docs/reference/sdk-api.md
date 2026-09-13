@@ -510,6 +510,14 @@ a value to the caller:
 A caller posts `POST /api/workflows/:id/update/:name`, gets `202` with a
 `promise_id`, and waits on that promise for the handler's return value.
 
+> **What a workflow result may contain** is a cross-backend contract, not a
+> cleat rule: the intersection of what PostgreSQL, MySQL and SQL Server accept.
+> No `\u0000` escape, no unpaired surrogate, nesting at most 100 deep, integers
+> exact only within ±(2^64−1) — and never depend on key order or duplicate keys,
+> because two of the three backends normalise them away. The measurements and
+> the reasons are in
+> [database-backends.md §7.4](./database-backends.md#74-what-a-workflow-result-may-contain).
+
 **An update name is reusable.** The same name can be requested as many times as
 the caller likes over the life of a run — an update is a request, and a request
 can be made twice. Each request is a row of its own, carries its own

@@ -12646,3 +12646,60 @@ number differs from the story.
 
 **Migrations** `postgres/068`, `mysql/062`, `mssql/066`, each applied **twice** against a database
 built from the full set, because `SetupFullSchema` re-applies everything in tests.
+
+---
+
+### 3.322 A workflow result that succeeds on one backend can fail on another, and nothing said so — ✅ **FIXED 2026-09-13** (cleat#1025)
+
+**Decided by the repo owner: document the intersection. The contract for a workflow result is what
+all three dialects accept; cleat does not normalise them to agree.**
+
+`workflow_instances.result` is a different type per backend, and the type is the constraint —
+`JSONB`, `JSON`, and `NVARCHAR(MAX)` with `CHECK (ISJSON(...) = 1)`. Nothing upstream catches a
+violation: `coerceResultJSON` checks `json.Valid` and object shape and *reports* rather than
+rejects, so every divergent payload passes it. The rejection lands in `FinalizeWorkflowSegment`,
+**after the workflow body and its side effects have run** — the work is done and the record says
+`failed`.
+
+**Two of the three sources I was given were wrong, and re-measuring is what found it.**
+
+| claim | source | measured |
+|---|---|---|
+| MySQL rejects a lone surrogate with `3141` | cleat#1025 | **`3140`** |
+| SQL Server stores every divergent payload | a summary handed to me | **false** — it refuses nesting past **128** |
+| "PostgreSQL reorders keys; the other two preserve bytes" | same summary | **false** — MySQL reorders too; only SQL Server preserves |
+
+The issue itself said SQL Server was *"not established … likely a third answer, worth measuring"*.
+A contract document is precisely the artefact that must not infer that column, so it was measured.
+
+**The limits, measured 2026-09-13 on PostgreSQL 16.15, MySQL 8.4.11, SQL Server 16.0.4275.2:**
+
+    NUL escape        pg REJECTED 22P05   my accepted        ms accepted
+    lone surrogate    pg REJECTED 22P02   my REJECTED 3140   ms accepted
+    depth 100/101     pg ok / ok          my ok / REJECTED   ms ok / ok
+    depth 128/129     pg ok / ok          my REJECTED        ms ok / REJECTED
+    integer 2^64      pg exact            my 1.8446744073709552e19   ms exact
+
+So: no NUL escape, no unpaired surrogate, depth ≤ 100, integers exact only within ±(2^64−1) — and
+**not** "must fit `BIGINT`", which cleat#1022 originally said and which is wrong by a factor of two
+on the positive side, since `9223372036854775808` is past signed `BIGINT` and every backend keeps it.
+
+**Acceptance is not the whole contract.** A result accepted everywhere still reads back differently:
+`{"b":1,"a":2}` becomes `{"a": 2, "b": 1}` on PostgreSQL **and MySQL**, and `{"a":1,"a":2}` becomes
+`{"a": 2}` on both. Only SQL Server preserves bytes — the backend that validates least. So the
+contract also forbids depending on key order or on duplicate keys surviving.
+
+**The measurement had a silent-failure of its own worth recording**, because it is this repo's
+recurring shape and it produced a complete-looking table with one column measuring nothing:
+`dbo.TenantFilter_Instances` is a FILTER PREDICATE, so with no session context the seeded row is
+invisible, the `UPDATE` matches zero rows and **reports success**, and every SQL Server case read as
+"no rows". Nothing errored. `database/sql` made it worse by clearing the context between statements
+— it calls `ResetSession` when a connection returns to the pool and go-mssqldb implements that as
+`sp_reset_connection`. The fix is a held `sql.Conn`; the test carries a precondition that fails
+loudly if the row is not visible, so this cannot recur quietly.
+
+**The document is guarded rather than trusted.** `TestAWorkflowResultContractIsTheIntersection`
+asserts every row of both tables on all three dialects, so a backend changing its limits turns
+§7.4 red instead of stale. Falsified twice, each restored by content: claiming MySQL accepts depth
+101 fails with `REJECTED on mysql, want ACCEPTED`; claiming SQL Server normalises fails on both
+normalisation cases.
