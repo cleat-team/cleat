@@ -1,4 +1,4 @@
--- cleat migration 064 (mssql): record how request/response were encoded.
+-- cleat migration 065 (mssql): record how request/response were encoded.
 --
 -- See migrations/postgres/067_event_payload_encoding.sql for why. In short:
 -- tryDecodeBase64 fell back on decode FAILURE, and ordinary text decodes fine --

@@ -1,4 +1,4 @@
--- cleat migration 064 (mysql): record how request/response were encoded.
+-- cleat migration 061 (mysql): record how request/response were encoded.
 --
 -- See migrations/postgres/067_event_payload_encoding.sql for why. In short:
 -- tryDecodeBase64 fell back on decode FAILURE, and ordinary text decodes fine --

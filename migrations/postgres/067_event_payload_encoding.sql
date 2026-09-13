@@ -1,4 +1,4 @@
--- cleat migration 064 (postgres): record how request/response were encoded,
+-- cleat migration 067 (postgres): record how request/response were encoded,
 -- instead of guessing it at read time.
 --
 -- tryDecodeBase64 base64-decoded a stored value and fell back to the raw string
