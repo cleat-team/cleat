@@ -85,10 +85,58 @@ CREATE INDEX IF NOT EXISTS idx_instances_tenant_status_created
 -- dedicated ErrorContains filter queries this column alone, not ORed against
 -- input/result -- see the note on Search below for why the same index does
 -- NOT help there).
+-- AN EXTENSION IS PER-DATABASE, NOT PER-SCHEMA, and that is what makes the
+-- obvious spelling of this fail for a second pool. cleat#1366.
+--
+-- `CREATE EXTENSION IF NOT EXISTS` is per-DATABASE. The first pool to run this
+-- creates pg_trgm in whatever its search_path pointed at; a second pool in the
+-- same database, migrating into its own schema, gets a NOTICE and a no-op --
+-- correctly, the extension does exist -- and then cannot resolve the bare
+-- `gin_trgm_ops`, because the opclass lives in the FIRST pool's schema:
+--
+--     NOTICE:  extension "pg_trgm" already exists, skipping
+--     ERROR:   operator class "gin_trgm_ops" does not exist for access method "gin"
+--
+-- The IF NOT EXISTS is what makes it quiet: it turns "the extension is
+-- somewhere else" into a NOTICE, and the failure surfaces two lines later
+-- reading like a MISSING extension when the extension is present.
+--
+-- Qualifying it `public.gin_trgm_ops` is the obvious repair and it is wrong.
+-- The extension is wherever search_path pointed when the first pool won the
+-- race, which is not guaranteed to be public. Measured on PostgreSQL 16.15
+-- with the extension deliberately installed into a schema named ext_home:
+--
+--     public.gin_trgm_ops    ERROR: operator class "public.gin_trgm_ops" does not exist
+--     resolved at run time   CREATE INDEX ... USING gin (error_msg ext_home.gin_trgm_ops)
+--
+-- So resolve it from the catalog instead of assuming. This is also why the
+-- index is created through EXECUTE format rather than written out: the schema
+-- is not known until the query above has run.
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE INDEX IF NOT EXISTS idx_instances_error_msg_trgm
-    ON workflow_instances USING GIN (error_msg gin_trgm_ops)
-    WHERE error_msg IS NOT NULL;
+
+DO $pg_trgm_index$
+DECLARE
+    ext_schema text;
+BEGIN
+    SELECT n.nspname INTO ext_schema
+      FROM pg_extension e
+      JOIN pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'pg_trgm';
+
+    -- Cannot happen after the CREATE EXTENSION above, which either created it
+    -- or found it. Asserted anyway, because the alternative to an exception
+    -- here is a format() that quietly produces `NULL.gin_trgm_ops`.
+    IF ext_schema IS NULL THEN
+        RAISE EXCEPTION 'pg_trgm is not installed and CREATE EXTENSION did not create it';
+    END IF;
+
+    EXECUTE format(
+        'CREATE INDEX IF NOT EXISTS idx_instances_error_msg_trgm '
+        'ON workflow_instances USING GIN (error_msg %I.gin_trgm_ops) '
+        'WHERE error_msg IS NOT NULL',
+        ext_schema);
+END
+$pg_trgm_index$;
 
 -- ===========================================================================
 -- 4. What this migration deliberately does NOT index, and why
