@@ -85,7 +85,7 @@ All API calls are defined in `src/lib/api.ts` and return typed promises. The API
 | `/api/workflows/:id/cancel`    | POST   | Cancel a workflow              |
 | `/api/workflows/:id/history`   | GET    | Get workflow event history     |
 | `/api/workflows/:id/dag`       | GET    | Get workflow DAG structure     |
-| `/api/workflows/:id/query`     | GET    | Get queryable workflow state   |
+| `/api/workflows/:id/query?key=` | GET   | Read ONE published key (required) |
 | `/api/workflows/batch-history` | POST   | Get histories for comparison   |
 | `/api/definitions`             | GET    | List workflow definitions      |
 | `/api/schedules`               | GET    | List schedules                 |
