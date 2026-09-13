@@ -353,15 +353,53 @@ defect for exactly that reason.
 
 ## The convergence metric
 
-New `IMPROVEMENT-PLAN.md` sections per day, counted by **first appearance** of each section number
-anywhere in the tree. **Regenerate with `scripts/convergence.py --markdown`** — do not retype it,
-and do not count `+###` diff lines (see below).
+Findings recorded per day, from **both** places the project records them: new `IMPROVEMENT-PLAN.md`
+sections, counted by **first appearance** of each section number anywhere in the tree, and new
+GitHub issues, bucketed by local day. **Regenerate with `scripts/convergence.py --markdown`** — do
+not retype it, and do not count `+###` diff lines (see below).
 
-| 08-31 | 09-01 | 09-02 | 09-03 | 09-04 | 09-05 |
-|---|---|---|---|---|---|
-| 4 | 27 | 16 | 23 | 17 | 4* |
+| | 09-01 | 09-02 | 09-03 | 09-04 | 09-05 | 09-06 | 09-07 | 09-08 | 09-09 | 09-10 | 09-11 | 09-12 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| sections | 27 | 16 | 23 | 17 | 32 | 17 | 19 | 3 | 4 | 14 | 9 | 9 |
+| issues | 0 | 0 | 0 | 0 | 7 | 12 | 22 | 37 | 33 | 37 | 54 | 27 |
+| **total** | 27 | 16 | 23 | 17 | 39 | 29 | 41 | 40 | 37 | 51 | 63 | 36 |
 
-\* partial day. The superseded row read 8 / 37 / 37 / 48 / 9.
+**The section row is the metric as it was published until 2026-09-12, and on 09-08 it read 3.**
+Three, against a documented baseline of "roughly twenty a day" — which is the shape this section
+tells a reader to interpret as the work finishing. It was not. **The tracker went into use on
+2026-09-06** (228 of the repo's 229 issues were filed on or after that date; the 229th is #71, from
+June), findings moved there, and the metric was left counting one of the two places they land. The
+combined rate roughly **doubled** over the same window that the published one halved.
+
+Note the direction, because it is the reason nobody caught it for a week: a scan that cannot see
+where the answer moved reports the *flattering* number, and a flattering number does not get
+re-derived. Same shape as the `pub fn` surface scan in CLAUDE.md, which reported 100% coverage
+against a real 88.7%.
+
+**Summing the two rows is not double counting**, and that was checked rather than assumed — of 229
+issues, **18** are cited anywhere in either plan file, and a citation is weaker than a section:
+
+    gh issue list --state all --limit 1000 --json number --jq '.[].number' | sort -n > /tmp/i.txt
+    grep -ohE '#[0-9]{3,4}' IMPROVEMENT-PLAN.md IMPROVEMENT-PLAN-CLOSED.md \
+      | tr -d '#' | sort -un > /tmp/c.txt
+    comm -12 /tmp/i.txt /tmp/c.txt | wc -l
+
+**What the total row does not establish**: a `§` section and an issue are not demonstrably the same
+*size* of finding. The claim the table supports is the negative one — the finding rate did not fall
+— and not a precise rate. If the two units turn out to differ systematically, the fix is to weight
+them, not to go back to counting one.
+
+**Bucket the issue side by LOCAL day**, or the two rows are in different calendars and disagree by
+the offset at every midnight. Issues #1404 and #1410 carry `2026-09-13T02:24Z` and `03:46Z` and
+were filed at 22:24 and 23:46 local on the 12th; a UTC bucket opens a day that has not started yet
+and files two findings into it. Across this window the naive read moves 09-05 from 7 to 0 and
+09-12 from 27 to 45 — larger than several of the day-to-day differences anyone would read a trend
+off. `scripts/convergence.py --self-test` pins this against a fixed `-04:00`, not the machine's
+zone, because on a UTC runner "is it converted?" is satisfied by doing nothing.
+
+**When `gh` cannot be asked, the issue and total columns read `UNMEASURED`, never 0.** An offline
+or unauthenticated run would otherwise reprint exactly the plan-only figure this change retires,
+and it would look like a measurement.
 
 **Partial days undercount, and by a lot.** 09-04 read **11** when it was measured at 21:30 local
 and closed at **17**. The last row of this table is always partial, so a low final figure is not
@@ -373,18 +411,21 @@ first day each `### N.M` is present in the tree — **not** by counting `+###` l
 section again every time its heading is rewritten, and a heading is rewritten precisely when a
 status marker is corrected. On 2026-09-03 that difference is 48 versus 27.
 
-**It has still not bent.** 27 → 16 → 23 → 17 is noise around roughly twenty a day. This paragraph
-previously read "27 → 16 → 23 → 11" and called 09-04 "a nearly-complete day, so it is the first
-plausible dip". **That was wrong, and wrong in the way this section is about**: 09-04 was measured
-at 21:30 local and closed at 17, so the dip was six sections of day left. A partial reading was
-published as evidence of the very trend the metric exists to detect.
+**It has still not bent.** The total row is noise around forty a day and trending up, not down.
+This paragraph has now been wrong twice in the same direction, and the second time is the
+instructive one: it once read "27 → 16 → 23 → 11" and called 09-04 the first plausible dip, off a
+partial day; it then stood correct for a week while the number underneath it quietly stopped
+measuring the thing. **A partial reading and a partial denominator produce the same sentence.**
 
 The conclusion is unchanged: **the project is still finding work faster than a converging project
-would.** The open-item count says the opposite — 1 🔴 heading out of 168 in the plan — and it is the less honest
-of the two, because closing fast and finding fast look identical in it.
+would.** The open-item count says the opposite and is the less honest of the two, because closing
+fast and finding fast look identical in it. Do not quote a figure for it here — this file has
+carried "1 🔴 heading out of 168" while the tree held 7 of 271. Run the unmarked/open scan in
+CLAUDE.md's *Project state* section instead.
 
-Read it once a day. The first day it falls while the fix rate holds is the first evidence that the
-work is finishing rather than continuing.
+Read it once a day. The first day **the total** falls while the fix rate holds is the first
+evidence that the work is finishing rather than continuing. The section row alone can no longer
+answer that question.
 
 ---
 
