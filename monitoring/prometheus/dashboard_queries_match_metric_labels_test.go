@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -46,6 +47,78 @@ var globalDashboardLabels = map[string]bool{
 	"le": true,
 }
 
+// callerSuppliedLabels returns, per recording-method name, the attribute keys
+// that CALLERS pass as extraAttrs.
+//
+// It reads the whole repository because that is where the callers are; the
+// metric is declared in this package and labelled somewhere else entirely.
+//
+// git ls-files, NOT a filesystem walk. A walk from ../.. descends into
+// .claude/worktrees/ when one exists -- a second full copy of the repo -- and
+// would attribute a label to a metric from a scratch checkout. git ls-files
+// answers "what is in the repo", which is the question.
+//
+// IT NEEDS NO VACUITY CHECK OF ITS OWN, unusually, because the test is
+// self-checking here: knownGroupingMismatches no longer exempts
+// cleat_call_retries_total|operation, so if this scan returns nothing the
+// dashboard test FAILS rather than passing blind. A silent breakage in this
+// function is a red run, not a green one.
+func callerSuppliedLabels(t *testing.T) map[string][]string {
+	t.Helper()
+	cmd := exec.Command("git", "ls-files", "*.go")
+	cmd.Dir = "../.."
+	outBytes, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git ls-files: %v", err)
+	}
+
+	out := map[string][]string{}
+	for _, rel := range strings.Fields(string(outBytes)) {
+		if strings.HasSuffix(rel, "_test.go") {
+			continue
+		}
+		path := filepath.Join("../..", rel)
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			continue // not every tracked .go file has to parse standalone
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || !strings.HasPrefix(sel.Sel.Name, "Record") && !strings.HasPrefix(sel.Sel.Name, "Set") {
+				return true
+			}
+			// The AST spans line continuations, which a line-oriented grep does
+			// not: the RecordCallRetry call site puts each attribute on its own
+			// line, and a grep of the call's own line reports zero labels.
+			for _, arg := range call.Args {
+				inner, ok := arg.(*ast.CallExpr)
+				if !ok {
+					continue
+				}
+				isel, ok := inner.Fun.(*ast.SelectorExpr)
+				if !ok || len(inner.Args) == 0 {
+					continue
+				}
+				if pkg, ok := isel.X.(*ast.Ident); !ok || pkg.Name != "attribute" {
+					continue
+				}
+				if lit, ok := inner.Args[0].(*ast.BasicLit); ok {
+					if s, err := strconv.Unquote(lit.Value); err == nil {
+						out[sel.Sel.Name] = append(out[sel.Sel.Name], s)
+					}
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
 func metricLabels(t *testing.T) map[string][]string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -67,6 +140,9 @@ func metricLabels(t *testing.T) map[string][]string {
 	}
 
 	out := map[string][]string{}
+	// method name -> the metric(s) it records, so caller-supplied labels can be
+	// attributed below. See callerSuppliedLabels.
+	method2metric := map[string][]string{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
 		if !ok || fn.Recv == nil || fn.Body == nil {
@@ -103,19 +179,41 @@ func metricLabels(t *testing.T) map[string][]string {
 		for _, fld := range fields {
 			if name, ok := field2name[fld]; ok {
 				out[name] = append(out[name], labels...)
+				method2metric[fn.Name.Name] = append(method2metric[fn.Name.Name], name)
 			}
 		}
 		return true
 	})
+
+	// EVERY recording method takes `extraAttrs ...attribute.KeyValue` and merges
+	// it, so a label can be supplied entirely by the CALLER and never appear in
+	// metrics.go at all. Reading only the method bodies reports such a metric as
+	// carrying fewer labels than it does, and the guard then flags a correct
+	// panel -- which is how cleat_call_retries_total|operation reached
+	// knownGroupingMismatches when `operation` is in fact supplied at the call
+	// site in engine/durablecalls.go.
+	for method, labels := range callerSuppliedLabels(t) {
+		for _, metric := range method2metric[method] {
+			out[metric] = append(out[metric], labels...)
+		}
+	}
 	return out
 }
 
 // knownGroupingMismatches are the panels this guard found on the day it was
 // written and which need a decision rather than an edit -- exactly like
 // unfedMetrics next door. Each groups by a label its metric does not carry and
-// no call site adds (checked: zero callers of any of the four pass extraAttrs),
-// so each panel shows one undifferentiated series where it promises a
-// breakdown.
+// no call site adds, so each panel shows one undifferentiated series where it
+// promises a breakdown.
+//
+// THIS LIST HELD FOUR ENTRIES AND THE FOURTH WAS WRONG. It exempted
+// cleat_call_retries_total|operation on the stated grounds that "zero callers
+// of any of the four pass extraAttrs". Two do: engine/durablecalls.go supplies
+// service and operation to RecordCallRetry, and outcome to RecordAmbiguousCall.
+// The claim came from a line-oriented grep of each call's own line, and that
+// call site puts every attribute on a continuation line. callerSuppliedLabels
+// now reads the callers with the AST, so the panel is recognised as correct and
+// the entry is gone.
 //
 // Fixing them is not mechanical. `by (def_name)` is probably right for
 // replay_steps; cleat_calls_total carries NO labels at all, so the choice is
@@ -125,7 +223,6 @@ func metricLabels(t *testing.T) map[string][]string {
 //
 // THIS LIST MAY ONLY SHRINK. A new mismatch fails the test.
 var knownGroupingMismatches = map[string]string{
-	"cleat_call_retries_total|operation":          "cleat#1444",
 	"cleat_calls_total|workflow_name":             "cleat#1444 -- the metric declares no labels at all",
 	"cleat_replay_steps_total|workflow_name":      "cleat#1444 -- the metric declares def_name",
 	"cleat_workflows_claimed_total|workflow_name": "cleat#1444",
