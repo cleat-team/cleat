@@ -178,6 +178,19 @@ invocation, so two concurrent runs against one instance both obey it and both wi
 tables. `CleanupMSSQLTestData` is the same shape. See cleat#982, where that is the leading
 explanation for four SQL Server failures that would not reproduce alone.
 
+**You no longer have to guess whether that is what happened.** Every test that gets its database
+from `testutil.TestDB` now prints, *if and only if it fails*, who else was attached at that
+moment -- by client process id on MySQL and SQL Server, which report it without being asked, and
+by a tagged `application_name` on PostgreSQL, which does not. A passing test runs no query. So
+read the tail of a database-backed failure before assuming it is about your change:
+
+    cleat#982 probe (mssql): 2 OTHER client process session(s) were attached ...
+
+`pgrep` is not a substitute and was the first thing tried: it sees processes on this machine
+rather than connections to *this database*, and cleat#982 lost a candidate to exactly that
+difference -- a concurrent `go test` was spotted, assumed relevant, then eliminated because it
+was pointed at different ports.
+
 **A skip that hides a crash is not a skip.** `t.Skipf("... crashed")` and
 `t.Skipf("... compatibility issue")` are failures wearing a skip's clothing, and they make a
 regression invisible forever. A skip is legitimate only for a genuine environmental precondition

@@ -464,7 +464,10 @@ func TestDB(t *testing.T, dialect Dialect) *sql.DB {
 	var configured bool
 	switch dialect {
 	case DialectPostgres:
-		dsn = PostgresTestDSN()
+		// Tagged so this process can tell its own sessions from another
+		// process's -- see foreign_sessions.go. PostgreSQL is the only one of
+		// the three that does not tell the server our pid by itself.
+		dsn = tagPostgresDSN(PostgresTestDSN())
 		driverName = "postgres"
 		configured = os.Getenv("CLEAT_TEST_POSTGRES") != "" || os.Getenv("CLEAT_TEST_DB") != ""
 	case DialectMySQL:
@@ -509,7 +512,70 @@ func TestDB(t *testing.T, dialect Dialect) *sql.DB {
 		return nil
 	}
 	SetupMinimalSchema(t, db, dialect)
+	SampleForeignSessionsAtStart(dialect)
+	ReportForeignSessionsOnFailure(t, dialect)
 	return db
+}
+
+// ReportForeignSessionsOnFailure arranges for the identity of every OTHER
+// client process attached to this test database to be printed if -- and only
+// if -- the test fails.
+//
+// This is cleat#982's missing datum. That issue is four failures of the shape
+// "the row was not there", and the one mechanism measured as sufficient to
+// produce all of them is a second process running the unqualified
+// `DELETE FROM` that every cleanup helper issues. Whether that is what actually
+// happened was never established, because the connections are gone by the time
+// anyone reads the failure. The instrument built for it fired zero times in
+// eight runs -- the right instrument, never pointed at the event.
+//
+// Registering on FAILURE is what makes it affordable enough to leave on
+// permanently, and leaving it on permanently is the point: the flake is rare,
+// load-dependent, and has never been reproduced on demand, so the only way to
+// catch it is to already be watching. A passing test pays one t.Cleanup
+// closure and runs no query at all.
+//
+// It reports; it does not fail. A foreign session is not by itself wrong --
+// two suites can legitimately share a server -- and a test that failed for an
+// unrelated reason should not acquire a second, confusing failure. What it
+// removes is the guesswork: the next time this family appears, the failure says
+// whether anyone else was there.
+func ReportForeignSessionsOnFailure(t *testing.T, dialect Dialect) {
+	t.Helper()
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		foreign, basis, ok := ForeignSessions(dialect)
+		switch {
+		case !ok:
+			// Say this plainly and never as an all-clear. The first version of
+			// this printed "no other client process was attached" when the
+			// query had not run at all, which is the reassuring sentence and
+			// was evidence of nothing.
+			t.Logf("cleat#982 probe (%s): COULD NOT TELL who else was attached when this "+
+				"test failed -- %s", dialect, basis)
+		case len(foreign) == 0:
+			t.Logf("cleat#982 probe (%s): no other client process was attached to this "+
+				"test database when this test failed.\n  basis: %s\n"+
+				"  at the first TestDB call in this process: %s\n"+
+				"  (this is a sample, not a watch: a process that attached, wiped and left "+
+				"between those two points is invisible to both)",
+				dialect, basis, ForeignSessionsAtStart(dialect))
+		default:
+			t.Logf("cleat#982 probe (%s): %d OTHER client process session(s) were attached to "+
+				"this test database when this test failed.\n"+
+				"  basis: %s\n"+
+				"  at the first TestDB call in this process: %s\n"+
+				"  %s\n\n"+
+				"  Every cleanup helper here is an unqualified DELETE FROM across every table, so a "+
+				"second process running this suite deletes this one's fixtures mid-test. That is "+
+				"measured as SUFFICIENT to produce failures of the shape \"the row was not there\". "+
+				"It is not proof that it is what happened -- a reader can be attached and harmless -- "+
+				"but it is the fact cleat#982 could never recover after the fact.",
+				dialect, len(foreign), basis, ForeignSessionsAtStart(dialect), strings.Join(foreign, "\n  "))
+		}
+	})
 }
 
 // redactDSN strips the password from a DSN so it can appear in test output.
