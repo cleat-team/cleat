@@ -289,8 +289,19 @@ type Lifecycle interface {
 	// Returns the runID, result, and any error. This is "wait for any child."
 	AwaitAnyChild(runIDs []string) (completedRunID string, result string, err error)
 
-	// PollChild checks a child's status without blocking.
+	// PollChild checks a run's status without blocking.
 	// Returns status ("running", "completed", "failed"), result, and any error.
+	//
+	// NOT restricted to your children, despite the name. PollChild takes any
+	// run id in the calling workflow's TENANT: nothing filters by parentage --
+	// not this call, not the ABI binding, and not the store query, which is
+	// `WHERE id = ?` on all three dialects. The `child` names the common case,
+	// not a boundary; the boundary is the tenant. This is the call for
+	// observing a run you did not spawn (cleat#1120).
+	//
+	// An unknown run id reports "running", NOT an error: a missing row and an
+	// unfinished one are indistinguishable here. Never read "running" as proof
+	// a run exists.
 	PollChild(runID string) (status string, result string, err error)
 
 	// ChildWorkflowTyped starts a child workflow with typed input.
