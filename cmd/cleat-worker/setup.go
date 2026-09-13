@@ -1718,9 +1718,26 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 
 	// ---- Load WASM ----
+	//
+	// THIS MEASURES A LOAD AND USED TO FEED THE COMPILE METRIC. loadWASM checks
+	// the in-memory cache, then the disk cache, then the database, and returns
+	// []byte -- it compiles nothing. So cleat_wasm_compile_duration_seconds
+	// ("WASM compile duration by def_name") has been carrying storage latency,
+	// and cleat_wasm_load_latency_seconds ("Time to load a WASM module from
+	// storage"), which is exactly this quantity, was never fed at all
+	// (cleat#1317).
+	//
+	// An operator alerting on compile duration was therefore watching the
+	// database and the disk cache. Not a missing metric -- a confident wrong
+	// one, which is the worse of the two because it invites action.
+	//
+	// Real compilation is Runtime.CompileModule (engine/runtime.go:209), which
+	// lives in a package with no Metrics handle. Feeding the compile metric
+	// from here as well would publish one measurement under two names, which is
+	// the defect cleat#1317 already found in SetMemoryPressureRatio.
 	wasmStart := time.Now()
 	wasmBytes, err := w.loadWASM(wf.DefName, wf.DefVersion)
-	w.Metrics.RecordWasmCompileDuration(context.Background(), time.Since(wasmStart), wf.DefName)
+	w.Metrics.RecordWasmLoadLatency(context.Background(), time.Since(wasmStart), wf.DefName)
 	if err != nil {
 		w.logger.ErrorContext(context.Background(), "failed to load WASM", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		var ce *engine.CleatError
