@@ -76,7 +76,8 @@ func TestAFailedUpdateCompletesAndSettlesTheCallersPromise(t *testing.T) {
 			// The failing shape: an empty result and an error message, exactly
 			// what runUpdate passes when a handler is missing, a validator
 			// refuses, or a handler errors.
-			if err := us.CompleteUpdateRequest(ctx, wfID, name, "", "handler refused"); err != nil {
+			reqID := onlyPendingRequestID(t, store, wfID, name)
+			if err := us.CompleteUpdateRequest(ctx, wfID, reqID, "", "handler refused"); err != nil {
 				t.Fatalf("completing a FAILED update was rejected by the database: %v\n\n"+
 					"An update that fails must still be recordable as failed. When this errors "+
 					"the row stays 'pending' and the caller's promise is never settled, which is "+

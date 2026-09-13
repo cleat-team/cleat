@@ -493,18 +493,16 @@ func (s *MSSQLStore) ListPromises(ctx context.Context, workflowID string) ([]Pro
 }
 
 func (s *MSSQLStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
-		VALUES (@p1, @p2, @p3, @p4, 'pending', @p5)
-	`, workflowID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
+	requestID, err := newUpdateRequestID()
 	if err != nil {
-		// (workflow_id, update_name) is the primary key, so a uniqueness
-		// violation is this name having been used on this workflow before.
-		// Detected typed, via isMSSQLDuplicateKey, and wrapped so the HTTP
-		// layer answers 409 without reading driver text. cleat#1330.
-		if isMSSQLDuplicateKey(err) {
-			return fmt.Errorf("%w: %s", ErrUpdateNameUsed, updateName)
-		}
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload, promise_id, status, tenant_id)
+		VALUES (@p1, @p2, @p3, @p4, @p5, 'pending', @p6)
+	`, workflowID, requestID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
+	if err != nil {
 		return err
 	}
 
@@ -524,7 +522,7 @@ func (s *MSSQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 
 func (s *MSSQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT workflow_id, update_name, payload, ISNULL(promise_id, ''), status,
+		SELECT workflow_id, ISNULL(request_id, update_name), update_name, payload, ISNULL(promise_id, ''), status,
 		       ISNULL(result, ''), ISNULL(error_msg, ''), created_at
 		FROM workflow_update_requests
 		WHERE workflow_id = @p1 AND tenant_id = @p2 AND status = 'pending'
@@ -538,7 +536,7 @@ func (s *MSSQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 	var requests []UpdateRequestInfo
 	for rows.Next() {
 		var req UpdateRequestInfo
-		if err := rows.Scan(&req.WorkflowID, &req.UpdateName, &req.Payload, &req.PromiseID,
+		if err := rows.Scan(&req.WorkflowID, &req.RequestID, &req.UpdateName, &req.Payload, &req.PromiseID,
 			&req.Status, &req.Result, &req.ErrorMsg, &req.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -548,12 +546,12 @@ func (s *MSSQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 	return requests, rows.Err()
 }
 
-func (s *MSSQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (s *MSSQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = @p3, error_msg = @p4, completed_at = SYSUTCDATETIME()
-		WHERE workflow_id = @p1 AND update_name = @p2 AND tenant_id = @p5 AND status = 'pending'
-	`, workflowID, updateName, jsonOrNull(result), errMsg, s.tenantID)
+		WHERE workflow_id = @p1 AND request_id = @p2 AND tenant_id = @p5 AND status = 'pending'
+	`, workflowID, requestID, jsonOrNull(result), errMsg, s.tenantID)
 	return err
 }
 

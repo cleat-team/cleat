@@ -1963,11 +1963,35 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	}
 	for _, p := range pending {
 		if p.UpdateName == updateName {
-			// A `detail` beside the message, because this and the
-			// update_name_used case below are two different conditions with
-			// one status and a caller had no way to tell them apart: one is
-			// "wait for the in-flight one", the other is "this name is spent
-			// for the life of this workflow". cleat#1330.
+			// The `detail` stays even though it no longer distinguishes this
+			// from update_name_used, which cleat#1416 removed. A caller that
+			// learned to branch on it under cleat#1330 keeps working, and the
+			// field still says which of the API's 409s this is -- the message
+			// text is not a contract.
+			//
+			// This is the ONLY reason a repeat is refused now: one request per
+			// name in flight at a time. It clears when the in-flight update is
+			// answered, and the next request with the same name is accepted.
+			//
+			// AND IT IS A CHECK, NOT A CONSTRAINT, which is a real change and
+			// is stated rather than glossed. This read and the INSERT below are
+			// not atomic; before cleat#1416 the primary key on
+			// (workflow_id, update_name) was the backstop, so two racing
+			// requests produced one 409 and one row. Now they produce two rows,
+			// two promises and two dispatches.
+			//
+			// Left that way deliberately. Under "an update is a request" two
+			// concurrent requests ARE two requests, and each caller gets its
+			// own answer -- which is the outcome this whole change is for. No
+			// caller is stranded either way, because each row carries its own
+			// request_id and its own promise. What is lost is only the
+			// guarantee that the 409 fires; nothing depends on it firing.
+			//
+			// Closing the race properly would need a partial unique index on
+			// (workflow_id, update_name) WHERE status = 'pending'. PostgreSQL
+			// and SQL Server have those; MySQL has no filtered index, so it
+			// would be a two-dialect guarantee documented as three. See
+			// docs/reference/sdk-api.md, which says the same thing to callers.
 			s.writeJSON(w, 409, map[string]string{
 				"error":  "update already pending with name: " + updateName,
 				"detail": "update_already_pending",
@@ -1984,25 +2008,20 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Create the update request in the database.
+	// No update_name_used branch, and its absence is the point of cleat#1416.
+	//
+	// A name used to be consumed for the life of the workflow, because
+	// (workflow_id, update_name) was the primary key and completion is an
+	// UPDATE rather than a delete. cleat#1392 made all three dialects refuse
+	// the second request identically, with a 409 carrying
+	// detail=update_name_used, and said in its own commit that the refusal
+	// would become UNREACHABLE rather than wrong if the name were later made
+	// reusable. It is now reusable, so the branch is gone rather than dead.
+	//
+	// The pending guard above is what remains, and it is now the whole of the
+	// concurrency control: one request per name may be in flight, and the next
+	// one is accepted the moment that one is answered.
 	if err := st.CreateUpdateRequest(r.Context(), id, updateName, payload, promiseID); err != nil {
-		// The pending guard above filters status = 'pending', so it covers
-		// only the window before dispatch. Once the update has COMPLETED the
-		// guard passes and the insert runs into the primary key -- and that is
-		// the common case, since a caller retrying is far more likely to do so
-		// after the first finished than during the pending window.
-		//
-		// It answered 500 with the raw driver string. The request is
-		// well-formed and the state says no, which is what the sibling 409
-		// above is for. cleat#1330.
-		if errors.Is(err, engine.ErrUpdateNameUsed) {
-			s.writeJSON(w, 409, map[string]string{
-				"error": "update name already used on this workflow: " + updateName,
-				// Distinct from update_already_pending: that one clears when
-				// the in-flight update finishes, this one never does.
-				"detail": "update_name_used",
-			})
-			return
-		}
 		s.writeError(w, 500, err.Error())
 		return
 	}

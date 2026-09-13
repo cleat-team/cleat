@@ -272,7 +272,10 @@ type ConcurrencyKeyInfo struct {
 
 // UpdateRequestInfo holds the state of an incoming update request.
 type UpdateRequestInfo struct {
-	WorkflowID string    `json:"workflow_id"`
+	WorkflowID string `json:"workflow_id"`
+	// RequestID identifies this request. UpdateName does NOT: cleat#1416 made a
+	// name reusable, so a workflow can hold several requests that share one.
+	RequestID  string    `json:"request_id"`
 	UpdateName string    `json:"update_name"`
 	Payload    string    `json:"payload"`
 	PromiseID  string    `json:"promise_id,omitempty"`

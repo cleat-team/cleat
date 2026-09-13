@@ -75,8 +75,8 @@ func TestMSSQLPayloadConstraintsAcceptJSONScalars(t *testing.T) {
 			}
 
 			_, err = db.ExecContext(ctx, `
-				INSERT INTO workflow_update_requests (workflow_id, update_name, payload)
-				VALUES (@p1, @p2, @p3)`, wfID, "upd-"+tc.name, tc.payload)
+				INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload)
+				VALUES (@p1, @p2, @p2, @p3)`, wfID, "upd-"+tc.name, tc.payload)
 			switch {
 			case tc.accept && err != nil:
 				t.Errorf("workflow_update_requests.payload rejected %s: %v", tc.payload, err)

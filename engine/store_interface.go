@@ -414,7 +414,7 @@ type WorkflowStore interface {
 	GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error)
 
 	// CompleteUpdateRequest marks an update request as completed with a result or error.
-	CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error
+	CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error
 
 	// ---- Concurrency Key methods (Feature 5) ----
 

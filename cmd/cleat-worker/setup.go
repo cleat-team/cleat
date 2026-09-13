@@ -3148,10 +3148,17 @@ func (w *Worker) failStrandedUpdates(wf *engine.WorkflowInstance, terminalStatus
 	reason := fmt.Sprintf("workflow %s reached terminal status %q with this update still pending, "+
 		"so it can never be handled", wf.ID, terminalStatus)
 
+	// upd.RequestID, not upd.UpdateName. cleat#1416 made a name reusable, so a
+	// workflow can strand SEVERAL requests sharing one -- and completing by
+	// name would close all of them on the first iteration while rejecting only
+	// the first promise, leaving the rest of these callers holding a promise
+	// nothing settles. That is the failure this sweep exists to prevent, so it
+	// would have been this loop reintroducing it.
 	for _, upd := range updates {
-		if cErr := st.CompleteUpdateRequest(ctx, wf.ID, upd.UpdateName, "", reason); cErr != nil {
+		if cErr := st.CompleteUpdateRequest(ctx, wf.ID, upd.RequestID, "", reason); cErr != nil {
 			w.logger.ErrorContext(ctx, "error failing stranded update",
-				"worker_id", w.id, "workflow_id", wf.ID, "update_name", upd.UpdateName, "error", cErr)
+				"worker_id", w.id, "workflow_id", wf.ID,
+				"update_name", upd.UpdateName, "request_id", upd.RequestID, "error", cErr)
 			continue
 		}
 		if upd.PromiseID == "" {

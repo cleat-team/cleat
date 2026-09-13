@@ -9,7 +9,6 @@ import (
 	"fmt"
 
 	"github.com/cespare/xxhash/v2"
-	"github.com/lib/pq"
 )
 
 func (s *PostgresStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
@@ -187,36 +186,26 @@ func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]
 // AcquireConcurrencyKey tries to acquire a concurrency key for a workflow.
 // Returns true if acquired, false if already held by another workflow.
 
-// ErrUpdateNameUsed is returned by CreateUpdateRequest when this workflow has
-// already accepted an update under this name.
+// ErrUpdateNameUsed is gone, and this note is here so the next reader does not
+// reintroduce it. cleat#1416.
 //
-// workflow_update_requests is keyed PRIMARY KEY (workflow_id, update_name) on
-// all three dialects, and completion is an UPDATE ... SET status = 'completed'
-// rather than a delete, so the name is consumed for the life of the workflow.
-// Whether it SHOULD be is cleat#1330's open question and a schema change
-// either way; this exists so that all three dialects refuse the second
-// request the same way in the meantime, and so the HTTP layer can answer 409
-// without reading driver text.
+// It existed because workflow_update_requests was PRIMARY KEY (workflow_id,
+// update_name) and completion is an UPDATE ... SET status = 'completed' rather
+// than a delete, so a name was consumed for the life of the workflow. cleat#1330
+// measured the three dialects refusing the second request three different ways
+// and cleat#1392 made them agree on a 409. That 409 was correct for the schema
+// that produced it and is now UNREACHABLE rather than wrong -- which is the
+// property cleat#1392 chose it for, in its own words:
 //
-// It sits beside ErrScheduleExists deliberately -- same shape, same reason,
-// and each dialect detects its own uniqueness violation while the error is
-// still TYPED (pq SQLSTATE 23505, MySQL 1062, SQL Server 2601/2627). See
-// engine/mssql_errors.go for what the string form costs.
+//	If the answer later is "reusable", the new 409 becomes unreachable rather
+//	than wrong, and the three-dialect test goes red rather than quiet.
 //
-// WHAT THIS REPLACED, per dialect, measured on develop before the fix:
+// It went red. The three-dialect test now asserts the opposite and is named for
+// it. The per-dialect uniqueness detections (pq 23505, MySQL 1062, SQL Server
+// 2601/2627) went with it: there is no uniqueness constraint left to violate.
 //
-//	PostgreSQL   500 {"error":"pq: duplicate key value violates unique
-//	                  constraint \"workflow_update_requests_pkey\" (23505)"}
-//	SQL Server   500, same shape with the mssql driver's text
-//	MySQL        202 + a promise_id, and NO ROW -- INSERT IGNORE discarded it
-//	             and the result was discarded too, so RowsAffected == 0 was
-//	             invisible and this returned nil
-//
-// MySQL's was the dangerous one: the caller held a promise that provably
-// cannot settle, because CompleteUpdateRequest's WHERE matches nothing and
-// failStrandedUpdates sweeps rows, of which there are none. That is the exact
-// failure cleat/runtime_updates.go names as the reason the feature exists.
-var ErrUpdateNameUsed = errors.New("update name already used")
+// ErrScheduleExists next door is a different case and stays -- schedule names
+// ARE unique, by decision.
 
 func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -230,19 +219,16 @@ func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, upd
 	// is then rejected by the very column it exists to satisfy. That is the
 	// second half of 2.60c, which fixed it for signals and left this copy
 	// behind. IMPROVEMENT-PLAN 3.19.
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
-		VALUES ($1, $2, $3, $4, 'pending', $5)
-	`, workflowID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
+	requestID, err := newUpdateRequestID()
 	if err != nil {
-		// 23505 is unique_violation, and (workflow_id, update_name) is the
-		// primary key, so it means this name has been used on this workflow
-		// before. Detected typed and wrapped, so nothing above the store
-		// parses a driver message. cleat#1330.
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
-			return fmt.Errorf("%w: %s", ErrUpdateNameUsed, updateName)
-		}
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload, promise_id, status, tenant_id)
+		VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+	`, workflowID, requestID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
+	if err != nil {
 		return err
 	}
 
@@ -273,7 +259,7 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT workflow_id, update_name, payload #>> '{}', COALESCE(promise_id, ''), status,
+		SELECT workflow_id, COALESCE(request_id, update_name), update_name, payload #>> '{}', COALESCE(promise_id, ''), status,
 		       COALESCE(result #>> '{}', ''), COALESCE(error_msg, ''), created_at
 		FROM workflow_update_requests
 		WHERE workflow_id = $1 AND tenant_id = $2 AND status = 'pending'
@@ -287,7 +273,7 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 	var requests []UpdateRequestInfo
 	for rows.Next() {
 		var r UpdateRequestInfo
-		if err := rows.Scan(&r.WorkflowID, &r.UpdateName, &r.Payload, &r.PromiseID,
+		if err := rows.Scan(&r.WorkflowID, &r.RequestID, &r.UpdateName, &r.Payload, &r.PromiseID,
 			&r.Status, &r.Result, &r.ErrorMsg, &r.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -355,7 +341,7 @@ func jsonOrNull(s string) any {
 	return s
 }
 
-func (s *PostgresStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (s *PostgresStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("complete update request: begin: %w", err)
@@ -365,8 +351,8 @@ func (s *PostgresStore) CompleteUpdateRequest(ctx context.Context, workflowID, u
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = $3, error_msg = $4, completed_at = now()
-		WHERE workflow_id = $1 AND update_name = $2 AND tenant_id = $5 AND status = 'pending'
-	`, workflowID, updateName, jsonOrNull(result), errMsg, s.tenantID)
+		WHERE workflow_id = $1 AND request_id = $2 AND tenant_id = $5 AND status = 'pending'
+	`, workflowID, requestID, jsonOrNull(result), errMsg, s.tenantID)
 	if err != nil {
 		return err
 	}

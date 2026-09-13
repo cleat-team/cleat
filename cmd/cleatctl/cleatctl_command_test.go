@@ -411,9 +411,9 @@ func (m *mockStore) GetPendingUpdateRequests(ctx context.Context, workflowID str
 	return nil, nil
 }
 
-func (m *mockStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	if m.completeUpdateRequestFn != nil {
-		return m.completeUpdateRequestFn(ctx, workflowID, updateName, result, errMsg)
+		return m.completeUpdateRequestFn(ctx, workflowID, requestID, result, errMsg)
 	}
 	return nil
 }
