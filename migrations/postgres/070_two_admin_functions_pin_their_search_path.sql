@@ -1,0 +1,49 @@
+-- cleat migration 070 (postgres): grant/revoke_plugin_to_tenant pin their search_path
+--
+-- admin.grant_plugin_to_tenant and admin.revoke_plugin_from_tenant are
+-- SECURITY DEFINER and set no search_path, so every unqualified name in them
+-- resolves through the CALLER's. cleat#1480, and the same shape cleat#1363
+-- closed for admin.drop_tenant.
+--
+-- WHAT IS ACTUALLY REACHABLE, stated rather than implied, because the obvious
+-- reading overstates it. Every TABLE reference in both functions is already
+-- qualified -- admin.tenant_roles, admin.plugin_tables -- and the GRANT and
+-- REVOKE are built with format('%I.%I', ...). What is unqualified is the
+-- FUNCTION calls: replace() and format() themselves.
+--
+-- Those are still reachable. pg_catalog is searched first only IMPLICITLY: a
+-- caller that names it explicitly and late
+--
+--     SET search_path = something_else, pg_catalog
+--
+-- shadows both, and replace() is what computes the schema name the GRANT then
+-- targets.
+--
+-- AND IT IS BOUNDED, which is the other half of an honest description.
+-- Migration 065 revoked EXECUTE on the admin routines from PUBLIC, so the
+-- callers are cleat_app and superusers rather than any tenant role. This is
+-- closer to defence in depth than to a live escalation, and it is not the
+-- reachable-from-a-tenant case cleat#1363 measured.
+--
+-- THE ARGUMENT THAT DOES CARRY IS VERIFIABILITY, and it is cleat#1363's.
+-- With the path pinned there is nothing left for it to affect, which is exactly
+-- why it costs nothing -- and why omitting it is expensive: an unqualified name
+-- that survives a later edit then FAILS LOUDLY instead of silently resolving
+-- through whoever called. That converts "these names all look qualified" from
+-- something a reader has to check into something the database enforces.
+--
+-- pg_catalog rather than public, matching 069. Both functions reach only
+-- admin.* tables, which they qualify, and pg_catalog builtins. Nothing here
+-- needs public on the path, and naming it would re-admit the schema an attacker
+-- is most likely to be able to create in.
+--
+-- ALTER FUNCTION rather than CREATE OR REPLACE, deliberately: the bodies are
+-- unchanged and re-stating them here would create a second copy of a definition
+-- that 001_schema.sql owns, which is how admin.drop_tenant came to have four.
+-- A later migration that does CREATE OR REPLACE these without a SET clause will
+-- silently drop the pin -- which is what the guard in
+-- engine/admin_functions_pin_their_search_path_test.go exists to catch, and why
+-- it reads pg_proc rather than these files.
+
+ALTER FUNCTION admin.grant_plugin_to_tenant(TEXT, UUID) SET search_path = pg_catalog;
+ALTER FUNCTION admin.revoke_plugin_from_tenant(TEXT, UUID) SET search_path = pg_catalog;
