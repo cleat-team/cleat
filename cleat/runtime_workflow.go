@@ -469,6 +469,89 @@ func (s *Saga) AddStep(description string, forward func(HostCalls) (string, erro
 	return s
 }
 
+// StepCall describes a saga step as a pair of durable calls rather than as a
+// pair of Go functions. See Saga.AddStepCall.
+type StepCall struct {
+	// Description is used for logging, as with AddStep.
+	Description string
+
+	// Service and Op name the forward durable call; Payload is its JSON input.
+	Service string
+	Op      string
+	Payload string
+
+	// CompensateOp is the operation that undoes the forward call, on the same
+	// Service. Leave it empty for a step with no meaningful compensation --
+	// the equivalent of passing a nil compensate to AddStep.
+	CompensateOp string
+
+	// CompensatePayload is the compensating call's JSON input. It defaults to
+	// Payload when empty, because the common case is undoing the same subject:
+	// withdraw {"account":"A"} is compensated by deposit {"account":"A"}.
+	CompensatePayload string
+}
+
+// AddStepCall adds a step described by the durable calls it makes, rather than
+// by function values the caller has to build.
+//
+//	s.AddStepCall(cleat.StepCall{
+//	    Description:  "withdraw",
+//	    Service:      "banking",
+//	    Op:           "withdraw",
+//	    Payload:      payload,
+//	    CompensateOp: "refund",
+//	})
+//
+// WHY THIS EXISTS, which is narrower than it looks (cleat#1131). AddStep is not
+// being replaced and named functions already work with it:
+//
+//	s.AddStep("withdraw", doWithdraw, doRefund)   // builds today
+//
+// What does not work is PARAMETERISING a step. Writing a helper that returns a
+// step function -- the obvious way to avoid N near-identical named functions --
+// fails whichever way it is written. As a local closure the analyzer reports
+// E009, because the callee is a function value it cannot resolve. As a
+// package-level factory it reports that the factory "is reachable from a
+// workflow entry point but does not have a HostCalls parameter", because the
+// DurableCall inside the returned closure is attributed to the enclosing named
+// function. Neither diagnostic mentions the other, and the shape that satisfies
+// both is a factory carrying an unused HostCalls parameter.
+//
+// This form sidesteps both by construction rather than by exemption: there is
+// no function value for the caller to produce, so E009 has no callee to flag,
+// and no factory to misclassify as a durable leaf. A StepCall is data, and data
+// can be built in a loop, read from config, or returned from a helper.
+//
+// The closures are built HERE, inside the SDK, which is already where Run calls
+// them -- step.Forward(h) is itself a function-value call and has always been
+// accepted, because the analyzer is looking at workflow code rather than at the
+// runtime it links against.
+func (s *Saga) AddStepCall(c StepCall) *Saga {
+	service, op, payload := c.Service, c.Op, c.Payload
+	compOp := c.CompensateOp
+	compPayload := c.CompensatePayload
+	if compPayload == "" {
+		compPayload = payload
+	}
+
+	var compensate func(HostCalls) error
+	if compOp != "" {
+		// Nil rather than a no-op closure when there is nothing to undo: Run
+		// skips nil compensators, and a closure that returns nil would be
+		// indistinguishable from a compensation that ran and succeeded.
+		compensate = func(h HostCalls) error {
+			_, err := h.DurableCall(service, compOp, compPayload)
+			return err
+		}
+	}
+
+	return s.AddStep(c.Description,
+		func(h HostCalls) (string, error) {
+			return h.DurableCall(service, op, payload)
+		},
+		compensate)
+}
+
 // Run executes all forward steps in order. If any step fails, previously
 // completed steps are compensated in reverse order. Nil compensate functions
 // are skipped. The first forward error encountered is returned.

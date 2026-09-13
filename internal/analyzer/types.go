@@ -119,6 +119,49 @@ func HostCallsMethod(sel *types.Selection) bool {
 	return IsHostCallsType(sel.Recv())
 }
 
+// SDKDurableHelper reports whether a selection is an SDK helper that makes a
+// durable host call on the caller's behalf, rather than a HostCalls method the
+// workflow wrote itself.
+//
+// Saga.AddStepCall is the first of these (cleat#1131). It takes a StepCall --
+// data -- and builds the DurableCall closures inside the SDK, which is the
+// point: it is the only form that can be PARAMETERISED without tripping E009
+// or the durable-leaf check. But three separate layers decide what a workflow
+// does by looking for HostCalls methods in workflow code, and none of them
+// could see it:
+//
+//	callgraph.hasHostCallsCall  -> not a durable leaf
+//	closure analysis            -> not in the durable closure, so...
+//	wasm.collectHostCallsCalls  -> never scanned, so no cleat_call import
+//
+// The module then built clean, imported nothing, and would have failed at RUN
+// time on its first step -- the cleat#1005 symptom reached from the opposite
+// direction. One predicate, asked by all three, keeps them from disagreeing.
+//
+// Saga.AddStep needs no entry: the caller writes the closure and its
+// h.DurableCall is visible to every layer already.
+func SDKDurableHelper(sel *types.Selection) bool {
+	if sel == nil {
+		return false
+	}
+	t := sel.Recv()
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return false
+	}
+	if named.Obj().Pkg().Name() != "cleat" {
+		return false
+	}
+	switch named.Obj().Name() + "." + sel.Obj().Name() {
+	case "Saga.AddStepCall":
+		return true
+	}
+	return false
+}
+
 // PluginCallerMethod reports whether the given selection is a method call
 // on a type that implements the cleat.PluginCaller marker interface.
 func PluginCallerMethod(sel *types.Selection) bool {

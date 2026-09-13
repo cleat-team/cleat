@@ -169,7 +169,7 @@ func hasHostCallsCall(fd *analyzer.FuncDecl) bool {
 		if !ok {
 			return true
 		}
-		if analyzer.HostCallsMethod(sel) || analyzer.PluginCallerMethod(sel) {
+		if analyzer.HostCallsMethod(sel) || analyzer.PluginCallerMethod(sel) || analyzer.SDKDurableHelper(sel) {
 			found = true
 			return false
 		}

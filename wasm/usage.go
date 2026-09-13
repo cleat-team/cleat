@@ -12,6 +12,7 @@ package wasm
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -25,6 +26,35 @@ const GoTarget = "go"
 // PythonTarget identifies the Python WASM compilation target.
 // Used by the Go build system to dispatch to the componentize-py pipeline.
 const PythonTarget = "python"
+
+// sdkHelperImports maps an SDK helper method to the host functions it makes on
+// the caller's behalf. Keyed by "Type.Method".
+//
+// This exists because collectHostCallsCalls finds imports by spotting HostCalls
+// methods in workflow code. A helper that makes the call itself is invisible to
+// that, and the failure is silent: the module builds, imports nothing, and dies
+// at run time with "the HostCalls runtime was not initialized" -- the same
+// symptom as cleat#1005, from the opposite direction.
+var sdkHelperImports = map[string][]string{
+	"Saga.AddStepCall": {"cleat_call"},
+}
+
+// sdkHelperKey renders a selection as "Type.Method", or "" when the receiver is
+// not a named SDK type. Pointer receivers are unwrapped, so *Saga keys as Saga.
+func sdkHelperKey(sel *types.Selection, method string) string {
+	if sel == nil {
+		return ""
+	}
+	t := sel.Recv()
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj() == nil {
+		return ""
+	}
+	return named.Obj().Name() + "." + method
+}
 
 // HostFunction identifies a host function that can be imported from the
 // WASM host environment (e.g., "cleat_call", "cleat_sleep").
@@ -410,6 +440,25 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 			if analyzer.PluginCallerMethod(sel) {
 				info.Used["plugin_call"] = true
 				info.Used["plugin_call_streaming"] = true
+			}
+			// SDK helpers that make a host call the workflow never writes.
+			//
+			// Saga.AddStepCall takes a StepCall -- data -- and builds the
+			// DurableCall closures inside the SDK, which is the whole point:
+			// it is the one form that can be parameterised without tripping
+			// E009 or the durable-leaf check (cleat#1131). But this scan finds
+			// imports by looking for HostCalls methods in WORKFLOW code, and
+			// AddStepCall's receiver is *Saga, so nothing here saw it: the
+			// module built clean, imported no cleat_call, and would have failed
+			// at RUN time on the first step.
+			//
+			// Saga.AddStep does not need a row, because the user writes the
+			// closure and its h.DurableCall is visible to the scan above. This
+			// is the first SDK API where the durable call is not in user code.
+			if analyzer.SDKDurableHelper(sel) {
+				for _, importName := range sdkHelperImports[sdkHelperKey(sel, selExpr.Sel.Name)] {
+					info.Used[importName] = true
+				}
 			}
 			return true
 		}
