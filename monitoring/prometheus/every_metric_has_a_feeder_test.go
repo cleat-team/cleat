@@ -41,8 +41,6 @@ var unfedMetrics = map[string]string{
 	"SetConcurrencyKeysTotal": "NEEDS A FEEDER. Concurrency-key inventory",
 	"SetConcurrencyKeysExpiringSoon": "NEEDS A FEEDER. The leading indicator " +
 		"for a key sweep falling behind",
-	"SetWasmCacheEntries": "NEEDS A FEEDER. Compiled-module cache occupancy",
-	"SetWasmCacheBytes":   "NEEDS A FEEDER. The byte half of the same",
 
 	// The counters and histograms. Less severe -- a counter never Added reads
 	// 0 rather than vanishing -- but still an instrument nothing writes.

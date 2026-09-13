@@ -92,6 +92,22 @@ func (c *wasmLRUCache) sizeBytesLocked() int64 {
 	return total
 }
 
+// stats reports the cache's occupancy for cleat_wasm_cache_entries and
+// cleat_wasm_cache_bytes (cleat#1317). Both gauges existed, were registered and
+// described, and nothing ever called them -- so an operator sizing
+// --wasm-cache-max-mb had no way to see what the cache actually held.
+//
+// Reuses sizeBytesLocked rather than tracking a running total, because a
+// running total is a second source of truth for a number this already computes
+// and would drift silently on any future eviction path that forgot to update
+// it. The walk is over at most --wasm-cache-max-entries elements, once per
+// memory tick.
+func (c *wasmLRUCache) stats() (entries int, bytes int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.index), c.sizeBytesLocked()
+}
+
 func (c *wasmLRUCache) evictLocked() {
 	if elem := c.list.Back(); elem != nil {
 		entry := elem.Value.(*wasmLRUEntry)
@@ -1438,6 +1454,15 @@ func (w *Worker) dispatchLoop() {
 			w.Metrics.RecordWorkflowMemoryEstimate(w.ctx, key.tenantID, key.defName, bytes)
 		}
 		w.Metrics.SetQueueDepth(w.ctx, state.QueueDepth)
+
+		// Compiled-module cache occupancy, on the same tick as the other
+		// gauges. It is the observable for --wasm-cache-max-entries and
+		// --wasm-cache-max-mb, which an operator otherwise tunes blind.
+		if w.wasmCache != nil {
+			ents, cbytes := w.wasmCache.stats()
+			w.Metrics.SetWasmCacheEntries(w.ctx, int64(ents))
+			w.Metrics.SetWasmCacheBytes(w.ctx, cbytes)
+		}
 		updateThroughputGauges()
 
 		if !w.memoryController.CanClaim() {
