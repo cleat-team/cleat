@@ -41,11 +41,12 @@ var unfedMetrics = map[string]string{
 	"RecordWasmCompileDuration": "NEEDS A CALL SITE, and did not used to -- it " +
 		"was fed from the LOAD path, which compiles nothing, so it carried " +
 		"storage latency under a compile name (cleat#1317). Real compilation is " +
-		"Runtime.CompileModule in engine/, which has no Metrics handle; same " +
-		"blocker as RecordEncryptionError below. Deliberately left unfed rather " +
-		"than fed from the wrong measurement: an absent histogram is honest, a " +
-		"confident wrong one invites action",
-	"RecordEncryptionError":       "NEEDS A CALL SITE. Payload-encryption failures",
+		"Runtime.CompileModule in engine/. NOT blocked on a Metrics handle -- " +
+		"engine already imports monitoring/prometheus and PostgresStore already " +
+		"holds one; RecordEncryptionError was wired that way. What is missing is " +
+		"a compile SITE with a receiver that has one. Deliberately left unfed " +
+		"rather than fed from the wrong measurement: an absent histogram is " +
+		"honest, a confident wrong one invites action",
 	"RecordReaperInstanceClaimed": "NEEDS A CALL SITE. Reaper reclaims",
 }
 
