@@ -36,15 +36,22 @@ var goFixtureExpectations = map[string]string{
 	"durablesend":    "",
 	"fencereentry":   "",
 	"generics":       "",
-	"minimal-wf":     "",
-	"noargs":         "",
-	"nowms":          "",
-	"rejectpromise":  "",
-	"resolvepromise": "",
-	"scheduleinvoke": "",
-	"signalworkflow": "",
-	"spin":           "",
-	"updatedispatch": "",
+	// cleat#1131. Verifies cleanly BECAUSE of analyzer.SDKDurableHelper: its
+	// saga steps are StepCall data, so the DurableCall lives in the SDK and
+	// nothing in this package writes a HostCalls method. Before that predicate
+	// it also "verified cleanly" -- and produced a module importing no
+	// cleat_call, which is why the real guard is the import check in
+	// testdata/sagaparameterised's sibling test rather than this row.
+	"sagaparameterised": "",
+	"minimal-wf":        "",
+	"noargs":            "",
+	"nowms":             "",
+	"rejectpromise":     "",
+	"resolvepromise":    "",
+	"scheduleinvoke":    "",
+	"signalworkflow":    "",
+	"spin":              "",
+	"updatedispatch":    "",
 
 	// The known-positive. A substring of the message, not just "some error":
 	// "it must fail" is satisfied by failing for any reason at all, including
