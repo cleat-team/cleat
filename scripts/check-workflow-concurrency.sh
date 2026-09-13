@@ -65,6 +65,24 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Extract THE group expression, or say we cannot. cleat#1426 review (WS-3):
+# `grep '^\s*group:' | head -1` silently assumes one top-level concurrency
+# block per file. Add a job-level block and head -1 analyses whichever came
+# first, so the guard checks the wrong expression and passes -- a PARTIAL skip,
+# which neither vacuity control below can see because they only fire at zero.
+#
+# Measured 2026-09-13: 9 merge_group workflows, all with a single top-level
+# block, 0 job-level blocks anywhere. So this is unreached today and is here to
+# stay unreached: it turns a future silent misread into a loud refusal.
+# NOTE THE SHAPE: the count happens in the LOOP's shell, not in a helper called
+# through $(...). The first version of this was a group_expr() function that
+# appended to `ambiguous` and was invoked as `group=$(group_expr "$f")` -- a
+# command substitution runs in a SUBSHELL, so every append was discarded and the
+# guard passed a deliberately ambiguous tree. Caught by the known-positive
+# below, which is the whole argument for having one: the refusal was written,
+# reviewed, and inert.
+ambiguous=()
+
 bad_cancel=()
 bad_group=()
 scanned=0
@@ -86,7 +104,12 @@ for f in .github/workflows/*.yml; do
 
     # The group must vary per commit on a push. github.sha and github.run_id
     # both do; github.ref alone does not.
-    group=$(grep -E '^\s*group:' "$f" | head -1)
+    n_group=$(grep -cE '^[[:space:]]*group:' "$f")
+    if [ "$n_group" -ne 1 ]; then
+        ambiguous+=("$f ($n_group group: lines)")
+        continue
+    fi
+    group=$(grep -E '^[[:space:]]*group:' "$f")
     case "$group" in
         *github.sha*|*github.run_id*) ;;
         *) bad_group+=("$f") ;;
@@ -109,7 +132,17 @@ for f in .github/workflows/*.yml; do
     # even though it does not on push. A group built only from
     # github.event.pull_request.* or github.event.issue.* is the cleat#1426
     # defect: both are null on merge_group, so the expression is a constant.
-    group=$(grep -E '^\s*group:' "$f" | head -1)
+    n_group=$(grep -cE '^[[:space:]]*group:' "$f")
+    if [ "$n_group" -ne 1 ]; then
+        ambiguous+=("$f ($n_group group: lines)")
+        continue
+    fi
+    group=$(grep -E '^[[:space:]]*group:' "$f")
+    # github.ref is the per-entry gh-readonly-queue ref here, so it qualifies on
+    # merge_group even though it does not on push. github.run_id also passes,
+    # but note WHY: it is unique per run, so it satisfies this by making the
+    # concurrency block inert. That is safe, not good -- this is a list of keys
+    # that cannot collapse, not a list of recommendations.
     case "$group" in
         *github.ref*|*github.sha*|*github.run_id*|*merge_group.head_sha*) ;;
         *) bad_queue_group+=("$f") ;;
@@ -159,6 +192,16 @@ if [ ${#bad_group[@]} -gt 0 ]; then
     echo "GitHub keeps at most one pending run per group, so the next merge cancels" >&2
     echo "the queued one before it starts -- with zero jobs, and 'cancelled' is not" >&2
     echo "'success'. cancel-in-progress: false does not prevent this." >&2
+    fail=1
+fi
+
+if [ ${#ambiguous[@]} -gt 0 ]; then
+    echo "ERROR: these workflows have zero or several 'group:' lines, so this guard" >&2
+    echo "cannot tell which concurrency expression governs the run:" >&2
+    printf '    %s\n' "${ambiguous[@]}" >&2
+    echo >&2
+    echo "Refusing rather than analysing the first one, which would check the wrong" >&2
+    echo "expression and pass. Teach this script about job-level concurrency blocks." >&2
     fail=1
 fi
 
