@@ -241,23 +241,49 @@ var (
 	dbCredentialProvider          = flag.String("db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
 	dbCredentialPath              = flag.String("db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 	encryptionKeyFile             = flag.String("encryption-key-file", "", "Path to file containing base64-encoded AES-256-GCM encryption key (32 bytes after decode)")
-	encryptSensitivePayloads      = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
-	maxQuotaEvents                = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
-	maxQuotaChildren              = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
-	maxQuotaConcurrencyKeys       = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
-	maxQuotaSchedules             = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
-	claimAcrossTenants            = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. Requires a database-side grant; see migrations/postgres/023_cross_tenant_claim.sql and migrations/mssql/012_admin_role.sql")
-	maxWorkflowDuration           = flag.Duration("max-workflow-duration", 0, "Maximum wall-clock duration per workflow execution (0 = no limit). Workflows exceeding this are cancelled and fail with a timeout error.")
-	healthCheckInterval           = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
-	maxPluginConnections          = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
-	otelEndpoint                  = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
-	otelDisabled                  = flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
-	benchSvcURL                   = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
-	tenantPoolMaxConns            = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool (MySQL/MSSQL only)")
-	logLevel                      = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-	enableAdminAPI                = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
-	verifyBackend                 = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
-	listPlugins                   = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
+
+	// ROLE-PER-TENANT ISOLATION. cleat#1307.
+	//
+	// A SEPARATE FLAG, not something --require-auth turns on. The dead branch
+	// this replaces was gated on *requireAuth, and --require-auth defaults
+	// TRUE -- so reusing it would switch a new isolation mechanism on for every
+	// existing deployment at upgrade, silently changing which connection plugin
+	// code runs on. That is the trap --completed-workflow-retention-days
+	// defaults to 0 to avoid.
+	//
+	// "rls" is what production does today: set_config('cleat.tenant_id', ...)
+	// per transaction on the owner pool, where a path that forgets the call is
+	// a cross-tenant read. "role" opens a pool per tenant authenticating AS
+	// that tenant's PostgreSQL login role, so the credential carries the
+	// identity and there is nothing to forget -- plugin.TenantPools' own
+	// comment: "the connection IS the tenant".
+	tenantIsolation = flag.String("tenant-isolation", "rls",
+		"How tenant isolation is enforced for plugin host functions: 'rls' (default) sets "+
+			"cleat.tenant_id per transaction on the shared owner pool; 'role' opens a "+
+			"connection per tenant authenticating as that tenant's PostgreSQL login role. "+
+			"'role' requires --tenant-role-secret-file and PostgreSQL.")
+	tenantRoleSecretFile = flag.String("tenant-role-secret-file", "",
+		"Path to a file holding the key that derives tenant role passwords, base64-encoded "+
+			"(at least 32 bytes after decode). Required by --tenant-isolation=role. Each "+
+			"tenant's password is HMAC-SHA256(key, tenant_id), so nothing per-tenant is "+
+			"stored and any worker can open a tenant pool without reading a credential.")
+	encryptSensitivePayloads = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
+	maxQuotaEvents           = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
+	maxQuotaChildren         = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
+	maxQuotaConcurrencyKeys  = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
+	maxQuotaSchedules        = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
+	claimAcrossTenants       = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. Requires a database-side grant; see migrations/postgres/023_cross_tenant_claim.sql and migrations/mssql/012_admin_role.sql")
+	maxWorkflowDuration      = flag.Duration("max-workflow-duration", 0, "Maximum wall-clock duration per workflow execution (0 = no limit). Workflows exceeding this are cancelled and fail with a timeout error.")
+	healthCheckInterval      = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
+	maxPluginConnections     = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
+	otelEndpoint             = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
+	otelDisabled             = flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
+	benchSvcURL              = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
+	tenantPoolMaxConns       = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool, used by --tenant-isolation=role. PostgreSQL only: plugin.TenantPools authenticates as a PostgreSQL login role (cleat#1307). The help text said MySQL/MSSQL, which was the opposite of the implementation.")
+	logLevel                 = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	enableAdminAPI           = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
+	verifyBackend            = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
+	listPlugins              = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
 )
 
 func applyChildBindingOverrideEnv() {
