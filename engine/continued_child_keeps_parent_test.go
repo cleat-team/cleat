@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -171,24 +172,47 @@ func TestAContinuedChildStaysItsParentsChild(t *testing.T) {
 // claimSpecific claims until it gets the run it was asked for, so a test that
 // needs a particular workflow's generation is not at the mercy of what else is
 // ready. It gives up rather than looping forever.
+// claimSpecific claims repeatedly until it gets the workflow asked for.
+//
+// IT REPORTS WHICH WAY IT GAVE UP, and the two are different diagnoses. Both
+// returned the same errClaimEmpty until 2026-09-13, so a failing test said
+// "claim returned nothing runnable" whichever had happened:
+//
+//	QUEUE EMPTY   ClaimWorkflow returned nil. The row is not claimable at all
+//	              -- wrong status, a next_wake_at still in the future, a
+//	              different tenant, or already assigned. Nothing was competing
+//	              with it; it simply was not on offer.
+//	BOUND HIT     50 other workflows were claimed and none was the one asked
+//	              for. The row may be perfectly claimable and merely behind
+//	              more work than the bound. This is the shape cleat#1447 is
+//	              chasing next door, where a sweep bounded at TOP (100) skips
+//	              the row a test is about.
+//
+// Both still satisfy errors.Is(err, errClaimEmpty), so any caller matching on
+// that keeps working; what changed is what a human reads.
 func claimSpecific(t *testing.T, ctx context.Context, store WorkflowStore, id, worker string) (*WorkflowInstance, error) {
 	t.Helper()
-	for i := 0; i < 50; i++ {
+	const maxClaims = 50
+	for i := 0; i < maxClaims; i++ {
 		wf, err := store.ClaimWorkflow(ctx, worker)
 		if err != nil {
 			return nil, err
 		}
 		if wf == nil {
-			return nil, errClaimEmpty
+			return nil, fmt.Errorf("%w: the queue went empty after %d claim(s) without "+
+				"offering %s -- it is not claimable (status, next_wake_at, tenant or "+
+				"assigned_to), rather than queued behind other work", errClaimEmpty, i, id)
 		}
 		if wf.ID == id {
 			return wf, nil
 		}
 	}
-	return nil, errClaimEmpty
+	return nil, fmt.Errorf("%w: claimed %d other workflow(s) without reaching %s -- the "+
+		"bound was hit, not the queue, so this says nothing about whether that row is "+
+		"claimable", errClaimEmpty, maxClaims, id)
 }
 
-var errClaimEmpty = errors.New("claim returned nothing runnable for the requested workflow")
+var errClaimEmpty = errors.New("claim did not reach the requested workflow")
 
 // chainOf returns every run in a continue-as-new chain, head first.
 func chainOf(t *testing.T, ctx context.Context, store WorkflowStore, head string) []string {
