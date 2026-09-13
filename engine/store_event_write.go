@@ -115,6 +115,15 @@ func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflow
 	checksum := computeEventChecksum(rec, prevChecksum)
 	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
 	if err != nil {
+		// cleat#1317: encryption failures were counted nowhere, while their
+		// decryption twin has been counted since db.go:176. The asymmetry was
+		// not a decision -- RecordEncryptionError existed, was registered and
+		// described, and had no caller.
+		//
+		// Recorded HERE rather than inside encodeEventForStorage because that
+		// is a free function with no store receiver and therefore no Metrics.
+		// The error is already propagated with context; this only counts it.
+		s.recordEncryptionFailure(ctx)
 		return fmt.Errorf("append one event: step %d: %w", rec.Step, err)
 	}
 	_, err = tx.ExecContext(ctx, `
@@ -148,6 +157,15 @@ func (s *PostgresStore) execEventStmt(ctx context.Context, stmt *sql.Stmt, workf
 	checksum := computeEventChecksum(rec, prevChecksum)
 	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
 	if err != nil {
+		// cleat#1317: encryption failures were counted nowhere, while their
+		// decryption twin has been counted since db.go:176. The asymmetry was
+		// not a decision -- RecordEncryptionError existed, was registered and
+		// described, and had no caller.
+		//
+		// Recorded HERE rather than inside encodeEventForStorage because that
+		// is a free function with no store receiver and therefore no Metrics.
+		// The error is already propagated with context; this only counts it.
+		s.recordEncryptionFailure(ctx)
 		return fmt.Errorf("exec event stmt: step %d: %w", rec.Step, err)
 	}
 	_, err = stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,

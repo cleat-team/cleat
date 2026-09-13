@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -134,4 +135,22 @@ func (pe *PayloadEncryption) DecryptJSON(jsonValue []byte) ([]byte, error) {
 	}
 	encoded := string(jsonValue[1 : len(jsonValue)-1])
 	return pe.DecryptBase64(encoded)
+}
+
+// recordEncryptionFailure counts a failed encrypt-on-write (cleat#1317).
+//
+// A method on the store because the encode path is free functions taking a
+// *PayloadEncryption, with no receiver and so no Metrics -- and because the
+// nil check belongs in one place rather than at each of the three call sites.
+//
+// Its decryption twin has been counted since db.go:176; this side simply never
+// was. The difference in SHAPE is deliberate and worth keeping: a failed
+// decrypt is swallowed and counted, because a row that will not decrypt should
+// not stop a read; a failed encrypt is counted AND returned, because writing
+// the plaintext instead is the outcome encryption exists to prevent.
+func (s *PostgresStore) recordEncryptionFailure(ctx context.Context) {
+	if s.Metrics == nil {
+		return
+	}
+	s.Metrics.RecordEncryptionError(ctx)
 }

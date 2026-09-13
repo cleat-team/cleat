@@ -208,6 +208,15 @@ func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, 
 	// left every write-ahead intent's request in the clear.
 	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
 	if err != nil {
+		// cleat#1317: encryption failures were counted nowhere, while their
+		// decryption twin has been counted since db.go:176. The asymmetry was
+		// not a decision -- RecordEncryptionError existed, was registered and
+		// described, and had no caller.
+		//
+		// Recorded HERE rather than inside encodeEventForStorage because that
+		// is a free function with no store receiver and therefore no Metrics.
+		// The error is already propagated with context; this only counts it.
+		s.recordEncryptionFailure(ctx)
 		return fmt.Errorf("write call intent: step %d: %w", rec.Step, err)
 	}
 
