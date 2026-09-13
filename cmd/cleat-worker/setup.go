@@ -3352,7 +3352,7 @@ func (w *Worker) recordTerminalFailureWithHistory(wf *engine.WorkflowInstance, s
 	// can handle an update still pending against it.
 	w.failStrandedUpdates(wf, "failed")
 	ctx := context.Background()
-	w.Metrics.RecordWorkflowFailed(ctx, wf.DefName, "", "")
+	w.Metrics.RecordWorkflowFailed(ctx, wf.DefName, "")
 	w.Metrics.RecordWorkflowDuration(ctx, time.Since(startedAt), wf.DefName, "failed", "")
 	if deadLettered {
 		w.Metrics.RecordWorkflowsDeadLettered(ctx)
