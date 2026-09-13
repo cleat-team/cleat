@@ -626,6 +626,113 @@ the target dialect's syntax.
    native window functions that are exact; MySQL computes from all samples in
    Go.
 
+
+### 7.4 What a workflow result may contain
+
+**The contract for a workflow result is the INTERSECTION of what all three
+backends accept. cleat does not normalise them to agree** (cleat#1025).
+
+A result is stored in `workflow_instances.result`, which is a different type on
+each backend, and the type is the constraint:
+
+| backend | column | behaviour |
+|---|---|---|
+| PostgreSQL | `JSONB` | validates **and normalises** |
+| MySQL | `JSON` | validates and normalises, depth-limited |
+| SQL Server | `NVARCHAR(MAX)` + `CHECK (ISJSON(result) = 1)` | validates, stores bytes as given |
+
+Nothing upstream catches a violation. `coerceResultJSON`
+(`engine/store_lifecycle.go`) checks `json.Valid` and object shape and *reports*
+rather than rejects — every case below is valid JSON and an object, so it passes
+all of them. The rejection happens in the database, at
+`FinalizeWorkflowSegment`, **after the workflow body and its side effects have
+already run**: the work is done and the record says `failed`.
+
+#### The limits
+
+Measured 2026-09-13 against the schema the migrations build, on PostgreSQL
+16.15, MySQL 8.4.11 and SQL Server 2022 (16.0.4275.2):
+
+| what you write | PostgreSQL | MySQL | SQL Server |
+|---|---|---|---|
+| a `\u0000` escape in a string | **rejected** `22P05` | accepted | accepted |
+| a lone surrogate (`\ud800`) | **rejected** `22P02` | **rejected** `3140` | accepted |
+| nesting depth 100 | accepted | accepted | accepted |
+| nesting depth 101 | accepted | **rejected** `3157` | accepted |
+| nesting depth 129 | accepted | **rejected** `3157` | **rejected** |
+| integer up to 2^64−1 | exact | exact | exact |
+| integer 2^64 | exact | **degrades to `1.8446744073709552e19`** | exact |
+
+So the contract is:
+
+- **No `\u0000` escape.** PostgreSQL cannot store a NUL in text.
+- **No unpaired surrogate.** Two of three reject it.
+- **Nesting depth at most 100** — MySQL's limit, and the tightest of the three.
+  SQL Server's is 128; PostgreSQL accepted 10 000.
+- **Integers are exact only within ±(2^64−1).** Beyond that MySQL degrades to
+  `DOUBLE` (cleat#1022). Note this is **not** "must fit `BIGINT`":
+  `9223372036854775808` is past signed `BIGINT` and MySQL keeps it exactly, so
+  a limit written to the signed bound is wrong by a factor of two on the
+  positive side.
+
+**No backend is "the strict one", which is the whole reason this is written
+down.** A NUL escape passes on MySQL and SQL Server and fails on PostgreSQL;
+depth 120 passes on PostgreSQL and SQL Server and fails on MySQL. A workflow
+validated against one backend can fail on another.
+
+#### And acceptance is not the whole contract
+
+A result accepted by all three can still **read back differently**, because two
+of the three normalise:
+
+| | key order preserved | duplicate keys preserved |
+|---|---|---|
+| PostgreSQL `JSONB` | no — reordered | no — last wins |
+| MySQL `JSON` | no — reordered | no — last wins |
+| SQL Server `NVARCHAR` | yes | yes |
+
+Measured: `{"b":1,"a":2}` reads back as `{"a": 2, "b": 1}` on PostgreSQL **and
+on MySQL**, and byte-identical on SQL Server; `{"a":1,"a":2}` becomes `{"a": 2}`
+on both of the first two.
+
+So, independently of what is accepted: **never depend on key order, and never
+send duplicate keys.** Only one of the three backends preserves either, and it
+is the one that validates least.
+
+#### Re-deriving this
+
+Every figure above comes from writing the payload into
+`workflow_instances.result` on a schema built from `migrations/<dialect>/` and
+reading it back. Two things make the measurement easy to get wrong, both met
+while taking it:
+
+- **SQL Server needs session context set on the connection you measure with.**
+  `dbo.TenantFilter_Instances` is a FILTER PREDICATE, so without it the row is
+  invisible: the `UPDATE` matches zero rows and *reports success*, and the
+  read-back returns nothing. Nothing errors. Set
+  `sp_set_session_context @key=N'tenant_id'` and hold the connection —
+  `database/sql` calls `ResetSession` when a connection returns to the pool and
+  go-mssqldb implements that as `sp_reset_connection`, which clears it.
+- **Do not type a NUL escape into a shell.** The payload is the four characters
+  `\u0000`, not a NUL byte; build it in the program.
+- **Measure against `workflow_instances` itself, never a probe table built to
+  mirror the column.** The constraint is not in the column type. In
+  `migrations/mssql/001_schema.sql` the type is at line 190 and the validation
+  is 23 lines below it, inside the same `CREATE TABLE`:
+
+      CONSTRAINT ck_workflow_instances_result CHECK (result IS NULL OR ISJSON(result) = 1)
+
+  A probe table built as bare `NVARCHAR(MAX)` — which is what line 190 says on
+  its own — accepts every payload on this list, and reports a clean, complete,
+  entirely wrong table. That is how the first attempt at this section concluded
+  SQL Server validates nothing: **the instrument was constructed from the
+  hypothesis it existed to test, so it could not disagree.** Found by a second
+  session measuring the real column and getting a different answer.
+
+`TestAWorkflowResultContractIsTheIntersection` (`engine/`) asserts every row of
+both tables above on all three dialects, so a backend changing its limits turns
+this section red rather than stale.
+
 ---
 
 ## 8. Performance Tuning
