@@ -540,18 +540,71 @@ func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error 
 	}
 	defer tx.Rollback()
 
+	digest := scheduleRequestDigest(sch)
+	key := nullableScheduleKey(sch.IdempotencyKey)
+
+	// Look the key up BEFORE inserting, not only on the way out of a conflict.
+	// A retry that reuses both the key and the name violates two constraints at
+	// once, and which one the database reports is not something to depend on --
+	// the answer would be "this name is taken" for a caller whose whole point is
+	// that it is the one who took it.
+	if sch.IdempotencyKey != "" {
+		var stored sql.NullString
+		err := tx.QueryRowContext(ctx, `
+			SELECT request_digest FROM workflow_schedules
+			WHERE tenant_id = $1 AND idempotency_key = $2
+		`, s.tenantID, sch.IdempotencyKey).Scan(&stored)
+		switch {
+		case err == nil:
+			return scheduleIdempotencyVerdict(stored, digest)
+		case !errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("create schedule: read idempotency key: %w", err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT before_schedule_insert`); err != nil {
+		return fmt.Errorf("create schedule: savepoint: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy, idempotency_key, request_digest)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputOrDefault(sch.Input), sch.Enabled, sch.NextRunAt, s.tenantID,
 		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
-		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy))
+		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy),
+		key, digest)
 	if err != nil {
 		// 23505 is unique_violation. Detected while the error is still a
 		// *pq.Error, so nothing above the store has to read a message -- same
 		// idiom as compaction.go's 40P01 deadlock check.
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			// WHICH of the two unique constraints, now that there are two.
+			// Answering ErrScheduleExists for an idempotency-key collision
+			// would tell a caller its own retry hit somebody else's name.
+			//
+			// This branch is the RACE, not the ordinary retry -- the lookup
+			// above already served that. Two concurrent first-requests carrying
+			// one key both miss the read and one loses the insert; the loser
+			// re-reads and returns the answer its rival is about to return.
+			//
+			// THE ROLLBACK TO SAVEPOINT IS NOT OPTIONAL. PostgreSQL marks the
+			// whole transaction aborted on a constraint violation, so without
+			// it the re-read fails with "current transaction is aborted" and
+			// this path silently degrades to ErrScheduleExists -- correct-
+			// looking, untestable by any single-threaded test, and wrong
+			// exactly when it matters.
+			if sch.IdempotencyKey != "" {
+				if _, rerr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT before_schedule_insert`); rerr == nil {
+					var stored sql.NullString
+					if qerr := tx.QueryRowContext(ctx, `
+						SELECT request_digest FROM workflow_schedules
+						WHERE tenant_id = $1 AND idempotency_key = $2
+					`, s.tenantID, sch.IdempotencyKey).Scan(&stored); qerr == nil {
+						return scheduleIdempotencyVerdict(stored, digest)
+					}
+				}
+			}
 			return fmt.Errorf("%w: %s", ErrScheduleExists, sch.Name)
 		}
 		return err

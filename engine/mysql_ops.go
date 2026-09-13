@@ -320,22 +320,60 @@ func (s *MySQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	if err := sch.ValidateForCreate(); err != nil {
 		return err
 	}
+	digest := scheduleRequestDigest(sch)
+
+	// See PostgresStore.CreateSchedule for why the key is looked up before the
+	// insert rather than only on the way out of a conflict.
+	if sch.IdempotencyKey != "" {
+		stored, found, lerr := s.lookupScheduleKey(ctx, sch.IdempotencyKey)
+		if lerr != nil {
+			return fmt.Errorf("CreateSchedule: read idempotency key: %w", lerr)
+		}
+		if found {
+			return scheduleIdempotencyVerdict(stored, digest)
+		}
+	}
+
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy, idempotency_key, request_digest)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputOrDefault(sch.Input), sch.Enabled, sch.NextRunAt, s.tenantID,
 		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
-		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy))
+		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy),
+		nullableScheduleKey(sch.IdempotencyKey), digest)
 	if err != nil {
-		// The name is the PRIMARY KEY, so a uniqueness violation here is a
-		// caller reusing a name. Detected typed, via isDuplicateKeyError, and wrapped
-		// so the HTTP layer answers 409 without reading driver text.
+		// Two unique constraints now: the name is the PRIMARY KEY and the key
+		// has its own index. Detected typed, via isDuplicateKeyError, and then
+		// told apart by ASKING whether the key is held -- not by reading the
+		// index name out of the driver's message, which is dialect-specific
+		// text and the one thing a machine-readable error exists to avoid.
+		//
+		// No savepoint here, unlike PostgreSQL: this path runs outside a
+		// transaction, so the failed INSERT leaves the connection usable.
 		if isDuplicateKeyError(err) {
+			if sch.IdempotencyKey != "" {
+				if stored, found, lerr := s.lookupScheduleKey(ctx, sch.IdempotencyKey); lerr == nil && found {
+					return scheduleIdempotencyVerdict(stored, digest)
+				}
+			}
 			return fmt.Errorf("%w: %s", ErrScheduleExists, sch.Name)
 		}
 		return fmt.Errorf("CreateSchedule: %w", err)
 	}
 	return nil
+}
+
+// lookupScheduleKey reports the stored input digest for a key this tenant holds.
+func (s *MySQLStore) lookupScheduleKey(ctx context.Context, key string) (sql.NullString, bool, error) {
+	var stored sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT request_digest FROM workflow_schedules
+		WHERE tenant_id = ? AND idempotency_key = ?
+	`, s.tenantID, key).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return stored, false, nil
+	}
+	return stored, err == nil, err
 }
 
 // ListSchedules returns all registered schedules for the current tenant.
