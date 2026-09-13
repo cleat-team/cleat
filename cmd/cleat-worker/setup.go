@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime/debug"
 	"sort"
@@ -472,6 +473,39 @@ func dsnWithSchema(dsn, schema string) string {
 		sep = "&"
 	}
 	return dsn + sep + "search_path=" + schema
+}
+
+// baseDSNFromURL parses a PostgreSQL connection URL and returns the base
+// connection DSN in libpq key=value format, WITHOUT user or password.
+// plugin.TenantPools appends `user=<role> password=<derived>` per tenant.
+//
+// RESTORED. #1350 deleted this, correctly: its only production caller was the
+// unreachable tenant-pool branch, so it was dead, and two guards said so --
+// check-test-only-code.sh and check-unreachable-main.sh. cleat#1307 makes that
+// branch reachable behind --tenant-isolation=role, so the helper is needed
+// again and comes back from git, which is the cost that was accepted when it
+// went. Recovered from a06a0b72^ rather than rewritten, so the format it emits
+// is byte-for-byte what plugin/tenant_db.go was written against.
+//
+// The 5432 default and the libpq output are why role isolation is PostgreSQL
+// only: this produces `host=… port=… dbname=… sslmode=…`, which no other
+// driver accepts.
+func baseDSNFromURL(dbURL string) string {
+	u, err := url.Parse(dbURL)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "5432"
+	}
+	dbname := strings.TrimPrefix(u.Path, "/")
+	sslmode := u.Query().Get("sslmode")
+	if sslmode == "" {
+		sslmode = "disable"
+	}
+	return fmt.Sprintf("host=%s port=%s dbname=%s sslmode=%s", host, port, dbname, sslmode)
 }
 
 // baseDSNFromDSN parses a PostgreSQL DSN in key=value format and returns a

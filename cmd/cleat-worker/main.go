@@ -152,6 +152,27 @@ func main() {
 		logger.InfoContext(context.Background(), "checksum verification enabled", "worker_id", workerID)
 	}
 
+	// TENANT ISOLATION IS RESOLVED FIRST, BEFORE ANY ONE-SHOT MODE. cleat#1307.
+	//
+	// The repo owner's decision was refuse-to-boot, and "boot" includes the
+	// administrative modes below. --create-tenant PROVISIONS the tenant's login
+	// role when role isolation is configured, so it needs the derivation key --
+	// and a --create-tenant that silently created a tenant with no role, under
+	// a configuration asking for per-tenant credentials, would leave a tenant
+	// that no worker in that deployment can serve: TenantPools.For refuses
+	// rather than falling back to the owner pool.
+	//
+	// Before any connection is opened, so a bad configuration costs nothing.
+	tenantMode, tenantSecret, tiErr := resolveTenantIsolation(
+		*tenantIsolation, *tenantRoleSecretFile, *driver)
+	if tiErr != nil {
+		// Surfaced as-is: resolveTenantIsolation's errors name the flag, the
+		// value and what to do, and this layer cannot improve on that.
+		logger.ErrorContext(context.Background(), "tenant isolation configuration refused",
+			"worker_id", workerID, "error", tiErr)
+		os.Exit(1)
+	}
+
 	// Handle --uninstall-plugin (standalone mode: reverse migrations and exit).
 	//
 	// cleat#1290. Migration.Down is populated by 18 plugins across 29 sites and
@@ -274,6 +295,52 @@ func main() {
 			logger.ErrorContext(context.Background(), "failed to create tenant", "worker_id", workerID, "name", *createTenantNamed, "error", cErr)
 			os.Exit(1)
 		}
+		// PROVISION THE ROLE, when role isolation is configured. cleat#1307.
+		//
+		// admin.create_tenant_role creates the tenant's PostgreSQL login role,
+		// its tenant_<uuid> schema, and the cleat.tenant_id role default that
+		// makes the connection self-identifying. Nothing called it: it was
+		// reachable only from 002_defaults.sql's backfill, which runs at
+		// migration time and cannot know a tenant created afterwards.
+		//
+		// HERE rather than inside auth.CreateTenant, because the password is
+		// DERIVED from the worker's key and auth/ has no access to it -- and
+		// because admin.tenant_roles.tenant_id REFERENCES admin.tenants, so the
+		// role can only be provisioned once the tenant row exists.
+		//
+		// Only under --tenant-isolation=role. Creating login roles on a
+		// deployment that does not use them would leave credentials nobody
+		// asked for.
+		if tenantMode == isolationRole {
+			password, pErr := plugin.TenantRolePassword(tenantSecret, tid.String())
+			if pErr != nil {
+				logger.ErrorContext(context.Background(), "failed to derive the tenant role password",
+					"worker_id", workerID, "tenant_id", tid, "error", pErr)
+				os.Exit(1)
+			}
+			var roleName sql.NullString
+			if rErr := gdb.QueryRowContext(context.Background(),
+				`SELECT admin.create_tenant_role($1::uuid, $2)`, tid, password).Scan(&roleName); rErr != nil {
+				logger.ErrorContext(context.Background(), "failed to provision the tenant role",
+					"worker_id", workerID, "tenant_id", tid, "error", rErr)
+				os.Exit(1)
+			}
+			if !roleName.Valid {
+				// create_tenant_role RAISEs a warning and returns NULL when the
+				// connection cannot CREATE ROLE. Fatal here rather than a
+				// warning: the operator asked for role isolation, and a tenant
+				// without a role cannot be served under it -- TenantPools.For
+				// refuses rather than falling back to the owner pool.
+				logger.ErrorContext(context.Background(),
+					"tenant role was not created: this connection cannot CREATE ROLE",
+					"worker_id", workerID, "tenant_id", tid,
+					"hint", "--tenant-isolation=role needs a superuser or CREATEROLE connection")
+				os.Exit(1)
+			}
+			logger.InfoContext(context.Background(), "provisioned tenant role",
+				"worker_id", workerID, "tenant_id", tid, "role", roleName.String)
+		}
+
 		fmt.Printf("\n")
 		fmt.Printf("=== CLEAT TENANT ===\n")
 		fmt.Printf("Tenant ID: %s\n", tid)
@@ -368,6 +435,7 @@ func main() {
 	var db *sql.DB
 	var pluginDB *sql.DB
 	var tenantPools *plugin.TenantPools
+
 	var factory engine.StoreFactory
 	var payloadEncryption *engine.PayloadEncryption
 	if *shardsFile != "" {
@@ -531,36 +599,55 @@ func main() {
 			db.SetConnMaxLifetime(5 * time.Minute)
 			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel).WithLogger(logger)
 
-			// NO PER-TENANT POOLS ARE BUILT HERE, ON ANY DIALECT, AND THAT IS
-			// CORRECT. cleat#1307.
+			// PER-TENANT POOLS, WHEN --tenant-isolation=role. cleat#1307.
 			//
-			// PostgreSQL does not need them: set_config('cleat.tenant_id', ...)
-			// per transaction gives RLS what it needs on the owner pool.
+			// This is the decided answer to the question the previous version of
+			// this comment left open. What plugin.TenantPools provides is
+			// defence in depth: a pool per tenant authenticating AS that
+			// tenant's PostgreSQL login role, with cleat.tenant_id set as a
+			// ROLE DEFAULT, so the RLS variable arrives with the credential and
+			// isolation does not depend on the application remembering to
+			// assert who it is. Its own comment: "the connection IS the tenant".
 			//
-			// MySQL does not get them because it is single-tenant by decision --
-			// tiers.yaml, "DECIDED 2026-09-03: MySQL is single-tenant only, and a
-			// second, very different implementation of multi-tenancy is not worth
-			// building", enforced by migrations/mysql/038_single_tenant_guard.sql.
+			// POSTGRES ONLY, AND ONLY IN THIS ARM. TenantPools is
+			// PostgreSQL-only in its implementation -- plugin/tenant_db.go
+			// opens sql.Open("postgres", ...) against a libpq keyword DSN --
+			// and resolveTenantIsolation refuses --tenant-isolation=role on any
+			// other driver before we get here. Building it inside this arm
+			// rather than after the switch is what makes that structural rather
+			// than a matter of remembering.
 			//
-			// WHAT USED TO BE HERE, because the obvious repair is the dangerous
-			// one. This block read
+			// WHAT USED TO BE HERE, because the obvious repair was the
+			// dangerous one and the next reader will think of it. The block read
 			//
 			//	if *driver != "postgres" && *requireAuth { tenantPools = ... }
 			//
-			// inside this `case "postgres":` arm, so reaching it required
-			// *driver == "postgres" while it tested the opposite: unreachable, and
-			// tenantPools was nil on every dialect. The tempting fix is to move it
-			// out of the switch so MySQL and MSSQL reach it. That would be worse
-			// than the dead code, because plugin.TenantPools is PostgreSQL-ONLY in
-			// its implementation -- plugin/tenant_db.go opens `sql.Open("postgres",
-			// ...)` against a libpq keyword DSN with $1 placeholders. A MySQL
-			// worker would get a postgres connection builder.
+			// inside this `case "postgres":` arm -- so reaching it required
+			// *driver == "postgres" while it tested the opposite. Unreachable,
+			// and tenantPools was nil on every dialect. Moving it out of the
+			// switch, which is what the old comment invited, would have handed a
+			// MySQL worker a postgres connection builder.
 			//
-			// So the guard selected one dialect and the body served the other, and
-			// the comment above it asserted a third thing. Whether to build tenant
-			// pools for PostgreSQL, or retire plugin.TenantPools, is open in
-			// cleat#1307; it is not something this line can decide.
-			// TestTheWorkerBuildsNoTenantPools pins the current answer.
+			// Gated on its own flag rather than on *requireAuth, which is what
+			// the dead branch used: --require-auth defaults TRUE, so reusing it
+			// would switch a new isolation mechanism on for every existing
+			// deployment at upgrade.
+			if tenantMode == isolationRole {
+				baseDSN := baseDSNFromURL(*dbURL)
+				if baseDSN == "" {
+					// Refused, not skipped. A nil tenantPools here would fall
+					// back to the owner pool for every tenant -- the silent
+					// downgrade TenantPools.For was changed to refuse.
+					logger.ErrorContext(context.Background(),
+						"--tenant-isolation=role could not derive a base DSN from --db",
+						"worker_id", workerID)
+					os.Exit(1)
+				}
+				tenantPools = plugin.NewTenantPools(db, baseDSN, *tenantPoolMaxConns, tenantSecret)
+				logger.InfoContext(context.Background(),
+					"role-per-tenant isolation enabled for plugin host functions",
+					"worker_id", workerID, "max_conns_per_tenant", *tenantPoolMaxConns)
+			}
 
 			// Create plugin-dedicated connection pool.
 			if *maxPluginConnections > 0 {
