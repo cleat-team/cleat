@@ -167,7 +167,7 @@ func TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for _, st := range tenantStatementsFor(
-			joinConcatenatedSQL(string(blankGoComments(t, src, path))), path, tables, looksLikeMySQL) {
+			joinConcatenatedSQL(resolvePackageStringConsts(t, string(blankGoComments(t, src, path)))), path, tables, looksLikeMySQL) {
 			scanned++
 			key, ex, ok := exemptionFor(mysqlTenantPredicateAllowlist, filepath.Base(path), st)
 			if ok {
@@ -238,6 +238,76 @@ func TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 // enough for a predicate question -- which columns are compared to what -- and
 // it is not enough to parse the statement, which this guard does not do
 // anyway.
+// resolvePackageStringConsts splices the VALUE of a package-level backtick
+// constant into a statement that concatenates one, so the scan sees the SQL the
+// database receives rather than the fragments around a name.
+//
+// WHY THIS IS NOT THE SAME COMPROMISE joinConcatenatedSQL MAKES. That function
+// drops the expression between two literals on purpose: a runtime value could be
+// anything, and guessing would invent SQL. A package-level `const x = ` + "`...`" + “ is
+// different in kind -- Go resolves it at compile time, so its text IS part of the
+// statement, exactly and knowably.
+//
+// It exists because cleat#1457 moved each retention arm's predicate into a shared
+// constant so a dry-run and the sweep cannot drift. Without this pass both tenant
+// guards reported those statements as having no tenant predicate at all: true of
+// the fragment they could see, false of the statement. A guard that cannot see a
+// predicate reports a confident finding about SQL that does not exist -- the
+// failure joinConcatenatedSQL's own comment calls worse than a miss.
+//
+// Conservative in the safe direction: an identifier it does not recognise is left
+// for joinConcatenatedSQL to drop, so unresolvable expressions still produce a
+// finding rather than a pass.
+func resolvePackageStringConsts(t *testing.T, src string) string {
+	t.Helper()
+	consts := packageBacktickConsts(t)
+	// `lit` + Ident + `lit`  ->  `lit<value>lit`
+	re := regexp.MustCompile("`([^`]*)`\\s*\\+\\s*(\\w+)\\s*\\+\\s*`([^`]*)`")
+	for i := 0; i < 12; i++ {
+		next := re.ReplaceAllStringFunc(src, func(m string) string {
+			g := re.FindStringSubmatch(m)
+			v, ok := consts[g[2]]
+			if !ok {
+				return m
+			}
+			return "`" + g[1] + v + g[3] + "`"
+		})
+		if next == src {
+			break
+		}
+		src = next
+	}
+	return src
+}
+
+// packageBacktickConsts maps every package-level backtick-string constant in
+// this package to its value.
+//
+// Read from the source rather than from the running binary because the guards
+// scan source: a constant is only useful here if its text can be spliced back
+// into the statement that names it.
+func packageBacktickConsts(t *testing.T) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	re := regexp.MustCompile("(?m)^\\s*(\\w+)\\s*=\\s*`([^`]*)`")
+	for _, path := range goFilesCarryingSQL(t) {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+			out[m[1]] = m[2]
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("found no package-level backtick constants at all. This package " +
+			"defines several (engine/retention_predicates.go); zero means the " +
+			"extractor is broken, and every statement that concatenates one would " +
+			"then be scanned with its predicate missing.")
+	}
+	return out
+}
+
 func joinConcatenatedSQL(src string) string {
 	// `lit` + <anything with no backtick> + `lit`, repeatedly.
 	re := regexp.MustCompile("`([^`]*)`\\s*\\+\\s*[^`+]*\\+\\s*`([^`]*)`")
@@ -310,6 +380,45 @@ func mysqlTenantScopedTables(t *testing.T) map[string]bool {
 		}
 	}
 	return out
+}
+
+// TestResolvePackageStringConstsSplicesTheValueAndLeavesTheRest is
+// resolvePackageStringConsts' own control.
+//
+// Both directions, because each failure is silent in a different way. Failing to
+// splice a known constant makes the guard report a predicate as missing when the
+// database receives it -- a confident wrong finding. Splicing something that is
+// NOT a compile-time constant would invent SQL and could hide a real gap, which
+// is the direction that produces a false green.
+//
+// Verified against a real constant rather than a fixture: the guards resolve what
+// this package actually declares, and a test that defines its own would pass
+// while the extractor read nothing.
+func TestResolvePackageStringConstsSplicesTheValueAndLeavesTheRest(t *testing.T) {
+	consts := packageBacktickConsts(t)
+	if _, ok := consts["pgCompletedWorkflows"]; !ok {
+		t.Fatalf("pgCompletedWorkflows is not among the %d constants found. It is "+
+			"declared in engine/retention_predicates.go, so the extractor is reading "+
+			"the wrong files or the wrong shape.", len(consts))
+	}
+
+	// Known constant: its text must appear in the output.
+	in := "q := `SELECT id` + pgCompletedWorkflows + ` ORDER BY id`"
+	got := resolvePackageStringConsts(t, in)
+	if !strings.Contains(got, "completed_at") {
+		t.Errorf("a known constant was not spliced.\n  in:  %s\n  got: %s\n\n"+
+			"The guards would then scan this statement without its predicate and "+
+			"report a tenant clause as missing that the database does receive.", in, got)
+	}
+
+	// Unknown identifier: left for joinConcatenatedSQL to drop, not guessed at.
+	unknown := "q := `SELECT id FROM t WHERE x IN (` + someRuntimeClause + `)`"
+	if out := resolvePackageStringConsts(t, unknown); out != unknown {
+		t.Errorf("an unknown identifier was substituted.\n  in:  %s\n  got: %s\n\n"+
+			"Only compile-time constants may be spliced. Anything else is a runtime "+
+			"value, and inventing its text could hide a genuinely unscoped statement.",
+			unknown, out)
+	}
 }
 
 // TestJoinConcatenatedSQLSeesTheWholeStatement is joinConcatenatedSQL's own

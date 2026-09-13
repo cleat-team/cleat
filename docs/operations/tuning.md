@@ -199,6 +199,34 @@ cleat-worker \
   --retention-days 7
 ```
 
+### Previewing a retention sweep
+
+Retention deletes event history and, when the opt-in arms are enabled, the
+workflow records themselves. Neither is recoverable. Before running a sweep —
+especially one with an `older_than` override, which can scope far wider than the
+configured window — ask what it would remove:
+
+```
+POST /api/admin/retention/sweep
+{"older_than": "720h", "dry_run": true}
+```
+
+The response has the same shape as a real sweep, with `"dry_run": true` added, so
+a preview and the sweep that follows it can be diffed directly. Disabled arms
+appear in `skipped` exactly as they do in a real sweep, so a zero is never
+ambiguous between "that arm is off" and "nothing matched".
+
+**The counts are best effort, not a guarantee.** They are read at one instant
+from a live database: by the time you run the sweep, workflows will have
+completed and rows will have aged past the cutoff. Treat the numbers as the right
+order of magnitude — enough to catch a mistyped window, which is what the preview
+is for — and not as a list of rows that will be deleted. Expect a preview and the
+sweep that follows it to differ by whatever the workload did in between.
+
+A preview takes no locks and writes nothing, so it is safe to run against a busy
+worker. It also does not advance the retention last-run metric, so checking a
+preview does not look like a retention pass to your dashboards.
+
 ## Database connection pool
 
 Each concurrent workflow holds one database connection. The worker also uses a

@@ -294,7 +294,7 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		for _, st := range mssqlTenantStatements(string(blankGoComments(t, src, path)), path, tables) {
+		for _, st := range mssqlTenantStatements(resolvePackageStringConsts(t, string(blankGoComments(t, src, path))), path, tables) {
 			// An offending literal outside any function has no name to exempt,
 			// and inventing one is how this guard talked a reader into
 			// exempting an unrelated function -- see blankGoComments. Say where

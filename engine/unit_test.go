@@ -1609,6 +1609,22 @@ func (s *stubWorkflowStore) DeleteDeadLetteredWorkflows(ctx context.Context, old
 	return 0, nil
 }
 
+func (s *stubWorkflowStore) CountExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (s *stubWorkflowStore) CountExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (s *stubWorkflowStore) CountDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (s *stubWorkflowStore) CountCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
 func (s *stubWorkflowStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }

@@ -316,6 +316,23 @@ func (s *apiServer) handleAdminOpError(w http.ResponseWriter, err error) {
 // that gets reversed. Disabled arms come back in `skipped`, so a zero count is
 // never ambiguous between "disabled" and "found nothing".
 //
+// `{"dry_run": true}` REPORTS WITHOUT DELETING. cleat#1457: retention was the
+// only one of cleat's destructive operations with no preview, while
+// cleatctl drop-tenant, revokeapikey, the version GC and --uninstall-dry-run all
+// have one -- and it is the least reversible of them, since none of the others
+// deletes event history. An `older_than` an operator can mistype, with no way to
+// see the blast radius first, is the case this closes.
+//
+// The preview counts are BEST EFFORT, and the response marks itself `dry_run`
+// so a caller cannot mistake one for a sweep. They are read at one instant from
+// a live database: by the time a sweep runs, workflows have completed and rows
+// have aged past the cutoff. The number is sized to catch a mistyped window, not
+// to predict a later sweep exactly.
+//
+// The preview shares the sweep's response shape deliberately, so "what it said
+// it would do" and "what it did" can be diffed directly, and shares its
+// PREDICATES so the two cannot drift -- see engine/retention_predicates.go.
+//
 // Gated on *enableAdminAPI like the other destructive admin routes, so it
 // inherits that exposure decision rather than making a new one.
 func (s *apiServer) handleRetentionSweep(w http.ResponseWriter, r *http.Request) {
@@ -330,6 +347,9 @@ func (s *apiServer) handleRetentionSweep(w http.ResponseWriter, r *http.Request)
 
 	var req struct {
 		OlderThan string `json:"older_than"`
+		// DryRun reports what the sweep would remove and removes nothing.
+		// cleat#1457.
+		DryRun bool `json:"dry_run"`
 	}
 	if r.Body != nil {
 		// An absent or empty body means "use the configured windows", which is
@@ -358,8 +378,14 @@ func (s *apiServer) handleRetentionSweep(w http.ResponseWriter, r *http.Request)
 		window = d
 	}
 
-	res := s.worker.runRetentionSweepWindow(
-		*retentionDays, *completedWorkflowRetentionDays, *deadLetterRetentionDays, window)
+	var res retentionSweepResult
+	if req.DryRun {
+		res = s.worker.previewRetentionSweepWindow(
+			*retentionDays, *completedWorkflowRetentionDays, *deadLetterRetentionDays, window)
+	} else {
+		res = s.worker.runRetentionSweepWindow(
+			*retentionDays, *completedWorkflowRetentionDays, *deadLetterRetentionDays, window)
+	}
 
 	status := 200
 	if len(res.Errors) > 0 {

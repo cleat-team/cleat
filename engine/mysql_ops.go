@@ -1174,10 +1174,7 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 		result, err := s.db.ExecContext(ctx, `
 			DELETE e FROM event_history e
 			INNER JOIN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
+				SELECT id`+myExpiredEventsWorkflows+`
 				  AND tenant_id = ?
 				ORDER BY completed_at
 				LIMIT 10000
@@ -1220,11 +1217,7 @@ func (s *MySQLStore) ClearExpiredCompactionState(ctx context.Context, olderThan 
 		result, err := s.db.ExecContext(ctx, `
 			UPDATE workflow_instances w
 			INNER JOIN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
-				  AND compaction_state IS NOT NULL
+				SELECT id`+myExpiredCompactionState+`
 				  AND tenant_id = ?
 				ORDER BY completed_at
 				LIMIT 10000
@@ -1405,10 +1398,7 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 		result, err := s.db.ExecContext(ctx, `
 			DELETE w FROM workflow_instances w
 			INNER JOIN (
-				SELECT id FROM workflow_instances
-				WHERE status = 'dead_lettered'
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
+				SELECT id`+myDeadLetteredWorkflows+`
 				  AND tenant_id = ?
 				ORDER BY id
 				LIMIT 10000
@@ -1470,10 +1460,7 @@ func (s *MySQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan tim
 		result, err := s.db.ExecContext(ctx, `
 			DELETE w FROM workflow_instances w
 			INNER JOIN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed', 'terminated')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
+				SELECT id`+myCompletedWorkflows+`
 				  AND tenant_id = ?
 				ORDER BY id
 				LIMIT 10000

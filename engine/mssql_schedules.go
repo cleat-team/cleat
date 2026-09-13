@@ -416,10 +416,7 @@ func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time
 		result, err := tx.ExecContext(ctx, `
 			DELETE FROM event_history
 			WHERE workflow_id IN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < @p1
+				SELECT id`+msExpiredEventsWorkflows+`
 				  AND tenant_id = @p2
 				ORDER BY id
 				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
@@ -482,11 +479,7 @@ func (s *MSSQLStore) clearExpiredCompactionStateOnce(ctx context.Context, olderT
 			UPDATE workflow_instances
 			SET compaction_state = NULL, compaction_step = NULL, compacted_at = NULL
 			WHERE id IN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < @p1
-				  AND compaction_state IS NOT NULL
+				SELECT id`+msExpiredCompactionState+`
 				  AND tenant_id = @p2
 				ORDER BY id
 				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
@@ -644,19 +637,13 @@ func (s *MSSQLStore) deleteWorkflowsBatch(ctx context.Context, selectSQL, label 
 // copy look supported. Two functions sharing a premise is how that happened,
 // so they now share the code instead.
 const mssqlSelectCompletedBatch = `
-		SELECT id FROM workflow_instances
-		WHERE status IN ('done', 'failed', 'terminated')
-		  AND completed_at IS NOT NULL
-		  AND completed_at < @p1
+		SELECT id` + msCompletedWorkflows + `
 		  AND tenant_id = @p2
 		ORDER BY id
 		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY`
 
 const mssqlSelectDeadLetteredBatch = `
-		SELECT id FROM workflow_instances
-		WHERE status = 'dead_lettered'
-		  AND completed_at IS NOT NULL
-		  AND completed_at < @p1
+		SELECT id` + msDeadLetteredWorkflows + `
 		  AND tenant_id = @p2
 		ORDER BY id
 		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY`
