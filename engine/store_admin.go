@@ -371,6 +371,14 @@ func (s *PostgresStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflow
 	var res sql.Result
 	var err error
 	deadline := int(deferPhaseTimeout.Seconds())
+	// Coerced again, and not redundantly. Every caller today reaches here via
+	// adminForceResolve, which coerces first, so this is a no-op on valid JSON
+	// (coerceResultJSON returns early). But TestEveryResultWriteIsCoerced
+	// asserts the property PER WRITER rather than per call path, and it is
+	// right to: the coercion has to travel with the function that writes the
+	// column, or the next caller of this one inherits a raw string and a
+	// database syntax error naming the driver instead of the missing call.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
 	if a.action == adminActionForceComplete {
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
@@ -562,6 +570,14 @@ func (s *MySQLStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflowID 
 	var res sql.Result
 	var err error
 	deadline := int(deferPhaseTimeout.Seconds())
+	// Coerced again, and not redundantly. Every caller today reaches here via
+	// adminForceResolve, which coerces first, so this is a no-op on valid JSON
+	// (coerceResultJSON returns early). But TestEveryResultWriteIsCoerced
+	// asserts the property PER WRITER rather than per call path, and it is
+	// right to: the coercion has to travel with the function that writes the
+	// column, or the next caller of this one inherits a raw string and a
+	// database syntax error naming the driver instead of the missing call.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
 	if a.action == adminActionForceComplete {
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
@@ -749,6 +765,14 @@ func (s *MSSQLStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflowID 
 	var res sql.Result
 	var err error
 	deadline := int(deferPhaseTimeout.Seconds())
+	// Coerced again, and not redundantly. Every caller today reaches here via
+	// adminForceResolve, which coerces first, so this is a no-op on valid JSON
+	// (coerceResultJSON returns early). But TestEveryResultWriteIsCoerced
+	// asserts the property PER WRITER rather than per call path, and it is
+	// right to: the coercion has to travel with the function that writes the
+	// column, or the next caller of this one inherits a raw string and a
+	// database syntax error naming the driver instead of the missing call.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
 	if a.action == adminActionForceComplete {
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
