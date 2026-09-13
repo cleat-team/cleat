@@ -4,6 +4,20 @@
 # is caught by the duplicate check in scripts/check-skip-budget.sh rather than
 # left to trust.
 #
+# THIS DOES NOT SOLVE THE PROBLEM ON GITHUB, and the comment here said it did
+# until cleat#1395. Server-side mergeability does not consult .gitattributes,
+# so a PR appending to this file still goes DIRTY the moment another one
+# merges. Measured on one pair of heads, all three cases:
+#
+#     local merge, this file present     clean
+#     local merge, this file removed     CONFLICT
+#     GitHub, the same two heads         CONFLICTING / DIRTY
+#
+# The line below is kept because it genuinely helps every `git merge` and
+# `git rebase` a human runs. The actual fix is scripts/skip-ledger.d/ -- one
+# file per declaration, so two streams have nothing to conflict over anywhere.
+# New declarations go there; see its README.
+#
 # Deliberately NOT applied to IMPROVEMENT-PLAN.md, which conflicts the same way
 # and must keep doing so: union there would interleave two prose sections and
 # silently accept two headings claiming the same section number.
