@@ -18,7 +18,14 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("pgvector: nil function registry")
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "search", Idempotent: true}, p.search); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "search",
+		// Idempotent -- a search writes nothing. NOT stable: it reads a mutable
+		// index, and any insert between the original call and the replay
+		// changes the result set. cleat#1318.
+		Idempotent:        true,
+		SameValueOnReplay: false,
+	}, p.search); err != nil {
 		return err
 	}
 	if err := scope.Register(plugin.FuncOptions{Name: "upsert"}, p.upsert); err != nil {

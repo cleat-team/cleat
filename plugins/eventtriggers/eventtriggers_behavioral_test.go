@@ -169,8 +169,19 @@ func TestRegisterHostFunctions_ValidRegistry(t *testing.T) {
 	if mock.registered[0].opts.Name != "await_event" {
 		t.Errorf("expected function name 'await_event', got %q", mock.registered[0].opts.Name)
 	}
-	if !mock.registered[0].opts.Idempotent {
-		t.Error("expected Idempotent to be true")
+	// await_event declares NEITHER property as of cleat#1318, and the assertion
+	// is inverted rather than deleted so the reason survives next to the code.
+	//
+	// It is not idempotent: on the not-found path it WRITES, calling
+	// registerAwaiter. And it is not stable: it selects the latest UNPROCESSED
+	// event, so a replay can match a different one. Replay therefore returns
+	// the recorded output instead of calling it live.
+	if mock.registered[0].opts.Idempotent {
+		t.Error("await_event must not declare Idempotent: the not-found path writes")
+	}
+	if mock.registered[0].opts.SameValueOnReplay {
+		t.Error("await_event must not declare SameValueOnReplay: it selects the " +
+			"latest unprocessed event, so a replay can match a different one")
 	}
 	if mock.registered[0].fn == nil {
 		t.Error("registered function is nil")

@@ -26,7 +26,20 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	// blob_get is safe to re-invoke during replay -- reads from S3, not from
 	// event history. Registering as idempotent means the engine will re-invoke
 	// the function on replay instead of returning cached output.
-	if err := scope.Register(plugin.FuncOptions{Name: "get", Idempotent: true}, p.blobGet); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "get",
+		// A GET has no effect, and a blob key is treated as write-once, so a
+		// replay reads what the original read.
+		//
+		// CAVEAT, RECORDED BECAUSE THE PLUGIN DOES NOT ENFORCE IT: blobGet
+		// takes a key and no version, and every store it targets will happily
+		// overwrite that key. The determinism claim is a statement about how
+		// callers use blob keys, not something this code guarantees. If that
+		// convention does not hold in a deployment, this is the next wrong
+		// entry and it will be wrong the same way the five in cleat#1318 were.
+		Idempotent:        true,
+		SameValueOnReplay: true,
+	}, p.blobGet); err != nil {
 		return err
 	}
 	return nil

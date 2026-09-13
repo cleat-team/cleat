@@ -157,7 +157,11 @@ Rules:
 ```go
 func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
     scope.Register(plugin.FuncOptions{Name: "do_thing"}, p.doThing)
-    scope.Register(plugin.FuncOptions{Name: "read_thing", Idempotent: true}, p.readThing)
+    scope.Register(plugin.FuncOptions{
+        Name:              "read_thing",
+        Idempotent:        true, // calling again has no additional effect
+        SameValueOnReplay: true, // ...and returns what the first call returned
+    }, p.readThing)
     return nil
 }
 
@@ -185,10 +189,15 @@ func (p *Plugin) doThing(ctx context.Context, inputJSON string) (string, error) 
 
 Rules:
 - `CallContext` gives you `TenantID` and `WorkflowID` — the engine injects it
-- Use `Idempotent: true` for read-only functions (S3 reads, cache lookups).
-  The engine re-invokes these during replay instead of returning cached output.
-- Use `Idempotent: false` (default) for side-effecting functions. The engine
-  records input/output in event_history and returns cached output during replay.
+- **By default, replay returns the recorded output. Leave it that way unless you
+  can defend both properties** (cleat#1318):
+  - `Idempotent` — calling again has no additional effect.
+  - `SameValueOnReplay` — calling again returns what the first call returned.
+
+  The engine re-invokes during replay only when **both** are set. "Read-only" is
+  the answer to the first question and not the second: a read of anything
+  mutable — a feature flag, an index, a provider's catalogue — can hand the
+  workflow a value it never branched on. Being side-effect-free is not enough.
 - Output MUST be valid JSON — the WASM boundary expects it
 - Keep output small for non-idempotent functions (it's stored in event_history)
 - Return errors as `(string, error)` — the engine records the error in history
@@ -361,9 +370,11 @@ func (p *Plugin) cleanupStaleRefs(ctx context.Context) error {
   `auth.TenantIDFromContext` (auth middleware sets a different context key).
 - **Don't allocate resources in the constructor** — the constructor is called
   during `Discover()` before `RunMigrations()`. Allocate in `Init()`.
-- **Don't store large outputs from non-idempotent host functions** — they're
-  stored in event_history. Use `Idempotent: true` for functions that return
-  large data.
+- **Don't store large outputs from host functions** — they're stored in
+  event_history. Note that the flags do **not** help here: every plugin call's
+  output is recorded on the original run whatever its replay policy, so setting
+  `Idempotent` / `SameValueOnReplay` to avoid storage does not work and trades a
+  correctness property for nothing. Return a reference and fetch the data.
 - **Don't return errors from background `Run()`** — the goroutine exits and
   your plugin is disabled. Log and continue.
 

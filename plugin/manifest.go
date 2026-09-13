@@ -52,8 +52,20 @@ type HostFuncDef struct {
 	Description string  `json:"description" yaml:"description"`
 	Input       TypeDef `json:"input" yaml:"input"`
 	Output      TypeDef `json:"output" yaml:"output"`
-	Idempotent  bool    `json:"idempotent,omitempty" yaml:"idempotent,omitempty"`
-	Streaming   bool    `json:"streaming,omitempty" yaml:"streaming,omitempty"`
+	// Idempotent here is DECLARATIVE ONLY and does not affect replay.
+	//
+	// It reaches internal/plugingen's IR and stops: no generator emits it into
+	// a FuncOptions literal, so a manifest saying `idempotent: true` produces a
+	// registration with the field unset. Verified by the field being written at
+	// from_manifest.go and read by nothing outside tests.
+	//
+	// Stated because the opposite is the natural assumption, and because the
+	// engine-side meaning changed in cleat#1318: replay re-invokes only when a
+	// registration sets BOTH Idempotent and SameValueOnReplay. A manifest
+	// author cannot ask for that here; a hand-written Register call is the only
+	// way to set either.
+	Idempotent bool `json:"idempotent,omitempty" yaml:"idempotent,omitempty"`
+	Streaming  bool `json:"streaming,omitempty" yaml:"streaming,omitempty"`
 }
 
 // TypeDef describes a type in a plugin manifest.

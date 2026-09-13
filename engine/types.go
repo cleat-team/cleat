@@ -267,7 +267,13 @@ type EventRecord struct {
 	PluginInput  string `json:"plugin_input,omitempty"`
 	PluginOutput string `json:"plugin_output,omitempty"`
 	PluginError  string `json:"plugin_error,omitempty"`
-	Idempotent   bool   `json:"idempotent,omitempty"`
+	// Idempotent and SameValueOnReplay are the two halves cleat#1318 split
+	// apart. Neither is persisted: event_history has dedicated plugin_*
+	// columns and none for these, so both read false on any record loaded
+	// from the database and the registry decides instead. They carry the
+	// policy only for an in-process replay.
+	Idempotent        bool `json:"idempotent,omitempty"`
+	SameValueOnReplay bool `json:"same_value_on_replay,omitempty"`
 
 	// Stream chunk fields.
 	StreamChunkIndex int  `json:"stream_chunk_index,omitempty"`

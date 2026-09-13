@@ -94,13 +94,16 @@ func TestPluginCall_ReplayDivergentPluginName(t *testing.T) {
 	}
 }
 
-func TestPluginCall_ReplayIdempotentReinvokes(t *testing.T) {
+// Renamed from TestPluginCall_ReplayIdempotentReinvokes: idempotence alone no
+// longer licenses re-invocation, so the old name asserted a rule that is gone.
+// cleat#1318.
+func TestPluginCall_ReplayReinvokesWhenBothPropertiesHold(t *testing.T) {
 	callCount := 0
 	pr := NewPluginRegistry()
-	pr.RegisterIdempotent("test-plugin", "my-func", func(ctx context.Context, inputJSON string) (string, error) {
+	pr.RegisterWithPolicy("test-plugin", "my-func", func(ctx context.Context, inputJSON string) (string, error) {
 		callCount++
 		return `{"reinvoked":true}`, nil
-	})
+	}, ReplayPolicy{Idempotent: true, SameValueOnReplay: true})
 
 	s := newTestExecSession()
 	s.engine.pluginRegistry = pr
@@ -109,7 +112,9 @@ func TestPluginCall_ReplayIdempotentReinvokes(t *testing.T) {
 		Step: 0, EventType: EventTypePluginCall,
 		PluginName: "test-plugin", PluginFunc: "my-func",
 		PluginInput: `{"key":"val"}`, PluginOutput: `{"cached":"old"}`,
-		Idempotent: true,
+		// BOTH on the record. Neither survives the database -- this is the
+		// in-process case, which is the only one where the record decides.
+		Idempotent: true, SameValueOnReplay: true,
 	}}
 
 	buf := make([]byte, 256)
@@ -129,13 +134,18 @@ func TestPluginCall_ReplayIdempotentReinvokes(t *testing.T) {
 	}
 }
 
-func TestPluginCall_ReplayIdempotentFallbackLookup(t *testing.T) {
+// Renamed from TestPluginCall_ReplayIdempotentFallbackLookup. cleat#1318.
+//
+// This is the path that decides in practice: neither property is persisted, so
+// a record loaded from the database always reads both false however it was
+// registered, and the registry is consulted instead.
+func TestPluginCall_ReplayFallsBackToTheRegistryForBothProperties(t *testing.T) {
 	callCount := 0
 	pr := NewPluginRegistry()
-	pr.RegisterIdempotent("test-plugin", "my-func", func(ctx context.Context, inputJSON string) (string, error) {
+	pr.RegisterWithPolicy("test-plugin", "my-func", func(ctx context.Context, inputJSON string) (string, error) {
 		callCount++
 		return `{"reinvoked":true}`, nil
-	})
+	}, ReplayPolicy{Idempotent: true, SameValueOnReplay: true})
 
 	s := newTestExecSession()
 	s.engine.pluginRegistry = pr
@@ -144,7 +154,9 @@ func TestPluginCall_ReplayIdempotentFallbackLookup(t *testing.T) {
 		Step: 0, EventType: EventTypePluginCall,
 		PluginName: "test-plugin", PluginFunc: "my-func",
 		PluginInput: `{"key":"val"}`, PluginOutput: `{"cached":"old"}`,
-		Idempotent: false, // not persisted, but registry has it as idempotent
+		// Both false, as every DB-loaded record is. The registry carries the
+		// policy.
+		Idempotent: false, SameValueOnReplay: false,
 	}}
 
 	result := s.PluginCall(context.Background(), nil, "test-plugin", "my-func", `{"key":"val"}`, 0, 0)
@@ -335,13 +347,14 @@ func TestPluginCall_FreshWithTenantAndWorkflowID(t *testing.T) {
 	}
 }
 
-func TestPluginCall_ReplayIdempotentPluginWithHistory(t *testing.T) {
+// Renamed from TestPluginCall_ReplayIdempotentPluginWithHistory. cleat#1318.
+func TestPluginCall_ReInvokingOnReplayDoesNotAppendToHistory(t *testing.T) {
 	callCount := 0
 	pr := NewPluginRegistry()
-	pr.RegisterIdempotent("test-plugin", "my-func", func(ctx context.Context, inputJSON string) (string, error) {
+	pr.RegisterWithPolicy("test-plugin", "my-func", func(ctx context.Context, inputJSON string) (string, error) {
 		callCount++
 		return `{"live":true}`, nil
-	})
+	}, ReplayPolicy{Idempotent: true, SameValueOnReplay: true})
 
 	s := newTestExecSession()
 	s.engine.pluginRegistry = pr
