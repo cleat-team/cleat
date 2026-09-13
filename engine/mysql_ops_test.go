@@ -272,9 +272,13 @@ func TestMySQLStore_GetPendingUpdateRequests_WithRows(t *testing.T) {
 	createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		{
-			match: "SELECT workflow_id, update_name",
+			// The match is a PREFIX of the real query and the column list
+			// changed under it (cleat#1416 inserted request_id), so this
+			// stopped matching and the mock returned nothing -- surfacing as
+			// "unexpected: []" rather than as a stale fixture.
+			match: "SELECT workflow_id, COALESCE(request_id",
 			data: [][]driver.Value{
-				{"wf-1", "update-a", `{}`, "prom-1", "pending", "", "", createdAt},
+				{"wf-1", "ureq-1", "update-a", `{}`, "prom-1", "pending", "", "", createdAt},
 			},
 		},
 	}, nil)
@@ -282,7 +286,7 @@ func TestMySQLStore_GetPendingUpdateRequests_WithRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPendingUpdateRequests: %v", err)
 	}
-	if len(reqs) != 1 || reqs[0].UpdateName != "update-a" {
+	if len(reqs) != 1 || reqs[0].UpdateName != "update-a" || reqs[0].RequestID != "ureq-1" {
 		t.Errorf("unexpected: %+v", reqs)
 	}
 }

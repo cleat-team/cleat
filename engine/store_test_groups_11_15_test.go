@@ -334,7 +334,8 @@ func TestCompleteUpdateRequest(t *testing.T) {
 			if err := store.CreateUpdateRequest(ctx, runID, "upd-c", "payload-c", ""); err != nil {
 				t.Fatalf("CreateUpdateRequest: %v", err)
 			}
-			if err := store.CompleteUpdateRequest(ctx, runID, "upd-c", `{"ok":true}`, ""); err != nil {
+			reqID := onlyPendingRequestID(t, store, runID, "upd-c")
+			if err := store.CompleteUpdateRequest(ctx, runID, reqID, `{"ok":true}`, ""); err != nil {
 				t.Fatalf("CompleteUpdateRequest: %v", err)
 			}
 

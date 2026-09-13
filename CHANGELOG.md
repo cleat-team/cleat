@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An update name is now reusable.** `POST /api/workflows/:id/update/:name` may be called any
+  number of times over a run's life; each request is a row of its own with its own `promise_id`.
+  Previously a name was consumed for the life of the workflow and the second request was refused
+  with `409 update_name_used`. That `detail` value no longer occurs — `update_already_pending` is
+  the only remaining 409 on this endpoint, and it clears when the in-flight request is answered.
+  A client that branches on `detail` keeps working. (cleat#1416)
+
+  **Schema change**, applied by `postgres/068`, `mysql/062` and `mssql/066`:
+  `workflow_update_requests` gains a `request_id` column and is keyed
+  `(workflow_id, request_id)` instead of `(workflow_id, update_name)`. Existing rows are backfilled
+  from `update_name`, which is unique per workflow under the old key, so a workflow suspended
+  mid-update across the upgrade completes against the correct row.
+
+  Updates are **not** idempotent: a caller that retries after its first request was answered gets a
+  new update rather than a replay. Carry your own key in the payload if you need at-most-once.
+
+
 ### UPGRADE NOTES — breaking
 
 - **Terminating a workflow that has registered `defer` bodies is now asynchronous,

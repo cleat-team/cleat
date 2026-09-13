@@ -77,7 +77,7 @@ func TestMSSQLRetentionDeletesTheRowsTheWorkflowOwns(t *testing.T) {
 		"concurrency_keys":         {`INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id) VALUES (HASHBYTES('SHA2_256',@p1), @p1, @p2, DATEADD(hour,1,SYSUTCDATETIME()), @p3)`, []any{key, id, tid}},
 		"workflow_signals":         {`INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id) VALUES (@p1,'sig','{}',@p2)`, []any{id, tid}},
 		"workflow_promises":        {`INSERT INTO workflow_promises (workflow_id, promise_name, promise_id, tenant_id) VALUES (@p1,'pn',@p3,@p2)`, []any{id, tid, "pid-" + uniq}},
-		"workflow_update_requests": {`INSERT INTO workflow_update_requests (workflow_id, update_name, tenant_id, priority, payload, status) VALUES (@p1,'upd',@p2,0,'{}','pending')`, []any{id, tid}},
+		"workflow_update_requests": {`INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, tenant_id, priority, payload, status) VALUES (@p1,'ureq-'+@p1,'upd',@p2,0,'{}','pending')`, []any{id, tid}},
 	}
 
 	countFor := func(table string) int {

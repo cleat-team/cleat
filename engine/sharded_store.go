@@ -1486,12 +1486,12 @@ func (s *ShardedStore) GetPendingUpdateRequests(ctx context.Context, workflowID 
 }
 
 // CompleteUpdateRequest routes by workflow ID.
-func (s *ShardedStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (s *ShardedStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
 		return fmt.Errorf("complete_update_request: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.CompleteUpdateRequest(ctx, workflowID, updateName, result, errMsg)
+	return shard.Store.CompleteUpdateRequest(ctx, workflowID, requestID, result, errMsg)
 }
 
 // ---- Version management methods ----

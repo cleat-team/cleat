@@ -12575,3 +12575,74 @@ One thing that could have decided it and did not: the integrity checksum is comp
 
 The JSON-object case is the **control**: without it, "nothing was corrupted" is equally satisfied by
 a reader that stopped decoding altogether.
+
+---
+
+### 3.321 An update name was consumed for the life of the workflow, and the row's identity was its name — ✅ **FIXED 2026-09-13** (cleat#1416)
+
+**Decided by the repo owner: an update name is reusable. "An update is a request."**
+
+`workflow_update_requests` was `PRIMARY KEY (workflow_id, update_name)` on all three dialects, and
+completion is an `UPDATE … SET status = 'completed'` rather than a delete — so a workflow could
+accept each update name exactly **once in its entire lifetime**. cleat#1330 measured the three
+dialects answering the second request three different ways, one of them a `202` over a promise that
+could never settle; cleat#1392 made them agree on a `409` and said in its own commit message that
+the refusal would become *"unreachable rather than wrong"* if the name were later made reusable.
+It is, and it did.
+
+**What replaced the key, and why it is not `promise_id`.** The row needed an identity that survives
+a duplicated name. `promise_id` was the tempting reuse — it is already unique and already carried
+through the request key — and it is the wrong one: the column is nullable and means *"someone is
+waiting"*. `engine/updater.go` has an explicit branch for a request with no promise and three tests
+create one, so making it the key would render a caller-less request unrepresentable. A generated
+`request_id` was added instead, minted Go-side so all three dialects behave identically and the
+value exists before the INSERT.
+
+**The migrations backfill `request_id` from `update_name`, and that choice is load-bearing twice
+over.** Under the old primary key `(workflow_id, update_name)` is unique *by construction*, so the
+copy satisfies the new key without inventing anything — and it is what lets a workflow suspended
+mid-update across the upgrade complete against the right row with no special case, because the
+request key it replays carries the name and nothing else.
+
+**The risk was never "is the second request accepted".** That is the easy assertion. Two rows
+sharing a name is a state that could not previously exist, and every reader keyed on
+`(workflow_id, update_name)` silently addresses *one of them* in it. Measured on PostgreSQL against
+the migration with the old predicate still in place:
+
+    two pending rows, r1 and r2, both named "bump"
+    UPDATE ... WHERE workflow_id = ? AND update_name = 'bump' AND status = 'pending'
+    -> UPDATE 2
+
+One completion closes both. `DurableCompleteUpdate` then settles **one** promise, and the other
+caller holds a promise nothing will ever settle — not even `failStrandedUpdates`, which sweeps rows
+that are still `pending`, and that row now says `completed`. That is the exact failure
+`cleat/runtime_updates.go` names as the reason updates exist.
+
+Two sites had to change, and the second is the one that would have gone unnoticed:
+
+| site | keyed on | why it matters |
+|---|---|---|
+| `CompleteUpdateRequest`, ×3 dialects | `request_id` | the guest completing its own update |
+| `failStrandedUpdates` | `upd.RequestID` | the sweep whose whole job is that nobody is left waiting |
+
+**The request key gained a version marker rather than a third inferred field.** A v2 key is
+`<len>:<name>` followed by the promise id; v3 is `<len>:<name><len>:<requestID>` followed by it.
+Telling them apart by looking for digits-then-colon after the name means asking whether a *promise
+id* happens to start that way — arbitrary in the store's contract, and the tests alone use
+`"prom-1"`, `"promise-a"` and `""`. `u3:` costs three bytes and removes the question;
+`TestAPromiseIDCannotBeMistakenForAV3Marker` pins it.
+
+**Falsification.** Both guards, both restored by content against the commit as a separate step:
+
+| mutation | caught by |
+|---|---|
+| all three `CompleteUpdateRequest` predicates back to `update_name` | the three-dialect test, on **all three** — `2 requests named "bump" are still pending … want exactly 1` |
+| `failStrandedUpdates` back to `upd.UpdateName` | `completed [bump bump], want [ureq-a ureq-b]` |
+
+Note the first mutation's signature is `2 pending`, not `0` — the store matched on the name while
+the caller passed an id, so it matched *nothing*. The `0` case is the historical one and is what
+the raw-SQL measurement above shows. Both are failures and both are caught; recorded because the
+number differs from the story.
+
+**Migrations** `postgres/068`, `mysql/062`, `mssql/066`, each applied **twice** against a database
+built from the full set, because `SetupFullSchema` re-applies everything in tests.

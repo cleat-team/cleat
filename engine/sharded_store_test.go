@@ -567,7 +567,7 @@ func (m *mockShardStore) GetPendingUpdateRequests(ctx context.Context, workflowI
 	return nil, nil
 }
 
-func (m *mockShardStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockShardStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	m.recordCall("CompleteUpdateRequest")
 	return m.err
 }

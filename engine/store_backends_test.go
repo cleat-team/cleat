@@ -794,17 +794,17 @@ func insertChildRows(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID st
 	// workflow_update_requests
 	switch dialect {
 	case testutil.DialectPostgres:
-		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, update_name) VALUES ($1, 'test-update')`, wfID)
+		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, request_id, update_name) VALUES ($1, 'ureq-' || $1, 'test-update')`, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_update_requests (postgres): %v", err)
 		}
 	case testutil.DialectMySQL:
-		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, update_name, payload) VALUES (?, 'test-update', '{}')`, wfID)
+		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload) VALUES (?, CONCAT('ureq-', ?), 'test-update', '{}')`, wfID, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_update_requests (mysql): %v", err)
 		}
 	case testutil.DialectMSSQL:
-		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, update_name, payload) VALUES (@p1, 'test-update', '{}')`, wfID)
+		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload) VALUES (@p1, 'ureq-'+@p1, 'test-update', '{}')`, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_update_requests (mssql): %v", err)
 		}

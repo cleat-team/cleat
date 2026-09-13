@@ -410,7 +410,7 @@ type UpdateStore interface {
 	// the request to be redelivered on the next segment.
 	GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error)
 	// CompleteUpdateRequest records the handler's outcome on the request row.
-	CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error
+	CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error
 	// ResolvePromise and RejectPromise settle the promise the caller is
 	// holding. Both are keyed by promise ID alone; see PromiseStore.
 	ResolvePromise(ctx context.Context, promiseID, value string) error

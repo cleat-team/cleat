@@ -1728,7 +1728,7 @@ func TestMySQLIntegration_UpdateRequests(t *testing.T) {
 	}
 
 	// Complete the update request.
-	if err := s.CompleteUpdateRequest(ctx, runID, "my-update", `{"result":"ok"}`, ""); err != nil {
+	if err := s.CompleteUpdateRequest(ctx, runID, pending[0].RequestID, `{"result":"ok"}`, ""); err != nil {
 		t.Fatalf("CompleteUpdateRequest: %v", err)
 	}
 

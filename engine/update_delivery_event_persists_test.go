@@ -101,7 +101,7 @@ func TestAnUpdateDeliveryEventPersists(t *testing.T) {
 			// back to DurableCompleteUpdate, which splits it to address the row
 			// and the promise. A key that survives the database but decodes to
 			// the wrong halves settles the wrong thing.
-			name, promise := splitUpdateRequestKey(got.UpdateRequestID)
+			name, _, promise := splitUpdateRequestKey(got.UpdateRequestID)
 			if name != "bump" || promise != "01234567-89ab-cdef-0123-456789abcdef" {
 				t.Errorf("the key round-tripped through the database as (%q, %q), want "+
 					"(bump, 01234567-89ab-cdef-0123-456789abcdef).\n\n"+

@@ -145,23 +145,23 @@ func (s *MySQLStore) ListPromises(ctx context.Context, workflowID string) ([]Pro
 
 // CreateUpdateRequest registers an incoming update request for a workflow.
 func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
-	// A plain INSERT, not INSERT IGNORE, and this is the fix rather than a
-	// tidy-up. IGNORE discarded the row for a name already used, the result
-	// was discarded too, so RowsAffected == 0 was invisible and this returned
-	// nil -- the handler then answered 202 with a promise id for a request
-	// that had not been recorded. The caller held a promise nothing could
-	// settle. Letting the constraint speak makes this dialect agree with the
-	// other two. cleat#1330.
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
-		VALUES (?, ?, ?, ?, 'pending', ?)
-	`, workflowID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
+	requestID, err := newUpdateRequestID()
 	if err != nil {
-		// (workflow_id, update_name) is the primary key, so a uniqueness
-		// violation is this name having been used on this workflow before.
-		if isDuplicateKeyError(err) {
-			return fmt.Errorf("%w: %s", ErrUpdateNameUsed, updateName)
-		}
+		return err
+	}
+
+	// A plain INSERT, not INSERT IGNORE. Under cleat#1416's key there is no
+	// uniqueness left for a duplicate name to violate, but IGNORE would still
+	// be wrong here for the reason cleat#1330 found it wrong: it swallows a row
+	// the caller was told was recorded. IGNORE discarded the row, the result
+	// was discarded too, so RowsAffected == 0 was invisible and this returned
+	// nil -- the handler then answered 202 with a promise id for a request that
+	// did not exist, and the caller held a promise nothing could settle.
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload, promise_id, status, tenant_id)
+		VALUES (?, ?, ?, ?, ?, 'pending', ?)
+	`, workflowID, requestID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
+	if err != nil {
 		return err
 	}
 
@@ -182,7 +182,7 @@ func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 // GetPendingUpdateRequests returns all pending (not yet dispatched) update requests.
 func (s *MySQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT workflow_id, update_name, CAST(payload AS CHAR),
+		SELECT workflow_id, COALESCE(request_id, update_name), update_name, CAST(payload AS CHAR),
 		       COALESCE(promise_id, ''),
 		       status,
 		       COALESCE(CAST(result AS CHAR), ''),
@@ -200,7 +200,7 @@ func (s *MySQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 	var requests []UpdateRequestInfo
 	for rows.Next() {
 		var r UpdateRequestInfo
-		if err := rows.Scan(&r.WorkflowID, &r.UpdateName, &r.Payload,
+		if err := rows.Scan(&r.WorkflowID, &r.RequestID, &r.UpdateName, &r.Payload,
 			&r.PromiseID, &r.Status, &r.Result, &r.ErrorMsg, &r.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -217,12 +217,12 @@ func (s *MySQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 }
 
 // CompleteUpdateRequest marks an update request as completed with a result or error.
-func (s *MySQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (s *MySQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = ?, error_msg = ?, completed_at = NOW(6)
-		WHERE workflow_id = ? AND update_name = ? AND status = 'pending' AND tenant_id = ?
-	`, jsonOrNull(result), errMsg, workflowID, updateName, s.tenantID)
+		WHERE workflow_id = ? AND request_id = ? AND status = 'pending' AND tenant_id = ?
+	`, jsonOrNull(result), errMsg, workflowID, requestID, s.tenantID)
 	return err
 }
 

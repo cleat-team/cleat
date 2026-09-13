@@ -1317,9 +1317,13 @@ func TestPostgresStore_GetPendingUpdateRequests(t *testing.T) {
 	createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT workflow_id, update_name",
+			// The match string is a PREFIX of the real query and the column
+			// list changed under it (cleat#1416 added request_id), so this
+			// stopped matching and the mock returned no rows -- reported as
+			// "expected 1 request, got 0", which reads like a store bug.
+			match: "SELECT workflow_id, COALESCE(request_id",
 			data: [][]driver.Value{
-				{"wf-1", "update-a", `{}`, "prom-1", "pending", "", "", createdAt},
+				{"wf-1", "ureq-1", "update-a", `{}`, "prom-1", "pending", "", "", createdAt},
 			},
 		},
 	}, nil)
@@ -1335,6 +1339,10 @@ func TestPostgresStore_GetPendingUpdateRequests(t *testing.T) {
 	}
 	if reqs[0].UpdateName != "update-a" || reqs[0].Status != "pending" {
 		t.Errorf("unexpected request: %+v", reqs[0])
+	}
+	if reqs[0].RequestID != "ureq-1" {
+		t.Errorf("RequestID = %q, want ureq-1 -- the row's identity must be read back, or "+
+			"CompleteUpdateRequest has nothing to address", reqs[0].RequestID)
 	}
 }
 

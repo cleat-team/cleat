@@ -1530,7 +1530,7 @@ func (s *stubWorkflowStore) CreateUpdateRequest(ctx context.Context, workflowID,
 func (s *stubWorkflowStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (s *stubWorkflowStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (s *stubWorkflowStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (s *stubWorkflowStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
@@ -2686,7 +2686,7 @@ func (m *mockCollectMetricsStore) CreateUpdateRequest(ctx context.Context, workf
 func (m *mockCollectMetricsStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (m *mockCollectMetricsStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockCollectMetricsStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (m *mockCollectMetricsStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
@@ -2876,7 +2876,7 @@ func (m *mockCheckStaleStore) CreateUpdateRequest(ctx context.Context, workflowI
 func (m *mockCheckStaleStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (m *mockCheckStaleStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockCheckStaleStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (m *mockCheckStaleStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
@@ -3063,7 +3063,7 @@ func (m *mockGCStore) CreateUpdateRequest(ctx context.Context, workflowID, updat
 func (m *mockGCStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (m *mockGCStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockGCStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (m *mockGCStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
@@ -3242,7 +3242,7 @@ func (m *mockPurgeStore) CreateUpdateRequest(ctx context.Context, workflowID, up
 func (m *mockPurgeStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (m *mockPurgeStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockPurgeStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (m *mockPurgeStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {

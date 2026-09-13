@@ -510,23 +510,35 @@ a value to the caller:
 A caller posts `POST /api/workflows/:id/update/:name`, gets `202` with a
 `promise_id`, and waits on that promise for the handler's return value.
 
-**An update name can be used once per workflow.** `workflow_update_requests` is
-keyed `(workflow_id, update_name)` and completion marks the row rather than
-deleting it, so the name is consumed for the life of the run. A second request
-under the same name is refused with `409`, and the `detail` field says which of
-the two refusals it is:
+**An update name is reusable.** The same name can be requested as many times as
+the caller likes over the life of a run — an update is a request, and a request
+can be made twice. Each request is a row of its own, carries its own
+`promise_id`, and is answered independently.
+
+One rule remains, and it is concurrency rather than identity: a second request
+under a name whose first is **still in flight** is normally refused with `409`:
 
 | `detail` | means | clears |
 |---|---|---|
-| `update_already_pending` | the first request has not been dispatched yet | when it is handled |
-| `update_name_used` | this name has already been handled on this workflow | never |
+| `update_already_pending` | a request under this name has not been handled yet | when it is |
 
-This is recorded as the behaviour that ships, not as a contract anyone designed:
-whether a name *should* be reusable is open in
-[cleat#1330](https://github.com/cleat-team/cleat/issues/1330), and either answer
-is a schema change. Until it is settled, treat a name as single-use and use a
-distinct one per request — `bump-1`, `bump-2` — rather than relying on either
-behaviour persisting.
+That refusal is a **check, not a constraint** — the server reads the pending set
+and then inserts, and the two are not atomic. Two requests racing under one name
+may therefore both be accepted, and each gets its own `promise_id` and its own
+answer. Do not build on the 409 firing; build on each request being answered,
+which is guaranteed.
+
+`update_name_used` is gone. It was the other half of this table until
+[cleat#1416](https://github.com/cleat-team/cleat/issues/1416), when the primary
+key stopped being `(workflow_id, update_name)`; there is no longer a state a
+name can be in that permanently refuses the next request. A client that branches
+on `detail` keeps working — the value simply never occurs.
+
+Note what that means for retries: a caller that retries after its first request
+was answered gets a **new** update, not a replay of the old one. Updates are not
+idempotent, and the `promise_id` from the first request stays valid and settled
+with the first result. If you need at-most-once semantics, carry your own key in
+the payload.
 
 ```go
 DispatchUpdates()

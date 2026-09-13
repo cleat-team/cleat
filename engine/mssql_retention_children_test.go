@@ -170,7 +170,7 @@ func seedMSSQLRetentionFixture(t *testing.T, ctx context.Context, admin *sql.DB,
 		{"concurrency_keys", `INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id) VALUES (@p1, @p2, @p3, DATEADD(HOUR, 1, SYSUTCDATETIME()), @p4)`, []any{mssqlKeyHash(wfID + "-ck"), wfID + "-ck", wfID, tenant}},
 		{"workflow_signals", `INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id) VALUES (@p1, 'sig', '{}', @p2)`, []any{wfID, tenant}},
 		{"workflow_promises", `INSERT INTO workflow_promises (workflow_id, promise_id, promise_name, tenant_id) VALUES (@p1, @p2, 'p', @p3)`, []any{wfID, wfID + "-promise", tenant}},
-		{"workflow_update_requests", `INSERT INTO workflow_update_requests (workflow_id, update_name, tenant_id) VALUES (@p1, 'upd', @p2)`, []any{wfID, tenant}},
+		{"workflow_update_requests", `INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, tenant_id) VALUES (@p1, 'ureq-'+@p1, 'upd', @p2)`, []any{wfID, tenant}},
 	}
 	for _, s := range seeds {
 		if _, err := admin.ExecContext(ctx, s.stmt, s.args...); err != nil {

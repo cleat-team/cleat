@@ -221,10 +221,13 @@ func seedRetentionFixture(t *testing.T, ctx context.Context, db *sql.DB, store r
 			`INSERT INTO workflow_promises (workflow_id, promise_id, promise_name, tenant_id)
 			 VALUES (` + ph(1) + `, ` + ph(2) + `, 'p', ` + ph(3) + `)`,
 			[]any{wfID, wfID + "-promise", DefaultTenantUUID}},
+		// request_id is NOT NULL as of cleat#1416 and has no default -- MySQL
+		// refuses DEFAULT (UUID()) under statement-based binlogging, so no
+		// dialect has one. Seeds name it explicitly.
 		{"workflow_update_requests",
-			`INSERT INTO workflow_update_requests (workflow_id, update_name, tenant_id)
-			 VALUES (` + ph(1) + `, 'upd', ` + ph(2) + `)`,
-			[]any{wfID, DefaultTenantUUID}},
+			`INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, tenant_id)
+			 VALUES (` + ph(1) + `, ` + ph(2) + `, 'upd', ` + ph(3) + `)`,
+			[]any{wfID, "ureq-" + wfID, DefaultTenantUUID}},
 	} {
 		if _, err := db.ExecContext(ctx, s.stmt, s.args...); err != nil {
 			t.Fatalf("seed %s: %v", s.table, err)

@@ -50,8 +50,18 @@ import (
 // flag do not fit an i64 result alongside each other, and every SDK already has
 // a JSON decoder because the ABI is JSON-carrying throughout.
 type updateDelivery struct {
-	Name      string `json:"name"`
-	Payload   string `json:"payload"`
+	Name    string `json:"name"`
+	Payload string `json:"payload"`
+	// RequestID here is the composite KEY from updateRequestKey, not the
+	// request_id COLUMN cleat#1416 added -- the two are different things
+	// wearing one name, and this comment is the only place that says so.
+	//
+	// The key packs the update name, the row's request_id and the promise id
+	// into one opaque string, because the guest hands back exactly what it was
+	// given and the host needs all three to settle the request. No SDK parses
+	// it; splitUpdateRequestKey is the only reader. Renaming the JSON field
+	// would be an ABI change across five SDKs for a clarification, which is why
+	// this is a comment.
 	RequestID string `json:"request_id"`
 }
 
@@ -156,7 +166,13 @@ func (s *execSession) DurableCompleteUpdate(ctx context.Context, m api.Module, r
 		return callSuspendSentinel
 	}
 
-	name, promiseID := splitUpdateRequestKey(requestID)
+	name, rowID, promiseID := splitUpdateRequestKey(requestID)
+	if rowID == "" {
+		// A key written before cleat#1416, replayed across the upgrade. The
+		// migrations backfilled request_id from update_name, so the name
+		// addresses exactly the row this key was written for.
+		rowID = name
+	}
 
 	s.recordEvent(EventRecord{
 		Step:              s.stepCount,
@@ -171,7 +187,7 @@ func (s *execSession) DurableCompleteUpdate(ctx context.Context, m api.Module, r
 		return 0
 	}
 
-	if err := s.engine.updateStore.CompleteUpdateRequest(ctx, s.engine.workflowID, name, result, errMsg); err != nil {
+	if err := s.engine.updateStore.CompleteUpdateRequest(ctx, s.engine.workflowID, rowID, result, errMsg); err != nil {
 		s.engine.log().ErrorContext(ctx, "complete_update: recording the outcome on the request row",
 			"workflow_id", s.engine.workflowID, "update_name", name, "error", err)
 	}
@@ -251,36 +267,83 @@ const updateFoundFlag = uint32(0x0100)
 //	"" + "p-1"       ->  "0:p-1"
 //
 // splitUpdateRequestKey is the only reader, so the encoding is free to change.
+//
+// It changed for cleat#1416, which made an update name reusable: the key now
+// carries the request's own identity as well, because the name no longer
+// identifies a row. Two length-prefixed fields, and a "u3:" marker so the two
+// older forms can be told apart WITHOUT GUESSING.
+//
+// The marker is not decoration. A v2 key is `len:name` followed by the promise
+// id, and a v3 key is `len:name` followed by `len:requestID` followed by the
+// promise id -- so distinguishing them by looking for digits-then-colon after
+// the name means asking whether a PROMISE ID happens to start that way. Promise
+// ids are `upd-<hex>` in the worker but arbitrary in the store's contract, and
+// the tests alone use "prom-1", "promise-a" and "". A prefix costs three bytes
+// and removes the question.
 func updateRequestKey(u UpdateRequestInfo) string {
-	return strconv.Itoa(len(u.UpdateName)) + ":" + u.UpdateName + u.PromiseID
+	return "u3:" + strconv.Itoa(len(u.UpdateName)) + ":" + u.UpdateName +
+		strconv.Itoa(len(u.RequestID)) + ":" + u.RequestID + u.PromiseID
 }
 
 // splitUpdateRequestKey reverses updateRequestKey.
 //
-// It also still reads the NUL-separated form. Those keys cannot exist on
-// PostgreSQL -- the write that would have persisted one is the write that
-// failed -- but MySQL and SQL Server accepted them, so a workflow suspended
-// mid-update on either has one in its history and must still replay.
-func splitUpdateRequestKey(key string) (updateName, promiseID string) {
-	// Legacy NUL form first: a length-prefixed key cannot contain a NUL,
-	// because neither the digits nor the colon is one, so the two forms cannot
-	// be confused.
+// It reads all three forms this function has written. A workflow suspended
+// mid-update across an upgrade replays a key written by the previous version,
+// so none of them can be dropped:
+//
+//	u3:3:add5:ureq-x…p-1   current -- name, request id, promise id
+//	3:addp-1               cleat#3.247's, no request id
+//	add\0p-1               the original NUL-separated form
+//
+// A missing request id is returned EMPTY rather than guessed at. The caller
+// supplies the fallback, and there is exactly one: migrations/postgres/068 and
+// its two siblings backfill request_id from update_name, so for any row written
+// before the upgrade the name IS the request id. That is why the backfill was
+// chosen to be the name rather than a generated value.
+//
+// The NUL form cannot exist on PostgreSQL -- the write that would have
+// persisted one is the write that failed -- but MySQL and SQL Server accepted
+// them.
+func splitUpdateRequestKey(key string) (updateName, requestID, promiseID string) {
+	// Legacy NUL form first: neither a length prefix nor the "u3:" marker can
+	// contain a NUL, so the forms cannot be confused.
 	for i := 0; i < len(key); i++ {
 		if key[i] == 0 {
-			return key[:i], key[i+1:]
+			return key[:i], "", key[i+1:]
 		}
 	}
 
-	colon := strings.IndexByte(key, ':')
-	if colon < 0 {
+	if rest, ok := strings.CutPrefix(key, "u3:"); ok {
+		name, after, ok := cutLengthPrefixed(rest)
+		if !ok {
+			return key, "", ""
+		}
+		rid, after, ok := cutLengthPrefixed(after)
+		if !ok {
+			return key, "", ""
+		}
+		return name, rid, after
+	}
+
+	name, after, ok := cutLengthPrefixed(key)
+	if !ok {
 		// Not a form this function wrote. Returning the whole key as the name
 		// preserves the pre-3.247 behaviour for a malformed key rather than
 		// inventing a new failure mode here.
-		return key, ""
+		return key, "", ""
 	}
-	n, err := strconv.Atoi(key[:colon])
-	if err != nil || n < 0 || colon+1+n > len(key) {
-		return key, ""
+	return name, "", after
+}
+
+// cutLengthPrefixed reads one `<len>:<value>` field and returns the rest.
+func cutLengthPrefixed(s string) (value, rest string, ok bool) {
+	colon := strings.IndexByte(s, ':')
+	if colon < 0 {
+		return "", "", false
 	}
-	return key[colon+1 : colon+1+n], key[colon+1+n:]
+	n, err := strconv.Atoi(s[:colon])
+	if err != nil || n < 0 || colon+1+n > len(s) {
+		return "", "", false
+	}
+	return s[colon+1 : colon+1+n], s[colon+1+n:], true
 }

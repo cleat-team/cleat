@@ -91,7 +91,7 @@ type mockStore struct {
 	listPromisesFn                     func(ctx context.Context, workflowID string) ([]engine.PromiseInfo, error)
 	createUpdateRequestFn              func(ctx context.Context, workflowID, updateName, payload, promiseID string) error
 	getPendingUpdateRequestsFn         func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error)
-	completeUpdateRequestFn            func(ctx context.Context, workflowID, updateName, result, errMsg string) error
+	completeUpdateRequestFn            func(ctx context.Context, workflowID, requestID, result, errMsg string) error
 	acquireConcurrencyKeyFn            func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error)
 	releaseConcurrencyKeyFn            func(ctx context.Context, key string) error
 	releaseWorkflowConcurrencyKeysFn   func(ctx context.Context, workflowID string) error
@@ -471,9 +471,9 @@ func (m *mockStore) GetPendingUpdateRequests(ctx context.Context, workflowID str
 	return nil, nil
 }
 
-func (m *mockStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	if m.completeUpdateRequestFn != nil {
-		return m.completeUpdateRequestFn(ctx, workflowID, updateName, result, errMsg)
+		return m.completeUpdateRequestFn(ctx, workflowID, requestID, result, errMsg)
 	}
 	return nil
 }
@@ -3919,14 +3919,20 @@ func TestAStrandedUpdateIsRejectedWhenItsWorkflowFails(t *testing.T) {
 	ms := &mockStore{}
 	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
 		return []engine.UpdateRequestInfo{
-			{WorkflowID: workflowID, UpdateName: "set-address", Payload: `{"a":1}`, PromiseID: "prom-1"},
+			{WorkflowID: workflowID, RequestID: "ureq-1", UpdateName: "set-address",
+				Payload: `{"a":1}`, PromiseID: "prom-1"},
 		}, nil
 	}
-	var completedName, completedErr string
+	// completedID, not completedName: cleat#1416 made the name reusable, so
+	// CompleteUpdateRequest is keyed on the request's own identity. A sweep
+	// still passing the name would close every request sharing it -- see
+	// TestAStrandSweepAddressesEachRequestSeparately, which covers that
+	// directly.
+	var completedID, completedErr string
 	var completeCalls int
-	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 		completeCalls++
-		completedName, completedErr = updateName, errMsg
+		completedID, completedErr = requestID, errMsg
 		return nil
 	}
 	var rejectedID, rejectedErr string
@@ -3943,8 +3949,8 @@ func TestAStrandedUpdateIsRejectedWhenItsWorkflowFails(t *testing.T) {
 	if completeCalls != 1 {
 		t.Fatalf("the stranded update was completed %d times, want 1", completeCalls)
 	}
-	if completedName != "set-address" {
-		t.Fatalf("completed update name = %q, want %q", completedName, "set-address")
+	if completedID != "ureq-1" {
+		t.Fatalf("completed update request = %q, want %q", completedID, "ureq-1")
 	}
 	if completedErr == "" {
 		t.Fatal("the stranded update was completed with an empty error, so the caller is told it " +

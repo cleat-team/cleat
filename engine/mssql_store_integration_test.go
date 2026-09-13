@@ -1678,7 +1678,7 @@ func TestMSSQLIntegration_UpdateRequests(t *testing.T) {
 	}
 
 	// CompleteUpdateRequest with result.
-	if err := store.CompleteUpdateRequest(ctx, wfID, "update-name-1", `{"completed":true}`, ""); err != nil {
+	if err := store.CompleteUpdateRequest(ctx, wfID, pending[0].RequestID, `{"completed":true}`, ""); err != nil {
 		t.Fatalf("CompleteUpdateRequest: %v", err)
 	}
 

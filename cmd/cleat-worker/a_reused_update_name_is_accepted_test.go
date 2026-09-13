@@ -12,17 +12,28 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
-// The pending guard in handleWorkflowUpdate filters `status = 'pending'`, so it
-// covers only the window before dispatch. Once the update has COMPLETED the
-// guard passes and the insert runs into the primary key -- and that is the
-// COMMON case, because a caller retrying is far more likely to do so after the
-// first finished than during the pending window.
+// A reused update name is ACCEPTED, and the pending guard is now the whole of
+// the concurrency control. cleat#1416.
 //
-// The answer was `500 {"error":"pq: duplicate key value violates unique
-// constraint \"workflow_update_requests_pkey\" (23505)"}` -- a driver string
-// in a server-error class, for a well-formed request the state refuses, which
-// is what the sibling 409 two blocks above is for. cleat#1330.
-func TestAReusedUpdateNameIsA409(t *testing.T) {
+// This file is TestAReusedUpdateNameIsA409 inverted rather than deleted. That
+// test was right for the schema it was written against: the primary key was
+// (workflow_id, update_name), completion is an UPDATE rather than a delete, and
+// so a name was spent for the life of the workflow. cleat#1392 mapped the
+// resulting driver error to a clean 409 and predicted its own obsolescence --
+// "the new 409 becomes unreachable rather than wrong". The name is now
+// reusable, so the case is gone and its opposite is asserted here.
+//
+// WHAT REMAINS, and it is the distinction worth keeping straight:
+//
+//	update_already_pending   one request under this name is in flight.
+//	                         Still refused, still 409. CLEARS when it is answered.
+//	update_name_used         removed. There is no state a name can be in that
+//	                         permanently refuses the next request.
+//
+// The pending guard filters `status = 'pending'`, so it covers exactly the
+// window before dispatch -- which used to be a limitation, the primary key
+// covering everything after it, and is now the entire rule.
+func TestAReusedUpdateNameIsAccepted(t *testing.T) {
 	for _, c := range []struct {
 		name       string
 		pending    []engine.UpdateRequestInfo
@@ -31,15 +42,19 @@ func TestAReusedUpdateNameIsA409(t *testing.T) {
 		wantDetail string
 	}{
 		{
-			name:       "already used",
-			createErr:  fmt.Errorf("%w: bump", engine.ErrUpdateNameUsed),
-			wantStatus: 409,
-			wantDetail: "update_name_used",
+			// THE CHANGE. The store no longer refuses a name that has been used
+			// and completed, so the handler must answer 202 -- there is no
+			// pending row, and CreateUpdateRequest succeeds.
+			//
+			// This case is the previous "already used" row inverted. It read
+			// createErr: ErrUpdateNameUsed, wantStatus: 409,
+			// wantDetail: update_name_used.
+			name:       "a name used and completed earlier is accepted again",
+			wantStatus: 202,
 		},
 		{
-			// The sibling condition, which already answered 409 but carried no
-			// detail -- so a caller could not tell "wait for the in-flight one"
-			// from "this name is spent for the life of this workflow".
+			// The one refusal that survives, and the ONLY one now. It carries a
+			// detail so a caller can tell it from any other 409 the API grows.
 			name:       "already pending",
 			pending:    []engine.UpdateRequestInfo{{UpdateName: "bump", Status: "pending"}},
 			wantStatus: 409,
@@ -89,9 +104,9 @@ func TestAReusedUpdateNameIsA409(t *testing.T) {
 			}
 			if body["detail"] == "" {
 				t.Fatalf("the 409 carries no detail: %q.\n\n"+
-					"Both conditions answer 409 and they are not the same thing -- one clears "+
-					"when the in-flight update finishes, the other never does. A caller "+
-					"branching on status alone cannot tell them apart.", rec.Body.String())
+					"A caller that learned to branch on detail under cleat#1330 keeps working "+
+					"only if the field is still there. The message text is not a contract; "+
+					"the detail is.", rec.Body.String())
 			}
 			if body["detail"] != c.wantDetail {
 				t.Errorf("detail = %q, want %q", body["detail"], c.wantDetail)
