@@ -355,6 +355,25 @@ jobs:
       - name: Unreachable-from-main guard
         run: scripts/check-unreachable-main.sh
 
+      # cleat#1412. The script has existed since #618 on 2026-09-03 and no
+      # workflow had ever invoked it -- `git log -S 'check-hostfunc-budget'
+      # -- .github/` was empty -- while
+      # engine/wasmtime_hostbudget.go:138 and IMPROVEMENT-PLAN 3.90's A3 row
+      # both named it, present tense, as the thing that enforces the rule.
+      #
+      # It catches a regression nothing else can see. A wasmtime host function
+      # registered with a raw linker.FuncWrap WORKS: it registers, the guest
+      # calls it, nothing errors. The only consequence is that time the host
+      # spends on the guest's behalf is charged to the guest's epoch budget, so
+      # a guest doing nothing wrong is killed early under load. No test fails.
+      #
+      # Verified in both directions before wiring, because a guard that passes a
+      # clean tree is satisfied by every broken version of itself:
+      #   clean                                      -> OK, 63 host functions, exit 0
+      #   one raw linker.FuncWrap in wasmtime_wasi.go -> FAIL naming the line, exit 1
+      - name: Host-function epoch-budget guard
+        run: scripts/check-hostfunc-budget.sh
+
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
