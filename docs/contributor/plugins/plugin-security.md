@@ -778,7 +778,14 @@ Plugin "example/hello-world" host function "greet" exceeded instruction budget.
 
 ### Configuring pool sizes per worker
 
+**None of the configuration below exists.** It described an intended design and
+read as shipped behaviour; cleat#1470 measured that no part of it is
+implemented. Kept as a sketch of the intent, marked, rather than deleted —
+cleat#1486 is where the real policy is being designed, and the shape here is
+part of its input.
+
 ```json
+// DOES NOT EXIST -- intended design only, see cleat#1486
 {
   "tenant_pool": {
     "max_open_per_tenant": 5,
@@ -789,9 +796,25 @@ Plugin "example/hello-world" host function "greet" exceeded instruction budget.
 }
 ```
 
-For deployments with many tenants, idle pools are evicted after TTL. A
-connection to a tenant that hasn't been active for 15 minutes is dropped,
-freeing the slot.
+`git grep -n 'pool_eviction_ttl\|max_open_per_tenant' -- '*.go'` returns
+nothing. There is no config file of this shape and no key of any of these
+names.
+
+**What exists instead.** One flag, `--tenant-pool-max-conns` (default 25),
+applied per tenant pool. There is no TTL and **no eviction of any kind**:
+
+* `TenantPools.EvictIdle` (`plugin/tenant_db.go:131`) returns `0`
+  unconditionally and has no caller.
+* `TenantPools` records no last-used timestamps, so a TTL policy would have
+  nothing to read even if it were called.
+
+So a worker opens a pool per tenant it has ever touched and holds it for the
+worker's lifetime. **The count is unbounded in tenant count and never
+decreases**, whatever the traffic pattern. Size for the tenants a worker will
+serve, not for the tenants active at any moment.
+
+The sizing table above should be read the same way: it is guidance for
+provisioning, not a description of a mechanism that reclaims anything.
 
 ---
 
