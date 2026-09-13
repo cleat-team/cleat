@@ -3198,6 +3198,18 @@ func (w *Worker) failStrandedUpdates(wf *engine.WorkflowInstance, terminalStatus
 		"worker_id", w.id, "workflow_id", wf.ID, "terminal_status", terminalStatus, "count", len(updates))
 }
 
+// classifyTerminalErrorCode upgrades an unclassified terminal failure to
+// retries_exhausted when the engine's own signal says that is what happened.
+//
+// Extracted so it can be tested as a rule rather than mirrored in a test file:
+// a copy of a rule passes happily after the rule changes.
+func classifyTerminalErrorCode(errorCode string, deadLettered bool) string {
+	if deadLettered && errorCode == engine.ErrUnknown.String() {
+		return engine.ErrRetriesExhausted.String()
+	}
+	return errorCode
+}
+
 // writeTerminalFailure writes a workflow's terminal failure, to the dead-letter
 // queue or to 'failed'.
 //
@@ -3249,6 +3261,31 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	// retention depend on the workflow author wrapping with %w. See
 	// endedOnAnExhaustedCall for what replaced it and what it cannot tell.
 	deadLettered = eligibleForDLQ && endedOnAnExhaustedCall(history)
+
+	// ...and the same fact classifies the failure, which it did not before:
+	// error_code was ALWAYS "unknown" on this path. cleat#1009.
+	//
+	// The producer is the gap, not the storage or the projection. The caller
+	// derives its code with `errors.As(err, &ce)` against a *engine.CleatError
+	// (setup.go, the execution-error branch), and that never matches here for
+	// the reason the comment above gives: the engine's typed error is handed to
+	// the GUEST, which returns a plain string out of its entry point. So the
+	// assertion succeeds, the code stays ErrUnknown, and an operator asking
+	// "why did this stop retrying" gets "unknown" for the one case the engine
+	// knows the answer to.
+	//
+	// Only when the caller has nothing. A code that was genuinely classified --
+	// ErrPermanent from a version check, ErrCancelled -- is information this
+	// signal does not have, and overwriting it would trade a real answer for a
+	// narrower one.
+	//
+	// Gated on `deadLettered` rather than on endedOnAnExhaustedCall alone, so
+	// the code and the status always agree: a run dead-lettered for exhaustion
+	// reads retries_exhausted, and the panic path -- which passes
+	// eligibleForDLQ=false because a recovered panic is a crash rather than a
+	// call that ran out of attempts -- keeps its own code.
+	errorCode = classifyTerminalErrorCode(errorCode, deadLettered)
+
 	var err error
 	if deadLettered {
 		err = st.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
