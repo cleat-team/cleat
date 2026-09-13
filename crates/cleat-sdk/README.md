@@ -104,7 +104,7 @@ The `HostCalls` struct wraps all WASM imports from the `"env"` module.
 | `cleat_call_with_retry` | Server-side retry with `RetryPolicy` |
 | `cleat_call_heartbeat` | Long-running call with progress heartbeats |
 | `cleat_sleep` / `cleat_sleep_ms` | Suspend for a duration (survives restarts) |
-| `cleat_log` | Emit a log message (recorded in event history) |
+| `cleat_log` | Emit a log message to the worker's logger, suppressed on replay (NOT recorded in event history -- cleat#1308) |
 | `cleat_fetch` | Durable HTTP fetch, returns `Result<FetchResult, String>` |
 | `cleat_send` | Fire-and-forget (no response) |
 | `schedule_invoke` | Delayed one-shot invocation |

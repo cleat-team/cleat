@@ -216,8 +216,11 @@ are welcome as community contributions, following the same HostCall boundary.
 
 Every workflow execution is observable by default. The worker exports
 Prometheus metrics (`/metrics`) covering throughput, latency, error rates,
-and queue depth. Structured logging through HostCalls (`LogKV`) is recorded
-in event history. The embedded Svelte web UI provides workflow list/detail
+and queue depth. Structured logging through HostCalls (`LogKV`) goes to
+the worker's logger, tagged with the workflow id and suppressed on replay so a
+resumed run does not re-emit lines the original already wrote. It is **not**
+recorded in event history -- this line said it was until cleat#1308, while the
+host call discarded the message entirely. The embedded Svelte web UI provides workflow list/detail
 views, schedule management, and live execution state. You should never need
 to wonder what your workflows are doing.
 

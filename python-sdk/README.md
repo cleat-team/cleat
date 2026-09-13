@@ -122,7 +122,9 @@ def my_workflow(h: HostCalls, name: str) -> str:
     # WRONG: stdout output is not deterministic, not visible in replay
     print(f"Processing {name}")
 
-    # CORRECT: recorded in event history, visible in replay
+    # CORRECT: goes to the worker's logger, tagged with the workflow id, and
+    # suppressed on replay so a resumed run does not re-emit it.
+    # NOT recorded in event history -- see cleat#1308.
     h.cleat_log(f"Processing {name}")
 
     result = h.cleat_call("service", "Op", {"name": name})
