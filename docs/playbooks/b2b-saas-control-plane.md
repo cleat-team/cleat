@@ -155,10 +155,16 @@ and it is not the axis your own revenue necessarily follows.
 **Where this loses.**
 
 *You are now running an identity system.* `oauthprovider` is an OIDC relying party with sessions —
-it is not SCIM provisioning, not directory sync, not SAML, not a consent screen, not device
-management, not a compliance certification you can show a customer. Enterprise buyers ask for SAML
-and SCIM by name. **This is the most likely reason to buy WorkOS anyway**, and the playbook is
-wrong if it pretends otherwise.
+it is not SCIM provisioning, not directory sync, not a consent screen, not device management, and
+not a compliance certification you can show a customer. Enterprise buyers ask for SAML and SCIM by
+name.
+
+**SAML has since been decided and the answer is not "build it"** — see
+[`docs/enterprise-identity-decision.md`](../enterprise-identity-decision.md). A SAML proxy *is* an
+OIDC provider, so a customer terminates SAML themselves and presents it to cleat as OIDC; cleat
+never handles an XML signature. That needs a generic OIDC issuer, which `oauthprovider` does not yet
+have — three providers are hardcoded (#1582). **SCIM remains genuinely absent** and is deferred
+rather than declined.
 
 *Feature flags without the product around them.* `featureflags` evaluates rules with targeting and
 percentage rollout. It has no experimentation platform, no metrics-linked rollout, no approval
@@ -212,7 +218,10 @@ thing you have to route through a workflow for the history to answer it.
 
 ## What you still have to build or buy
 
-1. **SAML and SCIM**, if you sell to enterprises. `oauthprovider` covers OIDC only.
+1. **A terminator, if a customer needs SAML**, plus the generic OIDC issuer support to accept it
+   (#1582). cleat does not implement SAML by decision, not by omission —
+   [`docs/enterprise-identity-decision.md`](../enterprise-identity-decision.md). **SCIM** is still
+   yours to build or buy.
 2. **Per-tenant TLS**, if tenants get their own domains.
 3. **A user-level authorization model.** `SessionInfo` carries `TenantID`, `SessionID` and
    `UserEmail` (`plugins/oauthprovider/middleware.go:16-20`), so a principal below the tenant
@@ -256,6 +265,7 @@ table list and the cascade note; `cleatctl cost`'s parameters and its retention 
 **Asserted, not measured:** every cost and operational claim, including the marginal-cost-per-tenant
 argument, which follows from the data model rather than from a deployment.
 
-**Not verified:** that `oauthprovider` lacks SAML/SCIM is inferred from the provider list in
-`routes.go:49-55` (GitHub, Okta OIDC endpoints) rather than from an exhaustive search; confirm
-before telling a customer.
+**Since confirmed.** That `oauthprovider` lacks SAML was inferred here from the provider list in
+`routes.go:49-55`; the map and its `validProviders` allowlist have since been read in full — three
+providers, no SAML, and `oauth_config` already per-tenant. Recorded in
+[`docs/enterprise-identity-decision.md`](../enterprise-identity-decision.md) and #1582.
