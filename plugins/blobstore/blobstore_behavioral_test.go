@@ -18,6 +18,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // ---------------------------------------------------------------------------
@@ -414,25 +415,17 @@ func TestMigrationValid(t *testing.T) {
 	p := &Plugin{}
 	migrations := p.Migrations()
 
-	if len(migrations) == 0 {
-		t.Fatal("expected at least one migration")
-	}
+	// One shared predicate for what a migration must do, rather than a copy per
+	// plugin -- thirteen plugins carried their own and they had already drifted
+	// (cleat#1513). The copy that stood here rejected a TenantScoped migration
+	// in both halves: v4 declares a table for the runtime to put a policy on
+	// and carries no SQL in either direction, because there is none to write
+	// and no policy an author could drop. cleat#1512.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 
-	for i, m := range migrations {
-		t.Run(fmt.Sprintf("migration-%d", m.Version), func(t *testing.T) {
-			if m.Version <= 0 {
-				t.Errorf("migration[%d] has non-positive version %d", i, m.Version)
-			}
-			if strings.TrimSpace(m.Up) == "" {
-				t.Errorf("migration[%d] (v%d) has empty Up SQL", i, m.Version)
-			}
-			if strings.TrimSpace(m.Down) == "" {
-				t.Errorf("migration[%d] (v%d) has empty Down SQL", i, m.Version)
-			}
-		})
-	}
-
-	// Verify versions are sequential and strictly increasing.
+	// Kept local: strictly increasing versions is blobstore's own rule, and
+	// cleat#1513's doc comment asks for exactly this split rather than folding
+	// one plugin's rule onto twelve others.
 	for i := 1; i < len(migrations); i++ {
 		if migrations[i].Version <= migrations[i-1].Version {
 			t.Errorf("migrations not sequential: v%d follows v%d",
@@ -444,6 +437,16 @@ func TestMigrationValid(t *testing.T) {
 func TestMigrationUpContainsSQL(t *testing.T) {
 	p := &Plugin{}
 	for _, m := range p.Migrations() {
+		// A TenantScoped migration has no SQL and that is the point: the
+		// runtime emits the policy from the field. This assertion is about a
+		// migration that WRITES SQL saying nothing, so it does not apply --
+		// and it is the one cleat#1512's table records blobstore as not
+		// having, which is how it was nearly shipped red. cleat#1513's shared
+		// helper covers "the migration does something"; these two cover "the
+		// SQL it wrote is SQL".
+		if len(m.TenantScoped) > 0 {
+			continue
+		}
 		up := m.Up
 		if !strings.Contains(up, "CREATE") && !strings.Contains(up, "ALTER") && !strings.Contains(up, "INSERT") {
 			t.Errorf("migration v%d Up SQL does not contain CREATE, ALTER, or INSERT: %s", m.Version, up[:min(len(up), 80)])
@@ -454,6 +457,11 @@ func TestMigrationUpContainsSQL(t *testing.T) {
 func TestMigrationDownContainsSQL(t *testing.T) {
 	p := &Plugin{}
 	for _, m := range p.Migrations() {
+		// See TestMigrationUpContainsSQL. A TenantScoped migration has no Down
+		// either -- the policy is the runtime's to drop, not an author's.
+		if len(m.TenantScoped) > 0 {
+			continue
+		}
 		down := m.Down
 		if !strings.Contains(down, "DROP") && !strings.Contains(down, "ALTER") {
 			t.Errorf("migration v%d Down SQL does not contain DROP or ALTER: %s", m.Version, down[:min(len(down), 80)])
