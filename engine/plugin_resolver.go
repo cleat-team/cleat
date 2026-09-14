@@ -196,11 +196,19 @@ func resolveOnePlugin(ctx context.Context, db *sql.DB, name, constraintStr strin
 
 	// Try each version (newest first) and return the first match.
 	for _, v := range versions {
-		ver, err := parseVersion(v)
-		if err != nil {
+		// The parse is a FILTER, not a conversion, and it has to stay even
+		// though VersionSatisfies parses the version itself. VersionSatisfies
+		// answers "" and "*" with true BEFORE it looks at the version, which
+		// is right for its own caller -- the worker asking whether an
+		// installed plugin satisfies a dependency, where the version is its
+		// own Info().Version and cannot be junk. Here the version is a
+		// plugin_defs row, so dropping this guard would let an unconstrained
+		// dependency resolve to a malformed registry entry and return it as a
+		// concrete version. cleat#1252.
+		if _, err := parseVersion(v); err != nil {
 			continue // skip malformed versions
 		}
-		if matchesConstraint(ver, constraintStr) {
+		if VersionSatisfies(v, constraintStr) {
 			return v, nil
 		}
 	}
