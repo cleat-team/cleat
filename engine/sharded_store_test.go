@@ -791,6 +791,11 @@ func (m *mockShardStore) TerminateWorkflow(ctx context.Context, workflowID, reas
 	return m.err
 }
 
+func (m *mockShardStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	m.recordCall("CancelWorkflow")
+	return m.err
+}
+
 func (m *mockShardStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
 	m.recordCall("AdminForceComplete")
 	return m.err

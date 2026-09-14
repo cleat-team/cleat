@@ -649,6 +649,10 @@ func (m *mockCompactStore) FinalizeWorkflowSegment(ctx context.Context, runID, w
 func (m *mockCompactStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return nil
 }
+
+func (m *mockCompactStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	return nil
+}
 func (m *mockCompactStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }

@@ -1379,10 +1379,41 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 // Note that an ALREADY-terminated workflow still matches: the UPDATE carries no
 // status filter, so terminate stays idempotent and only a genuinely absent (or
 // other-tenant) row returns not-found.
+// TerminateWorkflow force-terminates a workflow, recording 'terminated'.
 func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	return s.preemptivelySettle(ctx, workflowID, reason, statusTerminated)
+}
+
+// CancelWorkflow stops a workflow pre-emptively and records 'cancelled' -- a
+// terminal status of its own, distinct from the 'done' a cooperatively
+// cancelled run used to report. cleat#1153.
+//
+// NOT RequestCancellation, which is the cooperative verb: it sets a flag and
+// leaves both stopping and reporting to the workflow, so a run that honoured a
+// cancellation and one that simply finished were indistinguishable from
+// outside. This one does not ask.
+//
+// IT SHARES TerminateWorkflow'S BODY DELIBERATELY, because the hard part is not
+// the status value -- it is the two-phase transition that lets a workflow owing
+// defers run them before it becomes terminal. Writing that a second time would
+// be writing the cleat#1114 fix a second time, in three dialects, and getting
+// one of the six wrong is the likely outcome rather than the unlucky one.
+func (s *PostgresStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	return s.preemptivelySettle(ctx, workflowID, reason, statusCancelled)
+}
+
+// preemptivelySettle is the shared body: mark-then-finalize when the workflow
+// owes a defer phase, one terminal write when it does not.
+//
+// finalStatus is the outcome to record, and it flows to
+// pending_terminal_status unchanged in the two-phase case -- FinalizeDeferPhase
+// applies it with `SET status = pending_terminal_status`, verbatim and without
+// validating it against any list, on all three dialects. That is why adding an
+// outcome here needs no change there.
+func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reason, finalStatus string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
-		return fmt.Errorf("terminate workflow: begin: %w", err)
+		return fmt.Errorf("%s workflow: begin: %w", finalStatus, err)
 	}
 	defer tx.Rollback()
 
@@ -1405,7 +1436,7 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 		return ErrWorkflowNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("terminate workflow: read: %w", err)
+		return fmt.Errorf("%s workflow: read: %w", finalStatus, err)
 	}
 
 	if deferPhaseOwed(curStatus, hasDefers, compacted) {
@@ -1422,18 +1453,18 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = $3,
-			    pending_terminal_status = 'terminated',
+			    pending_terminal_status = $5,
 			    defer_phase_deadline = now() + ($4 * interval '1 second'),
 			    error_msg = $2,
 			    next_wake_at = now(),
 			    assigned_to = NULL,
 			    generation = generation + 1
 			WHERE id = $1
-		`, workflowID, reason, statusTerminating, int(deferPhaseTimeout.Seconds())); err != nil {
-			return fmt.Errorf("terminate workflow: mark defer phase: %w", err)
+		`, workflowID, reason, statusTerminating, int(deferPhaseTimeout.Seconds()), finalStatus); err != nil {
+			return fmt.Errorf("%s workflow: mark defer phase: %w", finalStatus, err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("terminate workflow commit: %w", err)
+			return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 		}
 		// No releaseWorkflowResources and no enforceParentClosePolicy here.
 		// Both belong to the terminal transition, and this workflow is not
@@ -1446,7 +1477,7 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'terminated',
+		SET status = $3,
 		    error_msg = $2,
 		    completed_at = now(),
 		    completed_by = assigned_to, assigned_to = NULL,
@@ -1454,19 +1485,19 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL
 		WHERE id = $1
-	`, workflowID, reason)
+	`, workflowID, reason, finalStatus)
 	if err != nil {
-		return fmt.Errorf("terminate workflow: %w", err)
+		return fmt.Errorf("%s workflow: %w", finalStatus, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("terminate workflow: rows affected: %w", err)
+		return fmt.Errorf("%s workflow: rows affected: %w", finalStatus, err)
 	}
 	if n == 0 {
 		return ErrWorkflowNotFound
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("terminate workflow commit: %w", err)
+		return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 	}
 	releaseWorkflowResources(s.log(), s, workflowID)
 	// IMPROVEMENT-PLAN 3.79. Terminate is a terminal transition, and the close

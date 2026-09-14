@@ -1605,6 +1605,10 @@ func (s *stubWorkflowStore) TerminateWorkflow(ctx context.Context, workflowID, r
 	return nil
 }
 
+func (s *stubWorkflowStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	return nil
+}
+
 func (s *stubWorkflowStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }

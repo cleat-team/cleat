@@ -221,23 +221,33 @@ func (s *MSSQLStore) releaseWorkflowConcurrencyKeysOnce(ctx context.Context, wor
 // and simply was not reaching the SQL.
 //
 // Since 3.92 a terminate that matches no row returns ErrWorkflowNotFound and
-// does not run the parent-close cascade. See terminateWorkflowOnce.
+// does not run the parent-close cascade. See preemptivelySettleOnce.
 //
 // TERMINATE IS ASYNCHRONOUS WHEN THE WORKFLOW OWES CLEANUP (D6, and
 // IMPROVEMENT-PLAN 3.75 step 2) -- see PostgresStore.TerminateWorkflow for the
 // whole story. A workflow with registered defers goes to 'terminating' here,
 // carrying its outcome in pending_terminal_status, and is finalized by
 // FinalizeDeferPhase once its cleanup has run.
+// TerminateWorkflow force-terminates a workflow, recording 'terminated'.
 func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return withRollbackGuaranteedRetry(ctx, "terminate workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		return s.terminateWorkflowOnce(ctx, workflowID, reason)
+		return s.preemptivelySettleOnce(ctx, workflowID, reason, statusTerminated)
 	})
 }
 
-func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reason string) error {
+// CancelWorkflow stops a workflow pre-emptively and records 'cancelled'.
+// cleat#1153. See the PostgresStore method for why this shares a body with
+// TerminateWorkflow rather than repeating the two-phase transition.
+func (s *MSSQLStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	return withRollbackGuaranteedRetry(ctx, "cancel workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.preemptivelySettleOnce(ctx, workflowID, reason, statusCancelled)
+	})
+}
+
+func (s *MSSQLStore) preemptivelySettleOnce(ctx context.Context, workflowID, reason, finalStatus string) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
-		return fmt.Errorf("terminate workflow: begin: %w", err)
+		return fmt.Errorf("%s workflow: begin: %w", finalStatus, err)
 	}
 	defer tx.Rollback()
 
@@ -262,7 +272,7 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 		return ErrWorkflowNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("terminate workflow: read: %w", err)
+		return fmt.Errorf("%s workflow: read: %w", finalStatus, err)
 	}
 
 	if deferPhaseOwed(curStatus, hasDefers == 1, compacted == 1) {
@@ -272,7 +282,7 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = @p4,
-			    pending_terminal_status = 'terminated',
+			    pending_terminal_status = @p6,
 			    defer_phase_deadline = DATEADD(SECOND, @p5, SYSUTCDATETIME()),
 			    error_msg = @p2,
 			    next_wake_at = SYSUTCDATETIME(),
@@ -280,18 +290,18 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 			    generation = generation + 1
 			WHERE id = @p1 AND tenant_id = @p3
 		`, sql.Named("p1", workflowID), sql.Named("p2", reason), sql.Named("p3", s.tenantID),
-			sql.Named("p4", statusTerminating), sql.Named("p5", int(deferPhaseTimeout.Seconds()))); err != nil {
-			return fmt.Errorf("terminate workflow: mark defer phase: %w", err)
+			sql.Named("p4", statusTerminating), sql.Named("p5", int(deferPhaseTimeout.Seconds())), sql.Named("p6", finalStatus)); err != nil {
+			return fmt.Errorf("%s workflow: mark defer phase: %w", finalStatus, err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("terminate workflow commit: %w", err)
+			return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 		}
 		return nil
 	}
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'terminated',
+		SET status = @p4,
 		    error_msg = @p2,
 		    completed_at = SYSUTCDATETIME(),
 		    completed_by = assigned_to, assigned_to = NULL,
@@ -299,13 +309,13 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL
 		WHERE id = @p1 AND tenant_id = @p3
-	`, sql.Named("p1", workflowID), sql.Named("p2", reason), sql.Named("p3", s.tenantID))
+	`, sql.Named("p1", workflowID), sql.Named("p2", reason), sql.Named("p3", s.tenantID), sql.Named("p4", finalStatus))
 	if err != nil {
-		return fmt.Errorf("terminate workflow: %w", err)
+		return fmt.Errorf("%s workflow: %w", finalStatus, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("terminate workflow: rows affected: %w", err)
+		return fmt.Errorf("%s workflow: rows affected: %w", finalStatus, err)
 	}
 	if n == 0 {
 		// Not wrapped, so withRollbackGuaranteedRetry's
@@ -314,7 +324,7 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 		return ErrWorkflowNotFound
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("terminate workflow commit: %w", err)
+		return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 	}
 	releaseWorkflowResources(s.log(), s, workflowID)
 	// IMPROVEMENT-PLAN 3.79. Terminate is a terminal transition, and the close

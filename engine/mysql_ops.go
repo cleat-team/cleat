@@ -1302,10 +1302,22 @@ func (s *MySQLStore) ClearExpiredCompactionState(ctx context.Context, olderThan 
 // whole story. A workflow with registered defers goes to 'terminating' here,
 // carrying its outcome in pending_terminal_status, and is finalized by
 // FinalizeDeferPhase once its cleanup has run.
+// TerminateWorkflow force-terminates a workflow, recording 'terminated'.
 func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	return s.preemptivelySettle(ctx, workflowID, reason, statusTerminated)
+}
+
+// CancelWorkflow stops a workflow pre-emptively and records 'cancelled'.
+// cleat#1153. See the PostgresStore method for why this shares a body with
+// TerminateWorkflow rather than repeating the two-phase transition.
+func (s *MySQLStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	return s.preemptivelySettle(ctx, workflowID, reason, statusCancelled)
+}
+
+func (s *MySQLStore) preemptivelySettle(ctx context.Context, workflowID, reason, finalStatus string) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
-		return fmt.Errorf("terminate workflow: begin: %w", err)
+		return fmt.Errorf("%s workflow: begin: %w", finalStatus, err)
 	}
 	defer tx.Rollback()
 
@@ -1327,7 +1339,7 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 		return ErrWorkflowNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("terminate workflow: read: %w", err)
+		return fmt.Errorf("%s workflow: read: %w", finalStatus, err)
 	}
 
 	if deferPhaseOwed(curStatus, hasDefers, compacted) {
@@ -1337,25 +1349,25 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = ?,
-			    pending_terminal_status = 'terminated',
+			    pending_terminal_status = ?,
 			    defer_phase_deadline = NOW(6) + INTERVAL ? SECOND,
 			    error_msg = ?,
 			    next_wake_at = NOW(6),
 			    assigned_to = NULL,
 			    generation = generation + 1
 			WHERE id = ? AND tenant_id = ?
-		`, statusTerminating, int(deferPhaseTimeout.Seconds()), reason, workflowID, s.tenantID); err != nil {
-			return fmt.Errorf("terminate workflow: mark defer phase: %w", err)
+		`, statusTerminating, finalStatus, int(deferPhaseTimeout.Seconds()), reason, workflowID, s.tenantID); err != nil {
+			return fmt.Errorf("%s workflow: mark defer phase: %w", finalStatus, err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("terminate workflow commit: %w", err)
+			return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 		}
 		return nil
 	}
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'terminated',
+		SET status = ?,
 		    error_msg = ?,
 		    completed_at = NOW(),
 		    completed_by = assigned_to, assigned_to = NULL,
@@ -1363,19 +1375,19 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL
 		WHERE id = ? AND tenant_id = ?
-	`, reason, workflowID, s.tenantID)
+	`, finalStatus, reason, workflowID, s.tenantID)
 	if err != nil {
-		return fmt.Errorf("terminate workflow: %w", err)
+		return fmt.Errorf("%s workflow: %w", finalStatus, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("terminate workflow: rows affected: %w", err)
+		return fmt.Errorf("%s workflow: rows affected: %w", finalStatus, err)
 	}
 	if n == 0 {
 		return ErrWorkflowNotFound
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("terminate workflow commit: %w", err)
+		return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 	}
 	// The other two dialects have always done this and MySQL never did.
 	//
@@ -1488,7 +1500,7 @@ func (s *MySQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan tim
 		if _, err := s.db.ExecContext(ctx, `
 			DELETE k FROM idempotency_keys k
 			INNER JOIN workflow_instances w ON w.id = k.workflow_id
-			WHERE w.status IN ('done', 'failed', 'terminated')
+			WHERE w.status IN ('done', 'failed', 'terminated', 'cancelled')
 			  AND w.completed_at IS NOT NULL
 			  AND w.completed_at < ?
 			  AND w.tenant_id = ?
@@ -1539,7 +1551,7 @@ func (s *MySQLStore) GetChildCount(ctx context.Context, parentWorkflowID string)
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
-		WHERE parent_workflow_id = ? AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated') AND tenant_id = ?
+		WHERE parent_workflow_id = ? AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled') AND tenant_id = ?
 	`, parentWorkflowID, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get child count for %s: %w", parentWorkflowID, err)

@@ -14,8 +14,9 @@ left to be rediscovered.
 ## The statuses
 
 `workflow_instances.status` is a `TEXT` column with no `CHECK` constraint
-(`migrations/postgres/001_schema.sql:227`, default `'ready'`). Seven values are written; the
-seventh, `terminating`, gained its writer on 2026-09-04 (see the defer phase below):
+(`migrations/postgres/001_schema.sql:227`, default `'ready'`). Eight values are written. The
+seventh, `terminating`, gained its writer on 2026-09-04 (see the defer phase below); the eighth,
+`cancelled`, on 2026-09-14 (cleat#1153).
 
 | status | terminal? | meaning |
 |---|---|---|
@@ -24,6 +25,7 @@ seventh, `terminating`, gained its writer on 2026-09-04 (see the defer phase bel
 | `done` | **yes** | The workflow returned a result. |
 | `failed` | **yes** | The workflow failed terminally, or its parent's close policy terminated it. |
 | `terminated` | **yes** | Force-terminated by an operator through the admin API. |
+| `cancelled` | **yes** | Stopped pre-emptively by an operator, through `POST /api/workflows/:id/cancel` with `{"preemptive": true}`. **Distinct from `done` deliberately** — cleat#1153: cancellation used to be cooperative and unobservable, so a run that honoured a cancellation and one that simply finished were both `done`, and nobody could tell which had happened. Like `terminated`, it runs the workflow's registered defers first, through the same two-phase transition. |
 | `dead_lettered` | **yes** | Retries exhausted. On the Go SDK this is reachable only through a retry policy short enough to have run on the host — see `IMPROVEMENT-PLAN.md` §3.88. |
 | `terminating` | no | The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Written by `TerminateWorkflow`, by `enforceParentClosePolicy`'s TERMINATE arm, and since 2026-09-13 by force-complete and force-fail — in each case only when the workflow has registered defers; cleared by `FinalizeDeferPhase` or by the deadline sweep. Schema in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
 
@@ -71,10 +73,26 @@ The name survives in three places, and none of them make it a status:
 > `CREATE OR REPLACE`, find the highest-numbered definition before concluding what the procedure
 > does — 003 still contains an earlier body.
 
-### There are no status constants
+### There are no EXPORTED status constants, and the unexported ones do not cover everything
 
-Every status is a string literal, in both Go and SQL. There is no `engine.StatusReady`. A typo in
-a status string is caught by a failing test, if one covers that path, and not by the compiler.
+This section said "there are no status constants" until cleat#1560, which added
+`engine/status_vocabulary.go`. What is there now is narrow, and the distinction matters more than
+the correction:
+
+- **Unexported constants exist for the settled statuses** — `statusDone`, `statusFailed`,
+  `statusDeadLettered`, `statusTerminated`, `statusCancelled` — plus `statusTerminating` beside
+  the transition that writes it. They build `settledStatusList`, the canonical SQL spelling.
+- **There is still no `engine.StatusReady`**, and no constant for `ready` or `running` at all.
+  Callers outside the package still compare strings.
+- **SQL still spells every list literally**, on purpose. Embedding the constant would split each
+  query into a concatenation, and `engine/mssql_tenant_predicate_test.go` reads statements from
+  the backtick literal with no constant folding — it would see only the first fragment of a
+  statement whose tenant predicate lives in the second. So the rule is *enforced* by
+  `engine/one_definition_of_settled_test.go` rather than shared.
+
+A typo in a status string is therefore still caught by a failing test, if one covers that path,
+and not by the compiler — except in a settled-status list, where the guard above fails on any
+spelling that is not the canonical one.
 
 ### Duplicate calls: one policy, every endpoint
 
@@ -274,12 +292,15 @@ stateDiagram-v2
 
     ready --> terminated: TerminateWorkflow (admin)
     running --> terminated: TerminateWorkflow (admin)
+    ready --> cancelled: CancelWorkflow (preemptive)
+    running --> cancelled: CancelWorkflow (preemptive)
     ready --> failed: parent close policy TERMINATE
     running --> failed: parent close policy TERMINATE
 
     done --> [*]
     failed --> [*]
     terminated --> [*]
+    cancelled --> [*]
     dead_lettered --> [*]
 ```
 
@@ -295,6 +316,7 @@ stateDiagram-v2
 | `*` → `failed` (parent) | `enforceParentClosePolicy` TERMINATE arm, `engine/store_lifecycle.go:467` |
 | `running` → `dead_lettered` | `MoveToDeadLetterQueue`, `engine/store_lifecycle.go:505` |
 | `*` → `terminated` | `TerminateWorkflow`, `engine/db.go:1128`, `mysql_ops.go`, `mssql_operations.go` |
+| `*` → `cancelled` | `CancelWorkflow`, `engine/db.go`, `mysql_ops.go`, `mssql_operations.go` — all three share `TerminateWorkflow`'s body (`preemptivelySettle`), parameterised on the outcome |
 
 ### Which terminal transitions close the workflow's children
 
@@ -354,7 +376,13 @@ guest is running to drain its defers:
 | | who runs the defers | takes the defer phase |
 |---|---|---|
 | guest exits — `done`, `failed`, `dead_lettered` | the guest, on its way out of the entry point | no |
-| host imposes — `terminate`, parent-close `TERMINATE`, force-complete, force-fail | nobody, unless the host replays a segment | **yes** |
+| host imposes — `terminate`, **pre-emptive `cancel`**, parent-close `TERMINATE`, force-complete, force-fail | nobody, unless the host replays a segment | **yes** |
+
+Pre-emptive `cancel` sits on the second row for exactly the stated reason, and it is the whole of
+the constraint the repository owner attached to cleat#1153: the guest is not on its way out of the
+entry point, so nobody drains its defers unless the host replays a segment. Cooperative
+`RequestCancellation` is not on either row — it sets a flag and changes no status, so the workflow
+exits through whichever guest-exit row it chooses.
 
 `MoveToDeadLetterQueue` is the case most often misread as a gap. It writes `dead_lettered` with a
 plain `UPDATE` and no defer check, and it needs none: it is called from `writeTerminalFailure`
@@ -417,6 +445,11 @@ follows from that:
 - **`terminate` is asynchronous.** It records an intent that will be honoured; it does not
   guarantee the workflow is terminal by the time the call returns. Any caller that currently
   reads status straight after terminating and expects `terminated` needs to poll.
+- **So is pre-emptive `cancel`**, for the same reason and through the same two halves
+  (cleat#1153). `POST /cancel` with `{"preemptive": true}` answers `{"status": "cancelled"}`,
+  which names the OUTCOME rather than the current state — exactly as terminate answers
+  `"terminated"` for a workflow that is at that moment `terminating`. A caller that needs to know
+  the run has finished polls the status.
 - **The window has its own name.** It is *not* reported as `ready`, which would be indistinguishable
   from a workflow that is simply runnable. A distinct status is what makes the state
   visible — a caller can tell "terminating, running its cleanup" from "running normally".

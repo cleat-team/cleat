@@ -547,6 +547,26 @@ type WorkflowStore interface {
 	// indeterminate state and should only be used when a workflow is truly stuck.
 	TerminateWorkflow(ctx context.Context, workflowID, reason string) error
 
+	// CancelWorkflow stops a workflow pre-emptively and records 'cancelled' as
+	// its terminal status. cleat#1153.
+	//
+	// THE DIFFERENCE FROM RequestCancellation IS OBSERVABILITY, not force.
+	// RequestCancellation sets a flag and leaves stopping AND reporting to the
+	// workflow, so a run that honoured a cancellation and one that simply
+	// finished both ended 'done' -- an operator could not answer "did this stop
+	// because I asked it to?". This records the answer.
+	//
+	// IT RUNS THE DEFERS IT OWES. A workflow with registered defer bodies goes
+	// to 'terminating' with 'cancelled' recorded in pending_terminal_status,
+	// is re-claimed, replays its history as a defer segment, and only then
+	// becomes 'cancelled'. That is TerminateWorkflow's two-phase transition,
+	// shared rather than rebuilt.
+	//
+	// IT TAKES EFFECT AT THE NEXT CLAIM, not by interrupting a durable call in
+	// flight. Same as TerminateWorkflow, and the two-phase shape depends on it:
+	// the workflow has to be re-claimed to run its defer segment.
+	CancelWorkflow(ctx context.Context, workflowID, reason string) error
+
 	// DeleteDeadLetteredWorkflows permanently deletes workflow instances that are
 	// in the dead_lettered state and whose completed_at is older than the cutoff.
 	// Child rows (event_history, signals, promises, concurrency_keys, update_requests)

@@ -231,7 +231,7 @@ func (s *PostgresStore) GetChildCount(ctx context.Context, parentWorkflowID stri
 	var count int
 	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
-		WHERE parent_workflow_id = $1 AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
+		WHERE parent_workflow_id = $1 AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 	`, parentWorkflowID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get child count for %s: %w", parentWorkflowID, err)

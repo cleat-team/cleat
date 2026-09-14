@@ -1382,7 +1382,7 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 //
 // `AND tenant_id` on both steps and on childrenClosedByTerminate is
 // load-bearing (3.92), and the reason is specific to how this is CALLED rather
-// than to the statements themselves: terminateWorkflowOnce invokes this
+// than to the statements themselves: preemptivelySettleOnce invokes this
 // unconditionally after its commit and never looks at how many rows the
 // terminate touched. 3.86 put a tenant predicate on the terminate itself, so a
 // cross-tenant terminate now matches no parent -- and then reached here anyway
@@ -1403,7 +1403,7 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 // working path.
 //
 // THE DEEPER FIX IS NOT THIS ONE, and is deliberately not taken here.
-// adminForceResolve does what terminateWorkflowOnce does not: it checks
+// adminForceResolve does what preemptivelySettleOnce does not: it checks
 // RowsAffected and returns adminNotFound before it can reach this function.
 // "Do not cascade for a workflow you did not terminate" is the actual bug;
 // a predicate on the cascade is its symptom-level twin. Closing it properly
@@ -1446,7 +1446,7 @@ var mssqlParentCloseDeferPhase = fmt.Sprintf(`
 		    generation = generation + 1
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = @p2
 		  AND %s
 	`, deferPhaseDeadlineMSSQL, deferPhaseOwedSQL)
@@ -1472,7 +1472,7 @@ func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = @p2
 		  AND NOT ` + deferPhaseOwedSQL + `
 	`},
@@ -1482,7 +1482,7 @@ func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		SET cancellation_requested = 1
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
-		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = @p2
 	`},
 	}
@@ -1531,7 +1531,7 @@ func (s *MSSQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkfl
 		SELECT id FROM workflow_instances
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = @p2
 		  AND NOT `+deferPhaseOwedSQL+`
 	`, parentWorkflowID, s.tenantID)

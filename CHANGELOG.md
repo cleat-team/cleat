@@ -12,6 +12,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pre-emptive cancellation, with a terminal status of its own.**
+  `POST /api/workflows/:id/cancel` accepts `{"preemptive": true}`, which stops the workflow and
+  records **`cancelled`** rather than asking it to stop. (cleat#1153)
+
+  **Why it exists.** Cancellation was cooperative *and unobservable*: `RequestCancellation` set a
+  flag and left both stopping and reporting to the workflow, and `cancelled` was an error code
+  rather than a status the engine ever wrote. So a run that honoured a cancellation and one that
+  simply finished were **both `done`**, and an operator could not answer "did this stop because I
+  asked it to?".
+
+  **It runs the defers it owes.** A workflow with registered `defer` bodies goes to `terminating`
+  carrying `cancelled` as its recorded outcome, is re-claimed, replays its history as a defer
+  segment, and only then becomes `cancelled`. That is the same two-phase transition `terminate`
+  uses, shared rather than rebuilt.
+
+  **Asynchronous, like terminate**, and for the same reason (`tiers.yaml` decision D6). The
+  endpoint answers `{"status": "cancelled"}`, which names the *outcome*; a caller that needs to
+  know the run has finished polls the status.
+
+  **Not a breaking change.** `preemptive` defaults to `false`: a client sending `{"reason": "..."}`
+  gets the cooperative path and the `cancellation_requested` response exactly as before.
+
+  **`cancelled` is a new terminal status**, so a client that switches exhaustively on workflow
+  status should add a case. It is excluded from the active-child count, from parent close
+  policies, and from every other "is this run settled?" predicate — see
+  `docs/reference/workflow-lifecycle.md`.
+
 - **`completed_by` on the workflow object** — the worker that performed the terminal write.
   `assigned_to` is a *lease*, not an audit field: every terminal write clears it while fencing on
   it, so it is blank on every finished run and cannot answer "which worker ran this" after the

@@ -690,7 +690,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND NOT ` + deferPhaseOwedSQL + `
 	`},
 		{"TERMINATE (defer phase)", `
@@ -704,7 +704,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		    generation = generation + 1
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND ` + deferPhaseOwedSQL + `
 	`},
 		{"REQUEST_CANCEL", `
@@ -712,7 +712,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		SET cancellation_requested = true
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
-		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 	`},
 	}
 
@@ -761,7 +761,7 @@ func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWor
 		SELECT id FROM workflow_instances
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND NOT `+deferPhaseOwedSQL+`
 	`, parentWorkflowID)
 	if err != nil {

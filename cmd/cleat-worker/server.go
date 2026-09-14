@@ -1209,10 +1209,45 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 	}
 	var req struct {
 		Reason string `json:"reason"`
+		// Preemptive selects the cleat#1153 behaviour: stop the workflow and
+		// record 'cancelled' as its terminal status, rather than setting a flag
+		// and hoping it looks.
+		//
+		// DEFAULTS TO FALSE, AND THAT IS THE WHOLE COMPATIBILITY STORY. An
+		// existing client sends {"reason": "..."} and gets exactly what it got
+		// before, including the "cancellation_requested" response. Making
+		// pre-emption the default would silently convert every cooperative
+		// caller into a forceful one, which is a behaviour change nobody asked
+		// for on a request body that did not change.
+		Preemptive bool `json:"preemptive"`
 	}
 	if !s.decodeJSONBody(w, r, signalBodyLimit(), &req) {
 		return
 	}
+
+	if req.Preemptive {
+		if err := st.CancelWorkflow(r.Context(), id, req.Reason); err != nil {
+			// Same shape as terminate: callerOwnsTarget has already answered
+			// 404 for an id this tenant does not own, so reaching here means
+			// the row went away in between.
+			if errors.Is(err, engine.ErrWorkflowNotFound) {
+				s.writeError(w, 404, "not found")
+				return
+			}
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		// Names the OUTCOME, not the current state, which is what terminate
+		// does -- it answers "terminated" for a workflow that is at that moment
+		// 'terminating' and running its defers. A cancelled workflow owing
+		// defers is in exactly that position, so answering "cancelled" here is
+		// the same promise: this is what the run will end as. A caller that
+		// needs to know it has finished polls the status, as tiers.yaml's
+		// decision D6 already requires for terminate.
+		s.writeJSON(w, 200, map[string]string{"status": "cancelled"})
+		return
+	}
+
 	if err := st.RequestCancellation(r.Context(), id, req.Reason); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -1927,7 +1962,8 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 // isTerminalStatus reports whether a workflow can no longer run guest code, and
 // therefore can never service an update.
 //
-// The four settled statuses are obvious. 'terminating' is included and is worth
+// The five settled statuses are obvious -- 'cancelled' joined them in
+// cleat#1153. 'terminating' is included and is worth
 // explaining: a terminating workflow is running its DEFER phase, and the engine
 // refuses new work there on purpose -- engine/updater.go's poll says so, "a
 // defer segment exists to run a terminated workflow's cleanup, not to service
@@ -1945,7 +1981,7 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 // refused for consistency and because a 409 now beats a rejection later.
 func isTerminalStatus(status string) bool {
 	switch status {
-	case "done", "failed", "terminated", "dead_lettered", "terminating":
+	case "done", "failed", "terminated", "dead_lettered", "cancelled", "terminating":
 		return true
 	}
 	return false
