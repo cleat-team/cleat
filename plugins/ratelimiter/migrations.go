@@ -80,5 +80,31 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS rate_counter;
 			`,
 		},
+		{
+			// Tenant isolation for both of this plugin's tables. cleat#1278.
+			//
+			// A separate version rather than a TenantScoped on v1 or v2: both
+			// are already recorded as applied wherever ratelimiter runs, and a
+			// recorded migration never runs again.
+			//
+			// NUMBERED 3 after reading the WHOLE list. The kafkaconnect
+			// conversion numbered its migration 2 against a plugin that already
+			// had one, because the version list was surveyed with a `head -10`
+			// that truncated it. A duplicate version is silently SKIPPED rather
+			// than refused, so the policy is never created and the failure
+			// surfaces as "the policy does not filter" -- pointing at RLS
+			// rather than at the migration that never ran.
+			//
+			// BOTH tables, and they are scoped for different reasons. rate_limits
+			// is configuration: one tenant's operator setting their own limits.
+			// rate_counter is per-tenant state keyed (tenant_id, limit_key,
+			// window_start). Neither is a global-by-design table like
+			// datadogexport's plugin_lease, which has no tenant_id at all.
+			//
+			// Up is empty on purpose: the runtime emits both policies from
+			// TenantScoped.
+			Version:      3,
+			TenantScoped: []string{"rate_limits", "rate_counter"},
+		},
 	}
 }

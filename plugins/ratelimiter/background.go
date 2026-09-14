@@ -72,7 +72,23 @@ func (p *Plugin) Run(ctx context.Context) error {
 // in-memory token bucket map atomically under the plugin mutex.
 // Returns the number of configs reloaded.
 func (p *Plugin) reload(ctx context.Context) (int, error) {
-	rows, err := p.db.Query(ctx, plugin.Rebind(`
+	// A NAMED cross-tenant read. cleat#1278.
+	//
+	// This loads EVERY tenant's configured limits into one in-memory bucket map
+	// keyed by tenant. It cannot be scoped to a tenant, because serving all of
+	// them is the point. Once rate_limits carries a policy (migrations.go v3) an
+	// unnamed statement here is refused.
+	//
+	// Bound to a separate variable rather than `ctx =`, and here that is
+	// defensive rather than load-bearing: reload makes no downstream call with
+	// this context today, so a reassignment would be harmless NOW. It stops
+	// being harmless the first time someone adds one, and the failure then is
+	// silent -- a narrowing inside the new callee would be ignored, since
+	// beginTenantTx tests CrossTenant first. Same shape as kafkaconnect's
+	// pollConfigs, where the reach is already real.
+	loadCtx := plugin.AcrossAllTenants(ctx, "rate-limiter: loading every tenant's limits into the shared bucket map")
+
+	rows, err := p.db.Query(loadCtx, plugin.Rebind(`
 		SELECT tenant_id, limit_key, max_requests, window_seconds
 		FROM rate_limits
 	`, p.dialect))
@@ -127,7 +143,16 @@ func (p *Plugin) pruneRateCounters(ctx context.Context) {
 		cutoff = minCutoff
 	}
 
-	result, err := p.db.Exec(ctx, plugin.Rebind(`
+	// A NAMED cross-tenant sweep. cleat#1278.
+	//
+	// The cutoff is a timestamp and no tenant owns it: pruning only one
+	// tenant's expired counters per tick would leave every other tenant's to
+	// accumulate forever, and report success doing it. Once rate_counter
+	// carries a policy this statement is refused without the marking, so adding
+	// the policy and leaving this bare are the same change.
+	pruneCtx := plugin.AcrossAllTenants(ctx, "rate-limiter: pruning expired counters, the window cutoff is global")
+
+	result, err := p.db.Exec(pruneCtx, plugin.Rebind(`
 		DELETE FROM rate_counter WHERE window_start < $1
 	`, p.dialect), cutoff)
 	if err != nil {
