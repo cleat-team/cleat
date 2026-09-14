@@ -79,10 +79,24 @@ func TestMigrations(t *testing.T) {
 		if m.Version == 0 {
 			t.Errorf("migrations[%d].Version is 0, expected non-zero", i)
 		}
-		if m.Up == "" {
-			t.Errorf("migrations[%d].Up is empty", i)
+		// A migration must DO something -- but SQL is not the only way. A
+		// TenantScoped migration carries no SQL by design: the runtime emits
+		// ENABLE / FORCE / CREATE POLICY from the declaration, and writing it
+		// here by hand would put a second, drifting copy of the policy in the
+		// tree.
+		//
+		// TEMPORARY SHAPE. cleat#1513 extracts this assertion into
+		// plugintest.AssertMigrationsDoSomething, because thirteen plugins
+		// carried their own copy and they had already drifted apart through
+		// independent authorship alone -- three checked Up and not Down, and
+		// the wording differed in every one. That PR deliberately left this
+		// file alone to avoid conflicting with this branch. Once it lands,
+		// replace this block with the helper rather than leaving a fourteenth
+		// variant behind. cleat#1512.
+		if m.Up == "" && len(m.TenantScoped) == 0 {
+			t.Errorf("migrations[%d] has neither Up SQL nor TenantScoped tables, so it does nothing", i)
 		}
-		if m.Down == "" {
+		if m.Down == "" && len(m.TenantScoped) == 0 {
 			t.Errorf("migrations[%d].Down is empty", i)
 		}
 	}
@@ -96,9 +110,22 @@ func TestMigrations(t *testing.T) {
 		prevVersion = m.Version
 	}
 
-	// Each migration should contain at least one SQL statement keyword.
+	// Each migration should contain at least one SQL statement keyword --
+	// unless it is a TenantScoped declaration, which carries no SQL at all and
+	// whose DDL the runtime emits from the declaration. cleat#1512.
+	//
+	// This is a FOURTH distinct predicate on migration shape, beyond the
+	// non-empty check above, the sequential-version check, and the by-index
+	// and table-name assertions other plugins carry. The thirteen copies of
+	// "assert something about migrations" are more varied than they look,
+	// which is the argument for cleat#1513's shared helper and also the reason
+	// that helper must not absorb the variants -- doing so would impose one
+	// plugin's rule on twelve others.
 	sqlKeywords := []string{"CREATE TABLE", "ALTER TABLE", "CREATE INDEX", "DROP TABLE"}
 	for i, m := range migs {
+		if len(m.TenantScoped) > 0 {
+			continue
+		}
 		hasSQL := false
 		for _, kw := range sqlKeywords {
 			if strings.Contains(m.Up, kw) {

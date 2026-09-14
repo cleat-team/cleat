@@ -159,5 +159,26 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS event_awaiters;
 			`,
 		},
+		{
+			// Tenant isolation for the three event-trigger tables. cleat#1512.
+			//
+			// A new version rather than TenantScoped on v1: v1 is already
+			// recorded everywhere eventtriggers runs, and a recorded migration
+			// never runs again, so editing it would protect new databases and
+			// leave every existing one open.
+			//
+			// Up is empty on purpose -- the runtime emits ENABLE / FORCE / the
+			// policy from TenantScoped via plugin.applyTenantScoping, using
+			// cleat.tenant_row_is_visible. Writing that SQL here would put a
+			// second, drifting copy of the policy in the tree.
+			//
+			// All three tables carry tenant_id and are read on request paths,
+			// host calls, and the retry sweep. The sweep is why this plugin
+			// could not adopt scoping when kvstore did; see Run() and the
+			// ForTenant call in background.go for how the scan and the
+			// per-event work are separated.
+			Version:      4,
+			TenantScoped: []string{"ingested_events", "event_subscriptions", "event_awaiters"},
+		},
 	}
 }

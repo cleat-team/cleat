@@ -21,6 +21,18 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return nil
 	}
 
+	// The BATCH SCAN is cross-tenant; the per-event work is not. cleat#1512.
+	//
+	// processBatch asks "which events anywhere are unprocessed", which has no
+	// tenant and cannot have one -- so it is marked here. Everything it finds
+	// belongs to exactly one tenant, and that tenant is a column on the row, so
+	// retryEvent narrows back down rather than inheriting this. See the
+	// ForTenant call below: the bypass is deliberately NOT carried past the
+	// scan, because beginTenantTx tests the bypass first and a ForTenant built
+	// from a bypassed context would be ignored without a word (cleat#1515).
+	ctx = plugin.AcrossAllTenants(ctx,
+		"event-triggers retry sweep: the scan for unprocessed events spans every tenant by definition")
+
 	interval := defaultRetryInterval
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -66,7 +78,22 @@ func (p *Plugin) processBatch(parentCtx context.Context) {
 
 		// Use context.Background() for individual processing so that each
 		// retry completes even if the parent context is cancelled.
-		p.retryEvent(context.Background(), eventID, tenantID, eventType, eventData, retryCount)
+		//
+		// ForTenant, not the sweep's bypass. This event belongs to exactly one
+		// tenant and tenantID is a column we have just read, so the write side
+		// of this loop is scoped rather than exempt -- which matters because
+		// retryEvent's UPDATEs address ingested_events BY ID with no tenant
+		// predicate, and the policy is what stops an id collision or a bug
+		// touching another tenant's row.
+		//
+		// Building from context.Background() rather than from ctx is doing two
+		// jobs: it detaches from the tick's cancellation, as before, AND it
+		// starts from a context that does not carry the sweep's bypass. A
+		// ForTenant applied on top of AcrossAllTenants is silently ignored
+		// (cleat#1515), so deriving this from ctx would have compiled, passed,
+		// and left every retry write unscoped.
+		p.retryEvent(plugin.ForTenant(context.Background(), tenantID),
+			eventID, tenantID, eventType, eventData, retryCount)
 	}
 
 	if err := rows.Err(); err != nil {
