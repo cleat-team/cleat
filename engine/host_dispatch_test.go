@@ -817,21 +817,36 @@ func TestDurableDeferReplayPastEnd(t *testing.T) {
 // DurableScheduleInvoke edge case: replay divergence.
 // ---------------------------------------------------------------------------
 
-func TestScheduleInvokeReplayAdvancesAnyEvent(t *testing.T) {
+// TestScheduleInvokeReplayRefusesAForeignEvent was
+// TestScheduleInvokeReplayAdvancesAnyEvent, and it asserted the defect.
+//
+// Its body carried the behaviour as a statement of fact -- `EventType: "call",
+// // DurableScheduleInvoke does not check event type` and `// Advances past the
+// event without checking type` -- under a heading reading "replay divergence".
+// So the divergence case was noticed and what was written down was what the
+// code DID, not what it should do. Renamed as well as inverted, because the old
+// name asserted the bug too.
+//
+// Consuming a foreign record is the damaging half: every subsequent step then
+// reads the wrong history entry, and the run reports success throughout. See
+// TestAFireAndForgetReplayChecksWhatItConsumes, which covers both primitives
+// and both directions. cleat#1507.
+func TestScheduleInvokeReplayRefusesAForeignEvent(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{{
 		Step:      0,
-		EventType: "call", // DurableScheduleInvoke does not check event type
+		EventType: "call", // belongs to a durable call, not to this
 	}}
 	result := s.DurableScheduleInvoke(context.Background(), nil, "my-svc", "my-op", `{}`, 5000)
 
-	// Advances past the event without checking type, never calls exitReplay.
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	if result == 0 {
+		t.Error("reported success on a foreign record: wasm/adapter_metadata.go raises an " +
+			"error only for a non-zero code, so the guest would be told the invoke was scheduled")
 	}
-	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1 (advanced past event), got %d", s.stepCount)
+	if s.stepCount != 0 {
+		t.Errorf("expected stepCount=0 (the foreign record must NOT be consumed), got %d -- "+
+			"consuming it misaligns every later step", s.stepCount)
 	}
 	if !s.isReplay {
 		t.Error("expected isReplay to remain true")
