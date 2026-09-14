@@ -195,12 +195,10 @@ func (e *Engine) executeWithBackend(
 		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
 	defer workflowSpan.End()
 
-	// Apply overall workflow execution timeout if configured.
-	if e.defaultWorkflowTimeout > 0 {
-		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, e.defaultWorkflowTimeout)
-		defer cancel()
-	}
+	// Apply the workflow execution timeout, resolved through the tenant and run
+	// tiers. ONE helper for both call sites -- see its comment. cleat#1117.
+	execCtx, cancelWorkflowDeadline := e.withResolvedWorkflowDeadline(execCtx)
+	defer cancelWorkflowDeadline()
 
 	// Apply the wall-clock ceiling if configured.
 	//
@@ -474,13 +472,10 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
 	defer workflowSpan.End()
 
-	// Apply overall workflow execution timeout if configured.
-	// This wraps the entire execution including replay and fresh run.
-	if e.defaultWorkflowTimeout > 0 {
-		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, e.defaultWorkflowTimeout)
-		defer cancel()
-	}
+	// Apply the workflow execution timeout, resolved through the tenant and run
+	// tiers. ONE helper for both call sites -- see its comment. cleat#1117.
+	execCtx, cancelWorkflowDeadline := e.withResolvedWorkflowDeadline(execCtx)
+	defer cancelWorkflowDeadline()
 
 	// Apply the wall-clock ceiling if configured.
 	//
@@ -899,3 +894,30 @@ func (e *Engine) invokePerDeferExports(ctx context.Context, mod api.Module, defe
 // DispatchUpdate dispatches an update to a workflow by invoking its registered handler.
 // The handler receives the update name and payload JSON, and returns the result JSON.
 // Returns an error if no update handler is configured on the engine.
+
+// withResolvedWorkflowDeadline applies --max-workflow-duration, resolved
+// through this tenant's and this run's overrides, to ctx.
+//
+// WHY THIS IS A HELPER AND NOT TWO IF-STATEMENTS. There are two execution
+// paths -- executeWithBackend (the worker) and executeCompiled (the wazero path
+// CLI tooling uses) -- and both must apply the same bound. IMPROVEMENT-PLAN
+// 3.90 is the case where one of two sites was fixed and the other kept reading
+// the flag; the resolved value was correct everywhere and simply never reached
+// one of the two deadlines.
+//
+// That failure was reproduced here before this helper existed: reverting ONLY
+// the executeCompiled site to e.defaultWorkflowTimeout left the whole engine
+// suite green, because the test that covers this goes through
+// executeWithBackend. Rather than add a second test that drives a wazero module
+// just to observe a context deadline, the two sites now share one statement --
+// so the regression that was invisible is no longer expressible without
+// deleting a call outright.
+//
+// Returns ctx unchanged with a no-op cancel when no tier set a bound, so the
+// caller can defer unconditionally.
+func (e *Engine) withResolvedWorkflowDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if limit := e.maxWorkflowDuration(ctx); limit > 0 {
+		return context.WithTimeout(ctx, limit)
+	}
+	return ctx, func() {}
+}

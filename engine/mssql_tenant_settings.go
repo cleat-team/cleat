@@ -23,17 +23,17 @@ import (
 // query text at all, so the policy is the only thing that can hide it, and it
 // checks the policy is enabled before believing the result.
 func (s *MSSQLStore) GetTenantSettings(ctx context.Context) (TenantSettings, error) {
-	var instanceMs, wallClockMs, retryMs *int64
+	var instanceMs, wallClockMs, retryMs, maxWorkflowMs *int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT wasm_instance_timeout_ms, wasm_wall_clock_ceiling_ms, host_retry_budget_ms
+		SELECT wasm_instance_timeout_ms, wasm_wall_clock_ceiling_ms, host_retry_budget_ms, max_workflow_duration_ms
 		FROM dbo.tenant_settings
 		WHERE tenant_id = @p1
-	`, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs)
+	`, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs, &maxWorkflowMs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TenantSettings{}, nil
 	}
 	if err != nil {
 		return TenantSettings{}, fmt.Errorf("get tenant settings for %s: %w", s.tenantID, err)
 	}
-	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs), nil
+	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs, maxWorkflowMs), nil
 }

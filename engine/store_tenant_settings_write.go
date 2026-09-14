@@ -40,20 +40,21 @@ func (s *PostgresStore) ReadTenantSettingsForUpdate(ctx context.Context) (Tenant
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var instanceMs, wallClockMs, retryMs *int64
+	var instanceMs, wallClockMs, retryMs, maxWorkflowMs *int64
 	var updatedAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT wasm_instance_timeout_ms, wasm_wall_clock_ceiling_ms, host_retry_budget_ms, updated_at
+		SELECT wasm_instance_timeout_ms, wasm_wall_clock_ceiling_ms, host_retry_budget_ms,
+		       max_workflow_duration_ms, updated_at
 		FROM tenant_settings
 		WHERE tenant_id = $1
-	`, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs, &updatedAt)
+	`, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs, &maxWorkflowMs, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TenantSettings{}, TenantSettingsRevision{}, nil
 	}
 	if err != nil {
 		return TenantSettings{}, TenantSettingsRevision{}, fmt.Errorf("read tenant settings for %s: %w", s.tenantID, err)
 	}
-	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs),
+	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs, maxWorkflowMs),
 		TenantSettingsRevision{UpdatedAt: updatedAt, Existed: true}, nil
 }
 
@@ -72,7 +73,7 @@ func (s *PostgresStore) WriteTenantSettings(ctx context.Context, settings Tenant
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	inst, wall, retry := tenantSettingsToMillis(settings)
+	inst, wall, retry, maxDur := tenantSettingsToMillis(settings)
 
 	var n int64
 	if !rev.Existed {
@@ -82,10 +83,11 @@ func (s *PostgresStore) WriteTenantSettings(ctx context.Context, settings Tenant
 		// the other writer decided.
 		res, execErr := tx.ExecContext(ctx, `
 			INSERT INTO tenant_settings
-				(tenant_id, wasm_instance_timeout_ms, wasm_wall_clock_ceiling_ms, host_retry_budget_ms, updated_at)
-			VALUES ($1, $2, $3, $4, now())
+				(tenant_id, wasm_instance_timeout_ms, wasm_wall_clock_ceiling_ms, host_retry_budget_ms,
+				 max_workflow_duration_ms, updated_at)
+			VALUES ($1, $2, $3, $4, $5, now())
 			ON CONFLICT (tenant_id) DO NOTHING
-		`, s.tenantID, inst, wall, retry)
+		`, s.tenantID, inst, wall, retry, maxDur)
 		if execErr != nil {
 			return fmt.Errorf("write tenant settings: %w", execErr)
 		}
@@ -94,9 +96,9 @@ func (s *PostgresStore) WriteTenantSettings(ctx context.Context, settings Tenant
 		res, execErr := tx.ExecContext(ctx, `
 			UPDATE tenant_settings
 			SET wasm_instance_timeout_ms = $2, wasm_wall_clock_ceiling_ms = $3,
-			    host_retry_budget_ms = $4, updated_at = now()
-			WHERE tenant_id = $1 AND updated_at = $5
-		`, s.tenantID, inst, wall, retry, rev.UpdatedAt)
+			    host_retry_budget_ms = $4, max_workflow_duration_ms = $5, updated_at = now()
+			WHERE tenant_id = $1 AND updated_at = $6
+		`, s.tenantID, inst, wall, retry, maxDur, rev.UpdatedAt)
 		if execErr != nil {
 			return fmt.Errorf("write tenant settings: %w", execErr)
 		}
@@ -120,7 +122,7 @@ func (s *PostgresStore) WriteTenantSettings(ctx context.Context, settings Tenant
 // operator's flag", and 0 in these columns would be read back by
 // tenantSettingsFromMillis as zero and mean the same thing -- but writing NULL
 // keeps the row honest about which values a tenant has actually set.
-func tenantSettingsToMillis(s TenantSettings) (inst, wall, retry *int64) {
+func tenantSettingsToMillis(s TenantSettings) (inst, wall, retry, maxDur *int64) {
 	ms := func(d time.Duration) *int64 {
 		if d <= 0 {
 			return nil
@@ -128,5 +130,6 @@ func tenantSettingsToMillis(s TenantSettings) (inst, wall, retry *int64) {
 		v := int64(d / time.Millisecond)
 		return &v
 	}
-	return ms(s.WasmInstanceTimeout), ms(s.WasmWallClockCeiling), ms(s.HostRetryBudget)
+	return ms(s.WasmInstanceTimeout), ms(s.WasmWallClockCeiling), ms(s.HostRetryBudget),
+		ms(s.MaxWorkflowDuration)
 }

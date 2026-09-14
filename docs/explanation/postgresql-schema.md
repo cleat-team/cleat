@@ -126,6 +126,7 @@ CREATE TABLE workflow_instances (
     run_wasm_instance_timeout_ms BIGINT,
     run_wasm_wall_clock_ceiling_ms BIGINT,
     run_host_retry_budget_ms BIGINT,
+    run_max_workflow_duration_ms BIGINT,
     completed_by TEXT,
     PRIMARY KEY (id),
     FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs(tenant_id, name, version)

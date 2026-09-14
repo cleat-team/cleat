@@ -52,6 +52,24 @@ type TenantSettings struct {
 	// the guest had already chosen a path before the host was consulted and no
 	// tenant could change it. 3.94 step 4 moved the decision here.
 	HostRetryBudget time.Duration
+
+	// MaxWorkflowDuration overrides --max-workflow-duration.
+	//
+	// Why it exists (cleat#1117): a worker process is not a tenancy boundary.
+	// One worker serves many tenants, so a process-wide deadline applies one
+	// tenant's operational policy to another's workflows. The other three had
+	// the same defect and 3.94 fixed it for them; this one was left on the flag.
+	//
+	// SCOPE, stated because the name invites the wrong reading and I made it
+	// while writing this: despite "workflow" in the name, this bounds ONE
+	// EXECUTION SEGMENT, not a workflow's whole lifetime. executor.go applies
+	// it to execCtx, which derives from the per-invocation context, so a
+	// workflow that suspends and resumes gets a fresh deadline each time. That
+	// is pre-existing behaviour of the flag and cleat#1117 does not change it --
+	// the issue is about WHO may set the bound, not what it spans. See the note
+	// at executor.go's event-cap comment for the same distinction biting a
+	// different mechanism.
+	MaxWorkflowDuration time.Duration
 }
 
 // TenantSettingsReader is implemented by stores that can read the settings row
@@ -107,7 +125,7 @@ func ClampToCeiling(tenant, ceiling time.Duration) time.Duration {
 	return ceiling
 }
 
-// tenantSettingsFromMillis builds a TenantSettings from three nullable
+// tenantSettingsFromMillis builds a TenantSettings from the nullable
 // millisecond columns, shared by all three dialect read paths.
 //
 // Non-positive values are dropped rather than carried. The CHECK constraints
@@ -116,7 +134,12 @@ func ClampToCeiling(tenant, ceiling time.Duration) time.Duration {
 // an unbounded worker. Dropping is right rather than erroring -- a settings row
 // that has gone strange should cost the tenant its overrides, not its ability
 // to run workflows.
-func tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs *int64) TenantSettings {
+//
+// Taking one parameter per column rather than a struct is deliberate: adding a
+// field here is a compile error at every dialect read path, which is what makes
+// it impossible to add a limit and silently leave one dialect reading NULL.
+// cleat#1117 added the fourth parameter and the compiler found all six sites.
+func tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs, maxWorkflowMs *int64) TenantSettings {
 	ms := func(v *int64) time.Duration {
 		if v == nil || *v <= 0 {
 			return 0
@@ -127,6 +150,7 @@ func tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs *int64) TenantSet
 		WasmInstanceTimeout:  ms(instanceMs),
 		WasmWallClockCeiling: ms(wallClockMs),
 		HostRetryBudget:      ms(retryMs),
+		MaxWorkflowDuration:  ms(maxWorkflowMs),
 	}
 }
 
