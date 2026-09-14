@@ -154,5 +154,41 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE blob_index DROP COLUMN IF EXISTS deleted_at;
 			`,
 		},
+		{
+			// Tenant isolation for blob_index. cleat#1512.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v1. A recorded migration never
+			// runs again, so editing v1 would protect databases created after
+			// this lands and leave every existing one open.
+			//
+			// Up and Down are empty on purpose. The runtime emits ENABLE /
+			// FORCE / the policy from TenantScoped (plugin.applyTenantScoping),
+			// using cleat.tenant_row_is_visible so a sweep that named itself
+			// through plugin.AcrossAllTenants is admitted and an unmarked one
+			// still fails closed. On MySQL and SQL Server this version is
+			// recorded and installs nothing, which is what the field means.
+			//
+			// ONE OF THIS PLUGIN'S THREE TABLES, AND THE OTHER TWO ARE NOT
+			// OVERSIGHTS.
+			//
+			//   blob_content is keyed by sha256 and carries ref_count: it is
+			//   CONTENT-ADDRESSED AND DEDUPLICATED ON PURPOSE, so two tenants
+			//   storing identical bytes share one row. There is no tenant_id to
+			//   scope by and adding one would undo the deduplication that is
+			//   the table's reason for existing.
+			//
+			//   workflow_blob_refs is keyed by (workflow_id, sha256) and has no
+			//   tenant_id either.
+			//
+			// So what this version protects is the NAMESPACE -- which keys a
+			// tenant can see, and therefore which content it can reach -- not
+			// the bytes, which stay shared by design. A tenant that already
+			// knows a sha256 can still read blob_content directly. That is a
+			// pre-existing property of content addressing, unchanged here, and
+			// it is written down because "blobstore is tenant-scoped" would
+			// otherwise be read as more than this change does.
+			Version:      4,
+			TenantScoped: []string{"blob_index"},
+		},
 	}
 }

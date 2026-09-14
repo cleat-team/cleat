@@ -8,9 +8,18 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// Run starts the TTL cleanup goroutine. It runs every hour, deleting expired
-// blob_index entries and garbage-collecting blob_content rows whose ref_count
-// reaches zero. Returns when ctx is cancelled.
+// cleanupInterval is how often Run sweeps.
+//
+// A var rather than a literal so that the test which proves Run marks its own
+// sweep can drive a real tick. At an hour, nothing in a test can make the loop
+// fire, so the AcrossAllTenants call below would be covered by no test at all
+// -- and it is the one line whose absence breaks the worker outright rather
+// than degrading it. cleat#1512.
+var cleanupInterval = time.Hour
+
+// Run starts the TTL cleanup goroutine. It runs on cleanupInterval, deleting
+// expired blob_index entries and garbage-collecting blob_content rows whose
+// ref_count reaches zero. Returns when ctx is cancelled.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
 		p.logger.Warn("blobstore: no database, TTL cleanup disabled")
@@ -18,10 +27,35 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return nil
 	}
 
-	ticker := time.NewTicker(1 * time.Hour)
+	// THE SWEEP NAMES ITSELF CROSS-TENANT. cleat#1512. blob_index carries a
+	// row-level policy from migration v4, and the policy calls
+	// cleat.assert_tenant_set(), which RAISEs rather than filtering when no
+	// tenant is in scope. Without this the loop does not degrade -- it fails
+	// outright on its first statement against blob_index after the migration
+	// lands.
+	//
+	// AcrossAllTenants rather than ForTenant, because there is no tenant to be
+	// had: cleanupExpired deletes by expires_at and by deleted_at across every
+	// tenant, and its other two tables -- blob_content, keyed by sha256, and
+	// workflow_blob_refs, keyed by workflow -- have no tenant_id to narrow to
+	// even in principle. The discrimination matters: a writer that HAS a tenant
+	// and loses it on the way to context.Background() wants ForTenant, and
+	// bypassing there compiles, passes every test, and silently disables
+	// isolation on that path.
+	//
+	// Marked ONCE here rather than at the seven statements in cleanupExpired,
+	// because every one of them is cross-tenant for the same reason. The
+	// handlers in routes.go are deliberately NOT marked: they run on
+	// r.Context(), which carries the request's tenant, and neither is the host
+	// call in host_functions.go, which has carried the workflow's tenant since
+	// cleat#1492 bridged it at the PluginCall boundary.
+	ctx = plugin.AcrossAllTenants(ctx,
+		"blobstore TTL cleanup: expiry and orphan collection run over every tenant's index")
+
+	ticker := time.NewTicker(cleanupInterval)
 	defer ticker.Stop()
 
-	p.logger.Info("blobstore: TTL cleanup started, interval=1h")
+	p.logger.Info("blobstore: TTL cleanup started", "interval", cleanupInterval)
 
 	for {
 		select {
