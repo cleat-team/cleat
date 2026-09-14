@@ -520,8 +520,19 @@ The reviewer may approve, request changes, or comment with questions.
 ### 5. Merge
 
 Once approved and all checks are green, the PR is **squash-merged** into
-`main`. Squash is the only merge method — no merge commits, no rebase merges.
-This keeps the main branch history linear and each commit atomic.
+`develop` — the branch it was opened against, and the repo default. It does not
+go to `main`; only the `release/` and `hotfix/` flows touch `main`, and they use
+merge commits rather than squash, for the reason given in
+[Where to branch from](#where-to-branch-from-and-how-it-merges).
+
+**`develop` is behind a merge queue, so you do not pick the method.** The queue
+is configured `SQUASH`, and `gh pr merge --squash` reports "The merge strategy
+for develop is set by the merge queue" and enqueues the PR rather than merging
+it. Expect a wait behind other entries; the PR merges when it reaches the front
+and its checks pass there. Re-derive the configuration with:
+
+    gh api graphql -f query='{ repository(owner:"cleat-team",name:"cleat"){
+      mergeQueue(branch:"develop"){ configuration { mergeMethod mergingStrategy } } } }'
 
 The squash commit message must retain the PR title as its subject line and
 include any `Co-authored-by` trailers for contributors who participated.
