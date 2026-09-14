@@ -2,7 +2,10 @@ module github.com/cleat-team/cleat/examples
 
 go 1.25.11
 
-require github.com/cleat-team/cleat/cleat v0.0.0
+require (
+	github.com/cleat-team/cleat/cleat v0.0.0
+	github.com/cleat-team/cleat/cleat/backendkit v0.0.0-20260914142453-535d1c610746
+)
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
@@ -52,4 +55,11 @@ require github.com/cleat-team/cleat v0.0.0 // indirect
 replace (
 	github.com/cleat-team/cleat => ../
 	github.com/cleat-team/cleat/cleat => ../cleat
+	// backendkit is its OWN module, not a package of cleat/ -- so requiring
+	// cleat/ does not make it reachable and it needs its own pair. The
+	// distinction is invisible while a go.work is in effect, which resolves
+	// every module in the workspace: `go build` passes and `GOWORK=off go
+	// build` does not. scripts/check-test-only-code.sh runs with GOWORK=off
+	// and is what catches it.
+	github.com/cleat-team/cleat/cleat/backendkit => ../cleat/backendkit
 )

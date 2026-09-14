@@ -179,6 +179,82 @@ cost one test its discriminating power: a case written to hold a winner open kep
 sleep parameter went unbound, because a 50 ms run and a 20 s sleep are both `ready`.
 
 
+### Writing a client that retries a start
+
+Everything above says what the server answers. This says what a client should do with it, because
+the shape is not obvious and getting it wrong is silent.
+
+**The whole recipe is two loops, and it needs only `id`.**
+
+```go
+res, err := c.StartWorkflowWithOptions(ctx, "charge", input,
+    backendkit.StartOptions{IdempotencyKey: key})
+// Loop 1: retry TRANSPORT failures. The same key makes that safe.
+// Do NOT retry ErrIdempotencyKeyInputMismatch or …DefinitionMismatch.
+
+for {
+    wf, err := c.GetWorkflow(ctx, res.ID)   // Loop 2: poll until terminal.
+    …                                        // wf.Result is here, not in res.
+}
+```
+
+**Two loops, not one, because they have different budgets.** *"Did my POST land?"* is bounded —
+seconds, and a failure means something is wrong. *"Is the work finished?"* is unbounded: a durable
+workflow may legitimately sleep for days. Collapse them and a bounded retry budget silently governs
+an unbounded wait, so "gave up after five attempts" becomes indistinguishable from "the workflow
+failed".
+
+#### Why a blind retry is always safe
+
+A client that sends a `POST` and gets no reply cannot tell three cases apart:
+
+| | what happened | what the retry does |
+|---|---|---|
+| **a** | the server never received it | finds no key, **starts the run** |
+| **b** | received, still processing | **waits** on the key, then returns the winner |
+| **c** | finished, the reply was lost | finds the key, returns the winner |
+
+**It does not need to tell them apart.** It retries with the same key, and the server's answer *is*
+the disambiguation. That is what the key is for.
+
+Case **b** is the one implementations usually get wrong, and it is handled by the database rather
+than by application logic: the key and the workflow row are inserted in **one transaction**, so a
+concurrent retry blocks on the key's unique index until the first request commits or rolls back.
+Committed, the retry reads the winner; rolled back — which is where a disconnected client lands,
+since the request context is cancelled and the transaction is rolled back — the retry's own insert
+succeeds and it creates the run. Either way exactly one run exists, and the key is never left
+naming a run that was not created.
+
+#### Four things that bite
+
+**The not-ready case is a `201`, not an error.** A retry loop that branches on the status code —
+retry `5xx`, treat `2xx` as done — will sail straight past a run that has not finished. Read
+`idempotent_replay` and `status` from the body; the transport layer says nothing about whether work
+is outstanding.
+
+**A retry can block for as long as the original request's transaction lives.** It is not a fast
+"already exists" lookup. Set the client timeout to allow for it, or the retry is cancelled at
+exactly the moment it was about to tell you the truth.
+
+**The start response never carries `result`** — on a replay or otherwise. `GET /api/workflows/<id>`
+is the only source for it. This is deliberate: one place to look for an outcome, rather than two
+that can disagree.
+
+**`status: "unknown"` is not terminal.** It means the winner could not be read, not that it
+finished. Treat it as *ask again*. `StartResult.Terminal()` implements this, and the status to
+branch on is terminal-versus-not — never `running`, which most outstanding work never reports (see
+above).
+
+#### What `idempotent_replay` is for
+
+Nothing in the recipe above needs it: the client polls either way, so correctness does not depend on
+knowing which call created the run.
+
+It answers a different question — **did my original request land?** `false` means this call created
+the run, so the earlier attempt never arrived (case **a**). `true` means an earlier one did (cases
+**b** and **c**). That is worth reading for logging, metrics, or deciding whether to warn a user
+that their action was already submitted; it is not worth branching the happy path on.
+
 ---
 
 ## The state machine

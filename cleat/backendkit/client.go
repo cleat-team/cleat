@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,6 +56,85 @@ type HistoryEvent struct {
 	Err       string `json:"err,omitempty"`
 }
 
+// The two refusals a start can get back that are ABOUT the idempotency key
+// rather than about the request.
+//
+// Typed because a caller has to act differently on each, and the only
+// alternative was matching on the text of an error built with fmt.Errorf --
+// which is a contract nobody declared and every server change can break.
+//
+//   - ErrIdempotencyKeyInputMismatch: the key was used before with a DIFFERENT
+//     payload. Retrying cannot help; the caller sent two different requests
+//     under one key and must decide which it meant.
+//   - ErrIdempotencyKeyDefinitionMismatch: the key already started a different
+//     workflow definition. Same shape, same conclusion.
+//
+// Both are terminal for that key. Neither is a reason to retry, which is
+// exactly why they must be distinguishable from the transport failures that
+// are.
+var (
+	ErrIdempotencyKeyInputMismatch      = errors.New("idempotency key was used with a different payload")
+	ErrIdempotencyKeyDefinitionMismatch = errors.New("idempotency key already started a different workflow definition")
+)
+
+// StartOptions carries the per-start values that are not the input.
+//
+// A struct rather than more parameters: StartWorkflow and StartWorkflowRaw
+// already take four, and an idempotency key is the fifth thing a start can
+// want rather than the last.
+type StartOptions struct {
+	// EntryPoint selects a non-default entry point. Empty uses the default.
+	EntryPoint string
+
+	// TenantID overrides Client.TenantID for this call. Empty uses the client's.
+	TenantID string
+
+	// IdempotencyKey makes the start safe to retry. Send the SAME key on every
+	// retry of one logical request, and a different key for a different one.
+	//
+	// Empty means no key, which is not the same as a key equal to "": two
+	// callers who both send nothing do not collide with each other.
+	IdempotencyKey string
+}
+
+// StartResult is what a start answers, including the two fields that say
+// whether this call was the original.
+type StartResult struct {
+	// ID is the workflow run. On a replay this is the ORIGINAL run's id, which
+	// is the whole point: a retry names the work its first attempt created.
+	ID string `json:"id"`
+
+	// IdempotentReplay is false when this call created the run and true when an
+	// earlier call under the same key did.
+	//
+	// It is present on both, so it can be read unconditionally. Do not infer
+	// "original" from a missing field -- an old server that does not send one
+	// is indistinguishable from a server saying false.
+	IdempotentReplay bool `json:"idempotent_replay"`
+
+	// Status is the run's lifecycle status, and is only meaningful on a replay
+	// -- the server has nothing to report about a run it just created.
+	//
+	// "unknown" means the server could not read the run, NOT that it forgot to
+	// say. Treat it as "ask again", never as terminal.
+	Status string `json:"status,omitempty"`
+}
+
+// Terminal reports whether Status is an end state, so a caller can stop
+// polling.
+//
+// Branch on this rather than on Status == "running". A workflow that sleeps,
+// awaits a child, waits on a signal or backs off a retry is "ready" for nearly
+// all of its life; "running" covers only the slices when a worker holds it. A
+// poller that waits for "running" to disappear may never see it at all.
+func (r StartResult) Terminal() bool {
+	switch r.Status {
+	case "done", "failed", "terminated", "dead_lettered":
+		return true
+	}
+	return false
+}
+
 // New creates a new Cleat API client with the given base URL.
 func New(baseURL string) *Client {
 	return &Client{
@@ -72,9 +152,39 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, classifyError(resp.StatusCode, body)
 	}
 	return resp, nil
+}
+
+// classifyError turns a refusal into a typed error where the server named one,
+// and keeps the old opaque form otherwise.
+//
+// The server answers a refused idempotency key with a machine-readable `detail`
+// alongside the human `error`. Without this, both arrive as
+// "unexpected status 409: {…}" and a caller wanting to tell "retrying will
+// never help" from "the service is briefly unavailable" has to match on text.
+//
+// Errors are WRAPPED, not replaced, so the message still carries the server's
+// own words and errors.Is still answers the question the caller asked.
+func classifyError(status int, body []byte) error {
+	generic := fmt.Errorf("unexpected status %d: %s", status, strings.TrimSpace(string(body)))
+	if status != http.StatusConflict {
+		return generic
+	}
+	var detail struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(body, &detail); err != nil {
+		return generic
+	}
+	switch detail.Detail {
+	case "idempotency_key_input_mismatch":
+		return fmt.Errorf("%w: %s", ErrIdempotencyKeyInputMismatch, strings.TrimSpace(string(body)))
+	case "idempotency_key_definition_mismatch":
+		return fmt.Errorf("%w: %s", ErrIdempotencyKeyDefinitionMismatch, strings.TrimSpace(string(body)))
+	}
+	return generic
 }
 
 // StartWorkflow starts a new workflow instance with the given name, entry point, and input.
@@ -163,6 +273,88 @@ func (c *Client) StartWorkflowRaw(ctx context.Context, name string, entryPoint s
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	return result.ID, nil
+}
+
+// StartWorkflowWithOptions starts a workflow and returns everything the start
+// answered, including whether this call created the run or matched an earlier
+// one.
+//
+// THIS IS THE ONE TO USE WHEN A START MUST BE SAFE TO RETRY. StartWorkflow and
+// StartWorkflowRaw cannot send an idempotency key and discard the replay flag,
+// so a caller using them has no way to retry a start without risking a second
+// run.
+//
+// WHAT A CORRECT RETRY LOOP LOOKS LIKE, because the shape is not obvious and
+// getting it wrong is silent:
+//
+//	res, err := c.StartWorkflowWithOptions(ctx, "charge", input,
+//		backendkit.StartOptions{IdempotencyKey: key})
+//	// retry err on TRANSPORT failures only; the same key makes that safe.
+//	// Do NOT retry ErrIdempotencyKeyInputMismatch or …DefinitionMismatch --
+//	// those say the request was different, and repeating it changes nothing.
+//	for {
+//		wf, err := c.GetWorkflow(ctx, res.ID)
+//		…            // wf.Status terminal? wf.Result is there. Otherwise wait.
+//	}
+//
+// TWO LOOPS, NOT ONE, and the reason is that they have different budgets. "Did
+// my POST land" is bounded -- seconds, and a failure means something is wrong.
+// "Is the work finished" is unbounded: a durable workflow may legitimately
+// sleep for days. Collapsing them makes a bounded retry budget govern an
+// unbounded wait, and "gave up" then looks exactly like "failed".
+//
+// THE START RESPONSE NEVER CARRIES THE RESULT, on a replay or otherwise. The
+// run is the only source for that, which is why the loop above ends at
+// GetWorkflow rather than reading anything from res.
+//
+// A RETRY CAN BLOCK. If the original request is still inside its transaction
+// when the retry arrives, the retry waits on the database until that
+// transaction ends -- measured at three seconds against a deliberately slow
+// original. It is not a fast "already exists" lookup, so the client timeout has
+// to allow for it, or a retry gets cancelled precisely when it was about to
+// report the truth.
+func (c *Client) StartWorkflowWithOptions(ctx context.Context, name string, input json.RawMessage, opts StartOptions) (StartResult, error) {
+	var res StartResult
+
+	body := map[string]interface{}{"input": input}
+	if opts.EntryPoint != "" {
+		body["entry_point"] = opts.EntryPoint
+	}
+	tid := opts.TenantID
+	if tid == "" {
+		tid = c.TenantID
+	}
+	if tid != "" {
+		body["tenant_id"] = tid
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return res, fmt.Errorf("marshal request body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.BaseURL+"/api/workflows/"+url.PathEscape(name)+"/start",
+		bytes.NewReader(bodyBytes))
+	if err != nil {
+		return res, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// Only when non-empty. An empty header is a key equal to "", which would
+	// make every caller that sent no key collide with every other.
+	if opts.IdempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", opts.IdempotencyKey)
+	}
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return res, fmt.Errorf("start workflow: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return res, fmt.Errorf("decode response: %w", err)
+	}
+	return res, nil
 }
 
 // SignalWorkflow sends a signal to a running workflow.
