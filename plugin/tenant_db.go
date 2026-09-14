@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +27,24 @@ type TenantPools struct {
 	// see TenantRolePassword and cleat#1307. Empty means no tenant pool can be
 	// opened, which For() reports rather than working around.
 	secret []byte
+
+	// budget is the total connections every tenant pool together may hold, or 0
+	// for unbounded -- which is what every deployment had before cleat#1486.
+	//
+	// It bounds the SUM of the pools' SetMaxOpenConns rather than their live
+	// connection count, and that is the only bound database/sql can actually
+	// hold: *sql.DB exposes no way to close a particular connection, so the
+	// enforceable statement is "these pools may not be configured to open more
+	// than N", not "these pools hold no more than N right now". The live count
+	// is always at or below it.
+	budget int
+
+	// minPerPool is the floor the per-pool share is not squeezed below. A pool
+	// configured to open one connection serialises that tenant's work
+	// completely; two is the smallest number that lets a query and a
+	// transaction coexist, and matches the idle floor SetMaxIdleConns already
+	// uses.
+	minPerPool int
 
 	// clock is time.Now unless a test replaces it, and it exists so that
 	// eviction can be tested without sleeping. An assertion that waits for real
@@ -99,6 +118,11 @@ func NewTenantPools(ownerDB *sql.DB, baseDSN string, maxConns int, secret []byte
 		maxConns: maxConns,
 		connStr:  baseDSN,
 		secret:   secret,
+		// SET HERE, NOT LEFT ZERO. makeRoomLocked divides the budget by this,
+		// so a zero is not a benign default -- it is an integer divide by zero
+		// the first time any worker sets a budget and touches a tenant.
+		// Verified by probe before this line existed: panic, immediately.
+		minPerPool: defaultMinConnsPerTenantPool,
 	}
 }
 
@@ -137,13 +161,45 @@ func (tp *TenantPools) For(ctx context.Context, tenantID string) (*sql.DB, error
 				tenantID, ctx.Err())
 		}
 	}
+	// ADMISSION CONTROL. cleat#1470.
+	//
+	// This is the moment the budget would be violated, so it is the moment it
+	// is enforced. A timer-driven sweep cannot do this: between two ticks the
+	// pool count is whatever demand made it, and the overshoot has already
+	// happened. EvictIdle still exists and is still worth running, but it is
+	// hygiene -- the bound lives here.
+	//
+	// Under the same lock that installs the entry, so two concurrent
+	// first-touches for DIFFERENT tenants cannot both see room for the last
+	// slot.
+	evicted := tp.makeRoomLocked()
+
 	entry := &tenantPool{ready: make(chan struct{})}
 	entry.lastUsed.Store(tp.now().UnixNano())
 	tp.pools[tenantID] = entry
 	tp.mu.Unlock()
 
+	// Closed outside the lock and asynchronously: (*sql.DB).Close waits for
+	// in-use connections, and a tenant opening its first pool must not block on
+	// an unrelated tenant's in-flight query.
+	for _, e := range evicted {
+		go func(victim *tenantPool) {
+			<-victim.ready
+			if victim.db != nil {
+				_ = victim.db.Close()
+			}
+		}(e)
+	}
+
 	entry.db, entry.err = tp.open(ctx, tenantID)
 	close(entry.ready)
+
+	// Re-share the budget now that the live set has changed. Deliberately
+	// after close(entry.ready), so the new pool is visible to rebalance rather
+	// than skipped as still-opening and left at the unshared default.
+	if entry.err == nil {
+		tp.rebalance()
+	}
 
 	if entry.err != nil {
 		// A FAILED OPEN IS NOT CACHED. The pre-cleat#1508 code cached nothing
@@ -259,6 +315,16 @@ func (tp *TenantPools) Close() {
 		}
 	}
 }
+
+// defaultMinConnsPerTenantPool is the floor a pool's share is never squeezed
+// below.
+//
+// One connection serialises a tenant's work completely -- a query and the
+// transaction it runs in cannot overlap -- so two is the smallest number that
+// is not a stall. It matches the floor SetMaxIdleConns already uses, and it is
+// what makes "how many tenants fit in this budget" a finite number rather than
+// an arbitrarily large one of arbitrarily useless pools.
+const defaultMinConnsPerTenantPool = 2
 
 // tenantConnIdleTimeout is how long an individual connection may sit unused in
 // a tenant pool before database/sql closes it.
@@ -395,4 +461,138 @@ func (tp *TenantPools) Stats() TenantPoolStats {
 		}
 	}
 	return st
+}
+
+// SetConnectionBudget bounds what every tenant pool together may open.
+//
+// Zero is unbounded, which is what every deployment had before cleat#1486 and
+// stays the default: the budget is opt-in, so no existing worker changes
+// behaviour by upgrading.
+//
+// WHAT IT BOUNDS, precisely, because the difference decides whether this is
+// enforceable at all. It holds the SUM of the pools' SetMaxOpenConns at or
+// below n. It does not hold the live connection count at or below n -- it does
+// not have to, because the live count is always at or below the configured
+// maxima. database/sql offers no way to close a particular connection, so
+// "never more than n exist at this instant" is not expressible without
+// replacing it with a custom pool over driver.Conn; "never configured to open
+// more than n" is, and it is the bound that matters for a database's
+// max_connections.
+func (tp *TenantPools) SetConnectionBudget(n int) {
+	tp.mu.Lock()
+	tp.budget = n
+	tp.mu.Unlock()
+	tp.rebalance()
+}
+
+// rebalance gives every live pool an equal share of the budget.
+//
+// LRU DECIDES WHICH TENANTS HAVE POOLS; THE SHARE DECIDES HOW WIDE EACH IS.
+// That split is the whole design. Accounting in whole pools of maxConns would
+// reserve 25 connections for a tenant using 2 and support far fewer tenants
+// than the budget can carry, which is why the repository owner rejected it:
+//
+//	"the accounting unit should not be 25 connections"
+//
+// Called on admission and on eviction, never on a timer: the count of live
+// pools only changes at those two points, so there is nothing for a ticker to
+// discover.
+//
+// SetMaxOpenConns SHRINKS RATHER THAN CUTS. Lowering it does not close
+// in-flight connections; excess ones close as they are returned. So a
+// rebalance never interrupts a query, and the worker converges on the new
+// share rather than snapping to it -- which is the behaviour that makes this
+// safe to call on the hot path.
+func (tp *TenantPools) rebalance() {
+	tp.mu.Lock()
+	budget := tp.budget
+	if budget <= 0 {
+		tp.mu.Unlock()
+		return
+	}
+	entries := make([]*tenantPool, 0, len(tp.pools))
+	for _, e := range tp.pools {
+		entries = append(entries, e)
+	}
+	minPer := tp.minPerPool
+	perPool := tp.maxConns
+	if n := len(entries); n > 0 {
+		if share := budget / n; share < perPool {
+			perPool = share
+		}
+	}
+	if perPool < minPer {
+		perPool = minPer
+	}
+	tp.mu.Unlock()
+
+	// Applied outside the lock: DB.SetMaxOpenConns takes the pool's own mutex
+	// and can wake waiters, and holding tp.mu across every pool's would put
+	// For()'s hot path behind all of them.
+	for _, e := range entries {
+		select {
+		case <-e.ready:
+			if e.db != nil {
+				e.db.SetMaxOpenConns(perPool)
+				e.db.SetMaxIdleConns(max(1, perPool/5))
+			}
+		default:
+			// Still opening. open() applies the current share itself, so an
+			// entry that finishes after this runs is not left at the default.
+		}
+	}
+}
+
+// makeRoom evicts least-recently-used pools until one more fits in the budget.
+//
+// THIS IS WHERE THE INVARIANT IS ENFORCED, and it is why a TTL sweep was
+// rejected as the mechanism: a timer can only shrink an overshoot after the
+// fact, whereas this runs at the moment the bound would be violated. EvictIdle
+// remains, as opportunistic hygiene, and is explicitly not this.
+//
+// "Fits" means the budget can still give every pool at least minPerPool. Below
+// that a pool cannot do useful work, so admitting another tenant by squeezing
+// everyone into one connection each trades a bounded number of working tenants
+// for an unbounded number of stalled ones.
+//
+// Returns the pools to close. The caller closes them OUTSIDE the lock and
+// asynchronously, because (*sql.DB).Close waits for in-use connections and a
+// tenant admitting a pool must not block on an unrelated tenant's query.
+func (tp *TenantPools) makeRoomLocked() []*tenantPool {
+	if tp.budget <= 0 {
+		return nil
+	}
+	maxPools := tp.budget / tp.minPerPool
+	if maxPools < 1 {
+		// A budget smaller than one pool's floor. Admit one anyway rather than
+		// refusing every tenant: a worker that can serve nobody is worse than
+		// one slightly over a misconfigured budget, and the startup check in
+		// cmd/cleat-worker refuses this configuration before it gets here.
+		maxPools = 1
+	}
+	if len(tp.pools) < maxPools {
+		return nil
+	}
+
+	// Evict oldest-first until the new pool fits.
+	type aged struct {
+		id   string
+		e    *tenantPool
+		used int64
+	}
+	all := make([]aged, 0, len(tp.pools))
+	for id, e := range tp.pools {
+		all = append(all, aged{id: id, e: e, used: e.lastUsed.Load()})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].used < all[j].used })
+
+	var evicted []*tenantPool
+	for _, a := range all {
+		if len(tp.pools) < maxPools {
+			break
+		}
+		delete(tp.pools, a.id)
+		evicted = append(evicted, a.e)
+	}
+	return evicted
 }

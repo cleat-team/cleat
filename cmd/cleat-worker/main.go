@@ -1204,6 +1204,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Hand the tenant pools whatever the fixed pools leave. cleat#1470.
+	//
+	// THE FIXED POOLS COME OFF THE TOP, and that is the only defensible split:
+	// they are opened at startup and never evicted, so a budget shared with
+	// them would be a budget the tenant pools can never actually reach. What is
+	// left is genuinely theirs.
+	//
+	// Zero, or an unset budget, leaves them unbounded -- which is what every
+	// deployment had before this and stays the default. The admission control
+	// this enables is opt-in for the same reason the check above is: a worker
+	// must not start evicting tenant pools because it was upgraded.
+	if tenantPools != nil && *connectionBudgetFlag > 0 {
+		tenantShare := *connectionBudgetFlag - budget.Fixed()
+		tenantPools.SetConnectionBudget(tenantShare)
+		logger.InfoContext(ctx, "tenant pools are bounded",
+			"worker_id", workerID, "tenant_connection_budget", tenantShare,
+			"tenant_pools_that_fit", budget.TenantHeadroom(*connectionBudgetFlag))
+	}
+
 	w := &Worker{
 		Metrics:                          metricsInstance,
 		id:                               workerID,
