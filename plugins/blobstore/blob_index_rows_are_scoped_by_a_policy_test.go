@@ -3,8 +3,11 @@ package blobstore
 import (
 	"context"
 	"crypto/sha256"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -16,10 +19,11 @@ import (
 
 // TestBlobIndexRowsAreScopedByAPolicyNotOnlyByTheQuery is cleat#1512.
 //
-// The name deliberately does NOT match its siblings' "...AndTheSweepSaysSo".
-// This one does not cover the sweep, for the reason below, and a name that
-// asserts a mechanism a test does not exercise is how a green run comes to
-// mean the wrong thing.
+// The name says NotOnlyByTheQuery where its siblings say AndTheSweepSaysSo,
+// and now UNDERSTATES rather than overstates: the sweep is covered, by the
+// last arm. Left as it is because the file is cited by name from cleat#1529
+// and cleat#1528, and a name that understates costs a reader nothing while
+// one that overstates is how a green run comes to mean the wrong thing.
 //
 // Every handler in this plugin already carries `WHERE tenant_id = $1`, and that
 // is the reason this test exists rather than a reason it does not: a
@@ -40,25 +44,20 @@ import (
 // policy, and this test asserts nothing about them, so that "blobstore is
 // tenant-scoped" is not read as more than the change does.
 //
-// THERE IS NO ARM THAT DRIVES Run, AND THAT IS A FINDING RATHER THAN AN
-// OMISSION. The sibling conversions (eventstore, notifications) each end with
-// an arm that runs the real loop, because that is the only way to see whether
-// Run applies the mark. Here the loop cannot complete at all: cleanupExpired's
-// PHASE 1 reads workflow_instances, a core table whose policy is the older
-// inline `tenant_id = cleat.assert_tenant_set()` form, which RAISEs on an unset
-// tenant and does NOT honour a named bypass. So the sweep dies before reaching
-// blob_index, with or without the marking, and an arm asserting anything about
-// it would be measuring cleat#1528 rather than this change.
-//
-// Measured with blob_index carrying NO POLICY AT ALL -- relrowsecurity=false,
-// relforcerowsecurity=false -- so it is pre-existing and not caused here:
+// THE LAST ARM DRIVES Run ITSELF, and it could not be written until cleat#1528
+// was fixed. cleanupExpired's PHASE 1 reads workflow_instances, a core table
+// whose policy is the older inline `tenant_id = cleat.assert_tenant_set()`
+// form -- it RAISEs on an unset tenant and does NOT honour a named bypass, so
+// the sweep died before reaching blob_index whatever the marking said. That was
+// pre-existing, measured with blob_index carrying no policy at all:
 //
 //	cleanupExpired(context.Background()) -> pq: cleat.tenant_id is not set (P0001)
 //
-// What arm 3 does instead is exercise the production phase-2 SQL directly. That
-// shows the statement the mark exists for is refused without it and admitted
-// with it. It does NOT show that Run supplies the mark, and this file does not
-// claim it does. cleat#1528 has to land before that claim is available.
+// Phase 1 now asks admin.in_flight_workflow_ids() instead, so the loop reaches
+// its own table and the marking becomes observable. Every arm before this one
+// supplies its own marked context and therefore stays green with the
+// AcrossAllTenants line deleted from Run; only this one fails. That asymmetry
+// is what localises a defect to the marking rather than to the policy.
 func TestBlobIndexRowsAreScopedByAPolicyNotOnlyByTheQuery(t *testing.T) {
 	pg := postgresPluginBackend(t)
 	defer pg.Cleanup()
@@ -193,6 +192,49 @@ func TestBlobIndexRowsAreScopedByAPolicyNotOnlyByTheQuery(t *testing.T) {
 		assertSeededRowsRemaining(t, db, key, 0)
 	})
 
+	t.Run("Run marks its own sweep, not just the context a test hands it", func(t *testing.T) {
+		// Arm 3 consumed the seeded rows, so put them back. The point of this
+		// arm is that it supplies a PLAIN context and lets Run mark it.
+		seed(t)
+		assertSeededRowsRemaining(t, db, key, 2)
+
+		p := &Plugin{
+			db:      db,
+			dialect: plugin.DialectPostgres,
+			logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+
+		restore := cleanupInterval
+		cleanupInterval = 10 * time.Millisecond
+		defer func() { cleanupInterval = restore }()
+
+		runCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- p.Run(runCtx) }()
+
+		// Polled rather than slept: a fixed sleep would have to be long enough
+		// for the slowest machine and would still be a wall-clock assertion.
+		deadline := time.Now().Add(20 * time.Second)
+		var remaining int
+		for time.Now().Before(deadline) {
+			remaining = countSeededRows(t, db, key)
+			if remaining == 0 {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		cancel()
+		<-done
+
+		if remaining != 0 {
+			t.Fatalf("Run swept for 20s at a 10ms interval and %d of this run's "+
+				"expired rows are still there.\n\nThe loop is running, so its "+
+				"statements are being refused. That is what an unmarked sweep looks "+
+				"like: cleat.assert_tenant_set() RAISEs, cleanupExpired returns the "+
+				"error, Run logs it, and the loop keeps ticking.", remaining)
+		}
+	})
 }
 
 func assertSeededRowsRemaining(t *testing.T, db *engine.SQLDBAdapter, key string, want int) {

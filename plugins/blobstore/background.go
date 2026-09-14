@@ -100,12 +100,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 func (p *Plugin) cleanupExpired(ctx context.Context) (staleRefs, expiredEntries, orphanedBlobs int, err error) {
 	// Phase 1: clean up stale workflow blob references. A ref is stale when
 	// the referencing workflow is no longer in-flight (done, failed, cancelled).
-	result1, err := p.db.Exec(ctx, plugin.Rebind(`
-		DELETE FROM workflow_blob_refs
-		WHERE workflow_id NOT IN (
-			SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
-		)
-	`, p.dialect))
+	result1, err := p.db.Exec(ctx, plugin.Rebind(staleWorkflowRefs.For(p.dialect), p.dialect))
 	if err != nil {
 		return staleRefs, expiredEntries, orphanedBlobs, err
 	}

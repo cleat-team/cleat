@@ -38,6 +38,17 @@ var (
 		"admin.get_due_schedules",
 		"admin.grant_core_tables_to_tenant_role",
 		"admin.grant_plugin_to_tenant",
+		// Migration 073, cleat#1528. Deliberately shared and deliberately
+		// `SET search_path FROM CURRENT`, for the same reason
+		// admin.claim_workflows is: its body reads workflow_instances
+		// unqualified, --schema moves that table, and a literal search_path
+		// would send the function to the wrong copy. So it carries the
+		// rebinding exposure this file's header describes -- a pool upgrading
+		// rewrites it for the others -- and that is the accepted trade, not an
+		// oversight. Pinning is only available to a function that qualifies
+		// its own names, which is why 069 and 070 could pin the three below
+		// and 023 could not pin the one above.
+		"admin.in_flight_workflow_ids",
 		"admin.revoke_plugin_from_tenant",
 		"cleat.assert_tenant_set",
 		"cleat.tenant_row_is_visible",
