@@ -161,8 +161,17 @@ func TestProduceValidateInput(t *testing.T) {
 func TestMigrations(t *testing.T) {
 	p := &Plugin{}
 	migrations := p.Migrations()
-	if len(migrations) != 2 {
-		t.Fatalf("expected 2 migrations, got %d", len(migrations))
+	// A COUNT AND TWO INDEXES, deliberately left as they are rather than folded
+	// into plugintest.AssertMigrationsDoSomething (cleat#1513). This asserts
+	// something plugin-specific -- that v1 creates the table and v2 adds
+	// event_type -- which the shared predicate does not and should not know.
+	//
+	// It is also brittle in the way an indexed assertion always is: adding v3
+	// for tenant scoping (cleat#1278) failed it on the COUNT, which is a
+	// correct complaint about a stale expectation rather than about the new
+	// migration. Updated deliberately, not silenced.
+	if len(migrations) != 3 {
+		t.Fatalf("expected 3 migrations, got %d", len(migrations))
 	}
 	if migrations[0].Version != 1 {
 		t.Errorf("expected Version 1, got %d", migrations[0].Version)
