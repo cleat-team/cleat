@@ -31,6 +31,12 @@ import (
 // superuser, and PostgreSQL exempts superusers from RLS unconditionally -- this
 // test written on the ordinary handle would pass against a policy that does
 // nothing at all.
+// EVERY TABLE REFERENCE BELOW IS SCHEMA-QUALIFIED. plugin.RunMigrations
+// defaults cfg.schema to "public" and ignores search_path, while this test's
+// own DDL resolves through search_path -- `"$user", public`. The Tier 2 job
+// connects as a role named `cleat`, for which a schema of that name exists, so
+// unqualified this test would create and police `cleat.schedules` and pass
+// while proving nothing about the table the plugin uses. cleat#1512.
 func TestTheScheduleCommandsSetTheirOwnTenant(t *testing.T) {
 	// A DATABASE OF THIS SUITE'S OWN, not the shared one. cleat#1512.
 	//
@@ -44,7 +50,7 @@ func TestTheScheduleCommandsSetTheirOwnTenant(t *testing.T) {
 	t.Cleanup(func() { admin.Close() })
 
 	if _, err := admin.Exec(`
-		CREATE TABLE IF NOT EXISTS schedules (
+		CREATE TABLE IF NOT EXISTS public.schedules (
 			tenant_id     UUID NOT NULL,
 			id            UUID PRIMARY KEY,
 			name          TEXT NOT NULL,
@@ -61,14 +67,14 @@ func TestTheScheduleCommandsSetTheirOwnTenant(t *testing.T) {
 	}
 	// A row left by an earlier run makes a later count pass for the wrong
 	// reason; testutil.TestDB persists between runs.
-	if _, err := admin.Exec(`DELETE FROM schedules`); err != nil {
+	if _, err := admin.Exec(`DELETE FROM public.schedules`); err != nil {
 		t.Fatalf("clearing schedules: %v", err)
 	}
 	for _, stmt := range []string{
-		`ALTER TABLE schedules ENABLE ROW LEVEL SECURITY`,
-		`ALTER TABLE schedules FORCE ROW LEVEL SECURITY`,
-		`DROP POLICY IF EXISTS schedules_tenant_isolation ON schedules`,
-		`CREATE POLICY schedules_tenant_isolation ON schedules
+		`ALTER TABLE public.schedules ENABLE ROW LEVEL SECURITY`,
+		`ALTER TABLE public.schedules FORCE ROW LEVEL SECURITY`,
+		`DROP POLICY IF EXISTS schedules_tenant_isolation ON public.schedules`,
+		`CREATE POLICY schedules_tenant_isolation ON public.schedules
 		     FOR ALL USING (cleat.tenant_row_is_visible(tenant_id))`,
 	} {
 		if _, err := admin.Exec(stmt); err != nil {
@@ -76,14 +82,14 @@ func TestTheScheduleCommandsSetTheirOwnTenant(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() {
-		_, _ = admin.Exec(`DROP POLICY IF EXISTS schedules_tenant_isolation ON schedules`)
-		_, _ = admin.Exec(`ALTER TABLE schedules NO FORCE ROW LEVEL SECURITY`)
-		_, _ = admin.Exec(`ALTER TABLE schedules DISABLE ROW LEVEL SECURITY`)
+		_, _ = admin.Exec(`DROP POLICY IF EXISTS schedules_tenant_isolation ON public.schedules`)
+		_, _ = admin.Exec(`ALTER TABLE public.schedules NO FORCE ROW LEVEL SECURITY`)
+		_, _ = admin.Exec(`ALTER TABLE public.schedules DISABLE ROW LEVEL SECURITY`)
 	})
 
 	testutil.SetupPostgresRLSRole(t, admin)
 	if _, err := admin.Exec(
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON schedules TO ` + testutil.PostgresRLSTestRole); err != nil {
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON public.schedules TO ` + testutil.PostgresRLSTestRole); err != nil {
 		t.Fatalf("granting on schedules: %v", err)
 	}
 
@@ -127,7 +133,7 @@ func TestTheScheduleCommandsSetTheirOwnTenant(t *testing.T) {
 			lowDB, adminDB)
 	}
 	_, bareErr := low.Exec(
-		`INSERT INTO schedules (tenant_id, id, name, cron, workflow_name) VALUES ($1,$2,'n','* * * * *','w')`,
+		`INSERT INTO public.schedules (tenant_id, id, name, cron, workflow_name) VALUES ($1,$2,'n','* * * * *','w')`,
 		tenant, uuid.New())
 	if bareErr == nil {
 		t.Fatal("an unscoped INSERT SUCCEEDED, so the policy is not in force and the " +
@@ -156,7 +162,7 @@ func TestTheScheduleCommandsSetTheirOwnTenant(t *testing.T) {
 
 	var id string
 	if err := admin.QueryRow(
-		`SELECT id FROM schedules WHERE tenant_id = $1 AND name = 'nightly'`, tenant).Scan(&id); err != nil {
+		`SELECT id FROM public.schedules WHERE tenant_id = $1 AND name = 'nightly'`, tenant).Scan(&id); err != nil {
 		t.Fatalf("the row schedule-add reported creating is not there: %v", err)
 	}
 
@@ -173,7 +179,7 @@ func TestTheScheduleCommandsSetTheirOwnTenant(t *testing.T) {
 	}
 	var n int
 	if err := admin.QueryRow(
-		`SELECT count(*) FROM schedules WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
+		`SELECT count(*) FROM public.schedules WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
 		t.Fatalf("counting after delete: %v", err)
 	}
 	if n != 0 {
