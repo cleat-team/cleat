@@ -829,15 +829,29 @@ func main() {
 		Logger:  slog.Default(),
 		Done:    ctx.Done(),
 		Dialect: plugin.Dialect(factory.Dialect()),
-		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
-			versions, err := store.ListVersions(ctx, defName)
+		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
+			// REJECTED, NOT DEFAULTED. Both of these were hardcoded here --
+			// the key as `""` and the tenant as engine.DefaultTenantUUID --
+			// which is why no plugin start was retry-safe (cleat#1555) or
+			// correctly attributed (cleat#1580). Substituting a default for a
+			// missing value would put both failures back, silently, which is
+			// the whole reason the fields are required.
+			if req.IdempotencyKey == "" {
+				return "", fmt.Errorf("start workflow %s: idempotency key is required; "+
+					"derive one from the durable row being acted on", req.DefName)
+			}
+			if req.TenantID == "" {
+				return "", fmt.Errorf("start workflow %s: tenant id is required", req.DefName)
+			}
+			versions, err := store.ListVersions(ctx, req.DefName)
 			if err != nil {
-				return "", fmt.Errorf("start workflow %s: %w", defName, err)
+				return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
 			}
 			if len(versions) == 0 {
-				return "", fmt.Errorf("start workflow %s: no versions deployed", defName)
+				return "", fmt.Errorf("start workflow %s: no versions deployed", req.DefName)
 			}
-			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "", engine.DefaultTenantUUID, 0)
+			runID, _, err := store.StartNewRun(ctx, "", req.DefName, versions[0], req.Input,
+				req.IdempotencyKey, req.TenantID, 0)
 			return runID, err
 		},
 

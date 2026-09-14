@@ -171,7 +171,24 @@ func triggerMatchingWorkflows(
 		}
 
 		if env != nil && env.StartWorkflow != nil {
-			runID, err := env.StartWorkflow(ctx, sub.DefName, inputJSON)
+			// KEYED PER (EVENT, SUBSCRIPTION), which is the unit this loop
+			// actually dispatches. Keying on the event alone would collapse a
+			// fan-out to several subscriptions into one start; keying on the
+			// subscription alone would deduplicate across unrelated events.
+			//
+			// This is also what a whole-event retry needs in order to become
+			// safe: re-running this loop re-presents the same key for each
+			// subscription that already succeeded, so those return the
+			// existing run rather than creating a second. That is the
+			// precondition for ever inverting the `matched > 0` gate, which is
+			// separate work. cleat#1555.
+			req := plugin.StartRequest{
+				DefName:        sub.DefName,
+				Input:          inputJSON,
+				IdempotencyKey: fmt.Sprintf("eventtrigger:%s:%s", eventID, sub.ID),
+				TenantID:       tenantID.String(),
+			}
+			runID, err := env.StartWorkflow(ctx, req)
 			if err != nil {
 				logger.Error("event-triggers: start workflow failed",
 					"def_name", sub.DefName,

@@ -944,7 +944,7 @@ func TestRunDueSchedules(t *testing.T) {
 	startWorkflowCalls := 0
 	p.env = &plugin.Environment{
 		DB: p.db,
-		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			startWorkflowCalls++
 			return uuid.New().String(), nil
 		},
@@ -1418,7 +1418,7 @@ func TestRunDueSchedules_WorkflowFailure(t *testing.T) {
 	startWorkflowCalls := 0
 	p.env = &plugin.Environment{
 		DB: p.db,
-		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			startWorkflowCalls++
 			return "", fmt.Errorf("workflow deployment not found")
 		},
@@ -2011,7 +2011,7 @@ func TestRunDueSchedules_ScanError(t *testing.T) {
 	p, _, store := setupTestPlugin(t, clock)
 	p.env = &plugin.Environment{
 		DB: p.db,
-		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			return uuid.New().String(), nil
 		},
 	}
@@ -2088,7 +2088,7 @@ func TestRunDueSchedules_ExecError(t *testing.T) {
 	p, _, store := setupTestPlugin(t, clock)
 	p.env = &plugin.Environment{
 		DB: p.db,
-		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			return uuid.New().String(), nil
 		},
 	}

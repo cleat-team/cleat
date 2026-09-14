@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -86,6 +87,32 @@ type dueSchedule struct {
 	cron         string
 	workflowName string
 	input        []byte
+
+	// dueAt is the occurrence this claim represents -- the next_run_at that
+	// was already in the row, not the time the sweep noticed it.
+	//
+	// IT IS THE IDEMPOTENCY KEY'S SECOND HALF and that is the only reason it
+	// is kept: the column was always selected and scanned into a local that
+	// was thrown away. Keying on the dispatch clock instead would produce a
+	// different key on every retry, which deduplicates nothing and looks
+	// exactly like having no key at all. cleat#1555.
+	dueAt time.Time
+}
+
+// scheduleStartKey names one firing of one schedule.
+//
+// A NAMED FUNCTION SO THE PROPERTY IS TESTABLE. What makes this key worth
+// having is that it is IDENTICAL for two dispatches of the same occurrence and
+// DIFFERENT for consecutive occurrences of the same schedule. Written inline it
+// is a format string nobody can assert on; the failure it guards -- a key built
+// from the dispatch clock, which differs on every attempt -- deduplicates
+// nothing and is invisible, because duplicate runs look exactly as they do with
+// no key at all. cleat#1555.
+//
+// UTC and UnixNano rather than a formatted time: the same instant must produce
+// the same key regardless of the session time zone a worker happens to hold.
+func scheduleStartKey(id uuid.UUID, dueAt time.Time) string {
+	return fmt.Sprintf("scheduler:%s:%d", id, dueAt.UTC().UnixNano())
 }
 
 // runDueSchedules finds schedules where enabled=true AND next_run_at <= now(),
@@ -148,6 +175,9 @@ func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
 			continue
 		}
 		s.id, s.tenantID = id.UUID, tenantID.UUID
+		if nextRunAt != nil {
+			s.dueAt = *nextRunAt
+		}
 		due = append(due, s)
 	}
 	rows.Close()
@@ -197,7 +227,22 @@ func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
 			"id", s.id, "tenant", s.tenantID,
 			"name", s.name, "workflow", s.workflowName)
 
-		runID, startErr := p.env.StartWorkflow(ctx, s.workflowName, json.RawMessage(s.input))
+		// KEYED ON THE OCCURRENCE, NOT THE ATTEMPT. (schedule id, due time)
+		// names this firing uniquely and identically on every retry of it, so
+		// a crash between the commit above and this call no longer costs the
+		// run: the retry presents the same key and the engine returns the
+		// existing instance instead of creating a second.
+		//
+		// The commit-before-start ordering is deliberate and documented above;
+		// it traded a lost run for never double-firing, because without a key
+		// those were the only two options. cleat#1555.
+		req := plugin.StartRequest{
+			DefName:        s.workflowName,
+			Input:          json.RawMessage(s.input),
+			IdempotencyKey: scheduleStartKey(s.id, s.dueAt),
+			TenantID:       s.tenantID.String(),
+		}
+		runID, startErr := p.env.StartWorkflow(ctx, req)
 		if startErr != nil {
 			p.logger.Error("scheduler: start workflow failed",
 				"id", s.id, "name", s.name,
