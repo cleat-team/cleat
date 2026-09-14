@@ -79,7 +79,7 @@ func TestAPluginStatementIsScopedToTheWorkflowsTenant(t *testing.T) {
 		// new shape is covered by
 		// a_tenant_policy_keeps_its_index_and_its_boundary_test.go. This
 		// fixture stays on cleat.tenant_row_is_visible because policies
-		// created before migration 074 keep it until their plugin's migrations
+		// created before migration 076 keep it until their plugin's migrations
 		// are re-applied -- which never happens for an already-recorded
 		// version -- so the tenant bridge must go on working against it. The
 		// POLICY name is a bare identifier -- it is scoped to the table, not to

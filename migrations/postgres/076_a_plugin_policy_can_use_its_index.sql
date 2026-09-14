@@ -1,4 +1,4 @@
--- 074: a plugin policy can use its index (cleat#1490)
+-- 076: a plugin policy can use its index (cleat#1490)
 --
 -- Migration 063 gave every plugin table one policy whose predicate is
 -- cleat.tenant_row_is_visible(tenant_id) -- a CASE that answers `true` for a
