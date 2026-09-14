@@ -156,8 +156,37 @@ func topologicalSort(entries map[string]registryEntry) ([]string, error) {
 	inDegree := make(map[string]int)
 	graph := make(map[string][]string)
 
-	for name, entry := range entries {
-		info := entry.info
+	// THE ONLY ITERATION OVER A MAP IN THIS FUNCTION, and its result is sorted
+	// before anything is decided with it. Everything below ranges over `names`.
+	//
+	// cleat#1566: this function used to range over `entries` directly to build
+	// the graph and over `inDegree` to seed the queue. Go randomises map
+	// iteration on every range, so the output was a different valid topological
+	// order on each call -- and plugin order decides middleware NESTING, so two
+	// workers running the same binary wrapped calls in different sequences, and
+	// one worker changed its own behaviour across a restart.
+	//
+	// SORTING THE SEED ALONE IS NOT ENOUGH, which is the trap here. The
+	// adjacency lists are built in the loop below; if that loop ranges over a
+	// map, `graph[dep]` is in map order and a plugin unblocked by a dependency
+	// enters the queue at a random position. Nearly every bundled plugin
+	// declares no Requires and so is in-degree 0, so a seed-only fix reads as
+	// verified against the whole tree and stays random for the first plugin
+	// that declares one. TestDiscoveryOrderIsStableForDependentsOfOneRoot is
+	// that case, isolated: one root, so the seed is a single element and every
+	// remaining degree of freedom is the adjacency list.
+	//
+	// The queue stays plain FIFO. Once no map iteration remains, the output is
+	// a pure function of `entries`; the goal is determinism, not any particular
+	// order, so no priority queue is needed.
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		info := entries[name].info
 		inDegree[name] = len(info.Requires)
 		for _, dep := range info.Requires {
 			if _, exists := entries[dep]; !exists {
@@ -169,8 +198,8 @@ func topologicalSort(entries map[string]registryEntry) ([]string, error) {
 
 	// Kahn's algorithm.
 	var queue []string
-	for name, deg := range inDegree {
-		if deg == 0 {
+	for _, name := range names {
+		if inDegree[name] == 0 {
 			queue = append(queue, name)
 		}
 	}
