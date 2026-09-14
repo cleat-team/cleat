@@ -785,7 +785,7 @@
             "uid": "$datasource"
           },
           "editorMode": "code",
-          "expr": "sum(rate(cleat_replay_steps_total{namespace=~\"$namespace\",workflow_name=~\"$workflow_name\"}[$__rate_interval])) by (workflow_name)",
+          "expr": "sum(rate(cleat_replay_steps_total{namespace=~\"$namespace\",def_name=~\"$workflow_name\"}[$__rate_interval])) by (def_name)",
           "legendFormat": "Replay {{workflow_name}}",
           "refId": "B"
         }

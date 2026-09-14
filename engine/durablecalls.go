@@ -70,7 +70,10 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	atomic.AddInt64(&freshCallCount, 1)
 
 	if s.engine.Metrics != nil {
-		s.engine.Metrics.RecordCall(ctx)
+		// Same value, same label, adjacent lines: cleat_calls_total carried no
+		// label at all until cleat#1444, so its dashboard panel grouped by
+		// workflow_name and drew a single line for every definition.
+		s.engine.Metrics.RecordCall(ctx, s.defName)
 		s.engine.Metrics.RecordFreshStep(ctx, s.defName)
 	}
 
