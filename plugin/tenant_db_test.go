@@ -7,7 +7,6 @@ import (
 	"io"
 	"strings"
 	"testing"
-	"time"
 )
 
 // fakeConnector provides a valid driver.Connector that returns an error
@@ -69,17 +68,17 @@ func TestTenantPoolsCloseWithEntries(t *testing.T) {
 	}
 }
 
-func TestEvictIdle(t *testing.T) {
-	tp := NewTenantPools(nil, "", 5, make([]byte, TenantRoleSecretMinBytes))
-	n := tp.EvictIdle(0)
-	if n != 0 {
-		t.Errorf("EvictIdle(0) = %d, want 0", n)
-	}
-	n = tp.EvictIdle(time.Hour)
-	if n != 0 {
-		t.Errorf("EvictIdle(1h) = %d, want 0", n)
-	}
-}
+// EvictIdle's real behaviour is in a_tenant_pool_records_when_it_was_last_used_test.go.
+//
+// What stood here asserted EvictIdle(0) == 0 and EvictIdle(1h) == 0 against a
+// TenantPools holding NO POOLS -- it never called For() and never wrote
+// tp.pools. Every possible implementation satisfies that, including the
+// `return 0` stub it was written alongside and the working one that replaced
+// it: both were green on it, which is the definition of a test that cannot
+// fail. It read as coverage of the function and was coverage of an empty map.
+//
+// Removed rather than extended, because the cases worth having need a pool, a
+// clock and a driver, and they live with the other tenant-pool tests.
 
 // ---------------------------------------------------------------------------
 // A driver that answers the role lookup with NO ROWS.

@@ -1257,6 +1257,7 @@ func (w *Worker) Run() {
 	initLoopCtx("heartbeat")
 	initLoopCtx("reaper")
 	initLoopCtx("concurrency_key_reaper")
+	initLoopCtx("tenant_pool_reaper")
 	initLoopCtx("dispatch")
 	initLoopCtx("schedule")
 	initLoopCtx("memory_reload")
@@ -1279,6 +1280,23 @@ func (w *Worker) Run() {
 	// Background concurrency key reaper goroutine (Feature 5).
 	w.registerLoopFunc("concurrency_key_reaper", w.concurrencyKeyReaperLoop)
 	w.launchLoop("concurrency_key_reaper", w.concurrencyKeyReaperLoop)
+
+	// Background tenant-pool reaper. cleat#1470.
+	//
+	// LAUNCHED only when tenant pools exist -- they are built solely under
+	// --tenant-isolation=role, and a loop that ticks forever over a nil manager
+	// is a health-tracked goroutine reporting success for doing nothing.
+	//
+	// Its context is initialised UNCONDITIONALLY above, with the others.
+	// TestEveryPreparedLoopIsLaunched caught the first version of this, which
+	// had the launch inside the guard and no initLoopCtx at all: the loop ran
+	// with no entry in the loop-context map, so the watchdog could neither
+	// cancel nor restart it. Preparing a context for a loop that is not
+	// launched is harmless; launching one without a context is not.
+	if w.tenantPools != nil {
+		w.registerLoopFunc("tenant_pool_reaper", w.tenantPoolReaperLoop)
+		w.launchLoop("tenant_pool_reaper", w.tenantPoolReaperLoop)
+	}
 
 	// Dispatch loop.
 	w.registerLoopFunc("dispatch", w.dispatchLoop)
@@ -2443,6 +2461,55 @@ func (w *Worker) expireDeferPhases() {
 	if n > 0 {
 		w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: terminated workflows whose cleanup did not finish in time",
 			"worker_id", w.id, "count", n)
+	}
+}
+
+// tenantPoolReaperLoop releases tenant pools nobody has touched.
+//
+// IT IS HOUSEKEEPING, NOT A BUDGET, and the distinction is the whole of
+// cleat#1470. A timer-driven sweep can only shrink an overshoot after the fact:
+// between two ticks the pool count is whatever demand made it. A connection
+// budget has to hold an INVARIANT, and an invariant is enforced where it would
+// be violated -- admission, in TenantPools.For -- which is why the repository
+// owner rejected TTL as the mechanism. This loop exists so that a worker which
+// served a thousand tenants overnight is not still holding a thousand pool
+// objects at breakfast; it is not what will keep the worker under a limit, and
+// wiring a limit to it would rebuild the rejected design under a new name.
+//
+// THE IDLE WINDOW IS LONG ON PURPOSE. Fifteen minutes is three times the pools'
+// own SetConnMaxLifetime, so by the time a pool is evicted its connections have
+// already been closed by database/sql and what is reclaimed is the struct and
+// the map entry. Evicting sooner would trade a real reconnect -- role lookup,
+// TCP, TLS, auth -- for a few bytes.
+func (w *Worker) tenantPoolReaperLoop() {
+	defer w.wg.Done()
+	const (
+		interval   = 5 * time.Minute
+		idleWindow = 15 * time.Minute
+	)
+	w.healthTracker.setInterval("tenant_pool_reaper", interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.getLoopCtx("tenant_pool_reaper").Done():
+			return
+		case <-ticker.C:
+			w.healthTracker.recordRun("tenant_pool_reaper")
+			start := time.Now()
+			// No error to classify: eviction touches no database. Closing the
+			// pools happens asynchronously inside EvictIdle precisely so this
+			// tick cannot block on another tenant's in-flight query.
+			evicted := w.tenantPools.EvictIdle(idleWindow)
+			if evicted > 0 {
+				w.logger.InfoContext(w.ctx, "Tenant pool reaper: released idle pools",
+					"worker_id", w.id, "count", evicted, "idle_window", idleWindow)
+				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "tenant_pool_reaper", int64(evicted))
+			}
+			w.Metrics.RecordBackgroundLoop(w.ctx, "tenant_pool_reaper", "ok")
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "tenant_pool_reaper", time.Since(start).Seconds())
+		}
 	}
 }
 
