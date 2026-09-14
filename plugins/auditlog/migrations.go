@@ -78,5 +78,47 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS audit_events;
 			`,
 		},
+		{
+			// Tenant isolation for audit_events. cleat#1278.
+			//
+			// A separate version rather than a TenantScoped on v1, for the
+			// reason kvstore's v2 gives: v1 is already recorded as applied
+			// wherever auditlog runs, and a recorded migration never runs
+			// again -- editing it would protect new databases and leave every
+			// existing one open.
+			//
+			// WHAT MAKES THIS ONE DIFFERENT FROM kvstore, AND WHY IT IS THE
+			// TEMPLATE TO COPY. kvstore qualified because every one of its
+			// access sites is request-scoped; its own comment says a plugin
+			// that also sweeps from a background loop "cannot adopt this yet".
+			// auditlog does sweep, and adopts it anyway, because the policy is
+			// not the obstacle -- an unnamed sweep is. The two non-request
+			// writers were resolved in OPPOSITE directions, and telling them
+			// apart is the whole judgement:
+			//
+			//	cleanupRetention  deletes by timestamp for everyone. Genuinely
+			//	                  cross-tenant, so it names itself with
+			//	                  plugin.AcrossAllTenants and the policy lifts.
+			//
+			//	recordAudit       writes ONE tenant's row and had the tenant in
+			//	                  hand the whole time -- it built its insert
+			//	                  context from context.Background() to survive a
+			//	                  cancelled request, and dropped the tenant on
+			//	                  the way. That is a LOST tenant, not a
+			//	                  cross-tenant operation. It carries the tenant
+			//	                  now.
+			//
+			// Bypassing in the second case would have worked, passed every
+			// test, and silently disabled isolation for every audit write --
+			// which is the failure this mechanism exists to make impossible.
+			// Reach for AcrossAllTenants only when there is no tenant to be
+			// had, never when there is one that went missing.
+			//
+			// Up is empty on purpose: the policy is emitted by the runtime from
+			// TenantScoped. On MySQL and SQL Server this version is recorded
+			// and does nothing, which is what the field documents.
+			Version:      2,
+			TenantScoped: []string{"audit_events"},
+		},
 	}
 }

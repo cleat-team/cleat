@@ -55,7 +55,22 @@ func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, method, pa
 
 	// Use a background context with a short timeout so the goroutine
 	// does not hang if the request context is already cancelled.
-	insertCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	//
+	// THE TENANT HAS TO BE PUT BACK. Deriving from context.Background() is
+	// deliberate and correct -- an audit row must be written even if the
+	// request it describes was cancelled -- but it discards everything the
+	// request context carried, including the tenant. Once audit_events has a
+	// row-level policy (migrations.go v2, cleat#1278) an insert with no tenant
+	// is refused outright:
+	//
+	//	cleat.tenant_id is not set -- tenant context required for RLS-scoped query
+	//
+	// tenantID is a parameter of this function, so nothing has to be looked up
+	// or plumbed: the value was in hand the whole time and only the carrier was
+	// lost. This is NOT a case for plugin.AcrossAllTenants -- see the note in
+	// migrations.go on why bypassing here would pass every test and silently
+	// disable isolation for every audit write.
+	insertCtx, cancel := context.WithTimeout(auth.WithTenantID(context.Background(), tenantID), 5*time.Second)
 	defer cancel()
 
 	durationMs := int(duration.Milliseconds())

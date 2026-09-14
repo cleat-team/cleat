@@ -959,15 +959,30 @@ func TestAL_Migrations(t *testing.T) {
 	if len(migrations) == 0 {
 		t.Fatal("expected at least 1 migration")
 	}
-	for _, m := range migrations {
+	for i, m := range migrations {
 		if m.Version == 0 {
 			t.Error("migration version must be non-zero")
 		}
-		if m.Up == "" {
-			t.Error("migration Up SQL must be non-empty")
+		// A migration must DO something -- but SQL is not the only way to do
+		// something. A TenantScoped migration carries no Up and no Down on
+		// purpose: the runtime emits its policy from the field
+		// (plugin.applyTenantScoping) and there is no statement to write.
+		//
+		// This guard predates that field and rejected it by construction, on
+		// BOTH halves -- v2 here first failed on Down, not Up. kvstore, the
+		// only plugin to adopt TenantScoped before cleat#1278, carries no such
+		// test, which is why the mechanism shipped without anyone meeting this.
+		// Thirteen plugins have a copy of it:
+		//
+		//	git grep -ln 'Up == ""' -- 'plugins/*/*_test.go'
+		//
+		// so this same edit is owed thirteen times. Matching the wording
+		// cleat#1511 used for jobqueue rather than inventing a second phrasing.
+		if m.Up == "" && len(m.TenantScoped) == 0 {
+			t.Errorf("migration %d: has neither Up SQL nor TenantScoped tables, so it does nothing", i)
 		}
-		if m.Down == "" {
-			t.Error("migration Down SQL must be non-empty")
+		if m.Down == "" && len(m.TenantScoped) == 0 {
+			t.Errorf("migration %d: has no Down SQL and is not TenantScoped", i)
 		}
 	}
 }
