@@ -19,6 +19,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -686,23 +687,22 @@ func (r *esFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc)
 func TestES_Migrations(t *testing.T) {
 	p, _, _ := newESPlugin(t)
 	migrations := p.Migrations()
-	if len(migrations) == 0 {
-		t.Error("expected at least one migration")
-	}
-	for i, m := range migrations {
-		if m.Version == 0 {
-			t.Errorf("migration %d: version must be non-zero", i)
-		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
-		if m.Down == "" {
-			t.Errorf("migration %d: Down SQL is empty", i)
-		}
-	}
-	// Verify version is exactly 1 for the current schema
+
+	// One shared predicate for what a migration must do, rather than a copy per
+	// plugin -- thirteen plugins carried their own and they had already drifted
+	// (cleat#1513). The copy that stood here rejected a TenantScoped migration
+	// by construction, and the Down half is the one that bit first: v2 declares
+	// a table for the runtime to put a policy on and carries no SQL in either
+	// direction, because there is none to write and no policy an author could
+	// drop. cleat#1512.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
+
+	// Kept local, and deliberately keyed on the INDEX rather than the count.
+	// "migrations[0] is version 1" still holds once v2 exists; `len(migrations)
+	// == 1` would not, and would have broken on every future migration while
+	// saying nothing about whether that migration was right.
 	if len(migrations) > 0 && migrations[0].Version != 1 {
-		t.Errorf("expected migration version 1, got %d", migrations[0].Version)
+		t.Errorf("expected the first migration to be version 1, got %d", migrations[0].Version)
 	}
 }
 
