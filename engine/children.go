@@ -115,6 +115,29 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 				written, writtenEC := s.writeOut(ctx, m, runIDPtr, rec.RunID, runIDMaxLen)
 				return packSimpleResult(writtenEC, written)
 			}
+			// Event type mismatch -- replay divergence. Report it rather than
+			// falling through.
+			//
+			// This block used to fall into the s.exitReplay() below, which
+			// merged two conditions that are not the same thing. Reaching the
+			// END of the history is how replay NORMALLY finishes -- a workflow
+			// with N events replays 0..N-1 and then runs on -- so the shared
+			// path had to be silent, and a divergence inherited that silence.
+			// The cost is specific: the child is started A SECOND TIME and the
+			// run continues as though nothing happened. AwaitChild, AwaitAnyChild
+			// and replayCall all report this; the spawn did not, and a spawn is
+			// the one where the duplicate is a whole workflow rather than a
+			// re-read.
+			//
+			// Not retryable, for the same reason as replayCall: a divergence is
+			// a bug in the workflow code, and running it again diverges again.
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected child_workflow, got %s.\n  child name: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType, name)
+			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+			return int64(uint64(errWritten)<<32 | 1)
 		}
 		s.exitReplay()
 	}

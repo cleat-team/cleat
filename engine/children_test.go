@@ -241,6 +241,22 @@ func TestChildWorkflowWithVersion_ReplayMatch(t *testing.T) {
 	}
 }
 
+// TestChildWorkflowWithVersion_ReplayMismatch asserts that a wrong-type history
+// record is reported as a divergence.
+//
+// It used to assert the OPPOSITE -- errCode 0 and isReplay=false, i.e. "fall
+// through to the fresh path" -- and that is worth recording rather than quietly
+// rewriting. The old assertions did not encode a decision. They arrived in
+// 9fd95738 (#194, "improve coverage across engine, wasm, worker, cleatctl,
+// ~200 new tests"), a sweep that described what the code did; the giveaway is
+// that it checked `s.isReplay` twice with two different messages. So the
+// silence was characterised, not chosen, and a reader finding this test would
+// reasonably have concluded the behaviour was intended.
+//
+// What it actually described is a spawn starting its child a SECOND time after
+// a divergence, with no metric and no message. The repository owner settled it
+// on 2026-09-13: a divergence is loud and non-retryable, as it already was for
+// replayCall, AwaitChild, AwaitAnyChild and replayAwaitAllChildren.
 func TestChildWorkflowWithVersion_ReplayMismatch(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
@@ -251,15 +267,21 @@ func TestChildWorkflowWithVersion_ReplayMismatch(t *testing.T) {
 
 	result := s.childWorkflowWithVersion(context.Background(), nil, "test-wf", `{}`, 0, 0, "", 0, 0)
 
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true: leaving replay is what runs the " +
+			"fresh-execution path below the guard and starts the child a second time")
 	}
 	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0 (fresh path), got %d", errCode)
+	if errCode != 1 {
+		t.Errorf("expected errCode 1 (divergence), got %d -- a spawn that diverges must not "+
+			"report success, because the caller then awaits a child that was started twice", errCode)
+	}
+	// The record must not be consumed. Before this change the fresh path below
+	// recorded the duplicate spawn at this step, which advanced stepCount to 1
+	// and misaligned every later step as well -- so the duplicate was not only
+	// run, it was written into the history as though it belonged there.
+	if s.stepCount != 0 {
+		t.Errorf("expected stepCount=0 (record not consumed), got %d", s.stepCount)
 	}
 }
 
@@ -1363,5 +1385,28 @@ func TestPollChildFailsClosedWithoutACompletionInstant(t *testing.T) {
 	}
 	if pr.Status != "failed" || !strings.Contains(pr.Error, "no completion timestamp") {
 		t.Errorf("expected a failed status naming the missing timestamp, got %q / %q", pr.Status, pr.Error)
+	}
+}
+
+// TestChildWorkflow_ReplayPastEndStillExitsReplay is the negative control for
+// the test above, and it is the half that matters.
+//
+// The fix splits one path into two. If the split were wrong in the other
+// direction -- treating the end of the history as a divergence -- every
+// workflow that resumed and did any new work would fail, and the test above
+// would still pass. This requires the normal case to stay normal.
+func TestChildWorkflow_ReplayPastEndStillExitsReplay(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{} // empty: immediately past the end
+
+	// stopBeforeNewWork returns the suspend sentinel on this bare session
+	// rather than proceeding to a real spawn, which is fine -- what is being
+	// asserted is that replay was EXITED rather than reported as a divergence.
+	_ = s.childWorkflowWithVersion(context.Background(), nil, "child-a", `{}`, 0, 0, "", 0, 0)
+
+	if s.isReplay {
+		t.Error("past the end of history, replay must be EXITED, not reported as divergence -- " +
+			"exhausting the history is how every resumed workflow reaches new work")
 	}
 }
