@@ -72,18 +72,21 @@ func TestEveryKeyBearingEndpointCarriesTheReplayFlag(t *testing.T) {
 		}
 	}
 
-	var readers, missing []string
+	var readers, missing, carrying []string
 	for name, h := range got {
 		if !h.readsKey {
 			continue
 		}
 		readers = append(readers, name)
-		if !h.setsFlag {
+		if h.setsFlag {
+			carrying = append(carrying, name)
+		} else {
 			missing = append(missing, name)
 		}
 	}
 	sort.Strings(readers)
 	sort.Strings(missing)
+	sort.Strings(carrying)
 
 	// NON-VACUITY. If the scan stops finding handlers, or stops finding the
 	// header, every assertion above is satisfied by an empty set — which reads
@@ -107,7 +110,13 @@ func TestEveryKeyBearingEndpointCarriesTheReplayFlag(t *testing.T) {
 			strings.Join(missing, "\n  "))
 	}
 
-	t.Logf("key-bearing handlers carrying the flag: %s", strings.Join(readers, ", "))
+	// `carrying`, not `readers`. readers is every handler that reads the
+	// header, which includes the ones reported as missing three lines above --
+	// so logging it named the same handler as missing the flag AND as carrying
+	// one, in the same output, in exactly the failure case someone is reading
+	// this to understand. Found by WS-1 running this guard's known-positive,
+	// which is the run where the two lines are printed together.
+	t.Logf("key-bearing handlers carrying the flag: %s", strings.Join(carrying, ", "))
 }
 
 // The flag's value must be a bool, not the string "true".
