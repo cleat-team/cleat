@@ -238,7 +238,16 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select isnull(result, '{}'), status, error_msg from workflow_instances where ",
 		Reason: scopedByCaller,
 	},
-	"mssql_signals_promises.go:GetChildCount#7e68d2d025fd": {
+	// DIGEST MOVED IN cleat#1153 GROUNDWORK AND THE REASON DID NOT. The statement
+	// gained 'terminated' in its NOT IN list -- it had been excluding three of the
+	// four settled statuses, so a terminated child kept holding its parent's
+	// child-workflow quota. That changes which ROWS the count includes and nothing
+	// about which TENANT can reach them: no WHERE was added or removed, no table
+	// correlated, and the id still comes from a row already read under a predicate.
+	// Re-stated here rather than carried over, because the key digests the SQL and
+	// an exemption that survived an edit unexamined is what stmtExemption exists to
+	// stop.
+	"mssql_signals_promises.go:GetChildCount#70203e032ff1": {
 		SQL:    "select count(*) from workflow_instances where parent_workflow_id = @p1 and sta",
 		Reason: scopedByCaller,
 	},

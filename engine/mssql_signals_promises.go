@@ -380,6 +380,23 @@ func (s *MSSQLStore) GetChildResult(ctx context.Context, runID string) (ChildOut
 	return ChildOutcome{}, nil
 }
 
+// GetChildCount returns the number of ACTIVE child workflows for the given
+// parent -- the number engine/children.go compares against maxQuotaChildren
+// before allowing another child to be created.
+//
+// All four settled statuses are excluded, and 'terminated' was missing from
+// that list until cleat#1153 groundwork: a terminated child went on holding its
+// parent's quota permanently, so a parent that spawned and disposed of children
+// in a loop eventually could not spawn at all. All three dialects had the same
+// omission, independently hand-written.
+//
+// 'terminating' is deliberately NOT excluded. A child mid-shutdown is running
+// its defer phase and can still do work, so it should still occupy a quota
+// slot; it is released by the terminal write that follows. That is the "settled"
+// question rather than the "can no longer run guest code" question -- see
+// engine/status_vocabulary.go, which keeps the two apart, and
+// engine/one_definition_of_settled_test.go, which fails if this list drifts
+// from the canonical set again.
 func (s *MSSQLStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
@@ -390,7 +407,7 @@ func (s *MSSQLStore) GetChildCount(ctx context.Context, parentWorkflowID string)
 	var count int
 	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
-		WHERE parent_workflow_id = @p1 AND status NOT IN ('done', 'failed', 'dead_lettered')
+		WHERE parent_workflow_id = @p1 AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
 	`, parentWorkflowID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get child count for %s: %w", parentWorkflowID, err)
