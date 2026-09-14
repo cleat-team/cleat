@@ -1043,6 +1043,19 @@ type Worker struct {
 	tenantPools          *plugin.TenantPools
 	plugList             []*plugin.LoadedPlugin
 
+	// Worker membership and this worker's slice of the cluster connection
+	// budget. cleat#1487.
+	//
+	// All four are nil or zero unless --cluster-connection-budget is set, and
+	// the loop that uses them is not launched in that case. A worker that was
+	// upgraded must not start participating in a budget nobody configured --
+	// the same opt-in rule the per-worker budget follows.
+	workerRegistry            *engine.WorkerRegistry
+	connectionShare           *connectionShare
+	connectionBudgetParts     connectionBudget
+	clusterConnectionBudget   int
+	perWorkerConnectionBudget int
+
 	ctx      context.Context
 	cancel   context.CancelFunc
 	draining atomic.Bool
@@ -1268,10 +1281,28 @@ func (w *Worker) Run() {
 	if *metricsSweepInterval > 0 {
 		initLoopCtx("metrics_sweep")
 	}
+	// Conditional on the same thing that launches it below. A loop launched
+	// without its context has no entry in getLoopCtx, so it can never be
+	// cancelled or restarted by the watchdog -- which is what
+	// TestEveryPreparedLoopIsLaunched caught here.
+	if w.workerRegistry != nil {
+		initLoopCtx("worker_membership")
+	}
 
 	// Background heartbeat goroutine.
 	w.registerLoopFunc("heartbeat", w.heartbeatLoop)
 	w.launchLoop("heartbeat", w.heartbeatLoop)
+
+	// Worker membership and the cluster connection share. cleat#1487.
+	//
+	// Launched only when --cluster-connection-budget is set. A worker that was
+	// merely upgraded must not begin registering itself and resizing its pools
+	// against a budget nobody configured -- the same opt-in rule the
+	// per-worker budget follows.
+	if w.workerRegistry != nil {
+		w.registerLoopFunc("worker_membership", w.workerMembershipLoop)
+		w.launchLoop("worker_membership", w.workerMembershipLoop)
+	}
 
 	// Background zombie reaper goroutine.
 	w.registerLoopFunc("reaper", w.reaperLoop)

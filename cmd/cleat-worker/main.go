@@ -1256,6 +1256,42 @@ func main() {
 			"tenant_pools_that_fit", budget.TenantHeadroom(*connectionBudgetFlag))
 	}
 
+	// Cluster-wide budget: register in admin.workers, then take an equal share
+	// of what every live worker divides. cleat#1487.
+	//
+	// REGISTER BEFORE COUNTING, and the order is load-bearing rather than
+	// tidy. A worker that counts first sizes itself to a cluster it is not yet
+	// part of, so every joining worker would briefly claim one worker's worth
+	// too much -- exactly when the cluster is growing and least able to
+	// absorb it. Registering first means the count already includes this
+	// worker and the share it computes is one it is entitled to.
+	var workerRegistry *engine.WorkerRegistry
+	var share *connectionShare
+	if *clusterConnectionBudgetFlag > 0 {
+		workerRegistry = &engine.WorkerRegistry{DB: db, Dialect: engine.Dialect(*driver)}
+		reg := engine.WorkerRegistration{
+			WorkerID:         workerID,
+			Hostname:         hostnameOrEmpty(),
+			PID:              os.Getpid(),
+			Concurrency:      *concurrency,
+			ConnectionBudget: *clusterConnectionBudgetFlag,
+		}
+		if err := workerRegistry.Register(ctx, reg); err != nil {
+			// Fatal on purpose. The alternative is a worker that silently
+			// opts out of a budget the operator configured and takes
+			// whatever it likes, which is worse than not starting: every
+			// other worker in the cluster has already divided the budget on
+			// the assumption that participants are countable.
+			logger.ErrorContext(ctx, "refusing to start: could not register in the worker registry",
+				"worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+		share = newConnectionShare(*clusterConnectionBudgetFlag, connectionShareGrowHoldDown, nil)
+		logger.InfoContext(ctx, "registered in the worker registry",
+			"worker_id", workerID, "cluster_connection_budget", *clusterConnectionBudgetFlag,
+			"grow_hold_down", connectionShareGrowHoldDown)
+	}
+
 	w := &Worker{
 		Metrics:                          metricsInstance,
 		id:                               workerID,
@@ -1271,6 +1307,11 @@ func main() {
 		bgWg:                             &bgWg,
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,
+		workerRegistry:                   workerRegistry,
+		connectionShare:                  share,
+		connectionBudgetParts:            budget,
+		clusterConnectionBudget:          *clusterConnectionBudgetFlag,
+		perWorkerConnectionBudget:        *connectionBudgetFlag,
 		pollInterval:                     *pollInterval,
 		ctx:                              ctx,
 		cancel:                           cancel,
