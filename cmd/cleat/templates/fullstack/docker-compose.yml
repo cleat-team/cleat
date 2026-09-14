@@ -1,0 +1,44 @@
+version: "3.9"
+services:
+  postgres:
+    # Deliberately NOT digest-pinned, unlike cleat's own CI. This file is
+    # scaffolded into your project, and a digest frozen on the day you ran
+    # `cleat init` is yours to carry, not ours to choose. 16 is cleat's
+    # minimum supported PostgreSQL.
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cleat
+      POSTGRES_PASSWORD: cleat
+      POSTGRES_DB: cleat
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cleat -d cleat"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  cleat-worker:
+    image: ghcr.io/cleat-team/cleat-worker:latest
+    command:
+      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+      - "--api-addr=:8080"
+      - "--concurrency=10"
+      # WITHOUT THIS FLAG THE RATE LIMITER IS PER-WORKER. plugin-config.json
+      # sets the rate-limiter to "db" mode, which coordinates through a
+      # rate_counter table and therefore holds across every worker. The
+      # default is "memory": in-process token buckets, so N workers give one
+      # tenant N times the configured rate. See README.md, "Check the rate
+      # limiter actually took".
+      - "--plugin-config=/etc/cleat/plugin-config.json"
+      # Per-tenant limits are off unless you set a rate. The per-IP default
+      # (100/s) is the wrong dimension behind a load balancer.
+      - "--rate-limit-per-tenant=50"
+      - "--rate-limit-per-tenant-burst=100"
+    volumes:
+      - ./plugin-config.json:/etc/cleat/plugin-config.json:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
