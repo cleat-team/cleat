@@ -298,6 +298,15 @@ var (
 			"--tenant-isolation=role -- and sizing from --concurrency alone under-provisions "+
 			"a default worker by a factor of five. When set, the worker logs the breakdown at "+
 			"startup and refuses to start if its fixed pools alone exceed it. cleat#1486")
+	clusterConnectionBudgetFlag = flag.Int("cluster-connection-budget", 0,
+		"Total database connections ALL workers together may open (0 = unset, no sharing). "+
+			"Separate from --connection-budget, which bounds one worker: this is the number "+
+			"the cluster divides, and each worker takes an equal share of it -- "+
+			"budget/live-workers, floor 1. Requires the worker registry, so workers must "+
+			"reach the same database. Set both to mean \"no worker above X, and no more than "+
+			"Y between them\": the effective budget is the smaller. A worker shrinks its "+
+			"share the moment another joins, and waits before growing when one leaves, "+
+			"because a crashed worker's connections outlive its heartbeat. cleat#1487")
 	encryptSensitivePayloads = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
 	maxQuotaEvents           = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
 	maxQuotaChildren         = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
