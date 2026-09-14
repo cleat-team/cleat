@@ -533,7 +533,7 @@ func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 	qsJSON := marshalQueryState(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
+		SET status = 'done', result = ?, completed_at = NOW(6), completed_by = assigned_to, assigned_to = NULL, query_state = ?
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
 	`, resultJSON, qsJSON, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
@@ -585,7 +585,7 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 		    error_code = ?,
 		    error_op = ?,
 		    completed_at = NOW(6),
-		    assigned_to = NULL,
+		    completed_by = assigned_to, assigned_to = NULL,
 		    query_state = ?
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
 	`, errorMsg, errorCode, errorOp, qsJSON, workflowID, workerID, s.tenantID, generation)
@@ -893,7 +893,7 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	qsJSON := marshalQueryState(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
+		SET status = 'done', result = ?, completed_at = NOW(6), completed_by = assigned_to, assigned_to = NULL, query_state = ?
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
 	`, resultJSON, qsJSON, currentRunID, workerID, s.tenantID, generation)
 	if err != nil {
@@ -1056,7 +1056,7 @@ func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = ?, error_code = ?, error_op = ?,
-		    completed_at = NOW(6), assigned_to = NULL
+		    completed_at = NOW(6), completed_by = assigned_to, assigned_to = NULL
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
 	`, errMsg, errorCode, errorOp, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
@@ -1096,7 +1096,7 @@ func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 func (s *MySQLStore) RetryWorkflow(ctx context.Context, workflowID string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL,
 		    error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = NOW(6)
 		WHERE id = ? AND status = 'dead_lettered' AND tenant_id = ?
@@ -1190,7 +1190,7 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		SET status = 'failed', error_msg = 'parent workflow terminated',
 		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
 		    completed_at = NOW(6),
-		    assigned_to = NULL, generation = generation + 1
+		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')

@@ -762,6 +762,11 @@ func testWorkflowRow(id, name string, version int64, status string, assignedTo s
 		// ("expected 15 destination arguments in Scan, not 16"), not a compile
 		// one, so these rows are the part a widened SELECT breaks.
 		false,
+		// completed_by, added by cleat#1118 -- the next column to prove the
+		// paragraph above. Blank because this row is a RUNNING workflow: the
+		// column is written at the moment the lease is surrendered, so a run
+		// that has not finished has nothing to record.
+		"",
 	}}
 }
 
@@ -868,6 +873,10 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 			"failed",                           // pending_terminal_status (cleat#1105)
 			true,                               // cancellation_requested (cleat#1351)
 			"INCIDENT-4242 operator cancelled", // cancellation_reason (cleat#1351)
+			// completed_by (cleat#1118). Deliberately NOT "worker-1", which
+			// this row already supplies for assigned_to: a scan that read the
+			// lease column twice would pass against a matching value.
+			"worker-7",
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")
@@ -896,6 +905,11 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 		t.Errorf("ParentWorkflowID is nil, want %q -- the fake row supplies it", "wf-parent")
 	} else if *wf.ParentWorkflowID != "wf-parent" {
 		t.Errorf("ParentWorkflowID = %q, want %q", *wf.ParentWorkflowID, "wf-parent")
+	}
+	// cleat#1118, same idiom as the three lines above. The want differs from
+	// AssignedTo on purpose -- see the row comment.
+	if wf != nil && wf.CompletedBy != "worker-7" {
+		t.Errorf("CompletedBy = %q, want %q", wf.CompletedBy, "worker-7")
 	}
 }
 
@@ -1556,6 +1570,7 @@ func TestMySQLStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 			"",    // pending_terminal_status (none pending)
 			false, // cancellation_requested (NOT NULL, default false)
 			"",    // cancellation_reason (COALESCE of NULL: never cancelled)
+			"",    // completed_by (COALESCE of NULL: still running, no worker recorded)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")

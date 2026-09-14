@@ -728,7 +728,7 @@ func (s *MSSQLStore) completeWorkflowOnce(ctx context.Context, workflowID, worke
 	qsJSON := marshalQueryState(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL, query_state = @p4
+		SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), completed_by = assigned_to, assigned_to = NULL, query_state = @p4
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p5
 	`, workflowID, workerID, resultJSON, string(qsJSON), generation)
 	if err != nil {
@@ -788,7 +788,7 @@ func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID 
 		    error_code = @p4,
 		    error_op = @p5,
 		    completed_at = SYSUTCDATETIME(),
-		    assigned_to = NULL,
+		    completed_by = assigned_to, assigned_to = NULL,
 		    query_state = @p6
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p7
 	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
@@ -845,7 +845,7 @@ func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = @p3, error_code = @p4, error_op = @p5,
-		    completed_at = SYSUTCDATETIME(), assigned_to = NULL
+		    completed_at = SYSUTCDATETIME(), completed_by = assigned_to, assigned_to = NULL
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p6
 	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
 	if err != nil {
@@ -892,7 +892,7 @@ func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, 
 func (s *MSSQLStore) RetryWorkflow(ctx context.Context, workflowID string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL,
 		    error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = SYSUTCDATETIME()
 		WHERE id = @p1 AND status = 'dead_lettered' AND tenant_id = @p2
@@ -1019,7 +1019,7 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 	qsJSON := marshalQueryState(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL, query_state = @p4
+		SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), completed_by = assigned_to, assigned_to = NULL, query_state = @p4
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p5
 	`, currentRunID, workerID, resultJSON, string(qsJSON), generation)
 	if err != nil {
@@ -1468,7 +1468,7 @@ func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		SET status = 'failed', error_msg = 'parent workflow terminated',
 		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
 		    completed_at = SYSUTCDATETIME(),
-		    assigned_to = NULL, generation = generation + 1
+		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')

@@ -163,7 +163,7 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 		var traceID sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
 			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &traceID, &wf.ReclaimCount,
-			&wf.CancellationRequested); err != nil {
+			&wf.CancellationRequested, &wf.CompletedBy); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		wf.TraceID = traceID.String
@@ -209,14 +209,15 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       -- so cancellation_requested is a BIT and go-mssqldb scans it into
 		       -- a Go bool directly. COALESCE keeps a NULL from a pre-migration
 		       -- row reading as cancelled.
-		       COALESCE(cancellation_requested, 0), COALESCE(cancellation_reason, '')
+		       COALESCE(cancellation_requested, 0), COALESCE(cancellation_reason, ''),
+		       COALESCE(completed_by, '')
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
 		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
 		&wf.CreatedAt, &wf.PendingTerminalStatus,
-		&wf.CancellationRequested, &wf.CancellationReason)
+		&wf.CancellationRequested, &wf.CancellationReason, &wf.CompletedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

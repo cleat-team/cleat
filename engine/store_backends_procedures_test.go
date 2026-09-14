@@ -54,6 +54,7 @@ var postgresProcedureMigrations = []string{
 	"049_a_burst_wakes_finalize_on_progress.sql",
 	"050_the_idempotency_write_needs_the_tenant.sql",
 	"053_the_finalize_procedure_stops_writing_the_result_column.sql",
+	"075_the_finalize_procedure_records_the_worker.sql",
 }
 
 var mysqlProcedureMigrations = []string{

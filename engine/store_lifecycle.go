@@ -345,7 +345,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	// deleted. cleat#1175.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
+		SET status = 'done', result = $3, completed_at = now(), completed_by = assigned_to, assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
 	`, currentRunID, workerID, resultJSON, qsJSON, generation)
 	if err != nil {
@@ -491,7 +491,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	// deleted. cleat#1175.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
+		SET status = 'done', result = $3, completed_at = now(), completed_by = assigned_to, assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
 	`, workflowID, workerID, resultJSON, qsJSON, generation)
 	if err != nil {
@@ -544,7 +544,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		    error_code = $4,
 		    error_op = $5,
 		    completed_at = now(),
-		    assigned_to = NULL,
+		    completed_by = assigned_to, assigned_to = NULL,
 		    query_state = $6
 		WHERE id = $1 AND assigned_to = $2 AND generation = $7
 	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
@@ -687,7 +687,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		SET status = 'failed', error_msg = 'parent workflow terminated',
 		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
 		    completed_at = now(),
-		    assigned_to = NULL, generation = generation + 1
+		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated')
@@ -796,7 +796,7 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
-		    completed_at = now(), assigned_to = NULL
+		    completed_at = now(), completed_by = assigned_to, assigned_to = NULL
 		WHERE id = $1 AND assigned_to = $2 AND generation = $6
 	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
 	if err != nil {
@@ -846,7 +846,7 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL,
 		    error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = now()
 		WHERE id = $1 AND status = 'dead_lettered'

@@ -165,15 +165,28 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "update workflow_instances set heartbeat_at = sysutcdatetime() where assigned_t",
 		Reason: mustNotScope,
 	},
-	"mssql_lifecycle.go:completeWorkflowOnce#40fe6875c0a5": {
+	// THE FOUR TERMINAL-WRITE DIGESTS BELOW MOVED IN cleat#1118 AND THE REASON
+	// DID NOT. That sweep added `completed_by = assigned_to` to every terminal
+	// write's SET clause; it touches no WHERE, correlates no new table, and
+	// changes nothing about where the id comes from, so scopedByCaller is as
+	// true of the new text as of the old. Re-stated here rather than carried
+	// over, because the key digests the statement and an exemption that
+	// survived an edit unexamined is the failure stmtExemption exists to stop.
+	//
+	// Worth knowing if you are ever reviewing one of these: the SQL field is
+	// truncated at 78 characters and the insertion lands after that cut, so
+	// three of these four hints are byte-identical before and after. The diff
+	// a reviewer can see is the digest alone -- which is the argument for
+	// keying on it rather than on the readable prefix.
+	"mssql_lifecycle.go:completeWorkflowOnce#c25028e11930": {
 		SQL:    "update workflow_instances set status = 'done', result = @p3, completed_at = sy",
 		Reason: scopedByCaller,
 	},
-	"mssql_lifecycle.go:failWorkflowOnce#23334c4367a9": {
+	"mssql_lifecycle.go:failWorkflowOnce#9f6051527077": {
 		SQL:    "update workflow_instances set status = 'failed', error_msg = @p3, error_code =",
 		Reason: scopedByCaller,
 	},
-	"mssql_lifecycle.go:moveToDeadLetterQueueOnce#2062ae416fbb": {
+	"mssql_lifecycle.go:moveToDeadLetterQueueOnce#6e62fa0d74d4": {
 		SQL:    "update workflow_instances set status = 'dead_lettered', error_msg = @p3, error",
 		Reason: scopedByCaller,
 	},
@@ -181,7 +194,7 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "update workflow_instances set status = case when pending_terminal_status is no",
 		Reason: scopedByCaller,
 	},
-	"mssql_lifecycle.go:continueAsNewOnce#40fe6875c0a5": {
+	"mssql_lifecycle.go:continueAsNewOnce#c25028e11930": {
 		SQL:    "update workflow_instances set status = 'done', result = @p3, completed_at = sy",
 		Reason: scopedByCaller,
 	},

@@ -317,7 +317,7 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 			UPDATE workflow_instances
 			SET status = 'done', result = $3, completed_at = now(),
 			    error_msg = NULL, error_code = NULL, error_op = NULL,
-			    assigned_to = NULL, generation = generation + 1,
+			    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
 			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = $1 AND tenant_id = $2 AND generation = $4
 		`, workflowID, s.tenantID, a.result, generation)
@@ -325,7 +325,7 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'failed', error_msg = $3, error_code = $4, error_op = 'admin_force_fail',
-			    completed_at = now(), assigned_to = NULL, generation = generation + 1,
+			    completed_at = now(), completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
 			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = $1 AND tenant_id = $2 AND generation = $5
 		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation)
@@ -527,7 +527,7 @@ func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, g
 			UPDATE workflow_instances
 			SET status = 'done', result = ?, completed_at = NOW(6),
 			    error_msg = NULL, error_code = NULL, error_op = NULL,
-			    assigned_to = NULL, generation = generation + 1,
+			    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
 			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = ? AND tenant_id = ? AND generation = ?
 		`, a.result, workflowID, s.tenantID, generation)
@@ -535,7 +535,7 @@ func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, g
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'failed', error_msg = ?, error_code = ?, error_op = 'admin_force_fail',
-			    completed_at = NOW(6), assigned_to = NULL, generation = generation + 1,
+			    completed_at = NOW(6), completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
 			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = ? AND tenant_id = ? AND generation = ?
 		`, a.errorMsg, a.errorCode, workflowID, s.tenantID, generation)
@@ -723,7 +723,7 @@ func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID strin
 			UPDATE workflow_instances
 			SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(),
 			    error_msg = NULL, error_code = NULL, error_op = NULL,
-			    assigned_to = NULL, generation = generation + 1,
+			    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
 			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = @p1 AND tenant_id = @p2 AND generation = @p4
 		`, workflowID, s.tenantID, a.result, generation)
@@ -731,7 +731,7 @@ func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID strin
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'failed', error_msg = @p3, error_code = @p4, error_op = 'admin_force_fail',
-			    completed_at = SYSUTCDATETIME(), assigned_to = NULL, generation = generation + 1,
+			    completed_at = SYSUTCDATETIME(), completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
 			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = @p1 AND tenant_id = @p2 AND generation = @p5
 		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation)

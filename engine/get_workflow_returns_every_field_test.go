@@ -143,6 +143,10 @@ func makeEveryColumnNonZero(t *testing.T, store WorkflowStore, id string) {
 		// that needs a helper.
 		`cancellation_requested = ` + trueLiteral(store),
 		`cancellation_reason = 'INCIDENT-4242 operator cancelled'`,
+		// cleat#1118. Set here like any other column: the guard's contract is
+		// that a row with every column non-zero produces a struct with every
+		// field non-zero, and completed_by is a column of this row like the rest.
+		`completed_by = 'worker-everyfield'`,
 		`completed_at = ` + nowLiteral(store),
 		`started_at = ` + nowLiteral(store),
 		`next_wake_at = ` + nowLiteral(store),

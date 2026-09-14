@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`completed_by` on the workflow object** — the worker that performed the terminal write.
+  `assigned_to` is a *lease*, not an audit field: every terminal write clears it while fencing on
+  it, so it is blank on every finished run and cannot answer "which worker ran this" after the
+  fact. Measured on a live database, `assigned_to` was blank on 185 of 185 terminal runs.
+  (cleat#1118)
+
+  **Schema change**, applied by `postgres/074`, `mysql/064` and `mssql/068`: `workflow_instances`
+  gains a nullable `completed_by`. `postgres/075` additionally re-emits `finalize_workflow_status`,
+  whose `done` and `failed` branches record it; the `ready` branch deliberately does not, because
+  that run goes back on the queue and recording there would name whoever yielded.
+
+  Returned by both read paths — `GET /api/workflows/:id` and the workflow listing.
+
+  **Nothing is backfilled.** The column is NULL on every row written before the migration, and on
+  any run that reached a terminal state without ever being claimed — no worker ran it. A run
+  terminated through its *defer phase* names the worker that ran the defer phase rather than the
+  workflow body: that transition clears the lease deliberately, to fence the old owner out.
+
 ### Changed
 
 - **An update name is now reusable.** `POST /api/workflows/:id/update/:name` may be called any

@@ -41,9 +41,40 @@ type WorkflowInstance struct {
 	ErrorCode  string          `json:"error_code,omitempty"`
 	ErrorOp    string          `json:"error_op,omitempty"`
 	AssignedTo string          `json:"assigned_to"`
-	NextWakeAt time.Time       `json:"next_wake_at"`
-	TenantID   string          `json:"tenant_id,omitempty"`
-	CreatedAt  time.Time       `json:"created_at,omitempty"`
+
+	// CompletedBy is the worker that took this run to a terminal status, or
+	// empty if none did. cleat#1118.
+	//
+	// A PLAIN STRING, UNLIKE CompletedAt BELOW, and the difference is which
+	// absence is ambiguous. CompletedAt is a pointer because a zero time.Time
+	// serialises as a parsable timestamp -- every running workflow would claim
+	// to have finished in the year 1. An empty string has no such second
+	// reading, and `status` already distinguishes "not finished" from
+	// "finished"; what this adds is WHICH worker, with empty meaning none is
+	// recorded -- a run terminated before it was ever claimed, or one finished
+	// before this column existed.
+	//
+	// It is NOT assigned_to. That field is a LEASE and every terminal write
+	// clears it while fencing on it, so it is blank on every completed run by
+	// construction -- measured 185 of 185 on a ports database. The two answer
+	// different questions and conflating them is what produced cleat#1118.
+	//
+	// POPULATED ON BOTH READ PATHS: GetWorkflowByID and ListWorkflows, the same
+	// rule ReclaimCount states below and for a related reason. Several
+	// neighbouring columns are deliberately NOT in the listing -- completed_at
+	// and started_at among them -- so carrying this one is a decision rather
+	// than the default, and the argument is that the high-value question is
+	// AGGREGATE. "Which worker is producing these failures" is a list scan, and
+	// a listing without the column turns it into one detail read per row. The
+	// size objection that keeps `result` and `cancellation_reason` out does not
+	// reach a short identifier.
+	//
+	// engine/list_workflows_returns_every_field_test.go is what forced the
+	// question, and it will force it again for the next column.
+	CompletedBy string    `json:"completed_by,omitempty"`
+	NextWakeAt  time.Time `json:"next_wake_at"`
+	TenantID    string    `json:"tenant_id,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
 
 	// CompletedAt is when the run reached a terminal status, or nil while it
 	// has not. A POINTER because its absence is the meaningful case: a plain
