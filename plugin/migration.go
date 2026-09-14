@@ -381,6 +381,14 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 				return fmt.Errorf("plugin %s migration v%d tenant scoping: %w", name, m.Version, err)
 			}
 
+			// And the grants for tables a sweep touches but which carry no
+			// tenant column. Same transaction, same reason: a sweep must never
+			// observe a state where its table exists and it cannot reach it.
+			if err := grantSweepTables(ctx, tx.ExecContext, dialect, m.SweepTables); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("plugin %s migration v%d sweep grants: %w", name, m.Version, err)
+			}
+
 			// And record them, in the same transaction and for the same
 			// reason: admin.drop_tenant reads admin.plugin_tables to find
 			// the plugin tables a dropped tenant owns rows in, so a table
@@ -484,25 +492,76 @@ func applyTenantScoping(ctx context.Context, exec func(ctx context.Context, quer
 			return fmt.Errorf("tenant-scoped table %q is not a plain identifier", table)
 		}
 		policy := table + "_tenant_isolation"
+		sweepPolicy := table + "_cross_tenant"
 		for _, stmt := range []string{
 			fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", table),
 			fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY", table),
 			fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s", policy, table),
-			// cleat.tenant_row_is_visible rather than the inline
-			// `tenant_id = cleat.assert_tenant_set()` this used to emit.
-			// Same answer when no bypass is named, including the RAISE on an
-			// unset tenant; it additionally admits a sweep that named itself
-			// through plugin.AcrossAllTenants. Defined in
-			// migrations/postgres/063, which is a CORE migration and so has
-			// already run by the time any plugin migration does --
-			// cmd/cleat-worker/main.go runs migration.Runner at :680 and
-			// plugin.RunMigrations at :686. cleat#1278.
-			fmt.Sprintf("CREATE POLICY %s ON %s FOR ALL USING (cleat.tenant_row_is_visible(tenant_id))",
+			fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s", sweepPolicy, table),
+			// TWO policies, not one CASE. Permissive policies are OR-ed, so
+			// the tenant predicate stays a plain equality the planner can turn
+			// into an Index Cond, and the sweep gets its own policy carrying
+			// no tenant predicate at all.
+			//
+			// This used to emit cleat.tenant_row_is_visible(tenant_id) (a
+			// CASE, migration 063), which lands as a Filter rather than an
+			// Index Cond: measured at 400000 rows over 400 tenants, 603.654 ms
+			// with 399000 rows removed by the filter, against 0.415 ms for the
+			// equality. Neither plan is a Seq Scan -- both are Index Only
+			// Scans -- so an EXPLAIN grepped for "Seq Scan" shows nothing and
+			// reads as already-fixed. cleat#1490.
+			fmt.Sprintf("CREATE POLICY %s ON %s FOR ALL TO PUBLIC USING (tenant_id = cleat.assert_tenant_set())",
 				policy, table),
+			// TO PUBLIC above, deliberately, and not a parent role every
+			// application role is granted: admin.create_tenant_role creates
+			// per-tenant roles NOINHERIT (001_schema.sql:67), and a NOINHERIT
+			// member does not match a `TO <parent>` policy. Measured, such a
+			// role reads 0 rows -- no error, just an empty result, which is
+			// the failure the RAISE in assert_tenant_set exists to prevent.
+			fmt.Sprintf("CREATE POLICY %s ON %s FOR ALL TO cleat_sweep USING (true)",
+				sweepPolicy, table),
+			// cleat_sweep is entered with SET LOCAL ROLE (see
+			// engine/plugindb_tenant.go), so it needs privileges of its own;
+			// membership does not lend them.
+			fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO cleat_sweep", table),
 		} {
 			if _, err := exec(ctx, stmt); err != nil {
 				return fmt.Errorf("%s: %w", stmt, err)
 			}
+		}
+	}
+	return nil
+}
+
+// grantSweepTables gives cleat_sweep privileges on tables a cross-tenant sweep
+// touches that carry no tenant column, declared in Migration.SweepTables.
+//
+// WHY A GRANT AND NOT A POLICY. These tables have no tenant_id, so there is
+// nothing for a policy to filter on; what they need is for the role a sweep
+// runs as to be able to reach them at all. beginTenantTx issues
+// SET LOCAL ROLE cleat_sweep for a plugin.AcrossAllTenants transaction
+// (cleat#1490), and a role switch changes privileges for EVERY table in the
+// transaction -- so a sweep that deletes from an unscoped table gets
+// "permission denied for table X (42501)" unless it is named here.
+//
+// Measured when this was found: 2 of 24 plugin packages needed it --
+// blobstore (blob_index scoped, blob_content not) and notifications
+// (webhook_config scoped, webhook_delivery not). The other 22 sweeps touch
+// only tables they had already declared.
+//
+// Non-PostgreSQL dialects return nil: no role is switched there, so no grant
+// is required.
+func grantSweepTables(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), dialect Dialect, tables []string) error {
+	if len(tables) == 0 || dialect != DialectPostgres {
+		return nil
+	}
+	for _, table := range tables {
+		if !isPlainIdentifier(table) {
+			return fmt.Errorf("sweep table %q is not a plain identifier", table)
+		}
+		stmt := fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO cleat_sweep", table)
+		if _, err := exec(ctx, stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
 		}
 	}
 	return nil

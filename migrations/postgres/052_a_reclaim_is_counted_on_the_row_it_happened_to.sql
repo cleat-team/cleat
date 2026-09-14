@@ -11,7 +11,17 @@
 -- cleat#1008. A workflow whose worker dies mid-segment is reclaimed by
 -- ReapStaleInstances and runs again, and nothing has ever recorded that it
 -- happened. Fleet-wide the reaper is visible -- cleat_reaper_instances_claimed_total
--- counts every row it takes -- but that counter cannot be attributed: a
+-- counts every row it takes -- but that counter cannot be attributed:
+--
+-- CORRECTION (cleat#1317, 2026-09-14): the sentence above was wrong when it was
+-- written. cleat_reaper_instances_claimed_total was declared in metrics.go and
+-- had NO call site, so it counted nothing and emitted no series; "fleet-wide the
+-- reaper is visible" was false. It is fed now, from the reaper loop in
+-- cmd/cleat-worker/setup.go. This migration column is unaffected either way --
+-- a fleet-wide counter cannot answer a per-workflow question no matter how well
+-- it works -- but the premise is corrected here because it was stated as fact
+-- and reasoned from, in this file and in
+-- engine/reclaim_count_records_reclaims_only_test.go. a
 -- thousand reclaims of one wedged workflow and one reclaim each of a thousand
 -- healthy ones produce the same number. An operator asking "has THIS workflow
 -- been reclaimed twenty times" has had no way to ask it.

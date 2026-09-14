@@ -327,18 +327,51 @@ tier1:
   # prevent, in the one place nobody had looked.
   #
   # DECIDED 2026-08-08: the claim is 16+, matching what CI has always actually run. 14+
-  # was never tested by anything. Nothing in the codebase needs 16 -- the Postgres-
-  # specific SQL is `FOR UPDATE SKIP LOCKED` (9.5), LISTEN/NOTIFY, and gen_random_uuid()
-  # via pgcrypto, and there is no runtime version check anywhere (grep for
-  # `server_version` returns nothing). So this is a claim about what is *verified*, not
-  # about what would happen to work. A floor nobody exercises is the claim most likely to
-  # be false, and lowering the claim to what CI runs is cheaper and more honest than
+  # was never tested by anything. At that date nothing in the codebase NEEDED 16 -- the
+  # Postgres-specific SQL was `FOR UPDATE SKIP LOCKED` (9.5), LISTEN/NOTIFY, and
+  # gen_random_uuid() via pgcrypto -- so the claim was about what is *verified*, not
+  # about what would happen to work. A floor nobody exercises is the claim most likely
+  # to be false, and lowering the claim to what CI runs was cheaper and more honest than
   # adding a 14 arm to a matrix that does not exist.
+  #
+  # THAT IS NO LONGER TRUE, AND THE FLOOR IS NOW LOAD-BEARING. 2026-09-14, owner
+  # decision on cleat#1490: migration 077 grants the cross-tenant sweep role with
+  #
+  #     GRANT cleat_sweep TO <role> WITH INHERIT FALSE
+  #
+  # which is PostgreSQL 16 syntax, and is not stylistic -- membership that INHERITS
+  # would make every member match the sweep's `USING (true)` policy, which is the
+  # isolation boundary itself. So 16 is a REQUIREMENT from that migration onward.
+  #
+  # Two paragraphs above say this file exists because status was recorded in prose
+  # nobody kept current. This entry is the same failure caught early: #1558 DID state
+  # "PostgreSQL 16+", at migrations/postgres/077:77 -- beside the code, where it felt
+  # done, and not in the file whose whole purpose is to be the single upstream claim.
+  # Documenting it locally is what made looking upstream feel unnecessary.
+  #
+  # ENFORCED 2026-09-14, migration/minimum_server_version.go: the runner refuses before
+  # applying anything, naming the version and the reason. A pre-flight rather than a
+  # migration because migrations apply in order -- a guard numbered 078 would run after
+  # 077 and never be reached on the server it exists to warn.
+  #
+  # WHAT AN OPERATOR ON 15 ACTUALLY MET BEFORE THAT, measured against postgres:15.19
+  # rather than reasoned about, because the first draft of this entry overstated it:
+  #
+  #     ERROR: migration 077_a_plugin_policy_can_use_its_index.sql: execute:
+  #            pq: syntax error at or near "INHERIT" (42601)
+  #
+  # and the failure is CLEAN. Each migration file runs in a transaction, so it rolls
+  # back whole: afterwards that database held 76 as its highest recorded migration, no
+  # cleat_sweep role, and no partial policies. So the check does not prevent a corrupted
+  # schema -- there was never one to prevent. It replaces a Postgres syntax error with a
+  # sentence. Saying "corrupts a 15 database" would read as alarmist to anyone who
+  # tested it, which is its own way of not being believed.
   #
   # There is no CI matrix over database versions for ANY dialect; each is pinned to
   # exactly one. If that changes, this is the key to widen.
   dialect_versions:
-    postgres: ">=16"     # tested against 16.14, digest-pinned at twelve sites
+    postgres: ">=16"     # REQUIRED since migration 077, not merely tested; see above.
+                         # Tested against 16.14, digest-pinned at twelve sites.
     mysql: ">=8.0"       # tested against 8.4, tag-pinned (not digest) -- see below
     mssql: ">=2022"      # tested against the digest pinned in tier1-gate.yml
 

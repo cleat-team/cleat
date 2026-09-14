@@ -41,7 +41,8 @@ func downTestDB(t *testing.T, name string) *sql.DB {
 	db := newPluginScratchDB(t, strings.ToLower(name))
 	// THE CORE SCHEMA IS REQUIRED, not incidental. A migration declaring
 	// TenantScoped makes applyTenantScoping create a policy calling
-	// cleat.tenant_row_is_visible, so an empty database fails with
+	// cleat.assert_tenant_set() and a second one granted to the cleat_sweep
+	// role (cleat#1490), so an empty database fails with
 	//
 	//	pq: schema "cleat" does not exist (3F000)
 	//

@@ -176,6 +176,35 @@ type Migration struct {
 	// returning nothing. kvstore qualifies because all of its access is
 	// request-scoped; most plugins do not yet.
 	TenantScoped []string
+
+	// SweepTables names tables a cross-tenant sweep in this plugin READS OR
+	// WRITES but which carry no tenant column, so they get no policy and are
+	// not listed in TenantScoped.
+	//
+	// WHY THIS EXISTS AT ALL, because "grant the sweep everything" is the
+	// obvious alternative. A cross-tenant sweep runs under SET LOCAL ROLE
+	// cleat_sweep (engine/plugindb_tenant.go, cleat#1490), and switching role
+	// changes the privilege set for EVERY table the transaction touches, not
+	// only the ones carrying a policy. cleat_sweep therefore needs privileges
+	// on these by name. Granting it blanket privileges instead would hand any
+	// plugin that names itself cross-tenant the engine's own tables, which
+	// migrations 023, 024 and 073 each declined to do -- 073 in as many words:
+	// "it would let ANY plugin that names itself cross-tenant read the
+	// engine's own table. That trades a bounded question for an open
+	// capability, on behalf of two callers."
+	//
+	// A MISSING ENTRY FAILS LOUDLY, which is the point of naming them. The
+	// sweep gets `permission denied for table X (42501)` in the plugin's own
+	// tests. That is why this is a declaration and not a heuristic: the
+	// alternative shapes all fail by quietly widening what a sweep can reach.
+	//
+	// NOT A SUBSTITUTE FOR TenantScoped. A table listed here gets a GRANT and
+	// no policy -- it is asserted to have no tenant column. A table with a
+	// tenant column belongs in TenantScoped, which gives it both.
+	//
+	// PostgreSQL only, for the same reason TenantScoped is: the other two
+	// dialects install no policy and do not switch role.
+	SweepTables []string
 }
 
 // HasCommands: plugin adds CLI subcommands.

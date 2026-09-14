@@ -718,6 +718,25 @@ func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 		// rather than `ON ALL FUNCTIONS`, because admin also holds
 		// admin.drop_tenant, and a blanket grant here would hand this role the
 		// capability cleat#1365 was filed to take away from tenant roles.
+		// MEMBERSHIP IN cleat_sweep, WITH INHERIT FALSE -- and the inheritance
+		// half is the point, not boilerplate. beginTenantTx issues
+		// `SET LOCAL ROLE cleat_sweep` for a plugin.AcrossAllTenants sweep
+		// (cleat#1490), which requires membership; without it every
+		// cross-tenant plugin test fails with "permission denied to set role".
+		//
+		// WITH INHERIT FALSE because a plain GRANT applies the sweep's
+		// `USING (true)` policy to this role PASSIVELY -- PostgreSQL matches a
+		// `TO role` policy on membership alone, no SET ROLE needed. Measured:
+		// plain GRANT let the role read all 400000 rows of a 400-tenant table
+		// with no error and the correct number of policies; WITH INHERIT FALSE
+		// returned its own 1000. A test harness that granted it the easy way
+		// would make every tenant-isolation test in this package unable to
+		// fail.
+		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cleat_sweep') THEN
+				EXECUTE 'GRANT cleat_sweep TO ` + PostgresRLSTestRole + ` WITH INHERIT FALSE';
+			END IF;
+		END $$;`,
 		`GRANT USAGE ON SCHEMA admin TO ` + PostgresRLSTestRole,
 		`DO $$ BEGIN
 			IF EXISTS (

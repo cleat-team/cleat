@@ -298,13 +298,22 @@ var (
 			"--tenant-isolation=role -- and sizing from --concurrency alone under-provisions "+
 			"a default worker by a factor of five. When set, the worker logs the breakdown at "+
 			"startup and refuses to start if its fixed pools alone exceed it. cleat#1486")
+	clusterConnectionBudgetFlag = flag.Int("cluster-connection-budget", 0,
+		"Total database connections ALL workers together may open (0 = unset, no sharing). "+
+			"Separate from --connection-budget, which bounds one worker: this is the number "+
+			"the cluster divides, and each worker takes an equal share of it -- "+
+			"budget/live-workers, floor 1. Requires the worker registry, so workers must "+
+			"reach the same database. Set both to mean \"no worker above X, and no more than "+
+			"Y between them\": the effective budget is the smaller. A worker shrinks its "+
+			"share the moment another joins, and waits before growing when one leaves, "+
+			"because a crashed worker's connections outlive its heartbeat. cleat#1487")
 	encryptSensitivePayloads = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
 	maxQuotaEvents           = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
 	maxQuotaChildren         = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
 	maxQuotaConcurrencyKeys  = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
 	maxQuotaSchedules        = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
 	claimAcrossTenants       = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. Requires a database-side grant; see migrations/postgres/023_cross_tenant_claim.sql and migrations/mssql/012_admin_role.sql")
-	maxWorkflowDuration      = flag.Duration("max-workflow-duration", 0, "Maximum wall-clock duration per workflow execution (0 = no limit). Workflows exceeding this are cancelled and fail with a timeout error.")
+	maxWorkflowDuration      = flag.Duration("max-workflow-duration", 0, "CEILING on wall-clock duration for ONE workflow execution segment (0 = no limit); a workflow that suspends and resumes gets a fresh deadline each time. Workflows exceeding it are cancelled and fail with a timeout error. A tenant may set a LOWER value in tenant_settings, and a single run a lower one still at start; neither can raise it. With 0 here the operator sets no bound, so a tenant's value stands alone -- which is how a deployment that never set this flag can still give one tenant a deadline. cleat#1117.")
 	healthCheckInterval      = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
 	maxPluginConnections     = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
 	otelEndpoint             = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")

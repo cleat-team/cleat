@@ -429,6 +429,33 @@ func (e *Engine) hostRetryBudget(ctx context.Context) time.Duration {
 		func(t TenantSettings) time.Duration { return t.HostRetryBudget })
 }
 
+// maxWorkflowDuration resolves --max-workflow-duration through this tenant's
+// and this run's overrides.
+//
+// SCOPE: one execution segment, not a workflow's whole lifetime -- see
+// TenantSettings.MaxWorkflowDuration. cleat#1117 changed who may set the bound,
+// not what it spans.
+//
+// cleat#1117. This was the last execution limit left as a bare worker flag,
+// and the reason it could not stay one is that a worker process is not a
+// tenancy boundary: one worker serves many tenants, so a process-wide deadline
+// applies one tenant's operational policy to another's workflows. 3.94 fixed
+// that for the other three limits and this one was not carried across.
+//
+// NO OPERATOR FALLBACK, and the asymmetry with its two siblings is deliberate.
+// wallClockCeiling falls back to the instance timeout and hostRetryBudget to
+// DefaultHostRetryBudget, because each has a meaningful default. This flag
+// defaults to 0 meaning "no limit", and ClampToCeiling already reads a
+// non-positive ceiling as "operator unbounded -- take the tenant's value". So
+// passing the flag through unchanged is what lets a tenant set a deadline on a
+// deployment where the operator set none, which is the common case and the
+// point of the feature. Substituting a fallback here would silently impose a
+// bound no operator asked for.
+func (e *Engine) maxWorkflowDuration(ctx context.Context) time.Duration {
+	return e.resolveLimit(ctx, e.defaultWorkflowTimeout,
+		func(t TenantSettings) time.Duration { return t.MaxWorkflowDuration })
+}
+
 // resolveLimit is THE precedence rule, written once.
 //
 // cleat#1187 asked for exactly that -- "one precedence rule, stated once and

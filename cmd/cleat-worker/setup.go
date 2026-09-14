@@ -1043,6 +1043,19 @@ type Worker struct {
 	tenantPools          *plugin.TenantPools
 	plugList             []*plugin.LoadedPlugin
 
+	// Worker membership and this worker's slice of the cluster connection
+	// budget. cleat#1487.
+	//
+	// All four are nil or zero unless --cluster-connection-budget is set, and
+	// the loop that uses them is not launched in that case. A worker that was
+	// upgraded must not start participating in a budget nobody configured --
+	// the same opt-in rule the per-worker budget follows.
+	workerRegistry            *engine.WorkerRegistry
+	connectionShare           *connectionShare
+	connectionBudgetParts     connectionBudget
+	clusterConnectionBudget   int
+	perWorkerConnectionBudget int
+
 	ctx      context.Context
 	cancel   context.CancelFunc
 	draining atomic.Bool
@@ -1268,10 +1281,28 @@ func (w *Worker) Run() {
 	if *metricsSweepInterval > 0 {
 		initLoopCtx("metrics_sweep")
 	}
+	// Conditional on the same thing that launches it below. A loop launched
+	// without its context has no entry in getLoopCtx, so it can never be
+	// cancelled or restarted by the watchdog -- which is what
+	// TestEveryPreparedLoopIsLaunched caught here.
+	if w.workerRegistry != nil {
+		initLoopCtx("worker_membership")
+	}
 
 	// Background heartbeat goroutine.
 	w.registerLoopFunc("heartbeat", w.heartbeatLoop)
 	w.launchLoop("heartbeat", w.heartbeatLoop)
+
+	// Worker membership and the cluster connection share. cleat#1487.
+	//
+	// Launched only when --cluster-connection-budget is set. A worker that was
+	// merely upgraded must not begin registering itself and resizing its pools
+	// against a budget nobody configured -- the same opt-in rule the
+	// per-worker budget follows.
+	if w.workerRegistry != nil {
+		w.registerLoopFunc("worker_membership", w.workerMembershipLoop)
+		w.launchLoop("worker_membership", w.workerMembershipLoop)
+	}
 
 	// Background zombie reaper goroutine.
 	w.registerLoopFunc("reaper", w.reaperLoop)
@@ -1493,9 +1524,20 @@ func (w *Worker) dispatchLoop() {
 		}
 		w.Metrics.SetQueueDepth(w.ctx, state.QueueDepth)
 
-		// Compiled-module cache occupancy, on the same tick as the other
-		// gauges. It is the observable for --wasm-cache-max-entries and
-		// --wasm-cache-max-mb, which an operator otherwise tunes blind.
+		// BYTE-cache occupancy, on the same tick as the other gauges. It is
+		// the observable for --wasm-cache-max-entries and --wasm-cache-max-mb,
+		// which an operator otherwise tunes blind.
+		//
+		// NOT THE COMPILED-MODULE CACHE, though this comment said "compiled-
+		// module cache" until cleat#1563 named the confusion. w.wasmCache is a
+		// *wasmLRUCache holding WASM BYTES with LRU eviction; the compiled
+		// wasmtime Modules live in a separate process-wide sync.Map
+		// (engine/backend_wasmtime.go:70) which has no eviction, no bound and
+		// no metric at all. The gauge names do not distinguish them --
+		// cleat_wasm_cache_entries is described as "the WASM module cache" --
+		// so an operator watching this gauge is not watching the cache that
+		// grows without limit. cleat#1563 tracks that gap; this comment only
+		// stops claiming to cover it.
 		if w.wasmCache != nil {
 			ents, cbytes := w.wasmCache.stats()
 			w.Metrics.SetWasmCacheEntries(w.ctx, int64(ents))
@@ -2414,6 +2456,17 @@ func (w *Worker) reaperLoop() {
 			if reaped > 0 {
 				w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
 				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "reaper", int64(reaped))
+				// The fleet-wide reclaim counter. It had NO call site until
+				// now, so cleat_reaper_instances_claimed_total has never
+				// emitted a sample -- despite migration 052 and
+				// engine/reclaim_count_records_reclaims_only_test.go both
+				// describing it as an existing counter that "counts every row
+				// it takes". cleat#1317.
+				//
+				// Fed here rather than inside ReapStaleInstances: the store
+				// has no Metrics handle, and this is the one funnel every
+				// dialect's reaper returns through.
+				w.Metrics.RecordReaperInstancesClaimed(w.ctx, int64(reaped))
 			}
 			// A full tick is the signal worth surfacing, and it is the only
 			// place this is observable: the sweep bounded at the limit looks

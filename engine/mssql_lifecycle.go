@@ -1210,6 +1210,7 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 	runInstanceMs := msOrNil(opts.RunLimits.WasmInstanceTimeout)
 	runWallClockMs := msOrNil(opts.RunLimits.WasmWallClockCeiling)
 	runRetryMs := msOrNil(opts.RunLimits.HostRetryBudget)
+	runMaxWorkflowMs := msOrNil(opts.RunLimits.MaxWorkflowDuration)
 	// Computed here rather than in the caller because this function is RETRIED
 	// -- withRollbackGuaranteedRetry may run it several times -- and the hash
 	// must be identical on every attempt. It is a pure function of the key, so
@@ -1325,11 +1326,11 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
 			VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
-			        @p5, @p6, @p7, @p8, @p9, @p10, @p11)
-		`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs)
+			        @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12)
+		`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -1345,11 +1346,11 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
 		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
-		        @p5, @p6, @p7, @p8, @p9, @p10, @p11)
-	`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs)
+		        @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12)
+	`, runID, defName, defVersion, string(input), tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}

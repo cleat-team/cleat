@@ -708,6 +708,11 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		WasmInstanceTimeoutMs  int64 `json:"wasm_instance_timeout_ms"`
 		WasmWallClockCeilingMs int64 `json:"wasm_wall_clock_ceiling_ms"`
 		HostRetryBudgetMs      int64 `json:"host_retry_budget_ms"`
+
+		// MaxWorkflowDurationMs bounds the WHOLE execution rather than one
+		// invocation, which is what separates it from the three above
+		// (cleat#1117). Same clamping rule, same units.
+		MaxWorkflowDurationMs int64 `json:"max_workflow_duration_ms"`
 	}
 	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &input) {
 		return
@@ -827,7 +832,8 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// override", so a negative cannot be expressed as a tightening at all --
 	// and silently treating it as "unset" would answer a caller who asked for
 	// something impossible with a run bounded by someone else's limits.
-	if input.WasmInstanceTimeoutMs < 0 || input.WasmWallClockCeilingMs < 0 || input.HostRetryBudgetMs < 0 {
+	if input.WasmInstanceTimeoutMs < 0 || input.WasmWallClockCeilingMs < 0 || input.HostRetryBudgetMs < 0 ||
+		input.MaxWorkflowDurationMs < 0 {
 		s.writeError(w, 400, "per-run limit overrides must be positive milliseconds; 0 or absent means no override")
 		return
 	}
@@ -837,6 +843,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 			WasmInstanceTimeout:  time.Duration(input.WasmInstanceTimeoutMs) * time.Millisecond,
 			WasmWallClockCeiling: time.Duration(input.WasmWallClockCeilingMs) * time.Millisecond,
 			HostRetryBudget:      time.Duration(input.HostRetryBudgetMs) * time.Millisecond,
+			MaxWorkflowDuration:  time.Duration(input.MaxWorkflowDurationMs) * time.Millisecond,
 		},
 	}
 	if starter, ok := st.(interface {

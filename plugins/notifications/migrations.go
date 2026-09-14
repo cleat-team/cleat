@@ -140,5 +140,30 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Version:      2,
 			TenantScoped: []string{"webhook_config"},
 		},
+		{
+			// Privileges for the cross-tenant delivery loop on
+			// webhook_delivery. cleat#1490.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v2: a recorded migration never
+			// runs again, so editing v2 would grant on databases created after
+			// this lands and leave every existing one failing.
+			//
+			// WHAT BROKE WITHOUT IT. Run() marks itself cross-tenant, which now
+			// means SET LOCAL ROLE cleat_sweep, and a role switch changes the
+			// privilege set for every table in the transaction, not only the
+			// ones carrying a policy. Measured:
+			//
+			//	pq: permission denied for table webhook_delivery (42501)
+			//
+			// THIS IS A GRANT, NOT THE SCOPING v2 SAYS IS STILL MISSING.
+			// background.go:56 already records that webhook_delivery "has no
+			// policy", and v2's comment records that giving it one needs a
+			// tenant_id column and a data migration. Neither is done here.
+			// This only restores the delivery loop's ability to reach a table
+			// it has always written; the scoping gap is unchanged and still
+			// filed separately.
+			Version:     3,
+			SweepTables: []string{"webhook_delivery"},
+		},
 	}
 }
