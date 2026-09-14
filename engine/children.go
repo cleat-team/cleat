@@ -838,11 +838,35 @@ func (s *execSession) runDetached(ctx context.Context, m api.Module, name, input
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
+			// CHECK BEFORE CONSUMING, and report. cleat#1507.
+			//
+			// This block used to call advanceReplayStep FIRST and compare
+			// afterwards, so a divergence had already consumed the record
+			// belonging to some other operation -- every later step then read
+			// the wrong history entry. That is the same corruption as
+			// DurableSend's (cleat#1532), reached from the other direction:
+			// there the type was never checked, here it was checked too late.
+			//
+			// The old branch also returned a bare `1` with no metric and no
+			// message, so an operator saw a failed detached run and had
+			// nothing saying it was a replay divergence rather than a refused
+			// start. The name is compared as well as the type because a
+			// detached run is identified by both.
+			if rec.EventType != EventTypeRunDetached || rec.DetachedName != name {
+				if s.engine.Metrics != nil {
+					s.engine.Metrics.RecordReplayFailure(ctx)
+				}
+				errMsg := fmt.Sprintf("replay divergence at step %d: expected run_detached %q, got %s %q.\n"+
+					"Run 'cleat vet' on your workflow code to check for common non-determinism issues "+
+					"(time.Now(), random values, map iteration, goroutines).",
+					rec.Step, name, rec.EventType, rec.DetachedName)
+				s.engine.log().ErrorContext(ctx, errMsg,
+					"workflow_id", s.workflowID, "step", rec.Step)
+				n, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+				return n, 1
+			}
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0, 0
-			}
-			if rec.EventType != EventTypeRunDetached || rec.DetachedName != name {
-				return 0, 1
 			}
 			// The id comes back from the RECORD on replay, not from a fresh
 			// StartChildWorkflow: the run was started on the original
