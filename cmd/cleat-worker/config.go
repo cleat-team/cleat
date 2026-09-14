@@ -291,6 +291,13 @@ var (
 			"(at least 32 bytes after decode). Required by --tenant-isolation=role. Each "+
 			"tenant's password is HMAC-SHA256(key, tenant_id), so nothing per-tenant is "+
 			"stored and any worker can open a tenant pool without reading a credential.")
+	connectionBudgetFlag = flag.Int("connection-budget", 0,
+		"Total database connections this worker may open across ALL its pools "+
+			"(0 = unset, no check). A worker opens six independent pools -- core, plugin, "+
+			"adaptive flusher, per-shard, migration and one per tenant under "+
+			"--tenant-isolation=role -- and sizing from --concurrency alone under-provisions "+
+			"a default worker by a factor of five. When set, the worker logs the breakdown at "+
+			"startup and refuses to start if its fixed pools alone exceed it. cleat#1486")
 	encryptSensitivePayloads = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
 	maxQuotaEvents           = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
 	maxQuotaChildren         = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")

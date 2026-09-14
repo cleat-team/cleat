@@ -336,3 +336,63 @@ func (tp *TenantPools) EvictIdle(maxIdle time.Duration) int {
 	}
 	return len(evicted)
 }
+
+// TenantPoolStats reports what the tenant pools are currently costing.
+//
+// It exists because nothing summed them. cleat#1486: a worker opens six
+// independent pools and no code anywhere adds them up, so "how many connections
+// does a worker use" had no answer that was not a hand calculation from flag
+// defaults -- and the tenant pools are the term that cannot be calculated at
+// all, because it depends on how many tenants this worker has touched.
+type TenantPoolStats struct {
+	// Pools is how many tenant pools are live.
+	Pools int
+
+	// OpenConnections is the sum of Stats().OpenConnections across them: the
+	// connections that EXIST right now, in use or idle.
+	//
+	// THIS IS THE NUMBER A BUDGET IS ABOUT, and it is not Pools*maxConns. A
+	// pool that has served two concurrent queries holds two connections, not
+	// twenty-five; one untouched for a ConnMaxLifetime holds none at all. The
+	// per-tenant ceiling is what a pool MAY reach, which is why documenting a
+	// worker's cost as tenants*maxConns overstates it by roughly an order of
+	// magnitude.
+	OpenConnections int
+
+	// InUse is the subset currently executing a query. OpenConnections-InUse is
+	// the idle tail that SetConnMaxIdleTime reclaims.
+	InUse int
+}
+
+// Stats sums the live tenant pools.
+//
+// Pools still opening are counted in Pools and contribute nothing to the
+// connection counts, which is accurate rather than convenient: an entry whose
+// `ready` is not yet closed has no *sql.DB to ask, and it has opened no
+// connections either -- sql.Open does not connect.
+func (tp *TenantPools) Stats() TenantPoolStats {
+	tp.mu.Lock()
+	entries := make([]*tenantPool, 0, len(tp.pools))
+	for _, e := range tp.pools {
+		entries = append(entries, e)
+	}
+	tp.mu.Unlock()
+
+	// Asked OUTSIDE the lock. DB.Stats takes the pool's own mutex, so holding
+	// tp.mu across every pool's Stats call would serialise the map against
+	// every pool's internal contention -- on the hot path For() shares.
+	st := TenantPoolStats{Pools: len(entries)}
+	for _, e := range entries {
+		select {
+		case <-e.ready:
+			if e.db != nil {
+				s := e.db.Stats()
+				st.OpenConnections += s.OpenConnections
+				st.InUse += s.InUse
+			}
+		default:
+			// Still opening: counted as a pool, contributing no connections.
+		}
+	}
+	return st
+}

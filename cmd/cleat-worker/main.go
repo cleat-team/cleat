@@ -435,6 +435,11 @@ func main() {
 	var db *sql.DB
 	var pluginDB *sql.DB
 	var tenantPools *plugin.TenantPools
+	// shardPoolCount is captured here rather than read from shardDBs, which is
+	// scoped to the sharded branch below. The connection census (cleat#1486)
+	// needs it after that scope has closed, and a census that silently omits
+	// the shard pools would understate a sharded worker by 15 per shard.
+	shardPoolCount := 0
 
 	var factory engine.StoreFactory
 	var payloadEncryption *engine.PayloadEncryption
@@ -478,6 +483,7 @@ func main() {
 		stores := make([]engine.WorkflowStore, len(configs))
 		closers := make([]func() error, len(configs))
 		shardDBs := make([]*sql.DB, len(configs))
+		shardPoolCount = len(configs)
 		shardFactories := make([]engine.StoreFactory, 0, len(configs))
 		for i, cfg := range configs {
 			dsn := cfg.ConnStr
@@ -1158,6 +1164,46 @@ func main() {
 		flusherRegistry = registry
 		logger.InfoContext(ctx, "adaptive flusher registry enabled", "worker_id", workerID, "max_wait_ms", *batchFlushMaxWaitMs, "max_batch", *batchFlushMaxSize, "enter_rate", *batchFlushEnterRate, "exit_rate", *batchFlushExitRate)
 	}
+	// The connection census. cleat#1486.
+	//
+	// Computed HERE because this is the first point at which every term is
+	// known: the shard pools are built from a config file, the flusher pool
+	// exists only if both its gates are false, and the plugin pool only if
+	// --max-plugin-connections > 0. Any earlier and the numbers would be flag
+	// defaults rather than this worker's.
+	//
+	// Logged unconditionally, checked only when a budget was configured. The
+	// log line is most of the value on its own: the documented figure was
+	// `concurrency + 5` -- the core pool alone -- for as long as nobody saw the
+	// other terms printed beside it.
+	budget := connectionBudget{
+		Core:          *concurrency + 5,
+		TenantPerPool: *tenantPoolMaxConns,
+	}
+	if *maxPluginConnections > 0 {
+		budget.Plugin = *maxPluginConnections
+	}
+	if !*batchFlushDisabled && !*noPerStepFlush {
+		budget.Flusher = *batchFlushMaxConns
+	}
+	budget.Shards = shardPoolCount * shardPoolMaxConns
+	if *migrateDBURL != "" {
+		budget.Migrate = migratePoolMaxConns
+	}
+	if tenantPools == nil {
+		// No tenant pools are built without --tenant-isolation=role, so the
+		// per-tenant term does not apply and must not be reported as if it did.
+		budget.TenantPerPool = 0
+	}
+	logger.InfoContext(ctx, "database connection budget",
+		"worker_id", workerID, "pools", budget.Describe(),
+		"configured_budget", *connectionBudgetFlag,
+		"tenant_pools_that_fit", budget.TenantHeadroom(*connectionBudgetFlag))
+	if err := checkConnectionBudget(*connectionBudgetFlag, budget); err != nil {
+		logger.ErrorContext(ctx, "refusing to start", "worker_id", workerID, "error", err)
+		os.Exit(1)
+	}
+
 	w := &Worker{
 		Metrics:                          metricsInstance,
 		id:                               workerID,
