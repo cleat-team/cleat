@@ -90,12 +90,33 @@ Cleat already has the adapter. `engine/readonlydb.go`:
 
 Beneath that, a PostgreSQL role without write grants is the real fence, and RLS is the tenant fence.
 
-**One property to verify before relying on this**, because this design leans on it entirely: the
-`Begin` path goes through `beginTenantTx`, while `Query` calls `Inner.QueryContext`. CLAUDE.md
-records cleat#1285/#1286 finding that the non-transactional path therefore did not carry tenant
-scope, and notes that the probe which found it only worked because a foreign-tenant row had been
-seeded — against an empty table the read came back clean and the gap was invisible. Whether that is
-closed at `654d6f84` was **not checked while writing this**.
+**The property this design leans on has since been checked, and the answer has three parts.**
+An earlier draft left it open, citing CLAUDE.md's record of cleat#1285/#1286 — that `Query` called
+`Inner.QueryContext` directly and so carried no tenant scope.
+
+**1. On PostgreSQL, with a tenant in context, it is scoped — cleat#1285/#1286 is fixed.** `Query`
+and `QueryRow` now both call `beginTenantTx` first (`engine/readonlydb.go:47-78`), which opens a
+read-only transaction and issues
+`SELECT set_config('cleat.tenant_id', $1, true)` — transaction-local, so the setting cannot follow
+the connection back into the pool (`engine/plugindb_tenant.go:150-167`).
+
+**2. With no tenant in context, the code does not scope — the database refuses.** `beginTenantTx`
+returns `(nil, nil)` when `tenantctx.From(ctx)` finds nothing (`:150-153`), and the caller falls
+through to an unscoped `Inner.QueryContext`. What stops that being a cross-tenant read is the RLS
+policy's own assertion, which raises `cleat.tenant_id is not set`. So this **fails closed at the
+database rather than in the adapter** — a distinction worth holding, because it is only true while
+the connecting role is subject to RLS. `cleat-worker` refuses to start on a connection that
+bypasses RLS by default (cleat#1204), which is what keeps that precondition true.
+
+Note the limit CLAUDE.md records: a `USING` clause is a row-level predicate, so **against an empty
+table it never fires**. An agent's clean read of an empty result set is not evidence that scoping
+worked.
+
+**3. On MySQL and SQL Server there is no scoping here at all, by design.** `beginTenantTx` returns
+`(nil, nil)` immediately for any non-PostgreSQL dialect (`:92-94`), so every read goes through the
+unscoped path. Isolation on those dialects comes from elsewhere — a database per tenant on MySQL,
+explicit predicates on SQL Server. **An investigation agent must not assume this adapter is its
+tenant fence outside PostgreSQL.**
 
 ---
 
@@ -279,7 +300,9 @@ because it depends on floor items:
 - **#1571, a queryable read model** — the narrowing stage is exactly the cross-run querying that
   issue is about.
 - **#1565, egress policy** — if the agent fetches external telemetry, it makes outbound calls.
-- Verification of the `ReadOnlyDB.Query` tenant-scoping property above.
+- ~~Verification of the `ReadOnlyDB.Query` tenant-scoping property.~~ **Done** — see above. It
+  holds on PostgreSQL with a tenant in context; elsewhere the fence is the database or the dialect's
+  own scheme, not this adapter.
 
 ---
 
@@ -315,8 +338,13 @@ landscape and the Resolve.ai funding figure; Temporal's time-travel debugging an
 positioning; DBOS's database time travel. **None of this was verified against the products
 themselves.** Vendor marketing is the source, and it is the least reliable input in this document.
 
-**Not verified:** whether `ReadOnlyDB.Query` carries tenant scope at this SHA — the single property
-this design most depends on. Also not verified: that no competing product exists, which three
-searches cannot establish.
+**Since verified**, and it was the single property this design most depends on: `ReadOnlyDB.Query`
+and `QueryRow` do carry tenant scope on PostgreSQL when a tenant is in context. Read from
+`engine/readonlydb.go:47-78` and `engine/plugindb_tenant.go:91-167`, including both branches on
+which `beginTenantTx` returns `(nil, nil)`. This was a code read, not a live probe against a
+seeded foreign-tenant row — which is the stronger check CLAUDE.md prescribes and which nobody has
+run here.
+
+**Not verified:** that no competing product exists, which three searches cannot establish.
 
 **Asserted, not measured:** that this approach diagnoses incidents faster. Nobody has built it.
