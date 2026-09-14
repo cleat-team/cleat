@@ -32,7 +32,15 @@ import (
 // test written on the ordinary handle would pass against a policy that does
 // nothing at all.
 func TestTheScheduleCommandsSetTheirOwnTenant(t *testing.T) {
-	admin := testutil.TestDB(t, testutil.DialectPostgres)
+	// A DATABASE OF THIS SUITE'S OWN, not the shared one. cleat#1512.
+	//
+	// This test ENABLES ROW LEVEL SECURITY on `schedules` and puts a policy on
+	// it. Under testutil.TestDB that table is shared with every other package
+	// running concurrently, so in a whole-repo run -- which the Tier 2 gate
+	// does -- the policy applies to their statements and their writes to this
+	// test's rows. The equivalent jobqueue test failed exactly that way, with a
+	// message that named neither the sharing nor the policy.
+	admin := testutil.SuiteTestDB(t, "scheduler")
 	t.Cleanup(func() { admin.Close() })
 
 	if _, err := admin.Exec(`
@@ -101,6 +109,23 @@ func TestTheScheduleCommandsSetTheirOwnTenant(t *testing.T) {
 		t.Fatalf("open low-privilege connection: %v", err)
 	}
 	defer low.Close()
+
+	// The commands write through `dsn` and the verification reads through
+	// `admin`. Assert they are the same database: if they are not, the command
+	// succeeds, the row lands somewhere real, and the read finds nothing --
+	// which is indistinguishable from the command being broken.
+	var adminDB, lowDB string
+	if err := admin.QueryRow(`SELECT current_database()`).Scan(&adminDB); err != nil {
+		t.Fatalf("reading the admin connection's database: %v", err)
+	}
+	if err := low.QueryRow(`SELECT current_database()`).Scan(&lowDB); err != nil {
+		t.Fatalf("reading the low-privilege connection's database: %v", err)
+	}
+	if adminDB != lowDB {
+		t.Fatalf("the commands would write to %q and this test reads from %q; "+
+			"those must be the same database or every assertion below is meaningless",
+			lowDB, adminDB)
+	}
 	_, bareErr := low.Exec(
 		`INSERT INTO schedules (tenant_id, id, name, cron, workflow_name) VALUES ($1,$2,'n','* * * * *','w')`,
 		tenant, uuid.New())
