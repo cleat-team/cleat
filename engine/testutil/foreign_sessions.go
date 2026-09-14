@@ -193,6 +193,26 @@ func testProcessTag() string {
 	return fmt.Sprintf("cleat-test-%d", selfPID())
 }
 
+// TagPostgresDSN adds the cleat#982 gate's application_name to a PostgreSQL
+// DSN, and does nothing else. cleat#1501.
+//
+// WHY THIS EXISTS SEPARATELY FROM PostgresTestDSN, which also tags. That
+// function supplies a localhost FALLBACK when neither environment variable is
+// set, so a caller that does its own empty-check cannot use it: swapping one
+// for the other makes the DSN never empty and turns "no database configured,
+// skip" into an attempt to connect to whatever is on 5432. The site stops
+// distinguishing "nobody asked for a database" from "a database was configured
+// and is broken" -- scripts/check-skips.sh's case (a) versus case (b), and the
+// whole point of the empty-check it would be replacing.
+//
+// So: use PostgresTestDSN when you want the project's DSN, and this when you
+// already have one and only need it to identify us.
+//
+// Idempotent. A DSN that already carries application_name comes back
+// unchanged, and so does anything that is not a postgres:// URL -- a keyword
+// DSN ("host=... user=...") is returned as-is rather than mangled.
+func TagPostgresDSN(dsn string) string { return tagPostgresDSN(dsn) }
+
 // tagPostgresDSN adds application_name to a PostgreSQL DSN.
 //
 // PostgreSQL is the one dialect of the three that does NOT hand the client's

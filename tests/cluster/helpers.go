@@ -12,6 +12,8 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // composeDir returns the project root directory containing the docker-compose files.
@@ -161,14 +163,34 @@ func EnsureDef(t *testing.T, db *sql.DB, name string, version int) {
 	}
 }
 
-// GetDB returns a *sql.DB connected to the cluster's PostgreSQL instance.
-func GetDB(t *testing.T) *sql.DB {
-	t.Helper()
+// ClusterDSN resolves this suite's PostgreSQL DSN, tagged for the cleat#982
+// gate. cleat#1501.
+//
+// ONE FUNCTION BECAUSE THERE WERE FIVE COPIES. GetDB here and requireDB in
+// cluster_test.go, failover_test.go, replay_test.go and scale_test.go each read
+// CLEAT_TEST_DB and fell back to the same literal. cleat#1501 cited GetBD alone,
+// and that is not an oversight in the issue so much as what duplication does to
+// a census: four of the five were invisible because nothing named them
+// together.
+//
+// TagPostgresDSN, not PostgresTestDSN. The gate identifies our PostgreSQL
+// sessions by application_name and nothing else, so an untagged connection is
+// reported as a stranger and refuses somebody else's run. But PostgresTestDSN
+// also supplies ITS default -- testutil's superuser role -- and this suite
+// talks to the compose stack, which runs as `cleat`. The tag is what is wanted
+// here; the fallback is not.
+func ClusterDSN() string {
 	dsn := os.Getenv("CLEAT_TEST_DB")
 	if dsn == "" {
 		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" //nolint:gosec // G101: a localhost default DSN for the local compose stack, used only when CLEAT_TEST_DB is unset.
 	}
-	db, err := sql.Open("postgres", dsn)
+	return testutil.TagPostgresDSN(dsn)
+}
+
+// GetDB returns a *sql.DB connected to the cluster's PostgreSQL instance.
+func GetDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("postgres", ClusterDSN())
 	if err != nil {
 		t.Fatalf("failed to open database: %v", err)
 	}

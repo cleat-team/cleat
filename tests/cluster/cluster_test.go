@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -19,11 +18,7 @@ func testStore(t *testing.T, taskQueues ...string) (*sql.DB, *engine.PostgresSto
 	if testing.Short() {
 		t.Skip("Skipping cluster test in short mode")
 	}
-	dsn := os.Getenv("CLEAT_TEST_DB")
-	if dsn == "" {
-		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"
-	}
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("postgres", ClusterDSN())
 	if err != nil {
 		t.Skipf("Skipping cluster test: no database available: %v", err)
 	}

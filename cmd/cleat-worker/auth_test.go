@@ -50,7 +50,12 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 	}
 	var haveTable bool
 
-	db, err := sql.Open("postgres", dsn)
+	// Tagged so the cleat#982 gate does not read this connection as a stranger
+	// (cleat#1501). TagPostgresDSN rather than PostgresTestDSN, because the
+	// empty-check above is load-bearing here: this test distinguishes "no
+	// database configured" from "the configured database is broken", and a
+	// constructor with a localhost fallback makes the DSN never empty.
+	db, err := sql.Open("postgres", testutil.TagPostgresDSN(dsn))
 	if err != nil {
 		fatalf("cannot connect to database: %v", err)
 		return

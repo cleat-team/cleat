@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/plugin"
 )
@@ -37,6 +38,27 @@ func OpenTestDB(t *testing.T, dialect plugin.Dialect, connStr string) (*sql.DB, 
 	switch dialect {
 	case plugin.DialectPostgres:
 		driverName = "postgres"
+		// TAGGED HERE, IN THE HELPER, NOT AT THE CALL SITES. cleat#1501.
+		//
+		// The cleat#982 gate identifies our own PostgreSQL sessions by
+		// application_name and nothing else, because PostgreSQL does not hand
+		// the client's pid to the server. A connection opened from an untagged
+		// DSN is reported as a stranger and refuses somebody else's run.
+		//
+		// Both callers in this module pass a DSN they read from the
+		// environment themselves, and a third would have to remember. Putting
+		// it here is the same move as PostgresTestDSN tagging in the
+		// constructor rather than at its thirteen callers.
+		//
+		// TagPostgresDSN, not PostgresTestDSN: callers here do their own
+		// empty-check and skip, and PostgresTestDSN's localhost fallback would
+		// turn that skip into a connection attempt. Idempotent, so a caller
+		// that already tagged loses nothing.
+		//
+		// Postgres only. MySQL and SQL Server report the client process id to
+		// the server without being asked, so the gate identifies those without
+		// a tag and there is nothing to add.
+		connStr = testutil.TagPostgresDSN(connStr)
 	case plugin.DialectMySQL:
 		driverName = "mysql"
 	case plugin.DialectMSSQL:
