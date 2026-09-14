@@ -18,6 +18,7 @@ var coreTables = []string{
 	"admin.tenant_api_keys",
 	"admin.tenant_roles",
 	"admin.tenants",
+	"admin.workers",
 	"concurrency_keys",
 	"event_history",
 	"idempotency_keys",

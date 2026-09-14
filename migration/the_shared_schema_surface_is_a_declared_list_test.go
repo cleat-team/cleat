@@ -30,6 +30,19 @@ var (
 		"admin.tenant_api_keys",
 		"admin.tenant_roles",
 		"admin.tenants",
+		// Migration 074, cleat#1487. Shared on purpose and in the strongest
+		// sense on this list: worker membership is the one thing here that is
+		// meaningless per pool. A cluster-global connection budget has to be
+		// divided among every worker against the database, so a per-pool
+		// workers table would let two pools each believe they were alone and
+		// each take the whole budget.
+		//
+		// The cleat#1375 hazard it accepts in exchange is the ordinary one --
+		// a pool running a newer migration rewrites this table for the others.
+		// It is bounded here because the table is only ever created, never
+		// altered by a later migration, and its readers ask for a COUNT and a
+		// list rather than for specific columns.
+		"admin.workers",
 	}
 	sharedRoutines = []string{
 		"admin.claim_workflows",
