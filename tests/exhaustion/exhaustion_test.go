@@ -24,6 +24,8 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // The compose file does not set --wasm-instance-timeout, so the worker uses the
@@ -53,7 +55,12 @@ func clusterDB(t *testing.T) *sql.DB {
 		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	// Tagged so the cleat#982 gate does not read this cluster connection as a
+	// stranger (cleat#1501). TagPostgresDSN rather than PostgresTestDSN: the
+	// default above is the compose stack's `cleat` role, and the `configured`
+	// flag below distinguishes "nobody asked" from "asked and broken" -- a
+	// fallback-supplying constructor would collapse both.
+	db, err := sql.Open("postgres", testutil.TagPostgresDSN(dsn))
 	if err != nil {
 		t.Fatalf("opening cluster database: %v", err)
 	}

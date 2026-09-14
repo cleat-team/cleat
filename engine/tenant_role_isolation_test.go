@@ -155,7 +155,13 @@ func TestATenantRoleSeesOnlyItsOwnRows(t *testing.T) {
 	// Connect AS the tenant. The DSN keeps the host/port/dbname of the admin
 	// one and swaps the credential -- which is exactly what
 	// plugin.TenantPools.For does with baseDSNFromURL's output.
-	tenantDB, err := sql.Open("postgres", rewriteDSNCredential(t, dsn, role.String, reDerived))
+	// Tagged OUTSIDE the credential rewrite (cleat#1501). Measured rather than
+	// assumed: rewriteDSNCredential keeps everything after the "@", so it
+	// preserves the query string and a tag applied either side survives --
+	// but a future rewrite that rebuilt the URL from parts would drop an
+	// inner tag silently, and wrapping the result cannot be defeated that way.
+	tenantDB, err := sql.Open("postgres",
+		testutil.TagPostgresDSN(rewriteDSNCredential(t, dsn, role.String, reDerived)))
 	if err != nil {
 		t.Fatalf("open tenant connection: %v", err)
 	}

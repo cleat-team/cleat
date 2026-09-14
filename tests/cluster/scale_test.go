@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,11 +20,7 @@ func scaleStore(t *testing.T) (*sql.DB, *engine.PostgresStore) {
 	if testing.Short() {
 		t.Skip("Skipping scale test in short mode")
 	}
-	dsn := os.Getenv("CLEAT_TEST_DB")
-	if dsn == "" {
-		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"
-	}
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("postgres", ClusterDSN())
 	if err != nil {
 		t.Skipf("Skipping: no database available: %v", err)
 	}
