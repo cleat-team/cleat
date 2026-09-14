@@ -5,15 +5,11 @@ engine/executor.go	func Engine.RunDeferCompiled
 engine/mysql_store.go	func MySQLStoreFactory.DropTenantDatabase
 monitoring/prometheus/metrics.go	func Metrics.RecordClaimLatency
 monitoring/prometheus/metrics.go	func Metrics.RecordEncryptionError
-monitoring/prometheus/metrics.go	func Metrics.RecordReaperInstanceClaimed
 monitoring/prometheus/metrics.go	func Metrics.RecordWasmLoadLatency
-monitoring/prometheus/metrics.go	func Metrics.SetConcurrencyKeysExpiringSoon
 monitoring/prometheus/metrics.go	func Metrics.SetConcurrencyKeysTotal
 monitoring/prometheus/metrics.go	func Metrics.SetEventHistoryRowCount
 monitoring/prometheus/metrics.go	func Metrics.SetEventHistorySize
 monitoring/prometheus/metrics.go	func Metrics.SetMemoryPressureRatio
-monitoring/prometheus/metrics.go	func Metrics.SetWasmCacheBytes
-monitoring/prometheus/metrics.go	func Metrics.SetWasmCacheEntries
 monitoring/prometheus/metrics.go	func Metrics.SetWorkflowsStuck
 plugin/signing.go	func MustRegisterOfficialPublicKey
 plugin/signing.go	func VerifyManifestSignature
