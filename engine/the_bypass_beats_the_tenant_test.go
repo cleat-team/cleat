@@ -30,6 +30,23 @@ import (
 // possibility rather than a hypothetical, and a doc comment asserting an
 // ordering is exactly the prose that rots.
 //
+// THERE IS A SECOND TEST OF THIS RULE AND IT IS NOT A DUPLICATE. The precedence
+// is enforced in two layers, and each test can only see one of them:
+//
+//	beginTenantTx                decides which GUCs it sets           (Go, here)
+//	cleat.tenant_row_is_visible  CASE reads cleat.cross_tenant first  (SQL, 063)
+//
+// This test pins the Go half and is the sharper test OF that half, because it
+// can require cleat.tenant_id to be EMPTY rather than merely overridden -- a
+// distinction invisible to anything reading through a policy, which sees only
+// the row that came back. plugins/auditlog's composite arm pins the pair
+// end to end, through a real policy as a non-superuser: if a later migration
+// flipped the CASE in 063, THIS test would still pass and that one would fail.
+//
+// So neither is redundant, and the reason is recorded in both places because a
+// deliberate second derivation that looks accidental gets tidied away
+// eventually.
+//
 // THE LOAD-BEARING ASSERTION IS THAT cleat.tenant_id IS EMPTY in the first
 // case. "cross_tenant is set" passes equally against an implementation that
 // sets BOTH -- which would be a policy-visible difference, since
