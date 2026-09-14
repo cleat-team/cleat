@@ -150,5 +150,25 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_events DROP COLUMN IF EXISTS retry_count;
 			`,
 		},
+		{
+			// Tenant isolation for both webhook tables. cleat#1512.
+			//
+			// Version 5, not 2: this plugin's versions run 1, 3, 4 -- there is
+			// no 2 -- so the next free number is 5 rather than the count of
+			// entries. A new version rather than TenantScoped on an existing
+			// one, because a recorded migration never runs again and editing
+			// one would protect new databases while leaving every existing one
+			// open.
+			//
+			// Up is empty on purpose: the runtime emits ENABLE / FORCE / the
+			// policy from TenantScoped via plugin.applyTenantScoping.
+			//
+			// Both tables, not just webhook_events: the retry scan LEFT JOINs
+			// webhook_sources, and scoping one side of a join while leaving
+			// the other open would make the pair's isolation depend on which
+			// table a query happened to start from.
+			Version:      5,
+			TenantScoped: []string{"webhook_events", "webhook_sources"},
+		},
 	}
 }

@@ -37,6 +37,6 @@ func TestTheBatchQueryRunsOnEveryDialect(t *testing.T) {
 	plugintest.RunEveryArm(t, &Plugin{}, []plugintest.Arm{
 		// WantCols guards the second failure mode: a valid statement returning
 		// the wrong shape fails at Scan, later, in the same silent loop.
-		{Name: "queryUnprocessedWebhookEvents", Q: queryUnprocessedWebhookEvents, WantCols: 8},
+		{Name: "queryUnprocessedWebhookEvents", Q: queryUnprocessedWebhookEvents, WantCols: 9},
 	})
 }

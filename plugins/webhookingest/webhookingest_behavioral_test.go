@@ -209,7 +209,13 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryAwaitEvents(query, args)
-	case strings.Contains(query, "SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at"):
+	// Matched on the FROM/JOIN rather than the select list. This case
+	// previously named every column, so adding one to the real query stopped
+	// it matching and the fake answered "unexpected Query" -- which surfaced
+	// as "timed out waiting for signal delivery" two tests away, not as a
+	// routing failure. cleat#1512.
+	case strings.Contains(query, "FROM webhook_events e") &&
+		strings.Contains(query, "LEFT JOIN webhook_sources s"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryProcessBatch(args, corrupt)
@@ -683,7 +689,11 @@ func (c *fakeConn) queryProcessBatch(_ []driver.NamedValue, corrupt bool) (drive
 		results = results[:100]
 	}
 
-	columns := []string{"id", "source_id", "event_type", "payload", "received_at", "signal_workflow_id", "signal_name", "retry_count"}
+	// tenant_id is second, matching the column order the real query selects.
+	// processBatch scopes each event's processing to its own tenant with
+	// plugin.ForTenant rather than running the whole sweep under the bypass,
+	// and this fake has to hand it the value to do that with. cleat#1512.
+	columns := []string{"id", "tenant_id", "source_id", "event_type", "payload", "received_at", "signal_workflow_id", "signal_name", "retry_count"}
 	var data [][]driver.Value
 	for i, e := range results {
 		// Find the source for this event.
@@ -705,7 +715,7 @@ func (c *fakeConn) queryProcessBatch(_ []driver.NamedValue, corrupt bool) (drive
 			retryCountVal = "not-an-int"
 		}
 		data = append(data, []driver.Value{
-			e.id, e.sourceID, e.eventType, []byte(e.payload), e.receivedAt,
+			e.id, e.tenantID, e.sourceID, e.eventType, []byte(e.payload), e.receivedAt,
 			signalWorkflowID, signalName, retryCountVal,
 		})
 	}
@@ -928,7 +938,7 @@ func (*rowsErrConn) Close() error              { return nil }
 func (*rowsErrConn) Begin() (driver.Tx, error) { return nil, fmt.Errorf("rowsErrConn: no tx") }
 func (c *rowsErrConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	// For processBatch query, return rows that fail with rows.Err().
-	if strings.Contains(query, "SELECT e.id, e.source_id, e.event_type") {
+	if strings.Contains(query, "FROM webhook_events e") && strings.Contains(query, "LEFT JOIN webhook_sources s") {
 		return &rowsErrFakeRows{}, nil
 	}
 	return nil, fmt.Errorf("rowsErrConn: unexpected query: %s", query)
@@ -975,7 +985,11 @@ func TestMigrations(t *testing.T) {
 		if m.Version == 0 {
 			t.Errorf("migration %d: version must be non-zero", i)
 		}
-		if m.Up == "" {
+		// A TenantScoped migration carries no SQL by design; the runtime emits
+		// the policy from the declaration. Replace with
+		// plugintest.AssertMigrationsDoSomething once cleat#1513 lands rather
+		// than leaving another variant behind. cleat#1512.
+		if m.Up == "" && len(m.TenantScoped) == 0 {
 			t.Errorf("migration %d: Up SQL is empty", i)
 		}
 	}
