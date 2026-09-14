@@ -15,6 +15,15 @@ const defaultRetryInterval = 30 * time.Second
 // webhook_events for unprocessed events that are at least 10 seconds old
 // and retries their workflow signal delivery. Returns when ctx is cancelled.
 func (p *Plugin) Run(ctx context.Context) error {
+	// The SCAN is cross-tenant; the per-event work is not. cleat#1512.
+	//
+	// processBatch asks "which webhook events anywhere are unprocessed", which
+	// has no tenant and cannot have one. Each row it finds belongs to exactly
+	// one tenant, and retryEvent narrows back to that tenant rather than
+	// inheriting this -- see the ForTenant call in processBatch.
+	ctx = plugin.AcrossAllTenants(ctx,
+		"webhook-ingest retry sweep: the scan for unprocessed events spans every tenant by definition")
+
 	if p.db == nil {
 		p.logger.Warn("webhook-ingest: no database, background retry worker disabled")
 		<-ctx.Done()
@@ -54,6 +63,7 @@ func (p *Plugin) processBatch(parentCtx context.Context) {
 	for rows.Next() {
 		var (
 			eventID          uuid.UUID
+			tenantID         uuid.UUID
 			sourceID         uuid.UUID
 			eventType        string
 			payload          []byte
@@ -62,7 +72,7 @@ func (p *Plugin) processBatch(parentCtx context.Context) {
 			signalName       string
 			retryCount       int
 		)
-		if err := plugin.ScanRow(rows, &eventID, &sourceID, &eventType, &payload, &receivedAt,
+		if err := plugin.ScanRow(rows, &eventID, &tenantID, &sourceID, &eventType, &payload, &receivedAt,
 			&signalWorkflowID, &signalName, &retryCount); err != nil {
 			p.logger.Error("webhook-ingest: scan event", "error", err)
 			continue
@@ -70,7 +80,25 @@ func (p *Plugin) processBatch(parentCtx context.Context) {
 
 		// Use context.Background() for individual processing so that each
 		// retry completes even if the parent context is cancelled.
-		p.retryEvent(context.Background(), eventID, sourceID, eventType, payload, receivedAt, signalWorkflowID, signalName, retryCount)
+		//
+		// ForTenant, not the sweep's bypass. cleat#1512. Every statement
+		// retryEvent issues addresses webhook_events BY ID with no tenant
+		// predicate, so the policy is the only thing standing between a bug or
+		// an id collision and another tenant's row.
+		//
+		// tenant_id was not previously selected here, which is why this is not
+		// simply "the tenant was dropped": it was never fetched. Adding the
+		// column is what makes the narrow answer available at all, and it is a
+		// column on the row the scan already reads rather than a second query.
+		//
+		// Built from context.Background() rather than from parentCtx for two
+		// reasons: to detach from the tick's cancellation, as before, and
+		// because parentCtx carries the sweep's bypass -- and a ForTenant
+		// applied on top of AcrossAllTenants is ignored without a word
+		// (cleat#1515), which would leave every retry write unscoped while
+		// looking correct at the call site.
+		p.retryEvent(plugin.ForTenant(context.Background(), tenantID),
+			eventID, sourceID, eventType, payload, receivedAt, signalWorkflowID, signalName, retryCount)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -174,7 +202,7 @@ func (p *Plugin) markRetryFailed(ctx context.Context, eventID uuid.UUID, current
 // background loop, and neither failure fails an assertion anywhere: the errors
 // go to the worker log, which is not in the CI console.
 var queryUnprocessedWebhookEvents = plugin.Query{
-	Default: `SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at,
+	Default: `SELECT e.id, e.tenant_id, e.source_id, e.event_type, e.payload, e.received_at,
        COALESCE(s.signal_workflow_id, ''), COALESCE(s.signal_name, 'webhook_received'),
        COALESCE(e.retry_count, 0)
 FROM webhook_events e
@@ -184,7 +212,7 @@ WHERE NOT e.processed
   AND e.received_at < NOW() - INTERVAL '10 seconds'
 ORDER BY e.received_at
 LIMIT 100`,
-	MySQL: `SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at,
+	MySQL: `SELECT e.id, e.tenant_id, e.source_id, e.event_type, e.payload, e.received_at,
        COALESCE(s.signal_workflow_id, ''), COALESCE(s.signal_name, 'webhook_received'),
        COALESCE(e.retry_count, 0)
 FROM webhook_events e
@@ -194,7 +222,7 @@ WHERE NOT e.processed
   AND e.received_at < NOW() - INTERVAL 10 SECOND
 ORDER BY e.received_at
 LIMIT 100`,
-	MSSQL: `SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at,
+	MSSQL: `SELECT e.id, e.tenant_id, e.source_id, e.event_type, e.payload, e.received_at,
        COALESCE(s.signal_workflow_id, ''), COALESCE(s.signal_name, 'webhook_received'),
        COALESCE(e.retry_count, 0)
 FROM webhook_events e
