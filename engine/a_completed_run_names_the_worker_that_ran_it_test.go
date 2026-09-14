@@ -41,12 +41,8 @@ func TestACompletedRunNamesTheWorkerThatRanIt(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 
-			type run struct {
-				id     string
-				worker string
-			}
-			var runs []run
-			for i, worker := range []string{"worker-alpha", "worker-beta"} {
+			started := map[string]bool{}
+			for i := 0; i < 2; i++ {
 				id, _, err := store.StartNewRun(ctx, "", "completer", 1,
 					json.RawMessage(`{}`),
 					fmt.Sprintf("completer-%d-%d", i, time.Now().UnixNano()),
@@ -54,24 +50,59 @@ func TestACompletedRunNamesTheWorkerThatRanIt(t *testing.T) {
 				if err != nil {
 					t.Fatalf("StartNewRun %d: %v", i, err)
 				}
-				runs = append(runs, run{id: id, worker: worker})
+				started[id] = true
 			}
 
-			// Claim each run as its own worker. One run is outstanding per
-			// claim, so a claim cannot consume a sibling (cleat#1115).
-			for i := range runs {
-				claimed, err := store.ClaimWorkflow(ctx, runs[i].worker)
+			// BIND EACH WORKER TO THE RUN IT ACTUALLY CLAIMED, rather than
+			// asserting which run it gets. cleat#1574.
+			//
+			// Both runs are created above before either is claimed, so TWO are
+			// outstanding at the first claim -- not one, as this comment used
+			// to say while citing cleat#1115. Which one comes back is not
+			// determined: the claim orders by `priority ASC, created_at` with
+			// no unique tiebreak (engine/mssql_lifecycle.go:232 and the same
+			// shape at engine/mysql_lifecycle.go:98), and on SQL Server the
+			// READPAST/UPDLOCK hints let the engine skip locked rows and do not
+			// oblige it to scan in index order. It failed roughly half the time
+			// on mssql, on branches containing no Go source at all.
+			//
+			// The ordering was incidental to what is being verified: that a
+			// completed run names ITS OWN claimant, and that two claimants are
+			// recorded as different. Binding after the fact tests exactly that
+			// and assumes nothing about order.
+			//
+			// The two guards below keep what the discarded assertion was
+			// really protecting. It could not tell "the claim returned my other
+			// run" from "the claim returned a run belonging to something else",
+			// and reported both as the former; these separate them, and the
+			// second also catches a claim consuming a run that was not
+			// outstanding, which is cleat#1115's actual subject.
+			type run struct {
+				id     string
+				worker string
+			}
+			var runs []run
+			claimedIDs := map[string]string{}
+			for _, worker := range []string{"worker-alpha", "worker-beta"} {
+				claimed, err := store.ClaimWorkflow(ctx, worker)
 				if err != nil || claimed == nil {
-					t.Fatalf("ClaimWorkflow as %s: %v (nil=%v)", runs[i].worker, err, claimed == nil)
+					t.Fatalf("ClaimWorkflow as %s: %v (nil=%v)", worker, err, claimed == nil)
 				}
-				if claimed.ID != runs[i].id {
-					t.Fatalf("%s claimed %s, wanted %s -- another run was outstanding, so "+
-						"the identities below would be attributed to the wrong rows",
-						runs[i].worker, claimed.ID, runs[i].id)
+				if !started[claimed.ID] {
+					t.Fatalf("UNMEASURED: %s claimed %s, which this test did not start -- "+
+						"something else's run is in this database, so the identities below "+
+						"would be attributed to rows this test knows nothing about",
+						worker, claimed.ID)
 				}
-				if err := store.CompleteWorkflow(ctx, runs[i].id, runs[i].worker,
+				if prev, dup := claimedIDs[claimed.ID]; dup {
+					t.Fatalf("%s claimed %s, which %s already holds -- a claim consumed a "+
+						"run that was not outstanding (cleat#1115)", worker, claimed.ID, prev)
+				}
+				claimedIDs[claimed.ID] = worker
+				runs = append(runs, run{id: claimed.ID, worker: worker})
+				if err := store.CompleteWorkflow(ctx, claimed.ID, worker,
 					claimed.Generation, `{"ok":true}`, nil); err != nil {
-					t.Fatalf("CompleteWorkflow as %s: %v", runs[i].worker, err)
+					t.Fatalf("CompleteWorkflow as %s: %v", worker, err)
 				}
 			}
 
