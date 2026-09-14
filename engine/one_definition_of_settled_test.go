@@ -50,14 +50,22 @@ var narrowerThanSettled = map[string]string{
 		"predicate names exactly the two statuses with nothing to delete. That is the " +
 		"inversion cleat#1023 is about; it is recorded there, not a gap here.",
 
-	"engine/retention_predicates.go:done,failed,terminated": "" +
-		"--completed-workflow-retention-days, which is OFF BY DEFAULT (cleat#1023). " +
-		"This is the arm that does reach 'terminated'. 'dead_lettered' is excluded on " +
+	"engine/retention_predicates.go:cancelled,done,failed,terminated": "" +
+		"--completed-workflow-retention-days, which is OFF BY DEFAULT (cleat#1023). This is " +
+		"the arm that reaches the operator-imposed terminal statuses. 'cancelled' was added " +
+		"to it by cleat#1153 WITH the status itself: a new terminal status collected by no " +
+		"arm at all would accumulate forever, which is cleat#1023's finding one step worse " +
+		"-- 'dead_lettered' at least has its own arm. 'dead_lettered' stays excluded here on " +
 		"purpose and the flag's own help text says so.",
 
-	"engine/mysql_ops.go:done,failed,terminated": "" +
-		"MySQL's arm of the same --completed-workflow-retention-days sweep; same set, " +
-		"same reason as the entry above.",
+	"engine/mysql_ops.go:cancelled,done,failed,terminated": "" +
+		"MySQL's inline idempotency_keys cleanup, joined to workflow_instances. It is the " +
+		"same sweep as the entry above and had to be widened SEPARATELY, because PostgreSQL " +
+		"and SQL Server delete their keys from an id list the retention predicate already " +
+		"selected while MySQL re-states the predicate in the DELETE. Missing it would have " +
+		"left cancelled runs' idempotency keys uncollected on one dialect only -- and a key " +
+		"that outlives its run answers a retry 'already_started' with a workflow_id that " +
+		"404s on every read path (cleat#1255).",
 }
 
 // TestEverySettledStatusPredicateUsesOneDefinition fails when a predicate

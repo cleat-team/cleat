@@ -2,7 +2,7 @@ package engine
 
 // IMPROVEMENT-PLAN 3.92. §3.86 scoped the terminate and left the cascade.
 //
-// terminateWorkflowOnce calls enforceParentClosePolicy UNCONDITIONALLY after
+// preemptivelySettleOnce calls enforceParentClosePolicy UNCONDITIONALLY after
 // its commit, and never looks at how many rows the terminate touched. So once
 // §3.86 put `AND tenant_id` on the terminate itself, a cross-tenant terminate
 // stopped matching the parent -- and went on to close that parent's CHILDREN

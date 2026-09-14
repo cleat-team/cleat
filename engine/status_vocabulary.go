@@ -38,6 +38,7 @@ const (
 	// exported-shaped name is a maintenance claim nobody is making. The list in
 	// the comment is the record; these four are the ones settledStatusList
 	// builds from.
+	statusCancelled    = "cancelled"
 	statusDone         = "done"
 	statusFailed       = "failed"
 	statusDeadLettered = "dead_lettered"
@@ -75,4 +76,4 @@ const (
 // correction touches only the three that were wrong -- and leaves the digests
 // in mssql_tenant_predicate_test.go's exemption list untouched.
 const settledStatusList = `'` + statusDone + `', '` + statusFailed + `', '` +
-	statusDeadLettered + `', '` + statusTerminated + `'`
+	statusDeadLettered + `', '` + statusTerminated + `', '` + statusCancelled + `'`

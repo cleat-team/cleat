@@ -238,7 +238,9 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select isnull(result, '{}'), status, error_msg from workflow_instances where ",
 		Reason: scopedByCaller,
 	},
-	// DIGEST MOVED IN cleat#1153 GROUNDWORK AND THE REASON DID NOT. The statement
+	// DIGEST MOVED TWICE, IN cleat#1560 AND AGAIN HERE, AND THE REASON DID NOT
+	// EITHER TIME -- the second move added 'cancelled' to the same NOT IN list.
+	// The statement
 	// gained 'terminated' in its NOT IN list -- it had been excluding three of the
 	// four settled statuses, so a terminated child kept holding its parent's
 	// child-workflow quota. That changes which ROWS the count includes and nothing
@@ -247,7 +249,7 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	// Re-stated here rather than carried over, because the key digests the SQL and
 	// an exemption that survived an edit unexamined is what stmtExemption exists to
 	// stop.
-	"mssql_signals_promises.go:GetChildCount#70203e032ff1": {
+	"mssql_signals_promises.go:GetChildCount#199ba83469ad": {
 		SQL:    "select count(*) from workflow_instances where parent_workflow_id = @p1 and sta",
 		Reason: scopedByCaller,
 	},
@@ -266,7 +268,7 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	//    Four hand audits and a substring script had passed over them.
 	//  - enforceParentClosePolicy and childrenClosedByTerminate were about to be
 	//    written down as scopedByCaller, and that reason was FALSE:
-	//    terminateWorkflowOnce calls the cascade unconditionally after its
+	//    preemptivelySettleOnce calls the cascade unconditionally after its
 	//    commit, so once 3.86 scoped the terminate itself a cross-tenant
 	//    terminate matched no parent and then failed another tenant's CHILDREN
 	//    anyway. They are NOT in this list because 3.92 fixed them -- and this

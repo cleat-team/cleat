@@ -1716,6 +1716,15 @@ func (s *ShardedStore) TerminateWorkflow(ctx context.Context, workflowID, reason
 	return shard.Store.TerminateWorkflow(ctx, workflowID, reason)
 }
 
+// CancelWorkflow dispatches to the shard owning this workflow. cleat#1153.
+func (s *ShardedStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("cancel_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.CancelWorkflow(ctx, workflowID, reason)
+}
+
 // LoadEventHistoryBatch returns event histories for multiple workflow IDs
 // by dispatching per-ID to the appropriate shard.
 func (s *ShardedStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]EventRecord, error) {

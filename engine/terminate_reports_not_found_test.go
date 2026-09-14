@@ -2,7 +2,7 @@ package engine
 
 // IMPROVEMENT-PLAN 3.92, the root rather than the symptom.
 //
-// terminateWorkflowOnce exec'd its UPDATE, ignored how many rows it touched,
+// preemptivelySettleOnce exec'd its UPDATE, ignored how many rows it touched,
 // and then ran enforceParentClosePolicy unconditionally. While the UPDATE
 // matched on id alone that was harmless -- a terminate that hit nothing was a
 // terminate of a workflow that did not exist, and its children did not exist

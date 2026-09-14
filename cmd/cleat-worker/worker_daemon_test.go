@@ -121,6 +121,7 @@ type mockStore struct {
 	setAllowedSignalCallersID          string
 	setAllowedSignalCallers            []string
 	terminateWorkflowFn                func(ctx context.Context, workflowID, reason string) error
+	cancelWorkflowFn                   func(ctx context.Context, workflowID, reason string) error
 	adminForceCompleteFn               func(ctx context.Context, workflowID string, generation int64, result string, operator string) error
 	adminForceFailFn                   func(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error
 	adminReReplayFn                    func(ctx context.Context, workflowID string, generation int64, operator string) error
@@ -3352,6 +3353,13 @@ func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []str
 func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan engine.EventRecord, <-chan error) {
 	return nil, nil
 }
+func (m *mockStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	if m.cancelWorkflowFn != nil {
+		return m.cancelWorkflowFn(ctx, workflowID, reason)
+	}
+	return nil
+}
+
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	if m.terminateWorkflowFn != nil {
 		return m.terminateWorkflowFn(ctx, workflowID, reason)

@@ -115,19 +115,34 @@ const (
 )
 
 // ---- completed workflow records --------------------------------------------
+//
+// 'cancelled' JOINED THIS ARM WITH THE STATUS ITSELF (cleat#1153), and leaving
+// it out would have shipped a fresh instance of cleat#1023. That issue measured
+// the retention picture and found it aimed away from the rows that survive: the
+// statuses whose event history is NOT purged at finalize are exactly the ones
+// the on-by-default sweep excludes. A new terminal status collected by no arm
+// at all is the same defect one step worse -- 'dead_lettered' at least has its
+// own arm above; 'cancelled' would have had none, and would accumulate forever
+// on every deployment.
+//
+// This is the flag-gated arm (--completed-workflow-retention-days, off by
+// default), so an operator who has opted into collecting terminated runs now
+// also collects cancelled ones. That is what they would expect: the two
+// statuses are the same kind of event, both imposed by an operator on a run
+// that did not finish on its own.
 const (
 	msCompletedWorkflows = ` FROM workflow_instances
-		WHERE status IN ('done', 'failed', 'terminated')
+		WHERE status IN ('done', 'failed', 'terminated', 'cancelled')
 		  AND completed_at IS NOT NULL
 		  AND completed_at < @p1`
 
 	myCompletedWorkflows = ` FROM workflow_instances
-				WHERE status IN ('done', 'failed', 'terminated')
+				WHERE status IN ('done', 'failed', 'terminated', 'cancelled')
 				  AND completed_at IS NOT NULL
 				  AND completed_at < ?`
 
 	pgCompletedWorkflows = ` FROM workflow_instances
-		WHERE status IN ('done', 'failed', 'terminated')
+		WHERE status IN ('done', 'failed', 'terminated', 'cancelled')
 		  AND completed_at IS NOT NULL
 		  AND completed_at < $1`
 )
