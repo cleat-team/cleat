@@ -80,5 +80,40 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS plugin_lease;
 			`,
 		},
+		{
+			// Tenant isolation for dd_config. cleat#1278.
+			//
+			// A separate version rather than a TenantScoped on v1: v1 is
+			// already recorded as applied wherever datadogexport runs, and a
+			// recorded migration never runs again -- editing it would protect
+			// new databases and leave every existing one open.
+			//
+			// ONLY dd_config. plugin_lease (v2) is deliberately NOT listed, and
+			// that is the judgement this plugin adds over auditlog's: it has no
+			// tenant_id at all. It is a leader-election lease keyed by name,
+			// one row for the whole fleet, and it is correct for every worker
+			// of every tenant to contend for the same row. A tenant column
+			// could be invented for it, and the lease would then elect one
+			// leader per tenant, which is not what leader election here means.
+			//
+			// So a plugin table is one of THREE things, not two:
+			//
+			//	tenant-scoped   dd_config       -> TenantScoped, policy applies
+			//	global by design plugin_lease   -> no TenantScoped, no policy,
+			//	                                   and its loops need no bypass
+			//	                                   because nothing scopes them
+			//	unscoped by oversight           -> the thing cleat#1278 is for
+			//
+			// The second and third look identical in the schema. The difference
+			// is whether a tenant OWNS the rows, and only a reader of the
+			// plugin can answer it -- which is why this is a per-plugin
+			// judgement and not a sweep.
+			//
+			// Up is empty on purpose: the policy is emitted by the runtime from
+			// TenantScoped. On MySQL and SQL Server this version is recorded and
+			// does nothing, which is what the field documents.
+			Version:      3,
+			TenantScoped: []string{"dd_config"},
+		},
 	}
 }

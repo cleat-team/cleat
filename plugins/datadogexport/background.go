@@ -178,7 +178,29 @@ func (p *Plugin) isLeader(ctx context.Context) bool {
 // metrics for each one. Errors for individual configs are logged but do not
 // prevent other configs from being processed.
 func (p *Plugin) exportMetrics(ctx context.Context) error {
-	rows, err := p.db.Query(ctx, `
+	// A NAMED cross-tenant read. cleat#1278.
+	//
+	// This query's whole job is to discover WHICH tenants have an export
+	// configured, so it cannot be scoped to one -- there is no tenant to scope
+	// it to until after it returns. Once dd_config carries a row-level policy
+	// (migrations.go v3) an unnamed statement here is refused with
+	// "cleat.tenant_id is not set", so adding the policy and leaving this bare
+	// are the same change.
+	//
+	// The scope ends here deliberately: exportForConfig below re-narrows to one
+	// tenant with plugin.ForTenant rather than inheriting this bypass.
+	// A SEPARATE VARIABLE, NOT `ctx =`. Reassigning would carry the bypass into
+	// exportForConfig below, where plugin.ForTenant would be silently ignored --
+	// beginTenantTx tests CrossTenant first, so a bypass in scope wins. That is
+	// the hazard ForTenant's own doc comment names, and the first draft of this
+	// function had it: `ctx =`, then `exportForConfig(ctx, cfg)`, with a comment
+	// in exportForConfig claiming it received the unmarked parent. It did not.
+	//
+	// The narrow scope is the point: the bypass covers the discovery query and
+	// nothing else.
+	discoverCtx := plugin.AcrossAllTenants(ctx, "datadog-export: discovering which tenants have an export configured")
+
+	rows, err := p.db.Query(discoverCtx, `
 			SELECT id, tenant_id, api_key, site, metrics_prefix
 			FROM dd_config
 			WHERE enabled = true
@@ -214,6 +236,30 @@ func (p *Plugin) exportMetrics(ctx context.Context) error {
 // exportForConfig queries workflow statistics for a single tenant and sends
 // them as gauge metrics to the Datadog Metrics API.
 func (p *Plugin) exportForConfig(ctx context.Context, cfg ddConfigRow) error {
+	// NARROWED TO ONE TENANT, not inheriting the caller's bypass. cleat#1278.
+	//
+	// cfg.TenantID is in hand, so this is the ForTenant case rather than the
+	// AcrossAllTenants one: the statement below reads ONE tenant's rows and
+	// should be scoped to say so.
+	//
+	// IT IS NOT COSMETIC. workflow_instances is a CORE table whose policy is
+	// `tenant_id = cleat.assert_tenant_set()`, which RAISES when no tenant is
+	// set -- so this read survives today only because the worker's plugin pool
+	// connects as an owner or superuser, which PostgreSQL waves past a policy.
+	// Point that pool at a non-superuser and the query fails; exportMetrics
+	// logs the error and continues, so the symptom is no metrics, which is
+	// indistinguishable from no enabled configs. Same shape as cleat#958, where
+	// an empty audit table read as a quiet system.
+	//
+	// The WHERE tenant_id = $1 below stays. It is the same value by a second
+	// route, and a scoped connection plus an explicit predicate disagree only
+	// if something is wrong.
+	//
+	// A BYPASS ALREADY IN SCOPE WOULD WIN AND THIS WOULD BE INERT -- see
+	// plugin.ForTenant. The caller marks cross-tenant for its discovery query;
+	// it passes the UNMARKED parent ctx here for exactly that reason.
+	ctx = plugin.ForTenant(ctx, cfg.TenantID)
+
 	// Query workflow counts by status for this tenant.
 	statusRows, err := p.db.Query(ctx, plugin.Rebind(`
 			SELECT status, COUNT(*) AS count
