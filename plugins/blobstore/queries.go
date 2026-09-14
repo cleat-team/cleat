@@ -101,6 +101,37 @@ var jsonbContains = plugin.Query{
 	MSSQL:   `EXISTS (SELECT 1 FROM OPENJSON(i.tags) AS t1 INNER JOIN OPENJSON($1) AS t2 ON t1.[key] = t2.[key] AND t1.value = t2.value)`,
 }
 
+// staleWorkflowRefs deletes the references held by workflows that are no longer
+// in flight.
+//
+// THE POSTGRES ARM DOES NOT READ workflow_instances DIRECTLY, and that is the
+// whole of cleat#1528. That table's policy is 001_schema.sql's inline
+// `tenant_id = cleat.assert_tenant_set()`, which RAISEs on an unset tenant and
+// -- unlike cleat.tenant_row_is_visible -- does not honour a named
+// cross-tenant bypass. A background sweep has no tenant, so this statement was
+// refused and cleanupExpired returned before reaching phase 2. Every tick.
+//
+// admin.in_flight_workflow_ids() (migration 073) is owned by cleat_dispatcher,
+// the NOLOGIN BYPASSRLS role that already owns admin.claim_workflows. It takes
+// no arguments and returns ids, so the exemption is bounded by the body rather
+// than by what a caller asks for.
+//
+// MySQL and SQL Server keep the direct subquery: neither has row-level security
+// on workflow_instances, so neither ever had the problem, and mirroring the
+// function would mean maintaining it in three dialects to fix one.
+var staleWorkflowRefs = plugin.Query{
+	Default: `DELETE FROM workflow_blob_refs
+WHERE workflow_id NOT IN (SELECT id FROM admin.in_flight_workflow_ids())`,
+	MySQL: `DELETE FROM workflow_blob_refs
+WHERE workflow_id NOT IN (
+	SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
+)`,
+	MSSQL: `DELETE FROM workflow_blob_refs
+WHERE workflow_id NOT IN (
+	SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
+)`,
+}
+
 var deleteChunksReturning = plugin.Query{
 	Default: `WITH deleted AS (
 	DELETE FROM blob_index

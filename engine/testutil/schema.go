@@ -709,6 +709,24 @@ func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 		`GRANT EXECUTE ON FUNCTION cleat.assert_tenant_set() TO ` + PostgresRLSTestRole,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ` + PostgresRLSTestRole,
 		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ` + PostgresRLSTestRole,
+
+		// ONE FUNCTION IN admin, NOT THE SCHEMA'S CONTENTS. This role exists to
+		// model a worker that RLS actually applies to, and a worker calls
+		// admin.in_flight_workflow_ids() -- migration 073, cleat#1528 -- so a
+		// test that cannot is modelling something else. USAGE on the schema is
+		// required to reach any function in it; the EXECUTE grant is named
+		// rather than `ON ALL FUNCTIONS`, because admin also holds
+		// admin.drop_tenant, and a blanket grant here would hand this role the
+		// capability cleat#1365 was filed to take away from tenant roles.
+		`GRANT USAGE ON SCHEMA admin TO ` + PostgresRLSTestRole,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+				WHERE n.nspname = 'admin' AND p.proname = 'in_flight_workflow_ids'
+			) THEN
+				EXECUTE 'GRANT EXECUTE ON FUNCTION admin.in_flight_workflow_ids() TO ` + PostgresRLSTestRole + `';
+			END IF;
+		END $$;`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
