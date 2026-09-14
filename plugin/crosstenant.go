@@ -3,6 +3,8 @@ package plugin
 import (
 	"context"
 
+	"github.com/google/uuid"
+
 	"github.com/cleat-team/cleat/internal/tenantctx"
 )
 
@@ -55,4 +57,48 @@ import (
 // class of answer this whole mechanism exists to make impossible.
 func AcrossAllTenants(ctx context.Context, reason string) context.Context {
 	return tenantctx.WithCrossTenant(ctx, reason)
+}
+
+// ForTenant marks ctx as acting for one specific tenant, so that statements run
+// with it see that tenant's rows and no others.
+//
+// IT IS THE COUNTERPART TO AcrossAllTenants, AND THE DISTINCTION IS THE POINT.
+// Until this existed the only tenant API a plugin had was the bypass, so a
+// background writer that had LOST its tenant and one that never had a tenant
+// looked like the same problem and got the same blunt answer. They are not the
+// same problem:
+//
+//	no tenant to be had        a retention sweep keyed on a timestamp, an index
+//	                           rebuild, a reaper -- nothing owns the rows it
+//	                           touches. Use AcrossAllTenants, with a reason.
+//
+//	a tenant that went missing a writer handed tenantID as a PARAMETER that
+//	                           derives its context from context.Background() so
+//	                           the write survives a cancelled request, and drops
+//	                           the tenant doing so. Use ForTenant.
+//
+// Reaching for the bypass in the second case works, passes every test, and
+// silently disables isolation for every write on that path -- which is the
+// failure this whole mechanism exists to make impossible. The two live in one
+// file so a reviewer can grep it and see every place a plugin asserted "this is
+// global" or "this is tenant X", each with its reason attached.
+//
+// Found in two plugins independently on the same evening: auditlog's recordAudit
+// and eventtriggers' retryEvent both take a tenant id and both throw it away at
+// a context.Background(). cleat#1278.
+//
+// A BYPASS ALREADY IN SCOPE WINS, AND THIS IS SILENT. beginTenantTx tests
+// CrossTenant before the tenant (engine/plugindb_tenant.go), deliberately, so
+// that marking a request context widens rather than narrows -- an admin endpoint
+// rebuilding an index for everyone must not be scoped to whoever called it. The
+// consequence is that ForTenant inside an AcrossAllTenants scope is ignored
+// without a word. If you need one statement scoped inside a sweep, build it from
+// a context that is not the bypassed one.
+//
+// POSTGRESQL ONLY in effect, like the scoping it sets. MySQL has no row-level
+// security and SQL Server scopes a tenant at the connector, so on both dialects
+// plugin statements were never scoped and this is inert. It is safe to write in
+// a plugin that runs on all three.
+func ForTenant(ctx context.Context, tenantID uuid.UUID) context.Context {
+	return tenantctx.With(ctx, tenantID)
 }

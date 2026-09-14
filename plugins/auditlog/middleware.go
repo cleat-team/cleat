@@ -67,10 +67,11 @@ func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, method, pa
 	//
 	// tenantID is a parameter of this function, so nothing has to be looked up
 	// or plumbed: the value was in hand the whole time and only the carrier was
-	// lost. This is NOT a case for plugin.AcrossAllTenants -- see the note in
-	// migrations.go on why bypassing here would pass every test and silently
-	// disable isolation for every audit write.
-	insertCtx, cancel := context.WithTimeout(auth.WithTenantID(context.Background(), tenantID), 5*time.Second)
+	// lost. plugin.ForTenant is the API for exactly that -- NOT
+	// plugin.AcrossAllTenants, which would pass every test here and silently
+	// disable isolation for every audit write. See the contrast in
+	// plugin/crosstenant.go.
+	insertCtx, cancel := context.WithTimeout(plugin.ForTenant(context.Background(), tenantID), 5*time.Second)
 	defer cancel()
 
 	durationMs := int(duration.Milliseconds())
