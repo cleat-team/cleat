@@ -1653,7 +1653,18 @@ func (w *Worker) dispatchLoop() {
 		}
 		w.consecutiveDBErrors = 0 // reset circuit breaker on success
 
-		w.Metrics.RecordWorkflowsClaimed(w.ctx, int64(len(wfs)))
+		// Per definition, not per batch. A claim returns whatever is queued --
+		// sticky and general work for any mix of definitions -- so a single
+		// Add(len(wfs)) cannot carry a definition label, and cleat_workflows_claimed_total's
+		// dashboard panel drew one undifferentiated line (cleat#1444). Grouping
+		// here is what gives the panel something to group BY.
+		claimedByDef := make(map[string]int64, len(wfs))
+		for _, wf := range wfs {
+			claimedByDef[wf.DefName]++
+		}
+		for defName, n := range claimedByDef {
+			w.Metrics.RecordWorkflowsClaimed(w.ctx, n, defName)
+		}
 
 		// Re-check draining after claim to close the TOCTOU window between
 		// the drain check above and the DB claim calls.

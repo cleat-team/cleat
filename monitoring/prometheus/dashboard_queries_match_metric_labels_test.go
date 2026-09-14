@@ -222,11 +222,23 @@ func metricLabels(t *testing.T) map[string][]string {
 // cleat#1444.
 //
 // THIS LIST MAY ONLY SHRINK. A new mismatch fails the test.
-var knownGroupingMismatches = map[string]string{
-	"cleat_calls_total|workflow_name":             "cleat#1444 -- the metric declares no labels at all",
-	"cleat_replay_steps_total|workflow_name":      "cleat#1444 -- the metric declares def_name",
-	"cleat_workflows_claimed_total|workflow_name": "cleat#1444",
-}
+// Empty since cleat#1444. All three entries were removed by fixing the panels
+// and the metrics rather than by re-describing them:
+//
+//	cleat_calls_total              the metric now carries workflow_name
+//	cleat_workflows_claimed_total  ditto, and its caller splits the claim
+//	                               batch per definition so there is something
+//	                               to group BY
+//	cleat_replay_steps_total       the metric already carried def_name; the
+//	                               PANEL was wrong, and now selects and groups
+//	                               on def_name the way the wasm-compile panels
+//	                               already do
+//
+// Left as an empty map rather than deleted: the lookup below is what makes an
+// exemption possible at all, and a future mismatch wants somewhere to be
+// recorded deliberately rather than a mechanism to be re-invented. It may only
+// shrink, so an entry added here needs an issue in its value.
+var knownGroupingMismatches = map[string]string{}
 
 func TestDashboardGroupingLabelsExistOnTheMetric(t *testing.T) {
 	labels := metricLabels(t)

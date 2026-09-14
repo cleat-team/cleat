@@ -859,8 +859,26 @@ func (m *Metrics) RecordReplayStep(ctx context.Context, defName string, extraAtt
 }
 
 // RecordCall increments the durable-call-invocations counter.
-func (m *Metrics) RecordCall(ctx context.Context, extraAttrs ...attribute.KeyValue) {
-	attrs := m.mergeAttrs(extraAttrs...)
+// The label is workflow_name rather than def_name, and the choice is
+// consistency rather than taste. cleat#1444's dashboard panel groups
+// cleat_calls_total by workflow_name and got one undifferentiated line,
+// because the metric carried no labels at all.
+//
+// Two names for this one value already exist in this file: workflow_name on
+// RecordWorkflowStarted, RecordWorkflowCompleted, RecordWorkflowFailed,
+// RecordWorkflowDuration and RecordFreshStep; def_name on RecordReplayStep.
+// Five against one, and RecordFreshStep is this counter's closest sibling --
+// engine/durablecalls.go records both on adjacent lines from the same
+// s.defName. So a call counter labelled def_name would be the odd one out
+// among the metrics it is read beside.
+//
+// That the value is a DEFINITION name and the dominant label says
+// "workflow_name" is a real inconsistency, and it is not resolved here:
+// renaming a published label breaks whatever queries it. Filed separately.
+func (m *Metrics) RecordCall(ctx context.Context, workflowName string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("workflow_name", workflowName),
+	}, extraAttrs...)...)
 	m.calls.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
@@ -940,9 +958,23 @@ func (m *Metrics) RecordWorkflowsDeadLettered(ctx context.Context, extraAttrs ..
 	m.workflowsDeadLettered.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
-// RecordWorkflowsClaimed increments the workflows-claimed counter by count.
-func (m *Metrics) RecordWorkflowsClaimed(ctx context.Context, count int64, extraAttrs ...attribute.KeyValue) {
-	attrs := m.mergeAttrs(extraAttrs...)
+// RecordWorkflowsClaimed increments the workflows-claimed counter by count,
+// for one definition.
+//
+// PER DEFINITION, NOT PER BATCH, which is why this takes a name and the caller
+// changed. A claim returns a heterogeneous batch -- sticky and general work for
+// whatever definitions happen to be queued -- so the old signature could not
+// carry a label even in principle: there is no single definition a batch of
+// eight belongs to. cleat#1444's panel grouped it by workflow_name and drew one
+// line, and no amount of labelling at THIS function would have fixed that
+// without the caller splitting the batch first.
+//
+// workflow_name rather than def_name for the reason given on RecordCall: every
+// other cleat_workflows_*_total counter in this file carries workflow_name.
+func (m *Metrics) RecordWorkflowsClaimed(ctx context.Context, count int64, workflowName string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("workflow_name", workflowName),
+	}, extraAttrs...)...)
 	m.workflowsClaimed.Add(ctx, count, metric.WithAttributes(attrs...))
 }
 
