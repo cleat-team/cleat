@@ -416,7 +416,7 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID, &wf.ReclaimCount,
-			&wf.CancellationRequested); err != nil {
+			&wf.CancellationRequested, &wf.CompletedBy); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		if nextWakeAt.Valid {
@@ -486,14 +486,15 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 		       generation, COALESCE(priority, 0) AS priority,
 		       COALESCE(trace_id, ''), tenant_id, continued_from, reclaim_count, parent_workflow_id,
 		       created_at, COALESCE(pending_terminal_status, ''),
-		       COALESCE(cancellation_requested, false), COALESCE(cancellation_reason, '')
+		       COALESCE(cancellation_requested, false), COALESCE(cancellation_reason, ''),
+		       COALESCE(completed_by, '')
 		FROM workflow_instances WHERE id = $1 AND tenant_id = $2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
 		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
 		&wf.CreatedAt, &wf.PendingTerminalStatus,
-		&wf.CancellationRequested, &wf.CancellationReason)
+		&wf.CancellationRequested, &wf.CancellationReason, &wf.CompletedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
@@ -1448,7 +1449,7 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 		SET status = 'terminated',
 		    error_msg = $2,
 		    completed_at = now(),
-		    assigned_to = NULL,
+		    completed_by = assigned_to, assigned_to = NULL,
 		    generation = generation + 1,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL

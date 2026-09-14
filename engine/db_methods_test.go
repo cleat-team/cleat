@@ -673,6 +673,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 				"failed",                           // pending_terminal_status (cleat#1105)
 				true,                               // cancellation_requested (cleat#1351)
 				"INCIDENT-4242 operator cancelled", // cancellation_reason (cleat#1351)
+				"worker-7",                         // completed_by (cleat#1118)
 			}},
 		},
 	}, nil)
@@ -1147,7 +1148,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", int64(4), false},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 			},
 		},
 	}, nil)
@@ -1179,7 +1180,7 @@ func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0), int64(0), "", int64(4), false},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 			},
 		},
 	}, nil)
@@ -1960,6 +1961,7 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 				"",                // pending_terminal_status (no two-phase terminal pending)
 				false,             // cancellation_requested (NOT NULL, default false)
 				"",                // cancellation_reason (COALESCE of NULL: never cancelled)
+				"",                // completed_by (COALESCE of NULL: no worker recorded)
 			}},
 		},
 	}, nil)
@@ -4712,7 +4714,7 @@ func TestPostgresStore_ListWorkflows_EmptyResult(t *testing.T) {
 func TestPostgresStore_ListWorkflows_StatusFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "status =", data: [][]driver.Value{
-			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "worker-1", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false},
+			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "worker-1", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 		}},
 	}, nil)
 	defer db.Close()
@@ -4733,7 +4735,7 @@ func TestPostgresStore_ListWorkflows_StatusFilter(t *testing.T) {
 func TestPostgresStore_ListWorkflows_SearchFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "OR", data: [][]driver.Value{
-			{"wf-2", "my-wf", int64(1), "done", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false},
+			{"wf-2", "my-wf", int64(1), "done", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false, "worker-2"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -4751,7 +4753,7 @@ func TestPostgresStore_ListWorkflows_SearchFilter(t *testing.T) {
 func TestPostgresStore_ListWorkflows_InputContainsFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "ILIKE", data: [][]driver.Value{
-			{"wf-3", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false},
+			{"wf-3", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 		}},
 	}, nil)
 	defer db.Close()
@@ -5238,7 +5240,7 @@ func TestBeginTxWithRLS_SetConfigError(t *testing.T) {
 func TestPostgresStore_ListWorkflows_ErrorContainsFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "error_msg", data: [][]driver.Value{
-			{"wf-1", "my-wf", int64(1), "failed", []byte(`{}`), "worker-1", nil, "ERR001", "some-op", "something failed", nil, int64(0), int64(0), "", int64(4), false},
+			{"wf-1", "my-wf", int64(1), "failed", []byte(`{}`), "worker-1", nil, "ERR001", "some-op", "something failed", nil, int64(0), int64(0), "", int64(4), false, "worker-2"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -5259,7 +5261,7 @@ func TestPostgresStore_ListWorkflows_ErrorContainsFilter(t *testing.T) {
 func TestPostgresStore_ListWorkflows_WithOffset(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "OFFSET", data: [][]driver.Value{
-			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false},
+			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 		}},
 	}, nil)
 	defer db.Close()

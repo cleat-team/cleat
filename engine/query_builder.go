@@ -156,11 +156,11 @@ func (d Dialect) batchLimit(limitPos int) string {
 func (d Dialect) workflowInstanceColumns() string {
 	switch d {
 	case DialectPostgres:
-		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, false)"
+		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, false), COALESCE(completed_by, '')"
 	case DialectMySQL:
-		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, false)"
+		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, false), COALESCE(completed_by, '')"
 	case DialectMSSQL:
-		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, 0)"
+		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, 0), COALESCE(completed_by, '')"
 	default:
 		panic("unknown dialect: " + d)
 	}
@@ -271,7 +271,7 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp,
 			&errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID,
-			&wf.ReclaimCount, &wf.CancellationRequested,
+			&wf.ReclaimCount, &wf.CancellationRequested, &wf.CompletedBy,
 		); err != nil {
 			return err
 		}
@@ -281,7 +281,7 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&wf.Input, &wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp,
 			&errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID,
-			&wf.ReclaimCount, &wf.CancellationRequested,
+			&wf.ReclaimCount, &wf.CancellationRequested, &wf.CompletedBy,
 		); err != nil {
 			return err
 		}

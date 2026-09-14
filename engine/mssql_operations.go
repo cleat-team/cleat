@@ -294,7 +294,7 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 		SET status = 'terminated',
 		    error_msg = @p2,
 		    completed_at = SYSUTCDATETIME(),
-		    assigned_to = NULL,
+		    completed_by = assigned_to, assigned_to = NULL,
 		    generation = generation + 1,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL

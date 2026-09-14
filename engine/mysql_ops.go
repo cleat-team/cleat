@@ -644,13 +644,14 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       generation, COALESCE(priority, 0) AS priority,
 		       COALESCE(trace_id, ''), tenant_id, continued_from, reclaim_count, parent_workflow_id,
 		       created_at, COALESCE(pending_terminal_status, ''),
-		       COALESCE(cancellation_requested, false), COALESCE(cancellation_reason, '')
+		       COALESCE(cancellation_requested, false), COALESCE(cancellation_reason, ''),
+		       COALESCE(completed_by, '')
 		FROM workflow_instances WHERE id = ? AND tenant_id = ?
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg,
 		&errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID, &tenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
 		&wf.CreatedAt, &wf.PendingTerminalStatus,
-		&wf.CancellationRequested, &wf.CancellationReason)
+		&wf.CancellationRequested, &wf.CancellationReason, &wf.CompletedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1357,7 +1358,7 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 		SET status = 'terminated',
 		    error_msg = ?,
 		    completed_at = NOW(),
-		    assigned_to = NULL,
+		    completed_by = assigned_to, assigned_to = NULL,
 		    generation = generation + 1,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL

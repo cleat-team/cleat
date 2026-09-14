@@ -1420,6 +1420,7 @@ func TestMSSQLStore_ListWorkflows_Simple(t *testing.T) {
 				"worker-1", now, nil, nil, nil, now,
 				int64(3), int64(0), "", int64(4), // reclaim_count (cleat#1123)
 				false, // cancellation_requested (cleat#1351)
+				"",    // completed_by (cleat#1118: blank, this row is running)
 			},
 		}},
 	}, nil)
@@ -1491,6 +1492,10 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 			"failed",                           // pending_terminal_status (cleat#1105)
 			true,                               // cancellation_requested (cleat#1351)
 			"INCIDENT-4242 operator cancelled", // cancellation_reason (cleat#1351)
+			// completed_by (cleat#1118). Deliberately NOT "worker-1", which
+			// this row already supplies for assigned_to: a scan that read the
+			// lease column twice would pass against a matching value.
+			"worker-7",
 		}}},
 	}, nil)
 	defer db.Close()
@@ -1528,6 +1533,11 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 		t.Errorf("ParentWorkflowID is nil, want %q -- the fake row supplies it", "wf-parent")
 	} else if *wf.ParentWorkflowID != "wf-parent" {
 		t.Errorf("ParentWorkflowID = %q, want %q", *wf.ParentWorkflowID, "wf-parent")
+	}
+	// cleat#1118, same idiom as the three lines above. The want differs from
+	// AssignedTo on purpose -- see the row comment.
+	if wf.CompletedBy != "worker-7" {
+		t.Errorf("CompletedBy = %q, want %q", wf.CompletedBy, "worker-7")
 	}
 }
 
