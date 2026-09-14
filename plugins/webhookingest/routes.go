@@ -100,8 +100,29 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Look up the webhook source.
+	//
+	// A NAMED cross-tenant read, bound to a SEPARATE variable. cleat#1538.
+	//
+	// POST /ingest/{source_id} is one of exactly two routes cmd/cleat-worker
+	// exempts from auth (main.go, the auth.Middleware call), because the caller
+	// is the external system sending the webhook and holds no cleat credential.
+	// So r.Context() carries no tenant, and this SELECT -- which has no tenant
+	// predicate because the row is HOW the handler learns the tenant -- cannot
+	// be scoped to one. webhook_sources carries a policy whose predicate RAISES
+	// on an unset tenant, so without this the endpoint answers 500 to every
+	// inbound webhook before reaching anything else.
+	//
+	// `discoverCtx :=`, never `ctx =` or a reassignment of r's context.
+	// beginTenantTx tests the cross-tenant marker BEFORE the tenant one, so a
+	// ForTenant inside this scope is silently ignored -- carrying the bypass
+	// forward would run the event insert, the publish and the signal unscoped.
+	// The same rule kafkaconnect's pollConfigs documents for its own discovery
+	// query.
+	discoverCtx := plugin.AcrossAllTenants(r.Context(),
+		"webhook ingest: the source id identifies the tenant, so there is none to scope by")
+
 	var source webhookSourceJSON
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(discoverCtx, plugin.Rebind(`
 		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1
@@ -122,6 +143,12 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 		p.writeError(w, 403, "source is disabled")
 		return
 	}
+
+	// Everything from here runs as the tenant the source belongs to. Derived
+	// from r.Context() rather than from discoverCtx: narrowing a bypassed
+	// context is a no-op, so a ForTenant built on discoverCtx would leave every
+	// statement below cross-tenant while reading as though it were scoped.
+	tenantCtx := plugin.ForTenant(r.Context(), source.TenantID)
 
 	// Read the request body.
 	body, err := io.ReadAll(r.Body)
@@ -180,7 +207,7 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	eventID := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err = p.db.Exec(tenantCtx, plugin.Rebind(`
 		INSERT INTO webhook_events (id, source_id, tenant_id, event_type, headers, payload, received_at, processed)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, false)
 	`, p.dialect), eventID, sourceID, source.TenantID, eventType, string(headersJSON), string(payloadJSON), now)
@@ -217,7 +244,7 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	matched, pubErr := eventtriggers.PublishEvent(
-		r.Context(), p.db, p.logger, p.env,
+		tenantCtx, p.db, p.logger, p.env,
 		eventID, source.TenantID, eventType, eventData,
 	)
 	if pubErr != nil {
@@ -248,13 +275,13 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 			signalName = "webhook_received"
 		}
 		if p.env != nil && p.env.SignalWorkflow != nil {
-			if serr := p.env.SignalWorkflow(r.Context(), source.SignalWorkflowID, signalName, string(payloadBytes)); serr != nil {
+			if serr := p.env.SignalWorkflow(tenantCtx, source.SignalWorkflowID, signalName, string(payloadBytes)); serr != nil {
 				p.logger.Error("webhook-ingest: signal delivery failed",
 					"workflow_id", source.SignalWorkflowID,
 					"error", serr,
 				)
 			} else {
-				p.db.Exec(r.Context(), plugin.Rebind(`
+				p.db.Exec(tenantCtx, plugin.Rebind(`
 					UPDATE webhook_events SET processed = true, status = 'completed' WHERE id = $1
 				`, p.dialect), eventID)
 				p.logger.Info("webhook-ingest: signal delivered",
