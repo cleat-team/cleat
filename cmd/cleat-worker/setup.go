@@ -2011,7 +2011,44 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 	// Always provide DB so per-step flush and adaptive flusher work.
 	engineOpts = append(engineOpts, engine.WithDB(w.db))
-	// Use tenant-scoped database connection for plugin host functions if available.
+	// Scope the ENGINE's statements to this tenant. cleat#1278.
+	//
+	// The comment here used to read "use tenant-scoped database connection for
+	// plugin host functions", and that is worth correcting loudly rather than
+	// quietly: two sessions independently built an architecture argument on it
+	// and both were wrong for hours. It describes a wire that exists and is
+	// dead.
+	//
+	// WHAT THIS ACTUALLY SCOPES. WithDB sets engine.db. That is the handle the
+	// per-step flush, the adaptive flusher and the engine's own statements use,
+	// covering the core tenant-scoped tables. Under --tenant-isolation=role it
+	// becomes a pool authenticated AS the tenant's login role, so those
+	// statements are isolated by the connection itself.
+	//
+	// WHAT IT DOES NOT SCOPE: plugin statements. A plugin holds the handle in
+	// plugin.Environment.DB, built ONCE at worker startup from the owner or
+	// the dedicated plugin pool -- cmd/cleat-worker/main.go's getPluginDB --
+	// and nothing here reaches it. Every statement in a plugin's HTTP handlers
+	// and background loops runs on that owner-privileged handle regardless of
+	// this block.
+	//
+	// THE DEAD WIRE, because "it cannot reach plugins" is the tempting summary
+	// and is not true either. execSession.pluginCallContext copies engine.db
+	// into plugin.CallContext.DB, so a plugin invoked over a HOST CALL is
+	// handed this tenant pool. No plugin reads that field: across plugins/,
+	// CallContext is read 48 times for TenantID and 6 for WorkflowID, and
+	// zero times for DB. So the path is built and unused rather than absent,
+	// which is the distinction that makes the original comment aspirational
+	// rather than simply false -- and the reason to state it here, since a
+	// plugin author who starts reading cc.DB silently changes which pool
+	// their statements run on.
+	//
+	// WHAT ISOLATES PLUGIN TABLES INSTEAD is row-level security plus
+	// cleat.tenant_id set per transaction by engine/plugindb_tenant.go's
+	// beginTenantTx, from the tenant in the context -- supplied by the HTTP
+	// middleware or, for host calls, by pluginCallContext. That mechanism is
+	// independent of this flag and works with --tenant-isolation=rls, which is
+	// the default.
 	if w.tenantPools != nil && wf.TenantID != "" {
 		tenantDB, err := w.tenantPools.For(w.ctx, wf.TenantID)
 		if err != nil {
