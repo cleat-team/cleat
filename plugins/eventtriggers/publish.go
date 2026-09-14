@@ -27,6 +27,30 @@ func PublishEvent(
 	eventType string,
 	eventData map[string]any,
 ) (int, error) {
+	// Scope every statement below to the tenant this event belongs to.
+	//
+	// The tenant arrives as an ARGUMENT and the context need not carry it --
+	// which is not a quirk of one caller but the shape of the shared entry
+	// point. PublishEvent is exported precisely so other plugins can publish
+	// without going through the HTTP API, and two of its three callers reach it
+	// with no tenant in context: kafkaconnect from a background poll loop, and
+	// webhookingest from POST /ingest/{source_id}, which cmd/cleat-worker's
+	// middleware list exempts from auth because the caller is an external
+	// system holding no cleat credential.
+	//
+	// At that second caller the argument and the context can legitimately
+	// DISAGREE even when the context has a tenant: the value comes from the
+	// webhook_sources row the handler just looked up, not from the requester.
+	// So the parameter is the only correct source, and scoping here rather than
+	// at each call site is not a convenience -- a caller-side convention has to
+	// be right at every site, this has to be right once. cleat#1538.
+	//
+	// It covers the fan-out too: triggerMatchingWorkflows reads
+	// event_subscriptions, signalAwaiters reads event_awaiters and
+	// unregisterAwaiter deletes from it, all three tenant-scoped, all three
+	// taking this ctx.
+	ctx = plugin.ForTenant(ctx, tenantID)
+
 	eventDataJSON, err := json.Marshal(eventData)
 	if err != nil {
 		return 0, fmt.Errorf("marshal event data: %w", err)
