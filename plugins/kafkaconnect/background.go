@@ -58,7 +58,22 @@ type configRow struct {
 // messages from each one, publishing them as events through the
 // event-triggers pipeline.
 func (p *Plugin) pollConfigs(ctx context.Context) error {
-	rows, err := p.db.Query(ctx, `
+	// A NAMED cross-tenant read, bound to a SEPARATE variable. cleat#1278.
+	//
+	// This query discovers WHICH tenants have an enabled config, so it cannot
+	// be scoped to one -- there is no tenant to scope it to until it returns.
+	// Once kafka_config carries a policy (migrations.go v2) an unnamed
+	// statement here is refused.
+	//
+	// `discoverCtx :=`, never `ctx =`. Reassigning would carry the bypass into
+	// pollConfig below and into everything it reaches, where any narrowing is
+	// silently ignored -- beginTenantTx tests CrossTenant first. Here that
+	// reach is longer than it looks: pollConfig is called INSIDE this cursor
+	// loop, so a bypassed ctx would cover the whole poll, the REST proxy round
+	// trips and the event publish at the far end of it.
+	discoverCtx := plugin.AcrossAllTenants(ctx, "kafka-connect: discovering which tenants have an enabled config")
+
+	rows, err := p.db.Query(discoverCtx, `
 		SELECT id, tenant_id, name, brokers, topic, consumer_group, COALESCE(event_type, topic)
 		FROM kafka_config
 		WHERE enabled = true
