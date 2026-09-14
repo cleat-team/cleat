@@ -49,7 +49,10 @@ func (d *countingRoleDriver) Open(string) (driver.Conn, error) { return counting
 
 type countingRoleConn struct{ d *countingRoleDriver }
 
-func (c countingRoleConn) Prepare(string) (driver.Stmt, error) { return countingRoleStmt{c.d}, nil }
+// The conversion rather than countingRoleStmt{c.d}: both types are single-field
+// wrappers over the same *countingRoleDriver, and gosimple's S1016 rejects the
+// literal form.
+func (c countingRoleConn) Prepare(string) (driver.Stmt, error) { return countingRoleStmt(c), nil }
 func (c countingRoleConn) Close() error                        { return nil }
 func (c countingRoleConn) Begin() (driver.Tx, error)           { return nil, driver.ErrSkip }
 
