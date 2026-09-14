@@ -116,6 +116,20 @@ func (p *Plugin) cleanupOrphanedHistory(ctx context.Context) {
 // executes pg_dump outside the transaction so row locks are not held across
 // potentially-long backup operations.
 func (p *Plugin) runDueBackups(ctx context.Context) {
+	// CROSS-TENANT, for the same reason as the scheduler's claim (cleat#1512):
+	// the scan and the next_run advance share ONE transaction, deliberately, so
+	// that another worker skips a config even if this one crashes before the
+	// backup completes. Splitting the advance into per-tenant transactions
+	// would release the lock between claiming and advancing.
+	//
+	// cleanupOrphanedHistory is genuinely global too -- it reaps history rows
+	// whose config is gone, which belongs to no tenant by definition.
+	//
+	// The per-config work below the commit is NOT covered by this: it is
+	// re-scoped with ForTenant from the tenant_id the scan read.
+	ctx = plugin.AcrossAllTenants(ctx,
+		"scheduledbackup due-backup claim: one transaction claims and advances every tenant's due configs, and the orphan sweep belongs to no tenant")
+
 	p.cleanupOrphanedHistory(ctx)
 
 	tx, err := p.db.Begin(ctx)
@@ -159,8 +173,15 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 		p.logger.Info("scheduledbackup: running scheduled backup",
 			"config_id", b.id, "tenant", b.tenantID, "name", b.name)
 		// Use a background context so the backup completes even if
-		// the originating ticker context is cancelled.
-		p.executeScheduledBackup(context.Background(), b.id, b.tenantID, b.name, b.cronExpr)
+		// the originating ticker context is cancelled -- and scope it to the
+		// config's own tenant, which the scan above read into b.tenantID.
+		//
+		// Built from context.Background() rather than from ctx for both
+		// reasons: to detach from the ticker, and because ctx now carries the
+		// sweep's bypass, which would silently swallow the ForTenant
+		// (cleat#1515).
+		p.executeScheduledBackup(plugin.ForTenant(context.Background(), b.tenantID),
+			b.id, b.tenantID, b.name, b.cronExpr)
 	}
 }
 
@@ -192,7 +213,7 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 	if err != nil {
 		p.logger.Error("scheduledbackup: refusing scheduled backup",
 			"config_id", configID, "history_id", historyID, "error", err)
-		p.markBackupFailed(historyID, err.Error())
+		p.markBackupFailed(tenantID, historyID, err.Error())
 		return
 	}
 	var stderr bytes.Buffer
