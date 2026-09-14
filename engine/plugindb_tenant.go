@@ -123,9 +123,9 @@ func beginTenantTx(ctx context.Context, db *sql.DB, dialect plugin.Dialect, opts
 		// AND the role, because the two mechanisms cover different policies.
 		//
 		// The GUC above is what migration 063's CASE predicate tests, and
-		// policies written before migration 076 still carry it -- a plugin
+		// policies written before migration 077 still carry it -- a plugin
 		// whose migrations have not been re-run, or a database upgraded but
-		// not yet swept. The role is what 076's `TO cleat_sweep USING (true)`
+		// not yet swept. The role is what 077’s `TO cleat_sweep USING (true)`
 		// policy matches. Setting only one of them silently narrows the sweep
 		// to whichever half of the tree happens to be on that form, and a
 		// narrowed sweep returns FEWER rows rather than an error.
@@ -133,7 +133,7 @@ func beginTenantTx(ctx context.Context, db *sql.DB, dialect plugin.Dialect, opts
 		// SET LOCAL, like the set_config above, so it reverts with the
 		// transaction and cannot follow the connection back into the pool.
 		// The connecting role needs membership in cleat_sweep, granted WITH
-		// INHERIT FALSE by migration 076 -- enough to SET ROLE, not enough to
+		// INHERIT FALSE by migration 077 -- enough to SET ROLE, not enough to
 		// match the sweep policy passively. A plain GRANT there is a silent
 		// cross-tenant leak: measured, the application role then reads every
 		// tenant's rows with no error and the correct number of policies.
@@ -143,7 +143,7 @@ func beginTenantTx(ctx context.Context, db *sql.DB, dialect plugin.Dialect, opts
 			return nil, fmt.Errorf(
 				"plugin: cross-tenant sweep %q could not enter cleat_sweep: %w "+
 					"(the connecting role needs GRANT cleat_sweep ... WITH INHERIT FALSE; "+
-					"see migrations/postgres/076)", reason, err)
+					"see migrations/postgres/077)", reason, err)
 		}
 		return tx, nil
 	}
