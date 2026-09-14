@@ -34,6 +34,20 @@ import (
 // IT MUST RUN AS A ROLE THAT CANNOT BYPASS RLS. PostgreSQL exempts superusers
 // unconditionally, and every plugin suite here connects as one, so this test
 // written on the ordinary handle would pass against a completely broken policy.
+// EVERY TABLE REFERENCE BELOW IS SCHEMA-QUALIFIED, and that is not tidiness.
+//
+// plugin.RunMigrations defaults cfg.schema to "public" and does not consult
+// search_path, so task_queue is created in public wherever the plugin runs.
+// This test's own DDL is resolved by search_path instead, which is
+// `"$user", public` -- and the Tier 2 job connects as a role named `cleat`,
+// for which a schema of the same name exists. Unqualified, this test would
+// CREATE, police and read `cleat.task_queue`: internally consistent, green,
+// and proving nothing whatsoever about the table the plugin actually uses.
+//
+// The two mechanisms agree on every machine whose current_schema() is public,
+// which is every local run. Found by WS-1 hitting the same divergence in
+// auditlog, where it surfaced as a missing relation rather than as a silent
+// pass. cleat#1512.
 func TestTheEnqueueCommandSetsItsOwnTenant(t *testing.T) {
 	// A DATABASE OF THIS SUITE'S OWN, not the shared one. cleat#1512.
 	//
@@ -53,7 +67,7 @@ func TestTheEnqueueCommandSetsItsOwnTenant(t *testing.T) {
 	// The policy the TenantScoped migration installs. Applied directly so the
 	// test does not depend on plugin migration ordering.
 	if _, err := admin.Exec(`
-		CREATE TABLE IF NOT EXISTS task_queue (
+		CREATE TABLE IF NOT EXISTS public.task_queue (
 			tenant_id    UUID NOT NULL,
 			queue_name   TEXT NOT NULL,
 			job_id       UUID NOT NULL,
@@ -68,14 +82,14 @@ func TestTheEnqueueCommandSetsItsOwnTenant(t *testing.T) {
 	}
 	// Start from a known state: a row left by an earlier run makes a later
 	// count pass for the wrong reason.
-	if _, err := admin.Exec(`DELETE FROM task_queue`); err != nil {
+	if _, err := admin.Exec(`DELETE FROM public.task_queue`); err != nil {
 		t.Fatalf("clearing task_queue: %v", err)
 	}
 	for _, stmt := range []string{
-		`ALTER TABLE task_queue ENABLE ROW LEVEL SECURITY`,
-		`ALTER TABLE task_queue FORCE ROW LEVEL SECURITY`,
-		`DROP POLICY IF EXISTS task_queue_tenant_isolation ON task_queue`,
-		`CREATE POLICY task_queue_tenant_isolation ON task_queue
+		`ALTER TABLE public.task_queue ENABLE ROW LEVEL SECURITY`,
+		`ALTER TABLE public.task_queue FORCE ROW LEVEL SECURITY`,
+		`DROP POLICY IF EXISTS task_queue_tenant_isolation ON public.task_queue`,
+		`CREATE POLICY task_queue_tenant_isolation ON public.task_queue
 		     FOR ALL USING (cleat.tenant_row_is_visible(tenant_id))`,
 	} {
 		if _, err := admin.Exec(stmt); err != nil {
@@ -83,15 +97,15 @@ func TestTheEnqueueCommandSetsItsOwnTenant(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() {
-		_, _ = admin.Exec(`DROP POLICY IF EXISTS task_queue_tenant_isolation ON task_queue`)
-		_, _ = admin.Exec(`ALTER TABLE task_queue NO FORCE ROW LEVEL SECURITY`)
-		_, _ = admin.Exec(`ALTER TABLE task_queue DISABLE ROW LEVEL SECURITY`)
+		_, _ = admin.Exec(`DROP POLICY IF EXISTS task_queue_tenant_isolation ON public.task_queue`)
+		_, _ = admin.Exec(`ALTER TABLE public.task_queue NO FORCE ROW LEVEL SECURITY`)
+		_, _ = admin.Exec(`ALTER TABLE public.task_queue DISABLE ROW LEVEL SECURITY`)
 	})
 
 	lowPrivDSN := rlsDSNFor(t, admin)
 	testutil.SetupPostgresRLSRole(t, admin)
 	if _, err := admin.Exec(
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON task_queue TO ` + testutil.PostgresRLSTestRole); err != nil {
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON public.task_queue TO ` + testutil.PostgresRLSTestRole); err != nil {
 		t.Fatalf("granting on task_queue: %v", err)
 	}
 
@@ -145,7 +159,7 @@ func TestTheEnqueueCommandSetsItsOwnTenant(t *testing.T) {
 			lowDB, adminDB)
 	}
 	_, bareErr := low.Exec(
-		`INSERT INTO task_queue (tenant_id, queue_name, job_id) VALUES ($1,$2,$3)`,
+		`INSERT INTO public.task_queue (tenant_id, queue_name, job_id) VALUES ($1,$2,$3)`,
 		uuid.New(), "q", uuid.New())
 	if bareErr == nil {
 		t.Fatal("a bare INSERT with no tenant set SUCCEEDED. The policy is not in force, so " +
@@ -181,7 +195,7 @@ func TestTheEnqueueCommandSetsItsOwnTenant(t *testing.T) {
 
 	var n int
 	if err := admin.QueryRow(
-		`SELECT count(*) FROM task_queue WHERE tenant_id = $1 AND queue_name = 'the-cli-queue'`,
+		`SELECT count(*) FROM public.task_queue WHERE tenant_id = $1 AND queue_name = 'the-cli-queue'`,
 		tenant).Scan(&n); err != nil {
 		t.Fatalf("counting the enqueued row: %v", err)
 	}
