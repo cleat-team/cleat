@@ -19,6 +19,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -787,18 +788,13 @@ func TestFF_ListFlags_Empty(t *testing.T) {
 
 func TestFF_Migrations(t *testing.T) {
 	p, _, _ := newFFPlugin(t)
-	migrations := p.Migrations()
-	if len(migrations) == 0 {
-		t.Error("expected at least one migration")
-	}
-	for i, m := range migrations {
-		if m.Version == 0 {
-			t.Errorf("migration %d: version must be non-zero", i)
-		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
-	}
+	// One shared predicate for what a migration must do, rather than a copy per
+	// plugin. This one had drifted already -- it checked Up and never Down --
+	// and its "Up is non-empty" rule rejects a TenantScoped migration by
+	// construction: v2 declares a table for the runtime to put a policy on and
+	// deliberately carries no SQL in either direction, because there is none to
+	// write and no policy an author could drop. cleat#1512.
+	plugintest.AssertMigrationsDoSomething(t, p.Migrations())
 }
 
 // ===========================================================================

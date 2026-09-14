@@ -68,5 +68,42 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS feature_flags;
 			`,
 		},
+		{
+			// Tenant isolation for feature_flags. cleat#1512.
+			//
+			// A NEW VERSION, NOT A TenantScoped ON v1. A recorded migration
+			// never runs again, so editing v1 would protect databases created
+			// after this lands and leave every existing one open -- the same
+			// reason kvstore's v2 exists rather than an edit to its v1.
+			//
+			// Up is empty on purpose: the policy is emitted by the runtime from
+			// TenantScoped, so there is no SQL to write and none that could be
+			// dialect-specific. On MySQL and SQL Server this version is recorded
+			// and installs nothing, because neither has row-level security.
+			//
+			// WHY featureflags QUALIFIES, which is a different question from
+			// "does it compile". The policy calls cleat.assert_tenant_set(),
+			// which RAISEs when no tenant is in scope, so every access site has
+			// to have one. There are two kinds here and both do:
+			//
+			//   - the six HTTP handlers in routes.go run on r.Context(), which
+			//     the auth middleware has already put the tenant into;
+			//   - evaluate_flag in host_functions.go is a HOST CALL, and that
+			//     path carried no tenant until cleat#1492 bridged the
+			//     workflow's own tenant into tenantctx at the PluginCall
+			//     boundary. It reaches the database through plugin.PluginDB,
+			//     whose SQLDBAdapter.QueryRow calls beginTenantTx, so the
+			//     bridged value is what sets cleat.tenant_id.
+			//
+			// That second bullet is why this could not have been done before
+			// 2026-09-13 and is worth stating: a host-call access site is a
+			// third category, and the rollout table in cleat#1512 classifies
+			// plugins only by whether they have a background loop.
+			//
+			// featureflags has no background loop, so plugin.AcrossAllTenants
+			// is not needed anywhere -- nothing here reads across tenants.
+			Version:      2,
+			TenantScoped: []string{"feature_flags"},
+		},
 	}
 }
