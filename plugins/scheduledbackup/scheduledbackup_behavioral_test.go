@@ -7,6 +7,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -2278,14 +2279,12 @@ func TestSB_Migrations_DownSQL(t *testing.T) {
 	if len(migrations) == 0 {
 		t.Fatal("expected migrations")
 	}
-	for _, m := range migrations {
-		if m.Up == "" {
-			t.Error("migration Up SQL must be non-empty")
-		}
-		if m.Down == "" {
-			t.Error("migration Down SQL must be non-empty")
-		}
-	}
+	// One shared predicate for what a migration must do, rather than a copy
+	// per plugin. Thirteen plugins carried their own and they had already
+	// drifted -- three checked Up and not Down. A TenantScoped migration has
+	// no SQL in either direction by design, so the old wording rejected it by
+	// construction. cleat#1278.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // =========================================================================
