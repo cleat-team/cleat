@@ -1,11 +1,11 @@
-package migration
+package migration_test
 
 import (
 	"context"
-	"database/sql"
-	"os"
 	"sort"
 	"testing"
+
+	"github.com/cleat-team/cleat/migration"
 )
 
 // The objects in `admin` and `cleat` are shared by every pool in a database,
@@ -49,28 +49,31 @@ var (
 // `EXECUTE format(...)` -- migration 066 creates one that way -- so the files
 // are not the authority on what exists. The database is.
 func TestTheSharedSchemaSurfaceIsADeclaredList(t *testing.T) {
-	// CLEAT_TEST_DB as well as CLEAT_TEST_POSTGRES: the only CI job running
-	// ./migration/... is test-go/support, which provides its PostgreSQL
-	// service as CLEAT_TEST_DB. Reading only the narrower name would make this
-	// skip in the one job that runs it.
-	dsn := os.Getenv("CLEAT_TEST_POSTGRES")
-	if dsn == "" {
-		dsn = os.Getenv("CLEAT_TEST_DB")
-	}
-	if dsn == "" {
-		t.Skip("no PostgreSQL DSN (CLEAT_TEST_POSTGRES or CLEAT_TEST_DB)")
-	}
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
+	// ITS OWN DATABASE, NOT ITS OWN SCHEMA IN A SHARED ONE. cleat#1479, and
+	// this test is the one that was actually caught doing it.
+	//
+	// The migration below rebinds the SHARED admin functions: 001 creates them
+	// `SET search_path FROM CURRENT`, freezing the migrating pool's schema onto
+	// them, and --schema does not move admin -- there is one copy per DATABASE.
+	// So after this ran against the engine suite's database,
+	//
+	//	claim_workflows | {"search_path=shared_surface_1375, pg_temp"}
+	//
+	// and admin.claim_workflows looked for workflow_instances in a schema the
+	// engine knows nothing about. It found none and returned an empty list WITH
+	// NO ERROR, failing eight cross-tenant and RLS tests in ./engine/ as "the
+	// rows were not there". That schema name is how the cause was identified.
+	//
+	// Measured: pristine database, the eight pass; one `go test ./migration/`;
+	// the eight fail. Two ALTER FUNCTION statements and they pass again --
+	// confirmed by repair, not by diagnosis alone.
+	//
+	// Nothing about what this test asserts needs a shared database: it migrates,
+	// then reads the catalog for the objects the migration created.
+	db := newScratchDB(t, "cleat_shared_surface_1375")
 
 	const schema = "shared_surface_1375"
-	if _, err := db.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
-		t.Fatalf("reset: %v", err)
-	}
-	if err := NewRunner(db, DialectPostgres, "../migrations").
+	if err := migration.NewRunner(db, migration.DialectPostgres, "../migrations").
 		WithSchema(schema).Run(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
