@@ -1785,6 +1785,7 @@ type metricsStore interface {
 	CountEventHistoryTotal(ctx context.Context) (int, error)
 	EstimateEventHistorySize(ctx context.Context) (int64, error)
 	CountActiveConcurrencyKeys(ctx context.Context) (int, error)
+	CountConcurrencyKeysExpiringSoon(ctx context.Context, within time.Duration) (int, error)
 }
 
 // PostgresStore must satisfy metricsStore in FULL. Every method below reaches
@@ -1794,6 +1795,15 @@ type metricsStore interface {
 // compile-time check because the runtime symptom is a zero, and a zero is what
 // a healthy system reports.
 var _ metricsStore = (*PostgresStore)(nil)
+
+// AND ShardedStore, which was missing and should not have been. It reaches its
+// shards through the assertion above, but it must also SATISFY the interface
+// itself -- the worker type-asserts w.store.(MetricsStore) at runtime, so a
+// ShardedStore missing one method disables all of the metrics silently rather
+// than failing the build. That is the same failure cleat#1317 found the first
+// time, one level out: adding CountConcurrencyKeysExpiringSoon compiled clean
+// and would have turned every metric off on sharded deployments.
+var _ metricsStore = (*ShardedStore)(nil)
 
 // ---------------------------------------------------------------------------
 // MetricsStore implementation (fans out to all shards and aggregates)
@@ -1856,6 +1866,30 @@ func (s *ShardedStore) EstimateEventHistorySize(ctx context.Context) (int64, err
 			continue
 		}
 		n, err := ms.EstimateEventHistorySize(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// CountConcurrencyKeysExpiringSoon returns the total across all shards.
+//
+// SUM, not max -- unlike CountStalledWorkflows, which takes the worst shard
+// because stalls are independent. A key nearing expiry is a unit of work the
+// sweep owes, and what an operator wants is how much is owed in total.
+func (s *ShardedStore) CountConcurrencyKeysExpiringSoon(ctx context.Context, within time.Duration) (int, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	var total int
+	for _, shard := range shards {
+		ms, ok := shard.Store.(metricsStore)
+		if !ok {
+			continue
+		}
+		n, err := ms.CountConcurrencyKeysExpiringSoon(ctx, within)
 		if err != nil {
 			return 0, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
 		}

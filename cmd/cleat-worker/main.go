@@ -1182,6 +1182,7 @@ func main() {
 		compactionInterval:               *compactionInterval,
 		stallThreshold:                   *stallThreshold,
 		metricsSweepInterval:             *metricsSweepInterval,
+		keyExpiryWindow:                  *keyExpiryWindow,
 		retentionInterval:                *retentionInterval,
 		versionGCInterval:                *versionGCInterval,
 		versionGCMinVersions:             *versionGCMinVersions,

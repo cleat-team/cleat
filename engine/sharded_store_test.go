@@ -79,6 +79,7 @@ type mockShardStore struct {
 	eventTotal          int
 	eventSize           int64
 	concurrencyKeyCount int
+	keysExpiringSoon    int
 }
 
 func (m *mockShardStore) recordCall(method string) {
@@ -977,7 +978,27 @@ func (m *mockShardStore) CountActiveConcurrencyKeys(ctx context.Context) (int, e
 	return m.concurrencyKeyCount, nil
 }
 
+func (m *mockShardStore) CountConcurrencyKeysExpiringSoon(ctx context.Context, within time.Duration) (int, error) {
+	m.recordCall("CountConcurrencyKeysExpiringSoon")
+	if m.err != nil {
+		return 0, m.err
+	}
+	return m.keysExpiringSoon, nil
+}
+
 var _ WorkflowStore = (*mockShardStore)(nil)
+
+// AND metricsStore, which this mock must satisfy in FULL or it satisfies none
+// of it. ShardedStore reaches each shard through one assertion to the whole
+// interface, so a mock missing a single method sends every shard down the
+// `continue` and makes all five metrics return (0, nil) -- the tests then fail
+// with "want 7, got 0" and point at the aggregation rather than at the mock.
+//
+// That is not hypothetical: adding CountConcurrencyKeysExpiringSoon did exactly
+// this to nine tests here before the method was added above, and it is the same
+// shape as the production defect cleat#1317 found in PostgresStore. A
+// compile-time assertion turns it into a build failure naming the method.
+var _ metricsStore = (*mockShardStore)(nil)
 
 // ---------------------------------------------------------------------------
 // Helpers

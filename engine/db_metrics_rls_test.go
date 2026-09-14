@@ -124,11 +124,35 @@ func TestMetricsQueriesWorkUnderRLS(t *testing.T) {
 	// shards through a single assertion to the whole metricsStore interface,
 	// that one gap made all four return (0, nil) on every sharded deployment.
 	// A compile-time assertion now pins the set; this pins the behaviour.
+	// The expiring-soon window, seeded so BOTH bounds are asserted. The held
+	// key above expires in an hour and the expired one an hour ago; adding one
+	// inside a 10-minute window makes the answer 1 and distinguishes three
+	// wrong implementations at once: ignoring the upper bound counts the
+	// 1-hour key (2), ignoring the lower bound counts the expired one (2), and
+	// counting all rows gives 3.
+	if _, err := adminDB.Exec(
+		`INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+		 VALUES ('\x03'::bytea, 'soon', 'rls-metrics-wf', now() + interval '2 minutes', $1)`,
+		tenant); err != nil {
+		t.Fatalf("seed expiring-soon key: %v", err)
+	}
+	soon, err := store.CountConcurrencyKeysExpiringSoon(ctx, 10*time.Minute)
+	if err != nil {
+		t.Errorf("CountConcurrencyKeysExpiringSoon under a non-superuser role: %v", err)
+	} else if soon != 1 {
+		t.Errorf("CountConcurrencyKeysExpiringSoon(10m) = %d, want 1.\n\n"+
+			"Three keys are seeded: one expiring in 2 minutes (inside), one in an "+
+			"hour (outside), one an hour ago (already expired). 2 means a bound is "+
+			"missing -- the upper one counts the 1-hour key, the lower one counts "+
+			"the expired key, and an uncollected lease is sweep lag rather than "+
+			"contention. 3 means neither bound is applied.", soon)
+	}
+
 	keys, err := store.CountActiveConcurrencyKeys(ctx)
 	if err != nil {
 		t.Errorf("CountActiveConcurrencyKeys under a non-superuser role: %v", err)
-	} else if keys != 1 {
-		t.Errorf("CountActiveConcurrencyKeys = %d, want 1 (one held key and one "+
+	} else if keys != 2 {
+		t.Errorf("CountActiveConcurrencyKeys = %d, want 2 (two held keys and one "+
 			"expired one were seeded).\n\n"+
 			"2 means expires_at is not being honoured: an uncollected lease is "+
 			"sweep lag, and counting it would make the gauge read high exactly "+

@@ -13,4 +13,5 @@ type MetricsStore interface {
 	CountEventHistoryTotal(ctx context.Context) (int, error)
 	EstimateEventHistorySize(ctx context.Context) (int64, error)
 	CountActiveConcurrencyKeys(ctx context.Context) (int, error)
+	CountConcurrencyKeysExpiringSoon(ctx context.Context, within time.Duration) (int, error)
 }

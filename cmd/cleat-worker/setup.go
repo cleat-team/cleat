@@ -1067,6 +1067,7 @@ type Worker struct {
 	retentionInterval       time.Duration
 	stallThreshold          time.Duration
 	metricsSweepInterval    time.Duration
+	keyExpiryWindow         time.Duration
 	deadLetterRetentionDays int
 
 	// Version GC. versionGCInterval is the switch: 0 means the sweep never
@@ -2805,6 +2806,16 @@ func (w *Worker) metricsSweepLoop() {
 				w.logger.ErrorContext(w.ctx, "metrics sweep: count active concurrency keys", "worker_id", w.id, "error", err)
 			} else {
 				w.Metrics.SetConcurrencyKeysTotal(w.ctx, int64(n))
+			}
+
+			// The leading indicator, on the same sweep as the total it sits
+			// beside. Both come from the same table, so asking twice here costs
+			// one extra query rather than a second loop.
+			if n, err := ms.CountConcurrencyKeysExpiringSoon(w.ctx, w.keyExpiryWindow); err != nil {
+				failed++
+				w.logger.ErrorContext(w.ctx, "metrics sweep: count concurrency keys expiring soon", "worker_id", w.id, "error", err)
+			} else {
+				w.Metrics.SetConcurrencyKeysExpiringSoon(w.ctx, int64(n))
 			}
 
 			status := "ok"

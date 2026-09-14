@@ -114,3 +114,40 @@ func (s *PostgresStore) CountActiveConcurrencyKeys(ctx context.Context) (int, er
 	}
 	return count, nil
 }
+
+// CountConcurrencyKeysExpiringSoon counts held keys whose lease runs out within
+// `within` (cleat#1317).
+//
+// SEPARATE FROM CountActiveConcurrencyKeys, and the pair is the point. The total
+// says how much contention exists; this says how much of it is about to be
+// released whether or not its holder is finished. A sweep that falls behind
+// shows up here FIRST -- keys pile into the window before they expire -- which
+// is what makes it a leading indicator rather than a second way of counting the
+// same thing.
+//
+// Bounded at both ends: `expires_at > now()` excludes leases already expired
+// (those are CountActiveConcurrencyKeys' exclusion too, and counting them here
+// would mix sweep lag into a contention signal), and `< now() + within` is the
+// window.
+//
+// RLS-forced table, so beginTxWithRLS rather than s.db -- see the file header.
+func (s *PostgresStore) CountConcurrencyKeysExpiringSoon(ctx context.Context, within time.Duration) (int, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count concurrency keys expiring soon: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only tx; Rollback returns ErrTxDone after Commit
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM concurrency_keys
+		WHERE expires_at > now() AND expires_at < now() + $1::interval
+		  AND tenant_id = $2
+	`, fmt.Sprintf("%d seconds", int(within.Seconds())), s.tenantID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count concurrency keys expiring soon: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("count concurrency keys expiring soon: commit: %w", err)
+	}
+	return count, nil
+}
