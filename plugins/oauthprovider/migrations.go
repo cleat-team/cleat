@@ -146,5 +146,30 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS state;
 			`,
 		},
+		{
+			// Tenant isolation for both OAuth tables. cleat#1512.
+			//
+			// oauth_sessions holds session_token, token_hash, access_token and
+			// refresh_token, which makes it the most sensitive table in this
+			// rollout and the one where the naive conversion breaks login.
+			//
+			// THREE of its statements DERIVE the tenant and cannot be scoped:
+			// the middleware's token-hash lookup, extractSession's, and the
+			// callback's lookup by OAuth `state`. Each runs on a request that
+			// has no tenant, because producing one is what the query is for. A
+			// policy calling cleat.assert_tenant_set() makes all three RAISE,
+			// so shipping this migration without marking them would have taken
+			// session authentication down entirely. They are marked with
+			// plugin.AcrossAllTenants and each says why.
+			//
+			// Everything else is scoped with plugin.ForTenant from the tenant
+			// in hand rather than from the request context, because this
+			// plugin's paths are frequently UNAUTHENTICATED -- handleLogin
+			// accepts ?tenant_id= precisely because a login has no session yet
+			// -- so the context carrier the policy reads is often empty even
+			// though the tenant is known.
+			Version:      3,
+			TenantScoped: []string{"oauth_config", "oauth_sessions"},
+		},
 	}
 }
