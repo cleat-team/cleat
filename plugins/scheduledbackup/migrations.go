@@ -124,5 +124,23 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS backup_config;
 			`,
 		},
+		{
+			// Tenant isolation for both backup tables. cleat#1512.
+			//
+			// A new version rather than TenantScoped on v1: v1 is recorded
+			// everywhere this plugin runs and a recorded migration never runs
+			// again, so editing it would protect new databases and leave every
+			// existing one open.
+			//
+			// Both tables: backup_history rows are addressed BY ID on the
+			// detached async path, and scoping the config while leaving the
+			// history open would protect the lighter of the two.
+			//
+			// The CLI is converted in this same change. It opens its own
+			// *sql.DB and would break the moment these policies exist -- which
+			// is what shipping the two separately did to jobqueue in #1511.
+			Version:      2,
+			TenantScoped: []string{"backup_config", "backup_history"},
+		},
 	}
 }

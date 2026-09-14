@@ -553,7 +553,7 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 	if err != nil {
 		p.logger.Error("scheduledbackup: refusing backup", "config_id", configID,
 			"history_id", historyID, "error", err)
-		p.markBackupFailed(historyID, err.Error())
+		p.markBackupFailed(tenantID, historyID, err.Error())
 		return
 	}
 
@@ -567,7 +567,7 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 		p.logger.Error("scheduledbackup: pg_dump failed",
 			"config_id", configID, "history_id", historyID, "error", errMsg,
 		)
-		p.markBackupFailed(historyID, errMsg)
+		p.markBackupFailed(tenantID, historyID, errMsg)
 		return
 	}
 
@@ -584,7 +584,13 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 		"size_bytes", sizeBytes,
 	)
 
-	p.db.Exec(context.Background(), plugin.Rebind(`
+	// ForTenant on every statement below. cleat#1512. This function runs in a
+	// goroutine on context.Background(), detached from the request that started
+	// it -- so the tenant the handler carried is gone, and each UPDATE here
+	// addresses its row BY ID with no tenant predicate.
+	ctx := plugin.ForTenant(context.Background(), tenantID)
+
+	p.db.Exec(ctx, plugin.Rebind(`
 		UPDATE backup_history SET status = 'completed', size_bytes = $1, completed_at = now()
 		WHERE id = $2
 	`, p.dialect), sizeBytes, historyID)
@@ -592,16 +598,16 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 	// Update last_run_at and next_run_at on the config.
 	now := time.Now()
 	var cronExpr string
-	if err := p.db.QueryRow(context.Background(), plugin.Rebind(`
+	if err := p.db.QueryRow(ctx, plugin.Rebind(`
 		SELECT cron FROM backup_config WHERE id = $1
 	`, p.dialect), configID).Scan(&cronExpr); err == nil && cronExpr != "" {
 		if nxt := nextRun(cronExpr, now); !nxt.IsZero() {
-			p.db.Exec(context.Background(), plugin.Rebind(`
+			p.db.Exec(ctx, plugin.Rebind(`
 				UPDATE backup_config SET last_run_at = $1, next_run_at = $2, updated_at = now()
 				WHERE id = $3
 			`, p.dialect), now, nxt, configID)
 		} else {
-			p.db.Exec(context.Background(), plugin.Rebind(`
+			p.db.Exec(ctx, plugin.Rebind(`
 				UPDATE backup_config SET last_run_at = $1, next_run_at = NULL, updated_at = now()
 				WHERE id = $2
 			`, p.dialect), now, configID)
@@ -616,8 +622,11 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 // failure would leave a history row stuck at 'running' forever for a config
 // whose name the path check rejects -- which reads as a hung backup rather than
 // a refused one, and is the state an operator would escalate.
-func (p *Plugin) markBackupFailed(historyID uuid.UUID, errMsg string) {
-	if _, err := p.db.Exec(context.Background(), plugin.Rebind(`
+// tenantID is a parameter because this runs on a detached context and the row
+// it updates is addressed BY ID with no tenant predicate. Every caller has the
+// tenant in hand; none of them had been passing it. cleat#1512.
+func (p *Plugin) markBackupFailed(tenantID uuid.UUID, historyID uuid.UUID, errMsg string) {
+	if _, err := p.db.Exec(plugin.ForTenant(context.Background(), tenantID), plugin.Rebind(`
 		UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
 		WHERE id = $2
 	`, p.dialect), errMsg, historyID); err != nil {

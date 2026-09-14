@@ -73,10 +73,16 @@ func (p *Plugin) cliBackupRun(cmds []string) error {
 		return fmt.Errorf("ping database: %w", err)
 	}
 
+	conn, release, err := connScopedToTenant(context.Background(), db, tenantID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	// Fetch the backup config.
 	var name, cronExpr, s3Bucket, s3Prefix string
 	var retentionDays int
-	err = db.QueryRow(`
+	err = conn.QueryRowContext(context.Background(), `
 		SELECT name, cron, s3_bucket, s3_prefix, retention_days
 		FROM backup_config WHERE id = $1 AND tenant_id = $2
 	`, configID, tenantID).Scan(&name, &cronExpr, &s3Bucket, &s3Prefix, &retentionDays)
@@ -92,7 +98,7 @@ func (p *Plugin) cliBackupRun(cmds []string) error {
 	now := time.Now()
 	filename := fmt.Sprintf("manual_%s_%s.dump", name, now.Format("20060102150405"))
 
-	_, err = db.Exec(`
+	_, err = conn.ExecContext(context.Background(), `
 		INSERT INTO backup_history (id, config_id, tenant_id, filename, status, started_at, created_at)
 		VALUES ($1, $2, $3, $4, 'running', $5, $5)
 	`, historyID, configID, tenantID, filename, now)
@@ -122,7 +128,7 @@ func (p *Plugin) cliBackupRun(cmds []string) error {
 			errMsg = err.Error()
 		}
 
-		db.Exec(`
+		conn.ExecContext(context.Background(), `
 			UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
 			WHERE id = $2
 		`, errMsg, historyID)
@@ -136,7 +142,7 @@ func (p *Plugin) cliBackupRun(cmds []string) error {
 	}
 
 	// Update history with completed status.
-	_, err = db.Exec(`
+	_, err = conn.ExecContext(context.Background(), `
 		UPDATE backup_history SET status = 'completed', size_bytes = $1, completed_at = now()
 		WHERE id = $2
 	`, sizeBytes, historyID)
@@ -146,12 +152,12 @@ func (p *Plugin) cliBackupRun(cmds []string) error {
 
 	// Update config last_run_at and next_run_at.
 	if nxt := nextRun(cronExpr, time.Now()); !nxt.IsZero() {
-		db.Exec(`
+		conn.ExecContext(context.Background(), `
 			UPDATE backup_config SET last_run_at = $1, next_run_at = $2, updated_at = now()
 			WHERE id = $3
 		`, time.Now(), nxt, configID)
 	} else {
-		db.Exec(`
+		conn.ExecContext(context.Background(), `
 			UPDATE backup_config SET last_run_at = $1, next_run_at = NULL, updated_at = now()
 			WHERE id = $2
 		`, time.Now(), configID)
@@ -216,7 +222,13 @@ func (p *Plugin) cliBackupList(cmds []string) error {
 
 	query += " ORDER BY h.started_at DESC"
 
-	rows, err := db.Query(query, qargs...)
+	conn, release, err := connScopedToTenant(context.Background(), db, tenantID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	rows, err := conn.QueryContext(context.Background(), query, qargs...)
 	if err != nil {
 		return fmt.Errorf("query: %w", err)
 	}
@@ -251,4 +263,46 @@ func (p *Plugin) cliBackupList(cmds []string) error {
 	}
 
 	return nil
+}
+
+// connScopedToTenant pins ONE connection and scopes it to tenantID for the
+// life of the command. cleat#1512.
+//
+// These commands do NOT go through plugin.PluginDB -- each opens its own
+// *sql.DB from --dsn -- so engine.beginTenantTx never runs for them and nothing
+// sets cleat.tenant_id. Once backup_config and backup_history carry policies
+// calling cleat.assert_tenant_set(), every statement fails. That is what
+// shipped broken for `cleat jobqueue-enqueue` in cleat#1511 (fixed in #1517),
+// so the policy and the CLI change land together here.
+//
+// A CONNECTION, NOT A TRANSACTION, and the difference is behavioural rather
+// than stylistic. cliBackupRun records its own failures -- it writes
+// `UPDATE backup_history SET status = 'failed'` and then returns an error.
+// Wrapping the command in one transaction would roll that record back on
+// exactly the path that needs it most, turning a recorded failure into a row
+// stuck at 'running', which is the state cleat#1305 added markBackupFailed to
+// avoid. Statements must keep autocommitting independently.
+//
+// A bare SET on the *sql.DB will not do either: it is a pool, and the SET may
+// land on a different connection from the statements. Pinning one connection
+// is what makes a session-level setting reliable.
+//
+// is_local is false here BECAUSE there is no transaction to scope it to. The
+// returned cleanup RESETs it before releasing the connection, so it cannot
+// follow the connection back into the pool -- the hazard beginTenantTx avoids
+// with is_local=true.
+func connScopedToTenant(ctx context.Context, db *sql.DB, tenantID uuid.UUID) (*sql.Conn, func(), error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("acquire connection: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`SELECT set_config('cleat.tenant_id', $1, false)`, tenantID.String()); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("set tenant scope: %w", err)
+	}
+	return conn, func() {
+		_, _ = conn.ExecContext(ctx, `SELECT set_config('cleat.tenant_id', '', false)`)
+		_ = conn.Close()
+	}, nil
 }
