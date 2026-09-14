@@ -74,7 +74,18 @@ func TestEveryLinkedPluginSupportsEveryDialectTheWorkerRunsOn(t *testing.T) {
 			// a migration that is empty by ACCIDENT still trips the guard.
 			// This is the case the comment below already described as out of
 			// subject; only the implementation did not say so.
-			if m.Up == "" && len(m.TenantScoped) > 0 {
+			// SweepTables is exempt for the same reason and by the same rule:
+			// the runtime emits its GRANT, and only on PostgreSQL, because
+			// only PostgreSQL switches to cleat_sweep (cleat#1490). A
+			// declaration-only migration has no dialect arm to supply, so
+			// demanding one would ask an author to write SQL that must not
+			// exist.
+			//
+			// Still narrow, for the reason the TenantScoped clause is: it
+			// requires the declaration to be NON-EMPTY, so a migration that is
+			// empty by accident trips the guard rather than slipping through
+			// this exemption.
+			if m.Up == "" && (len(m.TenantScoped) > 0 || len(m.SweepTables) > 0) {
 				continue
 			}
 
