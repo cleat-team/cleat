@@ -55,7 +55,12 @@ func TestTenantPoolsClose(t *testing.T) {
 func TestTenantPoolsCloseWithEntries(t *testing.T) {
 	tp := NewTenantPools(nil, "", 5, make([]byte, TenantRoleSecretMinBytes))
 	db := sql.OpenDB(&fakeConnector{})
-	tp.pools["550e8400-e29b-41d4-a716-446655440000"] = db
+	// The map holds an entry rather than a bare *sql.DB since cleat#1508, so
+	// that a caller arriving mid-open has something to wait on. A test that
+	// plants one has to plant it already-ready.
+	ready := make(chan struct{})
+	close(ready)
+	tp.pools["550e8400-e29b-41d4-a716-446655440000"] = &tenantPool{ready: ready, db: db}
 	// Close with one pool entry exercises the loop body.
 	tp.Close()
 	// The pool should have been removed from the map.
