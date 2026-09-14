@@ -115,46 +115,49 @@ func TestTruncate(t *testing.T) {
 // main.go — logBuildProgress
 // ---------------------------------------------------------------------------
 
-func TestLogBuildProgress(t *testing.T) {
-	// Should not panic with either jsonOut value.
-	// Coverage: jsonOut=true writes to stderr, jsonOut=false writes to stdout.
-	t.Run("jsonOut_true", func(t *testing.T) {
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		oldStderr := os.Stderr
-		os.Stderr = w
+// logBuildProgress writes to stderr whatever the caller is doing. cleat#1128.
+//
+// THIS TEST ASSERTED THE DEFECT. It had two arms -- jsonOut=true writes to
+// stderr, jsonOut=false writes to stdout -- and both passed, because the
+// function did exactly that. Nothing was broken about it; the CONTRACT was the
+// bug. A test can only tell you the code does what it says, and what it said
+// was that build commentary lands on whichever stream a flag selects.
+//
+// So the arms are replaced rather than fixed: there is one stream now, and the
+// assertion that matters is the NEGATIVE one -- nothing reaches stdout. An arm
+// that only checked stderr would pass against a function that wrote to both.
+func TestLogBuildProgressAlwaysWritesToStderrAndNeverToStdout(t *testing.T) {
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = wOut, wErr
 
-		logBuildProgress("json-msg-%s", true, "test")
+	logBuildProgress("commentary-%s\n", "test")
 
-		w.Close()
-		os.Stderr = oldStderr
-		var buf bytes.Buffer
-		io.Copy(&buf, r)
-		if !strings.Contains(buf.String(), "json-msg-test") {
-			t.Errorf("expected 'json-msg-test' on stderr, got %q", buf.String())
-		}
-	})
+	wOut.Close()
+	wErr.Close()
+	os.Stdout, os.Stderr = oldStdout, oldStderr
 
-	t.Run("jsonOut_false", func(t *testing.T) {
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		oldStdout := os.Stdout
-		os.Stdout = w
+	var outBuf, errBuf bytes.Buffer
+	io.Copy(&outBuf, rOut)
+	io.Copy(&errBuf, rErr)
 
-		logBuildProgress("stdout-msg-%s", false, "test")
-
-		w.Close()
-		os.Stdout = oldStdout
-		var buf bytes.Buffer
-		io.Copy(&buf, r)
-		if !strings.Contains(buf.String(), "stdout-msg-test") {
-			t.Errorf("expected 'stdout-msg-test' on stdout, got %q", buf.String())
-		}
-	})
+	if !strings.Contains(errBuf.String(), "commentary-test") {
+		t.Errorf("expected the message on stderr, got %q", errBuf.String())
+	}
+	if outBuf.Len() != 0 {
+		t.Errorf("build commentary reached stdout: %q\n\n"+
+			"stdout is a data channel (cleat#1128): it carries what the caller "+
+			"asked for and never commentary about the build, so that "+
+			"`cleat build ... > file` yields a usable file and "+
+			"`> /dev/null` still shows what went wrong.", outBuf.String())
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -276,13 +276,13 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 			os.Exit(1)
 		}
 	} else {
-		fmt.Printf("  Analyzing package %s...\n", result.TargetPkg.Path)
+		fmt.Fprintf(os.Stderr, "  Analyzing package %s...\n", result.TargetPkg.Path)
 
 		leafCount := len(cr.DurableLeaves)
 		closureCount := len(cr.DurableClosure)
-		fmt.Printf("  Found %d functions, %d entry point(s), %d in cleat closure.\n",
+		fmt.Fprintf(os.Stderr, "  Found %d functions, %d entry point(s), %d in cleat closure.\n",
 			result.NumFuncs, len(result.EntryPoints), leafCount+closureCount)
-		fmt.Printf("  Durable leaves: %s\n", formatDurableLeaves(result, cr))
+		fmt.Fprintf(os.Stderr, "  Durable leaves: %s\n", formatDurableLeaves(result, cr))
 		// VerifyThreading reports the PRE-TRANSFORM state, deliberately -- see
 		// TestVerifyThreadingAutothreadReportsPassThroughErrors, whose comment
 		// says pass-through functions in a global-h package "are correctly
@@ -297,17 +297,17 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		// already declares. IMPROVEMENT-PLAN 3.229.
 		threadingErrs = dropAutoThreaded(threadingErrs, tr)
 
-		fmt.Printf("  Verifying HostCalls threading... %s\n", formatThreadingStatus(threadingErrs))
+		fmt.Fprintf(os.Stderr, "  Verifying HostCalls threading... %s\n", formatThreadingStatus(threadingErrs))
 
 		if len(threadingErrs) > 0 {
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			for _, e := range threadingErrs {
-				fmt.Printf("  Error: %s\n", e.Message)
+				fmt.Fprintf(os.Stderr, "  Error: %s\n", e.Message)
 				if len(e.Chain) > 0 {
-					fmt.Printf("         Call chain: %s\n", strings.Join(e.Chain, " → "))
+					fmt.Fprintf(os.Stderr, "         Call chain: %s\n", strings.Join(e.Chain, " → "))
 				}
 				if e.Line > 0 {
-					fmt.Printf("         At: %d\n", e.Line)
+					fmt.Fprintf(os.Stderr, "         At: %d\n", e.Line)
 				}
 			}
 			os.Exit(1)
@@ -315,54 +315,46 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 
 		warnCount := cr.NumWarnings()
 		if warnCount > 0 {
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			for _, w := range cr.SortedWarnings() {
 				msg := fmt.Sprintf("  Warning: %s:%d: %s [%s]",
 					analyzer.ShortName(w.FuncName), w.Line, w.Message, w.Code)
-				fmt.Println(msg)
+				fmt.Fprintln(os.Stderr, msg)
 				if w.Suggestion != "" {
-					fmt.Printf("    suggestion: %s\n", w.Suggestion)
+					fmt.Fprintf(os.Stderr, "    suggestion: %s\n", w.Suggestion)
 				}
 			}
 		}
 
 		errCount := cr.NumErrors()
 		if errCount > 0 {
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			for _, e := range cr.SortedErrors() {
-				fmt.Printf("  %s: %s:%d: %s\n", e.Code, analyzer.ShortName(e.FuncName), e.Line, e.Message)
+				fmt.Fprintf(os.Stderr, "  %s: %s:%d: %s\n", e.Code, analyzer.ShortName(e.FuncName), e.Line, e.Message)
 				if e.Suggestion != "" {
-					fmt.Printf("    → %s\n", e.Suggestion)
+					fmt.Fprintf(os.Stderr, "    → %s\n", e.Suggestion)
 				}
 			}
 			os.Exit(1)
 		}
 
-		fmt.Println()
+		// Trailing break after the analysis summary. Commentary, so it goes where the commentary went.
+		fmt.Fprintln(os.Stderr)
 	}
 
 	outputs := wasm.BuildOutputs("main", usage, result, target)
 	hostCount := usage.Count()
-	if jsonOut {
-		fmt.Fprintf(os.Stderr, "  Generating WASM imports (%d host functions used)... ", hostCount)
-		fmt.Fprintln(os.Stderr, "OK")
-		fmt.Fprintf(os.Stderr, "  Generating host adapter... OK\n")
-		fmt.Fprintf(os.Stderr, "  Generating WASM exports (%d entry point(s))... OK\n", len(result.EntryPoints))
-		if len(tr.AddedH) > 0 {
-			fmt.Fprintf(os.Stderr, "  Auto-threading HostCalls into: %s\n", strings.Join(tr.AddedH, ", "))
-		} else {
-			fmt.Fprintf(os.Stderr, "  Auto-threading: no changes needed\n")
-		}
+	// One stream, not two. The two arms of this block were byte-identical apart
+	// from the writer, which is what cleat#1128 is about: the same commentary
+	// reached stdout or stderr depending on a flag the reader does not control.
+	fmt.Fprintf(os.Stderr, "  Generating WASM imports (%d host functions used)... ", hostCount)
+	fmt.Fprintln(os.Stderr, "OK")
+	fmt.Fprintf(os.Stderr, "  Generating host adapter... OK\n")
+	fmt.Fprintf(os.Stderr, "  Generating WASM exports (%d entry point(s))... OK\n", len(result.EntryPoints))
+	if len(tr.AddedH) > 0 {
+		fmt.Fprintf(os.Stderr, "  Auto-threading HostCalls into: %s\n", strings.Join(tr.AddedH, ", "))
 	} else {
-		fmt.Printf("  Generating WASM imports (%d host functions used)... ", hostCount)
-		fmt.Println("OK")
-		fmt.Printf("  Generating host adapter... OK\n")
-		fmt.Printf("  Generating WASM exports (%d entry point(s))... OK\n", len(result.EntryPoints))
-		if len(tr.AddedH) > 0 {
-			fmt.Printf("  Auto-threading HostCalls into: %s\n", strings.Join(tr.AddedH, ", "))
-		} else {
-			fmt.Printf("  Auto-threading: no changes needed\n")
-		}
+		fmt.Fprintf(os.Stderr, "  Auto-threading: no changes needed\n")
 	}
 
 	if diffOut && len(tr.Diffs) > 0 {
@@ -412,7 +404,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		os.Exit(1)
 	}
 
-	logBuildProgress("  Build directory: %s\n", jsonOut, outDir)
+	logBuildProgress("  Build directory: %s\n", outDir)
 
 	// Run go mod tidy in the build directory to generate go.sum entries
 	// before compilation. The replace directive points directly to the
@@ -432,7 +424,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	wasmPath := filepath.Join(outDir, wasmFile)
 
 	// Standard Go wasip1 compilation.
-	logBuildProgress("  Compiling WASM module (go/wasip1)...\n", jsonOut)
+	logBuildProgress("  Compiling WASM module (go/wasip1)...\n")
 	buildCmd := exec.Command("go", "build",
 		"-o", wasmPath,
 		".",
@@ -454,7 +446,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		fmt.Fprintf(os.Stderr, "Error: WASM binary not found at %s\n", wasmPath)
 		os.Exit(1)
 	}
-	logBuildProgress("  Wrote %s (%s)\n", jsonOut, wasmPath, formatSize(fi.Size()))
+	logBuildProgress("  Wrote %s (%s)\n", wasmPath, formatSize(fi.Size()))
 
 	// Embed cleat.metadata custom section for deployment.
 	wasmBytes, err := os.ReadFile(wasmPath)
@@ -488,7 +480,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		fmt.Fprintf(os.Stderr, "Error writing WASM binary with metadata: %v\n", err)
 		os.Exit(1)
 	}
-	logBuildProgress("  Embedded metadata: %s v%d (ABI v%d)\n", jsonOut,
+	logBuildProgress("  Embedded metadata: %s v%d (ABI v%d)\n",
 		meta.WorkflowName, meta.WorkflowVersion, meta.ABIVersion)
 	keepTempDir = true
 
@@ -501,7 +493,15 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	// not predict. These could indicate a bug in the closure analysis
 	// or unused imports the developer should investigate.
 	if orphans := wasm.FindCleatOrphanedImports(wasmBytes, usage.Used); len(orphans) > 0 {
-		fmt.Println()
+		// The separator goes where its warnings go. It used to be a bare
+		// fmt.Println() -- stdout -- immediately before warnings on stderr, so
+		// a reader of either stream got half of the formatting: an unexplained
+		// blank line on one, warnings with no leading break on the other. This
+		// is cleat#1128's defect in miniature, and it was already present
+		// before that issue's change, which is why it is worth naming: a sweep
+		// phrased in terms of "Warning:" or os.Stderr cannot see a line that
+		// contains neither.
+		fmt.Fprintln(os.Stderr)
 		for _, orphan := range orphans {
 			fmt.Fprintf(os.Stderr, "  Warning: %s\n", orphan)
 		}
@@ -1159,12 +1159,16 @@ func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closu
 // buildJSONDiagnostics builds a JSON representation of all diagnostics.
 // logBuildProgress prints a build progress message. In JSON output mode,
 // the message goes to stderr so stdout contains only the JSON diagnostics.
-func logBuildProgress(format string, jsonOut bool, args ...any) {
-	if jsonOut {
-		fmt.Fprintf(os.Stderr, format, args...)
-	} else {
-		fmt.Printf(format, args...)
-	}
+// logBuildProgress writes build commentary to stderr, always.
+//
+// It used to take jsonOut and pick the stream from it: stderr when --json was
+// set so the JSON on stdout stayed parseable, stdout otherwise. That was option
+// A already implemented, for one flag. cleat#1128's decision generalises it --
+// stdout carries what the caller asked for, stderr carries commentary about the
+// build -- so the parameter and the branch both go away rather than a third
+// case being added.
+func logBuildProgress(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format, args...)
 }
 
 // vetJSONOutput builds a VetOutput from analysis results.
@@ -1670,7 +1674,7 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 			Entries: entries,
 		}
 		if err := wasm.WriteLockFile(".", lf); err != nil {
-			logBuildProgress("  Warning: could not write %s: %v\n", jsonOut, wasm.LockFileName, err)
+			logBuildProgress("  Warning: could not write %s: %v\n", wasm.LockFileName, err)
 		} else if !jsonOut {
 			fmt.Printf("  Wrote %s (%d child workflow version(s))\n", wasm.LockFileName, len(entries))
 		}
@@ -1689,7 +1693,7 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 		return result
 	}
 
-	logBuildProgress("  Warning: no %s and no --db flag. Child workflow versions will be resolved dynamically at runtime.\n", jsonOut, wasm.LockFileName)
+	logBuildProgress("  Warning: no %s and no --db flag. Child workflow versions will be resolved dynamically at runtime.\n", wasm.LockFileName)
 	return nil
 }
 
