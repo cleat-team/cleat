@@ -7,8 +7,17 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// Run starts the periodic cleanup goroutine. It logs a cleanup message on a
-// 1-hour ticker and respects context cancellation. Returns when ctx is done.
+// cleanupInterval is how often Run sweeps expired events.
+//
+// A var rather than a literal so that the test which proves Run marks its own
+// sweep can drive a real tick. At an hour, nothing in a test can make the loop
+// fire, so the AcrossAllTenants call below would be covered by no test at all
+// -- and it is the one line whose absence breaks the worker outright rather
+// than degrading it. cleat#1512.
+var cleanupInterval = time.Hour
+
+// Run starts the periodic cleanup goroutine. It sweeps on cleanupInterval and
+// respects context cancellation. Returns when ctx is done.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
 		p.logger.Warn("eventstore: no database, cleanup disabled")
@@ -16,10 +25,33 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return nil
 	}
 
-	ticker := time.NewTicker(1 * time.Hour)
+	// THE SWEEP NAMES ITSELF CROSS-TENANT. cleat#1512. event_stream carries a
+	// row-level policy from migration v2, and the policy calls
+	// cleat.assert_tenant_set(), which RAISEs rather than filtering when no
+	// tenant is in scope. Without this the loop does not degrade -- it fails
+	// outright on its first statement after the migration lands.
+	//
+	// AcrossAllTenants rather than ForTenant, because there is no tenant to be
+	// had: cleanup deletes by AGE across every stream, and a retention policy
+	// that ran per-tenant would need a tenant it was never given. The
+	// discrimination matters -- a writer that HAS a tenant and drops it on the
+	// way to context.Background() wants ForTenant, and bypassing there compiles,
+	// passes every test, and silently disables isolation on that path.
+	//
+	// Marked ONCE here rather than inside cleanup(), because every statement
+	// reachable from this function is cross-tenant for the same reason. The
+	// three handlers in routes.go are deliberately NOT marked: they run on
+	// r.Context(), which carries the request's tenant. Nor is the poll loop
+	// INSIDE handleSSE -- a 1s ticker in a for/select, which reads exactly like
+	// a background loop and is not one. Its context is still the request's, so
+	// marking it would widen every SSE read to every tenant.
+	ctx = plugin.AcrossAllTenants(ctx,
+		"eventstore cleanup: retention deletes events by age across every tenant's streams")
+
+	ticker := time.NewTicker(cleanupInterval)
 	defer ticker.Stop()
 
-	p.logger.Info("eventstore: cleanup started, interval=1h")
+	p.logger.Info("eventstore: cleanup started", "interval", cleanupInterval)
 
 	for {
 		select {
