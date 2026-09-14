@@ -26,17 +26,17 @@ func (s *PostgresStore) GetTenantSettings(ctx context.Context) (TenantSettings, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var instanceMs, wallClockMs, retryMs *int64
+	var instanceMs, wallClockMs, retryMs, maxWorkflowMs *int64
 	err = tx.QueryRowContext(ctx, `
-		SELECT wasm_instance_timeout_ms, wasm_wall_clock_ceiling_ms, host_retry_budget_ms
+		SELECT wasm_instance_timeout_ms, wasm_wall_clock_ceiling_ms, host_retry_budget_ms, max_workflow_duration_ms
 		FROM tenant_settings
 		WHERE tenant_id = $1
-	`, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs)
+	`, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs, &maxWorkflowMs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TenantSettings{}, nil
 	}
 	if err != nil {
 		return TenantSettings{}, fmt.Errorf("get tenant settings for %s: %w", s.tenantID, err)
 	}
-	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs), nil
+	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs, maxWorkflowMs), nil
 }

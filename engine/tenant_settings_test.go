@@ -103,7 +103,8 @@ func TestANonPositiveStoredValueIsDroppedRatherThanCarried(t *testing.T) {
 
 	zero := int64(0)
 	neg := int64(-1)
-	got := tenantSettingsFromMillis(&zero, ms(5000), &neg)
+	big := int64(-9999)
+	got := tenantSettingsFromMillis(&zero, ms(5000), &neg, &big)
 
 	if got.WasmInstanceTimeout != 0 {
 		t.Errorf("a stored 0 became %v, want 0 (absent)\n\n"+
@@ -114,6 +115,9 @@ func TestANonPositiveStoredValueIsDroppedRatherThanCarried(t *testing.T) {
 	}
 	if got.HostRetryBudget != 0 {
 		t.Errorf("a stored -1 became %v, want 0 (absent)", got.HostRetryBudget)
+	}
+	if got.MaxWorkflowDuration != 0 {
+		t.Errorf("a stored -9999 became %v, want 0 (absent)", got.MaxWorkflowDuration)
 	}
 	if got.WasmWallClockCeiling != 5*time.Second {
 		t.Errorf("a valid neighbour was disturbed: got %v, want 5s",
@@ -126,9 +130,9 @@ func TestNoSettingsRowIsNotAnError(t *testing.T) {
 	// all three map "no row" to the zero value rather than to an error. A
 	// tenant that has never set an override is the common case; making it an
 	// error would fail every workflow on a deployment nobody had configured.
-	got := tenantSettingsFromMillis(nil, nil, nil)
+	got := tenantSettingsFromMillis(nil, nil, nil, nil)
 	if got != (TenantSettings{}) {
-		t.Errorf("three NULL columns resolved to %+v, want the zero value", got)
+		t.Errorf("four NULL columns resolved to %+v, want the zero value", got)
 	}
 }
 

@@ -703,6 +703,7 @@ func (s *MySQLStore) startNewRun(ctx context.Context, runID, defName string, def
 	runInstanceMs := msOrNil(opts.RunLimits.WasmInstanceTimeout)
 	runWallClockMs := msOrNil(opts.RunLimits.WasmWallClockCeiling)
 	runRetryMs := msOrNil(opts.RunLimits.HostRetryBudget)
+	runMaxWorkflowMs := msOrNil(opts.RunLimits.MaxWorkflowDuration)
 	// TYPED nils, not `any(nil)`. go-mssqldb infers the parameter type from the
 	// Go value, and an untyped nil arrives as NVARCHAR NULL -- which SQL Server
 	// refuses to put in a VARBINARY(32) column: "Implicit conversion from data
@@ -804,11 +805,11 @@ func (s *MySQLStore) startNewRun(ctx context.Context, runID, defName string, def
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
 			VALUES (?, ?, ?, 'ready', ?,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-			        ?, ?, ?, ?, ?, ?, ?)
-		`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs)
+			        ?, ?, ?, ?, ?, ?, ?, ?)
+		`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -824,11 +825,11 @@ func (s *MySQLStore) startNewRun(ctx context.Context, runID, defName string, def
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
 		VALUES (?, ?, ?, 'ready', ?,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-		        ?, ?, ?, ?, ?, ?, ?)
-	`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs)
+		        ?, ?, ?, ?, ?, ?, ?, ?)
+	`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}

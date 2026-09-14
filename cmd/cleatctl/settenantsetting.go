@@ -54,6 +54,7 @@ func runSetTenantSetting(ctx context.Context, db *sql.DB, args []string) {
 		"--wasm-instance-timeout-ms":   unset,
 		"--wasm-wall-clock-ceiling-ms": unset,
 		"--host-retry-budget-ms":       unset,
+		"--max-workflow-duration-ms":   unset,
 	}
 	var tenantID string
 	show := false
@@ -150,6 +151,7 @@ func runSetTenantSetting(ctx context.Context, db *sql.DB, args []string) {
 		{vals["--wasm-instance-timeout-ms"], &next.WasmInstanceTimeout},
 		{vals["--wasm-wall-clock-ceiling-ms"], &next.WasmWallClockCeiling},
 		{vals["--host-retry-budget-ms"], &next.HostRetryBudget},
+		{vals["--max-workflow-duration-ms"], &next.MaxWorkflowDuration},
 	} {
 		if f.v < 0 {
 			continue
@@ -214,6 +216,7 @@ larger value here is clamped to it at execution time rather than rejected.
   --wasm-instance-timeout-ms N    guest EXECUTION time ceiling
   --wasm-wall-clock-ceiling-ms N  WALL CLOCK ceiling for one invocation
   --host-retry-budget-ms N        worst-case host retry backoff ceiling
+  --max-workflow-duration-ms N    wall-clock ceiling for one execution segment
   --show                          print the current settings and exit
 
 Omitting a flag leaves that value unchanged. Passing 0 CLEARS it, which means

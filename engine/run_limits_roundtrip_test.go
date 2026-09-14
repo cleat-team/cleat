@@ -39,6 +39,7 @@ func TestARunsOwnLimitsSurviveAStartAndAreReadBack(t *testing.T) {
 				WasmInstanceTimeout:  7 * time.Second,
 				WasmWallClockCeiling: 11 * time.Second,
 				HostRetryBudget:      13 * time.Second,
+				MaxWorkflowDuration:  17 * time.Second,
 			}
 			id, _, err := starter.StartNewRunWithOptions(ctx,
 				fmt.Sprintf("rl-%d", time.Now().UnixNano()), "test-workflow", 1,
@@ -54,8 +55,12 @@ func TestARunsOwnLimitsSurviveAStartAndAreReadBack(t *testing.T) {
 			}
 			if got != want {
 				t.Errorf("run limits round-tripped as %+v, want %+v.\n\n"+
-					"Three distinct values are used so a mix-up between the columns is "+
-					"visible; equal values would pass against any permutation of them.", got, want)
+					"Four distinct values are used so a mix-up between the columns is "+
+					"visible; equal values would pass against any permutation of them.\n\n"+
+					"A field added to TenantSettings without a column behind it fails HERE and "+
+					"nowhere else: the struct compares equal at the zero value, so this test "+
+					"passes trivially unless every field carries a distinct non-zero value. "+
+					"cleat#1117 added the fourth.", got, want)
 			}
 		})
 

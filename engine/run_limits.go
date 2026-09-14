@@ -43,50 +43,50 @@ func (s *PostgresStore) GetRunLimits(ctx context.Context, workflowID string) (Te
 	}
 	defer tx.Rollback()
 
-	var instanceMs, wallClockMs, retryMs *int64
+	var instanceMs, wallClockMs, retryMs, maxWorkflowMs *int64
 	err = tx.QueryRowContext(ctx, `
-		SELECT run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms
+		SELECT run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms
 		FROM workflow_instances WHERE id = $1 AND tenant_id = $2
-	`, workflowID, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs)
+	`, workflowID, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs, &maxWorkflowMs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TenantSettings{}, tx.Commit()
 	}
 	if err != nil {
 		return TenantSettings{}, fmt.Errorf("run limits: %w", err)
 	}
-	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs), tx.Commit()
+	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs, maxWorkflowMs), tx.Commit()
 }
 
 // GetRunLimits reads one run's own limit overrides. See the PostgreSQL
 // implementation for the contract.
 func (s *MySQLStore) GetRunLimits(ctx context.Context, workflowID string) (TenantSettings, error) {
-	var instanceMs, wallClockMs, retryMs *int64
+	var instanceMs, wallClockMs, retryMs, maxWorkflowMs *int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms
+		SELECT run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms
 		FROM workflow_instances WHERE id = ? AND tenant_id = ?
-	`, workflowID, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs)
+	`, workflowID, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs, &maxWorkflowMs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TenantSettings{}, nil
 	}
 	if err != nil {
 		return TenantSettings{}, fmt.Errorf("run limits: %w", err)
 	}
-	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs), nil
+	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs, maxWorkflowMs), nil
 }
 
 // GetRunLimits reads one run's own limit overrides. See the PostgreSQL
 // implementation for the contract.
 func (s *MSSQLStore) GetRunLimits(ctx context.Context, workflowID string) (TenantSettings, error) {
-	var instanceMs, wallClockMs, retryMs *int64
+	var instanceMs, wallClockMs, retryMs, maxWorkflowMs *int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms
+		SELECT run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
-	`, workflowID, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs)
+	`, workflowID, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs, &maxWorkflowMs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TenantSettings{}, nil
 	}
 	if err != nil {
 		return TenantSettings{}, fmt.Errorf("run limits: %w", err)
 	}
-	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs), nil
+	return tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs, maxWorkflowMs), nil
 }

@@ -313,7 +313,7 @@ var (
 	maxQuotaConcurrencyKeys  = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
 	maxQuotaSchedules        = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
 	claimAcrossTenants       = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. Requires a database-side grant; see migrations/postgres/023_cross_tenant_claim.sql and migrations/mssql/012_admin_role.sql")
-	maxWorkflowDuration      = flag.Duration("max-workflow-duration", 0, "Maximum wall-clock duration per workflow execution (0 = no limit). Workflows exceeding this are cancelled and fail with a timeout error.")
+	maxWorkflowDuration      = flag.Duration("max-workflow-duration", 0, "CEILING on wall-clock duration for ONE workflow execution segment (0 = no limit); a workflow that suspends and resumes gets a fresh deadline each time. Workflows exceeding it are cancelled and fail with a timeout error. A tenant may set a LOWER value in tenant_settings, and a single run a lower one still at start; neither can raise it. With 0 here the operator sets no bound, so a tenant's value stands alone -- which is how a deployment that never set this flag can still give one tenant a deadline. cleat#1117.")
 	healthCheckInterval      = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
 	maxPluginConnections     = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
 	otelEndpoint             = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
