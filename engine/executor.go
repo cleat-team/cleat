@@ -219,6 +219,20 @@ func (e *Engine) executeWithBackend(
 	// If replaying, verify event history integrity (checksums) and
 	// validate version compatibility before proceeding.
 	if len(replayHistory) > 0 {
+		// (a0) Step density. First, because a history with a missing record
+		// makes every check after it meaningless: the checksum is computed over
+		// the rows that ARE there, and version validation says nothing about
+		// completeness. cleat#1507.
+		if derr := validateReplayStepDensity(replayHistory); derr != nil {
+			if e.Metrics != nil {
+				e.Metrics.RecordReplayFailure(ctx)
+			}
+			e.log().ErrorContext(ctx, "replay history is not dense", "workflow_id", e.workflowID,
+				"tenant_id", e.tenantID, "events", len(replayHistory), "error", derr)
+			return "", nil, nil, nil, nil, fmt.Errorf(
+				"host: workflow %s: replay history is incomplete: %w", e.workflowID, derr)
+		}
+
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if verr := e.workflowEventVerifier(ctx, e.workflowID); verr != nil {
@@ -485,6 +499,20 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 	// If replaying, verify event history integrity (checksums) and
 	// validate version compatibility before proceeding.
 	if len(replayHistory) > 0 {
+		// (a0) Step density. First, because a history with a missing record
+		// makes every check after it meaningless: the checksum is computed over
+		// the rows that ARE there, and version validation says nothing about
+		// completeness. cleat#1507.
+		if derr := validateReplayStepDensity(replayHistory); derr != nil {
+			if e.Metrics != nil {
+				e.Metrics.RecordReplayFailure(ctx)
+			}
+			e.log().ErrorContext(ctx, "replay history is not dense", "workflow_id", e.workflowID,
+				"tenant_id", e.tenantID, "events", len(replayHistory), "error", derr)
+			return "", nil, nil, nil, nil, fmt.Errorf(
+				"host: workflow %s: replay history is incomplete: %w", e.workflowID, derr)
+		}
+
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if err := e.workflowEventVerifier(ctx, e.workflowID); err != nil {

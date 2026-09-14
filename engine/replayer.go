@@ -122,3 +122,70 @@ func (s *execSession) invokeStepCallback(ctx context.Context, rec *EventRecord) 
 	}
 	return true
 }
+
+// validateReplayStepDensity reports whether the history about to be replayed is
+// the one every replay guard assumes: the record at array index i carries
+// Step i.
+//
+// WHY THIS IS A CHECK AND NOT A COMMENT. The invariant is already relied on and
+// already written down -- buildFullHistoryFromCompaction reconstructs its
+// virtual prefix as `Step: i` and appends the tail with "their Step fields
+// already reflect their original positions, which align with the reconstructed
+// array indices". Nothing verified it. On the write side it holds by
+// construction: fifty sites record `Step: s.stepCount` and recordEvent
+// increments that counter, so a run that completes normally produces a dense
+// history. It is the READ side, after rows have been through a database, that
+// can present something else.
+//
+// WHAT A VIOLATION MEANS, which is why this is fatal rather than a warning.
+// Every guard in this package is written as
+//
+//	if s.stepCount < len(s.history) { rec := s.history[s.stepCount]; ... }
+//
+// so a MISSING record does not divert into the type-mismatch branch that
+// thirty-one guards have -- it shifts every later record one position earlier.
+// The type check then compares the guest's next call against some other step's
+// record, and where those happen to agree the guard consumes it and returns
+// another step's result. When the shortened history runs out, `stepCount <
+// len(history)` is simply false and the session falls through to exitReplay()
+// and continues fresh -- the same path a workflow that legitimately reached the
+// end of its history takes.
+//
+// cleat#1429 is NOT an instance of the shape this catches, and saying so is the
+// point rather than a caveat. Its repro deletes a sleeping parent's only
+// event_history row -- DurableSleep records nothing, so that parent's history is
+// the single child_workflow spawn -- which does not perforate the history, it
+// EMPTIES it. An empty history is zero iterations here and `isReplay` is false,
+// so the run starts fresh and spawns a second child, which is exactly the
+// observed symptom and exactly what this cannot see. A peer measured that
+// (event_count=1, rows=0 at the moment of truncation) after this check was
+// written against the wrong example.
+//
+// The shape this DOES catch is a perforated history of two or more records: a
+// row lost from the front or the middle, leaving the survivors carrying their
+// original step numbers.
+//
+// So the two states the engine cannot otherwise tell apart are "this history
+// ended because the run suspended here" and "this history ended early because
+// records are missing". Density separates them for every case except a
+// truncated TAIL, where the records that would disagree are the ones that are
+// gone. That case is not covered here and is not covered anywhere; see the
+// issue.
+//
+// Unconditional, unlike the checksum check beside it, which is gated on
+// failOnChecksumMismatch because a mismatch can mean a legacy row format rather
+// than a corrupted one. A step gap has no benign reading: the array index and
+// the recorded step number are written by the same counter in the same process.
+func validateReplayStepDensity(history []EventRecord) error {
+	for i := range history {
+		if history[i].Step != i {
+			return fmt.Errorf(
+				"event %d of %d carries step %d: the history is missing at least one record, "+
+					"so replay would consume step %d's result where step %d's is expected and "+
+					"then re-execute the remainder as though the workflow had reached the end "+
+					"of its history",
+				i, len(history), history[i].Step, history[i].Step, i)
+		}
+	}
+	return nil
+}
