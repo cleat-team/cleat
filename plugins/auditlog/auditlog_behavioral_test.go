@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -959,17 +960,10 @@ func TestAL_Migrations(t *testing.T) {
 	if len(migrations) == 0 {
 		t.Fatal("expected at least 1 migration")
 	}
-	for _, m := range migrations {
-		if m.Version == 0 {
-			t.Error("migration version must be non-zero")
-		}
-		if m.Up == "" {
-			t.Error("migration Up SQL must be non-empty")
-		}
-		if m.Down == "" {
-			t.Error("migration Down SQL must be non-empty")
-		}
-	}
+	// One shared predicate, not a seventh inline copy. cleat#1513 extracted it
+	// after thirteen plugins were found carrying their own and already
+	// drifting -- three checked Up and not Down.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // =========================================================================

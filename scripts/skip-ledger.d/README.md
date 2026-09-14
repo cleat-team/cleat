@@ -67,3 +67,39 @@ disappears. A budget silently loses a grant nobody removed.
 
 `check-skip-budget.sh --self-test` has a control for this, and it fails if the
 reader goes back to `cat`.
+
+## Measure in the environment the JOB has, not in an empty one
+
+A ledger line is a claim about what happens *in one CI job*. Measuring it
+anywhere else answers a different question, and the script fails a line that
+matches nothing — correctly, because a grant covering something that is not
+there is worse than no grant.
+
+**Check which variable the job sets, not the one the code prefers.** This is the
+trap, and two sessions fell into it independently within an hour on 2026-09-14:
+
+* `testutil.PostgresTestDSN` reads `CLEAT_TEST_POSTGRES`, **falls back to
+  `CLEAT_TEST_DB`**, then to a localhost default.
+* `ci.yml`'s `test-go` job sets **`CLEAT_TEST_DB`** (job-level `env:`, alongside
+  a `postgres` service) and never sets `CLEAT_TEST_POSTGRES`.
+
+So `grep CLEAT_TEST_POSTGRES .github/workflows/ci.yml` returns nothing for that
+job and the job *has a database anyway*. One session measured with all four
+`CLEAT_TEST_*` unset; the other grepped for the wrong variable name. Both
+concluded "no database, so it skips", both wrote a line, and the empty result
+agreed with the hypothesis in each case, so neither re-checked.
+
+**A fallback chain means an absent variable proves nothing.** Read the job's
+`env:` block and its `services:`, then reproduce that exact set:
+
+    # what test-go/plugins actually has
+    env -u CLEAT_TEST_POSTGRES -u CLEAT_TEST_MYSQL -u CLEAT_TEST_MSSQL \
+        CLEAT_TEST_DB='postgres://…' \
+        go test ./plugins/... -count=1 -json > /tmp/report.json
+
+    scripts/check-skip-budget.sh test-go/plugins /tmp/report.json
+
+**Read that script's exit status directly, not through a pipe.** Piping it to
+`tail` or `head` makes `$?` the pager's status, so a script that exited 1 reads
+as 0 — the same `pipefail` hazard `ci.yml` documents on its own `go test | tee`
+step.
