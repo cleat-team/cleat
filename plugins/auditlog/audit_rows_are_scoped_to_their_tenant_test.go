@@ -187,6 +187,57 @@ func TestAuditRowsAreScopedToTheirTenant(t *testing.T) {
 			"plugin.AcrossAllTenants. Adding the policy and leaving the sweep bare are the "+
 			"same change, which is why they are in one commit.", err)
 	}
+	// ARM 4 -- A BYPASS ALREADY IN SCOPE WINS, SILENTLY. plugin.ForTenant's doc
+	// comment asserts this, and an ordering asserted only in prose is exactly
+	// what rots: beginTenantTx tests CrossTenant BEFORE the tenant, so a
+	// ForTenant inside an AcrossAllTenants scope is ignored without a word.
+	//
+	// That ordering is deliberate -- an admin endpoint rebuilding an index for
+	// everyone runs on a request context, and resolving it the other way would
+	// quietly scope the sweep to whoever called it. The hazard is that it is
+	// silent, so it is pinned rather than described.
+	//
+	// NOT A DUPLICATE OF cleat#1515, AND THE DIFFERENCE IS WHICH LAYER HOLDS IT
+	// UP. The precedence is enforced TWICE: beginTenantTx decides which GUCs it
+	// sets, and cleat.tenant_row_is_visible's own CASE reads cleat.cross_tenant
+	// before cleat.tenant_id (migrations/postgres/063). #1515 pins the Go half
+	// by reading the settings directly -- which is the sharper test of that
+	// half, since it can require cleat.tenant_id to be EMPTY rather than merely
+	// overridden. This arm pins the COMPOSITE, through a real policy on a real
+	// table: if a later migration flipped the CASE, #1515 would still pass and
+	// this would fail. Two derivations of one rule, at different layers, kept
+	// deliberately.
+	if _, err := su.ExecContext(ctx,
+		`INSERT INTO `+schema+`.audit_events (id, tenant_id, method, path, status_code, duration_ms, timestamp)
+		 VALUES (gen_random_uuid(), $1, 'GET', '/a', 200, 1, now()),
+		        (gen_random_uuid(), $2, 'GET', '/b', 200, 1, now())`, mine, theirs); err != nil {
+		t.Fatalf("re-seeding both tenants for the precedence arm: %v", err)
+	}
+	both := plugin.ForTenant(
+		plugin.AcrossAllTenants(ctx, "precedence probe: the bypass must win"), mine)
+	var underBypass int
+	if err := p.db.QueryRow(both,
+		`SELECT count(*) FROM `+schema+`.audit_events`).Scan(&underBypass); err != nil {
+		t.Fatalf("counting under a bypassed-then-scoped context: %v", err)
+	}
+	if underBypass != 2 {
+		t.Errorf("a ForTenant inside an AcrossAllTenants scope saw %d rows, want 2.\n\n"+
+			"The bypass is tested first and must win, so the narrowing is ignored. If this "+
+			"is 1, the precedence has been reversed -- and an admin sweep running on a "+
+			"request context would silently narrow to whoever called it, which is the "+
+			"class of answer this mechanism exists to make impossible.", underBypass)
+	}
+	if _, err := su.ExecContext(ctx, `DELETE FROM `+schema+`.audit_events`); err != nil {
+		t.Fatalf("clearing after the precedence arm: %v", err)
+	}
+	if _, err := su.ExecContext(ctx,
+		`INSERT INTO `+schema+`.audit_events (id, tenant_id, method, path, status_code, duration_ms, timestamp)
+		 VALUES (gen_random_uuid(), $1, 'GET', '/mine', 200, 1, now() - interval '30 days'),
+		        (gen_random_uuid(), $2, 'GET', '/theirs', 200, 1, now() - interval '30 days')`,
+		mine, theirs); err != nil {
+		t.Fatalf("re-seeding aged rows for the sweep arm: %v", err)
+	}
+
 	if deleted != 2 {
 		t.Errorf("the retention sweep deleted %d rows, want 2 (one per tenant).\n\n"+
 			"A sweep that deletes only its own tenant's expired rows leaves every other "+
