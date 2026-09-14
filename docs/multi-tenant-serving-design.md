@@ -454,6 +454,22 @@ that #1556 ("workers are enumerable, so a cluster-global budget has something to
 chasing for connections, and serving traffic makes it much more acute — a noisy tenant's front-end
 is precisely the case a fleet-wide limit exists for.
 
+**But a cluster-wide limiter already exists in the tree, and a serving tier should use it.** The
+paragraph above is about the worker's *built-in* limiters and stands as written for those.
+Separately, `plugins/ratelimiter/` has a `db` mode that coordinates through a `rate_counter` table:
+`checkDBRateLimit` (`plugins/ratelimiter/middleware.go:211-268`) keeps per-second buckets and sums
+them over a sliding window, portable across all three dialects.
+
+Three things qualify it rather than withdraw it. It is **opt-in** — `mode` defaults to `"memory"`
+(`plugins/ratelimiter/plugin.go:78`). It **falls back to memory without erroring** when no database
+is available (`:91-97`), so a misconfiguration silently degrades to per-process limiting. And it
+**fails open** on a database error (`middleware.go:186`), which is the right default for
+availability and the wrong one if the limiter is a spend control.
+
+So the accurate statement is not "cleat has no fleet-wide rate limiting" — it has one, off by
+default, in a plugin. An earlier draft of this document said otherwise, and the playbooks repeated
+it; corrected 2026-09-14.
+
 **The dimension that matters is off by default.** `--rate-limit-per-tenant` defaults to 0, meaning
 disabled (`cmd/cleat-worker/config.go:187`). The enabled default is per-IP at 100/s (`:185`).
 
@@ -574,14 +590,16 @@ Suggested sequence:
 
 1. Do the public-pattern handlers (`POST /ingest/{source_id}`, `GET /oauth/{provider}/callback`)
    consult the context tenant, which a client-supplied header can set on those routes? Not traced.
-2. What is the principal below a tenant, and how does RLS express it? Nothing in the current model
-   answers this.
+2. A principal below the tenant exists at the HTTP layer (`oauthprovider`'s `SessionInfo.UserEmail`),
+   but RLS is scoped by tenant alone. Should RLS learn about the user, or does within-tenant
+   authorisation stay application-layer and get documented as such?
 3. Does the asset store live in the database, in object storage, or split by size — and what is the
    availability coupling each choice creates?
 4. Is a per-tenant certificate subsystem in scope, or are tenants confined to subdomains of one
    wildcard-covered parent, with the cookie-scope consequences that implies?
-5. Should the fleet-wide rate limit that serving requires be built on the same worker-enumeration
-   mechanism as #1556's connection budget?
+5. `ratelimiter`'s `db` mode already provides a cluster-wide per-tenant limit. Should the worker's
+   built-in limiters be retired in favour of it, or should they gain the same DB coordination? Two
+   mechanisms for one job, with the weaker one on by default, is the state to resolve.
 
 ---
 
@@ -594,6 +612,21 @@ the wasmtime epoch, fuel and memory-limit sites; the auth middleware including i
 early return; the tenant-resolver middleware, its installation order relative to auth, and the
 identity of the context key both of them write; `tenantFor` and `scopedStore`; both rate limiters and `clientIP`; the connection budget and server connection
 limit; the memory controller; and the poll-interval and rate-limit flag defaults.
+
+**Corrected after review, and both errors came from the same habit.** Two claims in earlier drafts
+were wrong, both because a component was judged from its doc comments and neighbours rather than
+from the code path that answers the question:
+
+- *"Cleat has no fleet-wide rate limiting."* `plugins/ratelimiter/` has a `db` mode that coordinates
+  through a `rate_counter` table. I read its package comment ("rebuilds the in-memory token bucket
+  cache"), read the worker's own in-process limiters, and never opened `allowDB` — which is reached
+  by a branch three lines into `Middleware`. A doc comment describing one of two code paths is not a
+  description of the component.
+- *"Browser authentication does not exist here."* `plugins/oauthprovider/` is an OIDC relying party
+  with sessions and a user principal. Corrected in place under "One URL per tenant".
+
+Both were caught by a reader who knew the system, not by anything in the method used to write this
+document. That is the honest status of every remaining unverified claim here.
 
 **Reasoned about, not measured.** Every latency and cost statement. The Tier C write-amplification
 argument follows from reading the write path, not from running it. The competitive analysis is an

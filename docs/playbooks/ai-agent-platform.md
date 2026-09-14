@@ -144,9 +144,21 @@ token buckets as edge middleware, backed by a config table reloaded on an interv
 bound time, not spend. A cost ceiling means recording token counts per call and enforcing against
 an accumulated total — see [What you still have to build](#what-you-still-have-to-build-or-buy).
 
-Also note the limitation recorded in `docs/multi-tenant-serving-design.md`: `ratelimiter`'s
-buckets, like the worker's own, are per-process. With N workers a tenant gets N times the
-configured rate. For a spend-sensitive product this is the gap that matters most.
+**Set the plugin to `db` mode, and know why.** `ratelimiter` has two modes (`plugin.go:52`). The
+default is `memory`: in-process token buckets, so with N workers a tenant gets N times the
+configured rate. Mode `db` is genuinely cluster-wide — `checkDBRateLimit`
+(`plugins/ratelimiter/middleware.go:211-268`) keeps per-second buckets in a `rate_counter` table and
+sums them over a sliding window, working across all three dialects.
+
+For a spend-sensitive product the default is the wrong one. Set `mode: "db"` in the plugin config,
+and check the startup log line — `Init` **silently falls back to memory when no DB is available**
+(`plugin.go:91-97`), so a misconfiguration degrades to per-process limiting rather than failing.
+
+Two properties of the DB path to design around: it **fails open** on a database error
+(`middleware.go:186`), which is the right default for availability and the wrong one if the limiter
+is your spend control; and the read-then-increment is not one atomic statement, so concurrent
+workers can slightly overshoot a limit at its boundary. It is a cluster-wide limiter, not a
+cluster-wide semaphore.
 
 ---
 
@@ -252,8 +264,10 @@ tells you what happened; it does not tell you whether it was any good.
 1. **Token and cost accounting.** Record per-call token counts, accumulate per tenant, enforce a
    ceiling. The `tenant_settings` clamp pattern is the model to copy; the metric plumbing does not
    exist.
-2. **Fleet-wide rate limiting.** Per-process buckets are not a cluster limit. This is the same
-   problem #1556 is addressing for connections.
+2. **Nothing — but configure it.** Fleet-wide rate limiting already exists as `ratelimiter` in
+   `db` mode. What you have to do is turn it on and verify it took, since the default is `memory`
+   and the fallback is silent. Listed here because an unconfigured default looks identical to a
+   missing feature.
 3. **Token streaming to the browser.** SSE on the mux is a solved, demonstrated pattern
    (`plugins/eventstore/`); bridging a workflow's `chat_stream` output to such a route is not, and
    the durability semantics of a partial, unrecorded token stream need deciding.

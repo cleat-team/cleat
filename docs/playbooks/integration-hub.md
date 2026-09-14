@@ -163,10 +163,17 @@ else in this playbook series.
 the request rate; per-tenant execution ceilings via `cleatctl set-tenant-setting` scope the compute.
 A customer doing a bulk backfill is bounded without you writing the bounding.
 
-**The caveat that applies to all of it:** `ratelimiter`'s buckets are per-process, so with N workers
-a tenant gets N times the configured rate. For an integration hub, where a runaway customer backfill
-is the archetypal incident, this is the gap most worth closing first — it is the same problem #1556
-addresses for connections.
+**Use the plugin's `db` mode, not its default.** `ratelimiter` defaults to `memory` — in-process
+buckets, so N workers give a tenant N times the configured rate. Mode `db` coordinates through a
+`rate_counter` table with per-second buckets summed over a sliding window
+(`plugins/ratelimiter/middleware.go:211-268`), which is cluster-wide and dialect-portable. For an
+integration hub, where a runaway customer backfill is the archetypal incident, that distinction is
+the difference between a limit and a suggestion.
+
+Watch two things: `Init` falls back to memory without erroring when no DB is available
+(`plugins/ratelimiter/plugin.go:91-97`), so confirm the mode in the startup log; and the DB path
+**fails open** on a database error (`middleware.go:186`), so a database problem removes the limiter
+rather than stopping traffic.
 
 **Background loops need their tenant exemption deliberately.** Several plugins here run `Run` loops,
 and a plugin loop has no tenant and cannot get one. Under the fail-closed policy it **fails outright**
