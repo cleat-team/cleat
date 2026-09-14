@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"math"
 	"net/http"
@@ -461,17 +462,12 @@ func TestMigrations(t *testing.T) {
 	if len(migs) == 0 {
 		t.Fatal("expected at least one migration")
 	}
-	for i, m := range migs {
-		if m.Version == 0 {
-			t.Errorf("migration[%d]: Version must be > 0", i)
-		}
-		if m.Up == "" {
-			t.Errorf("migration[%d]: Up query must not be empty", i)
-		}
-		if m.Down == "" {
-			t.Errorf("migration[%d]: Down query must not be empty", i)
-		}
-	}
+	// One shared predicate for what a migration must do, rather than a copy
+	// per plugin. Thirteen plugins carried their own and they had already
+	// drifted -- three checked Up and not Down. A TenantScoped migration has
+	// no SQL in either direction by design, so the old wording rejected it by
+	// construction. cleat#1278.
+	plugintest.AssertMigrationsDoSomething(t, migs)
 	// Verify the migration SQL mentions the rate_limits table.
 	if !strings.Contains(migs[0].Up, "rate_limits") {
 		t.Error("migration Up should create the rate_limits table")
