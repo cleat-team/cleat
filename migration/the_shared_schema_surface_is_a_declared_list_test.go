@@ -61,12 +61,35 @@ func TestTheSharedSchemaSurfaceIsADeclaredList(t *testing.T) {
 	//
 	// and admin.claim_workflows looked for workflow_instances in a schema the
 	// engine knows nothing about. It found none and returned an empty list WITH
-	// NO ERROR, failing eight cross-tenant and RLS tests in ./engine/ as "the
-	// rows were not there". That schema name is how the cause was identified.
+	// NO ERROR, so cross-tenant and RLS tests in ./engine/ failed as "the rows
+	// were not there". That schema name is how the cause was identified.
 	//
-	// Measured: pristine database, the eight pass; one `go test ./migration/`;
-	// the eight fail. Two ALTER FUNCTION statements and they pass again --
-	// confirmed by repair, not by diagnosis alone.
+	// Confirmed by repair rather than by diagnosis alone: ALTER FUNCTION on the
+	// rebound functions and they pass again.
+	//
+	// THIS SAID "eight tests" AND "two ALTER FUNCTION statements", AND BOTH WERE
+	// CENSUSES THAT DRIFTED. Met again on 2026-09-14 in a database still
+	// carrying the residue: ten tests, and FOUR functions -- claim_workflows,
+	// get_due_schedules, create_tenant_role and grant_core_tables_to_tenant_role.
+	// The rebinding reaches every admin function created `SET search_path FROM
+	// CURRENT`, which is a set that grows with ordinary work, and the two numbers
+	// were a snapshot of it on one afternoon.
+	//
+	// The predicate does not drift, and it is also the repair. It generates its
+	// own ALTER statements, so it cannot go stale against a function added later:
+	//
+	//	SELECT 'ALTER FUNCTION admin.'||p.proname||'('||
+	//	       pg_get_function_identity_arguments(p.oid)||
+	//	       ') SET search_path = public, pg_temp;'
+	//	FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+	//	WHERE n.nspname = 'admin'
+	//	  AND array_to_string(p.proconfig, ',') LIKE '%<the scratch schema>%';
+	//
+	// Three of the seven were immune, and for a reason worth keeping: migrations
+	// 069 and 070 pin drop_tenant, grant_plugin_to_tenant and
+	// revoke_plugin_from_tenant to `search_path = pg_catalog` explicitly
+	// (cleat#1363, cleat#1481). A function with a literal search_path cannot be
+	// rebound by a later migration. FROM CURRENT is what makes one vulnerable.
 	//
 	// Nothing about what this test asserts needs a shared database: it migrates,
 	// then reads the catalog for the objects the migration created.
