@@ -85,5 +85,28 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			       ALTER TABLE task_queue DROP COLUMN IF EXISTS input;
 			       ALTER TABLE task_queue DROP COLUMN IF EXISTS def_name;`,
 		},
+		{
+			// Tenant isolation for task_queue. cleat#1278.
+			//
+			// A separate version rather than a TenantScoped on v1, for the
+			// reason kvstore's v2 gives: v1 is already recorded as applied
+			// everywhere jobqueue runs, and a recorded migration never runs
+			// again. Editing it would protect new databases and leave every
+			// existing one open.
+			//
+			// Up is empty on purpose. The runtime emits ENABLE / FORCE / the
+			// policy from TenantScoped (plugin.applyTenantScoping), using
+			// cleat.tenant_row_is_visible so that a sweep which named itself
+			// through plugin.AcrossAllTenants is admitted and an unmarked one
+			// still fails closed. On MySQL and SQL Server this version is
+			// recorded and installs nothing, which is what the field means.
+			//
+			// jobqueue could not adopt this when kvstore did, because kvstore
+			// qualified only by having no background loop. The loop is what
+			// made this hard, and Run() naming itself cross-tenant is what
+			// makes it possible -- see plugins/jobqueue/background.go.
+			Version:      3,
+			TenantScoped: []string{"task_queue"},
+		},
 	}
 }

@@ -62,6 +62,24 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return nil
 	}
 
+	// Mark the whole background loop cross-tenant. cleat#1278.
+	//
+	// task_queue became tenant-scoped in migration version 3, and that policy
+	// RAISES when no tenant is set rather than returning fewer rows. A tenant
+	// reaches this plugin only through the HTTP middleware, so nothing below
+	// this line has a tenant in context and none of it can obtain one -- the
+	// poller and the reaper serve every tenant's queue by definition. Without
+	// this the loop does not degrade, it fails outright on its first statement.
+	//
+	// Marked ONCE here rather than at the six call sites it covers, because
+	// every statement reachable from this function is cross-tenant for the
+	// same reason. The four handlers in routes.go are deliberately NOT marked:
+	// they run on r.Context(), which carries the request's tenant, and marking
+	// them would silently widen a per-tenant read to every tenant -- the exact
+	// class of answer this mechanism exists to make impossible.
+	ctx = plugin.AcrossAllTenants(ctx,
+		"jobqueue background worker: the poller and the stuck-job reaper both operate on every tenant's queue")
+
 	pollTicker := time.NewTicker(5 * time.Second)
 	defer pollTicker.Stop()
 

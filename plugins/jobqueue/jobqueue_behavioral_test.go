@@ -1425,10 +1425,24 @@ func TestJQMigrations(t *testing.T) {
 		if m.Version == 0 {
 			t.Errorf("migration %d: version must be non-zero", i)
 		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
+		// A migration must DO something, which is what this guard is for --
+		// but SQL is not the only way to do something. A TenantScoped
+		// migration carries no SQL by design: the runtime emits ENABLE /
+		// FORCE / CREATE POLICY from the declaration (plugin.applyTenantScoping),
+		// and writing that SQL here by hand would put a second, drifting copy
+		// of the policy in the tree.
+		//
+		// The guard as written rejected exactly that shape, and it is not a
+		// jobqueue quirk: thirteen plugins carry this same loop, so every one
+		// of them blocks tenant scoping until it is amended the same way.
+		// kvstore, the only plugin that had adopted TenantScoped before this,
+		// has no such test -- which is why the mechanism shipped without
+		// anyone discovering that its own reference implementation was the
+		// single case that could not have revealed the obstacle. cleat#1278.
+		if m.Up == "" && len(m.TenantScoped) == 0 {
+			t.Errorf("migration %d: has neither Up SQL nor TenantScoped tables, so it does nothing", i)
 		}
-		if m.Down == "" {
+		if m.Down == "" && len(m.TenantScoped) == 0 {
 			t.Errorf("migration %d: Down SQL is empty", i)
 		}
 	}
