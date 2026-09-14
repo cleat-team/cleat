@@ -35,7 +35,19 @@ import (
 // unconditionally, and every plugin suite here connects as one, so this test
 // written on the ordinary handle would pass against a completely broken policy.
 func TestTheEnqueueCommandSetsItsOwnTenant(t *testing.T) {
-	admin := testutil.TestDB(t, testutil.DialectPostgres)
+	// A DATABASE OF THIS SUITE'S OWN, not the shared one. cleat#1512.
+	//
+	// This test ENABLES ROW LEVEL SECURITY on task_queue and creates a policy
+	// on it. On testutil.TestDB that table is shared with every other package
+	// running at the same time, so under a whole-repo run -- which is what the
+	// Tier 2 gate does -- the policy applies to their statements too, and their
+	// DELETEs apply to this test's rows. It passed in isolation and failed
+	// there, reporting "the command reported success without the row landing",
+	// which names neither the sharing nor the policy.
+	//
+	// SuiteTestDB exists for exactly this and makes the isolation the default
+	// rather than something each cleanup site has to get right.
+	admin := testutil.SuiteTestDB(t, "jobqueue")
 	t.Cleanup(func() { admin.Close() })
 
 	// The policy the TenantScoped migration installs. Applied directly so the
@@ -106,6 +118,32 @@ func TestTheEnqueueCommandSetsItsOwnTenant(t *testing.T) {
 		t.Fatalf("open low-privilege connection: %v", err)
 	}
 	defer low.Close()
+
+	// THE TWO CONNECTIONS MUST BE ON THE SAME DATABASE, and this is asserted
+	// rather than assumed because the failure it guards against is silent.
+	//
+	// The command writes through lowPrivDSN and the verification below reads
+	// through admin. If those resolve to different databases -- which is
+	// possible whenever the suite is on a per-package database and the DSN is
+	// derived from the environment rather than from the connection -- the
+	// command succeeds, the row lands somewhere real, and the read finds
+	// nothing. The symptom is "the command reported success without the row
+	// landing", which points at the command and not at the DSN.
+	var adminDB, lowDB string
+	if err := admin.QueryRow(`SELECT current_database()`).Scan(&adminDB); err != nil {
+		t.Fatalf("reading the admin connection's database: %v", err)
+	}
+	if err := low.QueryRow(`SELECT current_database()`).Scan(&lowDB); err != nil {
+		t.Fatalf("reading the low-privilege connection's database: %v", err)
+	}
+	if adminDB != lowDB {
+		t.Fatalf("the command would write to %q and this test reads from %q.\n\n"+
+			"Those must be the same database or the assertions below are meaningless. "+
+			"The low-privilege DSN is derived from testutil.PostgresTestDSN() with the "+
+			"admin connection's database name swapped in; if the suite is on a "+
+			"per-package database and that swap did not take, this is where it shows.",
+			lowDB, adminDB)
+	}
 	_, bareErr := low.Exec(
 		`INSERT INTO task_queue (tenant_id, queue_name, job_id) VALUES ($1,$2,$3)`,
 		uuid.New(), "q", uuid.New())
