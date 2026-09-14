@@ -19,6 +19,15 @@ import (
 // Run starts the delivery retry loop. It runs every 30 seconds, finding
 // undelivered webhook deliveries whose next_attempt_at <= now() and
 // attempting HTTP POST delivery. Returns when ctx is cancelled.
+// deliveryInterval is how often Run processes due deliveries.
+//
+// A var rather than a literal so that the test which proves Run marks its own
+// loop can drive a real tick. At 30s a test would have to sleep for half a
+// minute to see one, so the AcrossAllTenants call below would be covered by no
+// test at all -- and it is the one line whose absence breaks the worker
+// outright rather than degrading it. cleat#1512.
+var deliveryInterval = 30 * time.Second
+
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
 		p.logger.Warn("notifications: no database, delivery loop disabled")
@@ -26,10 +35,39 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return nil
 	}
 
-	ticker := time.NewTicker(30 * time.Second)
+	// THE DELIVERY LOOP NAMES ITSELF CROSS-TENANT. cleat#1512. webhook_config
+	// carries a row-level policy from migration v2, and the policy calls
+	// cleat.assert_tenant_set(), which RAISEs rather than filtering when no
+	// tenant is in scope. Without this the loop does not degrade -- it fails
+	// outright on its first statement after the migration lands.
+	//
+	// WHICH STATEMENT, precisely, because only one of them needs this and it is
+	// not the obvious one. queryDueDeliveries reads webhook_delivery, which has
+	// no tenant_id and therefore no policy, so it would run unmarked. It is
+	// deliver() that then reads `SELECT url, secret FROM webhook_config WHERE
+	// id = $1` -- by delivery, with no tenant predicate of its own, because the
+	// delivery row does not know its tenant. That read is what the bypass is
+	// for.
+	//
+	// AcrossAllTenants rather than ForTenant, and the reason is the same fact:
+	// there is no tenant to narrow to. The loop cannot know a delivery's tenant
+	// until it has read the config, and reading the config is the statement in
+	// question. A ForTenant afterwards would buy nothing -- every remaining
+	// statement in deliver() writes webhook_delivery, which has no policy.
+	//
+	// Marked ONCE here rather than at those call sites. The handlers in
+	// routes.go are deliberately NOT marked: they run on r.Context(), which
+	// carries the request's tenant, and so is the host call in
+	// host_functions.go since cleat#1492 bridged the workflow's tenant at the
+	// PluginCall boundary. Marking any of them would widen a per-tenant read to
+	// every tenant.
+	ctx = plugin.AcrossAllTenants(ctx,
+		"notifications delivery loop: a due delivery does not know its tenant until its webhook_config row is read")
+
+	ticker := time.NewTicker(deliveryInterval)
 	defer ticker.Stop()
 
-	p.logger.Info("notifications: delivery retry loop started, interval=30s")
+	p.logger.Info("notifications: delivery retry loop started", "interval", deliveryInterval)
 
 	for {
 		select {

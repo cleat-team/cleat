@@ -112,5 +112,33 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS webhook_config;
 			`,
 		},
+		{
+			// Tenant isolation for webhook_config. cleat#1512.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v1. A recorded migration never
+			// runs again, so editing v1 would protect databases created after
+			// this lands and leave every existing one open.
+			//
+			// Up and Down are empty on purpose. The runtime emits ENABLE /
+			// FORCE / the policy from TenantScoped (plugin.applyTenantScoping),
+			// using cleat.tenant_row_is_visible so a sweep that named itself
+			// through plugin.AcrossAllTenants is admitted and an unmarked one
+			// still fails closed. On MySQL and SQL Server this version is
+			// recorded and installs nothing, which is what the field means.
+			//
+			// webhook_delivery IS NOT HERE, AND CANNOT BE. It has no tenant_id
+			// column -- it is scoped through webhook_id REFERENCES
+			// webhook_config(id) -- and the policy this field emits is
+			// cleat.tenant_row_is_visible(tenant_id), so declaring it would
+			// fail the migration outright on "column tenant_id does not exist".
+			// Its isolation therefore still rests entirely on the joins and
+			// predicates in hand-written SQL, which is the thing cleat#1512
+			// exists to stop relying on. That is a gap this change does not
+			// close and does not widen; it needs a tenant_id column, which is a
+			// data migration rather than a policy, and it is filed separately
+			// rather than smuggled in here.
+			Version:      2,
+			TenantScoped: []string{"webhook_config"},
+		},
 	}
 }
