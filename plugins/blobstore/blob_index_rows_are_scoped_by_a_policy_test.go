@@ -1,11 +1,12 @@
 package blobstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
-	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -198,10 +199,18 @@ func TestBlobIndexRowsAreScopedByAPolicyNotOnlyByTheQuery(t *testing.T) {
 		seed(t)
 		assertSeededRowsRemaining(t, db, key, 2)
 
+		// CAPTURED, NOT DISCARDED. cleanupExpired's error is the only thing
+		// that says WHY the sweep swept nothing, and Run logs it rather than
+		// returning it -- so discarding the logger leaves this test able to
+		// report "rows are still there" and nothing else. Two different causes
+		// (a missing table grant and a missing schema grant, cleat#1490)
+		// produce byte-identical failures without it, and diagnosing either
+		// meant re-running with the logger rewired by hand.
+		var sweepLog syncBuffer
 		p := &Plugin{
 			db:      db,
 			dialect: plugin.DialectPostgres,
-			logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			logger:  slog.New(slog.NewTextHandler(&sweepLog, nil)),
 		}
 
 		restore := cleanupInterval
@@ -228,11 +237,16 @@ func TestBlobIndexRowsAreScopedByAPolicyNotOnlyByTheQuery(t *testing.T) {
 		<-done
 
 		if remaining != 0 {
+			// The log, not a guess at the cause. An earlier version of this
+			// message asserted that the sweep was unmarked and
+			// assert_tenant_set() was raising -- true when it was written, and
+			// wrong for both of the causes cleat#1490 introduced. What the
+			// sweep actually logged is the evidence; the rest is a hint.
 			t.Fatalf("Run swept for 20s at a 10ms interval and %d of this run's "+
-				"expired rows are still there.\n\nThe loop is running, so its "+
-				"statements are being refused. That is what an unmarked sweep looks "+
-				"like: cleat.assert_tenant_set() RAISEs, cleanupExpired returns the "+
-				"error, Run logs it, and the loop keeps ticking.", remaining)
+				"expired rows are still there.\n\nWhat the sweep logged:\n%s\n"+
+				"If that is empty the loop never ran; if it names a refused "+
+				"statement, read the refusal rather than assuming the sweep is "+
+				"unmarked.", remaining, sweepLog.String())
 		}
 	})
 }
@@ -271,4 +285,25 @@ func postgresPluginBackend(t *testing.T) testutil.PluginTestBackend {
 	}
 	t.Fatal("NewPluginTestBackends returned no PostgreSQL backend")
 	return testutil.PluginTestBackend{}
+}
+
+// syncBuffer is a bytes.Buffer safe for the sweep goroutine to write while the
+// test goroutine reads it. slog handlers do not serialise access to their
+// io.Writer, and Run logs from a goroutine this test starts, so an unguarded
+// buffer is a data race the race detector fails on rather than a flake.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

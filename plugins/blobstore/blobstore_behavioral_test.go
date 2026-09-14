@@ -444,7 +444,9 @@ func TestMigrationUpContainsSQL(t *testing.T) {
 		// having, which is how it was nearly shipped red. cleat#1513's shared
 		// helper covers "the migration does something"; these two cover "the
 		// SQL it wrote is SQL".
-		if len(m.TenantScoped) > 0 {
+		// A SweepTables-only migration has no SQL either: the runtime emits
+		// the GRANT, same as it emits the policy for TenantScoped. cleat#1490.
+		if len(m.TenantScoped) > 0 || len(m.SweepTables) > 0 {
 			continue
 		}
 		up := m.Up
@@ -459,7 +461,7 @@ func TestMigrationDownContainsSQL(t *testing.T) {
 	for _, m := range p.Migrations() {
 		// See TestMigrationUpContainsSQL. A TenantScoped migration has no Down
 		// either -- the policy is the runtime's to drop, not an author's.
-		if len(m.TenantScoped) > 0 {
+		if len(m.TenantScoped) > 0 || len(m.SweepTables) > 0 {
 			continue
 		}
 		down := m.Down

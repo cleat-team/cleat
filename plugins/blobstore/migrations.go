@@ -190,5 +190,34 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Version:      4,
 			TenantScoped: []string{"blob_index"},
 		},
+		{
+			// Privileges for the cross-tenant sweep, on the two tables above
+			// that have no tenant_id. cleat#1490.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v4, for the reason v4 gives about
+			// v1: a recorded migration never runs again, so editing v4 would
+			// grant on databases created after this lands and leave every
+			// existing one failing.
+			//
+			// WHAT BROKE WITHOUT IT. Run() marks itself cross-tenant, which now
+			// means SET LOCAL ROLE cleat_sweep, and a role switch changes the
+			// privilege set for every table in the transaction rather than only
+			// the ones carrying a policy. Measured:
+			//
+			//	pq: permission denied for table blob_content (42501)
+			//
+			// BOTH TABLES, NOT ONLY THE ONE THAT FAILED. blob_content is what
+			// the test hit first, in phase 3; phase 1 deletes from
+			// workflow_blob_refs and would have raised the same error next.
+			// v4's comment already names both as having no tenant_id.
+			//
+			// These get a GRANT and no policy, which is the whole distinction
+			// between this field and TenantScoped: they are asserted to have no
+			// tenant column, so there is nothing to filter on. What v4 protects
+			// is the namespace in blob_index; this only lets the sweep that
+			// maintains the shared tables reach them.
+			Version:     5,
+			SweepTables: []string{"blob_content", "workflow_blob_refs"},
+		},
 	}
 }
