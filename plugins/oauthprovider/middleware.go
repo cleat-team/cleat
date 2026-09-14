@@ -85,7 +85,19 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		var userEmail sql.NullString
 		var expiresAt sql.NullTime
 
-		err := plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+		// CROSS-TENANT, deliberately and unavoidably. cleat#1512.
+		//
+		// This is the call that turns a token into a tenant. It runs BEFORE any
+		// tenant is known -- establishing one is its whole purpose -- so a
+		// policy calling cleat.assert_tenant_set() would RAISE here and take
+		// session authentication with it for every request.
+		//
+		// Not a leak: the predicate is a SHA-256 token hash, so reaching
+		// another tenant's row requires already holding that tenant's session
+		// token.
+		err := plugin.ScanRow(p.db.QueryRow(
+			plugin.AcrossAllTenants(r.Context(), "oauth middleware: resolving a session token to its tenant, which is the value being looked up"),
+			plugin.Rebind(`
 				SELECT id, tenant_id, user_email, expires_at
 				FROM oauth_sessions
 				WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())

@@ -76,8 +76,17 @@ func TestRegisterRoutes(t *testing.T) {
 func TestMigrations(t *testing.T) {
 	p := &Plugin{}
 	migrations := p.Migrations()
-	if len(migrations) != 2 {
-		t.Fatalf("expected 2 migrations, got %d", len(migrations))
+	// At LEAST two, not exactly two. The assertions below index [0] and [1]
+	// and are about those two specific migrations; an exact count adds nothing
+	// to that and fails on every migration anyone appends afterwards -- which
+	// is what it did when version 3 was added for cleat#1512.
+	//
+	// This is a FIFTH distinct shape assertion across the plugin suites,
+	// after non-empty Up/Down, sequential versions, an SQL-keyword check, and
+	// by-index table-name checks. Noted for cleat#1513, whose shared helper
+	// should absorb none of them: each encodes one plugin's rule.
+	if len(migrations) < 2 {
+		t.Fatalf("expected at least 2 migrations, got %d", len(migrations))
 	}
 	if migrations[0].Version != 1 {
 		t.Errorf("expected version 1, got %d", migrations[0].Version)

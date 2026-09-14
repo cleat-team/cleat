@@ -113,6 +113,12 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 
 func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider string) (*oauthConfigRow, error) {
 	var cfg oauthConfigRow
+	// Scoped by the tenant this call is FOR, not by whatever the request
+	// context happens to carry. cleat#1512. Both callers reach here on paths
+	// where the request is not necessarily tenant-authenticated -- handleLogin
+	// accepts ?tenant_id= precisely because a login is unauthenticated -- so
+	// the value in hand is the only reliable one.
+	ctx = plugin.ForTenant(ctx, tenantID)
 	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
 			SELECT tenant_id, provider, client_id, client_secret, redirect_url,
 			       COALESCE(domain, '') AS domain, enabled
@@ -160,7 +166,19 @@ func (p *Plugin) extractSession(r *http.Request) *SessionInfo {
 
 	tokenHash := sha256Hex(token)
 
-	err := plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	// CROSS-TENANT, and this one is not a convenience. cleat#1512.
+	//
+	// The lookup is BY TOKEN HASH and its output is the tenant: this is the
+	// call that discovers which tenant the caller belongs to. There is no
+	// tenant to scope it by, and there cannot be one, because finding it is the
+	// point. A policy calling cleat.assert_tenant_set() would RAISE here and
+	// take session authentication with it.
+	//
+	// Not a leak: the predicate is a SHA-256 token hash, so seeing another
+	// tenant's row requires already holding that tenant's session token.
+	err := plugin.ScanRow(p.db.QueryRow(
+		plugin.AcrossAllTenants(r.Context(), "oauth session lookup: the token hash identifies the tenant, so there is none to scope by"),
+		plugin.Rebind(`
 			SELECT id, tenant_id, user_email, expires_at
 			FROM oauth_sessions
 			WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
@@ -240,7 +258,10 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Store state + code_verifier in oauth_sessions with 5-minute expiry.
 	sessionID := uuid.New()
 	sessionExpiresAt := time.Now().Add(5 * time.Minute)
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	// ForTenant: tid is known here but the request is unauthenticated by
+	// definition -- it may have come from ?tenant_id= -- so nothing has put it
+	// in the context carrier the policy reads. cleat#1512.
+	_, err = p.db.Exec(plugin.ForTenant(r.Context(), tid), plugin.Rebind(`
 			INSERT INTO oauth_sessions (id, tenant_id, provider, state, code_verifier, expires_at)
 			VALUES ($1, $2, $3, $4, $5, $6)
 		`, p.dialect), sessionID, tid, provider, state, codeVerifier, sessionExpiresAt)
@@ -291,7 +312,16 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	var codeVerifier sql.NullString
 	var sessionID uuid.UUID
 
-	err := plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	// CROSS-TENANT and deriving, like the token-hash lookups. cleat#1512.
+	//
+	// An OAuth callback arrives from the identity provider carrying only
+	// `state`, on a request that is not authenticated and has no tenant. The
+	// row is what says which tenant this flow belongs to, so there is nothing
+	// to scope the lookup by. The UPDATE further down, which runs after tid is
+	// known, is scoped with ForTenant rather than inheriting this.
+	err := plugin.ScanRow(p.db.QueryRow(
+		plugin.AcrossAllTenants(r.Context(), "oauth callback: the state parameter identifies the tenant, so there is none to scope by"),
+		plugin.Rebind(`
 			SELECT id, tenant_id, provider, code_verifier
 			FROM oauth_sessions
 			WHERE state = $1 AND expires_at > now()
@@ -418,7 +448,10 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Update the pre-inserted state row with the actual session data and clear
 	// the PKCE fields.
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	// ForTenant with the tid the state lookup above derived. The UPDATE
+	// addresses the row BY ID with no tenant predicate, so the policy is what
+	// keeps a state collision from writing another tenant's session.
+	_, err = p.db.Exec(plugin.ForTenant(r.Context(), tid), plugin.Rebind(`
 			UPDATE oauth_sessions
 			SET session_token = $1, token_hash = $2, user_email = $3,
 			    access_token = $4, refresh_token = $5, expires_at = $6,
@@ -454,7 +487,7 @@ func (p *Plugin) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Query(plugin.ForTenant(r.Context(), session.TenantID), plugin.Rebind(`
 			SELECT id, provider, user_email, created_at, expires_at
 			FROM oauth_sessions
 			WHERE tenant_id = $1
@@ -513,7 +546,7 @@ func (p *Plugin) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Exec(plugin.ForTenant(r.Context(), session.TenantID), plugin.Rebind(`
 			DELETE FROM oauth_sessions
 			WHERE id = $1 AND tenant_id = $2
 		`, p.dialect), id, session.TenantID)
