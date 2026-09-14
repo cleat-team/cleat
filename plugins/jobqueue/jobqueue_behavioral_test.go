@@ -742,16 +742,16 @@ type fakeEnvironment struct {
 
 func newFakeEnvironment() *fakeEnvironment {
 	fe := &fakeEnvironment{}
-	fe.Environment.StartWorkflow = func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+	fe.Environment.StartWorkflow = func(ctx context.Context, req plugin.StartRequest) (string, error) {
 		fe.mu.Lock()
-		fe.wfCalls = append(fe.wfCalls, startWorkflowCall{ctx: ctx, defName: defName, input: input})
+		fe.wfCalls = append(fe.wfCalls, startWorkflowCall{ctx: ctx, defName: req.DefName, input: req.Input})
 		count := len(fe.wfCalls)
 		fe.mu.Unlock()
 		if fe.wfError != nil {
 			return "", fe.wfError
 		}
 		// Return a deterministic run ID so the test can verify it was stored.
-		return fmt.Sprintf("run-%s-%d", defName, count), nil
+		return fmt.Sprintf("run-%s-%d", req.DefName, count), nil
 	}
 	return fe
 }

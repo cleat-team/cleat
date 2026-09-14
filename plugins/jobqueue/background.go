@@ -3,6 +3,7 @@ package jobqueue
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -184,7 +185,19 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 				input = json.RawMessage("{}")
 			}
 
-			runID, err := p.env.StartWorkflow(ctx, *defName, input)
+			// KEYED ON THE JOB ROW. The claim above is an UPDATE guarded by
+			// rowsAffected, so only one worker reaches here per job -- but a
+			// crash between that claim and this call, or a retry of the
+			// dispatch, would otherwise start the job's workflow twice. The
+			// job id names the unit of work and is stable across both.
+			// cleat#1555.
+			req := plugin.StartRequest{
+				DefName:        *defName,
+				Input:          input,
+				IdempotencyKey: fmt.Sprintf("jobqueue:%s", jobID),
+				TenantID:       tenantID.String(),
+			}
+			runID, err := p.env.StartWorkflow(ctx, req)
 			if err != nil {
 				p.logger.Error("jobqueue: dispatch workflow",
 					"job_id", jobID,

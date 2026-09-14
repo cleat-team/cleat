@@ -28,7 +28,6 @@ package pluginapi_test
 
 import (
 	"context"
-	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -223,7 +222,7 @@ var _ = pluginapi.Environment{
 	Config:   nil,
 	TenantID: "x",
 	Done:     nil,
-	StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+	StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 		return "", nil
 	},
 	SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {

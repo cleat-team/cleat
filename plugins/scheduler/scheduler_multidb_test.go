@@ -89,7 +89,7 @@ func TestSchedulerClaimsADueSchedule_MultiBackend(t *testing.T) {
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.logger = slog.New(slog.NewTextHandler(&logbuf, nil))
 			p.env = &plugin.Environment{
-				StartWorkflow: func(context.Context, string, json.RawMessage) (string, error) {
+				StartWorkflow: func(context.Context, plugin.StartRequest) (string, error) {
 					return "run-1", nil
 				},
 			}

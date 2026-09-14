@@ -90,10 +90,21 @@ type Environment struct {
 	Done     <-chan struct{}
 	Dialect  Dialect
 
-	// StartWorkflow starts a new workflow instance using the latest deployed version.
-	// Plugins use this to trigger workflow executions (e.g., from cron schedules
-	// or job queues). Returns the run ID of the new workflow instance.
-	StartWorkflow func(ctx context.Context, defName string, input json.RawMessage) (runID string, err error)
+	// StartWorkflow starts a new workflow instance using the latest deployed
+	// version. Plugins use this to trigger workflow executions (e.g. from cron
+	// schedules or job queues). Returns the run ID of the new instance.
+	//
+	// TAKES A STRUCT, AND BOTH KEY AND TENANT ARE REQUIRED. It used to be
+	// (ctx, defName, input) and the implementation supplied `""` for the
+	// idempotency key and the all-zeros default for the tenant, so no plugin
+	// could start a workflow that was either retry-safe or correctly
+	// attributed. cleat#1555 and cleat#1580.
+	//
+	// A STRUCT RATHER THAN TWO MORE STRINGS, because the key and the tenant are
+	// both strings and adjacent. Passing them the wrong way round would compile,
+	// run, and produce a workflow owned by a tenant named after an idempotency
+	// key -- a failure with no symptom at the call site.
+	StartWorkflow func(ctx context.Context, req StartRequest) (runID string, err error)
 
 	// SignalWorkflow delivers a signal to a running workflow instance.
 	// The signal name and JSON payload are recorded deterministically
@@ -104,6 +115,42 @@ type Environment struct {
 	// deployment, deprecation, capability changes, and invocation events.
 	// May be nil if the audit log is not configured.
 	Audit *AuditLogger
+}
+
+// StartRequest is everything a plugin must supply to start a workflow.
+//
+// EVERY FIELD IS REQUIRED and the implementation rejects an empty one rather
+// than defaulting it. Both of the added fields exist because the values were
+// previously hardcoded at the seam:
+//
+//   - IdempotencyKey was `""`, so a plugin that retried a start -- or crashed
+//     between starting and recording that it had -- created a second run. Each
+//     caller is a sweep over a durable table and already holds a natural key.
+//     cleat#1555.
+//   - TenantID was engine.DefaultTenantUUID, so a run triggered for tenant X
+//     was stored as the default tenant's. Every caller knows the real tenant;
+//     the seam discarded it. cleat#1580.
+//
+// Defaulting either would restore precisely the silent failure the requirement
+// exists to remove, so an empty value is an error rather than a fallback.
+type StartRequest struct {
+	// DefName is the workflow definition to start.
+	DefName string
+
+	// Input is the workflow's input payload.
+	Input json.RawMessage
+
+	// IdempotencyKey deduplicates retries of the same logical start.
+	//
+	// IT MUST BE STABLE ACROSS THOSE RETRIES: derive it from the durable row
+	// being acted on, never from the wall clock at dispatch. A key built from
+	// "now" differs on every attempt, so it deduplicates nothing -- and the
+	// failure has no symptom, because duplicate runs look exactly as they do
+	// without a key at all.
+	IdempotencyKey string
+
+	// TenantID is the tenant the started run belongs to, as a UUID string.
+	TenantID string
 }
 
 // AuditLogger is the interface for recording plugin lifecycle events.
