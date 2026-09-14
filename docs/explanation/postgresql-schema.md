@@ -12,6 +12,48 @@ lexical order, against a PostgreSQL 16+ database before deploying workflows:
 for f in migrations/postgres/*.sql; do psql -U postgres -d cleat -f "$f"; done
 ```
 
+### PostgreSQL 16 is required, not merely recommended
+
+From migration `077_a_plugin_policy_can_use_its_index.sql` onward the schema uses
+syntax that does not exist before PostgreSQL 16:
+
+```sql
+GRANT cleat_sweep TO <role> WITH INHERIT FALSE
+```
+
+`WITH INHERIT FALSE` is the whole isolation boundary for the cross-tenant sweep,
+not a stylistic choice. A plugin table's tenant policy is indexable because the
+bypass lives in a *separate* policy attached to `cleat_sweep`; membership that
+**inherited** would make every member match that policy's `USING (true)` and see
+every tenant's rows. Membership that is assumable but not inherited is what lets
+a sweep enter the role deliberately while nothing enters it by accident
+(cleat#1490).
+
+Earlier versions of cleat ran on older servers. The claim was `16+` before this
+too, but as a statement about what CI tested rather than a requirement — see
+`tiers.yaml`, `dialect_versions`.
+
+**On a server older than 16 the migration runner refuses before applying
+anything**, naming the version it found and the reason:
+
+> cleat requires PostgreSQL 16 or later and this server is 15.19 (Debian ...).
+>   Migration 077 grants the cross-tenant sweep role WITH INHERIT FALSE, ...
+>   Nothing has been applied. ...
+
+(Quoted rather than fenced deliberately: it is the error a migration run
+returns, not a command to type. A fenced block whose first line begins
+`cleat ` reads as an invocation, and `TestEveryDocumentedSubcommandExists`
+rightly rejects it — a reader following it literally would try to run
+`cleat requires`.)
+
+That last sentence is accurate rather than reassuring: each migration file runs
+inside a transaction, so before the check existed a 15 server failed *inside*
+077 with `syntax error at or near "INHERIT"` and rolled the file back whole. A
+database in that state has the migrations up to 076 and nothing from 077 — no
+partial policies and no `cleat_sweep` role. The check does not prevent a
+corrupted schema; it replaces a Postgres error with a sentence you can act on.
+
+
 All files are idempotent, so re-running them is safe.
 
 Apply **all** of them, not just `001_schema.sql`. `003_procedures.sql`
