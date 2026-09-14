@@ -19,6 +19,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -238,21 +239,13 @@ func TestRegisterHostFunctions_Valid(t *testing.T) {
 
 func TestMigrations(t *testing.T) {
 	p := &Plugin{}
-	migrations := p.Migrations()
-	if len(migrations) == 0 {
-		t.Fatal("expected at least one migration")
-	}
-	for i, m := range migrations {
-		if m.Version == 0 {
-			t.Errorf("migration %d: version must be non-zero", i)
-		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
-		if m.Down == "" {
-			t.Errorf("migration %d: Down SQL is empty", i)
-		}
-	}
+	// One shared predicate for what a migration must do, rather than a copy per
+	// plugin -- thirteen plugins carried their own and they had already drifted
+	// (cleat#1513). The copy that stood here rejected a TenantScoped migration
+	// by construction, in BOTH halves: v2 declares a table for the runtime to
+	// put a policy on and carries no SQL in either direction, because there is
+	// none to write and no policy an author could drop. cleat#1512.
+	plugintest.AssertMigrationsDoSomething(t, p.Migrations())
 }
 
 // ===========================================================================
