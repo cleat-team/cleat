@@ -35,7 +35,17 @@ import (
 // this against MySQL or SQL Server would assert that an absent policy does not
 // apply.
 func TestAuditRowsAreScopedToTheirTenant(t *testing.T) {
-	su := testutil.TestDB(t, testutil.DialectPostgres)
+	// A SUITE DATABASE, NOT THE SHARED ONE. This test's migrations put a
+	// row-level policy on audit_events, and under testutil.TestDB that table
+	// lives in the database every other package is using. A policy is not
+	// scoped to the test that created it: it applies to every statement any
+	// package makes against that table, and their writes and deletes apply to
+	// this test's rows. The failures that produces name neither the sharing nor
+	// the policy -- they point at whatever statement happened to run next.
+	//
+	// By construction this applies to every TenantScoped conversion test, since
+	// enabling RLS on a shared table is what they all do.
+	su := testutil.SuiteTestDB(t, "auditlog")
 	t.Cleanup(func() { su.Close() })
 	testutil.SetupFullSchema(t, su, testutil.DialectPostgres)
 
@@ -47,20 +57,34 @@ func TestAuditRowsAreScopedToTheirTenant(t *testing.T) {
 		config:  Config{RetentionDays: 1},
 	}
 
+	// ONE VALUE FOR "THE SCHEMA", PASSED IN RATHER THAN ASKED FOR TWICE.
+	//
+	// This test first derived it from `SELECT current_schema()` and granted on
+	// that, which is how it failed in the Tier 2 gate with
+	//
+	//	pq: relation "cleat.audit_events" does not exist (42P01)
+	//
+	// plugin.RunMigrations defaults its schema to "public" and does NOT consult
+	// search_path, so the table is created in public wherever it runs. The gate
+	// connects as user `cleat`, where current_schema() is `cleat`. Two
+	// derivations of "the schema", agreeing on every machine whose
+	// current_schema() happens to be public, and disagreeing in CI.
+	//
+	// Passing it explicitly makes them the same value by construction rather
+	// than by coincidence.
+	const schema = "public"
+
 	// The schema comes from the plugin's OWN migrations, including the v2 that
 	// declares TenantScoped -- so the policy under test is the one the runtime
 	// emits, not one written by hand here to fit the assertion.
 	if err := plugin.RunMigrations(ctx, su, dialect, nil,
-		[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+		[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}},
+		plugin.WithSchema(schema)); err != nil {
 		t.Fatalf("auditlog migrations: %v", err)
 	}
 
 	rls := testutil.OpenPostgresRLSTestDB(t, su)
 	t.Cleanup(func() { rls.Close() })
-	var schema string
-	if err := su.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
-		t.Fatalf("resolving the schema audit_events lives in: %v", err)
-	}
 	for _, g := range []string{
 		`GRANT USAGE ON SCHEMA ` + schema + ` TO ` + testutil.PostgresRLSTestRole,
 		`GRANT SELECT, INSERT, DELETE ON ` + schema + `.audit_events TO ` + testutil.PostgresRLSTestRole,
