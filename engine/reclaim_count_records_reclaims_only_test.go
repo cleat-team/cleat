@@ -10,8 +10,11 @@ import (
 // reclaim_count counts RECLAIMS, and only reclaims.
 //
 // This is the column cleat#1008 was missing. The reaper's fleet-wide counter
-// (cleat_reaper_instances_claimed_total) has always existed, but it cannot be
-// attributed: a thousand reclaims of one wedged workflow and one reclaim each
+// (cleat_reaper_instances_claimed_total) was DECLARED but had no call site when
+// this was written, so it had never emitted a sample -- the sentence below
+// described a counter that did not run. It is fed as of cleat#1317
+// (cmd/cleat-worker/setup.go, in the reaper loop). The argument is unaffected:
+// even now that it emits, it cannot be attributed: a thousand reclaims of one wedged workflow and one reclaim each
 // of a thousand healthy ones produce the same number, so "has THIS workflow
 // been reclaimed twenty times" had no answer anywhere.
 //

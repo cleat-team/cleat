@@ -1028,12 +1028,26 @@ func (m *Metrics) RecordBackgroundLoopRestart(ctx context.Context, loopName stri
 	m.backgroundLoopRestarts.Add(ctx, count, metric.WithAttributes(attrs...))
 }
 
-// RecordReaperInstanceClaimed increments the reaper-instances-claimed counter.
-func (m *Metrics) RecordReaperInstanceClaimed(ctx context.Context, status string, extraAttrs ...attribute.KeyValue) {
-	attrs := m.mergeAttrs(append([]attribute.KeyValue{
-		attribute.String("status", status),
-	}, extraAttrs...)...)
-	m.reaperInstancesClaimed.Add(ctx, 1, metric.WithAttributes(attrs...))
+// RecordReaperInstancesClaimed adds to the reaper-instances-claimed counter.
+//
+// TAKES A COUNT, AND HAS NO status LABEL, both deliberately. It was declared as
+// Add(1) with a `status` label, which would need one call per reclaimed row
+// carrying that row's outcome. The reaper is a single bounded UPDATE whose
+// status is a CASE over pending_terminal_status, and ReapStaleInstances returns
+// RowsAffected -- a bare count -- on all four dialects. Recovering the per-row
+// status means RETURNING/OUTPUT, which MySQL does not have, so on that dialect
+// the label could only ever be populated by a second query racing the UPDATE.
+//
+// A label that can never vary is worse than no label: it advertises a dimension
+// an operator can group by, and every query returns one bucket. Removing it
+// costs nothing because the metric has emitted no samples -- it had zero call
+// sites when this was written, so no series and no dashboard depend on its
+// shape. cleat#1317.
+func (m *Metrics) RecordReaperInstancesClaimed(ctx context.Context, count int64, extraAttrs ...attribute.KeyValue) {
+	if count <= 0 {
+		return
+	}
+	m.reaperInstancesClaimed.Add(ctx, count, metric.WithAttributes(m.mergeAttrs(extraAttrs...)...))
 }
 
 // RecordHTTPRequest increments the HTTP requests counter.

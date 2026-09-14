@@ -45,7 +45,6 @@ var unfedMetrics = map[string]string{
 		"a compile SITE with a receiver that has one. Deliberately left unfed " +
 		"rather than fed from the wrong measurement: an absent histogram is " +
 		"honest, a confident wrong one invites action",
-	"RecordReaperInstanceClaimed": "NEEDS A CALL SITE. Reaper reclaims",
 }
 
 // TestEveryMetricHasAFeeder.

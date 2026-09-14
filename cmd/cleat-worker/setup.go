@@ -1524,9 +1524,20 @@ func (w *Worker) dispatchLoop() {
 		}
 		w.Metrics.SetQueueDepth(w.ctx, state.QueueDepth)
 
-		// Compiled-module cache occupancy, on the same tick as the other
-		// gauges. It is the observable for --wasm-cache-max-entries and
-		// --wasm-cache-max-mb, which an operator otherwise tunes blind.
+		// BYTE-cache occupancy, on the same tick as the other gauges. It is
+		// the observable for --wasm-cache-max-entries and --wasm-cache-max-mb,
+		// which an operator otherwise tunes blind.
+		//
+		// NOT THE COMPILED-MODULE CACHE, though this comment said "compiled-
+		// module cache" until cleat#1563 named the confusion. w.wasmCache is a
+		// *wasmLRUCache holding WASM BYTES with LRU eviction; the compiled
+		// wasmtime Modules live in a separate process-wide sync.Map
+		// (engine/backend_wasmtime.go:70) which has no eviction, no bound and
+		// no metric at all. The gauge names do not distinguish them --
+		// cleat_wasm_cache_entries is described as "the WASM module cache" --
+		// so an operator watching this gauge is not watching the cache that
+		// grows without limit. cleat#1563 tracks that gap; this comment only
+		// stops claiming to cover it.
 		if w.wasmCache != nil {
 			ents, cbytes := w.wasmCache.stats()
 			w.Metrics.SetWasmCacheEntries(w.ctx, int64(ents))
@@ -2445,6 +2456,17 @@ func (w *Worker) reaperLoop() {
 			if reaped > 0 {
 				w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
 				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "reaper", int64(reaped))
+				// The fleet-wide reclaim counter. It had NO call site until
+				// now, so cleat_reaper_instances_claimed_total has never
+				// emitted a sample -- despite migration 052 and
+				// engine/reclaim_count_records_reclaims_only_test.go both
+				// describing it as an existing counter that "counts every row
+				// it takes". cleat#1317.
+				//
+				// Fed here rather than inside ReapStaleInstances: the store
+				// has no Metrics handle, and this is the one funnel every
+				// dialect's reaper returns through.
+				w.Metrics.RecordReaperInstancesClaimed(w.ctx, int64(reaped))
 			}
 			// A full tick is the signal worth surfacing, and it is the only
 			// place this is observable: the sweep bounded at the limit looks
