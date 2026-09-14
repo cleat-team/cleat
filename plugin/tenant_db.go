@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +26,22 @@ type TenantPools struct {
 	// see TenantRolePassword and cleat#1307. Empty means no tenant pool can be
 	// opened, which For() reports rather than working around.
 	secret []byte
+
+	// clock is time.Now unless a test replaces it, and it exists so that
+	// eviction can be tested without sleeping. An assertion that waits for real
+	// time to pass is measuring the scheduler as much as the code, and the
+	// usual repair -- widening the window -- makes it slower and no more
+	// truthful. With an injectable clock the test states the elapsed time it
+	// means and gets exactly that.
+	clock func() time.Time
+}
+
+// now reports the current time through the injectable clock.
+func (tp *TenantPools) now() time.Time {
+	if tp.clock == nil {
+		return time.Now()
+	}
+	return tp.clock()
 }
 
 // tenantPool is one tenant's pool, plus the means to wait for it while it is
@@ -44,6 +61,23 @@ type tenantPool struct {
 	ready chan struct{}
 	db    *sql.DB
 	err   error
+
+	// lastUsed is Unix nanoseconds, stamped every time For() hands this pool
+	// out. cleat#1470.
+	//
+	// ATOMIC RATHER THAN UNDER tp.mu, because the stamp happens on the hot
+	// path: every workflow the worker claims for a known tenant takes it, and
+	// making that contend on the map's mutex would put every tenant's dispatch
+	// behind every other tenant's. The reader (EvictIdle) tolerates a stamp
+	// racing with its own read -- it would evict a pool used microseconds ago,
+	// which costs one reopen and is not a correctness question.
+	//
+	// A pool that has never been handed out still has a stamp: For() sets it on
+	// the way out of the open, so "never used" and "used at time zero" are not
+	// confusable. Without that an unused pool looks infinitely idle and is the
+	// first thing evicted, which is wrong for a pool that was just created for
+	// a caller who is about to use it.
+	lastUsed atomic.Int64
 }
 
 // NewTenantPools creates a TenantPools manager.
@@ -86,6 +120,7 @@ func (tp *TenantPools) For(ctx context.Context, tenantID string) (*sql.DB, error
 	// slow query would serialise the first open of EVERY tenant.
 	tp.mu.Lock()
 	if entry, ok := tp.pools[tenantID]; ok {
+		entry.lastUsed.Store(tp.now().UnixNano())
 		tp.mu.Unlock()
 		select {
 		case <-entry.ready:
@@ -103,6 +138,7 @@ func (tp *TenantPools) For(ctx context.Context, tenantID string) (*sql.DB, error
 		}
 	}
 	entry := &tenantPool{ready: make(chan struct{})}
+	entry.lastUsed.Store(tp.now().UnixNano())
 	tp.pools[tenantID] = entry
 	tp.mu.Unlock()
 
@@ -171,6 +207,26 @@ func (tp *TenantPools) open(ctx context.Context, tenantID string) (*sql.DB, erro
 	pool.SetMaxIdleConns(max(2, tp.maxConns/5))
 	pool.SetConnMaxLifetime(5 * time.Minute)
 
+	// SetConnMaxIdleTime is "evict the least-recently-used individual
+	// connection", delegated to the stdlib. cleat#1470.
+	//
+	// *sql.DB exposes no way to address, enumerate or close a PARTICULAR
+	// connection -- its whole pool-control surface is four setters, Stats and
+	// Close -- so a global LRU ordering over individual connections cannot be
+	// written against it. What can be written is this, and under LIFO reuse it
+	// lands on the same connections.
+	//
+	// db.conn() takes freeConn[LAST], so the hottest connection is reused every
+	// time and a cold tail accumulates at the front. The connections that
+	// exceed an idle window are therefore exactly the coldest ones, which is
+	// the ordering the instruction asked for. LIFO is load-bearing here rather
+	// than incidental: under FIFO every connection would be touched in turn,
+	// none would ever look idle, and this setting would never fire.
+	//
+	// Distinct from SetConnMaxLifetime above, which closes a connection for
+	// being OLD however busy it is. This closes one for being UNUSED.
+	pool.SetConnMaxIdleTime(tenantConnIdleTimeout)
+
 	// No write to tp.pools here. For() owns the map; open() only builds. That
 	// separation is the fix -- the store-and-return that used to live here ran
 	// outside any single-flight, so concurrent callers each stored their own.
@@ -204,10 +260,79 @@ func (tp *TenantPools) Close() {
 	}
 }
 
-// EvictIdle closes pools that haven't been used for the given duration.
-// Returns the number of pools evicted.
+// tenantConnIdleTimeout is how long an individual connection may sit unused in
+// a tenant pool before database/sql closes it.
+//
+// Two minutes, against a five-minute SetConnMaxLifetime: shorter than the
+// lifetime so that idleness is what usually reclaims a connection, and long
+// enough that a tenant polled once a minute keeps its connections warm rather
+// than reconnecting on every tick.
+const tenantConnIdleTimeout = 2 * time.Minute
+
+// EvictIdle closes pools whose last use is older than maxIdle, and returns how
+// many were evicted.
+//
+// THIS IS OPPORTUNISTIC HYGIENE. IT IS NOT THE BOUND, AND MUST NOT BECOME IT.
+// cleat#1470.
+//
+// A timer-driven sweep can only shrink an overshoot after the fact: between two
+// sweeps the pool count is whatever demand made it. The thing a connection
+// budget has to guarantee is an INVARIANT -- never exceed it -- and an invariant
+// has to be enforced at the moment it would be violated, which is admission:
+// For() opening a pool for an unseen tenant. That is why the repository owner
+// rejected TTL eviction as the mechanism:
+//
+//	"TTL eviction just seems wrong. We need to respect the global limit on
+//	 connections, so the eviction and replacement policy can't just be TTL.
+//	 When we're at the limit and need to open a new connection, we must close
+//	 some other connection."
+//
+// Keeping this function is still worth it -- releasing a pool no tenant has
+// touched in an hour is good housekeeping when nowhere near any limit -- but
+// wiring a budget to rest on it would rebuild the rejected design under a new
+// name. Whoever adds the admission hook should put the bound in For(), not
+// here.
+//
+// NON-POSITIVE maxIdle EVICTS NOTHING, deliberately. "Idle for zero seconds"
+// describes every pool including one handed out microseconds ago, so treating
+// it literally is a stall dressed as a policy; a zero here is far more likely
+// to be an unset config value than a request to close everything.
 func (tp *TenantPools) EvictIdle(maxIdle time.Duration) int {
-	// For now, a simple implementation that just keeps all pools.
-	// Can be enhanced with last-used tracking later.
-	return 0
+	if maxIdle <= 0 {
+		// Not "evict everything". A non-positive idle window would close every
+		// pool including ones handed out microseconds ago, which is a stall
+		// dressed as a policy. The caller almost certainly meant a duration and
+		// got a zero value.
+		return 0
+	}
+
+	cutoff := tp.now().Add(-maxIdle).UnixNano()
+
+	tp.mu.Lock()
+	var evicted []*tenantPool
+	for id, entry := range tp.pools {
+		if entry.lastUsed.Load() < cutoff {
+			evicted = append(evicted, entry)
+			delete(tp.pools, id)
+		}
+	}
+	tp.mu.Unlock()
+
+	// CLOSED OUTSIDE THE LOCK, AND ASYNCHRONOUSLY. (*sql.DB).Close() waits for
+	// in-use connections to be returned, so closing under tp.mu would block
+	// every other tenant's For() behind one tenant's in-flight query -- turning
+	// a capacity control into a latency fault. Removing from the map is what
+	// makes a pool unreachable; the close is bookkeeping that can finish later.
+	//
+	// The count is returned BEFORE the closes complete, and that is deliberate:
+	// it reports how many pools were evicted, not how many sockets have shut.
+	for _, entry := range evicted {
+		go func(e *tenantPool) {
+			<-e.ready
+			if e.db != nil {
+				_ = e.db.Close()
+			}
+		}(entry)
+	}
+	return len(evicted)
 }
