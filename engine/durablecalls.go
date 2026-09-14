@@ -801,6 +801,36 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 		// On replay, skip: fire-and-forget is recorded but not re-executed.
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
+			// CHECK WHAT WE ARE CONSUMING. cleat#1507.
+			//
+			// This block used to advance past whatever record sat at this step
+			// and return success, without looking at its type. A divergence
+			// here was not merely unreported: the record belonging to some
+			// OTHER operation was consumed, so every subsequent step read the
+			// wrong history entry, and the run reported success throughout.
+			// That is worse than the silent re-execution cleat#1506 fixed for
+			// the child spawn, because the damage propagates rather than being
+			// confined to one duplicated call.
+			//
+			// Not retryable, as in replayCall: a divergence is a bug in the
+			// workflow code, and running it again diverges again.
+			if rec.EventType != EventTypeDurableSend {
+				if s.engine.Metrics != nil {
+					s.engine.Metrics.RecordReplayFailure(ctx)
+				}
+				s.engine.log().ErrorContext(ctx,
+					"replay divergence: expected durable_send, got a different event",
+					"workflow_id", s.workflowID, "step", rec.Step,
+					"expected", EventTypeDurableSend, "actual", rec.EventType,
+					"service", service, "operation", operation)
+				// errCode 1, not callErrorUnknown -- which is 0, i.e. SUCCESS.
+				// wasm/adapter_metadata.go decodes this return as
+				// `errCode := uint32(result)` and raises an error only when it
+				// is non-zero, so the guest would have been told the send
+				// succeeded. Matches the divergence code AwaitChild and
+				// AwaitAnyChild use.
+				return packSimpleResult(1)
+			}
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0
 			}
@@ -865,6 +895,24 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
+			// Same check, same reason as DurableSend above. cleat#1507.
+			if rec.EventType != EventTypeDurableScheduleInvoke {
+				if s.engine.Metrics != nil {
+					s.engine.Metrics.RecordReplayFailure(ctx)
+				}
+				s.engine.log().ErrorContext(ctx,
+					"replay divergence: expected durable_schedule_invoke, got a different event",
+					"workflow_id", s.workflowID, "step", rec.Step,
+					"expected", EventTypeDurableScheduleInvoke, "actual", rec.EventType,
+					"service", service, "operation", operation)
+				// errCode 1, not callErrorUnknown -- which is 0, i.e. SUCCESS.
+				// wasm/adapter_metadata.go decodes this return as
+				// `errCode := uint32(result)` and raises an error only when it
+				// is non-zero, so the guest would have been told the send
+				// succeeded. Matches the divergence code AwaitChild and
+				// AwaitAnyChild use.
+				return packSimpleResult(1)
+			}
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0
 			}
