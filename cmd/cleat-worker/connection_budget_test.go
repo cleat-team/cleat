@@ -166,6 +166,8 @@ func TestTheConnectionBudgetIsActuallyCheckedAtStartup(t *testing.T) {
 		"*connectionBudgetFlag",          // the flag is read, not a constant
 		"budget.Shards = shardPoolCount", // sharded workers are counted
 		"SetConnectionBudget(",           // the tenant pools are actually bounded
+		"queryServerConnectionLimit(",    // the server's ceiling is asked for
+		"assessConnectionFit(",           // and compared against this worker
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("main.go does not contain %q.\n\n"+

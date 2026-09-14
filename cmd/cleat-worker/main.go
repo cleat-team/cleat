@@ -1199,6 +1199,39 @@ func main() {
 		"worker_id", workerID, "pools", budget.Describe(),
 		"configured_budget", *connectionBudgetFlag,
 		"tenant_pools_that_fit", budget.TenantHeadroom(*connectionBudgetFlag))
+	// Does this worker fit on this server? cleat#1487.
+	//
+	// The issue opens with "two default workers want 150 and PostgreSQL's
+	// default is 100", and nothing detected it -- the only matches for
+	// `max_connections` in the tree were log labels for the plugin pool's own
+	// flag. This asks the server rather than assuming a default, because the
+	// answer is a property of the deployment and the usable figure is not the
+	// advertised one: superuser_reserved_connections and (on 16+)
+	// reserved_connections come off the top before an ordinary role is
+	// admitted.
+	//
+	// WARNS, never refuses. checkConnectionBudget below refuses because that
+	// budget is a number the operator stated, so a contradiction is
+	// unambiguously their error. This is the server's ceiling, and a worker
+	// that excludes a second may be the only worker there is; refusing to start
+	// it would be worse than the problem.
+	if limit, ok, reason := queryServerConnectionLimit(ctx, db, *driver); ok {
+		logger.InfoContext(ctx, "server connection limit",
+			"worker_id", workerID, "usable", limit.Usable(), "detail", limit.Detail,
+			"this_worker_needs", budget.Fixed())
+		if sev, msg := assessConnectionFit(budget.Fixed(), limit); sev == "error" {
+			logger.ErrorContext(ctx, msg, "worker_id", workerID)
+		} else if sev == "warn" {
+			logger.WarnContext(ctx, msg, "worker_id", workerID)
+		}
+	} else if reason != "" {
+		// Said out loud rather than skipped silently: a silent skip is
+		// indistinguishable from a check that passed, which is the failure this
+		// whole check exists to end.
+		logger.InfoContext(ctx, "server connection limit not checked",
+			"worker_id", workerID, "reason", reason)
+	}
+
 	if err := checkConnectionBudget(*connectionBudgetFlag, budget); err != nil {
 		logger.ErrorContext(ctx, "refusing to start", "worker_id", workerID, "error", err)
 		os.Exit(1)
