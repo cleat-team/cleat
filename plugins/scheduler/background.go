@@ -94,6 +94,33 @@ type dueSchedule struct {
 // StartWorkflow is called so that row locks are not held across external calls.
 // Returns (schedulesDue, workflowsStarted, workflowsFailed).
 func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
+	// CROSS-TENANT, and unlike eventtriggers' retry loop this one cannot be
+	// narrowed per row. cleat#1512.
+	//
+	// The discrimination used elsewhere in this rollout is "no tenant to be
+	// had is a bypass; a tenant that went missing is not" -- and on a first
+	// reading this looks like the second case, because every row scanned
+	// carries a tenant_id and could be handled under plugin.ForTenant.
+	//
+	// It is not, because the SCAN AND THE UPDATES SHARE ONE TRANSACTION and
+	// that is load-bearing. The claim is FOR UPDATE SKIP LOCKED, and
+	// next_run_at is advanced under the same transaction lock so that another
+	// worker skips these rows even if this one crashes before StartWorkflow.
+	// Splitting the updates into per-tenant transactions would release the
+	// lock between claiming and advancing, which is the property the lock
+	// exists to provide. The comment further down records what happened the
+	// last time the shape of this transaction was got wrong: every update was
+	// lost, on every dialect, and schedules fired on every poll regardless of
+	// their cron.
+	//
+	// So the unit of work genuinely spans tenants, and the bypass is the
+	// honest description rather than the convenient one. The cost is that the
+	// UPDATE ... WHERE id = $3 below is not policy-checked -- acceptable here
+	// because the id comes from the SELECT in this same transaction rather
+	// than from a caller.
+	ctx = plugin.AcrossAllTenants(ctx,
+		"scheduler due-schedule claim: one FOR UPDATE SKIP LOCKED transaction claims and advances every tenant's due rows together")
+
 	tx, err := p.db.Begin(ctx)
 	if err != nil {
 		p.logger.Error("scheduler: begin transaction", "error", err)

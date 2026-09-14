@@ -63,7 +63,13 @@ func (p *Plugin) cliList(args []string) error {
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`
+	tx, err := beginScopedToTenant(db, tenantID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(`
 		SELECT id, name, cron, workflow_name, enabled, last_run_at, next_run_at, created_at
 		FROM schedules
 		WHERE tenant_id = $1
@@ -164,13 +170,21 @@ func (p *Plugin) cliAdd(args []string) error {
 	}
 	defer db.Close()
 
+	tx, err := beginScopedToTenant(db, tenantID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	id := uuid.New()
-	_, err = db.Exec(`
+	if _, err = tx.Exec(`
 		INSERT INTO schedules (tenant_id, id, name, cron, workflow_name, input, enabled, next_run_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
-	`, tenantID, id, *name, *cron, *workflow, []byte(*input), *enabled, next)
-	if err != nil {
+	`, tenantID, id, *name, *cron, *workflow, []byte(*input), *enabled, next); err != nil {
 		return fmt.Errorf("insert: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 
 	fmt.Printf("Created schedule %s (next run: %s)\n", id, next.Format(time.RFC3339))
@@ -213,13 +227,22 @@ func (p *Plugin) cliDelete(args []string) error {
 	}
 	defer db.Close()
 
-	result, err := db.Exec(`DELETE FROM schedules WHERE id = $1 AND tenant_id = $2`, scheduleID, tenantID)
+	tx, err := beginScopedToTenant(db, tenantID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.Exec(`DELETE FROM schedules WHERE id = $1 AND tenant_id = $2`, scheduleID, tenantID)
 	if err != nil {
 		return fmt.Errorf("delete: %w", err)
 	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		return fmt.Errorf("schedule not found")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 
 	fmt.Printf("Deleted schedule %s\n", scheduleID)
@@ -231,4 +254,38 @@ func (p *Plugin) cliDelete(args []string) error {
 // never called but ensures the compiler sees the import as used.
 func init() {
 	_ = strings.HasPrefix
+}
+
+// beginScopedToTenant opens a transaction whose statements are scoped to
+// tenantID, for the CLI commands. cleat#1512.
+//
+// These commands do NOT go through plugin.PluginDB -- each opens its own
+// *sql.DB from --dsn -- so engine.beginTenantTx never runs for them and
+// nothing sets cleat.tenant_id. Once `schedules` carries a policy calling
+// cleat.assert_tenant_set(), every statement below fails with
+// "cleat.tenant_id is not set". Exactly this shipped broken for jobqueue's
+// enqueue command in cleat#1511 and was fixed in cleat#1517; these three are
+// the same shape, fixed in the same change that creates the policy.
+//
+// Having tenant_id in the WHERE clause does not help. The policy is checked
+// independently of the predicate, and for INSERT PostgreSQL applies a FOR ALL
+// policy's USING expression as the WITH CHECK when none is given -- so the
+// check runs before there is a row to check against.
+//
+// A TRANSACTION rather than a bare SET on the *sql.DB: a *sql.DB is a pool and
+// a session-level SET may land on a different connection from the statement
+// that needs it. set_config's third argument is is_local, so the setting
+// reverts at COMMIT and cannot follow a connection back into the pool -- which
+// a session-level SET on a returned connection would.
+func beginScopedToTenant(db *sql.DB, tenantID uuid.UUID) (*sql.Tx, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	if _, err := tx.Exec(
+		`SELECT set_config('cleat.tenant_id', $1, true)`, tenantID.String()); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("set tenant scope: %w", err)
+	}
+	return tx, nil
 }

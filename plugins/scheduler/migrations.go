@@ -69,5 +69,23 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS schedules;
 			`,
 		},
+		{
+			// Tenant isolation for schedules. cleat#1512.
+			//
+			// A new version rather than TenantScoped on v1: v1 is already
+			// recorded everywhere scheduler runs and a recorded migration
+			// never runs again, so editing it would protect new databases and
+			// leave every existing one open.
+			//
+			// Up is empty on purpose -- the runtime emits ENABLE / FORCE / the
+			// policy from TenantScoped via plugin.applyTenantScoping.
+			//
+			// The three CLI commands in commands.go are converted in the same
+			// change, deliberately. They open their own *sql.DB and would
+			// start failing the moment this policy exists; shipping the policy
+			// without them is what broke `cleat jobqueue-enqueue` in #1511.
+			Version:      2,
+			TenantScoped: []string{"schedules"},
+		},
 	}
 }
