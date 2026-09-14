@@ -1124,7 +1124,11 @@ func TestMigrations(t *testing.T) {
 		if m.Version <= 0 {
 			t.Errorf("migration %d: expected Version > 0, got %d", i, m.Version)
 		}
-		if m.Up == "" {
+		// A TenantScoped migration carries no SQL by design; the runtime
+		// emits the policy from the declaration. Replace this with
+		// plugintest.AssertMigrationsDoSomething once cleat#1513 lands rather
+		// than leaving another variant behind. cleat#1512.
+		if m.Up == "" && len(m.TenantScoped) == 0 {
 			t.Errorf("migration %d: expected non-empty Up SQL", i)
 		}
 	}
