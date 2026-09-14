@@ -229,6 +229,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	defer release()
 
+	// 0a. Refuse a server too old to hold this schema, before anything is
+	//     applied. See minimum_server_version.go for why this is a pre-flight
+	//     rather than a migration.
+	if err := r.checkServerVersion(ctx, session); err != nil {
+		return err
+	}
+
 	// 1. Ensure the tracking table exists.
 	if err := r.ensureMigrationsTable(ctx, session); err != nil {
 		return fmt.Errorf("create schema_migrations table: %w", err)

@@ -427,7 +427,13 @@ deterministic replay.
 
 ## PostgreSQL major version upgrade
 
-Cleat requires PostgreSQL 16+. When upgrading PostgreSQL to a new major version,
+Cleat requires PostgreSQL 16+, and since migration 077 that is enforced rather
+than advisory: the runner refuses to apply anything to an older server, naming
+the version and the reason. `WITH INHERIT FALSE` in 077 is PostgreSQL 16 syntax
+and carries the cross-tenant isolation boundary -- see
+`docs/explanation/postgresql-schema.md`, "PostgreSQL 16 is required".
+
+When upgrading PostgreSQL to a new major version,
 follow this procedure.
 
 ### Procedure
