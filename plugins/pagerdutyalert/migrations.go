@@ -54,5 +54,19 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS pd_config;
 			`,
 		},
+		{
+			// Tenant isolation for pd_config. cleat#1512.
+			//
+			// A new version rather than TenantScoped on v1: v1 is recorded
+			// everywhere this plugin runs and a recorded migration never runs
+			// again, so editing it would protect new databases and leave every
+			// existing one open. Up is empty by design -- the runtime emits
+			// ENABLE / FORCE / the policy from the declaration.			//
+			// Health() is marked cross-tenant in plugin.go: it asks whether the
+			// deployment has any enabled config at all, which belongs to no
+			// tenant and runs on no request.
+			Version:      2,
+			TenantScoped: []string{"pd_config"},
+		},
 	}
 }

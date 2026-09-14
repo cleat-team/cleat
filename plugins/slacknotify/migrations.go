@@ -57,5 +57,20 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS slack_config;
 			`,
 		},
+		{
+			// Tenant isolation for slack_config. cleat#1512.
+			//
+			// A new version rather than TenantScoped on v1: v1 is recorded
+			// everywhere this plugin runs and a recorded migration never runs
+			// again, so editing it would protect new databases and leave every
+			// existing one open. Up is empty by design -- the runtime emits
+			// ENABLE / FORCE / the policy from the declaration.			//
+			// Nothing else to mark: this plugin has no background loop, no CLI
+			// and no health query. Its host function carries the workflow's
+			// tenant through pluginCallContext, and its HTTP handlers run on
+			// authenticated requests, which already carry one.
+			Version:      2,
+			TenantScoped: []string{"slack_config"},
+		},
 	}
 }
