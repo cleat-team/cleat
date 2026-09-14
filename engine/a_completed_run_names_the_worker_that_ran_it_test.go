@@ -41,6 +41,28 @@ func TestACompletedRunNamesTheWorkerThatRanIt(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 
+			// A DECOY, RUNNABLE AND NEVER CLAIMED BY THIS TEST. It exists so
+			// the condition that broke this test in CI is present every time it
+			// runs, rather than only when the suite happens to leave a row
+			// behind. A claim that takes whatever is queued now fails here
+			// ALWAYS instead of once a day on one dialect.
+			//
+			// It is terminated at the end rather than left behind, because a
+			// runnable row outliving its test is precisely the pollution that
+			// caused this.
+			decoyID, _, err := store.StartNewRun(ctx, "", "completer", 1,
+				json.RawMessage(`{}`), fmt.Sprintf("decoy-%d", time.Now().UnixNano()),
+				DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun (decoy): %v", err)
+			}
+			defer func() {
+				if err := store.TerminateWorkflow(ctx, decoyID, "decoy, test over"); err != nil {
+					t.Logf("terminating the decoy failed: %v -- it stays runnable and may "+
+						"disturb a later test", err)
+				}
+			}()
+
 			type run struct {
 				id     string
 				worker string
@@ -57,17 +79,32 @@ func TestACompletedRunNamesTheWorkerThatRanIt(t *testing.T) {
 				runs = append(runs, run{id: id, worker: worker})
 			}
 
-			// Claim each run as its own worker. One run is outstanding per
-			// claim, so a claim cannot consume a sibling (cleat#1115).
+			// Claim each run as its own worker, BY ID.
+			//
+			// This used to be a bare ClaimWorkflow plus an assertion that the
+			// id came back as expected, justified with "one run is outstanding
+			// per claim, so a claim cannot consume a sibling". That reasoning
+			// is true of this test ALONE and false in the suite, which is where
+			// it failed: ClaimWorkflow returns whatever is runnable, and the
+			// engine suite leaves other runnable rows behind. It went red on
+			// the Tier 1 Gate against develop -- on mssql, where the ordering
+			// differs enough to surface it -- reporting exactly that:
+			//
+			//	worker-alpha claimed 6252fb8b-..., wanted c339bf43-...
+			//	-- another run was outstanding
+			//
+			// Two bugs, not one. The second is visible even in isolation: both
+			// runs are started BEFORE either is claimed, so nothing guarantees
+			// the first claim returns the first run. The assertion happened to
+			// hold because claim order usually follows insertion order, which
+			// is not a promise.
+			//
+			// claimSpecific is the repo's answer to both -- it claims until it
+			// gets the run asked for, and its own doc comment names this case.
 			for i := range runs {
-				claimed, err := store.ClaimWorkflow(ctx, runs[i].worker)
-				if err != nil || claimed == nil {
-					t.Fatalf("ClaimWorkflow as %s: %v (nil=%v)", runs[i].worker, err, claimed == nil)
-				}
-				if claimed.ID != runs[i].id {
-					t.Fatalf("%s claimed %s, wanted %s -- another run was outstanding, so "+
-						"the identities below would be attributed to the wrong rows",
-						runs[i].worker, claimed.ID, runs[i].id)
+				claimed, err := claimSpecific(t, ctx, store, runs[i].id, runs[i].worker)
+				if err != nil {
+					t.Fatalf("claim %s as %s: %v", runs[i].id, runs[i].worker, err)
 				}
 				if err := store.CompleteWorkflow(ctx, runs[i].id, runs[i].worker,
 					claimed.Generation, `{"ok":true}`, nil); err != nil {
