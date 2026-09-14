@@ -79,19 +79,28 @@ func migrationProblems(migrations []plugin.Migration) []string {
 			problems = append(problems, fmt.Sprintf("migration %d: version must be non-zero", i))
 		}
 		// "Does something" is the predicate, not "has SQL". A migration with
-		// neither SQL nor TenantScoped tables is recorded as applied and
-		// changes nothing, which is the actual defect worth failing on.
-		if m.Up == "" && len(m.TenantScoped) == 0 {
+		// no SQL and no declaration is recorded as applied and changes
+		// nothing, which is the actual defect worth failing on.
+		//
+		// SweepTables counts as doing something for the same reason
+		// TenantScoped does: the runtime emits the statement, so the author
+		// writes a declaration rather than SQL. It makes the runtime GRANT
+		// cleat_sweep on a table a cross-tenant sweep touches but which
+		// carries no tenant column (cleat#1490) -- without it the sweep gets
+		// "permission denied for table X (42501)".
+		declares := len(m.TenantScoped) > 0 || len(m.SweepTables) > 0
+		if m.Up == "" && !declares {
 			problems = append(problems, fmt.Sprintf(
-				"migration %d (version %d): has neither Up SQL nor TenantScoped tables, "+
-					"so applying it does nothing", i, m.Version))
+				"migration %d (version %d): has neither Up SQL nor a TenantScoped/"+
+					"SweepTables declaration, so applying it does nothing", i, m.Version))
 		}
-		if m.Down == "" && len(m.TenantScoped) == 0 {
+		if m.Down == "" && !declares {
 			problems = append(problems, fmt.Sprintf(
-				"migration %d (version %d): has no Down SQL and declares no TenantScoped "+
-					"tables. A migration that writes SQL must be able to undo it; one that "+
-					"only declares tenant scoping has nothing to undo, because the runtime "+
-					"owns the policy it emits.", i, m.Version))
+				"migration %d (version %d): has no Down SQL and declares no "+
+					"TenantScoped/SweepTables entries. A migration that writes SQL must "+
+					"be able to undo it; one that only declares scoping or sweep grants "+
+					"has nothing to undo, because the runtime owns the policy and the "+
+					"grant it emits.", i, m.Version))
 		}
 	}
 	return problems

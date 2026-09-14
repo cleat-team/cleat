@@ -381,6 +381,14 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 				return fmt.Errorf("plugin %s migration v%d tenant scoping: %w", name, m.Version, err)
 			}
 
+			// And the grants for tables a sweep touches but which carry no
+			// tenant column. Same transaction, same reason: a sweep must never
+			// observe a state where its table exists and it cannot reach it.
+			if err := grantSweepTables(ctx, tx.ExecContext, dialect, m.SweepTables); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("plugin %s migration v%d sweep grants: %w", name, m.Version, err)
+			}
+
 			// And record them, in the same transaction and for the same
 			// reason: admin.drop_tenant reads admin.plugin_tables to find
 			// the plugin tables a dropped tenant owns rows in, so a table
@@ -520,6 +528,40 @@ func applyTenantScoping(ctx context.Context, exec func(ctx context.Context, quer
 			if _, err := exec(ctx, stmt); err != nil {
 				return fmt.Errorf("%s: %w", stmt, err)
 			}
+		}
+	}
+	return nil
+}
+
+// grantSweepTables gives cleat_sweep privileges on tables a cross-tenant sweep
+// touches that carry no tenant column, declared in Migration.SweepTables.
+//
+// WHY A GRANT AND NOT A POLICY. These tables have no tenant_id, so there is
+// nothing for a policy to filter on; what they need is for the role a sweep
+// runs as to be able to reach them at all. beginTenantTx issues
+// SET LOCAL ROLE cleat_sweep for a plugin.AcrossAllTenants transaction
+// (cleat#1490), and a role switch changes privileges for EVERY table in the
+// transaction -- so a sweep that deletes from an unscoped table gets
+// "permission denied for table X (42501)" unless it is named here.
+//
+// Measured when this was found: 2 of 24 plugin packages needed it --
+// blobstore (blob_index scoped, blob_content not) and notifications
+// (webhook_config scoped, webhook_delivery not). The other 22 sweeps touch
+// only tables they had already declared.
+//
+// Non-PostgreSQL dialects return nil: no role is switched there, so no grant
+// is required.
+func grantSweepTables(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), dialect Dialect, tables []string) error {
+	if len(tables) == 0 || dialect != DialectPostgres {
+		return nil
+	}
+	for _, table := range tables {
+		if !isPlainIdentifier(table) {
+			return fmt.Errorf("sweep table %q is not a plain identifier", table)
+		}
+		stmt := fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO cleat_sweep", table)
+		if _, err := exec(ctx, stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
 		}
 	}
 	return nil

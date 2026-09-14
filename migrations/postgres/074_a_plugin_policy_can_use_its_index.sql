@@ -88,6 +88,41 @@ BEGIN
 END
 $$;
 
+-- SCHEMAS AND FUNCTIONS, NOT ONLY TABLES. Switching role changes the whole
+-- privilege surface of the transaction, and the tables are only the part that
+-- is obvious. Measured: after the table grants were right, blobstore's sweep
+-- still failed with
+--
+--	pq: permission denied for schema admin (42501)
+--
+-- because its phase 3 calls admin.in_flight_workflow_ids() (migration 073) to
+-- avoid collecting content an in-flight workflow still references.
+--
+-- NAMED, NOT BLANKET, and the named function is the same one
+-- SetupPostgresRLSRole grants to the role that models a worker. admin also
+-- holds admin.drop_tenant, and `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA
+-- admin` would hand every cross-tenant sweep the capability cleat#1365 was
+-- filed to take away from tenant roles. This is the same "expose one query
+-- rather than one exemption" shape as 023, 024 and 073.
+DO $$
+BEGIN
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO cleat_sweep', current_schema());
+    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'cleat') THEN
+        GRANT USAGE ON SCHEMA cleat TO cleat_sweep;
+        GRANT EXECUTE ON FUNCTION cleat.assert_tenant_set() TO cleat_sweep;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'admin') THEN
+        GRANT USAGE ON SCHEMA admin TO cleat_sweep;
+        IF EXISTS (
+            SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'admin' AND p.proname = 'in_flight_workflow_ids'
+        ) THEN
+            EXECUTE 'GRANT EXECUTE ON FUNCTION admin.in_flight_workflow_ids() TO cleat_sweep';
+        END IF;
+    END IF;
+END
+$$;
+
 -- Rewrite the policies migration 063 installed, for every plugin table that
 -- has one. admin.plugin_tables is the registry registerTenantScopedTables
 -- writes; pg_policies is consulted as well so a table whose policy was created

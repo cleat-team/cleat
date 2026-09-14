@@ -74,9 +74,16 @@ func TestAPluginStatementIsScopedToTheWorkflowsTenant(t *testing.T) {
 		`CREATE TABLE ` + table + ` (tenant_id uuid NOT NULL, k text NOT NULL)`,
 		`ALTER TABLE ` + table + ` ENABLE ROW LEVEL SECURITY`,
 		`ALTER TABLE ` + table + ` FORCE ROW LEVEL SECURITY`,
-		// Verbatim the shape plugin.applyTenantScoping emits. The POLICY name
-		// is a bare identifier -- it is scoped to the table, not to a schema --
-		// so only the table reference is qualified.
+		// The PRE-1490 shape, kept deliberately. applyTenantScoping now emits
+		// two role-scoped policies instead of this CASE (cleat#1490), and the
+		// new shape is covered by
+		// a_tenant_policy_keeps_its_index_and_its_boundary_test.go. This
+		// fixture stays on cleat.tenant_row_is_visible because policies
+		// created before migration 074 keep it until their plugin's migrations
+		// are re-applied -- which never happens for an already-recorded
+		// version -- so the tenant bridge must go on working against it. The
+		// POLICY name is a bare identifier -- it is scoped to the table, not to
+		// a schema -- so only the table reference is qualified.
 		`CREATE POLICY plugin_tenant_probe_policy ON ` + table +
 			` FOR ALL USING (cleat.tenant_row_is_visible(tenant_id))`,
 	} {

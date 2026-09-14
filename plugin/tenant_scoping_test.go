@@ -32,14 +32,21 @@ func TestTenantScopingEmitsEnableForceAndPolicy(t *testing.T) {
 		// owner, which is whoever ran the migration -- so a suite connecting
 		// as the owner would pass against an unprotected table.
 		"ALTER TABLE kv_store FORCE ROW LEVEL SECURITY",
-		// cleat.tenant_row_is_visible, not the inline
-		// `tenant_id = cleat.assert_tenant_set()` this asserted before
-		// #1278. The function gives the same answer when no bypass is
-		// named -- including the RAISE on an unset tenant -- and
-		// additionally admits a sweep that named itself through
-		// plugin.AcrossAllTenants. Asserting the call rather than the
-		// comparison is what keeps the two from being written twice.
-		"USING (cleat.tenant_row_is_visible(tenant_id))",
+		// TWO policies now, not the single cleat.tenant_row_is_visible CASE
+		// #1278 introduced. That CASE answered for both callers with one
+		// predicate, and a CASE cannot become an Index Cond: measured on
+		// 400000 rows over 400 tenants, 603.654 ms with 399000 rows removed
+		// by the filter, against 0.415 ms for the equality. cleat#1490.
+		"CREATE POLICY kv_store_tenant_isolation ON kv_store FOR ALL TO PUBLIC " +
+			"USING (tenant_id = cleat.assert_tenant_set())",
+		// TO PUBLIC and not a role: per-tenant roles are NOINHERIT
+		// (001_schema.sql), and a NOINHERIT member does not match a
+		// `TO <role>` policy -- measured, such a role reads 0 rows without
+		// raising, which is the failure assert_tenant_set exists to prevent.
+		"CREATE POLICY kv_store_cross_tenant ON kv_store FOR ALL TO cleat_sweep USING (true)",
+		// The sweep role is entered with SET LOCAL ROLE and so needs
+		// privileges of its own; membership does not lend them.
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON kv_store TO cleat_sweep",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("emitted DDL does not contain %q:\n%s", want, joined)
