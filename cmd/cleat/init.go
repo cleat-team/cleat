@@ -4,6 +4,7 @@ import (
 	"embed"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,13 +20,20 @@ var agentPythonTemplates embed.FS
 //go:embed templates/workflow/*
 var workflowTemplates embed.FS
 
+// The fullstack template has a web/ subdirectory, so this pattern is the
+// directory rather than templates/fullstack/* -- `*` does not descend, and a
+// scaffold missing its front-end would still build and still be wrong.
+//
+//go:embed templates/fullstack
+var fullstackTemplates embed.FS
+
 func runInit(args []string) {
 	flags := flag.NewFlagSet("init", flag.ExitOnError)
-	templateName := flags.String("template", "basic", "project template (basic, agent, agent-python, workflow)")
+	templateName := flags.String("template", "basic", "project template (basic, agent, agent-python, workflow, fullstack)")
 	_ = flags.Parse(args)
 
 	if flags.NArg() < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat init [--template agent|basic|agent-python|workflow] <project-name>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat init [--template agent|basic|agent-python|workflow|fullstack] <project-name>\n")
 		os.Exit(1)
 	}
 	projectName := flags.Arg(0)
@@ -39,8 +47,10 @@ func runInit(args []string) {
 		scaffoldAgentPython(projectName)
 	case "workflow":
 		scaffoldWorkflow(projectName)
+	case "fullstack":
+		scaffoldFullstack(projectName)
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown template %q. Valid: basic, agent, agent-python, workflow\n", *templateName)
+		fmt.Fprintf(os.Stderr, "Error: unknown template %q. Valid: basic, agent, agent-python, workflow, fullstack\n", *templateName)
 		os.Exit(1)
 	}
 }
@@ -185,6 +195,55 @@ func scaffoldWorkflow(projectName string) {
 	copyTemplate("docker-compose.yml", "docker-compose.yml")
 
 	fmt.Printf("Created workflow project in %s/\n", dir)
+}
+
+// scaffoldFullstack writes a project wiring a durable command path, the
+// plugins in front of it, and a front-end.
+//
+// It walks the embedded tree rather than listing filenames, because this
+// template has a subdirectory: a hand-maintained list silently stops copying
+// whatever someone adds later, and the failure is a scaffold that is merely
+// incomplete rather than broken -- which nobody notices.
+func scaffoldFullstack(projectName string) {
+	dir := projectName
+	const root = "templates/fullstack"
+
+	entries, err := fs.Sub(fullstackTemplates, root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	err = fs.WalkDir(entries, ".", func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return os.MkdirAll(filepath.Join(dir, path), 0755)
+		}
+		data, rerr := fs.ReadFile(entries, path)
+		if rerr != nil {
+			return rerr
+		}
+		dest := path
+		// go.mod.txt is stored under that name so it is not treated as this
+		// repository's own go.mod, exactly as the workflow template does.
+		if dest == "go.mod.txt" {
+			dest = "go.mod"
+		}
+		if strings.HasSuffix(dest, ".go") {
+			data = stripScaffoldBuildTag(data)
+		}
+		return os.WriteFile(filepath.Join(dir, dest), data, 0644)
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Created full-stack project in %s/\n", dir)
+	fmt.Printf("  next: cd %s && make up && make logs | grep rate-limiter\n", dir)
+	fmt.Printf("  the rate limiter must report mode=db; see README.md\n")
 }
 
 func writeYAML(dir, projectName string) {

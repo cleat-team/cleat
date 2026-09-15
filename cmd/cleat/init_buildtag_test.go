@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,7 @@ func TestScaffoldedGoFilesHaveNoBuildConstraint(t *testing.T) {
 		{"agent", scaffoldAgent},
 		{"workflow", scaffoldWorkflow},
 		{"basic", scaffoldBasic},
+		{"fullstack", scaffoldFullstack},
 	} {
 		t.Run(tmpl.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "proj")
@@ -74,6 +76,49 @@ func TestScaffoldedGoFilesHaveNoBuildConstraint(t *testing.T) {
 				t.Errorf("template %q scaffolded no .go files at all", tmpl.name)
 			}
 		})
+	}
+}
+
+// TestEveryScaffoldIsCoveredByTheBuildConstraintTable keeps the table above
+// honest.
+//
+// That table is hand-maintained, and a template missing from it is not covered
+// by the check that matters -- a scaffolded project whose .go files kept their
+// `//go:build ignore` has no buildable packages, which is the defect
+// stripScaffoldBuildTag exists to prevent. A hand-maintained list silently
+// stops covering whatever someone adds next, and the failure is invisible:
+// the suite stays green and the new template is simply unchecked.
+//
+// `fullstack` was added in the same change as this test and was, at that
+// moment, exactly such an omission.
+//
+// agent-python is exempt and named rather than inferred: it scaffolds Python,
+// so there is no Go file for the constraint to be wrong in.
+func TestEveryScaffoldIsCoveredByTheBuildConstraintTable(t *testing.T) {
+	src, err := os.ReadFile("init.go")
+	if err != nil {
+		t.Fatalf("read init.go: %v", err)
+	}
+	declared := regexp.MustCompile(`func (scaffold[A-Za-z]+)\(`).FindAllStringSubmatch(string(src), -1)
+	if len(declared) == 0 {
+		t.Fatal("found no scaffold functions in init.go; this guard is not looking at what it thinks")
+	}
+
+	// Kept in sync by hand ON PURPOSE: adding a name here is a deliberate act,
+	// which is the property the table above lacks.
+	covered := map[string]bool{
+		"scaffoldAgent":       true,
+		"scaffoldWorkflow":    true,
+		"scaffoldBasic":       true,
+		"scaffoldFullstack":   true,
+		"scaffoldAgentPython": true, // exempt: scaffolds Python, no Go files
+	}
+	for _, m := range declared {
+		if !covered[m[1]] {
+			t.Errorf("%s is declared in init.go but not covered by the build-constraint "+
+				"table; add it to that table (or, if it scaffolds no Go, to the exempt "+
+				"list here with the reason)", m[1])
+		}
 	}
 }
 

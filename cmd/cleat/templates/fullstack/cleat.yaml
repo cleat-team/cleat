@@ -1,0 +1,4 @@
+name: my-fullstack-app
+language: go
+entry_points:
+  - submit_order
