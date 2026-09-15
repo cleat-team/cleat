@@ -55,6 +55,55 @@ import (
 // used a sibling code; the SQLSTATE covers the family.
 const mysqlInvalidJSONSQLState = "22032"
 
+// mysqlCheckConstraintViolated is MySQL's ER_CHECK_CONSTRAINT_VIOLATED.
+//
+// KEYED ON THE NUMBER, WHICH CONTRADICTS THE PARAGRAPH ABOVE, AND DELIBERATELY.
+// That reasoning -- prefer the SQLSTATE, because the number family has more
+// members than the two measured -- is right for the invalid-JSON family, whose
+// SQLSTATE 22032 means exactly "invalid JSON text". It is wrong here: a check
+// constraint violation carries SQLSTATE HY000, the general-error catch-all, and
+// keying on that would classify unrelated failures as a rejected result.
+//
+// So the discriminator has to be the number plus WHICH constraint fired, and
+// that is why jsonValidityConstraints exists.
+const mysqlCheckConstraintViolated = 3819
+
+// jsonValidityConstraints are the CHECK constraints that exist to reject a
+// value that is not JSON. A violation of one of them IS a store refusing a JSON
+// value, which is what isStoreJSONRejection reports.
+//
+// WHY THIS LIST EXISTS AT ALL. cleat#1022 made MySQL's caller-controlled
+// columns LONGTEXT + CHECK (JSON_VALID(col)), because the JSON type silently
+// rewrote any integer outside [-2^63, 2^64-1]. The validation survived the
+// change -- JSON_VALID still refuses malformed JSON and still enforces the
+// depth limit -- but it MOVED, from the column type to the constraint, and with
+// it the error: 3141/3157 with SQLSTATE 22032 became 3819 with HY000.
+//
+// The refusal was therefore still correct and no longer CLASSIFIED, so a caller
+// got driver text and error_code "unknown" again. That is cleat#1460 returning
+// through a side door, and TestAResultTheStoreRefusesIsClassifiedNotJustReported
+// caught it.
+//
+// MATCHING A CONSTRAINT NAME IS NOT "MATCHING ON MESSAGE TEXT". The rule this
+// file states -- stay typed, never parse the driver's prose -- is about
+// phrasing, which the three dialects word differently and change between
+// versions. A constraint name is an identifier THIS REPOSITORY chose and a
+// migration creates; it does not vary by driver version, and it does not vary
+// by locale even if the surrounding sentence does.
+//
+// TestEveryJSONValidityConstraintIsClassified keeps this in step with the
+// migration, so a column added later cannot quietly go unclassified.
+var jsonValidityConstraints = map[string]bool{
+	"ck_workflow_instances_input":         true,
+	"ck_workflow_instances_result":        true,
+	"ck_event_history_payload":            true,
+	"ck_workflow_signals_payload":         true,
+	"ck_workflow_promises_result":         true,
+	"ck_workflow_schedules_input":         true,
+	"ck_workflow_update_requests_payload": true,
+	"ck_workflow_update_requests_result":  true,
+}
+
 // mssqlJSONNestingLimit is SQL Server's error for JSON past 128 nesting levels.
 // SQL Server has no SQLSTATE equivalent to key on here, so this is the measured
 // number.
@@ -79,7 +128,19 @@ func isStoreJSONRejection(err error) bool {
 	}
 	var myErr *mysqldriver.MySQLError
 	if errors.As(err, &myErr) {
-		return string(myErr.SQLState[:]) == mysqlInvalidJSONSQLState
+		if string(myErr.SQLState[:]) == mysqlInvalidJSONSQLState {
+			return true
+		}
+		// Since cleat#1022 these columns are LONGTEXT + CHECK(JSON_VALID),
+		// so the same refusal arrives as a constraint violation instead.
+		if myErr.Number == mysqlCheckConstraintViolated {
+			for name := range jsonValidityConstraints {
+				if strings.Contains(myErr.Message, name) {
+					return true
+				}
+			}
+		}
+		return false
 	}
 	var msErr mssql.Error
 	if errors.As(err, &msErr) {

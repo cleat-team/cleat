@@ -9,12 +9,21 @@ import (
 	"time"
 )
 
-// What a workflow INPUT and a SIGNAL PAYLOAD are worth after they have been
-// through their columns, per dialect. cleat#1022, second half.
+// A workflow INPUT and a SIGNAL PAYLOAD survive their columns byte for byte, on
+// every dialect. cleat#1022, second half.
 //
-// THIS TEST PINS A DEFECT ON PURPOSE AND IS NOT AN ENDORSEMENT, exactly as its
-// sibling TestAWorkflowResultSurvivesTheColumnOrDoesNot does. Read that one
-// first: it has the boundary, the cliff pairs, and why the cases come in twos.
+// THIS TEST PINNED A DEFECT UNTIL THE MIGRATION IN THIS SAME PR, and the
+// history is kept because the cases only make sense with it. MySQL's JSON type
+// keeps an integer as INT64 or UINT64 and falls back to DOUBLE when it fits
+// neither, so every value below outside [-2^63, 2^64-1] -- and any decimal
+// needing more precision than a float64 holds -- USED TO BE REWRITTEN on the
+// way in, on this dialect alone and with nothing to say so.
+//
+// migrations/mysql/070 stores these columns as LONGTEXT with a JSON_VALID
+// check, which is what SQL Server has always done, so all three dialects now
+// preserve. THE PER-DIALECT EXPECTATION IS GONE ON PURPOSE: it existed only to
+// encode a divergence, and encoding "every dialect, every case" as three
+// identical lists would be dead weight that hides the next real divergence.
 //
 // WHY A SECOND TEST RATHER THAN MORE ROWS IN THE FIRST. cleat#1022 is written
 // about `result`, and both measurements on it covered `result` alone. That
@@ -54,42 +63,48 @@ import (
 // fix the sibling columns get. Stated rather than left implied, so that nobody
 // reads its absence as an oversight.
 //
-// If you are here because this test went red after a deliberate fix: good, that
-// is the design. Update preservedBy, do not delete the case.
+// IF THIS GOES RED, A DIALECT HAS STARTED REWRITING A CALLER'S VALUE AGAIN.
+// That is a regression and not a tidiness problem: the value reaches the
+// workflow body, so every branch and every arithmetic result downstream is
+// computed from it. Do not delete the case and do not relax it to a decoded
+// comparison -- see checkPreserved for why decoding is blind exactly at the
+// boundary.
 func TestAnInputSurvivesTheColumnOrDoesNot(t *testing.T) {
 	const tenant = "c1022bbb-1022-4022-8022-c10220001022"
 
 	cases := []struct {
-		name        string
-		payload     string
-		preservedBy []string
+		name    string
+		payload string
 	}{
 		// Control. If this degrades anywhere the harness is broken rather than
 		// the dialect, and every row below is meaningless.
-		{"small int", `42`, []string{"postgres", "mysql", "mssql"}},
+		{"small int", `42`},
 
-		// Second control, and it is the one that gives the negatives their
-		// meaning: the SAME DIGITS as a JSON string. Text of this length
-		// survives on every dialect, so a DEGRADED row below is the column
-		// narrowing a NUMBER -- not the value being truncated somewhere.
-		{"same digits as a string", `"123456789012345678901234567890"`,
-			[]string{"postgres", "mysql", "mssql"}},
+		// Second control: the SAME DIGITS as a JSON string. It never depended
+		// on the number path at all, so when these cases DID fail it separated
+		// "the column narrows a NUMBER" from "the value is truncated
+		// somewhere". Kept for the same reason after the fix.
+		{"same digits as a string", `"123456789012345678901234567890"`},
 
-		// The positive cliff, one unit apart. MySQL's JSON keeps an integer as
-		// INT64 *or* UINT64, so the positive limit is 2^64-1 and not BIGINT.
-		{"2^64-1 (uint64 max)", `18446744073709551615`, []string{"postgres", "mysql", "mssql"}},
-		{"2^64 (past uint64)", `18446744073709551616`, []string{"postgres", "mssql"}},
+		// The cliff MySQL's JSON type used to have, straddled one unit apart so
+		// that either side moving is a failure. cleat#1022's own text put this
+		// limit at BIGINT; it was not -- MySQL's JSON kept an integer as INT64
+		// *or* UINT64, so the positive edge was 2^64-1, twice as far out. A
+		// test written to the signed bound would have sat nowhere near the real
+		// edge and passed while the boundary moved underneath it.
+		{"2^64-1 (uint64 max)", `18446744073709551615`},
+		{"2^64 (past uint64)", `18446744073709551616`},
 
-		// The negative cliff, one unit apart. Asymmetric with the positive one.
-		{"-2^63 (int64 min)", `-9223372036854775808`, []string{"postgres", "mysql", "mssql"}},
-		{"-2^63-1 (past int64 min)", `-9223372036854775809`, []string{"postgres", "mssql"}},
+		// The negative edge, which was asymmetric with the positive one.
+		{"-2^63 (int64 min)", `-9223372036854775808`},
+		{"-2^63-1 (past int64 min)", `-9223372036854775809`},
 
-		{"1.23e29 (cleat#1022's value)", `123456789012345678901234567890`,
-			[]string{"postgres", "mssql"}},
+		{"1.23e29 (cleat#1022's value)", `123456789012345678901234567890`},
 
-		// Decimals are not a special case of integers; they have the same cliff
-		// at float64's precision.
-		{"17 significant digits", `0.12345678901234567`, []string{"postgres", "mssql"}},
+		// Decimals were not a special case of integers; they had the same edge
+		// at float64's precision. Both earlier measurements of cleat#1022
+		// covered integers only and said so.
+		{"17 significant digits", `0.12345678901234567`},
 	}
 
 	for _, backend := range registeredBackends {
@@ -116,13 +131,6 @@ func TestAnInputSurvivesTheColumnOrDoesNot(t *testing.T) {
 			for _, tc := range cases {
 				sent := fmt.Sprintf(`{"x":%s}`, tc.payload)
 
-				want := false
-				for _, d := range tc.preservedBy {
-					if d == backend.Name() {
-						want = true
-					}
-				}
-
 				// --- workflow_instances.input, via StartNewRun ---------------
 				//
 				// The idempotency key must be unique per case: StartNewRun
@@ -137,7 +145,7 @@ func TestAnInputSurvivesTheColumnOrDoesNot(t *testing.T) {
 				storedIn := readJSONColumn(t, ctx, db, backend.Name(), tenant,
 					"workflow_instances", "input", "id", runID, "")
 				checkPreserved(t, backend.Name(), "workflow_instances.input", tc.name,
-					tc.payload, sent, storedIn, want)
+					tc.payload, sent, storedIn)
 
 				// --- workflow_signals.payload, via DeliverSignal -------------
 				sigName := "sig-" + strings.ReplaceAll(tc.name, " ", "-")
@@ -147,35 +155,33 @@ func TestAnInputSurvivesTheColumnOrDoesNot(t *testing.T) {
 				storedSig := readJSONColumn(t, ctx, db, backend.Name(), tenant,
 					"workflow_signals", "payload", "workflow_id", runID, sigName)
 				checkPreserved(t, backend.Name(), "workflow_signals.payload", tc.name,
-					tc.payload, sent, storedSig, want)
+					tc.payload, sent, storedSig)
 			}
 		})
 	}
 }
 
-// checkPreserved compares BYTES, never decoded numbers. Decoding is exactly what
-// hides this: json.Unmarshal into a float64 turns both sides into the same
-// degraded value and the assertion passes on every dialect.
+// checkPreserved compares BYTES, never decoded numbers.
 //
-// It reports the two directions differently on purpose. "Stopped preserving" is
-// a regression; "started preserving" is the deliberate fix landing, and a test
-// that says only "want X got Y" sends the reader of a GOOD change hunting for a
-// breakage.
-func checkPreserved(t *testing.T, dialect, column, caseName, payload, sent, stored string, want bool) {
+// DECODING IS BLIND EXACTLY AT THE BOUNDARY, which is the case that matters
+// most. A consumer decoding to a float64 recovers 2^64 exactly -- MySQL stored
+// the text `1.8446744073709552e19`, and that text round-trips through a double
+// back to 18446744073709551616 -- so a decoded comparison reports the one-unit-
+// past-the-cliff case as equal while the stored document says something else.
+// As exact decimals, every value MySQL used to rewrite denotes a different
+// number from the one that was sent.
+func checkPreserved(t *testing.T, dialect, column, caseName, payload, sent, stored string) {
 	t.Helper()
-	got := strings.Contains(stored, payload)
-	switch {
-	case want && !got:
-		t.Errorf("%s: %s no longer preserves this literal in %s.\n  sent:   %s\n  stored: %s\n\n"+
-			"A dialect that used to hold this value exactly has stopped. If a column type or "+
-			"driver changed, that is a regression in what a caller's data is worth on this backend.",
-			caseName, dialect, column, sent, stored)
-	case !want && got:
-		t.Errorf("%s: %s now preserves this literal in %s, and cleat#1022 says it does not.\n"+
-			"  sent:   %s\n  stored: %s\n\n"+
-			"This is a FIX, not a failure -- but the boundary this test pins has moved, so "+
-			"update the preservedBy set and say what changed. Do not delete the case: it is the "+
-			"only thing that would catch the degradation coming back.",
-			caseName, dialect, column, sent, stored)
+	if strings.Contains(stored, payload) {
+		return
 	}
+	t.Errorf("%s: %s did not preserve this literal in %s.\n  sent:   %s\n  stored: %s\n\n"+
+		"A dialect has started rewriting a caller's value. Before cleat#1022 this was MySQL's "+
+		"JSON column narrowing a number it could not hold, and migrations/mysql/070 fixed it by "+
+		"storing these columns as LONGTEXT with a JSON_VALID check -- what SQL Server has always "+
+		"done. If that migration was reverted, or a column was added back as JSON, or a write "+
+		"path reintroduced CAST(... AS JSON) -- which re-degrades the value BEFORE it reaches "+
+		"even a LONGTEXT column, and is why migrations/mysql/071 exists -- this is what it looks "+
+		"like: no error, valid JSON, right shape, different value.",
+		caseName, dialect, column, sent, stored)
 }
