@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
@@ -93,4 +94,25 @@ func validTraceID(s string) bool {
 		}
 	}
 	return !allZero
+}
+
+// SetTraceparentFromContext sets a traceparent on req using the trace-id the
+// engine put on this call's CallContext. cleat#1596.
+//
+// THE FORM EVERY PLUGIN SHOULD USE. The two-argument SetTraceparent exists for
+// callers that already hold a trace-id -- the worker's own fetch path does --
+// but a plugin host function receives its trace through the context and
+// nothing else. Making each of them unwrap CallContext by hand would be a dozen
+// copies of the same nil-check, and the site that got it wrong would be silent
+// rather than broken: a missing header looks exactly like a run with no trace.
+//
+// A nil CallContext is an ordinary state, not an error. Background sweeps and
+// scheduled work run with no inbound request and therefore no trace to join;
+// they need a trace ORIGINATED, which is a different mechanism and is not this.
+func SetTraceparentFromContext(ctx context.Context, req *http.Request) {
+	cc := CallContextFromContext(ctx)
+	if cc == nil {
+		return
+	}
+	SetTraceparent(req, cc.TraceID)
 }

@@ -108,6 +108,7 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("slack-notify: create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.httpClient.Do(req)

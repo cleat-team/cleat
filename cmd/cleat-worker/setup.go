@@ -219,6 +219,7 @@ func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operat
 	if err != nil {
 		return "", engine.NewPermanentError("bench-svc", "", fmt.Errorf("create request: %w", err))
 	}
+	plugin.SetTraceparent(req, c.traceID)
 	req.Header.Set("Content-Type", "application/json")
 	if idempotencyKey != "" {
 		// The conventional header name, as used by Stripe and others. A service

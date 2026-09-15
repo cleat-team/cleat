@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugin"
 	"io"
 	"net/http"
 	"strings"
@@ -73,6 +74,7 @@ func OllamaChat(ctx context.Context, client *http.Client, baseURL string, input 
 	if err != nil {
 		return ChatOutput{}, fmt.Errorf("ollama: create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
@@ -133,6 +135,7 @@ func OllamaChatStream(ctx context.Context, client *http.Client, baseURL string, 
 	if err != nil {
 		return nil, fmt.Errorf("ollama: create stream request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)

@@ -201,6 +201,7 @@ func (p *Plugin) postToPagerDuty(ctx context.Context, req pdEventRequest) (strin
 	if err != nil {
 		return "", fmt.Errorf("pagerduty: create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, httpReq)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.httpClient.Do(httpReq)

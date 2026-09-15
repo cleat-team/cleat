@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugin"
 	"io"
 	"net/http"
 	"strings"
@@ -136,6 +137,7 @@ func AnthropicChat(ctx context.Context, client *http.Client, apiKey, baseURL str
 	if err != nil {
 		return ChatOutput{}, fmt.Errorf("anthropic: create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("x-api-key", apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
@@ -227,6 +229,7 @@ func AnthropicChatStream(ctx context.Context, client *http.Client, apiKey, baseU
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: create stream request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("x-api-key", apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
