@@ -11,12 +11,26 @@ VALUES ($1, $2, (
 	WHERE tenant_id = $1 AND stream_id = $2
 ), $3::jsonb)
 RETURNING sequence`,
+	// No CAST($3 AS JSON) on the value. It was there to satisfy the JSON
+	// column type, and migration v3 made the column LONGTEXT -- but the cast
+	// is not merely redundant now, it would UNDO the migration. CAST(... AS
+	// JSON) applies the JSON type's number narrowing to the value before it
+	// reaches the column, so it degrades on the way in even when the
+	// destination is text. Measured on MySQL 8.4.11, both columns LONGTEXT,
+	// one INSERT:
+	//
+	//     via CAST   {"x": 1.2345678901234566e29}
+	//     direct     {"x":123456789012345678901234567890}
+	//
+	// So converting the column alone would have left a green test over a
+	// still-degrading path. The engine hit exactly this and needed
+	// migrations/mysql/071 for it. cleat#1622.
 	MySQL: `INSERT INTO event_stream (tenant_id, stream_id, sequence, event)
 VALUES ($1, $2, (
 	SELECT COALESCE(MAX(sequence), 0) + 1
 	FROM event_stream
 	WHERE tenant_id = $1 AND stream_id = $2
-), CAST($3 AS JSON))`,
+), $3)`,
 	MSSQL: `INSERT INTO event_stream (tenant_id, stream_id, sequence, event)
 OUTPUT INSERTED.sequence
 VALUES ($1, $2, (
