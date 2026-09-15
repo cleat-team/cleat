@@ -24,9 +24,25 @@ import (
 // fails if the table and the enforced set diverge in either direction.
 
 // deniedRange is one CIDR the floor refuses, with the reason it exists.
+//
+// exemptible says whether an OPERATOR may name a host in this range as a
+// deliberate exception (see PluginHostExempt). It is a property of the RANGE,
+// not of any configuration: some of these ranges can legitimately hold a
+// service an operator runs on purpose, and some cannot hold anything an
+// operator would ever mean to reach.
+//
+// The split is the whole safety of the mechanism, so it is a field with a
+// reason rather than a rule applied at the call site. cleat#1627.
 type deniedRange struct {
 	prefix netip.Prefix
 	why    string
+
+	// exemptible is TRUE for ranges where a real service may live -- a model
+	// server on loopback, an internal API on RFC1918 -- and FALSE for ranges
+	// where reaching anything at all is the failure this file exists to
+	// prevent. whyNotExemptible says which for every false entry.
+	exemptible       bool
+	whyNotExemptible string
 }
 
 // deniedRanges is the floor. Every entry is refused for a guest-initiated
@@ -37,23 +53,60 @@ type deniedRange struct {
 // invite an entry being added to one list and not the other, which is the
 // divergence the accompanying test exists to catch.
 var deniedRanges = []deniedRange{
-	{netip.MustParsePrefix("127.0.0.0/8"), "loopback: the worker's own API and admin surface"},
-	{netip.MustParsePrefix("::1/128"), "loopback, IPv6"},
-	{netip.MustParsePrefix("169.254.0.0/16"), "link-local, and 169.254.169.254 is cloud instance metadata -- often credentials"},
-	{netip.MustParsePrefix("fe80::/10"), "link-local, IPv6"},
-	{netip.MustParsePrefix("10.0.0.0/8"), "RFC1918 private: the network the worker sits in"},
-	{netip.MustParsePrefix("172.16.0.0/12"), "RFC1918 private"},
-	{netip.MustParsePrefix("192.168.0.0/16"), "RFC1918 private"},
-	{netip.MustParsePrefix("100.64.0.0/10"), "RFC6598 carrier-grade NAT: not public, and routable inside many hosts"},
-	{netip.MustParsePrefix("fc00::/7"), "IPv6 unique local, the RFC1918 equivalent"},
-	{netip.MustParsePrefix("0.0.0.0/8"), "unspecified / this-network: 0.0.0.0 reaches loopback on several stacks"},
-	{netip.MustParsePrefix("::/128"), "unspecified, IPv6"},
-	{netip.MustParsePrefix("224.0.0.0/4"), "multicast: not a meaningful fetch target, and reaches local segments"},
-	{netip.MustParsePrefix("ff00::/8"), "multicast, IPv6"},
-	{netip.MustParsePrefix("192.0.0.0/24"), "IETF protocol assignments, including NAT64 and DS-Lite endpoints"},
-	{netip.MustParsePrefix("192.0.2.0/24"), "TEST-NET-1: not routable, so reaching it means something local answered"},
-	{netip.MustParsePrefix("198.18.0.0/15"), "benchmarking range, routable inside some networks"},
-	{netip.MustParsePrefix("240.0.0.0/4"), "reserved: no legitimate fetch target, and treated as local by some stacks"},
+	// EXEMPTIBLE: an operator can legitimately run a service here and mean to
+	// reach it. A self-hosted model server is the motivating case -- ollama's
+	// own default is http://localhost:11434 (cleat#1627).
+	{prefix: netip.MustParsePrefix("127.0.0.0/8"), why: "loopback: the worker's own API and admin surface", exemptible: true},
+	{prefix: netip.MustParsePrefix("::1/128"), why: "loopback, IPv6", exemptible: true},
+	{prefix: netip.MustParsePrefix("10.0.0.0/8"), why: "RFC1918 private: the network the worker sits in", exemptible: true},
+	{prefix: netip.MustParsePrefix("172.16.0.0/12"), why: "RFC1918 private", exemptible: true},
+	{prefix: netip.MustParsePrefix("192.168.0.0/16"), why: "RFC1918 private", exemptible: true},
+	{prefix: netip.MustParsePrefix("100.64.0.0/10"), why: "RFC6598 carrier-grade NAT: not public, and routable inside many hosts", exemptible: true},
+	{prefix: netip.MustParsePrefix("fc00::/7"), why: "IPv6 unique local, the RFC1918 equivalent", exemptible: true},
+
+	// NOT EXEMPTIBLE. Each of these refuses something no operator configuring
+	// a plugin endpoint would ever mean, and the first is the address this
+	// whole file was written for.
+	{prefix: netip.MustParsePrefix("169.254.0.0/16"), why: "link-local, and 169.254.169.254 is cloud instance metadata -- often credentials",
+		whyNotExemptible: "the metadata endpoint is the target the floor exists to refuse; an exemption here would hand out cloud credentials to whatever supplied the endpoint"},
+	{prefix: netip.MustParsePrefix("fe80::/10"), why: "link-local, IPv6",
+		whyNotExemptible: "same as 169.254.0.0/16, and reachable by the same mistake"},
+	{prefix: netip.MustParsePrefix("0.0.0.0/8"), why: "unspecified / this-network: 0.0.0.0 reaches loopback on several stacks",
+		whyNotExemptible: "not an address anyone configures on purpose; it is what a blank or malformed endpoint parses to"},
+	{prefix: netip.MustParsePrefix("::/128"), why: "unspecified, IPv6",
+		whyNotExemptible: "same as 0.0.0.0/8"},
+	{prefix: netip.MustParsePrefix("224.0.0.0/4"), why: "multicast: not a meaningful fetch target, and reaches local segments",
+		whyNotExemptible: "a unicast HTTP endpoint is never multicast; naming one means the endpoint is wrong"},
+	{prefix: netip.MustParsePrefix("ff00::/8"), why: "multicast, IPv6",
+		whyNotExemptible: "same as 224.0.0.0/4"},
+	{prefix: netip.MustParsePrefix("192.0.0.0/24"), why: "IETF protocol assignments, including NAT64 and DS-Lite endpoints",
+		whyNotExemptible: "protocol infrastructure, not a service an operator runs"},
+	{prefix: netip.MustParsePrefix("192.0.2.0/24"), why: "TEST-NET-1: not routable, so reaching it means something local answered",
+		whyNotExemptible: "reaching it at all means something local answered for it, which is the case worth refusing"},
+	{prefix: netip.MustParsePrefix("198.18.0.0/15"), why: "benchmarking range, routable inside some networks",
+		whyNotExemptible: "same as TEST-NET-1"},
+	{prefix: netip.MustParsePrefix("240.0.0.0/4"), why: "reserved: no legitimate fetch target, and treated as local by some stacks",
+		whyNotExemptible: "reserved space; a service here is a misconfiguration whichever way it is reached"},
+}
+
+// NonExemptibleRanges reports the floor ranges no operator exemption can reach,
+// each with the floor's OWN reason string.
+//
+// It exists so that anything telling an operator what cannot be exempted --
+// a startup log, a doc generator -- quotes the table rather than paraphrasing
+// it. A paraphrase drifts: it is written once against the table as it was, and
+// nothing fails when a range is added or its reasoning changes. WS-1's review
+// of cleat#1630 made this point about their own FloorReadmissions and it is the
+// better construction, so it is here too.
+func NonExemptibleRanges() []string {
+	out := make([]string, 0, len(deniedRanges))
+	for _, d := range deniedRanges {
+		if d.exemptible {
+			continue
+		}
+		out = append(out, d.prefix.String()+" ("+d.why+")")
+	}
+	return out
 }
 
 // EgressDeniedError says a destination was refused and why.
@@ -77,14 +130,29 @@ func (e *EgressDeniedError) Error() string {
 }
 
 // checkAddr applies the floor to one resolved address.
-func checkAddr(host string, addr netip.Addr) error {
+func (g *EgressGuard) checkAddr(host string, addr netip.Addr) error {
 	a := addr.Unmap()
 	for _, d := range deniedRanges {
 		// A v4 prefix cannot contain a v6 address and vice versa; Contains
 		// already answers false, so no explicit family check is needed.
-		if d.prefix.Contains(a) {
-			return &EgressDeniedError{Host: host, IP: a.String(), Reason: d.why}
+		if !d.prefix.Contains(a) {
+			continue
 		}
+		// An operator exemption applies only to ranges the table marks
+		// exemptible. The check is on the RANGE first and the host second, so
+		// naming a host that resolves into the metadata range cannot become a
+		// grant by being named.
+		if d.exemptible && g.PluginHostExempt != nil && g.PluginHostExempt(host) {
+			return nil
+		}
+		reason := d.why
+		if !d.exemptible && g.PluginHostExempt != nil && g.PluginHostExempt(host) {
+			// Named, and refused anyway. Say so, because the operator has
+			// evidence they configured this and would otherwise read the bare
+			// floor message as the exemption not being applied.
+			reason = d.why + " -- and this range cannot be exempted: " + d.whyNotExemptible
+		}
+		return &EgressDeniedError{Host: host, IP: a.String(), Reason: reason}
 	}
 	return nil
 }
@@ -142,6 +210,28 @@ type EgressGuard struct {
 	// open RFC1918 and link-local, and the metadata address is the one thing
 	// this whole file exists to refuse.
 	AllowLoopback bool
+
+	// PluginHostExempt reports whether the operator has named this host as a
+	// deliberate exception to the floor. Nil means none, which is the default
+	// and the only value any guest-facing guard ever has.
+	//
+	// UNLIKE AllowLoopback this is a production mechanism, and the difference
+	// between them is the point. AllowLoopback is a blanket "loopback is fine"
+	// for in-process tests. This is per-HOST, operator-only, and cannot reach
+	// the ranges marked non-exemptible in deniedRanges -- the metadata address
+	// above all. cleat#1627.
+	//
+	// It exists because a plugin endpoint is OPERATOR configuration, the same
+	// category plugin_egress.go already gives the deployment allowlist for
+	// tenant-less sweeps. A self-hosted model server is the motivating case:
+	// plugins/llm's ollama provider defaults to http://localhost:11434 and was
+	// unreachable with no way to permit it.
+	//
+	// It is NOT wired into the guest fetch path or the embedded runner, and a
+	// test asserts that: a workflow is code cleat did not write, and nothing a
+	// guest supplies should reach a private address whatever the operator has
+	// configured for plugins.
+	PluginHostExempt func(host string) bool
 
 	// TenantOptional reports whether THIS call legitimately has no tenant, in
 	// which case the operator layer governs it alone.
@@ -212,7 +302,7 @@ func (g *EgressGuard) DialContext(ctx context.Context, network, address string) 
 	// resolving it, which is exactly what must not happen before the
 	// allowlists have spoken.
 	if ip, perr := netip.ParseAddr(host); perr == nil {
-		if err := checkAddr(host, ip); err != nil {
+		if err := g.checkAddr(host, ip); err != nil {
 			return nil, err
 		}
 	}
@@ -288,7 +378,7 @@ func (g *EgressGuard) DialContext(ctx context.Context, network, address string) 
 		if g.AllowLoopback && ip.Unmap().IsLoopback() {
 			continue
 		}
-		if err := checkAddr(host, ip); err != nil {
+		if err := g.checkAddr(host, ip); err != nil {
 			return nil, err
 		}
 	}

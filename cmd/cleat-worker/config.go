@@ -336,6 +336,23 @@ var (
 			"is none to scope by.\n"+
 			"Entry forms: an exact host, or a leading dot for any host ending in it, which "+
 			"excludes the apex. cleat#1565")
+	pluginEgressAllowPrivate = flag.String("plugin-egress-allow-private", "",
+		"Hosts a PLUGIN may reach even though they resolve into private address space, "+
+			"comma-separated. Empty (the default) means none, and the floor refuses every "+
+			"private address as before.\n"+
+			"This exists for a plugin endpoint the operator runs on purpose -- a "+
+			"self-hosted model server is the motivating case, since plugins/llm's ollama "+
+			"provider defaults to http://localhost:11434 and was otherwise unreachable "+
+			"with no way to permit it.\n"+
+			"It applies to PLUGIN egress only. A workflow's own fetches and the embedded "+
+			"runner are unaffected: a guest is code cleat did not write, and nothing it "+
+			"supplies should reach a private address whatever is configured here.\n"+
+			"It CANNOT reach link-local (169.254.0.0/16, fe80::/10), the unspecified, "+
+			"multicast or reserved ranges. Naming a host in one of those is accepted at "+
+			"startup and still refused at call time, saying which range and why -- the "+
+			"cloud metadata endpoint is what this whole policy exists to refuse.\n"+
+			"Entry forms: an exact host as it appears in the endpoint URL. Matching is on "+
+			"the HOST, so \"localhost\" and \"127.0.0.1\" are different entries. cleat#1627")
 	encryptSensitivePayloads = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
 	maxQuotaEvents           = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
 	maxQuotaChildren         = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")

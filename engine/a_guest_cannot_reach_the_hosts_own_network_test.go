@@ -44,7 +44,7 @@ func TestTheEgressFloorRefusesTheHostsOwnNetwork(t *testing.T) {
 			if err != nil {
 				t.Fatalf("bad test address: %v", err)
 			}
-			if err := checkAddr("probe.example", ip); err == nil {
+			if err := (&EgressGuard{}).checkAddr("probe.example", ip); err == nil {
 				t.Errorf("%s is allowed; it must not be (%s)", tc.addr, tc.why)
 			}
 		})
@@ -68,7 +68,7 @@ func TestTheEgressFloorAllowsOrdinaryPublicAddresses(t *testing.T) {
 			if err != nil {
 				t.Fatalf("bad test address: %v", err)
 			}
-			if err := checkAddr("probe.example", ip); err != nil {
+			if err := (&EgressGuard{}).checkAddr("probe.example", ip); err != nil {
 				t.Errorf("%s is refused and should not be: %v", addr, err)
 			}
 		})
