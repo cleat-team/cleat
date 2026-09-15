@@ -24,6 +24,7 @@ var coreTables = []string{
 	"event_history",
 	"idempotency_keys",
 	"plugin_defs",
+	"tenant_domains",
 	"tenant_settings",
 	"workflow_defs",
 	"workflow_instances",

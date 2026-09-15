@@ -4472,3 +4472,33 @@ func checkPluginDeps(workerPlugins, deps map[string]string) error {
 	}
 	return nil
 }
+
+// checkHostBindingConfigured refuses a worker that was told to enforce host
+// binding on a deployment that has configured no hostnames.
+//
+// WHY REFUSE RATHER THAN WARN. With --require-host-match set and
+// tenant_domains empty, every authenticated request is answered 404 --
+// correctly, by the middleware's own rule, since no host belongs to anyone.
+// The operator sees a worker that starts cleanly and rejects all traffic, which
+// reads as "cleat is broken" rather than "this is misconfigured".
+//
+// checkConnectionBudget is the precedent and the same argument: a budget the
+// fixed pools cannot honour is refused at boot, because it cannot be honoured
+// under any traffic. So is cleat#1581 in the negative -- the rate limiter warns
+// and downgrades, and an operator who asked for a cluster-wide limit gets a
+// per-process one with nothing but a log line to say so.
+//
+// It checks only that SOMETHING is configured. Whether the RIGHT hostnames are
+// configured is not a question a worker can answer at boot.
+func checkHostBindingConfigured(ctx context.Context, store *auth.TenantStore) error {
+	n, err := store.CountTenantDomains(ctx)
+	if err != nil {
+		return fmt.Errorf("could not read tenant_domains: %w "+
+			"(the table arrives in migration 079; run migrations before enabling this)", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("tenant_domains is empty, so every authenticated request would be " +
+			"refused; register at least one hostname, or unset --require-host-match")
+	}
+	return nil
+}

@@ -141,6 +141,20 @@ var (
 	// denies every signal until an operator makes a second call per workflow.
 	// It is a per-deployment decision, not yet a safe default.
 	// IMPROVEMENT-PLAN 3.15.
+	// OFF BY DEFAULT, and it has to be: every existing deployment has zero rows
+	// in tenant_domains, so defaulting this on would refuse every
+	// authenticated request everywhere. But an opt-in security control is
+	// cleat#1581's problem again -- an unconfigured default is
+	// indistinguishable from a missing feature -- so when it IS on and no
+	// domain is configured, the worker refuses to start rather than refusing
+	// every request at runtime. See checkHostBindingConfigured.
+	requireHostMatch = flag.Bool("require-host-match", false,
+		"Refuse a request whose Host header does not belong to the authenticated tenant, "+
+			"per the tenant_domains table (cleat#1568). Per-tenant URLs are not safe without "+
+			"it: otherwise one tenant's API key works against another tenant's hostname. "+
+			"The worker REFUSES TO START with this set and no domains configured, because "+
+			"that configuration refuses every authenticated request.")
+
 	requireSignalAuth = flag.Bool("require-signal-auth", false, "Require signal authorization: checks caller identity against target's allowed_signals (set it with PUT /api/workflows/{id}/allowed-signals). Off by default: workflows start with an empty list, so enabling this denies every signal until callers are granted")
 	generateAPIKeyFor = flag.String("generate-api-key", "", "Generate a new API key for the given tenant UUID and exit")
 	// --create-tenant is the other half of --generate-api-key, which mints a key
