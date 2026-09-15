@@ -28,7 +28,8 @@ import (
 // Connects as a role that CANNOT bypass RLS -- a superuser or table owner is
 // waved past a policy, so a tenant-isolation test on testutil.TestDB's own
 // connection cannot fail whatever the code does. PostgreSQL only, because
-// applyTenantScoping emits nothing on the other two dialects.
+// applyTenantScoping emits nothing on MySQL, which has no row-level security.
+// It DOES install a policy on SQL Server as of cleat#1552.
 func TestRateLimitsAreScopedToTheirTenant(t *testing.T) {
 	su := testutil.SuiteTestDB(t, "ratelimiter")
 	t.Cleanup(func() { su.Close() })

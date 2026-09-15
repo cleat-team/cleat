@@ -123,7 +123,17 @@ func cleanupKVStore(t *testing.T, p *Plugin) {
 	}
 	// Rebound like every other query the plugin issues: an unrebound $1 is
 	// an unknown column on MySQL and a money literal on SQL Server.
-	_, err := p.db.Exec(context.Background(),
+	//
+	// AND SCOPED TO THE TENANT, which context.Background() is not. The
+	// statement already names the tenant in its WHERE clause, and that is not
+	// what a policy reads -- SQL Server's filter predicate reads
+	// SESSION_CONTEXT, which only engine.beginTenantTx sets, and only when the
+	// context carries a tenant. Without this the DELETE matched nothing,
+	// removed nothing, and reported success; the next scenario then counted
+	// one row too many and blamed its own SELECT (cleat#1552). PostgreSQL
+	// would have RAISED here, which is why this was only ever wrong on SQL
+	// Server.
+	_, err := p.db.Exec(plugin.ForTenant(context.Background(), testTenantID),
 		plugin.Rebind(`DELETE FROM kv_store WHERE tenant_id = $1`, p.dialect), testTenantID)
 	if err != nil {
 		// Not a log: every scenario below counts rows, so a cleanup that did

@@ -43,8 +43,26 @@ import (
 func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		t.Run(be.Name, func(t *testing.T) {
+			// Fixtures here reach a tenant-scoped plugin table DIRECTLY rather
+			// than through p.db, so they carry no session context and SQL
+			// Server's policies (cleat#1552) turn them away: a WRITE loudly, by
+			// the BLOCK predicate, and a READ or DELETE SILENTLY, by matching
+			// nothing -- which is how one of these presented as a wrong row
+			// count rather than an error. A fixture legitimately spans whatever
+			// tenants it invents, so it takes the cross-tenant key. No-op on
+			// PostgreSQL and MySQL.
+			fixtureDB := be.CrossTenantConn(t, context.Background(),
+				"jobqueue reaper fixture: seeds and verifies rows for a tenant it invents")
 			defer be.Cleanup()
-			ctx := context.Background()
+			// MARKED THE WAY PRODUCTION MARKS IT. (*Plugin).Run wraps the
+			// background loop's context in plugin.AcrossAllTenants before
+			// calling this, and the test was calling it on a bare
+			// context.Background() -- a context production never hands it.
+			// With a policy installed that difference stops being cosmetic:
+			// the sweep's statement matches no rows and reports success
+			// (cleat#1552).
+			ctx := plugin.AcrossAllTenants(context.Background(),
+				"jobqueue reaper test: the reaper operates on every tenant's queue, as Run does")
 			dialect := plugin.Dialect(string(be.Dialect))
 			p := &Plugin{dialect: dialect}
 
@@ -64,14 +82,14 @@ func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
 			// 2026-09-10: one run of these tests left 5 rows in task_queue and
 			// 2 in schedules (cleat#1148).
 			defer func() {
-				if _, err := be.DB.ExecContext(context.Background(),
+				if _, err := fixtureDB.ExecContext(context.Background(),
 					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant); err != nil {
 					t.Errorf("cleanup task_queue on %s: %v", be.Name, err)
 				}
 			}()
 
 			stuckSince := time.Now().UTC().Add(-30 * time.Minute)
-			if _, err := be.DB.ExecContext(ctx, plugin.Rebind(
+			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
 				`INSERT INTO task_queue (tenant_id, queue_name, job_id, status, started_at)
 				 VALUES ($1, $2, $3, 'running', $4)`, dialect),
 				tenant, "reaper-test", job, stuckSince); err != nil {
@@ -87,7 +105,7 @@ func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
 			}
 
 			var status string
-			if err := be.DB.QueryRowContext(ctx, plugin.Rebind(
+			if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
 				`SELECT status FROM task_queue WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3`,
 				dialect), tenant, "reaper-test", job).Scan(&status); err != nil {
 				t.Fatalf("read back on %s: %v", be.Name, err)
@@ -123,8 +141,26 @@ func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
 func TestReaperTouchesNothingItShouldNot_MultiBackend(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		t.Run(be.Name, func(t *testing.T) {
+			// Fixtures here reach a tenant-scoped plugin table DIRECTLY rather
+			// than through p.db, so they carry no session context and SQL
+			// Server's policies (cleat#1552) turn them away: a WRITE loudly, by
+			// the BLOCK predicate, and a READ or DELETE SILENTLY, by matching
+			// nothing -- which is how one of these presented as a wrong row
+			// count rather than an error. A fixture legitimately spans whatever
+			// tenants it invents, so it takes the cross-tenant key. No-op on
+			// PostgreSQL and MySQL.
+			fixtureDB := be.CrossTenantConn(t, context.Background(),
+				"jobqueue reaper fixture: seeds and verifies rows for a tenant it invents")
 			defer be.Cleanup()
-			ctx := context.Background()
+			// MARKED THE WAY PRODUCTION MARKS IT. (*Plugin).Run wraps the
+			// background loop's context in plugin.AcrossAllTenants before
+			// calling this, and the test was calling it on a bare
+			// context.Background() -- a context production never hands it.
+			// With a policy installed that difference stops being cosmetic:
+			// the sweep's statement matches no rows and reports success
+			// (cleat#1552).
+			ctx := plugin.AcrossAllTenants(context.Background(),
+				"jobqueue reaper test: the reaper operates on every tenant's queue, as Run does")
 			dialect := plugin.Dialect(string(be.Dialect))
 			p := &Plugin{dialect: dialect}
 
@@ -144,7 +180,7 @@ func TestReaperTouchesNothingItShouldNot_MultiBackend(t *testing.T) {
 			// 2026-09-10: one run of these tests left 5 rows in task_queue and
 			// 2 in schedules (cleat#1148).
 			defer func() {
-				if _, err := be.DB.ExecContext(context.Background(),
+				if _, err := fixtureDB.ExecContext(context.Background(),
 					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant); err != nil {
 					t.Errorf("cleanup task_queue on %s: %v", be.Name, err)
 				}
@@ -172,7 +208,7 @@ func TestReaperTouchesNothingItShouldNot_MultiBackend(t *testing.T) {
 			for _, r := range rows {
 				id := uuid.New()
 				ids[r.name] = id
-				if _, err := be.DB.ExecContext(ctx, plugin.Rebind(
+				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
 					`INSERT INTO task_queue (tenant_id, queue_name, job_id, status, started_at)
 					 VALUES ($1, $2, $3, $4, $5)`, dialect),
 					tenant, queue, id, r.status, r.startedAt); err != nil {
@@ -188,7 +224,7 @@ func TestReaperTouchesNothingItShouldNot_MultiBackend(t *testing.T) {
 			for _, r := range rows {
 				var status string
 				var startedAt sql.NullTime
-				if err := be.DB.QueryRowContext(ctx, plugin.Rebind(
+				if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
 					`SELECT status, started_at FROM task_queue
 					 WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3`, dialect),
 					tenant, queue, ids[r.name]).Scan(&status, &startedAt); err != nil {

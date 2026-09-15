@@ -229,12 +229,21 @@ type Migration struct {
 	// the set of tenant-scoped plugin tables is a value the runtime can
 	// read rather than a pattern someone greps for.
 	//
-	// POSTGRESQL ONLY, and this is a real limit rather than a rounding
-	// error. MySQL has no row-level security, so a table named here is
-	// scoped by the plugin's own WHERE clause there and by nothing else.
-	// SQL Server has row-level security and does not yet get a policy from
-	// this field, so the same is true there for now. On both, this field is
-	// accepted and does nothing.
+	// POSTGRESQL AND SQL SERVER install a policy from this field. MySQL has
+	// no row-level security, so a table named here is scoped by the plugin's
+	// own WHERE clause there and by nothing else; the field is accepted and
+	// does nothing. That is a real limit rather than a rounding error.
+	//
+	// THE TWO ARMS ARE NOT IDENTICAL, and the differences are measured rather
+	// than assumed (applyTenantScopingMSSQL has the tables):
+	//
+	//   - a read with NO tenant set raises on PostgreSQL and returns an EMPTY
+	//     RESULT on SQL Server, because a SQL Server filter predicate must be
+	//     an inline table-valued function and cannot raise;
+	//   - writes are refused on SQL Server by BLOCK predicates rather than by
+	//     the filter, which does not affect writes at all;
+	//   - dropping a tenant collects a table's rows on PostgreSQL only, via
+	//     admin.plugin_tables, which SQL Server does not have.
 	//
 	// THE REASON GIVEN HERE FOR SQL SERVER WAS WRONG until cleat#1552: "SQL
 	// Server binds a tenant to a whole connection pool

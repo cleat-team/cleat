@@ -49,8 +49,27 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		t.Run(be.Name, func(t *testing.T) {
+			// Fixtures here reach a tenant-scoped plugin table DIRECTLY rather
+			// than through p.db, so they carry no session context and SQL
+			// Server's policies (cleat#1552) turn them away: a WRITE loudly, by
+			// the BLOCK predicate, and a READ or DELETE SILENTLY, by matching
+			// nothing -- which is how one of these presented as a wrong row
+			// count rather than an error. A fixture legitimately spans whatever
+			// tenants it invents, so it takes the cross-tenant key. No-op on
+			// PostgreSQL and MySQL.
+			fixtureDB := be.CrossTenantConn(t, context.Background(),
+				"blobstore expiry fixture: seeds and verifies index rows across tenants")
 			defer be.Cleanup()
-			ctx := context.Background()
+			// MARKED THE WAY PRODUCTION MARKS IT. (*Plugin).Run wraps the
+			// sweep's context in plugin.AcrossAllTenants before calling
+			// cleanupExpired, and this test was calling it on a bare
+			// context.Background() -- a context production never hands it.
+			// With a policy installed that stops being cosmetic: the sweep
+			// matches no rows and returns the same values it returns when
+			// there is nothing to do, which is the failure mode the comment
+			// below is about (cleat#1552).
+			ctx := plugin.AcrossAllTenants(context.Background(),
+				"blobstore expiry test: the sweep runs over every tenant's index, as Run does")
 			dialect := plugin.Dialect(be.Dialect)
 			p := &Plugin{dialect: dialect}
 
@@ -84,12 +103,12 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 			// reason that had nothing to do with the mutation.
 			defer func() {
 				bg := context.Background()
-				if _, err := be.DB.ExecContext(bg, plugin.Rebind(
+				if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
 					`DELETE FROM blob_index WHERE tenant_id = $1`, dialect), tenant); err != nil {
 					t.Errorf("cleanup blob_index on %s: %v", be.Name, err)
 				}
 				for _, sha := range [][]byte{shaLive, shaOrphan, shaUntouch} {
-					if _, err := be.DB.ExecContext(bg, plugin.Rebind(
+					if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
 						`DELETE FROM blob_content WHERE sha256 = $1`, dialect), sha); err != nil {
 						t.Errorf("cleanup blob_content on %s: %v", be.Name, err)
 					}
@@ -100,7 +119,7 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 				sha []byte
 				ref int
 			}{{shaLive, 3}, {shaOrphan, 1}, {shaUntouch, 2}} {
-				if _, err := be.DB.ExecContext(ctx, plugin.Rebind(
+				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
 					`INSERT INTO blob_content (sha256, size, data, ref_count, storage_backend)
 					 VALUES ($1, 0, $2, $3, 'memory')`, dialect),
 					c.sha, []byte{}, c.ref); err != nil {
@@ -122,7 +141,7 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 				{"untouched-a", shaUntouch, nil, nil},
 				{"untouched-b", shaUntouch, nil, nil},
 			} {
-				if _, err := be.DB.ExecContext(ctx, plugin.Rebind(
+				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
 					`INSERT INTO blob_index (`+quotedKeyColumn(dialect)+`, tenant_id, sha256, size, expires_at, deleted_at)
 					 VALUES ($1, $2, $3, 0, $4, $5)`, dialect),
 					ix.key, tenant, ix.sha, ix.expiresAt, ix.deletedAt); err != nil {
@@ -148,7 +167,7 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 				{"a content with nothing expiring", shaUntouch, 2, false},
 			} {
 				var ref int
-				err := be.DB.QueryRowContext(ctx, plugin.Rebind(
+				err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
 					`SELECT ref_count FROM blob_content WHERE sha256 = $1`, dialect), want.sha).Scan(&ref)
 				switch {
 				case want.gone && err == nil:
@@ -172,7 +191,7 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 			}
 
 			var remaining int
-			if err := be.DB.QueryRowContext(ctx, plugin.Rebind(
+			if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
 				`SELECT COUNT(*) FROM blob_index WHERE tenant_id = $1`, dialect), tenant).Scan(&remaining); err != nil {
 				t.Fatalf("count blob_index on %s: %v", be.Name, err)
 			}

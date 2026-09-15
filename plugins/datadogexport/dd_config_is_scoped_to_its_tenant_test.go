@@ -39,7 +39,8 @@ import (
 // these rows.
 //
 // POSTGRESQL ONLY: row-level security is the mechanism and
-// plugin.applyTenantScoping emits nothing on the other two dialects.
+// plugin.applyTenantScoping emits nothing on MySQL, which has no row-level
+// security. It DOES install a policy on SQL Server as of cleat#1552.
 func TestDDConfigIsScopedToItsTenant(t *testing.T) {
 	su := testutil.SuiteTestDB(t, "datadogexport")
 	t.Cleanup(func() { su.Close() })

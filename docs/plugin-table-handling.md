@@ -282,9 +282,10 @@ forward-only.
   > **Corrected 2026-09-15 (cleat#1552).** The second half of that reason was false. Plugins are not
   > given a connector-scoped pool, and `sp_set_session_context` does not survive a pooled
   > connection's recycle — measured, and `engine/mssql_store.go` already recorded the same driver
-  > behaviour from the other direction. A per-request tenant does fit on SQL Server, and now carries.
-  > What remains missing there is the policy, not the tenant. The bullet is left as written because
-  > it is a record of a decision taken at the time; this note says what it got wrong.
+  > behaviour from the other direction. SQL Server now carries the tenant **and** installs a policy
+  > per declared table, with `BLOCK` predicates for writes. MySQL remains a real gap and always
+  > will: it has no row-level security. The bullet is left as written because it is a record of a
+  > decision taken at the time; this note says what it got wrong.
 
 ---
 

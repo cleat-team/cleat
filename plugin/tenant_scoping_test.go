@@ -81,23 +81,46 @@ func TestTenantScopingDropsAnExistingPolicyFirst(t *testing.T) {
 	}
 }
 
-// MySQL has no row-level security and SQL Server scopes a tenant per pool, so
-// both emit nothing. This asserts the documented gap rather than leaving it to
-// be discovered: if either ever gains an arm, this test is where it is
-// declared.
-func TestTenantScopingEmitsNothingOnDialectsWithoutRowLevelSecurity(t *testing.T) {
-	for _, dialect := range []Dialect{DialectMySQL, DialectMSSQL} {
-		t.Run(string(dialect), func(t *testing.T) {
-			var got []string
-			if err := applyTenantScoping(context.Background(), recordingExec(&got),
-				dialect, []string{"kv_store"}); err != nil {
-				t.Fatalf("applyTenantScoping: %v", err)
-			}
-			if len(got) != 0 {
-				t.Errorf("emitted %d statements on %s, want none:\n%s",
-					len(got), dialect, strings.Join(got, "\n"))
-			}
-		})
+// MySQL has no row-level security, so it emits nothing and always will.
+//
+// THIS TEST USED TO COVER SQL SERVER TOO, and its own comment said what to do
+// when that changed -- "if either ever gains an arm, this test is where it is
+// declared". cleat#1552 gave SQL Server an arm, and this failing is how the
+// change announced itself, which is the guard working. The SQL Server side now
+// has its own assertions in
+// a_plugin_table_has_a_policy_on_sql_server_test.go: what the statements say,
+// and what they do against a real server.
+//
+// The MySQL half is kept as a SEPARATE test rather than folded in, because it
+// is a different claim. MySQL emits nothing because the database cannot express
+// the policy at all; SQL Server used to emit nothing because nobody had written
+// the arm. The first is permanent and the second was a gap, and a single test
+// covering both made them look like one fact.
+func TestTenantScopingEmitsNothingOnMySQL(t *testing.T) {
+	var got []string
+	if err := applyTenantScoping(context.Background(), recordingExec(&got),
+		DialectMySQL, []string{"kv_store"}); err != nil {
+		t.Fatalf("applyTenantScoping: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("emitted %d statements on mysql, want none:\n%s",
+			len(got), strings.Join(got, "\n"))
+	}
+}
+
+// And the control for the test above: it must be asserting something MySQL
+// specific rather than "applyTenantScoping never emits anything". If SQL Server
+// ever went quiet again the arm would be gone, and the MySQL assertion alone
+// would still pass.
+func TestTenantScopingDoesEmitOnSQLServer(t *testing.T) {
+	var got []string
+	if err := applyTenantScoping(context.Background(), recordingExec(&got),
+		DialectMSSQL, []string{"kv_store"}); err != nil {
+		t.Fatalf("applyTenantScoping: %v", err)
+	}
+	if len(got) == 0 {
+		t.Error("applyTenantScoping emitted nothing on mssql; the SQL Server arm " +
+			"(cleat#1552) has gone missing, and every plugin table there is unprotected")
 	}
 }
 

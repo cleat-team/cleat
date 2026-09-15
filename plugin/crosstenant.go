@@ -122,8 +122,9 @@ func AcrossAllTenants(ctx context.Context, reason string) context.Context {
 // anyone who could not already ask for them -- but it is a behaviour change on
 // a dialect where plugins previously saw nothing.
 //
-// PLUGIN tables are still unprotected there, until applyTenantScoping grows its
-// SQL Server arm. It is safe to write in a plugin that runs on all three.
+// PLUGIN tables carry a policy there too as of cleat#1552, and this key is what
+// admits a sweep past it. It is safe to write in a plugin that runs on all
+// three.
 //
 // The claim this paragraph used to make -- that SQL Server scopes a tenant at
 // the connector, so a per-request tenant does not fit -- is corrected at

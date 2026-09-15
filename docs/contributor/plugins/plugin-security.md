@@ -77,19 +77,31 @@ plugins cannot simply adopt a policy is cleat#1278: a tenant reaches a plugin
 only on the HTTP path, so for a plugin with a cross-tenant background sweep,
 "add a fail-closed policy" and "silently empty the sweep" are the same change.
 
-`TenantScoped` is PostgreSQL-only: it is the field that installs a *policy*,
-and `applyTenantScoping` still emits nothing on the other two dialects. On both,
-a plugin table is scoped by the Go predicate alone.
+`TenantScoped` installs a policy on **PostgreSQL and SQL Server**. On MySQL it
+is accepted and does nothing: MySQL has no row-level security, and a plugin
+table is scoped there by the Go predicate alone.
 
-The *reasons* differ, and until cleat#1552 this paragraph gave one reason for
-both. MySQL has no row-level security and never will have anything to install.
-SQL Server does, and the stated obstacle — that it "binds a tenant to a whole
-connection pool, which a per-request tenant does not fit" — was wrong: plugins
-are not handed a connector-scoped pool (`getPluginDB` gives them the main or
-plugin pool), and `sp_set_session_context` is cleared when `database/sql`
-recycles a connection, so a per-request tenant fits. As of cleat#1552 the tenant
-*is* carried on SQL Server; what is missing there is the policy that would read
-it.
+Until cleat#1552 this paragraph said the field was PostgreSQL-only, and gave
+one reason for both other dialects. MySQL has no row-level security and never
+will have anything to install. SQL Server does, and the stated obstacle — that
+it "binds a tenant to a whole connection pool, which a per-request tenant does
+not fit" — was wrong: plugins are not handed a connector-scoped pool
+(`getPluginDB` gives them the main or plugin pool), and `sp_set_session_context`
+is cleared when `database/sql` recycles a connection.
+
+Two differences from the PostgreSQL arm are worth knowing, both measured:
+
+* **A read with no tenant returns an empty table rather than raising.**
+  PostgreSQL's `cleat.assert_tenant_set()` raises; a SQL Server filter predicate
+  must be an inline table-valued function, which has no body to raise from.
+* **Writes are covered by `BLOCK` predicates, not by the filter.** A SQL Server
+  `FILTER PREDICATE` hides rows from reads and does not refuse writes at all, so
+  the policy carries `ADD BLOCK PREDICATE … AFTER INSERT` and `AFTER UPDATE`
+  as well. PostgreSQL needs no equivalent: `FOR ALL … USING` defaults its
+  `WITH CHECK` to the `USING` expression.
+
+Dropping a tenant is still PostgreSQL-only: `admin.drop_tenant` reads
+`admin.plugin_tables`, which SQL Server does not have.
 
 ### Which role a plugin runs as
 

@@ -43,7 +43,9 @@ import (
 //     only the row under test passes against a policy that does nothing.
 //
 // POSTGRESQL ONLY: row-level security is the mechanism, and
-// plugin.applyTenantScoping emits nothing on the other two dialects.
+// plugin.applyTenantScoping emits nothing on MySQL, which has no row-level
+// security. It DOES install a policy on SQL Server as of cleat#1552; this
+// test still runs on PostgreSQL only because that is where its fixture is.
 func TestAnAuthExemptRouteCannotAssumeATenant(t *testing.T) {
 	su := testutil.SuiteTestDB(t, "webhookingest")
 	t.Cleanup(func() { su.Close() })
