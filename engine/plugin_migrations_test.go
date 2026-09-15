@@ -34,6 +34,7 @@ import (
 	_ "github.com/cleat-team/cleat/plugins/scheduledbackup"
 	_ "github.com/cleat-team/cleat/plugins/scheduler"
 	_ "github.com/cleat-team/cleat/plugins/slacknotify"
+	_ "github.com/cleat-team/cleat/plugins/tenantquota"
 	_ "github.com/cleat-team/cleat/plugins/webhookingest"
 )
 
