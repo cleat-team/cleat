@@ -149,19 +149,25 @@ func beginTenantTx(ctx context.Context, db *sql.DB, dialect plugin.Dialect, opts
 //	db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 //	  -> read-only transactions are not supported
 //
-// ReadOnlyDB is the only caller that sets it, and its guarantee is enforced in
+// ReadOnlyDB was the only caller that set it, and its guarantee is enforced in
 // Go rather than by the database -- Exec is denied on the adapter and on the
 // transaction it hands back -- so dropping the option here loses nothing SQL
 // Server was providing.
 //
-// WHAT THIS DOES NOT DO is make ReadOnlyDB.Begin work on SQL Server. The next
-// statement that method runs is `SET TRANSACTION READ ONLY`, PostgreSQL and
-// MySQL syntax that SQL Server rejects outright ("Incorrect syntax near the
-// keyword 'READ'"), so Begin still fails there -- one line later, with a
-// different message. That is cleat#1615 and it is deliberately left alone:
-// what a read-only transaction should mean on SQL Server is a decision, not a
-// line to change on the way past. Query and QueryRow, which do not run that
-// statement, do become tenant-scoped here.
+// SINCE cleat#1615 THIS RELAXATION NO LONGER FIRES, and it is kept rather than
+// deleted. ReadOnlyDB now asks readOnlyTxOptions for its options, and that
+// returns nil on SQL Server, so nothing reaches here with ReadOnly set on this
+// dialect. It has to be decided in ReadOnlyDB rather than only here, because
+// Begin calls db.BeginTx DIRECTLY when beginTenantTx declines -- no tenant in
+// context -- and that call does not pass through this function. This stays as
+// the guard for any future caller that sets the option without knowing the
+// dialect cannot honour it.
+//
+// The paragraph that used to be here said cleat#1615 was "deliberately left
+// alone" and that Begin still failed on SQL Server one line later, at
+// `SET TRANSACTION READ ONLY`. That was true and is not: #1615 removed the
+// statement outright, having measured it as redundant on PostgreSQL, refused
+// by MySQL mid-transaction, and invalid on SQL Server.
 func beginScopedTx(ctx context.Context, db *sql.DB, dialect plugin.Dialect, opts *sql.TxOptions) (*sql.Tx, error) {
 	if dialect == plugin.DialectMSSQL && opts != nil && opts.ReadOnly {
 		relaxed := *opts

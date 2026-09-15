@@ -245,10 +245,12 @@ func TestACrossTenantSweepSetsNoTenantOnSQLServer(t *testing.T) {
 // TestAReadOnlyPluginReadIsTenantScopedOnSQLServer covers the adapter cleat#1285
 // added and cleat#1280 missed, on the dialect neither of them reached.
 //
-// It also pins the half that is still broken, so that cleat#1615 being fixed is
-// visible here rather than silently changing behaviour: Begin cannot work on
-// SQL Server, because the statement after the transaction opens is
-// `SET TRANSACTION READ ONLY` and SQL Server has no such statement.
+// It also covered the half that was broken, so that cleat#1615 being fixed
+// would be visible here rather than silently changing behaviour. It was: that
+// assertion required Begin to FAIL and said to remove it once the issue was
+// fixed. cleat#1615 removed the `SET TRANSACTION READ ONLY` that made Begin
+// impossible here, so the assertion now asserts what should be true instead --
+// the transaction opens AND carries the tenant into it.
 func TestAReadOnlyPluginReadIsTenantScopedOnSQLServer(t *testing.T) {
 	db := mssqlTenantTestPool(t)
 	tenantA, tenantB := uuid.New(), uuid.New()
@@ -265,9 +267,25 @@ func TestAReadOnlyPluginReadIsTenantScopedOnSQLServer(t *testing.T) {
 		t.Fatalf("read-only QueryRow saw %d rows, want 2 (tenant A's own)", n)
 	}
 
-	if _, err := ro.Begin(ctx); err == nil {
-		t.Fatal("ReadOnlyDB.Begin succeeded on SQL Server; cleat#1615 says it cannot, " +
-			"so either that issue is fixed and this assertion should go, or something " +
-			"is now swallowing the SET TRANSACTION READ ONLY failure")
+	tx, err := ro.Begin(ctx)
+	if err != nil {
+		t.Fatalf("ReadOnlyDB.Begin on SQL Server: %v", err)
+	}
+	// Roll back explicitly, and note WHY, because the failure it prevents does
+	// not look like a leak. The assertion this replaced ended the test with
+	// Begin's transaction still open; on SQL Server that holds locks on the
+	// scratch table, the cleanup DROP blocks on them, and the package dies at
+	// the suite timeout -- a package-level failure with ZERO failing tests,
+	// which reads as a build break rather than as a test that forgot to close
+	// something.
+	defer tx.Rollback()
+
+	var m int
+	if err := tx.QueryRow(ctx, "SELECT COUNT(*) FROM "+table).Scan(&m); err != nil {
+		t.Fatalf("read-only Begin+QueryRow: %v", err)
+	}
+	if m != 2 {
+		t.Errorf("a read-only transaction saw %d rows, want 2 (tenant A's own): "+
+			"the tenant scoping must survive into the Begin path, not only QueryRow", m)
 	}
 }
