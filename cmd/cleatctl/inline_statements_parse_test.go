@@ -85,6 +85,14 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// reads like a supported path.
 		"SELECT s.name, t.name FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = t.object_id AND c.name = 'tenant_id') ORDER BY s.name, t.name": "SQL Server catalogue views; cleat#1635. PostgreSQL has no sys.tables",
 		"SELECT count(*) FROM %s.%s WHERE tenant_id = @p1": "a format string, and SQL Server-only: the schema and table come from the row above, so there is no statement here to parse. cleat#1635",
+
+		// T-SQL, and it is REACHED only on SQL Server: rlsPostureOf dispatches
+		// on the dialect before this runs, so PostgreSQL never issues it.
+		// Pinned rather than rewritten because there is nothing to rewrite --
+		// IS_ROLEMEMBER has no PostgreSQL equivalent, which is the whole
+		// reason cleat#1646 exists. The PostgreSQL arm answers the same
+		// question with pg_roles and is checked by this test as before.
+		"SELECT IS_ROLEMEMBER('cleat_admin')": "SQL Server built-in: reached only on the mssql arm of rlsPostureOf, and there is no PostgreSQL equivalent to write instead (cleat#1646)",
 	}
 
 	// A template is not checkable as written, and saying so out loud is the

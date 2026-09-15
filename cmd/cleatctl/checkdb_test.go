@@ -194,8 +194,8 @@ func runCheckDBTestNoStub(t *testing.T, script []checkDBResult, args []string) (
 // error rather than a database, because the thing under test in every caller is
 // what runCheckDB DOES with the answer, not how the answer is derived --
 // rlsPostureOf's own derivation is exercised against a real PostgreSQL.
-func stubPosture(p rlsPosture, err error) func(context.Context, *sql.DB) (rlsPosture, []engine.RLSBypassReason, error) {
-	return func(context.Context, *sql.DB) (rlsPosture, []engine.RLSBypassReason, error) {
+func stubPosture(p rlsPosture, err error) func(context.Context, *sql.DB, string) (rlsPosture, []engine.RLSBypassReason, error) {
+	return func(context.Context, *sql.DB, string) (rlsPosture, []engine.RLSBypassReason, error) {
 		if err != nil {
 			return rlsUnknown, nil, err
 		}
