@@ -66,6 +66,7 @@ var mysqlProcedureMigrations = []string{
 	"048_a_burst_wakes_finalize_on_progress.sql",
 	"049_the_idempotency_write_needs_the_tenant.sql",
 	"053_the_finalize_procedure_stops_writing_the_result_column.sql",
+	"071_the_finalize_procedure_stops_casting_the_result.sql",
 }
 
 var mssqlProcedureMigrations = []string{

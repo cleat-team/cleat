@@ -638,8 +638,22 @@ each backend, and the type is the constraint:
 | backend | column | behaviour |
 |---|---|---|
 | PostgreSQL | `JSONB` | validates **and normalises** |
-| MySQL | `JSON` | validates and normalises, depth-limited |
+| MySQL | `LONGTEXT` + `CHECK (JSON_VALID(result))` | validates, depth-limited, stores bytes as given |
 | SQL Server | `NVARCHAR(MAX)` + `CHECK (ISJSON(result) = 1)` | validates, stores bytes as given |
+
+**MySQL's row changed in cleat#1022** (`migrations/mysql/070`). It was `JSON`,
+which silently rewrote any integer outside `[-2^63, 2^64-1]` and any decimal
+needing more precision than a `float64` holds. It now matches SQL Server, which
+never had the defect for exactly this reason: a text column stores the text.
+
+Two consequences worth knowing. **The depth limit survives** — `JSON_VALID`
+parses, so it still refuses depth 101 — but the rejection now comes from the
+CHECK constraint rather than the column type, so the error is `3819` rather
+than `3157`. And **CHECK constraints are parsed and ignored before MySQL
+8.0.16**, so on such a server these columns get neither validation nor the
+depth limit. cleat already depends on that for `tenant_settings`
+(`migrations/mysql/036`, tested at runtime by
+`engine/mysql_tenant_settings_test.go`); CI pins 8.4.11.
 
 Nothing upstream catches a violation. `coerceResultJSON`
 (`engine/store_lifecycle.go`) checks `json.Valid` and object shape and *reports*
@@ -661,7 +675,7 @@ Measured 2026-09-13 against the schema the migrations build, on PostgreSQL
 | nesting depth 101 | accepted | **rejected** `3157` | accepted |
 | nesting depth 129 | accepted | **rejected** `3157` | **rejected** |
 | integer up to 2^64−1 | exact | exact | exact |
-| integer 2^64 | exact | **degrades to `1.8446744073709552e19`** | exact |
+| integer 2^64 | exact | exact *(degraded before cleat#1022)* | exact |
 
 So the contract is:
 
@@ -669,11 +683,20 @@ So the contract is:
 - **No unpaired surrogate.** Two of three reject it.
 - **Nesting depth at most 100** — MySQL's limit, and the tightest of the three.
   SQL Server's is 128; PostgreSQL accepted 10 000.
-- **Integers are exact only within ±(2^64−1).** Beyond that MySQL degrades to
-  `DOUBLE` (cleat#1022). Note this is **not** "must fit `BIGINT`":
-  `9223372036854775808` is past signed `BIGINT` and MySQL keeps it exactly, so
-  a limit written to the signed bound is wrong by a factor of two on the
+- **Integers are exact on every backend.** MySQL used to degrade beyond
+  `2^64−1` to a `DOUBLE`; `migrations/mysql/070` and `071` removed that
+  (cleat#1022). The old bound is recorded here because it is still the shape of
+  the failure if it returns, and because it was **not** "must fit `BIGINT`":
+  `9223372036854775808` is past signed `BIGINT` and was always kept exactly, so
+  a limit written to the signed bound was wrong by a factor of two on the
   positive side.
+
+  Two migrations were needed, not one. The column type fixes the plain `UPDATE`
+  that `CompleteWorkflow` issues. It does **not** fix the FINALIZE half of the
+  two-phase terminal transition, which goes through the
+  `finalize_workflow_status` procedure — that wrote
+  `result = CAST(p_result AS JSON)`, and a cast re-degrades the value *before*
+  it reaches the column, LONGTEXT or not.
 
 **No backend is "the strict one", which is the whole reason this is written
 down.** A NUL escape passes on MySQL and SQL Server and fails on PostgreSQL;
@@ -688,16 +711,22 @@ of the three normalise:
 | | key order preserved | duplicate keys preserved |
 |---|---|---|
 | PostgreSQL `JSONB` | no — reordered | no — last wins |
-| MySQL `JSON` | no — reordered | no — last wins |
+| MySQL `LONGTEXT` | yes | yes |
 | SQL Server `NVARCHAR` | yes | yes |
 
-Measured: `{"b":1,"a":2}` reads back as `{"a": 2, "b": 1}` on PostgreSQL **and
-on MySQL**, and byte-identical on SQL Server; `{"a":1,"a":2}` becomes `{"a": 2}`
-on both of the first two.
+Measured: `{"b":1,"a":2}` reads back as `{"a": 2, "b": 1}` on PostgreSQL and
+byte-identical on MySQL and SQL Server; `{"a":1,"a":2}` becomes `{"a": 2}` on
+PostgreSQL only.
+
+**MySQL's two rows moved with its column type** (cleat#1022). They were both
+`no`, and that is why the sentence below used to read "two of three reorder".
 
 So, independently of what is accepted: **never depend on key order, and never
-send duplicate keys.** Only one of the three backends preserves either, and it
-is the one that validates least.
+send duplicate keys.** PostgreSQL still does both, so the advice is unchanged —
+what changed is that fewer backends enforce it for you by accident, which makes
+it easier to write a workflow that passes on two backends and surprises you on
+the third. Every consumer in cleat reads these through `json.Unmarshal`, which
+takes the last of a duplicate pair on all three regardless.
 
 #### Re-deriving this
 

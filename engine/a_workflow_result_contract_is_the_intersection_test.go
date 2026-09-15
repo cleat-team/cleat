@@ -19,9 +19,16 @@ import (
 //
 // WHY THE LIMITS DIVERGE AT ALL: the column is a different type per backend.
 //
-//	PostgreSQL   JSONB                                  validates AND normalises
-//	MySQL        JSON                                   validates and normalises, depth-limited
-//	SQL Server   NVARCHAR(MAX) + CHECK (ISJSON(..)=1)   validates, keeps the bytes
+//	PostgreSQL   JSONB                                    validates AND normalises
+//	MySQL        LONGTEXT + CHECK (JSON_VALID(..))        validates, depth-limited, keeps the bytes
+//	SQL Server   NVARCHAR(MAX) + CHECK (ISJSON(..)=1)     validates, keeps the bytes
+//
+// MySQL's row changed in cleat#1022 (migrations/mysql/070). It was `JSON`, which
+// silently rewrote any integer outside [-2^63, 2^64-1] and any decimal past
+// float64's precision. JSON_VALID still enforces the depth limit -- measured,
+// with the constraint installed, invalid JSON refused and valid JSON accepted as
+// controls -- so the only rows of section 7.4 that moved are key order,
+// duplicate keys and integers beyond 2^64-1.
 //
 // Nothing upstream catches a violation: coerceResultJSON checks json.Valid and
 // object shape and REPORTS rather than rejects, and every payload below is
@@ -148,8 +155,15 @@ func TestAWorkflowResultContractIsTheIntersection(t *testing.T) {
 			// keys -- is only true because this half is checked.
 			normalises := map[testutil.Dialect]bool{
 				testutil.DialectPostgres: true,
-				testutil.DialectMySQL:    true,
-				testutil.DialectMSSQL:    false,
+				// MySQL moved to false in cleat#1022. Its result column is no
+				// longer a JSON column -- migrations/mysql/070 makes it
+				// LONGTEXT with a JSON_VALID check, which is what SQL Server
+				// has always had -- so it no longer reorders keys or collapses
+				// duplicates. The CONTRACT is unchanged: PostgreSQL still
+				// normalises, so callers still must not depend on either.
+				// What changed is how many backends enforce that by accident.
+				testutil.DialectMySQL: false,
+				testutil.DialectMSSQL: false,
 			}[d.dialect]
 
 			for _, n := range []struct{ label, payload string }{
@@ -177,19 +191,24 @@ func TestAWorkflowResultContractIsTheIntersection(t *testing.T) {
 				}
 			}
 
-			// Integers are exact only within 2^64-1; beyond it MySQL degrades to
-			// DOUBLE (cleat#1022). The bound is NOT signed BIGINT: 2^63 is past
-			// it and every backend keeps that exactly, so a limit written to the
-			// signed bound is wrong by a factor of two on the positive side --
-			// and a test written to it would sit nowhere near the real edge.
+			// Integers are exact on every backend, and 2^64 is kept here as a
+			// REGRESSION ROW rather than a divergence.
+			//
+			// It used to degrade on MySQL, whose JSON column held an integer as
+			// INT64 or UINT64 and fell back to DOUBLE beyond both (cleat#1022).
+			// migrations/mysql/070 and 071 removed that -- the column is
+			// LONGTEXT now and finalize_workflow_status no longer casts. The
+			// bound was NOT signed BIGINT: 2^63 is past it and was always kept,
+			// so a limit written to the signed bound would have been wrong by a
+			// factor of two on the positive side and would have sat nowhere
+			// near the real edge.
 			for _, n := range []struct {
 				label, payload, want string
 				exact                bool
 			}{
 				{"2^63", `{"n":9223372036854775808}`, "9223372036854775808", true},
 				{"2^64-1", `{"n":18446744073709551615}`, "18446744073709551615", true},
-				{"2^64", `{"n":18446744073709551616}`, "18446744073709551616",
-					d.dialect != testutil.DialectMySQL},
+				{"2^64", `{"n":18446744073709551616}`, "18446744073709551616", true},
 			} {
 				if _, err := admin.Exec(set, n.payload, wfID); err != nil {
 					t.Fatalf("integer %s on %s: %v", n.label, d.dialect, err)
@@ -202,8 +221,11 @@ func TestAWorkflowResultContractIsTheIntersection(t *testing.T) {
 				if kept != n.exact {
 					keptVerb := map[bool]string{true: "kept exactly", false: "degraded"}
 					t.Errorf("integer %s on %s was %s (%q), want %s.\n\n"+
-						"Section 7.4 says integers are exact within 2^64-1 and that MySQL "+
-						"degrades beyond it. If that has changed, the doc changes too.",
+						"Section 7.4 says integers are exact on every backend since "+
+						"cleat#1022. A MySQL failure here means migrations/mysql/070 or 071 "+
+						"was reverted, or a write path reintroduced CAST(... AS JSON), which "+
+						"re-degrades the value before it reaches even a LONGTEXT column. "+
+						"If this changed deliberately, the doc changes too.",
 						n.label, d.dialect, keptVerb[kept], back, keptVerb[n.exact])
 				}
 			}

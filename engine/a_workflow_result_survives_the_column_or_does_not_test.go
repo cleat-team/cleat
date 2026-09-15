@@ -6,27 +6,30 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // What a workflow result is worth after it has been through the result column,
 // per dialect. cleat#1022.
 //
-// THIS TEST PINS A DEFECT ON PURPOSE, AND IT IS NOT AN ENDORSEMENT. On MySQL a
-// large integer or a high-precision decimal comes back with a DIFFERENT VALUE
-// from the one the workflow returned. Nothing errors, nothing logs, the result
-// is still valid JSON, still an object, still the right shape, and still
-// plausible. The API returns what the column holds, so a caller receives the
-// degraded value.
+// THIS TEST PINNED A DEFECT UNTIL THE MIGRATION IN THIS SAME PR. On MySQL a
+// large integer or a high-precision decimal came back with a DIFFERENT VALUE
+// from the one the workflow returned -- no error, no log, still valid JSON,
+// still an object, still the right shape, still plausible. The API returns what
+// the column holds, so a caller received the degraded value.
 //
-// The resolution -- document the limit, detect and log, or store as text -- is
-// a product decision and this test does not make it. What it does is make the
-// boundary CHECKABLE, because until now it was measured twice and pinned by
-// nothing: both probes were throwaways that never entered the tree. A driver
-// change, a column-type change, or a partial fix could move either cliff and
-// no test would notice.
+// The resolution this test deliberately did not make has now been made: STORE
+// AS TEXT, which is what SQL Server has always done and why SQL Server never
+// had the defect. migrations/mysql/070 makes these columns LONGTEXT with a
+// JSON_VALID check; migrations/mysql/071 stops finalize_workflow_status casting
+// the result to JSON, which re-degraded the value BEFORE it reached the column
+// and would have left this test green over a still-broken path.
 //
-// If you are here because this test went red after a deliberate fix: good, that
-// is the design. Update the table, do not delete the test.
+// THIS TEST IS THE EVIDENCE THE FIX WORKED, which is why it was written first
+// and in its own PR: it went red in the "now preserves ... this is a FIX"
+// direction on every previously-degraded case, on a database with the migration
+// applied and on one without it. The per-dialect expectation is gone because it
+// existed only to encode a divergence that no longer exists.
 //
 // WHY THE CASES ARE IN PAIRS ONE UNIT APART. cleat#1022's own text says the
 // limit is BIGINT. It is not: MySQL's JSON keeps an integer as INT64 *or*
@@ -44,33 +47,30 @@ import (
 func TestAWorkflowResultSurvivesTheColumnOrDoesNot(t *testing.T) {
 	const tenant = "c1022000-1022-4022-8022-c10220001022"
 
-	// preservedBy lists the dialects that store the literal unchanged. A
-	// dialect absent from the set degrades it.
 	cases := []struct {
-		name        string
-		payload     string
-		preservedBy []string
+		name    string
+		payload string
 	}{
 		// Control. If this degrades anywhere, the harness is broken rather
 		// than the dialect, and every row below is meaningless.
-		{"small int", `42`, []string{"postgres", "mysql", "mssql"}},
+		{"small int", `42`},
 
-		{"2^63-1 (int64 max)", `9223372036854775807`, []string{"postgres", "mysql", "mssql"}},
-		{"2^63 (past int64)", `9223372036854775808`, []string{"postgres", "mysql", "mssql"}},
+		{"2^63-1 (int64 max)", `9223372036854775807`},
+		{"2^63 (past int64)", `9223372036854775808`},
 
 		// The positive cliff, one unit apart.
-		{"2^64-1 (uint64 max)", `18446744073709551615`, []string{"postgres", "mysql", "mssql"}},
-		{"2^64 (past uint64)", `18446744073709551616`, []string{"postgres", "mssql"}},
+		{"2^64-1 (uint64 max)", `18446744073709551615`},
+		{"2^64 (past uint64)", `18446744073709551616`},
 
 		// The negative cliff, one unit apart. Asymmetric with the positive one.
-		{"-2^63 (int64 min)", `-9223372036854775808`, []string{"postgres", "mysql", "mssql"}},
-		{"-2^63-1 (past int64 min)", `-9223372036854775809`, []string{"postgres", "mssql"}},
+		{"-2^63 (int64 min)", `-9223372036854775808`},
+		{"-2^63-1 (past int64 min)", `-9223372036854775809`},
 
-		{"1.23e29 (the original report)", `123456789012345678901234567890`, []string{"postgres", "mssql"}},
+		{"1.23e29 (the original report)", `123456789012345678901234567890`},
 
 		// Decimals. Neither earlier measurement covered these.
-		{"17 significant digits", `0.12345678901234567`, []string{"postgres", "mssql"}},
-		{"23 significant digits", `0.12345678901234567890123`, []string{"postgres", "mssql"}},
+		{"17 significant digits", `0.12345678901234567`},
+		{"23 significant digits", `0.12345678901234567890123`},
 	}
 
 	for _, backend := range registeredBackends {
@@ -112,29 +112,10 @@ func TestAWorkflowResultSurvivesTheColumnOrDoesNot(t *testing.T) {
 
 				// Compare BYTES, never decoded numbers. Decoding is exactly
 				// what hides this: json.Unmarshal into a float64 turns both
-				// sides into the same degraded value and the test passes.
-				got := strings.Contains(stored, tc.payload)
-				want := false
-				for _, d := range tc.preservedBy {
-					if d == backend.Name() {
-						want = true
-					}
-				}
-
-				switch {
-				case want && !got:
-					t.Errorf("%s: %s no longer preserves this literal.\n  sent:   %s\n  stored: %s\n\n"+
-						"A dialect that used to hold this value exactly has stopped. If a column "+
-						"type or driver changed, that is a regression in what a workflow result is "+
-						"worth on this backend.", tc.name, backend.Name(), sent, stored)
-				case !want && got:
-					t.Errorf("%s: %s now preserves this literal, and cleat#1022 says it does not.\n"+
-						"  sent:   %s\n  stored: %s\n\n"+
-						"This is a FIX, not a failure -- but the boundary this test pins has moved, "+
-						"so update the preservedBy set and say what changed. Do not delete the case: "+
-						"it is the only thing that would catch the degradation coming back.",
-						tc.name, backend.Name(), sent, stored)
-				}
+				// sides into the same value at the cliff edge and the test
+				// passes.
+				checkPreserved(t, backend.Name(), "workflow_instances.result",
+					tc.name, tc.payload, sent, stored)
 			}
 		})
 	}
@@ -217,4 +198,85 @@ func readJSONColumn(t *testing.T, ctx context.Context, db *sql.DB, dialect, tena
 		t.Fatalf("%s read %s.%s: %v", dialect, table, col, err)
 	}
 	return stored
+}
+
+// The FINALIZE path preserves a result too, and it is a SECOND writer that the
+// test above cannot see. cleat#1022.
+//
+// WHY THIS EXISTS AS A SEPARATE TEST RATHER THAN MORE ROWS ABOVE. Two different
+// writers reach workflow_instances.result. CompleteWorkflow issues a plain
+// UPDATE from Go. The FINALIZE half of the two-phase terminal transition goes
+// through the finalize_workflow_status PROCEDURE -- engine/mysql_lifecycle.go's
+// `CALL finalize_workflow_status(...)` on this dialect -- and that procedure
+// wrote `result = CAST(p_result AS JSON)`.
+//
+// A CAST re-degrades the value BEFORE it reaches the column, so it is not fixed
+// by a column type. Measured on a LONGTEXT column, which is what makes the
+// point -- the column is not what is doing it:
+//
+//	SET r = CAST('{"x":123456789012345678901234567890}' AS JSON)
+//	  -> {"x": 1.2345678901234566e29}
+//	SET r =      '{"x":123456789012345678901234567890}'
+//	  -> {"x":123456789012345678901234567890}
+//
+// So migrations/mysql/070 alone would have left the test above GREEN over a
+// still-degrading path, which is the exact shape CLAUDE.md warns about: a check
+// that reads cleanest where it measured least. migrations/mysql/071 removes the
+// cast and this test is what holds it removed.
+//
+// p_query_state keeps its cast deliberately -- query_state stays a JSON column
+// because it is the one column MySQL genuinely queries as JSON
+// (engine/mysql_store.go:434) -- so it is still narrowed and is not asserted
+// here.
+func TestAFinalizedResultSurvivesTheColumn(t *testing.T) {
+	const tenant = "c1022ccc-1022-4022-8022-c10220001022"
+
+	// The two cliff-adjacent values plus a control. The full table lives on the
+	// test above; what is being checked here is the WRITE PATH, not the
+	// boundary, so repeating every row would be noise.
+	cases := []struct{ name, payload string }{
+		{"small int", `42`},
+		{"2^64 (past uint64)", `18446744073709551616`},
+		{"1.23e29 (cleat#1022's value)", `123456789012345678901234567890`},
+		{"17 significant digits", `0.12345678901234567`},
+	}
+
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			base, teardown := backend.Setup(t)
+			defer teardown()
+			ctx := context.Background()
+			s := storeForTenant(t, base, tenant)
+			db := rawDBOf(t, base)
+
+			for _, tc := range cases {
+				wfID := seedRunForTenant(t, s, tenant,
+					"fin-"+strings.ReplaceAll(tc.name, " ", "-"))
+
+				// One run outstanding at a time, so a single claim cannot
+				// consume a sibling (cleat#1115). Assert the claim is the run
+				// we seeded rather than assuming it: claiming the wrong row
+				// measures the wrong row and still passes.
+				claimed, err := s.ClaimWorkflow(ctx, "w1")
+				if err != nil || claimed == nil {
+					t.Fatalf("%s: ClaimWorkflow: %v (nil=%v)", tc.name, err, claimed == nil)
+				}
+				if claimed.ID != wfID {
+					t.Fatalf("%s: claimed %s but seeded %s -- another run was outstanding, "+
+						"so this case is measuring the wrong row", tc.name, claimed.ID, wfID)
+				}
+
+				sent := fmt.Sprintf(`{"x":%s}`, tc.payload)
+				if err := s.FinalizeWorkflowSegment(ctx, wfID, "w1", claimed.Generation,
+					nil, "done", sent, "", "", nil, time.Time{}); err != nil {
+					t.Fatalf("%s: FinalizeWorkflowSegment: %v", tc.name, err)
+				}
+
+				stored := readResultColumn(t, ctx, db, backend.Name(), tenant, wfID)
+				checkPreserved(t, backend.Name(), "workflow_instances.result (finalize path)",
+					tc.name, tc.payload, sent, stored)
+			}
+		})
+	}
 }
