@@ -45,10 +45,21 @@ import (
 // tests it for emptiness rather than for presence -- which is what stops a
 // pooled connection carrying a spent bypass to its next borrower.
 //
-// POSTGRESQL ONLY, like the scoping it lifts. MySQL has no row-level security
-// and SQL Server scopes a tenant at the connector, so on both dialects plugin
-// statements were never scoped and this is inert. It is safe to write in a
-// plugin that runs on all three; it simply has nothing to lift there.
+// MYSQL IS INERT; SQL SERVER IS NOT, AS OF cleat#1552. MySQL has no row-level
+// security at all, so there is nothing there to lift and never will be. On SQL
+// Server this now sets a `cross_tenant` key in SESSION_CONTEXT, for the same
+// transaction's life and by the same route the tenant takes (see
+// engine/plugindb_tenant.go's markCrossTenantOnTx). It lifts nothing YET --
+// applyTenantScoping still installs no SQL Server policy to read it -- so the
+// observable behaviour is unchanged until that lands. It is safe to write in a
+// plugin that runs on all three.
+//
+// THE REASON THIS PARAGRAPH USED TO GIVE WAS FALSE: "SQL Server scopes a tenant
+// at the connector, so ... plugin statements were never scoped". Plugins do not
+// get a connector-scoped pool -- getPluginDB hands them the main or plugin pool
+// -- and sp_set_session_context is cleared when database/sql recycles a
+// connection, so a per-request tenant fits after all. Measured; see
+// setTenantOnTx.
 //
 // Marking a context that already carries a tenant is allowed and the bypass
 // wins. A sweep launched from a request handler is a real shape -- an admin
@@ -95,10 +106,28 @@ func AcrossAllTenants(ctx context.Context, reason string) context.Context {
 // without a word. If you need one statement scoped inside a sweep, build it from
 // a context that is not the bypassed one.
 //
-// POSTGRESQL ONLY in effect, like the scoping it sets. MySQL has no row-level
-// security and SQL Server scopes a tenant at the connector, so on both dialects
-// plugin statements were never scoped and this is inert. It is safe to write in
-// a plugin that runs on all three.
+// MYSQL IS INERT; SQL SERVER CARRIES THE TENANT AS OF cleat#1552. MySQL has no
+// row-level security, so nothing reads what this sets and nothing ever will.
+//
+// On SQL Server the tenant now reaches the statement in SESSION_CONTEXT, which
+// CHANGES WHAT A PLUGIN SEES ON A CORE TABLE and is worth stating plainly: every
+// one of the shipped ADD FILTER PREDICATE statements binds dbo.fn_tenant_filter
+// (20 of them, 13 distinct tables --
+// `grep -rhoE 'ADD FILTER PREDICATE\s+dbo\.\w+\(' migrations/mssql/*.sql`), and
+// that function's authoritative definition reads SESSION_CONTEXT(N'tenant_id')
+// (migrations/mssql/012_admin_role.sql, the highest-numbered file defining it).
+// So a plugin statement against workflow_instances under ForTenant used to
+// match no rows and now matches that tenant's. That is a narrowing to the
+// correct answer rather than a widening -- no tenant's rows become visible to
+// anyone who could not already ask for them -- but it is a behaviour change on
+// a dialect where plugins previously saw nothing.
+//
+// PLUGIN tables are still unprotected there, until applyTenantScoping grows its
+// SQL Server arm. It is safe to write in a plugin that runs on all three.
+//
+// The claim this paragraph used to make -- that SQL Server scopes a tenant at
+// the connector, so a per-request tenant does not fit -- is corrected at
+// AcrossAllTenants above.
 func ForTenant(ctx context.Context, tenantID uuid.UUID) context.Context {
 	return tenantctx.With(ctx, tenantID)
 }

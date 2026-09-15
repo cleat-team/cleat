@@ -154,7 +154,25 @@ func TestAWorkflowResultSurvivesTheColumnOrDoesNot(t *testing.T) {
 // one -- a pool read would set it on one connection and select on another.
 func readResultColumn(t *testing.T, ctx context.Context, db *sql.DB, dialect, tenant, wfID string) string {
 	t.Helper()
+	return readJSONColumn(t, ctx, db, dialect, tenant, "workflow_instances", "result", "id", wfID, "")
+}
+
+// readJSONColumn is readResultColumn generalised to any JSON-typed column, for
+// cleat#1022's second half: `result` is not the boundary, it is the column
+// somebody happened to measure. Same per-dialect rules apply unchanged, which is
+// why this is one function and not a second copy -- the SQL Server branch below
+// is subtle enough that a copy would drift.
+//
+// `keyCol`/`keyVal` select the row; `extraCol`/`extraVal` add a second
+// predicate when the primary key needs two columns (workflow_signals is keyed
+// on (workflow_id, signal_name)). Empty extraCol means one predicate.
+func readJSONColumn(t *testing.T, ctx context.Context, db *sql.DB, dialect, tenant, table, col, keyCol, keyVal, extraVal string) string {
+	t.Helper()
 	var stored string
+	extraCol := ""
+	if extraVal != "" {
+		extraCol = "signal_name"
+	}
 
 	if dialect == "mssql" {
 		conn, err := db.Conn(ctx)
@@ -166,19 +184,37 @@ func readResultColumn(t *testing.T, ctx context.Context, db *sql.DB, dialect, te
 			`EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenant); err != nil {
 			t.Fatalf("mssql set session context: %v", err)
 		}
-		if err := conn.QueryRowContext(ctx,
-			`SELECT result FROM workflow_instances WHERE id = @p1`, wfID).Scan(&stored); err != nil {
-			t.Fatalf("mssql read result column: %v", err)
+		q := `SELECT ` + col + ` FROM ` + table + ` WHERE ` + keyCol + ` = @p1`
+		args := []any{keyVal}
+		if extraCol != "" {
+			q += ` AND ` + extraCol + ` = @p2`
+			args = append(args, extraVal)
+		}
+		if err := conn.QueryRowContext(ctx, q, args...).Scan(&stored); err != nil {
+			t.Fatalf("mssql read %s.%s: %v", table, col, err)
 		}
 		return stored
 	}
 
-	q := "SELECT CAST(result AS CHAR) FROM workflow_instances WHERE id = ?"
+	// CAST(... AS CHAR) on MySQL and ::text on PostgreSQL both ask the server
+	// for the column's own stored text. Neither repairs a narrowed number --
+	// by the time either runs, MySQL has already parsed the literal into a
+	// DOUBLE and the digits are gone.
+	q := "SELECT CAST(" + col + " AS CHAR) FROM " + table + " WHERE " + keyCol + " = ?"
 	if dialect == "postgres" {
-		q = "SELECT result::text FROM workflow_instances WHERE id = $1"
+		q = "SELECT " + col + "::text FROM " + table + " WHERE " + keyCol + " = $1"
 	}
-	if err := db.QueryRowContext(ctx, q, wfID).Scan(&stored); err != nil {
-		t.Fatalf("%s read result column: %v", dialect, err)
+	args := []any{keyVal}
+	if extraCol != "" {
+		if dialect == "postgres" {
+			q += " AND " + extraCol + " = $2"
+		} else {
+			q += " AND " + extraCol + " = ?"
+		}
+		args = append(args, extraVal)
+	}
+	if err := db.QueryRowContext(ctx, q, args...).Scan(&stored); err != nil {
+		t.Fatalf("%s read %s.%s: %v", dialect, table, col, err)
 	}
 	return stored
 }
