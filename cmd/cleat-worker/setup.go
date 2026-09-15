@@ -4538,7 +4538,7 @@ func checkHostBindingConfigured(ctx context.Context, store *auth.TenantStore) er
 	n, err := store.CountTenantDomains(ctx)
 	if err != nil {
 		return fmt.Errorf("could not read tenant_domains: %w "+
-			"(the table arrives in migration 079; run migrations before enabling this)", err)
+			"(the table arrives in migration 080; run migrations before enabling this)", err)
 	}
 	if n == 0 {
 		return fmt.Errorf("tenant_domains is empty, so every authenticated request would be " +
