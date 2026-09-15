@@ -231,6 +231,13 @@ func (e *Engine) executeWithBackend(
 				"host: workflow %s: replay history is incomplete: %w", e.workflowID, derr)
 		}
 
+		// (a0b) Tail length. The density check above cannot see a missing tail
+		// -- there is no index at which [0,1,2] disagrees with itself -- so the
+		// instance's own event_count is the only record of how long this
+		// history was meant to be. Reports, does not fail; see
+		// reportShortReplayHistory for why. cleat#1507.
+		e.warnIfReplayHistoryIsShort(ctx, replayHistory)
+
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if verr := e.workflowEventVerifier(ctx, e.workflowID); verr != nil {
@@ -507,6 +514,13 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 			return "", nil, nil, nil, nil, fmt.Errorf(
 				"host: workflow %s: replay history is incomplete: %w", e.workflowID, derr)
 		}
+
+		// (a0b) Tail length. The density check above cannot see a missing tail
+		// -- there is no index at which [0,1,2] disagrees with itself -- so the
+		// instance's own event_count is the only record of how long this
+		// history was meant to be. Reports, does not fail; see
+		// reportShortReplayHistory for why. cleat#1507.
+		e.warnIfReplayHistoryIsShort(ctx, replayHistory)
 
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
