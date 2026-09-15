@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -107,14 +108,25 @@ var dropTenantTables = []struct {
 	{"admin.tenants", `SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`},
 }
 
-// countTenantRows returns the row count for each table in dropTenantTables,
-// in order, plus the total.
-func countTenantRows(ctx context.Context, db *sql.DB, tenantID string) ([]int64, int64, error) {
-	counts := make([]int64, len(dropTenantTables))
+// rowCounter is the subset of *sql.DB and *sql.Conn this command counts
+// through.
+//
+// A *sql.Conn rather than only a *sql.DB because SQL Server's counts are
+// meaningless without SESSION_CONTEXT('tenant_id'), which is per-connection
+// state -- see droptenant_mssql.go. PostgreSQL passes the pool and is
+// unaffected.
+type rowCounter interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// countTenantRows returns the row count for each table given, in order, plus
+// the total.
+func countTenantRows(ctx context.Context, q rowCounter, tables []struct{ label, query string }, tenantID string) ([]int64, int64, error) {
+	counts := make([]int64, len(tables))
 	var total int64
-	for i, tbl := range dropTenantTables {
+	for i, tbl := range tables {
 		var n int64
-		if err := db.QueryRowContext(ctx, tbl.query, tenantID).Scan(&n); err != nil {
+		if err := q.QueryRowContext(ctx, tbl.query, tenantID).Scan(&n); err != nil {
 			return nil, 0, fmt.Errorf("count %s: %w", tbl.label, err)
 		}
 		counts[i] = n
@@ -123,15 +135,15 @@ func countTenantRows(ctx context.Context, db *sql.DB, tenantID string) ([]int64,
 	return counts, total, nil
 }
 
-func printTenantRowCounts(w *tabwriter.Writer, counts []int64, total int64) {
-	for i, tbl := range dropTenantTables {
+func printTenantRowCounts(w *tabwriter.Writer, tables []struct{ label, query string }, counts []int64, total int64) {
+	for i, tbl := range tables {
 		fmt.Fprintf(w, "  %s\t%d\n", tbl.label, counts[i])
 	}
 	w.Flush()
 	fmt.Printf("  TOTAL\t%d\n", total)
 }
 
-func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
+func runDropTenant(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	var tenantID string
 	dryRun := false
 	yes := false
@@ -139,6 +151,7 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 	// passed to admin.drop_tenant EXPLICITLY rather than left to search_path;
 	// see the call below and cleat#1363.
 	schema := "public"
+	schemaGiven := false
 	for _, a := range args {
 		switch {
 		case a == "--dry-run":
@@ -147,6 +160,7 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 			yes = true
 		case strings.HasPrefix(a, "--schema="):
 			schema = strings.TrimPrefix(a, "--schema=")
+			schemaGiven = true
 			if schema == "" {
 				fmt.Fprintln(os.Stderr, "--schema= requires a value")
 				printDropTenantUsage()
@@ -203,14 +217,57 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 	// quote_ident and a bind parameter rather than string interpolation: the
 	// statement is static, so it needs no exemption from the inline-SQL parse
 	// test, and a schema name needing quotes is handled by the server.
-	if _, err := db.ExecContext(ctx,
-		`SELECT set_config('search_path', quote_ident($1), false)`, schema); err != nil {
-		fmt.Fprintf(os.Stderr, "error selecting schema %q: %v\n", schema, err)
-		osExit(1)
+	//
+	// PostgreSQL only, along with --schema itself: WithSchema has no effect on
+	// any other dialect, so on SQL Server there is exactly one place plugin
+	// tables can be and nothing to pin.
+	var (
+		counter   rowCounter = db
+		tables               = dropTenantTables
+		mssqlConn *sql.Conn
+	)
+	switch d.name {
+	case "postgres":
+		if _, err := db.ExecContext(ctx,
+			`SELECT set_config('search_path', quote_ident($1), false)`, schema); err != nil {
+			fmt.Fprintf(os.Stderr, "error selecting schema %q: %v\n", schema, err)
+			osExit(1)
+		}
+	case "mssql":
+		// Refuse rather than ignore. A flag that is accepted and does nothing
+		// is how an operator comes to believe they deleted from a schema this
+		// dialect cannot put tables in.
+		if schemaGiven {
+			fmt.Fprintf(os.Stderr, "error: --schema is PostgreSQL-only -- plugin tables are always in dbo on SQL Server\n")
+			osExit(1)
+		}
+		// Held for the rest of the command: the tenant key below is
+		// per-connection, and every count depends on it. See
+		// droptenant_mssql.go.
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error opening a connection: %v\n", err)
+			osExit(1)
+		}
+		defer conn.Close()
+		if err := setMSSQLTenantKey(ctx, conn, tenantID); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			osExit(1)
+		}
+		tables, err = mssqlTenantTables(ctx, conn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			osExit(1)
+		}
+		counter, mssqlConn = conn, conn
 	}
 
+	// Through counter, not db: on SQL Server admin.tenants carries the same
+	// policy as everything else, so the name is only readable on the connection
+	// whose tenant key was set above.
 	var tenantName string
-	if err := db.QueryRowContext(ctx, `SELECT name FROM admin.tenants WHERE tenant_id = $1`, tenantID).Scan(&tenantName); err != nil {
+	nameSQL := plugin.Rebind(`SELECT name FROM admin.tenants WHERE tenant_id = $1`, d.query)
+	if err := counter.QueryRowContext(ctx, nameSQL, tenantID).Scan(&tenantName); err != nil {
 		if err == sql.ErrNoRows {
 			tenantName = "(no admin.tenants row for this ID)"
 		} else {
@@ -219,7 +276,7 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 		}
 	}
 
-	counts, total, err := countTenantRows(ctx, db, tenantID)
+	counts, total, err := countTenantRows(ctx, counter, tables, tenantID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error counting tenant data: %v\n", err)
 		osExit(1)
@@ -228,7 +285,7 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 	fmt.Printf("Tenant: %s (%s)\n", tenantID, tenantName)
 	fmt.Println("Rows that would be permanently deleted:")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	printTenantRowCounts(w, counts, total)
+	printTenantRowCounts(w, tables, counts, total)
 
 	if total == 0 {
 		fmt.Println("\nNothing to delete.")
@@ -251,8 +308,27 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 		}
 	}
 
-	if _, err := db.ExecContext(ctx, `SELECT admin.drop_tenant($1, $2)`, tenantID, schema); err != nil {
-		fmt.Fprintf(os.Stderr, "error dropping tenant: %v\n", err)
+	// The two dialects take different arguments, not merely different
+	// placeholder syntax, so this is a switch rather than a Rebind:
+	// PostgreSQL's function takes the schema (cleat#1363) and SQL Server's
+	// procedure has no schema to take.
+	dropErr := func() error {
+		switch d.name {
+		case "mssql":
+			// On the pinned connection, so that a failure leaves the same
+			// session the counts were read on -- and because the procedure
+			// restores whatever tenant key it found, which is the one set
+			// above.
+			_, err := mssqlConn.ExecContext(ctx,
+				plugin.Rebind(`EXEC admin.drop_tenant @tenant_id = $1`, d.query), tenantID)
+			return err
+		default:
+			_, err := db.ExecContext(ctx, `SELECT admin.drop_tenant($1, $2)`, tenantID, schema)
+			return err
+		}
+	}()
+	if dropErr != nil {
+		fmt.Fprintf(os.Stderr, "error dropping tenant: %v\n", dropErr)
 		osExit(1)
 	}
 
@@ -262,7 +338,7 @@ func runDropTenant(ctx context.Context, db *sql.DB, args []string) {
 	// the record of what was deleted.
 	fmt.Printf("\nDeleted tenant %s (%s). Rows removed:\n", tenantID, tenantName)
 	w2 := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	printTenantRowCounts(w2, counts, total)
+	printTenantRowCounts(w2, tables, counts, total)
 }
 
 func printDropTenantUsage() {
@@ -279,7 +355,15 @@ plugin schema and Postgres role.
 to "public" and must match cleat-worker's --schema. It is passed to
 admin.drop_tenant explicitly rather than inferred, so the deletion cannot be
 redirected by the connection's search_path (cleat#1363), and it also selects
-the schema the row counts above are read from.
+the schema the row counts above are read from. It is PostgreSQL-only and is
+refused on SQL Server, where every table this command touches is in dbo.
+
+On SQL Server the table list above is read from sys.columns rather than
+written down -- every table carrying a tenant_id column, which is the same set
+migrations/mssql/074 deletes from, so the preview and the deletion cannot
+disagree. Counting there requires the tenant's security-policy key, which this
+command sets on one held connection; without it every count reads zero and a
+tenant with data would preview as empty.
 
 workflow_defs holds the tenant's uploaded WASM and IS tenant-owned -- its
 primary key is (tenant_id, name, version). It used to be left behind; see
