@@ -136,6 +136,49 @@ So if a refusal names an allowlist, editing that allowlist is worth doing; if
 it names a floor rule, no configuration will change it and the destination has
 to move.
 
+## A plugin endpoint on a private address
+
+The floor refuses private address space, and for a *workflow's* fetches that is
+final. A **plugin** endpoint is different: it is something you configured, on a
+machine you run, and the motivating case is a self-hosted model server —
+`plugins/llm`'s ollama provider defaults to `http://localhost:11434`, which the
+floor refused with no way to permit it (cleat#1627).
+
+```
+cleat-worker --plugin-egress-allow-private localhost,models.internal
+```
+
+What this is and is not:
+
+| | |
+|---|---|
+| scope | **plugin egress only** — a workflow's own fetches and the embedded runner are unaffected |
+| granularity | one host at a time, matched exactly as the endpoint URL writes it |
+| `localhost` vs `127.0.0.1` | **different entries**; the match is on the host, not the address behind it |
+| wildcards | none, deliberately — a suffix form over private space is a far larger grant than this needs |
+| default | empty, which permits nothing |
+
+**It cannot reach the ranges that matter most.** Link-local (`169.254.0.0/16`,
+`fe80::/10`), the unspecified addresses, multicast and the reserved ranges are
+refused whatever you name, because `169.254.169.254` is cloud instance metadata
+and handing that to a misconfigured endpoint is the thing this whole policy
+exists to prevent. Naming such a host is accepted at startup and still refused at
+call time, and the refusal says so:
+
+```
+egress to named.example (169.254.169.254) is refused by cleat's network policy:
+  link-local, and 169.254.169.254 is cloud instance metadata -- often
+  credentials -- and this range cannot be exempted: the metadata endpoint is the
+  target the floor exists to refuse; ...
+```
+
+That wording is deliberate: you configured something and it did not apply, which
+is a different situation from never having configured it, and the message has to
+distinguish them or you will go looking for a flag that did not arrive.
+
+A worker with any exemption configured logs them at startup at WARN, naming the
+hosts. A worker with none logs nothing.
+
 **One case is deliberately not covered.** A *hostname* that resolves into a
 denied range — `localhost`, or a name pointing at an RFC1918 address — still
 reports the allowlist first, because finding out otherwise means resolving it,

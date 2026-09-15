@@ -867,8 +867,15 @@ func main() {
 	// plugin host-function calls and plugin sweeps all answer to it.
 	operatorEgress := engine.NewHostAllowlist(splitCommaList(*egressAllowlistFlag)...)
 
+	// cleat#1627: the operator's private-address exceptions for PLUGIN
+	// endpoints. Passed only here. The guest fetch path below builds its own
+	// guard and does not receive this, which is asserted by
+	// TestOnlyThePluginTransportCarriesThePrivateHostExemption.
+	pluginPrivateHosts := newPluginPrivateHosts(splitCommaList(*pluginEgressAllowPrivate))
+	pluginPrivateHosts.logStartup(slog.Default())
+
 	pluginEnv := &plugin.Environment{
-		HTTPTransport: pluginEgressTransport(egressAllow, operatorEgress),
+		HTTPTransport: pluginEgressTransport(egressAllow, operatorEgress, pluginPrivateHosts),
 		DB:            getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect())),
 		Mux:           plugMux,
 		Config:        rawPluginConfig,

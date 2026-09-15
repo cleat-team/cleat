@@ -45,9 +45,24 @@ import (
 //
 // operator is the deployment's policy and applies to everything. tenantStore is
 // consulted only when a tenant is actually in context.
-func pluginEgressTransport(tenantStore *engine.TenantEgressStore, operator *engine.HostAllowlist) http.RoundTripper {
+func pluginEgressTransport(tenantStore *engine.TenantEgressStore, operator *engine.HostAllowlist, private *pluginPrivateHosts) http.RoundTripper {
 	guard := &engine.EgressGuard{
 		OperatorAllows: operatorAllowFunc(operator),
+
+		// cleat#1627. A FOURTH thing, and it is not a fourth layer: the three
+		// above decide whether a destination is permitted, and this decides
+		// whether a permitted destination may be a private address.
+		//
+		// The distinction matters because it is the only one of the four that
+		// is not a policy about WHO -- it is a statement about the deployment's
+		// own network, which is the same category as the operator list and for
+		// the same reason. An operator who runs a model server on loopback is
+		// describing their machine, not granting anyone anything.
+		//
+		// Still narrower than it sounds: it names one host at a time, it cannot
+		// reach the link-local range whatever it names, and it is absent from
+		// every guest-facing guard.
+		PluginHostExempt: private.permits,
 
 		// A plugin's client is built once and serves BOTH shapes, so the
 		// tenant-less case is decided per call rather than per transport: a
