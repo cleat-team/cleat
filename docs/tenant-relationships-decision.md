@@ -99,6 +99,12 @@ reading.
 **Enterprise identity (PR #1583) is unaffected.** A customer terminates SAML and presents OIDC per
 tenant; nothing there assumes a relationship.
 
+**Plugin tenant scoping (cleat#1278) is the adjacent work and is not superseded by this.** Its owner
+decision of 2026-09-14 adopts tenant scoping across the remaining plugins and retires
+`--tenant-isolation=role`; its 2026-09-13 decision chooses the named-grant shape for a legitimate
+cross-tenant sweep. Both are about HOW a bypass is expressed. This document is about WHAT a grouping
+may be for. See "The seam to watch".
+
 ---
 
 ## The seam to watch
@@ -115,6 +121,24 @@ tenant in the deployment. Scoped to a group it becomes *"across these tenants"*,
 less. That inverts the usual reading of such a feature — adding groups would improve the isolation
 posture rather than trade it away, and that is the strongest argument for eventually doing it
 properly rather than leaving the bypass as the only mechanism.
+
+**cleat#1278 reached the same seam first, from the other direction, and names the property this
+section was circling.** Its owner decision of 2026-09-13 chose a named, reviewable grant — the
+`admin.claim_workflows` shape, `SECURITY DEFINER` with a `BYPASSRLS` owner — over a loop that sets
+each tenant in turn, and the argument recorded for it is not performance:
+
+> today *a sweep with no tenant filter* and *a sweep that is allowed to have none* are
+> indistinguishable in the code. That is the whole defect: the two states look identical until
+> someone reads the intent. A named bypass makes the widening a thing you can grep for and review.
+
+**Greppable widening is the property, and it subsumes the paragraph above.** A grouping is valuable
+here not merely because it is narrower than a total bypass, but because it moves the assertion from
+prose at a call site to a configured fact an operator can be asked about. Those are the same
+argument: a free-text reason cannot be reviewed in aggregate, and a group can.
+
+That decision governs the mechanism; this document governs only what a grouping may be *for*. They
+should not drift — if cleat#1278's named-grant shape lands first, a grouping is a scope on it rather
+than a second mechanism beside it.
 
 ---
 
