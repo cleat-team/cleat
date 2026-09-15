@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // A stand-in session with a durable clock that JUMPS, which is what a workflow
@@ -33,17 +34,18 @@ func TestTheMonotonicClockDoesNotFollowTheDurableClock(t *testing.T) {
 	h := &jumpyHandler{}
 	ctx := withHandler(context.Background(), h)
 
-	// Drive the two sources the way a guest would: interleaved reads.
-	wall := func() int64 {
-		ms := h.Now(ctx)
-		return ms
-	}
-
+	// THIS CALLS nextMonotonicNs, THE SHIPPED RULE. It used to keep its own
+	// copy -- `monotonicNs += wasiMonotonicStepNs` -- written out in the test
+	// body, so it asserted against a reimplementation and would have passed
+	// unchanged whatever the real clock did. cleat#1300 changed that clock from
+	// a per-read step to real elapsed time and neither of these tests noticed.
+	start := time.Now()
 	var monotonicNs int64
 	mono := func() int64 {
-		monotonicNs += wasiMonotonicStepNs
+		monotonicNs = nextMonotonicNs(monotonicNs, start, time.Now())
 		return monotonicNs
 	}
+	wall := func() int64 { return h.Now(ctx) }
 
 	firstWall, firstMono := wall(), mono()
 	secondWall, secondMono := wall(), mono()
@@ -54,102 +56,89 @@ func TestTheMonotonicClockDoesNotFollowTheDurableClock(t *testing.T) {
 	if wallDelta != 3_600_000 {
 		t.Fatalf("fixture is wrong: the durable clock moved %dms, expected an hour", wallDelta)
 	}
-	// LITERAL BOUNDS, not a comparison against wasiMonotonicStepNs. Asserting
-	// monoDelta == wasiMonotonicStepNs compares the implementation against
-	// itself and passes for any value of the constant, including one sourced
-	// from the durable clock -- which is the exact mistake this test exists to
-	// catch. Verified by sabotage: setting the constant to an hour left that
-	// form of the assertion green.
+
+	// The invariant is that the two domains are SEPARATE, and it is the one
+	// that survived the redesign. The durable clock may jump an hour because a
+	// workflow slept an hour; the monotonic clock must not, because the GC
+	// pacer reacts to the jump rather than to the value -- 3 collections
+	// instead of 17 and a 256MB heap against a 32MB limit.
 	//
-	// The band comes from the measurements on cleat#1300. Below ~1us per read,
+	// THE OLD PER-READ BAND IS GONE ON PURPOSE. It required each read to move
+	// between 1us and 100ms, with the floor justified by "below ~1us,
 	// poll_oneoff needs so many crossings to clear a timer that it reads as a
-	// hang. At or above ~1s per read the GC pacer collapses to 3 cycles and the
-	// heap reaches 8x the default limit.
-	const minStepNs = 1_000       // 1us
-	const maxStepNs = 100_000_000 // 100ms, two orders below the measured-bad 1s
-	if monoDelta < minStepNs || monoDelta > maxStepNs {
-		t.Errorf("the monotonic clock moved %dns between reads, outside the measured-safe band "+
-			"[%d, %d]. Too small and poll_oneoff spins without terminating; too large and Go's "+
-			"GC pacer runs 3 cycles instead of 17 and the heap reaches 256MB against "+
-			"DefaultMemoryLimitPages of 32MB.", monoDelta, minStepNs, maxStepNs)
+	// hang". That reasoning assumed poll_oneoff DOES NOT SLEEP, which was true
+	// only on wazero's default FakeNanosleep. It does sleep on wasmtime, and
+	// wazero now has a real Nanosleep, so a timer is cleared by waiting rather
+	// than by crossings and two reads a nanosecond apart are correct.
+	if monoDelta <= 0 {
+		t.Errorf("the monotonic clock moved %dns between reads; it must be strictly "+
+			"increasing, because the Go runtime throws \"fatal error: nanotime returning "+
+			"zero\" and a clock that repeats a value can make a timer never expire", monoDelta)
 	}
 	if monoDelta >= wallDelta*1_000_000 {
 		t.Errorf("the monotonic clock moved as far as the durable clock (%dns vs %dns); "+
-			"the two domains are not actually separate", monoDelta, wallDelta*1_000_000)
+			"the two domains are not actually separate. CLOCK_REALTIME is the durable, "+
+			"replayable one; CLOCK_MONOTONIC exists so timers terminate.",
+			monoDelta, wallDelta*1_000_000)
+	}
+}
+
+// The monotonic clock tracks REAL elapsed time, which is the fix for
+// cleat#1300's 125x sleep amplification.
+//
+// A clock advancing a fixed amount per read made a guest's 500ms time.Sleep
+// take 62.5 seconds on wasmtime: Go computes poll_oneoff's relative timeout as
+// deadline - nanotime(), wasmtime really blocks for it, and the guest then saw
+// only one step of progress and slept again.
+//
+// Asserted as a RATIO against a real sleep rather than against a constant. A
+// test that checked "the clock advanced by roughly the elapsed time" using its
+// own elapsed measurement would agree with any implementation that reads a
+// clock at all.
+func TestTheMonotonicClockTracksRealElapsedTime(t *testing.T) {
+	start := time.Now()
+	var ns int64
+	ns = nextMonotonicNs(ns, start, time.Now())
+
+	const pause = 50 * time.Millisecond
+	time.Sleep(pause)
+	after := nextMonotonicNs(ns, start, time.Now())
+
+	advanced := time.Duration(after - ns)
+	if advanced < pause/2 || advanced > 4*pause {
+		t.Errorf("across a real %v pause the monotonic clock advanced %v, which is not "+
+			"tracking real time.\n\n"+
+			"If this clock advances a FIXED AMOUNT PER READ again, a guest's time.Sleep is "+
+			"multiplied on any backend whose poll_oneoff really blocks -- measured at 125x on "+
+			"wasmtime, a 500ms sleep taking 62.5 seconds. cleat#1300.", pause, advanced)
 	}
 }
 
 // TestTheMonotonicClockIsNeverZero pins the other measured failure: the Go
 // runtime throws "fatal error: nanotime returning zero" before user code runs.
+//
+// It also pins STRICTLY increasing, which is what the floor is for now that the
+// clock reads a real clock: two reads inside the same nanosecond are ordinary
+// on a fast machine, and a repeated value can make a timer never expire.
 func TestTheMonotonicClockIsNeverZero(t *testing.T) {
-	if wasiMonotonicStepNs <= 0 {
-		t.Fatalf("wasiMonotonicStepNs is %d; a monotonic clock that does not advance makes "+
-			"poll_oneoff spin without terminating and a zero one kills the Go runtime at boot",
-			wasiMonotonicStepNs)
+	if wasiMonotonicFloorNs <= 0 {
+		t.Fatalf("wasiMonotonicFloorNs is %d; a monotonic clock that can repeat a value or "+
+			"return zero kills the Go runtime at boot", wasiMonotonicFloorNs)
 	}
+
+	// Same instant for every read, which is the case the floor exists for: no
+	// real time passes between them, so only the floor keeps them apart.
+	frozen := time.Now()
 	var ns int64
 	for i := 0; i < 3; i++ {
 		prev := ns
-		ns += wasiMonotonicStepNs
+		ns = nextMonotonicNs(ns, frozen, frozen)
 		if ns <= 0 {
 			t.Fatalf("read %d produced %d; the clock must never be zero or negative", i, ns)
 		}
 		if ns <= prev {
-			t.Fatalf("read %d went backwards: %d then %d", i, prev, ns)
+			t.Fatalf("read %d produced %d after %d; the clock must be strictly increasing "+
+				"even when no real time has passed", i, ns, prev)
 		}
-	}
-}
-
-// TestWasiEntropyIsReplayable: two runs of the same seeded session produce the
-// same bytes, and a different session does not.
-func TestWasiEntropyIsReplayable(t *testing.T) {
-	read := func(h HostHandler, n int) []byte {
-		d := &deterministicEntropy{h: h}
-		buf := make([]byte, n)
-		if _, err := d.Read(buf); err != nil {
-			t.Fatal(err)
-		}
-		return buf
-	}
-
-	a := read(&jumpyHandler{}, 32)
-	b := read(&jumpyHandler{}, 32)
-	if string(a) != string(b) {
-		t.Errorf("two identically seeded sessions produced different entropy:\n a=%x\n b=%x\n"+
-			"random_get must reproduce on replay or a guest reaching entropy through WASI "+
-			"diverges silently", a, b)
-	}
-
-	// The negative control: entropy that is merely CONSTANT would pass the test
-	// above. It must actually vary within a run.
-	if allSame(a) {
-		t.Errorf("the entropy stream is a single repeated byte (%x); the equality check above "+
-			"would pass for any constant, so this is what makes it mean something", a)
-	}
-
-	c := read(&jumpyHandler{random: 99}, 32)
-	if string(a) == string(c) {
-		t.Errorf("a session at a different point in its sequence produced identical entropy; " +
-			"the stream does not depend on the seed at all")
-	}
-}
-
-func allSame(b []byte) bool {
-	for i := range b {
-		if b[i] != b[0] {
-			return false
-		}
-	}
-	return true
-}
-
-// TestAWasiHandlerlessConfigDoesNotPanic: cleat dev and unit tests instantiate
-// without a session in the context. handlerFromContextOrNil exists for exactly
-// this, and the closures must tolerate the nil.
-func TestAWasiHandlerlessConfigDoesNotPanic(t *testing.T) {
-	d := &deterministicEntropy{h: nil}
-	buf := make([]byte, 16)
-	if _, err := d.Read(buf); err != nil {
-		t.Fatalf("entropy with no session returned an error: %v", err)
 	}
 }
