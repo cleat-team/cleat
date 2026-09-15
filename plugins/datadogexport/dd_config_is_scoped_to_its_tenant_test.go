@@ -249,9 +249,36 @@ func TestExportMetricsDoesNotLeakItsBypassToTheCaller(t *testing.T) {
 		t.Error("exportMetrics names no cross-tenant bypass at all. Its discovery query reads " +
 			"dd_config across tenants and is refused by the policy without one.")
 	}
-	if !strings.Contains(fn, "exportForConfig(ctx, cfg)") {
-		t.Error("exportMetrics no longer passes the bare ctx to exportForConfig; if it now " +
-			"passes a derived one, check that it is not the bypassed one.")
+	// WHAT THIS ACTUALLY PROTECTS is that exportForConfig does not receive the
+	// BYPASSED context -- not that the argument is spelled "ctx".
+	//
+	// It used to require the literal `exportForConfig(ctx, cfg)`, which failed
+	// the moment cleat#1611 passed a derived context carrying an originated
+	// trace-id (`ectx := plugin.WithNewTrace(ctx)`). That was the guard asking
+	// its own question correctly -- its message said "if it now passes a derived
+	// one, check that it is not the bypassed one" -- and the answer was that it
+	// is derived from the clean ctx. Checking the property rather than the
+	// spelling means the next legitimate derivation does not have to re-litigate
+	// it, while an ILLEGITIMATE one still fails.
+	m := regexp.MustCompile(`exportForConfig\((\w+), cfg\)`).FindStringSubmatch(fn)
+	if m == nil {
+		t.Error("exportMetrics does not call exportForConfig(<ctx>, cfg) in a form this guard " +
+			"can read. Keep the call shape simple enough to check, or teach this guard the new " +
+			"one -- an unreadable call is an unchecked one.")
+	} else {
+		arg := m[1]
+		if arg == "discoverCtx" {
+			t.Error("exportForConfig is called with discoverCtx, the CROSS-TENANT context.\n\n" +
+				"plugin.ForTenant inside it is then ignored without a word -- beginTenantTx " +
+				"tests CrossTenant before the tenant -- so one tenant's export would read every " +
+				"tenant's rows.")
+		}
+		// A derived context is fine unless it derives FROM the bypass.
+		derived := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(arg) + `\s*:?=\s*.*discoverCtx`)
+		if derived.MatchString(fn) {
+			t.Errorf("exportForConfig is called with %q, which is derived from discoverCtx and "+
+				"therefore still carries the cross-tenant bypass.", arg)
+		}
 	}
 }
 

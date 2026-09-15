@@ -131,7 +131,17 @@ func (p *Plugin) processDeliveries(ctx context.Context) (int, int, int, error) {
 		}
 
 		attempted++
-		outcome, err := p.deliver(ctx, d)
+		// ONE TRACE PER DELIVERY, originated here because a webhook delivery has
+		// no caller: this sweep runs on a timer with no inbound request, so there
+		// is nothing to continue. cleat#1611.
+		//
+		// Per DELIVERY rather than per sweep tick, and the loop above is why that
+		// is affordable: it iterates deliveries that are DUE, so a quiet period
+		// originates nothing at all. Per item rather than per batch because the
+		// item is what anyone asks about -- "why did this webhook fail" is a
+		// question for a trace; "how long did the sweep take" is one for a metric.
+		dctx := plugin.WithNewTrace(ctx)
+		outcome, err := p.deliver(dctx, d)
 		if err != nil {
 			p.logger.Error("notifications: deliver", "delivery_id", d.ID, "error", err)
 			continue
@@ -170,6 +180,7 @@ func (p *Plugin) deliver(ctx context.Context, d deliveryRow) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Webhook-Event", d.EventType)
 	req.Header.Set("X-Webhook-Signature", "sha256="+signature)

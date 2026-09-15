@@ -224,7 +224,13 @@ func (p *Plugin) exportMetrics(ctx context.Context) error {
 	}
 
 	for _, cfg := range configs {
-		if err := p.exportForConfig(ctx, cfg); err != nil {
+		// ONE TRACE PER EXPORT. This sweep has no caller to inherit from, and an
+		// export is a real unit of work -- it queries a tenant's workflow
+		// statistics and POSTs them -- rather than a poll that usually finds
+		// nothing. At one per enabled config per 60s that is a legible volume,
+		// which is the test the kafka-connect consumer fails. cleat#1611.
+		ectx := plugin.WithNewTrace(ctx)
+		if err := p.exportForConfig(ectx, cfg); err != nil {
 			p.logger.Error("datadog-export: config export failed",
 				"config_id", cfg.ID, "tenant", cfg.TenantID, "error", err)
 		}
@@ -325,6 +331,7 @@ func (p *Plugin) exportForConfig(ctx context.Context, cfg ddConfigRow) error {
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("DD-API-KEY", cfg.APIKey.Reveal())
 	req.Header.Set("Content-Type", "application/json")
 
