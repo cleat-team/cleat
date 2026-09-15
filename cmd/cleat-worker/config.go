@@ -358,18 +358,28 @@ var (
 	maxQuotaChildren         = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
 	maxQuotaConcurrencyKeys  = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
 	maxQuotaSchedules        = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
-	claimAcrossTenants       = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. Requires a database-side grant; see migrations/postgres/023_cross_tenant_claim.sql and migrations/mssql/012_admin_role.sql")
-	maxWorkflowDuration      = flag.Duration("max-workflow-duration", 0, "CEILING on wall-clock duration for ONE workflow execution segment (0 = no limit); a workflow that suspends and resumes gets a fresh deadline each time. Workflows exceeding it are cancelled and fail with a timeout error. A tenant may set a LOWER value in tenant_settings, and a single run a lower one still at start; neither can raise it. With 0 here the operator sets no bound, so a tenant's value stands alone -- which is how a deployment that never set this flag can still give one tenant a deadline. cleat#1117.")
-	healthCheckInterval      = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
-	maxPluginConnections     = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
-	otelEndpoint             = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
-	otelDisabled             = flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
-	benchSvcURL              = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
-	tenantPoolMaxConns       = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool, used by --tenant-isolation=role. PostgreSQL only: plugin.TenantPools authenticates as a PostgreSQL login role (cleat#1307). The help text said MySQL/MSSQL, which was the opposite of the implementation.")
-	logLevel                 = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-	enableAdminAPI           = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
-	verifyBackend            = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
-	listPlugins              = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
+	claimAcrossTenants       = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. "+
+		"Requires a database-side grant, and on SQL Server it now requires TWO steps rather than one.\n"+
+		"PostgreSQL: migrations/postgres/023_cross_tenant_claim.sql.\n"+
+		"SQL Server: apply migrations/mssql/optional/cross_tenant_claim.sql -- which is NOT applied "+
+		"automatically, because the predicate it installs costs the index seek on any query that does "+
+		"not carry its own tenant predicate (5760 logical reads against 33, measured; cleat#1491) -- "+
+		"and THEN grant dbo.cleat_admin membership as migrations/mssql/012_admin_role.sql documents. "+
+		"012 alone is no longer enough: since cleat#1541 the shipped predicate is the plain one, and a "+
+		"member of cleat_admin under it reads IS_ROLEMEMBER = 1 and sees zero rows.\n"+
+		"A worker started with this flag reports on both loops at startup whether it actually has the "+
+		"capability, so a half-completed setup says so rather than running silently single-tenant.")
+	maxWorkflowDuration  = flag.Duration("max-workflow-duration", 0, "CEILING on wall-clock duration for ONE workflow execution segment (0 = no limit); a workflow that suspends and resumes gets a fresh deadline each time. Workflows exceeding it are cancelled and fail with a timeout error. A tenant may set a LOWER value in tenant_settings, and a single run a lower one still at start; neither can raise it. With 0 here the operator sets no bound, so a tenant's value stands alone -- which is how a deployment that never set this flag can still give one tenant a deadline. cleat#1117.")
+	healthCheckInterval  = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
+	maxPluginConnections = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
+	otelEndpoint         = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
+	otelDisabled         = flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
+	benchSvcURL          = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
+	tenantPoolMaxConns   = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool, used by --tenant-isolation=role. PostgreSQL only: plugin.TenantPools authenticates as a PostgreSQL login role (cleat#1307). The help text said MySQL/MSSQL, which was the opposite of the implementation.")
+	logLevel             = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	enableAdminAPI       = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
+	verifyBackend        = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
+	listPlugins          = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
 )
 
 func applyChildBindingOverrideEnv() {

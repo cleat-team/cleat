@@ -842,7 +842,7 @@ for you.
 | dialect | what the deployment must do |
 |---------|-----------------------------|
 | PostgreSQL | Apply **both** `023_cross_tenant_claim.sql` and `024_cross_tenant_schedules.sql` as a superuser. 023 creates `cleat_dispatcher` (`NOLOGIN BYPASSRLS`) to own the claim function; 024 adds the due-schedule read to the same role. They are separate grants on purpose — with 023 alone, workflows execute but cron never fires, and the warning names the file you are missing. |
-| SQL Server | Add the worker's principal to the `cleat_admin` database role -- see `012_admin_role.sql`, which documents the exact statements. The role ships with no members. One grant covers both the claim and the schedule read: `fn_tenant_filter` is bound to every table involved. |
+| SQL Server | **Two steps since cleat#1541, and the first one is new.** (1) Apply `migrations/mssql/optional/cross_tenant_claim.sql`, which is deliberately *not* in the auto-applied set. (2) Add the worker's principal to the `cleat_admin` role -- see `012_admin_role.sql` for the exact statements; it ships with no members. One grant then covers both the claim and the schedule read, because `fn_tenant_filter` is bound to every table involved. **Step 2 alone does nothing**: the shipped predicate no longer mentions `IS_ROLEMEMBER`, so a member reads `IS_ROLEMEMBER = 1` and still sees zero rows. |
 | MySQL | **Not supported on the default topology.** `MySQLStoreFactory` gives each tenant its own physical database (`cleat_<tenant_id>`), so there is no predicate to drop -- the other tenants' rows are not filtered out, they are in another database. The worker warns once and claims its own tenant. A MySQL deployment pointed at a *single shared* database does work, since there isolation really is just a `tenant_id` predicate. |
 
 If the flag is set but the store cannot claim across tenants -- wrong dialect,
@@ -852,6 +852,37 @@ and it does not fail to start: on a mixed fleet the flag says what the operator
 wants while the store says what is actually possible, and those can disagree.
 
 A missing grant therefore narrows a worker rather than stopping it.
+
+### Why SQL Server's opt-in exists, and what it costs to turn on
+
+The `cleat_admin` bypass is a disjunction inside the row-level-security
+predicate:
+
+```sql
+WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)
+   OR IS_ROLEMEMBER(N'cleat_admin') = 1
+```
+
+It is free for a query that supplies its own tenant and expensive for one that
+relies on RLS to supply it, because the disjunction is what stops the optimiser
+pushing a bare equality into an index seek. Measured on SQL Server 2022, 200 000
+rows over 200 tenants:
+
+| predicate | query carries `tenant_id = ?` | plan | logical reads |
+|---|---|---|---|
+| plain (shipped) | yes | Index Seek | 33 |
+| plain (shipped) | **no** | Index Seek | 33 |
+| with the bypass | yes | Index Seek | 33 |
+| with the bypass | **no** | **Index Scan** | **5760** |
+
+So the cost lands on the statements that cannot name a tenant --
+`ClaimWorkflowsAcrossTenants` and `BatchHeartbeat`, which scan by design -- and
+on any future statement that forgets to. Applying the opt-in accepts that on
+every tenant-scoped table, which is why it is a deliberate act rather than the
+default.
+
+To reverse it, re-apply `074_the_admin_bypass_is_opt_in.sql`. It is idempotent
+and restores both the plain predicate and the marker the worker reads.
 
 **The worker says which mode it is in at startup**, before either loop ticks, so
 you do not have to infer it from silence:
