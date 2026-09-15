@@ -232,9 +232,19 @@ type Migration struct {
 	// POSTGRESQL ONLY, and this is a real limit rather than a rounding
 	// error. MySQL has no row-level security, so a table named here is
 	// scoped by the plugin's own WHERE clause there and by nothing else.
-	// SQL Server binds a tenant to a whole connection pool
-	// (tenantSessionConnector), which a per-request tenant does not fit.
-	// On both, this field is accepted and does nothing.
+	// SQL Server has row-level security and does not yet get a policy from
+	// this field, so the same is true there for now. On both, this field is
+	// accepted and does nothing.
+	//
+	// THE REASON GIVEN HERE FOR SQL SERVER WAS WRONG until cleat#1552: "SQL
+	// Server binds a tenant to a whole connection pool
+	// (tenantSessionConnector), which a per-request tenant does not fit".
+	// Plugins never get that pool -- getPluginDB hands them the main or the
+	// plugin pool -- and a per-request tenant fits fine, via
+	// sp_set_session_context, which database/sql's connection recycle clears.
+	// engine/plugindb_tenant.go now sets it. What is still missing on SQL
+	// Server is the half this field controls: applyTenantScoping emits no
+	// CREATE SECURITY POLICY there.
 	//
 	// ONLY FOR TABLES WHOSE EVERY READER HAS A TENANT. A policy fails
 	// closed, so a plugin that also sweeps across tenants from a background
