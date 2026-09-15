@@ -150,9 +150,18 @@ configured rate. Mode `db` is genuinely cluster-wide — `checkDBRateLimit`
 (`plugins/ratelimiter/middleware.go:211-268`) keeps per-second buckets in a `rate_counter` table and
 sums them over a sliding window, working across all three dialects.
 
-For a spend-sensitive product the default is the wrong one. Set `mode: "db"` in the plugin config,
-and check the startup log line — `Init` **silently falls back to memory when no DB is available**
-(`plugin.go:91-97`), so a misconfiguration degrades to per-process limiting rather than failing.
+For a spend-sensitive product the default is the wrong one. Set `mode: "db"` in the plugin config.
+
+**You no longer have to check the startup log for this.** This paragraph used to say `Init`
+*silently falls back to memory when no DB is available*, and told you to read the log line to find
+out — which put the burden on an operator noticing a `Warn` among everything else a worker prints
+at startup. Since cleat#1581 a `mode: "db"` that cannot be honoured **refuses to start**, naming
+the reason, and so does an unrecognised mode: `"DB"`, `"database"` and every other near-miss used
+to select per-process limiting, because the middleware asks `p.mode == "db"` and treats anything
+else as memory.
+
+The default is still `memory`, and a config that does not mention `mode` still gets it — the
+refusal fires only where a deployment asked for something it was not getting.
 
 Two properties of the DB path to design around: it **fails open** on a database error
 (`middleware.go:186`), which is the right default for availability and the wrong one if the limiter

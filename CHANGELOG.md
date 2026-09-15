@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The rate limiter refuses a cluster-wide limit it cannot honour, instead of quietly giving you
+  a per-process one.** (cleat#1581)
+
+  `mode: "db"` with no database configured used to log a warning and fall back to `memory`. The
+  worker started, and because the memory limiter is an in-process map, **every worker served the
+  full configured rate** — a four-worker deployment enforced four times the limit it was told to.
+  An unrecognised mode did the same thing more quietly: the middleware tests `mode == "db"` and
+  treats everything else as memory, so `"DB"`, `"database"` and any other near-miss also selected
+  per-process limiting.
+
+  Both now return an error from the plugin's `Init`, naming the reason.
+
+  **Who is affected: only deployments that are already not getting what they asked for.** The
+  default is unchanged (`memory`), and a config that does not set `mode` behaves exactly as
+  before. If a worker now refuses to start, it was silently enforcing the wrong limits before.
+  The fix is to supply a database or to say `mode: "memory"` and mean it.
+
 ### Added
 
 - **Pre-emptive cancellation, with a terminal status of its own.**

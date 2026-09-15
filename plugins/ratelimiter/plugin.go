@@ -7,6 +7,7 @@ package ratelimiter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -30,6 +31,14 @@ func New() plugin.Plugin {
 }
 
 // Config holds optional configuration for the rate-limiter plugin.
+// The modes this plugin understands. They are constants because Init now
+// REFUSES anything else, and a refusal that compares against a loose string
+// literal is one typo away from refusing a mode that works.
+const (
+	modeMemory = "memory"
+	modeDB     = "db"
+)
+
 type Config struct {
 	// Mode selects the rate-limiting backend: "memory" (default) for
 	// per-worker token buckets, or "db" for a DB-backed sliding-window
@@ -75,7 +84,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.db = env.DB
 	p.dialect = env.Dialect
 	p.buckets = make(map[string]*tokenBucket)
-	p.mode = "memory"
+	p.mode = modeMemory
 
 	if len(env.Config) > 0 {
 		var cfg Config
@@ -84,14 +93,42 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 			return err
 		}
 		if cfg.Mode != "" {
-			p.mode = cfg.Mode
+			switch cfg.Mode {
+			case modeMemory, modeDB:
+				p.mode = cfg.Mode
+			default:
+				// An unrecognised mode is REFUSED rather than ignored, and
+				// this is the same defect as the one below reached through a
+				// different door. middleware.go asks `p.mode == "db"` and
+				// treats everything else as memory, so `"DB"`, `"database"`,
+				// `"postgres"` and every other near-miss used to select
+				// per-process limiting -- the exact outcome the operator was
+				// trying to avoid by setting the field at all. cleat#1581.
+				return fmt.Errorf("rate-limiter: unknown mode %q: expected %q or %q -- "+
+					"an unrecognised mode would silently select per-process limiting, "+
+					"which is what configuring this field is meant to prevent",
+					cfg.Mode, modeMemory, modeDB)
+			}
 		}
 	}
 
-	// Fall back to memory mode if no DB is available.
-	if p.mode == "db" && p.db == nil {
-		p.logger.Warn("rate-limiter: no database available, falling back to memory mode")
-		p.mode = "memory"
+	// A CLUSTER-WIDE LIMIT THAT CANNOT BE HONOURED IS REFUSED, NOT DOWNGRADED.
+	//
+	// This used to log a Warn and set p.mode = "memory". A warning is not a
+	// refusal: the worker started, and every tenant got a per-process limiter
+	// while the configuration said otherwise. p.buckets is an in-process map,
+	// so N workers served N times the configured rate -- and the operator who
+	// wrote `mode: "db"` had said, in the only way the plugin offers, that
+	// this was the thing not to do.
+	//
+	// Refusing is safe for everyone who is not already broken: it fires only
+	// when a deployment EXPLICITLY asked for db mode, since the default is
+	// memory and an absent config still yields memory. A deployment that never
+	// mentions mode sees no change. cleat#1581.
+	if p.mode == modeDB && p.db == nil {
+		return fmt.Errorf("rate-limiter: mode %q requires a database and none is configured -- "+
+			"refusing to start rather than falling back to per-process limits, which would "+
+			"serve each worker the full configured rate", modeDB)
 	}
 
 	p.logger.Info("rate-limiter: initialized", "mode", p.mode)

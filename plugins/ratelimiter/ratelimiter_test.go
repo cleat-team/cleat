@@ -263,17 +263,41 @@ func TestInit_InvalidConfig(t *testing.T) {
 	}
 }
 
+// THIS TEST ASSERTED THE OPPOSITE UNTIL cleat#1581, and the reversal is
+// deliberate rather than a rewrite to match new code.
+//
+// It used to require Init to SUCCEED here, with the message "Init() should
+// succeed (fallback to memory)". That is the defect: a deployment that
+// explicitly configured cluster-wide limiting got a per-process limiter, and
+// since p.buckets is an in-process map, N workers served N times the
+// configured rate while the configuration said otherwise.
+//
+// WHAT MADE THIS SAFE TO REVERSE, checked rather than assumed, because
+// inverting a pinned behaviour is otherwise an owner's call and not mine:
+//
+//   - the fallback arrived in #9, "multi-backend WASM runtime -- wazero +
+//     wasmtime-go with Python Component Model". It was incidental to a
+//     WASM-runtime change, not a decision about rate-limiting semantics.
+//   - this test arrived in #196, "engine coverage 70%+, plugins 85%,
+//     threshold alignment" -- written to cover the code that existed, not to
+//     record an intent.
+//   - no document promises the fallback: grep over tracked markdown for
+//     "fall(ing)? back to memory" returns nothing.
+//
+// So what is being reversed is an accident nobody chose, which is a different
+// act from overruling a decision somebody did.
+//
+// The full matrix -- including the arm proving a db request WITH a database
+// still succeeds -- is in a_limit_that_cannot_be_honoured_is_refused_test.go.
 func TestInit_DBMode_NoDB(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
 		Config: []byte(`{"mode":"db"}`),
 	}
 	err := p.Init(context.Background(), env)
-	if err != nil {
-		t.Fatalf("Init() should succeed (fallback to memory), got: %v", err)
-	}
-	if p.mode != "memory" {
-		t.Errorf("expected mode=memory (fallback), got %q", p.mode)
+	if err == nil {
+		t.Fatal("Init() succeeded with mode=db and no database -- it must refuse rather " +
+			"than fall back to per-process limits (cleat#1581)")
 	}
 }
 
