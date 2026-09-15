@@ -101,8 +101,10 @@ func TestTheGuardChecksEveryAnswerAndDialsTheOneItChecked(t *testing.T) {
 	t.Run("a name answering both public and private is refused", func(t *testing.T) {
 		// Rebinding in progress. Dialling the public answer and proceeding
 		// would make the policy depend on resolver ordering.
+		// Explicitly permitted, so what this subtest measures is the FLOOR
+		// overriding an allowlist entry -- not the allowlist refusing first.
 		g := &EgressGuard{
-			Resolver: nil,
+			AllowHost: NewHostAllowlist("rebind.example").AllowHostFunc(),
 			Dial: func(context.Context, string, string) (net.Conn, error) {
 				t.Fatal("dialled despite a private answer among the results")
 				return nil, nil
@@ -130,6 +132,7 @@ func TestTheGuardChecksEveryAnswerAndDialsTheOneItChecked(t *testing.T) {
 		// the attacker's.
 		var dialled string
 		g := &EgressGuard{
+			AllowHost: NewHostAllowlist("public.example").AllowHostFunc(),
 			Dial: func(_ context.Context, _, address string) (net.Conn, error) {
 				dialled = address
 				return nil, errors.New("stop here; the address is what is under test")
@@ -212,11 +215,19 @@ func TestBothHTTPFetchImplementationsUseTheEgressGuard(t *testing.T) {
 		t.Fatal("no http.Client in the embedded runner at all -- this check is looking at " +
 			"the wrong file, which reads identically to a clean result")
 	}
-	guards := strings.Count(body, "EgressGuard{}).DialContext")
-	if guards < clients {
-		t.Errorf("the embedded runner builds %d http.Client(s) and guards %d of them. An "+
-			"unguarded one is a route around the worker's egress policy (cleat#1565)",
-			clients, guards)
+	// Counted by ROLE rather than by one spelling. The first version matched
+	// the literal `EgressGuard{}).DialContext`, and went red the moment the
+	// guard was built into a variable instead of inlined -- a false positive
+	// on a file that was correct, which is the worst kind of guard to have.
+	transports := strings.Count(body, "Transport:")
+	if transports < clients {
+		t.Errorf("the embedded runner builds %d http.Client(s) and gives %d of them a "+
+			"Transport. A client on the default transport does not go through the egress "+
+			"guard (cleat#1565)", clients, transports)
+	}
+	if !strings.Contains(body, "EgressGuard") {
+		t.Error("the embedded runner names no EgressGuard, so whatever its Transport is, " +
+			"it is not this policy (cleat#1565)")
 	}
 }
 

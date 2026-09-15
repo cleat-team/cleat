@@ -127,6 +127,8 @@ func main() {
 		runRevokeAPIKey(ctx, db, args[1:])
 	case "set-tenant-setting":
 		runSetTenantSetting(ctx, db, args[1:])
+	case "egress-allow":
+		runEgressAllow(ctx, db, d, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -153,6 +155,9 @@ Commands:
   debug <id> [--entry-point <n>] [--watch]  step-through workflow event replay
   drop-tenant <tenant-id> [--dry-run] [--yes]  permanently delete a tenant and all its data
   revoke-api-key [--key-id|--key-hash|--key-stdin|--list]  revoke an API key
+  egress-allow list <tenant>      show which hosts a tenant's workflows may fetch
+  egress-allow add <tenant> <host>...     permit hosts (.example.com = subdomains)
+  egress-allow remove <tenant> <host>...  revoke hosts
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)

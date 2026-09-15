@@ -79,6 +79,11 @@ func DurableCallIdempotencyKey(workflowID, runID string, step int) string {
 // exactly one place. Deriving it at each call site is how the step number and
 // the recorded event drift apart.
 func (s *execSession) callService(ctx context.Context, service, operation, requestJSON string, step int) (string, error) {
+	// Scope the tenant, so a caller can answer "whose workflow is this".
+	// cleat#1565: http.fetch's egress allowlist is per tenant, and without
+	// this the service path carried no tenant at all -- the same
+	// one-path-only shape cleat#1278 records for plugins.
+	ctx = s.tenantScopedContext(ctx)
 	if ic, ok := s.engine.caller.(IdempotentCaller); ok {
 		key := DurableCallIdempotencyKey(s.workflowID, s.execRunID, step)
 		return ic.CallWithIdempotencyKey(ctx, service, operation, requestJSON, key)

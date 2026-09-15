@@ -45,6 +45,13 @@ var portedOn = map[string][]string{
 	"debug":    {"postgres", "mysql", "mssql"},
 	"check-db": {"postgres", "mysql", "mssql"},
 
+	// egress-allow, cleat#1565: written for all three from the start. Its
+	// statements are plugin.Query values with a MySQL arm for the unprefixed
+	// table, routed through plugin.Rebind -- which is exactly what the
+	// unported ones below are missing. TestEgressAllowWorksOnEveryDialect is
+	// the test this entry is supposed to have behind it.
+	"egress-allow": {"postgres", "mysql", "mssql"},
+
 	// Not ported. These carry unqualified `admin.` SQL, which is correct on
 	// PostgreSQL and SQL Server and wrong on MySQL, plus $N placeholders that
 	// have not been routed through plugin.Rebind.

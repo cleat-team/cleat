@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/plugin"
@@ -153,6 +154,11 @@ type dbServiceCaller struct {
 	// It is a field only so that tests pinning non-egress behaviour can reach
 	// an httptest server. cleat#1565.
 	egress *engine.EgressGuard
+
+	// egressAllow is the per-tenant allowlist source. Nil denies every
+	// guest-initiated fetch, which is the correct behaviour for a worker
+	// that was not given one: an absent policy is not permission.
+	egressAllow *engine.TenantEgressStore
 }
 
 func (c *dbServiceCaller) Call(ctx context.Context, service, operation, requestJSON string) (string, error) {
@@ -240,13 +246,38 @@ func benchSvcStatusError(status int, body []byte) error {
 	return engine.NewTransientError("bench-svc", "", err)
 }
 
-// egressGuard is the policy this caller enforces: the strict default unless a
-// test supplied one.
-func (c *dbServiceCaller) egressGuard() *engine.EgressGuard {
+// egressGuard is the policy this caller enforces for one request.
+//
+// Built per call rather than once, because the allowlist is PER TENANT and the
+// tenant comes from the context of the workflow being executed --
+// engine.execSession.callService scopes it (cleat#1565).
+func (c *dbServiceCaller) egressGuard(ctx context.Context) *engine.EgressGuard {
 	if c.egress != nil {
-		return c.egress
+		return c.egress // a test supplied one
 	}
-	return &engine.EgressGuard{}
+	g := &engine.EgressGuard{}
+	if c.egressAllow == nil {
+		// No allowlist source configured: AllowHost stays nil and the guard
+		// denies. Deliberately not a nil-check that opens the gate.
+		return g
+	}
+	tid, ok := auth.TenantIDFromContext(ctx)
+	if !ok {
+		return g // no tenant, so no list, so nothing is permitted
+	}
+	tenant := tid.String()
+	g.AllowHost = func(ctx context.Context, host string) (bool, error) {
+		list, err := c.egressAllow.For(ctx, tenant)
+		if err != nil {
+			// An error is NOT a grant. Returned rather than swallowed so the
+			// refusal says "could not read the allowlist" instead of "not on
+			// the allowlist", which would send someone to edit a list that is
+			// not the problem.
+			return false, err
+		}
+		return list.Permits(host), nil
+	}
+	return g
 }
 
 func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON string) (string, error) {
@@ -282,7 +313,7 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 	// request finally goes. See engine.EgressGuard.
 	client := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: &http.Transport{DialContext: c.egressGuard().DialContext},
+		Transport: &http.Transport{DialContext: c.egressGuard(ctx).DialContext},
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -1077,6 +1108,10 @@ type Worker struct {
 	pluginStreamRegistry *engine.PluginStreamRegistry
 	tenantPools          *plugin.TenantPools
 	plugList             []*plugin.LoadedPlugin
+
+	// egressAllow answers "which hosts may this tenant's workflows reach".
+	// Nil denies every guest-initiated fetch. cleat#1565.
+	egressAllow *engine.TenantEgressStore
 
 	// Worker membership and this worker's slice of the cluster connection
 	// budget. cleat#1487.
@@ -2024,7 +2059,14 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		childBindingPolicy = wfMeta.ChildBindingPolicy
 	}
 
-	caller := &dbServiceCaller{store: execStore, workerID: w.id, benchSvcURL: *benchSvcURL}
+	// egressAllow is what makes http.fetch usable at all: without it the guard
+	// has no allowlist and refuses every destination. cleat#1565.
+	caller := &dbServiceCaller{
+		store:       execStore,
+		workerID:    w.id,
+		benchSvcURL: *benchSvcURL,
+		egressAllow: w.egressAllow,
+	}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(execStore.(engine.SignalStore)),
 		// The promise store, which the worker never wired.
