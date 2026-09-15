@@ -178,6 +178,28 @@ public class CleatEntryProcessor extends AbstractProcessor {
 
         int userParamCount = params.size() - 1; // Exclude HostCalls
 
+        // Refuse more than one user parameter, with the reason.
+        //
+        // cleat#1636. There was no check at all: the count was taken, params.get(1)
+        // was used, and the rest were ignored -- so the generated wrapper called
+        // `Class.method(hostCalls, firstParam)` for a two-parameter method and the
+        // author's first sight of the problem was an arity error inside generated
+        // source they did not write.
+        //
+        // Rust refuses the same thing for the same reason and its message is the
+        // model (crates/cleat-macro/src/entry.rs:79). The constraint is the ABI's,
+        // not this SDK's: a WASM export receives one JSON payload.
+        if (userParamCount > 1) {
+            processingEnv.getMessager().printMessage(
+                Diagnostic.Kind.ERROR,
+                "@CleatEntry methods must have exactly one user parameter (beyond "
+                    + "cleat.HostCalls).  Found " + userParamCount + ".  Reason: a WASM "
+                    + "export receives a single JSON payload, so only one user parameter "
+                    + "can be bound.  Combine them into a Map parameter and read the keys.",
+                method);
+            return;
+        }
+
         // Determine return type
         String returnType = method.getReturnType().toString();
         boolean returnsVoid = "void".equals(returnType);
@@ -198,9 +220,12 @@ public class CleatEntryProcessor extends AbstractProcessor {
                     Diagnostic.Kind.ERROR,
                     "Unsupported parameter type '" + inputType + "' for parameter '"
                         + paramName + "' in method '" + method.getSimpleName()
-                        + "'.  Supported types are: String, int, Integer, long, Long, "
-                        + "double, Double, boolean, Boolean, and custom reference types "
-                        + "that are JSON-serializable.",
+                        + "'.  Supported types are exactly what JsonHelper.parse can "
+                        + "decode: String, Object, Map, HashMap, List, ArrayList, and "
+                        + "int/long/double/float/short/boolean with their boxed forms.  "
+                        + "A custom type is NOT supported -- JsonHelper.parse throws "
+                        + "UnsupportedOperationException for it.  Take a Map and read "
+                        + "the fields, or take a String and parse it yourself.",
                     userParam);
             }
         }
@@ -293,7 +318,24 @@ public class CleatEntryProcessor extends AbstractProcessor {
             out.println("            String inputJSON = Memory.readString(argsPtr, argsLen);");
             out.println();
             out.println("            // Deserialize the workflow input.");
-            out.println("            " + inputType + " " + paramName + " = JsonHelper.parse(inputJSON, " + inputType + ".class);");
+            // ERASE GENERICS FOR THE CLASS LITERAL. `Map<String,Object>.class`
+            // is not legal Java, so a parameterised parameter generated a
+            // wrapper that did not compile -- reported at the generated file,
+            // which the author did not write. A RAW Map always worked, which is
+            // why this went unnoticed: the difference is invisible from the
+            // workflow's own source. cleat#1636.
+            //
+            // The declaration keeps its generics so the workflow method still
+            // type-checks against it; only the literal is erased. That makes the
+            // assignment unchecked, which is what JsonHelper.parse already is.
+            String classLiteralType = inputType;
+            int typeArgs = classLiteralType.indexOf('<');
+            if (typeArgs >= 0) {
+                classLiteralType = classLiteralType.substring(0, typeArgs);
+            }
+            out.println("            @SuppressWarnings(\"unchecked\")");
+            out.println("            " + inputType + " " + paramName + " = (" + inputType
+                + ") JsonHelper.parse(inputJSON, " + classLiteralType + ".class);");
             out.println();
         }
 
@@ -375,12 +417,51 @@ public class CleatEntryProcessor extends AbstractProcessor {
     }
 
     /**
-     * Returns true if the given type is supported as a workflow input parameter.
+     * The types {@link JsonHelper#parse} can decode, by fully-qualified name.
      * <p>
-     * Supported types include {@link String}, the common primitives and their
-     * boxed equivalents ({@code int}/{@link Integer}, {@code long}/{@link Long},
-     * {@code double}/{@link Double}, {@code boolean}/{@link Boolean}), and any
-     * custom reference type (which {@link JsonHelper} will attempt to deserialize).
+     * THIS LIST IS THE DECODER'S, NOT THIS PROCESSOR'S, and that is the whole
+     * point of cleat#1636. Two hand-maintained sets drifted apart in opposite
+     * directions: this check accepted every reference type, including POJOs
+     * that {@code JsonHelper.parse} throws {@code UnsupportedOperationException}
+     * for at run time, while rejecting the primitives {@code float} and
+     * {@code short}, which it decodes perfectly well.
+     * <p>
+     * A typed parameter therefore compiled cleanly, passed this check, and
+     * failed on the first start with a message telling the author to hand-parse.
+     * <p>
+     * {@code CleatEntryProcessorConformanceTest} derives both sets from their
+     * real implementations -- this list, and {@code JsonHelper.parse} actually
+     * invoked -- and fails on any disagreement, so the two cannot drift apart
+     * again without a red test.
+     */
+    private static final java.util.Set<String> DECODABLE_TYPES =
+        java.util.Collections.unmodifiableSet(new java.util.HashSet<>(java.util.Arrays.asList(
+            "java.lang.String",
+            "java.lang.Integer", "java.lang.Long", "java.lang.Double",
+            "java.lang.Float", "java.lang.Short", "java.lang.Boolean",
+            "java.lang.Object",
+            "java.util.Map", "java.util.HashMap",
+            "java.util.List", "java.util.ArrayList")));
+
+    /**
+     * The primitives {@link JsonHelper#parse} can decode.
+     * <p>
+     * {@code float} and {@code short} are here because the decoder handles them
+     * ({@code JsonHelper.java:96,105}); they were absent from this check and so
+     * refused at compile time, which is the second half of cleat#1636 and the
+     * direction nobody was looking for.
+     */
+    private static final java.util.Set<String> DECODABLE_PRIMITIVES =
+        java.util.Collections.unmodifiableSet(new java.util.HashSet<>(java.util.Arrays.asList(
+            "int", "long", "double", "float", "short", "boolean")));
+
+    /**
+     * Returns true if the given type is one {@link JsonHelper#parse} can decode.
+     * <p>
+     * A type this returns false for is refused at compile time, with a
+     * diagnostic naming what to use instead. Previously any reference type
+     * returned true and the refusal arrived at run time, inside a generated
+     * wrapper the author did not write.
      * </p>
      */
     private static boolean isSupportedParameterType(TypeMirror type) {
@@ -388,13 +469,33 @@ public class CleatEntryProcessor extends AbstractProcessor {
         if (kind == TypeKind.VOID || kind == TypeKind.ARRAY) {
             return false;
         }
-        if (kind.isPrimitive()) {
-            String name = type.toString();
-            return "int".equals(name) || "long".equals(name)
-                || "double".equals(name) || "boolean".equals(name);
+        return isSupportedParameterTypeByName(type.toString(), kind.isPrimitive());
+    }
+
+    /**
+     * The rule behind {@link #isSupportedParameterType}, reachable without a
+     * {@code TypeMirror}.
+     * <p>
+     * A {@code TypeMirror} exists only during annotation processing, so a test
+     * cannot ask the real check anything. This split exists so
+     * {@code EntryParameterTypesMatchTheDecoderTest} can compare THIS rule
+     * against {@code JsonHelper.parse} actually invoked, rather than against a
+     * copy of the rule -- and a copy is exactly how the two sets drifted apart
+     * in cleat#1636.
+     * <p>
+     * Package-private on purpose. It is not API; it is the seam that makes the
+     * production rule testable, and that test asserts this method still exists.
+     */
+    static boolean isSupportedParameterTypeByName(String typeName, boolean primitive) {
+        if (primitive) {
+            return DECODABLE_PRIMITIVES.contains(typeName);
         }
-        // All other reference types (String, custom types, etc.) are allowed.
-        return true;
+        // Erase generic arguments: Map<String,Object> must match java.util.Map.
+        int lt = typeName.indexOf('<');
+        if (lt >= 0) {
+            typeName = typeName.substring(0, lt);
+        }
+        return DECODABLE_TYPES.contains(typeName);
     }
 
     /**
