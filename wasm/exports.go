@@ -491,6 +491,34 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 		buf.WriteString(fmt.Sprintf("\t%s := argsJSON\n", fields[0].GoName))
 	} else if len(fields) > 0 {
 		for _, f := range fields {
+			// A POINTER PARAMETER MEANS OPTIONAL. cleat#1065.
+			//
+			// Absent binds nil and the workflow runs; present decodes as usual.
+			// This is the mechanism Go did not have: the contract's other
+			// SDKs each have one -- a Python-level default, Option<T> or
+			// #[serde(default)] in Rust -- and Go had none, so "optional" was
+			// expressible only as the implicit zero-binding of string and int,
+			// which cannot tell "sent zero" from "sent nothing".
+			//
+			// PURELY ADDITIVE TODAY. A pointer type currently falls into the
+			// default arm below, where extractJSONRaw returns "" for a missing
+			// key and json.Unmarshal("") fails -- so *T errors on absence and
+			// expresses "required, decoded differently" rather than "optional".
+			// Nothing in the tree declares one (checked across testdata/ and
+			// examples/), so this adds a capability and changes no behaviour
+			// anyone has.
+			//
+			// The spelling is deliberate: Go programmers already read *T as
+			// "may be absent", and it needs no tag, no option type, and no
+			// change to the workflow signature beyond the star.
+			if strings.HasPrefix(f.GoType, "*") {
+				fmt.Fprintf(buf, "\tvar %s %s\n", f.GoName, f.GoType)
+				fmt.Fprintf(buf, "\tif __raw := extractJSONRaw(argsJSON, %q); __raw != \"\" {\n", f.JSONTag)
+				fmt.Fprintf(buf, "\t\tif err := json.Unmarshal([]byte(__raw), &%s); err != nil {\n", f.GoName)
+				fmt.Fprintf(buf, "\t\t\treturn writeErrorOut(outPtr, maxOutLen, fmt.Errorf(\"unmarshal %s: %%w\", err))\n", f.JSONTag)
+				buf.WriteString("\t\t}\n\t}\n")
+				continue
+			}
 			switch f.GoType {
 			case "string":
 				fmt.Fprintf(buf, "\t%s := extractJSONString(argsJSON, %q)\n", f.GoName, f.JSONTag)
@@ -628,10 +656,24 @@ func hasComplexParams(result *analyzer.AnalysisResult) bool {
 	return false
 }
 
-// The dispatcher poll-loop model (main() -> cleatPollWork -> cleatDispatch)
-// was removed. Each workflow execution gets a fresh WASM instance via direct
-// export calls, eliminating both the parameter-envelope mismatch and the risk
-// of state bleed between invocations violating determinism.
+// THIS COMMENT SAID THE DISPATCHER MODEL "WAS REMOVED". It is the live path.
+//
+// Measured 2026-09-15 while adding the optional-parameter arm (cleat#1065):
+// the wasmtime backend calls `_start` (engine/backend_wasmtime.go:793), which
+// runs the generated main(), which calls cleatDispatch
+// (gen_main_stub.go). Removing the pointer arm from the dispatch binding
+// switch below turns a live test red; removing it from the //go:wasmexport
+// emitter does not.
+//
+// Both emitters are kept and both must carry every binding rule -- the
+// emitDispatchBindFailure comment records what one arm drifting costs
+// (cleat#1057 left the int arm reporting success) -- but a reader deciding
+// which one matters should know that this is the one the host reaches for a
+// Go guest.
+//
+// I nearly concluded the opposite from grepping ONE generated file for
+// "cleatDispatch" and finding only its definition. The caller is in a
+// different generated file.
 
 func ToSnakeCase(s string) string {
 	var b strings.Builder
@@ -723,6 +765,24 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 			fmt.Fprintf(buf, "\t\t%s := string(argsJSON)\n", fields[0].GoName)
 		} else {
 			for _, f := range fields {
+				// A POINTER PARAMETER MEANS OPTIONAL: absent binds nil.
+				// cleat#1065. THE SIBLING SITE IS THE //go:wasmexport emitter
+				// above and BOTH must carry this -- the emitDispatchBindFailure
+				// comment below records what happens when only one arm of this
+				// binding gets a fix (cleat#1057 left the int arm reporting
+				// success), and I repeated it one level up: the wasmexport
+				// emitter was changed first and this dispatch emitter was not,
+				// so the fixture bound nil-on-absence through the export and
+				// still errored through cleatDispatch -- which is the path the
+				// host actually calls.
+				if strings.HasPrefix(f.GoType, "*") {
+					fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
+					fmt.Fprintf(buf, "\t\tif __raw := extractJSONRaw(string(argsJSON), %q); __raw != \"\" {\n", f.JSONTag)
+					fmt.Fprintf(buf, "\t\t\tif err := json.Unmarshal([]byte(__raw), &%s); err != nil {\n", f.GoName)
+					emitDispatchBindFailure(buf, "\t\t\t\t", f.JSONTag)
+					buf.WriteString("\t\t\t}\n\t\t}\n")
+					continue
+				}
 				switch f.GoType {
 				case "string":
 					fmt.Fprintf(buf, "\t\t%s := extractJSONString(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
