@@ -188,4 +188,65 @@ func TestEveryNonExemptibleRangeSaysWhyItCannotBeExempted(t *testing.T) {
 	}
 }
 
+// Containment, adapted from WS-1's review of cleat#1630.
+//
+// Their point was about prefixes: re-admitting one range must not widen
+// another. Keyed by HOST the same question is sharper and is the weakest spot
+// in this design, because a name does not tell you what it resolves to. A host
+// an operator exempted for a loopback model server can later resolve to a
+// second address as well -- which is the rebinding shape -- and EVERY answer
+// has to be checked, not just the one that would be dialled.
+//
+// So: an exempt host resolving to a permitted private address AND a
+// non-exemptible one must be refused outright, not dialled on the good answer.
+func TestAnExemptHostIsRefusedIfANYAnswerIsNonExemptible(t *testing.T) {
+	for _, tc := range []struct {
+		ips []string
+		why string
+	}{
+		{[]string{"127.0.0.1", "169.254.169.254"}, "the exempted answer first"},
+		{[]string{"169.254.169.254", "127.0.0.1"}, "the metadata answer first -- resolver " +
+			"ordering must not decide the policy"},
+		{[]string{"10.1.2.3", "fe80::1"}, "RFC1918 alongside IPv6 link-local"},
+	} {
+		addrs := make([]netip.Addr, 0, len(tc.ips))
+		for _, ip := range tc.ips {
+			addrs = append(addrs, netip.MustParseAddr(ip))
+		}
+		g := &EgressGuard{
+			OperatorAllows:   func(context.Context, string) (bool, error) { return true, nil },
+			AllowHost:        func(context.Context, string) (bool, error) { return true, nil },
+			PluginHostExempt: func(string) bool { return true },
+			lookup:           func(context.Context, string) ([]netip.Addr, error) { return addrs, nil },
+			Dial: func(context.Context, string, string) (net.Conn, error) {
+				t.Errorf("%s: dialled a host with a non-exemptible answer among %v", tc.why, tc.ips)
+				return nil, nil
+			},
+		}
+		_, err := g.DialContext(context.Background(), "tcp", "models.example:11434")
+		var denied *EgressDeniedError
+		if !errors.As(err, &denied) {
+			t.Errorf("%s: got %v, want an EgressDeniedError", tc.why, err)
+		}
+	}
+}
+
+// And the control it needs: the same shape with every answer exemptible IS
+// dialled, so the test above is not passing because multi-answer hosts are
+// refused in general.
+func TestAnExemptHostWithOnlyExemptibleAnswersIsDialled(t *testing.T) {
+	g := &EgressGuard{
+		OperatorAllows:   func(context.Context, string) (bool, error) { return true, nil },
+		AllowHost:        func(context.Context, string) (bool, error) { return true, nil },
+		PluginHostExempt: func(string) bool { return true },
+		lookup: func(context.Context, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("10.1.2.3")}, nil
+		},
+		Dial: func(context.Context, string, string) (net.Conn, error) { return nil, errExemptDialProbe },
+	}
+	if _, err := g.DialContext(context.Background(), "tcp", "models.example:11434"); !errors.Is(err, errExemptDialProbe) {
+		t.Errorf("a host whose every answer is exemptible was refused: %v", err)
+	}
+}
+
 var errExemptDialProbe = errors.New("dial reached")

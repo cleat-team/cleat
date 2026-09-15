@@ -3,6 +3,8 @@ package main
 import (
 	"log/slog"
 	"strings"
+
+	"github.com/cleat-team/cleat/engine"
 )
 
 // pluginPrivateHosts is the operator's set of plugin endpoints permitted to
@@ -64,9 +66,13 @@ func (p *pluginPrivateHosts) logStartup(l *slog.Logger) {
 	for h := range p.hosts {
 		names = append(names, h)
 	}
+	// The ranges an exemption cannot reach come from engine.NonExemptibleRanges
+	// rather than being restated here. A restatement is written once against the
+	// table as it was and nothing fails when the table changes -- and this is
+	// the line an operator reads to decide whether their endpoint is reachable.
 	l.Warn("plugin egress: private-address exemptions are configured",
 		"hosts", strings.Join(names, ","),
 		"scope", "plugin endpoints only; guest fetches and the embedded runner are unaffected",
-		"note", "link-local, unspecified, multicast and reserved ranges are refused regardless",
+		"refused_regardless", strings.Join(engine.NonExemptibleRanges(), "; "),
 		"issue", "cleat#1627")
 }

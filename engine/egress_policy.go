@@ -89,6 +89,26 @@ var deniedRanges = []deniedRange{
 		whyNotExemptible: "reserved space; a service here is a misconfiguration whichever way it is reached"},
 }
 
+// NonExemptibleRanges reports the floor ranges no operator exemption can reach,
+// each with the floor's OWN reason string.
+//
+// It exists so that anything telling an operator what cannot be exempted --
+// a startup log, a doc generator -- quotes the table rather than paraphrasing
+// it. A paraphrase drifts: it is written once against the table as it was, and
+// nothing fails when a range is added or its reasoning changes. WS-1's review
+// of cleat#1630 made this point about their own FloorReadmissions and it is the
+// better construction, so it is here too.
+func NonExemptibleRanges() []string {
+	out := make([]string, 0, len(deniedRanges))
+	for _, d := range deniedRanges {
+		if d.exemptible {
+			continue
+		}
+		out = append(out, d.prefix.String()+" ("+d.why+")")
+	}
+	return out
+}
+
 // EgressDeniedError says a destination was refused and why.
 //
 // A distinct type because the caller has to turn it into a PERMANENT failure.
