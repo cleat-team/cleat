@@ -50,10 +50,28 @@ type FuncDecl struct {
 
 // AnalysisResult holds the complete analysis of a workflow package.
 type AnalysisResult struct {
-	TargetPkg   *Package
-	UserPkgs    []*Package
-	Funcs       map[string]*FuncDecl // keyed by fully-qualified name
-	EntryPoints []string             // fully-qualified names of entry points
+	TargetPkg *Package
+	UserPkgs  []*Package
+
+	// ImportedPkgs are the non-stdlib packages the build depends on,
+	// transitively, EXCLUDING TargetPkg.
+	//
+	// It exists for //cleat:require. That directive names host calls a package
+	// makes on the caller's behalf, and collectRequirements read it from
+	// TargetPkg.Files alone -- the workflow's own package. LoadPackages only
+	// retains the packages that matched the build pattern, so a directive in
+	// ANY imported package was silently ignored: cleat/dagrun's, and equally a
+	// user's own helper package in their own module. The failure is silent and
+	// late -- the module builds, deploys, and dies on the first call with "the
+	// HostCalls runtime was not initialized" (cleat#1617).
+	//
+	// Non-stdlib rather than cleat-module-only, deliberately: a user's helper
+	// package is not in cleat's module and has exactly the same problem. A
+	// directive is opt-in, can only add imports that already exist in the
+	// hostFunctions table, and there is no way for it to remove one.
+	ImportedPkgs []*Package
+	Funcs        map[string]*FuncDecl // keyed by fully-qualified name
+	EntryPoints  []string             // fully-qualified names of entry points
 
 	// Module information.
 	ModulePath string // e.g., "github.com/cleat-team/cleat"
