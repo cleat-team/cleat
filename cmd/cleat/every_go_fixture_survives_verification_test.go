@@ -53,10 +53,23 @@ var goFixtureExpectations = map[string]string{
 	"spin":              "",
 	"updatedispatch":    "",
 
+	// cleat#1614's floor assertion. The same Retrier.Wait as methodglobalh
+	// below, reaching the host through a cleat.HostCalls field on the
+	// receiver. Phase 3 admits it, and this row is what stops the phase-0
+	// tightening becoming "no method may reach the host".
+	"methodreceiverfield": "",
+
 	// The known-positive. A substring of the message, not just "some error":
 	// "it must fail" is satisfied by failing for any reason at all, including
 	// one this fixture was never written to exercise.
 	"errors": "does not have a HostCalls parameter",
+
+	// cleat#1614. A method reaching the host through the package-level h.
+	// The substring is the part that is specific to a METHOD: the generic
+	// "does not have a HostCalls parameter" above would be satisfied by the
+	// pre-1614 message, which told the author to declare the very global that
+	// makes this panic.
+	"methodglobalh": "a method cannot reach the host through a package-level",
 }
 
 // TestEveryGoFixtureMatchesItsExpectedVerification is cleat#1313.
