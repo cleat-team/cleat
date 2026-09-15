@@ -96,7 +96,11 @@ func toMigrationDialect(d Dialect) migration.Dialect {
 //
 // Concurrency: the Runner takes a database-wide advisory lock for PostgreSQL
 // (migration.Runner.session), so concurrent callers against one PostgreSQL
-// database -- across processes, not just goroutines -- are safe, the same
+// database -- across processes, not just goroutines -- are safe. That is true
+// PER DATABASE and says nothing about several: PostgreSQL advisory locks do not
+// cross databases, and roles do, so two processes migrating DIFFERENT scratch
+// databases in one instance still raced on CREATE ROLE until cleat#1599 added
+// withClusterMigrationLock below. It was the same
 // property applyPostgresSchemaFile's advisory lock used to provide. MySQL and
 // SQL Server have no such lock (migration/runner.go's Runner.session says why:
 // "untested locking code for the other two would be worse than none"), so two
@@ -126,8 +130,19 @@ func toMigrationDialect(d Dialect) migration.Dialect {
 // not what is broken.
 func applyMigrations(t *testing.T, db *sql.DB, dialect Dialect) {
 	t.Helper()
-	r := migration.NewRunner(db, toMigrationDialect(dialect), migrationsRoot())
-	if err := r.Run(context.Background()); err != nil {
-		t.Fatalf("apply %s migrations from %s: %v", dialect, migrationsRoot(), err)
+	run := func() {
+		r := migration.NewRunner(db, toMigrationDialect(dialect), migrationsRoot())
+		if err := r.Run(context.Background()); err != nil {
+			t.Fatalf("apply %s migrations from %s: %v", dialect, migrationsRoot(), err)
+		}
 	}
+	if dialect == DialectPostgres {
+		// Serialised across the whole INSTANCE, not just this database. The
+		// concurrency note above is correct per database and silent about
+		// several: roles are cluster-wide and six migrations create one.
+		// cleat#1599, cluster_wide_migration_lock.go.
+		withClusterMigrationLock(PostgresTestDSN(), run)
+		return
+	}
+	run()
 }
