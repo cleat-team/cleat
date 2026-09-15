@@ -148,14 +148,34 @@ func (g *EgressGuard) DialContext(ctx context.Context, network, address string) 
 		return nil, fmt.Errorf("egress: cannot parse address %q: %w", address, err)
 	}
 
-	if g.AllowHost != nil {
-		ok, err := g.AllowHost(ctx, host)
-		if err != nil {
-			return nil, fmt.Errorf("egress: checking the allowlist for %q: %w", host, err)
+	// The test seam, checked first and narrowly: an httptest server's URL is
+	// always a loopback IP LITERAL, so this needs no resolution and cannot be
+	// reached by a hostname. See AllowLoopback.
+	if g.AllowLoopback {
+		if ip, err := netip.ParseAddr(host); err == nil && ip.Unmap().IsLoopback() {
+			return g.dialer()(ctx, network, address)
 		}
-		if !ok {
-			return nil, &EgressDeniedError{Host: host, Reason: "host is not on this tenant's egress allowlist"}
+	}
+
+	// DENY BY DEFAULT. A nil AllowHost is not "unconfigured, so allow" -- it is
+	// the absence of a policy, and a platform that runs code it did not write
+	// must not read that as permission. cleat#1565, owner decision 2026-09-14.
+	//
+	// Checked BEFORE resolving, so a denied name is not a DNS oracle: a guest
+	// that cannot reach a host should not be able to learn whether it exists,
+	// or make the worker emit a lookup for a name of its choosing.
+	if g.AllowHost == nil {
+		return nil, &EgressDeniedError{
+			Host:   host,
+			Reason: "no egress allowlist is configured for this tenant, and an empty list permits nothing",
 		}
+	}
+	ok, err := g.AllowHost(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("egress: checking the allowlist for %q: %w", host, err)
+	}
+	if !ok {
+		return nil, &EgressDeniedError{Host: host, Reason: "host is not on this tenant's egress allowlist"}
 	}
 
 	lookup := g.lookup
@@ -184,11 +204,7 @@ func (g *EgressGuard) DialContext(ctx context.Context, network, address string) 
 		}
 	}
 
-	dial := g.Dial
-	if dial == nil {
-		d := &net.Dialer{}
-		dial = d.DialContext
-	}
+	dial := g.dialer()
 	// Dial the checked address literal rather than the name. This is the line
 	// that closes the rebinding window -- handing `host` back to the dialer
 	// would let it resolve again, and the second answer is the attacker's.
@@ -213,4 +229,13 @@ func CheckScheme(scheme string) error {
 		Host:   "",
 		Reason: fmt.Sprintf("scheme %q is not one of %s", scheme, strings.Join(AllowedSchemes, ", ")),
 	}
+}
+
+// dialer is g.Dial or a plain net.Dialer.
+func (g *EgressGuard) dialer() func(ctx context.Context, network, address string) (net.Conn, error) {
+	if g.Dial != nil {
+		return g.Dial
+	}
+	d := &net.Dialer{}
+	return d.DialContext
 }

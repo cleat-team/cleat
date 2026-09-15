@@ -126,6 +126,32 @@ type Runner struct {
 	mu        sync.RWMutex
 	workflows map[string]WorkflowFunc
 	now       time.Time
+
+	// egressAllowlist is the set of hosts http.fetch may reach. Nil denies
+	// everything, which is the same rule the worker enforces per tenant --
+	// cleat#1565, owner decision 2026-09-14.
+	//
+	// EXPLICIT rather than inherited or defaulted-open, and that was the
+	// decision rather than an accident of implementation. The embedded runner
+	// executes guest code exactly as the worker does, so defaulting it open
+	// would make the development path quietly weaker than production and
+	// would make "it worked in embedded" stop predicting anything.
+	egressAllowlist *engine.HostAllowlist
+}
+
+// WithEgressAllowlist permits http.fetch to reach these hosts, and only these.
+//
+//	embedded.New(embedded.WithEgressAllowlist("api.stripe.com", ".internal.example"))
+//
+// Entry forms are the worker's: an exact host, or a leading dot for "any host
+// ending in this", which excludes the apex. Without this option a workflow's
+// http.fetch is refused, naming the missing allowlist.
+//
+// It narrows and cannot widen: the link-local, loopback and RFC1918 floor is
+// refused whatever is listed here, so allowlisting 169.254.169.254 does not
+// reach cloud instance metadata.
+func WithEgressAllowlist(hosts ...string) Option {
+	return func(r *Runner) { r.egressAllowlist = engine.NewHostAllowlist(hosts...) }
 }
 
 // New creates a new embedded Runner. The simulated clock starts at
@@ -441,9 +467,15 @@ func (e *execution) handleHTTPFetch(requestJSON string) (string, error) {
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
 	}
+	// The allowlist lives on the Runner, which is what the caller configured;
+	// an execution borrows it. Nil stays nil, and nil denies.
+	guard := &engine.EgressGuard{}
+	if e.runner != nil && e.runner.egressAllowlist != nil {
+		guard.AllowHost = e.runner.egressAllowlist.AllowHostFunc()
+	}
 	client := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: &http.Transport{DialContext: (&engine.EgressGuard{}).DialContext},
+		Transport: &http.Transport{DialContext: guard.DialContext},
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {

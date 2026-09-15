@@ -1307,6 +1307,12 @@ func main() {
 			"grow_hold_down", connectionShareGrowHoldDown)
 	}
 
+	// cleat#1565: the per-tenant egress allowlist. Built from the worker's own
+	// pool, which carries no tenant -- the reads are scoped by an explicit
+	// tenant_id predicate, and admin.tenant_egress_allow deliberately has no
+	// row-level policy for that reason (see migration 079).
+	egressAllow := &engine.TenantEgressStore{DB: db, Dialect: engine.Dialect(*driver)}
+
 	w := &Worker{
 		Metrics:                          metricsInstance,
 		id:                               workerID,
@@ -1322,6 +1328,7 @@ func main() {
 		bgWg:                             &bgWg,
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,
+		egressAllow:                      egressAllow,
 		workerRegistry:                   workerRegistry,
 		connectionShare:                  share,
 		connectionBudgetParts:            budget,

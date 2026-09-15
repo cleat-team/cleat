@@ -66,6 +66,22 @@ func (s *execSession) pluginCallContext(ctx context.Context) context.Context {
 	}
 	ctx = plugin.WithCallContext(ctx, cc)
 
+	return s.tenantScopedContext(ctx)
+}
+
+// tenantScopedContext puts this execution's tenant on ctx, so anything
+// downstream that asks "whose workflow is this" gets an answer.
+//
+// Extracted from pluginCallContext rather than duplicated because a SECOND
+// consumer needed it: cleat#1565's egress allowlist is per tenant, and the
+// service-caller path (http.fetch) had no tenant on its context at all. Two
+// copies of this would be two places for the uuid.Parse warning to drift.
+//
+// Returns ctx unchanged when there is no usable tenant. That is not a
+// permissive default: a caller that requires a tenant must fail closed on its
+// absence, and the egress guard does -- no tenant means no allowlist, and an
+// absent allowlist permits nothing.
+func (s *execSession) tenantScopedContext(ctx context.Context) context.Context {
 	if s.tenantID == "" {
 		return ctx
 	}

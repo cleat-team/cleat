@@ -29,6 +29,12 @@ var (
 		"admin.plugin_tables",
 		"admin.tenant_api_keys",
 		"admin.tenant_roles",
+		// Migration 079, cleat#1565. Shared like the rest of admin: a
+		// tenant's egress allowlist is read by every worker, so a per-pool
+		// copy would mean two workers disagreeing about what a guest may
+		// reach -- and the one with the emptier copy would refuse traffic the
+		// operator had permitted.
+		"admin.tenant_egress_allow",
 		"admin.tenants",
 		// Migration 074, cleat#1487. Shared on purpose and in the strongest
 		// sense on this list: worker membership is the one thing here that is

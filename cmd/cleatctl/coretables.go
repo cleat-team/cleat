@@ -17,6 +17,7 @@ var coreTables = []string{
 	"admin.plugin_tables",
 	"admin.tenant_api_keys",
 	"admin.tenant_roles",
+	"admin.tenant_egress_allow",
 	"admin.tenants",
 	"admin.workers",
 	"concurrency_keys",
