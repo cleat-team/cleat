@@ -129,6 +129,8 @@ func main() {
 		runSetTenantSetting(ctx, db, args[1:])
 	case "egress-allow":
 		runEgressAllow(ctx, db, d, args[1:])
+	case "set-secret":
+		runSetSecret(ctx, db, d, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()

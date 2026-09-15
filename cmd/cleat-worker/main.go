@@ -806,6 +806,33 @@ func main() {
 		plugMux = http.NewServeMux()
 	}
 
+	// SECRETS. Built before plugin host functions are registered, because the
+	// adapter captures it -- a store created later would be nil in every
+	// wrapper and every ${secret:...} reference would silently reach the plugin
+	// as literal text.
+	//
+	// The master key comes from the ENVIRONMENT and not a flag: a flag value is
+	// visible in `ps`, in /proc/<pid>/cmdline to any local user, and in
+	// whatever records the command line. See engine.MasterKeyFromEnv.
+	masterKey, mkErr := engine.MasterKeyFromEnv(os.Getenv("CLEAT_SECRET_MASTER_KEY"))
+	if mkErr != nil {
+		logger.ErrorContext(context.Background(), "CLEAT_SECRET_MASTER_KEY is set but unusable",
+			"worker_id", workerID, "error", mkErr)
+		os.Exit(1)
+	}
+	secretStore, ssErr := engine.NewSecretStore(db, string(factory.Dialect()), masterKey)
+	if ssErr != nil {
+		logger.ErrorContext(context.Background(), "cannot build the secret store",
+			"worker_id", workerID, "error", ssErr)
+		os.Exit(1)
+	}
+	if err := checkSecretsUsable(ctx, secretStore); err != nil {
+		logger.ErrorContext(context.Background(),
+			"this deployment holds secrets but no master key is configured",
+			"worker_id", workerID, "error", err)
+		os.Exit(1)
+	}
+
 	var rawPluginConfig []byte
 	if *pluginConfigFile != "" {
 		data, ferr := os.ReadFile(*pluginConfigFile)
@@ -1049,6 +1076,7 @@ func main() {
 				registry:       pluginRegistry,
 				streamRegistry: pluginStreamRegistry,
 				pluginName:     lp.Plugin.Info().Name,
+				secrets:        secretStore,
 			}
 			if rerr := p.RegisterHostFunctions(adapter); rerr != nil {
 				logger.ErrorContext(context.Background(), "plugin host functions failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
