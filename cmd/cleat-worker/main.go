@@ -1507,6 +1507,28 @@ func main() {
 				logger.ErrorContext(context.Background(), "cannot build the API key resolver, so no request could be authenticated", "worker_id", workerID, "error", arErr)
 				os.Exit(1)
 			}
+			// HOST BINDING GOES ON FIRST, so that after auth.Middleware wraps
+			// it below the order is auth OUTSIDE, host binding INSIDE.
+			//
+			// That order is the whole correctness argument. Installed the other
+			// way round, the check would run before any credential had been
+			// resolved and would read whatever the tenant-resolver middleware
+			// had put in the context -- which on some paths is a value the
+			// CLIENT supplied. It would then be comparing a header against a
+			// header. cleat#1568.
+			if *requireHostMatch {
+				if err := checkHostBindingConfigured(ctx, authResolver); err != nil {
+					logger.ErrorContext(context.Background(),
+						"--require-host-match is set but no tenant domains are configured",
+						"worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				handler = auth.HostBindingMiddleware(authResolver,
+					"POST /ingest/{source_id}",
+					"GET /oauth/{provider}/callback",
+				)(handler)
+			}
+
 			handler = auth.Middleware(authResolver, true,
 				"POST /ingest/{source_id}",
 				"GET /oauth/{provider}/callback",
