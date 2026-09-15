@@ -96,6 +96,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/cleat"
+	"github.com/cleat-team/cleat/engine"
 	"github.com/google/uuid"
 )
 
@@ -430,10 +431,20 @@ func (e *execution) handleHTTPFetch(requestJSON string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("http.fetch: %w", err)
 	}
+	// cleat#1565, the SECOND implementation of this. The worker's copy is
+	// guarded the same way, and guarding only one would make this the
+	// documented route around whatever egress policy the other enforces --
+	// which is why the issue names both.
+	if err := engine.CheckScheme(httpReq.URL.Scheme); err != nil {
+		return "", fmt.Errorf("http.fetch: %w", err)
+	}
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: (&engine.EgressGuard{}).DialContext},
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		rec := cleat.CallResult{

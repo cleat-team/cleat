@@ -94,7 +94,10 @@ func TestHTTPFetchNetworkFailureStaysRetryable(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	c := &dbServiceCaller{}
+	// httptest always binds loopback, which cleat#1565's egress floor refuses
+	// for guest-initiated fetches. What this test pins is retryability, not
+	// egress, so it opts out of the floor narrowly rather than being deleted.
+	c := &dbServiceCaller{egress: &engine.EgressGuard{AllowLoopback: true}}
 	_, err := c.Call(context.Background(), "http", "fetch", fmt.Sprintf(`{"url":%q}`, url))
 	if err == nil {
 		t.Fatal("expected a connection failure")
@@ -115,7 +118,8 @@ func TestHTTPFetchStatusIsNotAnError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &dbServiceCaller{}
+	// Loopback, for the same reason as above: this pins status handling.
+	c := &dbServiceCaller{egress: &engine.EgressGuard{AllowLoopback: true}}
 	resp, err := c.Call(context.Background(), "http", "fetch", fmt.Sprintf(`{"url":%q}`, srv.URL))
 	if err != nil {
 		t.Fatalf("a 404 response became a call error: %v", err)

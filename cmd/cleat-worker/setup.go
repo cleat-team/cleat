@@ -146,6 +146,13 @@ type dbServiceCaller struct {
 	store       engine.WorkflowStore
 	workerID    string
 	benchSvcURL string
+
+	// egress is the network policy for guest-initiated fetches. Nil means the
+	// strict default, which is what production builds -- main.go never sets
+	// this, and TestNoProductionCodeAllowsLoopbackEgress keeps it that way.
+	// It is a field only so that tests pinning non-egress behaviour can reach
+	// an httptest server. cleat#1565.
+	egress *engine.EgressGuard
 }
 
 func (c *dbServiceCaller) Call(ctx context.Context, service, operation, requestJSON string) (string, error) {
@@ -233,6 +240,15 @@ func benchSvcStatusError(status int, body []byte) error {
 	return engine.NewTransientError("bench-svc", "", err)
 }
 
+// egressGuard is the policy this caller enforces: the strict default unless a
+// test supplied one.
+func (c *dbServiceCaller) egressGuard() *engine.EgressGuard {
+	if c.egress != nil {
+		return c.egress
+	}
+	return &engine.EgressGuard{}
+}
+
 func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON string) (string, error) {
 	var req fetchRequest
 	if err := json.Unmarshal([]byte(requestJSON), &req); err != nil {
@@ -252,12 +268,31 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 	if err != nil {
 		return "", engine.NewPermanentError("http.fetch", "", fmt.Errorf("invalid request %s %q: %w", req.Method, req.URL, err))
 	}
+	// cleat#1565. Scheme first, because a refused scheme should not depend on
+	// whether the host happens to resolve.
+	if err := engine.CheckScheme(httpReq.URL.Scheme); err != nil {
+		return "", engine.NewPermanentError("http.fetch", "", err)
+	}
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	// The guard is on the TRANSPORT, not on req.URL, and that placement is the
+	// whole point: a stock client follows up to ten redirects and re-resolves
+	// each hop, so a check on the guest's URL says nothing about where the
+	// request finally goes. See engine.EgressGuard.
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: c.egressGuard().DialContext},
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
+		// A refusal is PERMANENT. The generic failure below is transient, and
+		// retrying a policy decision burns the attempt budget against an
+		// answer that cannot change. cleat#1565 open question 5.
+		var denied *engine.EgressDeniedError
+		if errors.As(err, &denied) {
+			return "", engine.NewPermanentError("http.fetch", "", denied)
+		}
 		return "", engine.NewTransientError("http.fetch", "", fmt.Errorf("request %s %q failed: %w", req.Method, req.URL, err))
 	}
 	defer resp.Body.Close()
