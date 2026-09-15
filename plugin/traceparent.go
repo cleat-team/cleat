@@ -110,9 +110,59 @@ func validTraceID(s string) bool {
 // scheduled work run with no inbound request and therefore no trace to join;
 // they need a trace ORIGINATED, which is a different mechanism and is not this.
 func SetTraceparentFromContext(ctx context.Context, req *http.Request) {
-	cc := CallContextFromContext(ctx)
-	if cc == nil {
-		return
+	SetTraceparent(req, traceIDFor(ctx))
+}
+
+// originatedTraceKey carries a trace-id manufactured by a caller that had none
+// to inherit. Separate from CallContext deliberately -- see WithNewTrace.
+type originatedTraceKey struct{}
+
+// WithNewTrace returns a context carrying a freshly originated W3C trace-id, for
+// work that has no caller trace to join. cleat#1611.
+//
+// USE IT PER UNIT OF WORK, NEVER PER TICK. A background sweep that originates on
+// every iteration floods a collector with empty single-span traces at the sweep
+// interval, on every worker, forever -- burying the traces that mean something,
+// at a cost that scales with worker count. Originate when there is something to
+// do: a delivery to send, a batch actually fetched. An empty tick should produce
+// no trace at all.
+//
+// AND THE UNIT IS THE ITEM, NOT THE BATCH, because the item is what a person
+// asks about. "Why did this notification fail" is a question for a trace; "how
+// long did the sweep take" is a question for a metric, which
+// monitoring/prometheus already answers. A batch of N deliveries becomes N
+// traces sharing a time window, which is legible; one trace with N children
+// needs parentage that does not exist yet (cleat#1597).
+//
+// NOT STORED ON CallContext, and that is the one subtle choice here. CallContext
+// means "the engine invoked a plugin function for a workflow", and a background
+// sweep is none of those things. Fabricating one with only TraceID set would
+// make CallContextFromContext return non-nil where it returns nil today, so any
+// caller testing for presence would silently change behaviour. A separate key
+// says what is true: a trace exists, a workflow call does not.
+func WithNewTrace(ctx context.Context) context.Context {
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		// No id means no trace. Returning ctx unchanged degrades to today's
+		// behaviour -- no header -- rather than failing the work itself, which
+		// would trade a missing trace for a missed delivery.
+		return ctx
 	}
-	SetTraceparent(req, cc.TraceID)
+	return context.WithValue(ctx, originatedTraceKey{}, hex.EncodeToString(id))
+}
+
+// traceIDFor returns the trace this context is in: the engine's CallContext
+// trace first, then an originated one.
+//
+// ORDER MATTERS AND THIS IS THE SAFE DIRECTION. A real caller trace always wins
+// over a manufactured one, so a path that acquires both -- a plugin host
+// function that also calls WithNewTrace by mistake -- still propagates the
+// customer's trace rather than a fabricated root that silently detaches the
+// chain.
+func traceIDFor(ctx context.Context) string {
+	if cc := CallContextFromContext(ctx); cc != nil && cc.TraceID != "" {
+		return cc.TraceID
+	}
+	id, _ := ctx.Value(originatedTraceKey{}).(string)
+	return id
 }

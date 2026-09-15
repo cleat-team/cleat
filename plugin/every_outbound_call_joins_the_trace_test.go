@@ -21,8 +21,13 @@ import (
 //
 // The reason field says why the site is not done rather than why it is exempt.
 // Two genuinely never propagate and say so; the rest are queued.
-// needsOrigination marks a site with NO caller trace to join, because nothing
-// upstream of it ever had one. cleat#1596 stage 3.
+// needsOrigination marks a site with NO caller trace to join and NO decision yet
+// about whether one should be manufactured. cleat#1611.
+//
+// Shrinking: cleat#1611 answered it for the two sweeps that had a clear unit of
+// work (a due webhook delivery, a tenant statistics export) and answered it
+// NEGATIVELY for the kafka-connect consumer, which has its own entry saying why.
+// What is left under this constant is work nobody has priced.
 //
 // A different problem from propagation, and the distinction is why stage 2
 // stopped where it did. A plugin host function runs inside a workflow step, so
@@ -54,16 +59,38 @@ var notYetPropagating = map[string]string{
 	"plugin/index.go:fetchURL":                            "fetches from the plugin REGISTRY during resolution -- before and outside any run, so there is no caller trace to join. Would need a trace ORIGINATED rather than continued, which is the scheduled-run question in stage 3.",
 
 	// --- stage 2: the plugin sweep. Each has a live caller trace to join. ---
-	"plugins/notifications/background.go:deliver": needsOrigination,
 	"cleat/embedded/runner.go:handleHTTPFetch": "cleat#1596 stage 3, and it needs one " +
 		"thing the plugin sites do not: the EMBEDDED runner has no inbound request, so it has " +
 		"no trace to continue. Sibling of the worker's handleHTTPFetch, which this PR fixes, " +
 		"but the fix there is origination rather than propagation -- the scheduled-run case.",
-	"plugins/datadogexport/background.go:exportForConfig":    needsOrigination,
-	"plugins/kafkaconnect/background.go:consumeViaRestProxy": needsOrigination,
-	"plugins/kafkaconnect/background.go:createConsumer":      needsOrigination,
-	"plugins/kafkaconnect/background.go:pollRecords":         needsOrigination,
-	"plugins/kafkaconnect/background.go:subscribeConsumer":   needsOrigination,
+	"plugins/kafkaconnect/background.go:consumeViaRestProxy": "the kafka-connect consumer polls every FIVE SECONDS per enabled config, whether or not " +
+		"records exist, so originating here would produce a trace per empty poll per config per " +
+		"worker -- continuously. That is the flood WithNewTrace's contract forbids, and it buries " +
+		"the traces that mean something. cleat#1611 decided AGAINST tracing it: the consume's three " +
+		"HTTP calls are infrastructure chatter rather than a unit of business work, and the unit " +
+		"worth tracing is what happens when records actually arrive -- which is downstream of here. " +
+		"Compare plugins/datadogexport, which DOES originate: one real export per config per 60s.",
+	"plugins/kafkaconnect/background.go:createConsumer": "the kafka-connect consumer polls every FIVE SECONDS per enabled config, whether or not " +
+		"records exist, so originating here would produce a trace per empty poll per config per " +
+		"worker -- continuously. That is the flood WithNewTrace's contract forbids, and it buries " +
+		"the traces that mean something. cleat#1611 decided AGAINST tracing it: the consume's three " +
+		"HTTP calls are infrastructure chatter rather than a unit of business work, and the unit " +
+		"worth tracing is what happens when records actually arrive -- which is downstream of here. " +
+		"Compare plugins/datadogexport, which DOES originate: one real export per config per 60s.",
+	"plugins/kafkaconnect/background.go:pollRecords": "the kafka-connect consumer polls every FIVE SECONDS per enabled config, whether or not " +
+		"records exist, so originating here would produce a trace per empty poll per config per " +
+		"worker -- continuously. That is the flood WithNewTrace's contract forbids, and it buries " +
+		"the traces that mean something. cleat#1611 decided AGAINST tracing it: the consume's three " +
+		"HTTP calls are infrastructure chatter rather than a unit of business work, and the unit " +
+		"worth tracing is what happens when records actually arrive -- which is downstream of here. " +
+		"Compare plugins/datadogexport, which DOES originate: one real export per config per 60s.",
+	"plugins/kafkaconnect/background.go:subscribeConsumer": "the kafka-connect consumer polls every FIVE SECONDS per enabled config, whether or not " +
+		"records exist, so originating here would produce a trace per empty poll per config per " +
+		"worker -- continuously. That is the flood WithNewTrace's contract forbids, and it buries " +
+		"the traces that mean something. cleat#1611 decided AGAINST tracing it: the consume's three " +
+		"HTTP calls are infrastructure chatter rather than a unit of business work, and the unit " +
+		"worth tracing is what happens when records actually arrive -- which is downstream of here. " +
+		"Compare plugins/datadogexport, which DOES originate: one real export per config per 60s.",
 	"plugins/oauthprovider/routes.go:handleCallback": "an inbound HTTP HANDLER, not a workflow step. The trace it should join belongs to the " +
 		"browser or IdP that called it and arrives on the INBOUND request -- not to any run, and " +
 		"there is no CallContext here. Joining it means parsing the incoming traceparent on the " +
