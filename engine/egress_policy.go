@@ -108,9 +108,28 @@ func checkAddr(host string, addr netip.Addr) error {
 // further -- the per-tenant allowlist. It cannot widen: the floor has already
 // refused, and this is not reached.
 type EgressGuard struct {
-	// AllowHost reports whether this tenant may reach the requested host. Nil
-	// means no per-tenant list is configured and only the floor applies.
+	// AllowHost reports whether this TENANT may reach the requested host. Nil
+	// denies, because an absent tenant policy is not permission.
 	AllowHost func(ctx context.Context, host string) (bool, error)
+
+	// OperatorAllows reports whether this DEPLOYMENT may reach the host at all.
+	//
+	// EGRESS NEEDS BOTH. A destination is reachable only when the operator
+	// permits it AND the tenant permits it; either saying no is a refusal, and
+	// the refusal names which one. Owner decision 2026-09-15, correcting a
+	// model in which a tenant's list was the only thing consulted and an
+	// operator had no say in what their own deployment could reach.
+	//
+	// Nil means UNSET, which permits every public host -- owner decision, and
+	// the reason it is safe to default open here and not on the tenant side:
+	// the floor still applies underneath, so "all public" really is all
+	// public. An operator who wants to narrow sets a list; a tenant can only
+	// ever narrow further within it.
+	//
+	// It is consulted for egress that has no tenant at all -- plugin
+	// background sweeps, and anything on an auth-exempt route -- which is the
+	// case that previously had nowhere to look and grew a flag of its own.
+	OperatorAllows func(ctx context.Context, host string) (bool, error)
 
 	// AllowLoopback permits 127.0.0.0/8 and ::1 ONLY. It exists so that tests
 	// driving the real fetch path against an httptest server -- which always
@@ -123,6 +142,24 @@ type EgressGuard struct {
 	// open RFC1918 and link-local, and the metadata address is the one thing
 	// this whole file exists to refuse.
 	AllowLoopback bool
+
+	// TenantOptional reports whether THIS call legitimately has no tenant, in
+	// which case the operator layer governs it alone.
+	//
+	// A PREDICATE rather than a bool, because the answer differs per call on
+	// one transport. A plugin builds its http.Client once at Init and uses it
+	// for both host-function calls (a tenant is in context) and background
+	// sweeps (none is), so a static flag would have to be wrong for one of
+	// them. Nil means "a tenant is always required", which is what guest
+	// egress wants.
+	//
+	// Explicit rather than inferred from "AllowHost returned false", because
+	// those states must not be confused: a missing tenant on a call that
+	// SHOULD have one is a bug that has to deny, and treating it as
+	// "tenant-less, so operator only" turns that bug into an open gate. The
+	// test for exactly that is
+	// TestTenantlessEgressAnswersToTheOperatorAlone/a_MISSING_tenant_hook.
+	TenantOptional func(ctx context.Context) bool
 
 	// Resolver is overridable by callers. Nil means net.DefaultResolver.
 	Resolver *net.Resolver
@@ -157,26 +194,55 @@ func (g *EgressGuard) DialContext(ctx context.Context, network, address string) 
 		}
 	}
 
-	// DENY BY DEFAULT. A nil AllowHost is not "unconfigured, so allow" -- it is
-	// the absence of a policy, and a platform that runs code it did not write
-	// must not read that as permission. cleat#1565, owner decision 2026-09-14.
+	// BOTH LAYERS, operator first, and both BEFORE resolving -- a denied name
+	// must not be a DNS oracle. A guest that cannot reach a host should not be
+	// able to learn whether it exists, or make the worker emit a lookup for a
+	// name of its choosing.
 	//
-	// Checked BEFORE resolving, so a denied name is not a DNS oracle: a guest
-	// that cannot reach a host should not be able to learn whether it exists,
-	// or make the worker emit a lookup for a name of its choosing.
-	if g.AllowHost == nil {
-		return nil, &EgressDeniedError{
-			Host:   host,
-			Reason: "no egress allowlist is configured for this tenant, and an empty list permits nothing",
+	// Operator first because it is the outer bound: if the deployment may not
+	// reach a host, whose behalf the request is on does not matter, and the
+	// refusal should say so rather than blaming a tenant's list.
+	if g.OperatorAllows != nil {
+		ok, err := g.OperatorAllows(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("egress: checking the operator allowlist for %q: %w", host, err)
+		}
+		if !ok {
+			return nil, &EgressDeniedError{
+				Host:   host,
+				Reason: "host is not on this deployment's egress allowlist (operator policy)",
+			}
 		}
 	}
-	ok, err := g.AllowHost(ctx, host)
-	if err != nil {
-		return nil, fmt.Errorf("egress: checking the allowlist for %q: %w", host, err)
+
+	// A nil AllowHost is the absence of a TENANT policy, and a platform that
+	// runs code it did not write must not read that as permission. Unlike the
+	// operator layer, which defaults open, this defaults closed. cleat#1565.
+	//
+	// Skipped entirely when there is no tenant to have a policy -- a plugin
+	// background sweep, or an auth-exempt route. Those are governed by the
+	// operator layer alone, which is why that layer had to become general
+	// rather than a plugin-shaped flag.
+	if !g.tenantOptional(ctx) {
+		if g.AllowHost == nil {
+			return nil, &EgressDeniedError{
+				Host:   host,
+				Reason: "no egress allowlist is configured for this tenant, and an empty list permits nothing",
+			}
+		}
+		ok, err := g.AllowHost(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("egress: checking the allowlist for %q: %w", host, err)
+		}
+		if !ok {
+			return nil, &EgressDeniedError{Host: host, Reason: "host is not on this tenant's egress allowlist"}
+		}
 	}
-	if !ok {
-		return nil, &EgressDeniedError{Host: host, Reason: "host is not on this tenant's egress allowlist"}
-	}
+
+	// The FLOOR is below both layers and is checked after them, on the
+	// RESOLVED addresses -- neither an operator's list nor a tenant's can
+	// admit a private address, because a hostname on either list that resolves
+	// into private space is the rebinding case rather than a grant.
 
 	lookup := g.lookup
 	if lookup == nil {
@@ -238,4 +304,9 @@ func (g *EgressGuard) dialer() func(ctx context.Context, network, address string
 	}
 	d := &net.Dialer{}
 	return d.DialContext
+}
+
+// tenantOptional reports whether this call may proceed without a tenant.
+func (g *EgressGuard) tenantOptional(ctx context.Context) bool {
+	return g.TenantOptional != nil && g.TenantOptional(ctx)
 }
