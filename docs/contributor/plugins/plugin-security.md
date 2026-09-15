@@ -151,8 +151,30 @@ Two differences from the PostgreSQL arm are worth knowing, both measured:
   as well. PostgreSQL needs no equivalent: `FOR ALL … USING` defaults its
   `WITH CHECK` to the `USING` expression.
 
-Dropping a tenant is still PostgreSQL-only: `admin.drop_tenant` reads
-`admin.plugin_tables`, which SQL Server does not have.
+* **A `DELETE` is a read for the filter predicate's purposes**, which is the
+  half that costs an operator. The predicate hides rows from `DELETE` exactly as
+  it hides them from `SELECT`, so a statement issued with no tenant key removes
+  nothing and reports `(0 rows affected)` -- the one outcome indistinguishable
+  from "already clean". Measured as `sa` with `IS_SRVROLEMEMBER('sysadmin') = 1`:
+  privilege is not what gets you past a security policy on this dialect. The
+  `BLOCK` predicates do not help, because they refuse a write naming the *wrong*
+  tenant and this one names the right one on a connection that has not said who
+  it is.
+
+Dropping a tenant works on both dialects. `admin.drop_tenant` on SQL Server is
+`migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql`, and it finds
+tenant-owned tables by asking `sys.columns` which ones carry a `tenant_id`
+column rather than by reading a registry -- which reaches core and plugin tables
+in one query, because on this dialect both live in `dbo`. PostgreSQL reads
+`admin.plugin_tables` because `--schema` can put its plugin tables in a schema
+the function would otherwise have to guess.
+
+This paragraph said "still PostgreSQL-only: `admin.drop_tenant` reads
+`admin.plugin_tables`, which SQL Server does not have". Both halves were wrong.
+`admin.plugin_tables` has existed on SQL Server since
+`migrations/mssql/001_schema.sql:117` -- in the pre-066 two-column shape, with
+no producer -- and the dialect needed no registry to get tenant deletion.
+cleat#1635.
 
 ### Which role a plugin runs as
 

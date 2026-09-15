@@ -12844,3 +12844,82 @@ that does not send one, so `absent means original` would be unreadable by exactl
 client most likely to check. And **not a response count**, which would mean storing how many times a
 key was replayed — new persistent state for a case the decision says callers mostly do not care
 about.
+
+---
+
+### 3.325 A tenant could not be deleted at all on SQL Server, and the manual cleanup reported success while deleting nothing — ✅ **FIXED 2026-09-15** (cleat#1635)
+
+`admin.drop_tenant` existed only on PostgreSQL, so `cleatctl drop-tenant` refused on SQL Server
+(`cmd/cleatctl/ported.go`) and there was no supported way to remove a customer's data on a tier-1
+dialect.
+
+**The issue was filed with two claims that turned out to be wrong, both mine.** They are recorded
+because the corrections are the useful part.
+
+*"There is no ordinary path to those rows."* Measured on SQL Server 2022, against the predicate
+`applyTenantScopingMSSQL` emits, two tenants seeded each under its own key:
+
+| session | rows visible |
+|---|---|
+| `sa`, `IS_SRVROLEMEMBER('sysadmin') = 1`, no session context | **0** |
+| `tenant_id` = the dropped tenant | **1** |
+| `cross_tenant` set to any non-empty string | **2** |
+
+The first row is real and is why the residue looked unreachable: SQL Server applies RLS to
+`sysadmin` and `db_owner` too, with no `BYPASSRLS` counterpart. But the predicate's `cross_tenant`
+disjunct admits, and so does the dropped tenant's own key — the predicate never consults
+`admin.tenants`, so a tenant being gone does not enter into it. The rows were always reachable.
+
+*"`admin.plugin_tables` does not exist on SQL Server."* It has existed since
+`migrations/mssql/001_schema.sql:117`. What is true is narrower: it carries the pre-066 two-column
+shape and has never had a producer on that dialect.
+
+**The defect that was actually left is a silent no-op, and it is worse than the one in the title.**
+A filter predicate hides rows from `DELETE` exactly as it hides them from `SELECT`, so the cleanup
+an operator reaches for after being refused by cleatctl:
+
+    DELETE FROM dbo.kv_store WHERE tenant_id = '<dropped tenant>';
+    -- (0 rows affected)
+
+No error, nothing deleted, and `(0 rows affected)` is indistinguishable from *already clean*. With
+the tenant key set first the identical statement reports `1 row affected`. Both directions
+measured, and pinned by `TestADeleteWithoutTheTenantKeyRemovesNothingOnSQLServer` — a
+characterisation test, so if a future SQL Server raises instead, it goes red and migration 074's
+header needs rewriting.
+
+**The table set is DERIVED rather than listed, and that is the design decision worth carrying.**
+PostgreSQL's `admin.drop_tenant` deletes from a hand-maintained list, and that list has drifted
+three times:
+
+| | added by | missing from `drop_tenant` until |
+|---|---|---|
+| `tenant_settings` | 039 | "twenty migrations", per its own comment in `droptenant.go` |
+| `workflow_defs` | 001 | #1201 |
+| `workflow_memory_{stats,samples}` | 056 | **still open as #1644**, found while writing this |
+
+A list cannot answer *"is there a tenant-owned table I do not know about"*; `sys.columns` can. So
+`migrations/mssql/074` deletes five foreign-key-ordered tables by name and then sweeps every
+remaining table carrying a `tenant_id` column — core, plugin, and anything a later migration adds,
+with nobody editing the procedure. It needs no plugin registry, because on SQL Server plugin
+tables live in `dbo` alongside the core ones.
+
+The test reads the same universe from a different place, so it can disagree with the procedure.
+Falsified twice, each on a fresh database built by the migration runner — removing the sweep, and
+removing the session-key set — and both times it named `dbo.mssql_drop_tenant_probe` **and**
+`dbo.workflow_memory_stats`, which is the #1644 class being caught on the dialect that has the
+derived sweep.
+
+**`SET QUOTED_IDENTIFIER ON` is in the migration on purpose.** A procedure captures that setting at
+CREATE time, and every table this one deletes from is bound to a `WITH SCHEMABINDING` predicate, so
+a `DELETE` compiled with it OFF fails with `Msg 1934`. Measured: created from `sqlcmd`, which
+leaves it OFF for a `-i` script, the procedure was unusable. The nine other procedures in
+`migrations/mssql/` carry no such SET and work only because go-mssqldb's login turns it on — a
+client default holding a schema decision up.
+
+**No "no such tenant" guard**, deliberately: the state this procedure most needs to work in is the
+one the issue describes — the `admin.tenants` row already deleted by hand, the data still there —
+and a guard on that row would refuse exactly the cleanup it exists to perform.
+
+Files: `migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql`,
+`cmd/cleatctl/droptenant_mssql.go`, `cmd/cleatctl/droptenant.go`, `cmd/cleatctl/ported.go`,
+`engine/a_tenant_can_be_dropped_on_sql_server_test.go`.

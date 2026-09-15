@@ -629,7 +629,23 @@ const mssqlPluginTenantFilter = "fn_plugin_tenant_filter"
 // procedural body to raise from -- BEGIN ... THROW is a syntax error there. So
 // a READ with no tenant returns an empty result rather than an error. Writes
 // are covered by the block predicates above; reads are not, and that asymmetry
-// is real. cleat#1552 carries the options that were measured and rejected,
+// is real.
+//
+// AND A DELETE IS A READ FOR THIS PURPOSE, which this comment did not say and
+// is the sharper half. The filter predicate hides rows from DELETE exactly as
+// it hides them from SELECT, so a DELETE issued with no tenant key removes
+// nothing and reports success -- "(0 rows affected)", which is the one outcome
+// indistinguishable from "already clean". Measured as sa with
+// IS_SRVROLEMEMBER('sysadmin') = 1, because privilege is not what gets you
+// past a security policy on this dialect. The block predicates above do not
+// help: they refuse a write that names the WRONG tenant, and this write names
+// the right one on a connection that has not said who it is.
+//
+// That is what made a hand-written tenant cleanup silently do nothing, and it
+// is why migrations/mssql/074's admin.drop_tenant sets the tenant key before
+// its first DELETE. cleat#1635, and
+// TestADeleteWithoutTheTenantKeyRemovesNothingOnSQLServer pins the behaviour
+// so a change in it is visible. cleat#1552 carries the options that were measured and rejected,
 // including a CONVERT trip-wire whose message SQL Server redacts inside a
 // security predicate.
 func applyTenantScopingMSSQL(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), tables []string) error {
@@ -704,17 +720,24 @@ func grantSweepTables(ctx context.Context, exec func(ctx context.Context, query 
 //
 // PostgreSQL only. This USED to say "matching applyTenantScoping", and since
 // cleat#1552 that is no longer true: SQL Server gets a policy and no registry
-// row, because admin.plugin_tables does not exist there and nothing would read
-// it. MySQL gets neither, and needs neither.
+// row. MySQL gets neither, and needs neither.
 //
-// THAT LEAVES A GAP ON SQL SERVER, and it is recorded here rather than left for
-// someone to infer from the asymmetry. admin.drop_tenant reads this table to
-// find the plugin tables a dropped tenant owns rows in (cleat#1289). SQL Server
-// has no counterpart, so dropping a tenant there leaves its plugin rows in
-// place -- and now that a policy exists, unreadable as well as undeleted, which
-// is the exact pairing #1289 was filed about. Closing it needs a SQL Server
-// drop_tenant path, which is a separate piece of work from installing the
-// policies.
+// THE REASON GIVEN HERE WAS WRONG, and it is corrected rather than quietly
+// replaced because it was written confidently. This comment said
+// admin.plugin_tables "does not exist" on SQL Server. It has existed since
+// migrations/mssql/001_schema.sql:117; what is true is narrower -- it carries
+// the pre-066 two-column shape, with no schema_name and no tenant_scoped, and
+// nothing on that dialect has ever written a row to it.
+//
+// THE GAP THIS COMMENT DESCRIBED IS CLOSED, and closed without a registry.
+// migrations/mssql/074 defines admin.drop_tenant there, and it finds
+// tenant-owned tables by asking sys.columns which ones carry a tenant_id
+// column -- which reaches core tables and plugin tables in one query, because
+// on SQL Server both live in dbo (WithSchema is PostgreSQL-only). So there is
+// nothing for a SQL Server arm of this function to do: a registry would be a
+// second thing to keep in step with a question the catalogue already answers,
+// and PostgreSQL needs one only because --schema can put its plugin tables in
+// a schema the procedure would otherwise have to guess. cleat#1635.
 //
 // The schema is recorded alongside the name because --schema puts plugin
 // tables somewhere other than public while admin.plugin_tables stays in the

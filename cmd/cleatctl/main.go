@@ -122,7 +122,7 @@ func main() {
 	case "check-db":
 		runCheckDB(ctx, db, d, args[1:])
 	case "drop-tenant":
-		runDropTenant(ctx, db, args[1:])
+		runDropTenant(ctx, db, d, args[1:])
 	case "revoke-api-key":
 		runRevokeAPIKey(ctx, db, args[1:])
 	case "set-tenant-setting":
