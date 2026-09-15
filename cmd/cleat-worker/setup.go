@@ -2193,11 +2193,24 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			}))
 		}
 	}
-	// Load initial event count so the engine tracks events locally.
-	if w.maxQuotaEvents > 0 {
-		if count, err := execStore.GetEventCount(w.ctx, wf.ID); err == nil {
-			engineOpts = append(engineOpts, engine.WithInitialEventCount(count))
-		}
+	// Load the persisted event count. UNCONDITIONALLY, which it was not:
+	// this was gated on `w.maxQuotaEvents > 0` because the only consumer was
+	// the event cap, and a cap of 0 meant nobody needed the number.
+	//
+	// The replay tail check (engine/replayer.go, cleat#1507) is a second
+	// consumer with a different reachability requirement. Left behind the
+	// gate it would be green in every test that configures a quota and absent
+	// from every deployment that does not -- a detector that reports only
+	// where nobody is looking. Seeding it when no cap is set costs one query
+	// per claim and changes no cap behaviour: durablecalls.go's check is
+	// guarded by `maxEventsPerWorkflow > 0`, which WithMaxQuotaEvents is the
+	// only thing that sets.
+	//
+	// An error is deliberately swallowed: the count stays 0, and
+	// reportShortReplayHistory declines to speak on 0 precisely because it
+	// cannot tell "no events" from "I did not manage to ask".
+	if count, err := execStore.GetEventCount(w.ctx, wf.ID); err == nil {
+		engineOpts = append(engineOpts, engine.WithInitialEventCount(count))
 	}
 	if noPerStepFlush != nil && *noPerStepFlush {
 		engineOpts = append(engineOpts, engine.WithNoPerStepFlush(true))

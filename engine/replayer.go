@@ -189,3 +189,99 @@ func validateReplayStepDensity(history []EventRecord) error {
 	}
 	return nil
 }
+
+// truncatedCompactedEvents returns how many compacted events were dropped to
+// keep the compaction-state JSONB bounded, or 0 when none were.
+//
+// This is the correction term without which reportShortReplayHistory fires on
+// every workflow long enough to be truncated -- which is to say, on exactly the
+// long-running workflows most likely to be replayed. extractCompactionState
+// drops the oldest events (`cs.Events = cs.Events[truncated:]`) and records the
+// count here, so the reconstructed history is SHORTER than the instance's
+// event_count by design and not by loss.
+func truncatedCompactedEvents(cs *CompactionState) int {
+	if cs == nil || cs.Summary == nil {
+		return 0
+	}
+	return cs.Summary.TruncatedCount
+}
+
+// reportShortReplayHistory reports a replay whose loaded history is shorter
+// than the event_count the instance row records. cleat#1507.
+//
+// WHAT THIS CATCHES THAT validateReplayStepDensity CANNOT. That function walks
+// the history asserting history[i].Step == i, so it sees a HOLE. It cannot see
+// a missing TAIL: [0,1,2] with step 3 gone satisfies the predicate at every i,
+// because there is no index at which to disagree. The instance's own counter is
+// the only record of how long the history was supposed to be.
+//
+// # Why this is one-directional, and why the other direction is NOT a bug
+//
+// It reports only recorded > loaded. recorded < loaded is the ORDINARY state of
+// a crashed segment: the per-step flush persists each event as it happens and
+// deliberately does not count it (see TestPerStepFlushDoesNotDoubleCountEvents
+// and cleat#1594), while FinalizeWorkflowSegment counts the whole segment when
+// it ends. A worker that dies mid-segment therefore leaves rows on disk that
+// event_count has never counted -- measured at 5 rows against event_count 0.
+// That is precisely the case replay exists to recover, so an equality check
+// would fire on every recovery it is meant to protect.
+//
+// # Why this warns rather than failing the replay
+//
+// A repeated finalize double-counts: the row insert is idempotent but the
+// increment is unconditional, measured as event_count 3 -> 6 over two appends
+// of the same three records. That produces this exact signature with no history
+// missing. cleat#1507 records that the reachability of that path is NOT
+// established -- one caller, no retry, ErrFenceLost returns without
+// re-finalizing -- but "I could not construct it" is not "it cannot happen",
+// and failing a replay on a signal that might fire on a healthy workflow trades
+// a silent wrong answer for a loud one. Promoting this to a hard failure once
+// that path is closed is a one-line change; the reverse is not.
+func reportShortReplayHistory(recorded, loaded, truncated int) (short bool, missing int) {
+	// 0 is also what an unread or failed count looks like -- setup.go swallows
+	// GetEventCount's error and leaves the seed at zero -- and a check that
+	// cannot tell "no events recorded" from "I did not manage to ask" must not
+	// speak.
+	//
+	// THIS GUARD IS REDUNDANT WITH THE `missing <= 0` BELOW, and saying so is
+	// better than implying otherwise: with recorded == 0 and both other terms
+	// non-negative, missing is always <= 0, so no input reaches this return
+	// that the next one would not also stop. Deleting it leaves every test in
+	// a_replay_history_shorter_than_its_record_is_reported_test.go green --
+	// measured, not assumed. It stays because it is the guard that survives a
+	// change to the comparison: reverting `missing <= 0` to `missing != 0`
+	// makes the crashed-segment case fire, and this line is what still holds
+	// it. Redundant against today's arithmetic, load-bearing against
+	// tomorrow's edit.
+	if recorded <= 0 {
+		return false, 0
+	}
+	missing = recorded - (loaded + truncated)
+	if missing <= 0 {
+		return false, 0
+	}
+	return true, missing
+}
+
+// warnIfReplayHistoryIsShort runs reportShortReplayHistory against this
+// engine's persisted count and logs the result. Called from both replay entry
+// points, immediately after the density check, so that the history it measures
+// is the same one the density check just walked -- post-compaction merge, so
+// both sides describe the same events.
+func (e *Engine) warnIfReplayHistoryIsShort(ctx context.Context, replayHistory []EventRecord) {
+	short, missing := reportShortReplayHistory(
+		e.initialEventCount, len(replayHistory), truncatedCompactedEvents(e.compactionState))
+	if !short {
+		return
+	}
+	if e.Metrics != nil {
+		e.Metrics.RecordReplayShortHistory(ctx)
+	}
+	e.log().WarnContext(ctx, "replay history is shorter than the instance's recorded event count",
+		"workflow_id", e.workflowID, "tenant_id", e.tenantID,
+		"recorded_event_count", e.initialEventCount,
+		"loaded_events", len(replayHistory),
+		"truncated_compacted_events", truncatedCompactedEvents(e.compactionState),
+		"missing", missing,
+		"note", "a tail may be missing, or a segment's finalize may have counted twice (cleat#1507)")
+}

@@ -61,6 +61,7 @@ type Metrics struct {
 	calls                   metric.Int64Counter
 	callRetries             metric.Int64Counter
 	replayFailures          metric.Int64Counter
+	replayShortHistories    metric.Int64Counter
 	replayChecksumFailures  metric.Int64Counter
 	ambiguousCalls          metric.Int64Counter
 	compactionEventsDeleted metric.Int64Counter
@@ -248,6 +249,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_replay_failures_total: %w", err)
+	}
+
+	m.replayShortHistories, err = meter.Int64Counter(
+		"cleat_replay_short_histories_total",
+		metric.WithDescription("Replays whose loaded history was shorter than the instance's recorded event_count"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_replay_short_histories_total: %w", err)
 	}
 
 	m.replayChecksumFailures, err = meter.Int64Counter(
@@ -916,6 +925,18 @@ func (m *Metrics) RecordCallRetry(ctx context.Context, extraAttrs ...attribute.K
 func (m *Metrics) RecordReplayFailure(ctx context.Context, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.replayFailures.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordReplayShortHistory increments the replay-short-histories counter.
+//
+// NOT RecordReplayFailure, and the distinction is the whole point: a short
+// history is a SUSPICION, not a divergence. cleat#1507 records a path by which
+// the recorded count can legitimately exceed the rows without any history
+// being lost, so this counter must stay separable from the one an operator
+// pages on.
+func (m *Metrics) RecordReplayShortHistory(ctx context.Context, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.replayShortHistories.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordReplayChecksumFailure increments the replay-checksum-failures counter.
