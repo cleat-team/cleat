@@ -64,6 +64,11 @@ func (s *execSession) pluginCallContext(ctx context.Context) context.Context {
 	if s.engine.db != nil {
 		cc.DB = s.engine.db
 	}
+	// cleat#1596. Set unconditionally-if-present rather than guarded like the
+	// two above: an empty trace-id is a legitimate state (a run started by a
+	// scheduler has no inbound request to join), and plugin.SetTraceparent
+	// treats empty as "send nothing" rather than as an error.
+	cc.TraceID = s.engine.traceID
 	ctx = plugin.WithCallContext(ctx, cc)
 
 	return s.tenantScopedContext(ctx)
