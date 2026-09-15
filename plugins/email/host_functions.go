@@ -275,6 +275,7 @@ func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("email: create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 
 	q := req.URL.Query()
 	q.Add("limit", "10")

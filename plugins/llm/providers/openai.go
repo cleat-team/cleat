@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugin"
 	"io"
 	"net/http"
 	"strings"
@@ -26,6 +27,7 @@ func OpenAIChat(ctx context.Context, client *http.Client, apiKey, baseURL string
 	if err != nil {
 		return ChatOutput{}, fmt.Errorf("openai: create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -103,6 +105,7 @@ func OpenAIChatStream(ctx context.Context, client *http.Client, apiKey, baseURL 
 	if err != nil {
 		return nil, fmt.Errorf("openai: create stream request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -174,6 +177,7 @@ func OpenAIEmbed(ctx context.Context, client *http.Client, apiKey, baseURL strin
 	if err != nil {
 		return EmbedOutput{}, fmt.Errorf("openai: create embed request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 

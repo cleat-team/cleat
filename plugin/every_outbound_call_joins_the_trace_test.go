@@ -21,11 +21,20 @@ import (
 //
 // The reason field says why the site is not done rather than why it is exempt.
 // Two genuinely never propagate and say so; the rest are queued.
-// stageTwo marks a site queued for the plugin sweep. Deliberately one shared
-// string: these are not distinct reasons, and inventing twenty different
-// sentences would read as twenty considered decisions.
-const stageTwo = "stage 2 of cleat#1596: queued for the plugin sweep. A live caller trace " +
-	"exists here -- the trace-id reaches a plugin on plugin.CallContextFromContext(ctx).TraceID."
+// needsOrigination marks a site with NO caller trace to join, because nothing
+// upstream of it ever had one. cleat#1596 stage 3.
+//
+// A different problem from propagation, and the distinction is why stage 2
+// stopped where it did. A plugin host function runs inside a workflow step, so
+// a trace exists and the fix is one line. A BACKGROUND SWEEP runs on a timer
+// with no inbound request and no CallContext -- nothing to continue, so a trace
+// must be MANUFACTURED, which raises a question nobody has answered: is each
+// sweep iteration one trace, each delivery one, or the loop itself a single
+// long-lived one? Guessing produces traces worse than none, because they look
+// authoritative.
+const needsOrigination = "cleat#1596 stage 3: a background sweep with no inbound request and no " +
+	"CallContext, so there is no caller trace to join. Needs a trace ORIGINATED, which is a design " +
+	"question (one trace per iteration? per delivery? per loop?) rather than a one-line fix."
 
 var notYetPropagating = map[string]string{
 	// --- out of scope: not a hop in any run's causal chain ---
@@ -45,30 +54,21 @@ var notYetPropagating = map[string]string{
 	"plugin/index.go:fetchURL":                            "fetches from the plugin REGISTRY during resolution -- before and outside any run, so there is no caller trace to join. Would need a trace ORIGINATED rather than continued, which is the scheduled-run question in stage 3.",
 
 	// --- stage 2: the plugin sweep. Each has a live caller trace to join. ---
-	"cmd/cleat-worker/setup.go:forwardToBenchSvc":       stageTwo,
-	"plugins/notifications/background.go:deliver":       stageTwo,
-	"plugins/slacknotify/host_functions.go:sendMessage": stageTwo,
-	"cleat/embedded/runner.go:handleHTTPFetch": "stage 2 of cleat#1596, and it needs one " +
+	"plugins/notifications/background.go:deliver": needsOrigination,
+	"cleat/embedded/runner.go:handleHTTPFetch": "cleat#1596 stage 3, and it needs one " +
 		"thing the plugin sites do not: the EMBEDDED runner has no inbound request, so it has " +
 		"no trace to continue. Sibling of the worker's handleHTTPFetch, which this PR fixes, " +
 		"but the fix there is origination rather than propagation -- the scheduled-run case.",
-	"plugins/datadogexport/background.go:exportForConfig":        stageTwo,
-	"plugins/email/host_functions.go:checkStatus":                stageTwo,
-	"plugins/kafkaconnect/background.go:consumeViaRestProxy":     stageTwo,
-	"plugins/kafkaconnect/background.go:createConsumer":          stageTwo,
-	"plugins/kafkaconnect/background.go:pollRecords":             stageTwo,
-	"plugins/kafkaconnect/background.go:subscribeConsumer":       stageTwo,
-	"plugins/kafkaconnect/host_functions.go:produceViaRestProxy": stageTwo,
-	"plugins/llm/providers/anthropic.go:AnthropicChat":           stageTwo,
-	"plugins/llm/providers/anthropic.go:AnthropicChatStream":     stageTwo,
-	"plugins/llm/providers/gemini.go:GeminiChat":                 stageTwo,
-	"plugins/llm/providers/ollama.go:OllamaChat":                 stageTwo,
-	"plugins/llm/providers/ollama.go:OllamaChatStream":           stageTwo,
-	"plugins/llm/providers/openai.go:OpenAIChat":                 stageTwo,
-	"plugins/llm/providers/openai.go:OpenAIChatStream":           stageTwo,
-	"plugins/llm/providers/openai.go:OpenAIEmbed":                stageTwo,
-	"plugins/oauthprovider/routes.go:handleCallback":             stageTwo,
-	"plugins/pagerdutyalert/host_functions.go:postToPagerDuty":   stageTwo,
+	"plugins/datadogexport/background.go:exportForConfig":    needsOrigination,
+	"plugins/kafkaconnect/background.go:consumeViaRestProxy": needsOrigination,
+	"plugins/kafkaconnect/background.go:createConsumer":      needsOrigination,
+	"plugins/kafkaconnect/background.go:pollRecords":         needsOrigination,
+	"plugins/kafkaconnect/background.go:subscribeConsumer":   needsOrigination,
+	"plugins/oauthprovider/routes.go:handleCallback": "an inbound HTTP HANDLER, not a workflow step. The trace it should join belongs to the " +
+		"browser or IdP that called it and arrives on the INBOUND request -- not to any run, and " +
+		"there is no CallContext here. Joining it means parsing the incoming traceparent on the " +
+		"plugin mux the way cmd/cleat-worker does on its own routes: a third mechanism, not this " +
+		"issue's propagation.",
 }
 
 // TestEveryOutboundCallJoinsTheTrace fails when an outbound HTTP request is
