@@ -68,7 +68,12 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.dialect = env.Dialect
 	p.workerID = uuid.New().String()
 	p.httpClient = &http.Client{
-		Timeout: 30 * time.Second,
+		// cleat#1565: every outbound request goes through the egress guard.
+		// Nil in tests that build an Environment directly, which falls back to
+		// the default transport -- TestEveryPluginRoutesItsEgressThroughTheGuard
+		// is what keeps that from being how production works.
+		Transport: env.HTTPTransport,
+		Timeout:   30 * time.Second,
 	}
 
 	// Parse optional config.

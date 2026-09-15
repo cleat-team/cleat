@@ -67,7 +67,8 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	}
 
 	p.db = env.DB
-	p.httpClient = &http.Client{Timeout: 60 * time.Second}
+	// cleat#1565: every outbound request goes through the egress guard.
+	p.httpClient = &http.Client{Timeout: 60 * time.Second, Transport: env.HTTPTransport}
 
 	if len(env.Config) > 0 {
 		if err := json.Unmarshal(env.Config, &p.config); err != nil {

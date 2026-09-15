@@ -90,6 +90,25 @@ type Environment struct {
 	Done     <-chan struct{}
 	Dialect  Dialect
 
+	// HTTPTransport is the egress-guarded RoundTripper a plugin must use for
+	// every outbound HTTP request. cleat#1565.
+	//
+	// NIL MEANS UNGUARDED, and that is a deliberate hole with a fence around
+	// it rather than a default: cleattest, the embedded runner and a plugin's
+	// own unit tests construct an Environment directly and have no worker to
+	// build one. The worker always sets it, and
+	// TestEveryPluginRoutesItsEgressThroughTheGuard fails if a plugin reaches
+	// for http.DefaultTransport or builds a bare client instead of using this.
+	//
+	// What it enforces has two layers. The FLOOR -- loopback, link-local,
+	// RFC1918 -- always applies, so a misconfigured or attacker-supplied
+	// plugin endpoint cannot reach cloud instance metadata or the worker's own
+	// admin port. Above it, a tenant's allowlist applies when a tenant is in
+	// context (host-function calls), and the deployment-level
+	// --plugin-egress-allowlist applies when one is not (background loops,
+	// which are sweeps and have no tenant -- the same shape as cleat#1278).
+	HTTPTransport EgressTransport
+
 	// StartWorkflow starts a new workflow instance using the latest deployed
 	// version. Plugins use this to trigger workflow executions (e.g. from cron
 	// schedules or job queues). Returns the run ID of the new instance.

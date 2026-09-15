@@ -822,13 +822,29 @@ func main() {
 		}
 	}
 
+	// cleat#1565: the per-tenant egress allowlist. Built from the worker's own
+	// pool, which carries no tenant -- the reads are scoped by an explicit
+	// tenant_id predicate, and admin.tenant_egress_allow deliberately has no
+	// row-level policy for that reason (see migration 079).
+	//
+	// Constructed HERE, above the plugin environment, because the plugin
+	// transport needs it too (open question 4) and Go wants it declared before
+	// use. It was below, next to the Worker literal, when only the service
+	// caller consumed it.
+	egressAllow := &engine.TenantEgressStore{DB: db, Dialect: engine.Dialect(*driver)}
+
+	// cleat#1565 open question 4: plugin egress goes through the same guard.
+	// See plugin_egress.go for why this is three layers rather than one.
+	pluginDeploymentEgress := engine.NewHostAllowlist(splitCommaList(*pluginEgressAllowlistFlag)...)
+
 	pluginEnv := &plugin.Environment{
-		DB:      getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect())),
-		Mux:     plugMux,
-		Config:  rawPluginConfig,
-		Logger:  slog.Default(),
-		Done:    ctx.Done(),
-		Dialect: plugin.Dialect(factory.Dialect()),
+		HTTPTransport: pluginEgressTransport(egressAllow, pluginDeploymentEgress),
+		DB:            getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect())),
+		Mux:           plugMux,
+		Config:        rawPluginConfig,
+		Logger:        slog.Default(),
+		Done:          ctx.Done(),
+		Dialect:       plugin.Dialect(factory.Dialect()),
 		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			// REJECTED, NOT DEFAULTED. Both of these were hardcoded here --
 			// the key as `""` and the tenant as engine.DefaultTenantUUID --
@@ -1306,12 +1322,6 @@ func main() {
 			"worker_id", workerID, "cluster_connection_budget", *clusterConnectionBudgetFlag,
 			"grow_hold_down", connectionShareGrowHoldDown)
 	}
-
-	// cleat#1565: the per-tenant egress allowlist. Built from the worker's own
-	// pool, which carries no tenant -- the reads are scoped by an explicit
-	// tenant_id predicate, and admin.tenant_egress_allow deliberately has no
-	// row-level policy for that reason (see migration 079).
-	egressAllow := &engine.TenantEgressStore{DB: db, Dialect: engine.Dialect(*driver)}
 
 	w := &Worker{
 		Metrics:                          metricsInstance,
