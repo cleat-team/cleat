@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -86,6 +87,23 @@ func TestEveryLinkedPluginSupportsEveryDialectTheWorkerRunsOn(t *testing.T) {
 			// empty by accident trips the guard rather than slipping through
 			// this exemption.
 			if m.Up == "" && (len(m.TenantScoped) > 0 || len(m.SweepTables) > 0) {
+				continue
+			}
+
+			// A DELIBERATELY dialect-specific migration is exempt, and says so
+			// in the declaration rather than by the shape of its omission.
+			//
+			// The comment below has always said a migration with no Up at all
+			// is "not this test's subject" -- and the code did not implement
+			// that, so the first such migration (cleat#1622, converting
+			// MySQL's JSON columns to LONGTEXT, which the other two dialects
+			// neither need nor want) tripped a guard whose own prose exempted
+			// it. The same comment/implementation gap the TenantScoped clause
+			// above records fixing.
+			//
+			// Narrow for the same reason that one is: it requires BOTH no Up
+			// AND a stated reason, so an arm missing by accident still trips.
+			if m.Up == "" && strings.TrimSpace(m.DialectSpecific) != "" {
 				continue
 			}
 

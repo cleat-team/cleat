@@ -43,6 +43,30 @@ func TestMigrationProblemsReportsWhatItShould(t *testing.T) {
 			wantProblem: "has no Down SQL",
 		},
 		{
+			// THE CASE cleat#1622 NEEDED, and the one the old predicate
+			// rejected. A migration can be legitimately dialect-specific:
+			// converting MySQL's JSON columns to LONGTEXT is work PostgreSQL
+			// and SQL Server neither need nor want. Asking `m.Up == ""` called
+			// that "does nothing" while the migration runner ran it happily.
+			name: "MySQL-only migration with a MySQL reversal",
+			migrations: []plugin.Migration{{
+				Version:   6,
+				UpMySQL:   "ALTER TABLE t MODIFY c LONGTEXT",
+				DownMySQL: "ALTER TABLE t MODIFY c JSON",
+			}},
+		},
+		{
+			// Its failing twin: dialect-specific SQL still owes a reversal,
+			// or the pair above would pass for the wrong reason -- "any
+			// dialect arm makes it fine" rather than "this arm is reversible".
+			name: "MySQL-only migration with no way back",
+			migrations: []plugin.Migration{{
+				Version: 7,
+				UpMySQL: "ALTER TABLE t MODIFY c LONGTEXT",
+			}},
+			wantProblem: "has no Down SQL",
+		},
+		{
 			name:        "version zero",
 			migrations:  []plugin.Migration{{Up: "CREATE TABLE t (id int)", Down: "DROP TABLE t"}},
 			wantProblem: "version must be non-zero",

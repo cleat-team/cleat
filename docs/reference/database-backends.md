@@ -698,6 +698,22 @@ So the contract is:
   `result = CAST(p_result AS JSON)`, and a cast re-degrades the value *before*
   it reaches the column, LONGTEXT or not.
 
+  **Plugin tables have the same fix, and three columns deliberately do not.**
+  Plugin schemas are a separate migration system and were out of scope above;
+  cleat#1622 converted nine of their JSON columns the same way. What stayed
+  `JSON` on MySQL, and why:
+
+  | column | why it was left |
+  |---|---|
+  | `blob_index.tags` | queried with `JSON_CONTAINS`, so it cannot be text without rewriting the read — degraded, like `workflow_instances.query_state` |
+  | `webhook_config.events`, `webhook_events.headers` | `[]string` and `map[string]string`; they cannot carry a number |
+  | `audit_events.metadata` | never written by any statement — it holds its default |
+
+  One column is beyond a migration's reach: `ingested_events.event_data`
+  arrives through `map[string]any`, and Go's decoder turns a JSON number into a
+  `float64` before any column type has a say. Converting it would measure clean
+  and change nothing. That is cleat#1641.
+
 **No backend is "the strict one", which is the whole reason this is written
 down.** A NUL escape passes on MySQL and SQL Server and fails on PostgreSQL;
 depth 120 passes on PostgreSQL and SQL Server and fails on MySQL. A workflow

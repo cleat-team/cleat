@@ -9,6 +9,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1439,13 +1440,14 @@ func TestJQMigrations(t *testing.T) {
 		// has no such test -- which is why the mechanism shipped without
 		// anyone discovering that its own reference implementation was the
 		// single case that could not have revealed the obstacle. cleat#1278.
-		if m.Up == "" && len(m.TenantScoped) == 0 {
-			t.Errorf("migration %d: has neither Up SQL nor TenantScoped tables, so it does nothing", i)
-		}
-		if m.Down == "" && len(m.TenantScoped) == 0 {
-			t.Errorf("migration %d: Down SQL is empty", i)
-		}
+		_ = i
 	}
+	// The thirteenth copy, replaced by the shared helper rather than amended
+	// in place. This one asked `m.Up == ""`, so a MySQL-only migration read as
+	// doing nothing; the same drift the comment above predicts for every copy
+	// of this loop. cleat#1513 extracted the helper, cleat#1622 corrected its
+	// predicate to match the migration runner's.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // ===========================================================================
