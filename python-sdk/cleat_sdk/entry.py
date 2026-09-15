@@ -377,6 +377,43 @@ def cleat_entry(name: str | None = None) -> Callable:
         sig = inspect.signature(func)
         all_param_names = list(sig.parameters.keys())
 
+        # REFUSE AN UNANNOTATED HostCalls AT DECORATION TIME. cleat#1637.
+        #
+        # The injected parameter is identified by its TYPE HINT below. Without
+        # the hint it is not skipped, so it joins workflow_param_names and --
+        # having no default -- required_param_names, and the presence check
+        # refuses every payload: no caller ever sends a key called "h", because
+        # the framework injects it. The workflow never runs, on any input.
+        #
+        # THE OLD FAILURE NAMED THE WRONG THING, which is why this is an error
+        # and not a doc note. It said "Missing required parameters: h", which
+        # reads as a caller problem -- and adding "h" to the start payload DOES
+        # make it go away, handing the workflow a JSON value where it expects a
+        # HostCalls. The fix that suggests itself is worse than the defect.
+        #
+        # Java refuses the analogous shape in its annotation processor ("@CleatEntry
+        # method first parameter must be cleat.HostCalls, got ..."), so this
+        # brings Python to the same place: caught where it is written, not on
+        # the first start.
+        #
+        # SCOPED TO "a first parameter that is not HostCalls". A function with NO
+        # parameters is left alone: testdata/vet-checks/python/* declares several
+        # (`def workflow() -> None`) as fixtures for other rules, and whether a
+        # zero-parameter entry should be legal is a separate question this must
+        # not decide by accident.
+        if all_param_names:
+            first = all_param_names[0]
+            if hints.get(first) is not HostCalls:
+                raise TypeError(
+                    f"@cleat_entry {func.__name__}({first}, ...): the first parameter is the "
+                    f"injected HostCalls runtime and must be annotated "
+                    f"`{first}: HostCalls`. Without the annotation it is treated as a workflow "
+                    f"parameter, and every start fails with "
+                    f'"Missing required parameters: {first}" -- which names the payload rather '
+                    f"than the annotation. Import it with "
+                    f"`from cleat_sdk.host_calls import HostCalls`."
+                )
+
         workflow_param_names: list[str] = []
         required_param_names: list[str] = []
         for pname in all_param_names:
