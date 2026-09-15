@@ -194,6 +194,29 @@ func (g *EgressGuard) DialContext(ctx context.Context, network, address string) 
 		}
 	}
 
+	// An IP LITERAL in a denied range is refused here, above both allowlists,
+	// because its refusal is the one nobody can act on.
+	//
+	// The order below reports the FIRST gate that says no, and the floor is
+	// last, so a destination refused by every gate was reported as an
+	// allowlist failure -- which names a list the operator can edit. They
+	// edit it. `cleatctl egress-allow add 127.0.0.1` is accepted, `list`
+	// shows it afterwards, and the next call fails anyway, now citing the
+	// floor. cleat#1627: that round trip is the defect, not the refusal.
+	//
+	// This is NOT a reordering of the checks and does not touch the DNS-oracle
+	// property below. It applies only when the host is already an address, so
+	// no resolution happens and nothing is learned that the caller did not
+	// supply. A NAME that resolves into a denied range still reports the
+	// allowlist first, deliberately: finding out otherwise would require
+	// resolving it, which is exactly what must not happen before the
+	// allowlists have spoken.
+	if ip, perr := netip.ParseAddr(host); perr == nil {
+		if err := checkAddr(host, ip); err != nil {
+			return nil, err
+		}
+	}
+
 	// BOTH LAYERS, operator first, and both BEFORE resolving -- a denied name
 	// must not be a DNS oracle. A guest that cannot reach a host should not be
 	// able to learn whether it exists, or make the worker emit a lookup for a
