@@ -409,6 +409,25 @@ the compacted state.
 
 ## Networking
 
+### --max-stream-readers
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `1024` | Concurrent live SSE readers of `GET /api/workflows/{id}/stream` this worker may hold (`0` = unlimited) |
+
+A reader costs a goroutine, a held HTTP connection and a bounded chunk buffer.
+Over the ceiling the route answers `503` with `Retry-After`.
+
+**Not `--connection-budget`.** That budget bounds database pools, and a reader
+**holds** no database connection. It is not free of the database, though: each
+reader issues one indexed status read per 15-second heartbeat, so the ceiling
+also sets a floor on background query load. The two flags are independent and
+sizing one from the other will be wrong in both directions.
+
+See [Streaming tokens to a client](../how-to/stream-tokens-to-a-client.md).
+
+---
+
 ### --max-body-size
 
 | Type | Default | Description |

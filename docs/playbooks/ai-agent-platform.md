@@ -192,23 +192,23 @@ pause pay for the wait.
 
 **Where this loses, and you should concede it.**
 
-*Token streaming to a browser needs wiring that does not exist, though the pieces do.* Both halves
-are present and nothing joins them. `chat_stream` is a streaming host function — a
-`PluginStreamFunc` returning a channel of `StreamEvent` (`plugin/plugin.go:262-272`), consumed by a
-*workflow*. Separately, a plugin can serve server-sent events on the worker's mux, and
-`plugins/eventstore/routes.go:218-277` does exactly that, with `Content-Type: text/event-stream`
-and a real `http.Flusher`. So SSE from a cleat worker is a demonstrated pattern, not a missing
-capability.
+*Token streaming to a browser: SHIPPED, with one limit worth knowing before you design around it.*
+`GET /api/workflows/{id}/stream` serves a run's streamed tokens as server-sent events — see
+[Streaming tokens to a client](../how-to/stream-tokens-to-a-client.md). A browser reconnecting
+after a dropped connection is served exactly what it missed, from `event_history`, because every
+chunk is persisted as it arrives.
 
-What is absent is the path between them: a workflow's streamed tokens reaching an HTTP response.
-Those are opposite directions — one streams into the durable run, the other streams out to a
-client — and no component bridges them today. Note also that a streamed token is by definition not
-yet a recorded step, so the durability story for the partial output needs its own decision.
+**The limit: the live tail is worker-local.** A request landing on a worker that is not executing
+the run gets the durable history and then nothing live, and says so (`"live": false`). Behind a
+load balancer with N workers, expect that on a proportionate share of connections. Routing a
+reader to the right worker is not solved — cleat#1639.
 
-(An earlier draft of this playbook said flatly that the worker has no SSE support. That came from a
-grep scoped to `cmd/` and `engine/`, which is where the worker's own handlers live and not where
-plugin routes do. Corrected 2026-09-14; re-derive with
-`grep -rn 'text/event-stream' --include='*.go' .`)
+(This section said flatly that nothing bridged the two halves, and before that, that the worker had
+no SSE support at all. The second came from a grep scoped to `cmd/` and `engine/`, which is where
+the worker's own handlers live and not where plugin routes do. The first was true when written and
+was the filing of cleat#1572, which then found the issue's own central premise wrong: partial
+output *is* durable. Both corrected; the history is on the issue because the reasoning is more
+instructive than the conclusion.)
 
 *Every model call is written to the database.* That is the audit trail you wanted, and it is also
 write volume proportional to agent activity, with prompt and response payloads in it. Budget for
@@ -277,9 +277,9 @@ tells you what happened; it does not tell you whether it was any good.
    `db` mode. What you have to do is turn it on and verify it took, since the default is `memory`
    and the fallback is silent. Listed here because an unconfigured default looks identical to a
    missing feature.
-3. **Token streaming to the browser.** SSE on the mux is a solved, demonstrated pattern
-   (`plugins/eventstore/`); bridging a workflow's `chat_stream` output to such a route is not, and
-   the durability semantics of a partial, unrecorded token stream need deciding.
+3. **Nothing, for token streaming — it shipped.** `GET /api/workflows/{id}/stream`, cleat#1572.
+   What is still yours: routing a reader to the worker running the job, if `"live": false` on a
+   share of connections is not acceptable to your front end. Tracked as cleat#1639.
 4. **An eval and prompt-regression harness.** Entirely absent, and entirely your problem.
 5. **The front-end.** As designed.
 

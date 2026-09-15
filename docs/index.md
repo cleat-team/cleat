@@ -7,6 +7,7 @@
 - **Learn about signals and human-in-the-loop** -- [Signals Tutorial](tutorials/signals-and-human-loop.md)
 - **Use plugins (LLM, Slack, webhooks)** -- [Using Plugins](how-to/use-plugins.md)
 - **Test my workflows** -- [Testing Workflows](how-to/test-workflows.md)
+- **Stream a model's tokens to a browser** -- [Streaming Tokens to a Client](how-to/stream-tokens-to-a-client.md)
 - **Connect my company's identity provider (incl. SAML)** -- [Connect Any Identity Provider](how-to/connect-any-identity-provider.md)
 - **Deploy to production** -- [Deploying to Production](operations/deploying-to-production.md)
 - **Understand the architecture** -- [Architecture Overview](explanation/architecture.md)
