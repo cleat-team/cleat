@@ -17,12 +17,18 @@ import (
 // cannot answer anything else can implement it.
 //
 // Implementations MUST carry their own `AND tenant_id = ?` predicate rather
-// than relying on a row-level policy to filter. On PostgreSQL the policy does
-// filter, and on SQL Server there is none -- engine/mssql_lifecycle.go states
-// that the predicate "IS the whole of the tenant scoping" there. A lookup that
-// is correct only because some other layer happens to be filtering is the
-// defect shape this repository keeps meeting; see the featureflags test
-// asserting rows are scoped by a policy and NOT ONLY by the query.
+// than relying on a row-level policy to filter. All three dialects do scope
+// tenant_domains -- PostgreSQL by RLS policy, SQL Server by a SECURITY POLICY
+// filter predicate, MySQL by putting each tenant in its own database -- so the
+// predicate is belt and braces rather than the only protection. It is still
+// required: a lookup that is correct only because some other layer happens to
+// be filtering is the defect shape this repository keeps meeting, which is why
+// the featureflags suite asserts its rows are scoped by a policy and NOT ONLY
+// by the query.
+//
+// An earlier version of this comment said SQL Server had no policy at all,
+// citing engine/mssql_lifecycle.go. That file says the predicate is the whole
+// of the scoping for ONE query; it is not a statement about the dialect.
 type DomainResolver interface {
 	// TenantForHost returns the tenant owning hostname, scoped to want.
 	// found is false when no row matches -- which must be the answer both for
@@ -159,12 +165,10 @@ func refuseHost(w http.ResponseWriter) {
 // TenantForHost implements DomainResolver on the tenant store.
 //
 // The predicate carries `AND tenant_id = ?` UNCONDITIONALLY, on every dialect,
-// rather than only where no row-level policy exists. On PostgreSQL the policy
-// also filters, so this is belt and braces; on SQL Server there is no policy
-// and the predicate is the whole of the scoping. Writing it once, everywhere,
-// removes the question of which layer is holding the check up -- the question
-// engine/mssql_lifecycle.go answers for CountRunnableWorkflows and the
-// featureflags suite asserts for its own rows.
+// rather than reasoning about which of them has a policy. Each does scope this
+// table by its own mechanism (see the DomainResolver doc above), so writing the
+// predicate everywhere removes the question of which layer is holding the check
+// up rather than answering it differently per dialect.
 //
 // It returns only whether a row matched. The caller does not need the tenant
 // back -- it already has the authenticated one, and returning the owner of a

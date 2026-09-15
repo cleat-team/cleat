@@ -10,13 +10,14 @@
 -- separation is at a level above the table rather than inside it.
 --
 -- That has one consequence worth stating rather than discovering: on
--- PostgreSQL the policy makes "unknown host" and "host owned by another
--- tenant" the same answer, and the middleware inherits a no-oracle property
--- from the database. Here the tenant's database simply does not contain
--- another tenant's rows, which reaches the same outcome by a different route.
--- The middleware must not rely on either mechanism specifically; it compares
--- the row it gets against the authenticated tenant and refuses identically
--- when there is no row.
+-- PostgreSQL a policy makes "unknown host" and "host owned by another tenant"
+-- the same answer, and the middleware inherits a no-oracle property from the
+-- database. SQL Server reaches it with a SECURITY POLICY filter predicate (see
+-- 071). Here the tenant's database simply does not contain another tenant's
+-- rows, which reaches the same outcome by a third route. The middleware must
+-- not rely on any of them specifically; it carries its own tenant predicate,
+-- compares the row it gets against the authenticated tenant, and refuses
+-- identically when there is no row.
 --
 -- hostname is VARCHAR(255) rather than TEXT because MySQL cannot make a TEXT
 -- column a primary key without a prefix length, and 255 is the maximum length
