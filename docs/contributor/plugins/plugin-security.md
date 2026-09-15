@@ -106,6 +106,57 @@ the table's owner bypasses it unless the table is `FORCE`d. `engine.CheckRLSEnfo
 exists to detect exactly that, and the worker refuses to start on a bypassing
 connection when `-rls-check` is left at its default.
 
+### What `DatabaseAccessReadOnly` guarantees, and what it does not
+
+A plugin declaring `DatabaseAccessReadOnly` is handed an `engine.ReadOnlyDB`
+(`getPluginReadOnlyDB`). **That type is defence in depth, not a security
+boundary on its own**, and the difference is dialect-dependent.
+
+Three layers, which do not cover the same ground:
+
+| layer | postgres | mysql | sql server |
+|---|---|---|---|
+| `Exec` refused in Go | yes | yes | yes |
+| the **database** refuses a write inside the read transaction | yes | yes | **no** |
+| the connection's own privileges | whatever you granted | whatever you granted | whatever you granted |
+
+The second row is the one that matters, because the first does not cover
+`Query`. `Exec` is the route a caller uses deliberately; `Query` takes any
+statement string and has an ordinary reason to be handed
+`INSERT ... RETURNING`. Every read now runs inside a transaction so that the
+database can refuse it (cleat#1621) -- but **SQL Server has no read-only
+transaction**: go-mssqldb rejects the option and T-SQL has no statement that
+makes an open transaction read-only. There, layer 2 does not exist.
+
+**So grant the privileges.** A plugin that must not write should be given a
+connection whose database user has no `INSERT`, `UPDATE` or `DELETE` on the
+tables it can reach:
+
+```sql
+-- PostgreSQL: a role for read-only plugins
+CREATE ROLE cleat_plugin_ro LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE cleat TO cleat_plugin_ro;
+GRANT USAGE ON SCHEMA public TO cleat_plugin_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO cleat_plugin_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO cleat_plugin_ro;
+```
+
+```sql
+-- SQL Server: the db_datareader role is exactly this, and is the ONLY
+-- enforcement available there.
+CREATE LOGIN cleat_plugin_ro WITH PASSWORD = '...';
+CREATE USER cleat_plugin_ro FOR LOGIN cleat_plugin_ro;
+ALTER ROLE db_datareader ADD MEMBER cleat_plugin_ro;
+```
+
+Point the plugin pool at that connection. This is the only guarantee that
+holds on all three dialects, and on SQL Server it is the only one there is.
+
+Note it interacts with the row above: a read-only connection is still subject
+to the RLS question. Least privilege stops a plugin *writing*; it does not
+stop it *reading another tenant's rows*, which is what `engine.CheckRLSEnforced`
+and the tenant scoping are for.
+
 ### Per-tenant connection pools
 
 The worker maintains a separate connection pool per tenant:
