@@ -25,6 +25,7 @@ var coreTables = []string{
 	"idempotency_keys",
 	"plugin_defs",
 	"tenant_domains",
+	"tenant_secrets",
 	"tenant_settings",
 	"workflow_defs",
 	"workflow_instances",

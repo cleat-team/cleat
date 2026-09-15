@@ -67,6 +67,8 @@ import (
 //   - tenant_settings, ON DELETE CASCADE from 039_tenant_settings.sql
 //   - tenant_domains, ON DELETE CASCADE from
 //     080_a_hostname_belongs_to_one_tenant.sql (cleat#1568)
+//   - tenant_secrets, ON DELETE CASCADE from
+//     081_a_secret_never_reaches_the_guest.sql (cleat#1570)
 //   - workflow_defs, ON DELETE CASCADE from
 //     059_a_dropped_tenants_definitions_go_with_it.sql (cleat#1201)
 //
@@ -94,6 +96,11 @@ var dropTenantTables = []struct {
 	// reasoning deliberately. Listed here for the same reason 039 is: the
 	// operator wants the count, not the mechanism.
 	{"tenant_domains", `SELECT count(*) FROM tenant_domains WHERE tenant_id = $1`},
+	// ON DELETE CASCADE from 081_a_secret_never_reaches_the_guest.sql. Listed
+	// for the count, as tenant_settings is -- and this one matters more than
+	// most: an operator deleting a tenant wants to see that its credentials
+	// went with it.
+	{"tenant_secrets", `SELECT count(*) FROM tenant_secrets WHERE tenant_id = $1`},
 	{"workflow_defs", `SELECT count(*) FROM workflow_defs WHERE tenant_id = $1`},
 	{"admin.tenant_api_keys", `SELECT count(*) FROM admin.tenant_api_keys WHERE tenant_id = $1`},
 	{"admin.tenant_roles", `SELECT count(*) FROM admin.tenant_roles WHERE tenant_id = $1`},

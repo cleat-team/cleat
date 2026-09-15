@@ -25,6 +25,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/wasm"
@@ -397,6 +398,12 @@ type hostPluginRegistryAdapter struct {
 	registry       *engine.PluginRegistry
 	streamRegistry *engine.PluginStreamRegistry
 	pluginName     string
+
+	// secrets resolves ${secret:name} in a call's argument on the way IN to the
+	// plugin. Nil when no master key is configured, in which case a call
+	// carrying a reference fails rather than passing the literal text through
+	// to a third-party service as if it were a credential.
+	secrets *engine.SecretStore
 }
 
 func (a *hostPluginRegistryAdapter) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
@@ -415,7 +422,44 @@ func (a *hostPluginRegistryAdapter) Register(opts plugin.FuncOptions, fn plugin.
 	// silently, because the registry would then read SameValueOnReplay as
 	// false and simply stop re-invoking, which looks exactly like the fix
 	// working.
-	return a.registry.RegisterWithPolicy(a.pluginName, opts.Name, fn, engine.ReplayPolicy{Idempotent: opts.Idempotent, SameValueOnReplay: opts.SameValueOnReplay})
+	return a.registry.RegisterWithPolicy(a.pluginName, opts.Name, a.withSecrets(fn), engine.ReplayPolicy{Idempotent: opts.Idempotent, SameValueOnReplay: opts.SameValueOnReplay})
+}
+
+// withSecrets wraps a plugin function so ${secret:name} in its argument is
+// replaced by the value before the plugin sees it.
+//
+// WRAPPING AT REGISTRATION IS WHAT KEEPS THE SECRET OUT OF EVENT HISTORY, and
+// that is a structural property rather than a convention. PluginCall records
+// `PluginInput: inputJSON` and separately calls `fn(callCtx, inputJSON)` with
+// the same variable (engine/plugins.go). Because the substitution happens
+// INSIDE fn, the recorder cannot see it: history keeps the reference the
+// workflow wrote. Move this substitution any earlier -- into the host call, or
+// into the guest -- and the recorded input becomes the plaintext, which no
+// amount of redaction reliably fixes, engine.Redact being a field-name
+// heuristic.
+//
+// The tenant comes from the call context rather than from the adapter, because
+// one worker serves many tenants and this wrapper is built once at startup.
+func (a *hostPluginRegistryAdapter) withSecrets(fn plugin.PluginFunc) plugin.PluginFunc {
+	if a.secrets == nil {
+		return fn
+	}
+	return func(ctx context.Context, inputJSON string) (string, error) {
+		tid, ok := tenantctx.From(ctx)
+		if !ok {
+			// No tenant means no secrets to resolve. A reference here would be
+			// unresolvable anyway, and ResolveSecretRefs would have to guess
+			// whose secret was meant -- so pass through and let the reference
+			// reach the plugin as literal text rather than silently resolving
+			// it against some default tenant.
+			return fn(ctx, inputJSON)
+		}
+		resolved, err := engine.ResolveSecretRefs(ctx, a.secrets, tid.String(), inputJSON)
+		if err != nil {
+			return "", err
+		}
+		return fn(ctx, resolved)
+	}
 }
 
 func (a *hostPluginRegistryAdapter) RegisterStream(opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {
@@ -4516,11 +4560,44 @@ func checkHostBindingConfigured(ctx context.Context, store *auth.TenantStore) er
 	n, err := store.CountTenantDomains(ctx)
 	if err != nil {
 		return fmt.Errorf("could not read tenant_domains: %w "+
-			"(the table arrives in migration 079; run migrations before enabling this)", err)
+			"(the table arrives in migration 080; run migrations before enabling this)", err)
 	}
 	if n == 0 {
 		return fmt.Errorf("tenant_domains is empty, so every authenticated request would be " +
 			"refused; register at least one hostname, or unset --require-host-match")
+	}
+	return nil
+}
+
+// checkSecretsUsable refuses a worker that would fail on first use.
+//
+// A deployment holding secrets and started without CLEAT_SECRET_MASTER_KEY can
+// do everything except the one thing the secrets were for. The failure arrives
+// later, from inside a plugin call, as a workflow error whose text has no
+// obvious connection to a missing environment variable -- and it arrives on
+// whichever workflow happens to need a credential first, which may be hours
+// after the deploy that dropped the variable.
+//
+// So it is a boot-time refusal, on the same argument as checkConnectionBudget
+// and cleat#1568's host-binding check: a configuration that cannot be honoured
+// should be reported when it is made, not when it is exercised.
+//
+// The check is skipped entirely when a master key IS present -- reading the
+// count then answers nothing useful -- and a count that errors is not fatal,
+// because the table arrives in migration 080 and a worker started against an
+// older schema should say so through the migration runner rather than here.
+func checkSecretsUsable(ctx context.Context, store *engine.SecretStore) error {
+	if store == nil || store.HasMasterKey() {
+		return nil
+	}
+	n, err := store.CountSecrets(ctx)
+	if err != nil {
+		return nil
+	}
+	if n > 0 {
+		return fmt.Errorf("%d secret(s) are stored and CLEAT_SECRET_MASTER_KEY is not set, "+
+			"so every workflow that references one would fail at the plugin call; "+
+			"set it, or remove the secrets", n)
 	}
 	return nil
 }
