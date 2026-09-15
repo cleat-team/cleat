@@ -217,7 +217,20 @@ type Migration struct {
 	Up      string // required — SQL for PostgreSQL (the default)
 	UpMySQL string // optional — MySQL DDL. Empty means PG-only for this version.
 	UpMSSQL string // optional — MSSQL DDL. Empty means PG-only for this version.
-	Down    string // optional — SQL to roll back
+	Down    string // optional — SQL to roll back (PostgreSQL, and the default)
+
+	// DownMySQL and DownMSSQL are the dialect-specific reversals, symmetric
+	// with UpMySQL and UpMSSQL.
+	//
+	// They exist because a migration whose Up is dialect-specific could not be
+	// reversed before cleat#1622. Every migration in the tree until then had a
+	// non-empty Up as WELL as its dialect arms, so the asymmetry never
+	// surfaced: the first MySQL-only migration -- converting a plugin's JSON
+	// columns to LONGTEXT, which PostgreSQL and SQL Server do not need -- had
+	// nowhere to put a reversal that is also MySQL-only. A single Down would
+	// have been run verbatim against all three.
+	DownMySQL string // optional — MySQL reversal. Falls back to Down when empty.
+	DownMSSQL string // optional — MSSQL reversal. Falls back to Down when empty.
 
 	// TenantScoped names tables this migration creates whose rows belong to
 	// one tenant, identified by a tenant_id column. The runtime enables

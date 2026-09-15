@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -985,14 +986,13 @@ func TestMigrations(t *testing.T) {
 		if m.Version == 0 {
 			t.Errorf("migration %d: version must be non-zero", i)
 		}
-		// A TenantScoped migration carries no SQL by design; the runtime emits
-		// the policy from the declaration. Replace with
-		// plugintest.AssertMigrationsDoSomething once cleat#1513 lands rather
-		// than leaving another variant behind. cleat#1512.
-		if m.Up == "" && len(m.TenantScoped) == 0 {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
 	}
+
+	// cleat#1513 has landed; this is the helper rather than a variant of it.
+	// The predicate here was `m.Up == ""`, which reads a MySQL-only migration
+	// as doing nothing -- the drift the comment it replaces predicted.
+	// cleat#1622.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // ===========================================================================

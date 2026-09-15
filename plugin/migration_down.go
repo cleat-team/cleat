@@ -167,10 +167,12 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 	// property rather than a table.
 	var gaps []string
 	for _, m := range applied {
-		if !declaresDDL(m) {
+		// PER DIALECT: a migration that does nothing HERE has nothing to
+		// reverse here, even if it changes the schema elsewhere.
+		if strings.TrimSpace(upFor(m, dialect)) == "" {
 			continue
 		}
-		if strings.TrimSpace(m.Down) == "" {
+		if strings.TrimSpace(downFor(m, dialect)) == "" {
 			gaps = append(gaps, fmt.Sprintf("%d", m.Version))
 		}
 	}
@@ -232,7 +234,7 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 		// unqualified names against a different search_path and drop nothing,
 		// which is the bug this whole function had. RunMigrations applies each
 		// migration on the session for the same reason.
-		if _, err := session.ExecContext(ctx, m.Down); err != nil {
+		if _, err := session.ExecContext(ctx, downFor(m, dialect)); err != nil {
 			return res, fmt.Errorf("plugin %s: reversing %d: %w\n\nVersions already reversed: %v",
 				name, m.Version, err, res.Reversed)
 		}
@@ -268,4 +270,40 @@ func declaresDDL(m Migration) bool {
 	return strings.TrimSpace(m.Up) != "" ||
 		strings.TrimSpace(m.UpMySQL) != "" ||
 		strings.TrimSpace(m.UpMSSQL) != ""
+}
+
+// upFor and downFor select the SQL this dialect actually runs.
+//
+// A migration can be dialect-specific in BOTH directions, and the pair has to
+// agree: requiring a Down from a migration that does nothing on this dialect
+// would refuse a reversal over a version that changed nothing here, which is
+// the same defect declaresDDL was written to avoid one level up. cleat#1622.
+func upFor(m Migration, dialect Dialect) string {
+	switch dialect {
+	case DialectMySQL:
+		if strings.TrimSpace(m.UpMySQL) != "" {
+			return m.UpMySQL
+		}
+		return ""
+	case DialectMSSQL:
+		if strings.TrimSpace(m.UpMSSQL) != "" {
+			return m.UpMSSQL
+		}
+		return ""
+	}
+	return m.Up
+}
+
+func downFor(m Migration, dialect Dialect) string {
+	switch dialect {
+	case DialectMySQL:
+		if strings.TrimSpace(m.DownMySQL) != "" {
+			return m.DownMySQL
+		}
+	case DialectMSSQL:
+		if strings.TrimSpace(m.DownMSSQL) != "" {
+			return m.DownMSSQL
+		}
+	}
+	return m.Down
 }

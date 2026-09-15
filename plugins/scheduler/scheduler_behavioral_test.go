@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1124,14 +1125,17 @@ func TestMigrations(t *testing.T) {
 		if m.Version <= 0 {
 			t.Errorf("migration %d: expected Version > 0, got %d", i, m.Version)
 		}
-		// A TenantScoped migration carries no SQL by design; the runtime
-		// emits the policy from the declaration. Replace this with
-		// plugintest.AssertMigrationsDoSomething once cleat#1513 lands rather
-		// than leaving another variant behind. cleat#1512.
-		if m.Up == "" && len(m.TenantScoped) == 0 {
-			t.Errorf("migration %d: expected non-empty Up SQL", i)
-		}
 	}
+
+	// cleat#1513 has landed, so the instruction above is carried out rather
+	// than deferred again: this block is the helper now, not a variant of it.
+	//
+	// It had already drifted in the way that comment predicts. The predicate
+	// was `m.Up == ""`, which reports a MySQL-only migration as doing nothing
+	// -- while the migration RUNNER and the reversal path both ask about all
+	// three arms. cleat#1622 needed exactly such a migration and found five
+	// copies of this one predicate, four of them wrong.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // ---------------------------------------------------------------------------

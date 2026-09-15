@@ -165,5 +165,58 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Version:     3,
 			SweepTables: []string{"webhook_delivery"},
 		},
+		{
+			// A caller's JSON is stored as TEXT on MySQL, as it already is on
+			// SQL Server.
+			//
+			// cleat#1622, the plugin half of cleat#1022. MySQL's JSON type
+			// keeps an integer as INT64 or UINT64 and falls back to DOUBLE
+			// when it fits neither, so a value outside [-2^63, 2^64-1] -- and
+			// any decimal needing more precision than a float64 holds -- is
+			// REWRITTEN on the way in. Nothing errors, and the result is still
+			// valid JSON of the right shape:
+			//
+			//     sent    {"x":123456789012345678901234567890}
+			//     stored  {"x": 1.2345678901234566e29}
+			//
+			// The narrowing belongs to the JSON TYPE, not to any column: the
+			// same INSERT into a TEXT column in the same row keeps the digits.
+			// This is migrations/mysql/070 applied to notifications, including the
+			// CHECK that restores the validation LONGTEXT gives up.
+			//
+			// The CHECK is not optional: dropping to LONGTEXT surrenders the
+			// JSON type's validation, and invalid JSON would become storable
+			// where the column refuses it today. JSON_VALID restores that and
+			// nothing else. It is parsed and IGNORED before MySQL 8.0.16, a
+			// pre-existing dependency this repo already has.
+			//
+			// Existing rows are untouched and already-degraded values stay as
+			// they are -- the digits were lost at write time and there is
+			// nothing to recover. What changes is every write from here on.
+			//
+			// PostgreSQL and SQL Server need nothing: JSONB preserves, and
+			// SQL Server has always used NVARCHAR(MAX) + ISJSON here.
+			Version: 4,
+			Up:      "",
+			UpMySQL: `
+				ALTER TABLE webhook_delivery
+					MODIFY payload LONGTEXT NOT NULL DEFAULT ('{}');
+
+				ALTER TABLE webhook_delivery
+					ADD CONSTRAINT ck_webhook_delivery_payload CHECK (JSON_VALID(payload));
+			`,
+			// Reversal is MySQL-only because the change is. It restores the
+			// JSON type and with it the narrowing -- a value stored intact
+			// while this migration was applied is rewritten by the ALTER
+			// itself, so this is lossy and is only here because a migration
+			// that writes SQL must be reversible.
+			DownMySQL: `
+				ALTER TABLE webhook_delivery
+					DROP CONSTRAINT ck_webhook_delivery_payload;
+
+				ALTER TABLE webhook_delivery
+					MODIFY payload JSON NOT NULL DEFAULT ('{}');
+			`,
+		},
 	}
 }
