@@ -1,6 +1,6 @@
 module github.com/cleat-team/cleat/benchmarks/workflows
 
-go 1.25.11
+go 1.26.0
 
 require github.com/cleat-team/cleat/cleat v0.0.0
 
