@@ -169,6 +169,12 @@ type dbServiceCaller struct {
 	// guest-initiated fetch, which is the correct behaviour for a worker
 	// that was not given one: an absent policy is not permission.
 	egressAllow *engine.TenantEgressStore
+
+	// operatorEgress is the DEPLOYMENT's egress policy, from
+	// --egress-allowlist. Nil or empty permits every public host -- the
+	// operator layer defaults open where the tenant layer defaults closed,
+	// because the floor sits underneath it. cleat#1565.
+	operatorEgress *engine.HostAllowlist
 }
 
 func (c *dbServiceCaller) Call(ctx context.Context, service, operation, requestJSON string) (string, error) {
@@ -265,7 +271,7 @@ func (c *dbServiceCaller) egressGuard(ctx context.Context) *engine.EgressGuard {
 	if c.egress != nil {
 		return c.egress // a test supplied one
 	}
-	g := &engine.EgressGuard{}
+	g := &engine.EgressGuard{OperatorAllows: operatorAllowFunc(c.operatorEgress)}
 	if c.egressAllow == nil {
 		// No allowlist source configured: AllowHost stays nil and the guard
 		// denies. Deliberately not a nil-check that opens the gate.
@@ -1177,6 +1183,10 @@ type Worker struct {
 	// egressAllow answers "which hosts may this tenant's workflows reach".
 	// Nil denies every guest-initiated fetch. cleat#1565.
 	egressAllow *engine.TenantEgressStore
+
+	// operatorEgress answers "which hosts may this DEPLOYMENT reach at all".
+	// Egress needs both this and the tenant's permission. cleat#1565.
+	operatorEgress *engine.HostAllowlist
 
 	// Worker membership and this worker's slice of the cluster connection
 	// budget. cleat#1487.
@@ -2134,11 +2144,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// egressAllow is what makes http.fetch usable at all: without it the guard
 	// has no allowlist and refuses every destination. cleat#1565.
 	caller := &dbServiceCaller{
-		store:       execStore,
-		workerID:    w.id,
-		benchSvcURL: *benchSvcURL,
-		egressAllow: w.egressAllow,
-		traceID:     traceID,
+		store:          execStore,
+		workerID:       w.id,
+		benchSvcURL:    *benchSvcURL,
+		egressAllow:    w.egressAllow,
+		operatorEgress: w.operatorEgress,
+		traceID:        traceID,
 	}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(execStore.(engine.SignalStore)),

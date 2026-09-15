@@ -860,12 +860,14 @@ func main() {
 	// caller consumed it.
 	egressAllow := &engine.TenantEgressStore{DB: db, Dialect: engine.Dialect(*driver)}
 
-	// cleat#1565 open question 4: plugin egress goes through the same guard.
-	// See plugin_egress.go for why this is three layers rather than one.
-	pluginDeploymentEgress := engine.NewHostAllowlist(splitCommaList(*pluginEgressAllowlistFlag)...)
+	// cleat#1565: egress needs BOTH the operator's permission and the
+	// requesting tenant's. This is the operator half, and it is one policy for
+	// the whole deployment rather than a per-surface flag -- guest fetches,
+	// plugin host-function calls and plugin sweeps all answer to it.
+	operatorEgress := engine.NewHostAllowlist(splitCommaList(*egressAllowlistFlag)...)
 
 	pluginEnv := &plugin.Environment{
-		HTTPTransport: pluginEgressTransport(egressAllow, pluginDeploymentEgress),
+		HTTPTransport: pluginEgressTransport(egressAllow, operatorEgress),
 		DB:            getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect())),
 		Mux:           plugMux,
 		Config:        rawPluginConfig,
@@ -1367,6 +1369,7 @@ func main() {
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,
 		egressAllow:                      egressAllow,
+		operatorEgress:                   operatorEgress,
 		workerRegistry:                   workerRegistry,
 		connectionShare:                  share,
 		connectionBudgetParts:            budget,

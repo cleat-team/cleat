@@ -40,25 +40,56 @@ import (
 // transport correct for a client built once at Init: DialContext receives the
 // context of the request being dialled, and every one of these plugins already
 // uses http.NewRequestWithContext.
-func pluginEgressTransport(store *engine.TenantEgressStore, deployment *engine.HostAllowlist) http.RoundTripper {
+// pluginEgressTransport is the RoundTripper every plugin's outbound HTTP goes
+// through.
+//
+// operator is the deployment's policy and applies to everything. tenantStore is
+// consulted only when a tenant is actually in context.
+func pluginEgressTransport(tenantStore *engine.TenantEgressStore, operator *engine.HostAllowlist) http.RoundTripper {
 	guard := &engine.EgressGuard{
+		OperatorAllows: operatorAllowFunc(operator),
+
+		// A plugin's client is built once and serves BOTH shapes, so the
+		// tenant-less case is decided per call rather than per transport: a
+		// host-function call has a tenant in context, a background sweep does
+		// not. That is not a hole -- a sweep answers to the operator list
+		// alone, which is why that list had to become general rather than
+		// remain a plugin-shaped flag.
+		TenantOptional: func(ctx context.Context) bool {
+			_, ok := auth.TenantIDFromContext(ctx)
+			return !ok
+		},
+
 		AllowHost: func(ctx context.Context, host string) (bool, error) {
-			if tid, ok := auth.TenantIDFromContext(ctx); ok && store != nil {
-				list, err := store.For(ctx, tid.String())
-				if err != nil {
-					// Not a grant. A database briefly unreachable must not be
-					// indistinguishable from a tenant that permitted this host.
-					return false, err
-				}
-				return list.Permits(host), nil
+			tid, ok := auth.TenantIDFromContext(ctx)
+			if !ok || tenantStore == nil {
+				// Unreachable when TenantOptional is doing its job; kept as a
+				// refusal rather than a grant so that a future change to that
+				// predicate fails closed.
+				return false, nil
 			}
-			// No tenant: a background sweep. deployment is nil unless the
-			// operator set --plugin-egress-allowlist, and a nil list permits
-			// nothing -- the same rule the tenant path follows.
-			return deployment.Permits(host), nil
+			list, err := tenantStore.For(ctx, tid.String())
+			if err != nil {
+				// Not a grant. A database briefly unreachable must not be
+				// indistinguishable from a tenant that permitted this host.
+				return false, err
+			}
+			return list.Permits(host), nil
 		},
 	}
 	return &http.Transport{DialContext: guard.DialContext}
+}
+
+// operatorAllowFunc turns the deployment list into the guard's operator hook.
+//
+// A nil or empty list returns nil, which the guard reads as UNSET and permits
+// every public host -- owner decision 2026-09-15. That is safe to default open
+// only because the floor sits underneath it.
+func operatorAllowFunc(l *engine.HostAllowlist) func(context.Context, string) (bool, error) {
+	if l == nil || len(l.Entries()) == 0 {
+		return nil
+	}
+	return l.AllowHostFunc()
 }
 
 // splitCommaList turns a flag value into entries, dropping empties so that

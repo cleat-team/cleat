@@ -322,14 +322,20 @@ var (
 			"Y between them\": the effective budget is the smaller. A worker shrinks its "+
 			"share the moment another joins, and waits before growing when one leaves, "+
 			"because a crashed worker's connections outlive its heartbeat. cleat#1487")
-	pluginEgressAllowlistFlag = flag.String("plugin-egress-allowlist", "",
-		"Comma-separated hosts a PLUGIN BACKGROUND LOOP may reach (empty = none). "+
-			"Plugin host-function calls are governed by the calling tenant's own "+
-			"allowlist instead; this covers the sweeps, which have no tenant and whose "+
-			"destination is operator configuration -- a Kafka REST proxy, a Datadog "+
-			"endpoint. Entry forms are the tenant list's: an exact host, or a leading "+
-			"dot for any host ending in it, which excludes the apex. The loopback, "+
-			"link-local and RFC1918 floor applies whatever is listed here. cleat#1565")
+	egressAllowlistFlag = flag.String("egress-allowlist", "",
+		"Hosts THIS DEPLOYMENT may reach, comma-separated. Empty (the default) permits "+
+			"every PUBLIC host -- the loopback, link-local and RFC1918 floor still applies, "+
+			"so \"all public\" really is all public.\n"+
+			"Egress needs BOTH permissions: a destination is reachable only when the "+
+			"operator permits it and the requesting tenant permits it (cleatctl "+
+			"egress-allow). Either saying no is a refusal, and the refusal names which. "+
+			"A tenant can only ever narrow within this list.\n"+
+			"It is the ONLY policy for egress that has no tenant at all -- plugin "+
+			"background sweeps, and auth-exempt routes such as the OAuth callback, which "+
+			"says in its own code that the state parameter identifies the tenant so there "+
+			"is none to scope by.\n"+
+			"Entry forms: an exact host, or a leading dot for any host ending in it, which "+
+			"excludes the apex. cleat#1565")
 	encryptSensitivePayloads = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
 	maxQuotaEvents           = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
 	maxQuotaChildren         = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
