@@ -402,12 +402,35 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 			db := testutil.TestDB(t, d.dialect)
 			testutil.SetupFullSchema(t, db, d.dialect)
 
+			// A routine an OPTIONAL migration may legitimately redefine.
+			//
+			// This guard's premise is that the numbered migrations determine
+			// what is installed. cleat#1541 makes that false for exactly one
+			// routine: migrations/mssql/optional/cross_tenant_claim.sql
+			// installs a different dbo.fn_tenant_filter, on purpose, for a
+			// deployment that wants --claim-across-tenants -- and this test
+			// suite is one, because CleanupMSSQLTestData deletes across
+			// tenants and cannot work without it.
+			//
+			// So the database legitimately carries a definition the numbered
+			// files do not ship, and the authority for WHICH is
+			// admin.rls_predicate_form rather than the file list.
+			//
+			// Narrow on purpose. It exempts one named routine on one dialect,
+			// and only when the marker says the deployment opted in -- so a
+			// genuinely stale fn_tenant_filter on a database that did NOT opt
+			// in still fails here, which is the case this guard exists for.
+			optedIn := mssqlOptedIntoTheCrossTenantPredicate(t, db, d.dialect)
+
 			checkedDiscriminators := 0
 			for _, name := range order {
 				defList := byName[name]
 				latest := defList[len(defList)-1]
 				if dropped[latest.migration+"\x00"+name] {
 					continue // created and destroyed in the same migration
+				}
+				if optedIn && strings.EqualFold(name, "dbo.fn_tenant_filter") {
+					continue
 				}
 
 				text, exists := databaseRoutineText(t, db, d.dialect, name)
@@ -578,4 +601,27 @@ func procedureMigrationsFor(d testutil.Dialect) []string {
 		return mssqlProcedureMigrations
 	}
 	return nil
+}
+
+// mssqlOptedIntoTheCrossTenantPredicate reports whether this database has
+// applied migrations/mssql/optional/cross_tenant_claim.sql.
+//
+// Reads the marker table rather than the predicate's own definition, for the
+// reason recorded in engine/mssql_schedules.go: SQL Server's metadata
+// visibility means sys.sql_modules answers 0 for an unprivileged principal
+// under BOTH predicates, so a check built on it cannot disagree with itself.
+//
+// Any error is reported as NOT opted in, which is the conservative direction:
+// it leaves the drift check ON, so a missing marker produces a loud failure
+// here rather than a silently skipped routine.
+func mssqlOptedIntoTheCrossTenantPredicate(t *testing.T, db *sql.DB, dialect testutil.Dialect) bool {
+	t.Helper()
+	if string(dialect) != "mssql" {
+		return false
+	}
+	var form string
+	if err := db.QueryRow(`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
+		return false
+	}
+	return form == "admin"
 }

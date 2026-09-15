@@ -147,11 +147,27 @@ func applyMigrationFileForTest(t *testing.T, db *sql.DB, name string) {
 	if err != nil {
 		t.Fatalf("read %s: %v", name, err)
 	}
+	// ONE connection for every batch, not the pool.
+	//
+	// 074 captures the policy set into a #temp table in one batch and replays
+	// it in another; a #temp table lives for the SESSION, so batches issued
+	// through a pool can land on different connections and the second one sees
+	// "Invalid object name '#cleat_bound_policies'". migration.Runner does not
+	// have this problem because it opens one connection per file -- so a helper
+	// that applies a migration has to do the same or it is not applying it the
+	// way the runner does.
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire a single connection to apply %s: %v", name, err)
+	}
+	defer conn.Close()
+
 	for _, batch := range splitMSSQLBatchesForTest(string(raw)) {
 		if strings.TrimSpace(batch) == "" {
 			continue
 		}
-		if _, err := db.Exec(batch); err != nil {
+		if _, err := conn.ExecContext(ctx, batch); err != nil {
 			t.Fatalf("applying %s: %v", name, err)
 		}
 	}

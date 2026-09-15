@@ -97,9 +97,10 @@ DECLARE @fn INT = OBJECT_ID(N'dbo.fn_tenant_filter');
 IF @fn IS NULL
     THROW 50074, N'074: dbo.fn_tenant_filter does not exist; 001_schema.sql has not been applied', 1;
 
-DECLARE @bound TABLE (policy_name SYSNAME, target_schema SYSNAME, target_name SYSNAME);
+IF OBJECT_ID(N'tempdb..#cleat_bound_policies') IS NOT NULL DROP TABLE #cleat_bound_policies;
+CREATE TABLE #cleat_bound_policies (policy_name SYSNAME, target_schema SYSNAME, target_name SYSNAME);
 
-INSERT INTO @bound (policy_name, target_schema, target_name)
+INSERT INTO #cleat_bound_policies (policy_name, target_schema, target_name)
 SELECT sp.name, SCHEMA_NAME(o.schema_id), o.name
   FROM sys.security_predicates AS pred
   JOIN sys.security_policies   AS sp ON sp.object_id = pred.object_id
@@ -110,34 +111,46 @@ SELECT sp.name, SCHEMA_NAME(o.schema_id), o.name
 -- a migration that reported success. 001 binds eight on a fresh install, so
 -- anything less than one means the capture failed rather than that the schema
 -- is small.
-IF (SELECT COUNT(*) FROM @bound) = 0
+IF (SELECT COUNT(*) FROM #cleat_bound_policies) = 0
     THROW 50074, N'074: no security policy references dbo.fn_tenant_filter; refusing to continue rather than leave the tables unguarded', 1;
 
 DECLARE @sql NVARCHAR(MAX) = N'';
 
 SELECT @sql = @sql + N'DROP SECURITY POLICY dbo.' + QUOTENAME(policy_name) + N';' + CHAR(10)
-  FROM (SELECT DISTINCT policy_name FROM @bound) AS d;
+  FROM (SELECT DISTINCT policy_name FROM #cleat_bound_policies) AS d;
 EXEC sp_executesql @sql;
 
 -- 001's predicate, restored verbatim. The absence of the disjunction is the
 -- change; anything else differing from 001 would be an unrelated change hiding
 -- in this one.
-EXEC(N'
+GO
+
+-- Defined as a plain CREATE OR ALTER in its own batch rather than inside
+-- EXEC(N'...'), and that is not style. engine's routine-definition drift guard
+-- reads this file TEXTUALLY to learn what each routine should be; wrapped in
+-- dynamic SQL it read the whole migration -- MERGE, QUOTENAME, sp_executesql --
+-- as part of the function body and reported drift against a database that was
+-- correct. A definition a reader cannot extract is one a guard cannot check.
+--
+-- The captured policy set survives the batch boundary because it is a #temp
+-- table: those live for the session, and migration.Runner.applyMigration runs
+-- every batch of a file on one connection inside one transaction.
 CREATE OR ALTER FUNCTION dbo.fn_tenant_filter(@tenant_id UNIQUEIDENTIFIER)
 RETURNS TABLE
 WITH SCHEMABINDING
 AS
 RETURN SELECT 1 AS access
-    WHERE @tenant_id = CAST(SESSION_CONTEXT(N''tenant_id'') AS UNIQUEIDENTIFIER);
-');
+    WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER);
 
-SET @sql = N'';
+GO
+
+DECLARE @sql NVARCHAR(MAX) = N'';
 SELECT @sql = @sql
      + N'CREATE SECURITY POLICY dbo.' + QUOTENAME(policy_name)
      + N' ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON '
      + QUOTENAME(target_schema) + N'.' + QUOTENAME(target_name)
      + N' WITH (STATE = ON);' + CHAR(10)
-  FROM @bound;
+  FROM #cleat_bound_policies;
 EXEC sp_executesql @sql;
 
 MERGE admin.rls_predicate_form AS t
