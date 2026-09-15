@@ -36,9 +36,15 @@ each area against their own most demanding requirement, and a single zero collap
 contribution entirely — *and costs more than never having offered it*, because they now run a
 vendor **and** a half-used subsystem, with the integration seam between them.
 
-Concretely: a prospect needs SAML. `oauthprovider` speaks OIDC. They buy WorkOS. Now cleat's
+Concretely: a prospect needs SAML. `oauthprovider` speaks OIDC. They buy a vendor. Now cleat's
 identity story is not "one less vendor" but "an unused table and a middleware we had to reason
 about anyway".
+
+*That example has since been resolved, and the resolution illustrates the rule rather than escaping
+it — see [`enterprise-identity-decision.md`](enterprise-identity-decision.md). The answer was not to
+build SAML but to accept a generic OIDC issuer and let the customer terminate SAML, which clears the
+bar without owning the dangerous part. Clearing a bar cheaply is exactly the move this section
+argues for.*
 
 Two consequences follow, and they point in opposite directions:
 
@@ -91,7 +97,7 @@ The bar is the buyer's most demanding common requirement, not parity with the ca
 | Rate limiting | Cluster-wide, per tenant, observable | **Clears, badly configured** | `db` mode exists; default is `memory`, fallback is silent, fails open |
 | Feature flags | Targeting, percentage rollout, kill switch | **Probably clears** | No experimentation platform — rarely the deciding requirement |
 | Audit | Who did what, retained, exportable | **Partial** | HTTP-level, not semantic; no tamper-evidence or export tooling |
-| Identity | SSO, and SAML/SCIM for enterprise | **Clears for SMB, not enterprise** | OIDC only |
+| Identity | SSO, and SAML/SCIM for enterprise | **Decided, not yet built** | SAML via a customer-run terminator (#1582); SCIM deferred |
 | Secrets | Encrypted at rest, rotatable | **Does not clear** | `kvstore` is config storage, not a secrets manager |
 | Outbound network | Cannot be used to attack the host | **Does not clear** | No SSRF guard, no egress allowlist |
 | Reading your own data | Query a tenant's entities | **Does not clear** | One key at a time from a JSONB column |
@@ -99,8 +105,14 @@ The bar is the buyer's most demanding common requirement, not parity with the ca
 
 **Four of ten miss.** Two of those four — egress and secrets — are the kind that end an evaluation
 rather than lose a comparison, because they are security answers rather than feature answers. The
-read model is the one that costs every adopter the most hand-written code. Identity is the one
-most likely to be decided by a single procurement checkbox.
+read model is the one that costs every adopter the most hand-written code.
+
+Identity was the fourth and is the one that has moved: it is no longer an open question but a
+recorded decision ([`enterprise-identity-decision.md`](enterprise-identity-decision.md)) awaiting a
+small piece of work (#1582) — cleat accepts a generic OIDC issuer and the customer terminates SAML.
+It still counts as missing here because **a decision is not a shipped capability**: the row changes
+when the issuer support exists, not when the reasoning is written down. SCIM stays deferred, and
+enterprise identity is not cleared by SAML alone in any case — SOC 2 is the larger gate.
 
 ---
 
