@@ -77,9 +77,19 @@ plugins cannot simply adopt a policy is cleat#1278: a tenant reaches a plugin
 only on the HTTP path, so for a plugin with a cross-tenant background sweep,
 "add a fail-closed policy" and "silently empty the sweep" are the same change.
 
-`TenantScoped` is PostgreSQL-only. MySQL has no row-level security, and SQL
-Server binds a tenant to a whole connection pool, which a per-request tenant
-does not fit. On both, a plugin table is scoped by the Go predicate alone.
+`TenantScoped` is PostgreSQL-only: it is the field that installs a *policy*,
+and `applyTenantScoping` still emits nothing on the other two dialects. On both,
+a plugin table is scoped by the Go predicate alone.
+
+The *reasons* differ, and until cleat#1552 this paragraph gave one reason for
+both. MySQL has no row-level security and never will have anything to install.
+SQL Server does, and the stated obstacle — that it "binds a tenant to a whole
+connection pool, which a per-request tenant does not fit" — was wrong: plugins
+are not handed a connector-scoped pool (`getPluginDB` gives them the main or
+plugin pool), and `sp_set_session_context` is cleared when `database/sql`
+recycles a connection, so a per-request tenant fits. As of cleat#1552 the tenant
+*is* carried on SQL Server; what is missing there is the policy that would read
+it.
 
 ### Which role a plugin runs as
 
