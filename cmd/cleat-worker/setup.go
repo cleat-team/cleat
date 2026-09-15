@@ -1578,6 +1578,13 @@ func (w *Worker) dispatchLoop() {
 			w.Metrics.SetWasmCacheEntries(w.ctx, int64(ents))
 			w.Metrics.SetWasmCacheBytes(w.ctx, cbytes)
 		}
+
+		// And the cache the comment above says these gauges do NOT cover.
+		// cleat#1563 bounded it; this is what makes the bound observable, so an
+		// operator tuning --wasm-module-cache-max-entries is not doing it blind.
+		if c, ok := w.wasmtimeBackend.(interface{ CompiledModuleCacheEntries() int }); ok {
+			w.Metrics.SetWasmCompiledModuleCacheEntries(w.ctx, int64(c.CompiledModuleCacheEntries()))
+		}
 		updateThroughputGauges()
 
 		if !w.memoryController.CanClaim() {

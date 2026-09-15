@@ -67,7 +67,14 @@ type wasmtimeBackend struct {
 
 	// moduleCache holds compiled wasmtime Modules keyed by xxhash of wasmBytes.
 	// Shared across PerExecution instances to avoid serialized recompilation.
-	moduleCache  *sync.Map
+	//
+	// BOUNDED since cleat#1563. It was a bare sync.Map with no Delete anywhere,
+	// so it held one entry per distinct artifact the process had ever run, for
+	// the life of the process, across every tenant -- and the resident cost is
+	// compiled native code. See moduleLRU for why evicting is safe despite the
+	// "Do NOT close the module" rule below, and why the bound counts entries
+	// rather than bytes.
+	moduleCache  *moduleLRU
 	compileLocks *sync.Map // per-key *sync.Mutex to serialize compilation
 	metaCache    *sync.Map // per-key *wasmMeta (envNeeded, hasWasi, language)
 
@@ -154,7 +161,7 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 
 	b := &wasmtimeBackend{
 		engine:       eng,
-		moduleCache:  new(sync.Map),
+		moduleCache:  newModuleLRU(bcfg.moduleCacheMaxEntries),
 		compileLocks: new(sync.Map),
 		metaCache:    new(sync.Map),
 		limits:       lim,
@@ -694,8 +701,8 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	var module *wasmtime.Module
 
 	// Fast path: module already cached.
-	if cached, ok := b.moduleCache.Load(wKey); ok {
-		module = cached.(*wasmtime.Module)
+	if cached, ok := b.moduleCache.load(wKey); ok {
+		module = cached
 		if DebugTiming {
 			fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
 		}
@@ -705,8 +712,8 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		mu := muI.(*sync.Mutex)
 		mu.Lock()
 		// Double-check: another goroutine may have compiled while we waited.
-		if cached, ok := b.moduleCache.Load(wKey); ok {
-			module = cached.(*wasmtime.Module)
+		if cached, ok := b.moduleCache.load(wKey); ok {
+			module = cached
 			if DebugTiming {
 				fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile WAIT THEN HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
 			}
@@ -720,7 +727,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 				mu.Unlock()
 				return nil, fmt.Errorf("host: compile: %w", err)
 			}
-			b.moduleCache.Store(wKey, module)
+			b.moduleCache.store(wKey, module)
 		}
 		mu.Unlock()
 	}
