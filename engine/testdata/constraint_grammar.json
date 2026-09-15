@@ -1,0 +1,239 @@
+{
+  "_comment": "Measured behaviour of every production-reachable plugin-constraint matcher, cleat#1554. Each column is produced through that matcher's PRODUCTION SEAM, not by calling an inner function -- see the header of engine/plugin_constraint_grammar_test.go, which explains why that distinction changed three answers while this was being built.",
+  "rows": [
+    {
+      "version": "1.2.3",
+      "constraint": "",
+      "loader": true,
+      "resolver": true,
+      "index": true,
+      "divergent": false,
+      "note": "WILDCARD: Resolve short-circuits \"\" (and \"latest\") to the highest version before parsing, so it matches. The engine reaches the same answer by a different route -- parseConstraint has an explicit \"\"/\"*\" case. cmd/cleat/plugin_cmd.go:428 passes \"\" on purpose to mean \"latest\"."
+    },
+    {
+      "version": "1.2.3",
+      "constraint": "*",
+      "loader": true,
+      "resolver": true,
+      "index": false,
+      "divergent": true,
+      "note": "THE SHARPEST DIVERGENCE. \"*\" is \"any version\" to the engine and a HARD REJECTION to the index: Resolve short-circuits \"\" and \"latest\" but not \"*\", so it reaches parseConstraint, which has no wildcard case and errors. A user who writes \"*\" gets every version from the engine and nothing from the index."
+    },
+    {
+      "version": "1.2.3",
+      "constraint": "1.2.3",
+      "loader": true,
+      "resolver": true,
+      "index": true,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "1.2.4",
+      "constraint": "1.2.3",
+      "loader": false,
+      "resolver": false,
+      "index": false,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "1.2.3",
+      "constraint": "=1.2.3",
+      "loader": true,
+      "resolver": true,
+      "index": true,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "1.2.3+build1",
+      "constraint": "=1.2.3",
+      "loader": true,
+      "resolver": false,
+      "index": false,
+      "divergent": true,
+      "note": "BUILD METADATA, the case cleat#1554 cites. The loader compares with semver.Compare, which ignores +build; the index uses string equality (index.go:137). The engine was changed to Compare for cleat#1243; plugin/index.go was not."
+    },
+    {
+      "version": "1.2.3",
+      "constraint": "=1.2.3+build1",
+      "loader": true,
+      "resolver": false,
+      "index": false,
+      "divergent": true,
+      "note": "the same divergence with the metadata on the constraint side"
+    },
+    {
+      "version": "1.2.3",
+      "constraint": ">=1.2.3",
+      "loader": true,
+      "resolver": true,
+      "index": true,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "1.0.0",
+      "constraint": ">=1.2.3",
+      "loader": false,
+      "resolver": false,
+      "index": false,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "1.2.4",
+      "constraint": ">1.2.3",
+      "loader": "err",
+      "resolver": true,
+      "index": false,
+      "divergent": true,
+      "note": "OPERATOR COVERAGE: \">\" is understood only by the resolver; the loader and the index both fail to parse it."
+    },
+    {
+      "version": "1.2.2",
+      "constraint": "<1.2.3",
+      "loader": "err",
+      "resolver": true,
+      "index": false,
+      "divergent": true,
+      "note": "as above, for \"<\""
+    },
+    {
+      "version": "1.2.3",
+      "constraint": "<=1.2.3",
+      "loader": "err",
+      "resolver": true,
+      "index": false,
+      "divergent": true,
+      "note": "as above, for \"<=\""
+    },
+    {
+      "version": "1.2.4",
+      "constraint": "^1.2.3",
+      "loader": true,
+      "resolver": true,
+      "index": true,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "2.0.0",
+      "constraint": "^1.2.3",
+      "loader": false,
+      "resolver": false,
+      "index": false,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "1.2.4",
+      "constraint": "~1.2.3",
+      "loader": true,
+      "resolver": true,
+      "index": true,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "1.3.0",
+      "constraint": "~1.2.3",
+      "loader": false,
+      "resolver": false,
+      "index": false,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "1.5.0",
+      "constraint": "1.2.3 - 2.0.0",
+      "loader": "err",
+      "resolver": false,
+      "index": false,
+      "divergent": false,
+      "note": "RANGE SYNTAX is understood by none of them."
+    },
+    {
+      "version": "1.5.0",
+      "constraint": ">=1.0.0 <2.0.0",
+      "loader": "err",
+      "resolver": false,
+      "index": false,
+      "divergent": false,
+      "note": "COMPOUND CONSTRAINT: understood by none of them."
+    },
+    {
+      "version": "1.2.3",
+      "constraint": "v1.2.3",
+      "loader": true,
+      "resolver": true,
+      "index": true,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "1.2.3",
+      "constraint": "1.2",
+      "loader": false,
+      "resolver": false,
+      "index": false,
+      "divergent": false,
+      "note": "partial versions match nothing anywhere"
+    },
+    {
+      "version": "1.2.3",
+      "constraint": "1",
+      "loader": false,
+      "resolver": false,
+      "index": false,
+      "divergent": false,
+      "note": ""
+    },
+    {
+      "version": "1.2.3-alpha",
+      "constraint": ">=1.0.0",
+      "loader": true,
+      "resolver": false,
+      "index": true,
+      "divergent": true,
+      "note": "PRERELEASE: the resolver's parseVersion rejects a prerelease outright, so VersionSatisfies answers false where both others match. LIVE: cmd/cleat-worker/setup.go:4370 fails the workflow with ErrPermanent on a false."
+    },
+    {
+      "version": "1.2.3-alpha",
+      "constraint": "=1.2.3-alpha",
+      "loader": true,
+      "resolver": false,
+      "index": true,
+      "divergent": true,
+      "note": "the same prerelease divergence on an exact match"
+    },
+    {
+      "version": "1.2.3",
+      "constraint": "abc",
+      "loader": "err",
+      "resolver": false,
+      "index": false,
+      "divergent": false,
+      "note": "garbage: refused everywhere"
+    },
+    {
+      "version": "1.2.3",
+      "constraint": ">=",
+      "loader": "err",
+      "resolver": false,
+      "index": false,
+      "divergent": false,
+      "note": "an operator with no version: refused everywhere"
+    },
+    {
+      "version": "1.2.3",
+      "constraint": "1.2.3.4",
+      "loader": "err",
+      "resolver": true,
+      "index": false,
+      "divergent": true,
+      "note": "FOUR COMPONENTS: the resolver accepts it and MATCHES; the other two refuse."
+    }
+  ]
+}
