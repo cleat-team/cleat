@@ -1175,6 +1175,11 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 		}
 		// AFTER the stubs: DefineWasi binds clock_time_get and random_get, and
 		// these two replace them. cleat#1300.
+		// poll_oneoff BEFORE the determinism overrides, matching their own
+		// AllowShadowing discipline: each shadows exactly what it replaces.
+		if err := b.registerPollOneoff(linker); err != nil {
+			return err
+		}
 		if err := b.registerWasiDeterminism(linker); err != nil {
 			return err
 		}

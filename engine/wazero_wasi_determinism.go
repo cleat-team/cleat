@@ -150,14 +150,17 @@ func withDeterministicClockAndEntropy(ctx context.Context, config wazero.ModuleC
 			// blocks -- measured 500ms -> 502ms. Two backends that sleep for the
 			// same reason rather than one sleeping and one spinning.
 			//
-			// IT DOES NOT CONSULT THE DURABLE CLOCK, deliberately. Making a
-			// replayed sleep return at once, and advancing h.Now() across a guest
-			// sleep, are both right -- and doing them HERE would do them on wazero
-			// only, because wasmtime's poll_oneoff never reaches this handler. That
-			// is the dev-deterministic/production-not inversion cleat#1300 exists
-			// to remove, relocated rather than fixed. Both backends together, or
-			// neither. See cleat#1300 for the follow-up.
-			sleepBounded(ctx, time.Duration(ns))
+			// THE DURABLE CLOCK DECIDES, the same predicate wasmtime's
+			// poll_oneoff uses (engine/wasmtime_poll_oneoff.go). cleat#1633
+			// landed this on BOTH backends at once deliberately: doing it here
+			// alone would make h.Now() advance across a guest sleep under
+			// cleatctl replay and not in production, which is cleat#1300's own
+			// complaint with the roles swapped.
+			d := time.Duration(ns)
+			if h != nil {
+				d = h.ServeWasiSleep(ctx, ns/int64(time.Millisecond))
+			}
+			sleepBounded(ctx, d)
 		}).
 		WithRandSource(&deterministicEntropy{h: h})
 }
