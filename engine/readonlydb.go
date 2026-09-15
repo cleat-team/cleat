@@ -16,6 +16,17 @@ import (
 // identical portability problem -- a SELECT with $N placeholders fails on
 // MySQL and SQL Server exactly as an UPDATE does -- so leaving this one out
 // would fix the writes and quietly keep the reads broken.
+//
+// WHAT IS ACTUALLY ENFORCED, AND WHERE. Exec is refused in Go on every
+// dialect. The DATABASE additionally refuses a write inside the transaction on
+// PostgreSQL and MySQL, and cannot on SQL Server, which has no read-only
+// transaction -- see readOnlyTxOptions. So do not read "Begin returned a
+// transaction" as "the database is enforcing read-only": on SQL Server it is
+// not, and a mutating statement sent through Query reaches the database there.
+//
+// That gap is cleat#1621 and is wider than SQL Server: Query and QueryRow fall
+// through to the bare pool whenever beginTenantTx declines, which includes
+// PostgreSQL with no tenant in context.
 type ReadOnlyDB struct {
 	Inner   *sql.DB
 	Dialect plugin.Dialect
@@ -23,20 +34,46 @@ type ReadOnlyDB struct {
 
 var _ plugin.PluginDB = (*ReadOnlyDB)(nil)
 
+// readOnlyTxOptions returns the options that make the DATABASE enforce
+// read-only for this dialect, or nil where it has no way to.
+//
+// PostgreSQL and MySQL both refuse a write inside a transaction opened with
+// ReadOnly: true, with no further statement needed -- measured on PostgreSQL
+// 16 and MySQL 8.4 as SQLSTATE 25006 and error 1792. SQL Server has no
+// read-only transaction at all: go-mssqldb rejects the option outright
+// ("read-only transactions are not supported") and T-SQL has no statement
+// that makes an open transaction read-only.
+//
+// So the guarantee is NOT uniform, and the difference is deliberate rather
+// than overlooked. On SQL Server a ReadOnlyDB transaction is enforced only by
+// readOnlyTx.Exec refusing in Go. That still covers every write route
+// plugin.PluginTx offers, but it is a weaker thing than the other two: a
+// mutating statement sent through Query -- which denies nothing -- reaches
+// the database on SQL Server and is refused on the others. cleat#1615.
+func readOnlyTxOptions(d plugin.Dialect) *sql.TxOptions {
+	if d == plugin.DialectMSSQL {
+		return nil
+	}
+	return &sql.TxOptions{ReadOnly: true}
+}
+
 func (r *ReadOnlyDB) Begin(ctx context.Context) (plugin.PluginTx, error) {
-	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, &sql.TxOptions{ReadOnly: true})
+	opts := readOnlyTxOptions(r.Dialect)
+	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, opts)
 	if err != nil {
 		return nil, fmt.Errorf("readOnlyDB begin tenant-scoped tx: %w", err)
 	}
 	if tx == nil {
-		if tx, err = r.Inner.BeginTx(ctx, &sql.TxOptions{ReadOnly: true}); err != nil {
+		if tx, err = r.Inner.BeginTx(ctx, opts); err != nil {
 			return nil, fmt.Errorf("readOnlyDB begin tx: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, "SET TRANSACTION READ ONLY"); err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("readOnlyDB set transaction read only: %w", err)
-	}
+	// No "SET TRANSACTION READ ONLY" here. It was redundant on PostgreSQL --
+	// the option above already does it -- FATAL on MySQL, which refuses to
+	// change transaction characteristics once a transaction is open (error
+	// 1568, SQLSTATE 25001), and a syntax error on SQL Server. So the one
+	// statement that was meant to make this portable was the only thing
+	// stopping Begin working on two of the three dialects.
 	return &readOnlyTx{tx: tx, dialect: r.Dialect}, nil
 }
 
@@ -45,7 +82,7 @@ func (r *ReadOnlyDB) Exec(ctx context.Context, query string, args ...any) (int64
 }
 
 func (r *ReadOnlyDB) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
-	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, &sql.TxOptions{ReadOnly: true})
+	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, readOnlyTxOptions(r.Dialect))
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +102,7 @@ func (r *ReadOnlyDB) Query(ctx context.Context, query string, args ...any) (plug
 }
 
 func (r *ReadOnlyDB) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
-	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, &sql.TxOptions{ReadOnly: true})
+	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, readOnlyTxOptions(r.Dialect))
 	if err != nil {
 		return &rowScanner{err: err}
 	}

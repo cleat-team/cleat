@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -113,19 +112,23 @@ func TestReadOnlyDB_BeginError(t *testing.T) {
 	}
 }
 
-func TestReadOnlyDB_Begin_SetTransactionError(t *testing.T) {
-	setTxErr := errors.New("read-only mode not available")
+// TestReadOnlyDB_Begin_IssuesNoSetTransaction is the inverse of the test that
+// used to be here, which asserted that a failing "SET TRANSACTION READ ONLY"
+// made Begin fail.
+//
+// Begin no longer issues that statement at all (cleat#1615): it is redundant
+// on PostgreSQL, refused by MySQL once a transaction is open, and a syntax
+// error on SQL Server. Arming the mock to fail on it and requiring Begin to
+// SUCCEED turns the old expectation into a guard -- this goes red the moment
+// anyone puts the statement back.
+func TestReadOnlyDB_Begin_IssuesNoSetTransaction(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET TRANSACTION", err: setTxErr},
+		{match: "SET TRANSACTION", err: errors.New("SET TRANSACTION was issued, and must not be")},
 	})
 	r := &ReadOnlyDB{Inner: db}
 
-	_, err := r.Begin(context.Background())
-	if err == nil {
-		t.Fatal("expected error from SET TRANSACTION failure")
-	}
-	if !strings.Contains(err.Error(), "readOnlyDB set transaction read only") {
-		t.Errorf("expected wrapped error, got: %v", err)
+	if _, err := r.Begin(context.Background()); err != nil {
+		t.Fatalf("Begin issued a statement it should not have: %v", err)
 	}
 }
 
