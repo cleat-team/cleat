@@ -28,7 +28,8 @@ import (
 // both straight past a policy -- so a tenant-isolation test written on
 // testutil.TestDB's own connection cannot fail whatever the code does.
 //
-// POSTGRESQL ONLY: plugin.applyTenantScoping emits nothing on the other two
+// POSTGRESQL FIXTURE: plugin.applyTenantScoping emits nothing on MySQL, and
+// installs a policy on SQL Server too as of cleat#1552; this test covers the
 // dialects, so running this elsewhere would assert that an absent policy does
 // not apply.
 func TestKafkaConfigIsScopedToItsTenant(t *testing.T) {

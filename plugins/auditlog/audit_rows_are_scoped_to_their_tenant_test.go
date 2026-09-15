@@ -31,7 +31,8 @@ import (
 // connection cannot fail, whatever the code does.
 //
 // POSTGRESQL ONLY, and not by omission: row-level security is the mechanism, and
-// plugin.applyTenantScoping emits nothing on the other two dialects. Running
+// plugin.applyTenantScoping emits nothing on MySQL, and installs a policy on
+// SQL Server too as of cleat#1552. Running
 // this against MySQL or SQL Server would assert that an absent policy does not
 // apply.
 func TestAuditRowsAreScopedToTheirTenant(t *testing.T) {

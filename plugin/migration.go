@@ -338,13 +338,35 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 				return fmt.Errorf("plugin %s migration v%d begin: %w", name, m.Version, err)
 			}
 
+			// A migration may carry NO SQL AT ALL and exist only to declare
+			// something -- TenantScoped, SweepTables. cleat#1512 established
+			// that idiom and slacknotify's v2 states the reason: a recorded
+			// migration never runs again, so protecting an EXISTING database
+			// means adding a new version rather than editing v1, and that new
+			// version has nothing to execute.
+			//
+			// The dialect skip below is for a migration whose SQL does not
+			// port. A declaration-only migration has no SQL that could fail to
+			// port, and skipping it records the version as applied while
+			// installing nothing -- so the table never gets another chance.
+			//
+			// Measured on a freshly migrated SQL Server database while adding
+			// applyTenantScopingMSSQL: 25 declared tables, 2 policies. The
+			// other 23 are covered by 17 declaration-only migrations, every one
+			// of which took this branch. cleat#1552.
+			//
+			// This changes nothing on MySQL beyond removing a misleading log
+			// line: falling through runs an empty statement list, and all three
+			// of the declaration helpers below are no-ops there.
+			declarationOnly := m.Up == "" && m.UpMySQL == "" && m.UpMSSQL == ""
+
 			// Select dialect-appropriate SQL.
 			sql := m.Up
 			switch dialect {
 			case DialectMySQL:
 				if m.UpMySQL != "" {
 					sql = m.UpMySQL
-				} else {
+				} else if !declarationOnly {
 					log.Printf("[plugin] %s v%d: no MySQL migration — skipping", name, m.Version)
 					if _, err := tx.ExecContext(ctx, insertPluginMigrationSQL(dialect), name, m.Version); err != nil {
 						_ = tx.Rollback()
@@ -356,7 +378,7 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 			case DialectMSSQL:
 				if m.UpMSSQL != "" {
 					sql = m.UpMSSQL
-				} else {
+				} else if !declarationOnly {
 					log.Printf("[plugin] %s v%d: no MSSQL migration — skipping", name, m.Version)
 					if _, err := tx.ExecContext(ctx, insertPluginMigrationSQL(dialect), name, m.Version); err != nil {
 						_ = tx.Rollback()
@@ -480,11 +502,18 @@ func RegisterPluginTables(ctx context.Context, db *sql.DB, pluginName string, ta
 // silently bypassed for the table's owner, which is whoever ran the migration
 // -- see the comment above the engine's own FORCE block in 001_schema.sql.
 //
-// Non-PostgreSQL dialects return nil without doing anything; see the
-// TenantScoped field for why, and note that it is a real gap rather than an
-// omission.
+// SQL SERVER gets the same protection by a different mechanism; see
+// applyTenantScopingMSSQL. MySQL returns nil without doing anything: it has no
+// row-level security, and its tenancy is a database boundary rather than a
+// policy.
 func applyTenantScoping(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), dialect Dialect, tables []string) error {
-	if len(tables) == 0 || dialect != DialectPostgres {
+	if len(tables) == 0 {
+		return nil
+	}
+	if dialect == DialectMSSQL {
+		return applyTenantScopingMSSQL(ctx, exec, tables)
+	}
+	if dialect != DialectPostgres {
 		return nil
 	}
 	for _, table := range tables {
@@ -533,6 +562,109 @@ func applyTenantScoping(ctx context.Context, exec func(ctx context.Context, quer
 	return nil
 }
 
+// mssqlPluginTenantFilter is the predicate every plugin policy binds to.
+//
+// A SEPARATE FUNCTION FROM THE ENGINE'S dbo.fn_tenant_filter, and the reason is
+// not tidiness. A SECURITY POLICY holds a hard dependency on the function under
+// it, so CREATE OR ALTER on that function fails while any policy references it
+// -- migrations/mssql/001_schema.sql has a long header about exactly this, and
+// works around it by dropping every policy first, which it can do because it
+// owns them all. A plugin migration owns only its own tables and cannot know
+// what else is bound to the engine's function. Binding plugin policies to the
+// engine's predicate would therefore make migration 012 -- which does
+// CREATE OR ALTER dbo.fn_tenant_filter -- fail on any database with plugins
+// installed.
+const mssqlPluginTenantFilter = "fn_plugin_tenant_filter"
+
+// applyTenantScopingMSSQL installs a security policy per declared table.
+// cleat#1552.
+//
+// THE PREDICATE CARRIES NO ADMIN DISJUNCT. migration 012 added
+// `OR IS_ROLEMEMBER(N'cleat_admin') = 1` to the engine's predicate, and #1491
+// measured what that costs: a query that does not carry its own tenant equality
+// loses its seek and scans. cleat#1541 is removing it. Plugin tables are not
+// adopting it on the way past -- the cross-tenant key below serves the same
+// purpose, and is tested once per query rather than once per row.
+//
+// THE SECOND KEY IS THE SWEEP BYPASS, mirroring PostgreSQL's cleat.cross_tenant
+// GUC. SQL Server has no SET ROLE, so PostgreSQL's newer `TO cleat_sweep`
+// policy has no counterpart; engine/plugindb_tenant.go's markCrossTenantOnTx
+// sets this key for the life of one transaction. It is emphatically NOT the
+// sentinel 012 refuses: that refuses a magic tenant_id VALUE, which would let
+// anything that can call sp_set_session_context assume a particular tenant.
+// This key names no tenant, and dbo.fn_tenant_filter does not read it, so it
+// cannot widen any engine table.
+//
+// BLOCK PREDICATES AS WELL AS A FILTER, and this is the half that reading the
+// PostgreSQL arm does not suggest. A FILTER PREDICATE hides rows from reads; it
+// does not refuse writes. Measured against SQL Server 2022 on a table carrying
+// only a filter: an INSERT with no session context SUCCEEDS, and the row is
+// then invisible to the writer.
+//
+// PostgreSQL does not have that hole, because `FOR ALL ... USING` defaults its
+// WITH CHECK to the USING expression. Measured on the shipped shape as a
+// NOSUPERUSER NOBYPASSRLS role -- a first attempt measured it as a SUPERUSER,
+// which bypasses RLS unconditionally and duly reported every write as
+// permitted, which is what that fixture was always going to say:
+//
+//	                                        postgres        sql server
+//	                                                    filter   filter+block
+//	INSERT own tenant's row                 ok          ok       ok
+//	INSERT another tenant's row             REFUSED     ok (!)   REFUSED
+//	UPDATE moving a row to another tenant   REFUSED     ok (!)   REFUSED
+//	INSERT with no tenant set               REFUSED     ok (!)   REFUSED
+//
+// AFTER INSERT and AFTER UPDATE are the two that matter. BEFORE UPDATE and
+// BEFORE DELETE would be redundant: the filter predicate already hides another
+// tenant's rows, so there is nothing for them to match.
+//
+// THE TABLE MUST BE TWO-PART QUALIFIED. `ON <table>` fails with "Cannot schema
+// bind security policy ... Names must be in two-part format", so this emits
+// `ON dbo.<table>`. WithSchema is PostgreSQL-only, so dbo is where a plugin's
+// CREATE TABLE put them.
+//
+// WHAT IT DOES NOT MATCH: PostgreSQL's cleat.assert_tenant_set() RAISES when no
+// tenant is set, so a statement that forgot one fails loudly. A SQL Server
+// filter predicate must be an inline table-valued function, which has no
+// procedural body to raise from -- BEGIN ... THROW is a syntax error there. So
+// a READ with no tenant returns an empty result rather than an error. Writes
+// are covered by the block predicates above; reads are not, and that asymmetry
+// is real. cleat#1552 carries the options that were measured and rejected,
+// including a CONVERT trip-wire whose message SQL Server redacts inside a
+// security predicate.
+func applyTenantScopingMSSQL(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), tables []string) error {
+	// Guarded creation rather than CREATE OR ALTER, for the dependency reason
+	// above: once a policy binds this function it cannot be altered, and it
+	// never needs to be. Re-running is a no-op, measured.
+	createFilter := fmt.Sprintf(`IF OBJECT_ID('dbo.%[1]s', 'IF') IS NULL
+	EXEC('CREATE FUNCTION dbo.%[1]s(@tenant_id UNIQUEIDENTIFIER)
+	      RETURNS TABLE WITH SCHEMABINDING AS
+	      RETURN SELECT 1 AS access
+	      WHERE @tenant_id = CAST(SESSION_CONTEXT(N''tenant_id'') AS UNIQUEIDENTIFIER)
+	         OR CAST(SESSION_CONTEXT(N''cross_tenant'') AS NVARCHAR(4000)) <> N''''')`,
+		mssqlPluginTenantFilter)
+	if _, err := exec(ctx, createFilter); err != nil {
+		return fmt.Errorf("create dbo.%s: %w", mssqlPluginTenantFilter, err)
+	}
+
+	for _, table := range tables {
+		if !isPlainIdentifier(table) {
+			return fmt.Errorf("tenant-scoped table %q is not a plain identifier", table)
+		}
+		policy := table + "_tenant_isolation"
+		stmt := fmt.Sprintf(`IF NOT EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'%[1]s')
+	CREATE SECURITY POLICY %[1]s
+		ADD FILTER PREDICATE dbo.%[2]s(tenant_id) ON dbo.%[3]s,
+		ADD BLOCK PREDICATE dbo.%[2]s(tenant_id) ON dbo.%[3]s AFTER INSERT,
+		ADD BLOCK PREDICATE dbo.%[2]s(tenant_id) ON dbo.%[3]s AFTER UPDATE
+	WITH (STATE = ON)`, policy, mssqlPluginTenantFilter, table)
+		if _, err := exec(ctx, stmt); err != nil {
+			return fmt.Errorf("create security policy %s: %w", policy, err)
+		}
+	}
+	return nil
+}
+
 // grantSweepTables gives cleat_sweep privileges on tables a cross-tenant sweep
 // touches that carry no tenant column, declared in Migration.SweepTables.
 //
@@ -570,9 +702,19 @@ func grantSweepTables(ctx context.Context, exec func(ctx context.Context, query 
 // registerTenantScopedTables records each tenant-scoped table in
 // admin.plugin_tables, so admin.drop_tenant can find it.
 //
-// PostgreSQL only, matching applyTenantScoping: on the other two dialects
-// TenantScoped installs no policy and admin.plugin_tables does not exist, so
-// there is nothing to register and nothing that would read it.
+// PostgreSQL only. This USED to say "matching applyTenantScoping", and since
+// cleat#1552 that is no longer true: SQL Server gets a policy and no registry
+// row, because admin.plugin_tables does not exist there and nothing would read
+// it. MySQL gets neither, and needs neither.
+//
+// THAT LEAVES A GAP ON SQL SERVER, and it is recorded here rather than left for
+// someone to infer from the asymmetry. admin.drop_tenant reads this table to
+// find the plugin tables a dropped tenant owns rows in (cleat#1289). SQL Server
+// has no counterpart, so dropping a tenant there leaves its plugin rows in
+// place -- and now that a policy exists, unreadable as well as undeleted, which
+// is the exact pairing #1289 was filed about. Closing it needs a SQL Server
+// drop_tenant path, which is a separate piece of work from installing the
+// policies.
 //
 // The schema is recorded alongside the name because --schema puts plugin
 // tables somewhere other than public while admin.plugin_tables stays in the
