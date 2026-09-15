@@ -3,6 +3,11 @@
 This guide covers configuration, monitoring, backups, scaling, health checks,
 and graceful shutdown for running cleat in production.
 
+> **Before a tenant's workflows can fetch anything**, egress must be permitted
+> by both the operator and the tenant — see
+> [egress-policy.md](egress-policy.md). An unconfigured tenant reaches nothing,
+> which is deliberate.
+
 ## Configuration
 
 ### Database URL
