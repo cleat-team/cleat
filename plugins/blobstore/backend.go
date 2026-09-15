@@ -86,6 +86,25 @@ func newS3Backend(ctx context.Context, cfg Config) (*s3Backend, error) {
 		creds = credentials.NewChainCredentials([]credentials.Provider{
 			&credentials.EnvAWS{},
 			&credentials.IAM{
+				// DELIBERATELY NOT the egress-guarded transport, and this is
+				// the one place in the tree where that is correct.
+				//
+				// cleat#1565's floor refuses link-local precisely because
+				// 169.254.169.254 is the cloud instance metadata endpoint, and
+				// reaching it is the entire job of this client: it is how the
+				// EC2 instance-profile / ECS task-role credential chain gets
+				// credentials. Routing it through the guard would refuse the
+				// request the guard is named after.
+				//
+				// It is safe in a way the plugin clients are not, because the
+				// destination is not configurable: it comes from the AWS SDK,
+				// not from a tenant, a plugin config or a workflow. Nothing a
+				// guest supplies reaches it.
+				//
+				// Exempted BY NAME in
+				// TestEveryPluginRoutesItsEgressThroughTheGuard, so this
+				// remains a decision somebody made rather than a client
+				// somebody missed.
 				Client: &http.Client{},
 			},
 		})
