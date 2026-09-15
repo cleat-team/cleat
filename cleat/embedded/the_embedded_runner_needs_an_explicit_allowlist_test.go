@@ -15,16 +15,26 @@ import (
 // It executes guest code exactly as the worker does. Defaulting it open would
 // make the development path quietly weaker than production, and would make
 // "it worked under embedded" stop predicting anything about a deployment.
-func TestTheEmbeddedRunnerRefusesEgressWithoutAnAllowlist(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("reached"))
-	}))
-	defer srv.Close()
+// The destination is a NAME on no floor rule, not an httptest server, and the
+// difference is the whole assertion.
+//
+// This used an httptest URL, which is always a loopback literal. That worked
+// only because the allowlist gate was reached first; cleat#1627 refuses a
+// denied literal above the allowlists, so the same fixture now produces
+// "loopback: the worker's own API and admin surface" and the test could no
+// longer see the thing it is named for. Two refusers, and the fixture chose
+// between them by accident.
+//
+// Nothing needs to be listening: with no allowlist configured the refusal
+// happens BEFORE any resolution, which is also why an unroutable name costs no
+// DNS and cannot flake.
+const unlistedHost = "http://api.example.com/probe"
 
+func TestTheEmbeddedRunnerRefusesEgressWithoutAnAllowlist(t *testing.T) {
 	r := New() // no WithEgressAllowlist
 	var fetchErr error
 	r.Register("test", func(ctx *Context) error {
-		_, fetchErr = ctx.H().DurableCall("http", "fetch", fmt.Sprintf(`{"url":%q}`, srv.URL))
+		_, fetchErr = ctx.H().DurableCall("http", "fetch", fmt.Sprintf(`{"url":%q}`, unlistedHost))
 		ctx.SetOutput(`{"ok":true}`)
 		return nil
 	})
@@ -36,7 +46,10 @@ func TestTheEmbeddedRunnerRefusesEgressWithoutAnAllowlist(t *testing.T) {
 			"must not read as permission")
 	}
 	if !strings.Contains(fetchErr.Error(), "allowlist") {
-		t.Errorf("refused, but not by the allowlist -- %v", fetchErr)
+		t.Errorf("refused, but not by the allowlist -- %v. The destination is deliberately "+
+			"a host no floor rule covers, so the allowlist is the only layer that can "+
+			"refuse it; any other refuser means this test is measuring something else.",
+			fetchErr)
 	}
 }
 

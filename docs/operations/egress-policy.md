@@ -116,6 +116,34 @@ The distinction matters operationally: the second is fixed with
 `--egress-allowlist`, the third with `cleatctl egress-allow`, and editing the
 wrong one changes nothing.
 
+### A refusal you cannot configure away says so
+
+The three gates are checked operator → tenant → floor, and the message names
+the **first** one that said no. That ordering used to mislead in one case: a
+destination that is already an IP address in a denied range is refused by every
+gate, so it was reported as an allowlist failure — which names a list you can
+edit. `cleatctl egress-allow add 127.0.0.1` is accepted and `list` shows it
+afterwards, and the next call fails anyway, now citing the floor.
+
+A denied **address literal** is now reported by the floor directly:
+
+```
+egress to 127.0.0.1 is refused by cleat's network policy: loopback: the
+  worker's own API and admin surface
+```
+
+So if a refusal names an allowlist, editing that allowlist is worth doing; if
+it names a floor rule, no configuration will change it and the destination has
+to move.
+
+**One case is deliberately not covered.** A *hostname* that resolves into a
+denied range — `localhost`, or a name pointing at an RFC1918 address — still
+reports the allowlist first, because finding out otherwise means resolving it,
+and nothing is resolved until the allowlists have permitted the host. That
+ordering is what stops a workflow making the worker look up a name of its
+choosing. If a name-based destination is refused by an allowlist and adding it
+does not help, the address behind it is on the floor.
+
 **A refusal is permanent, not transient.** A workflow will not retry against
 it, because the answer cannot change without a configuration change.
 
