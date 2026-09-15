@@ -1,10 +1,10 @@
--- cleat migration 068 (mysql): a secret never reaches the guest
+-- cleat migration 069 (mysql): a secret never reaches the guest
 --
--- cleat#1570. The PostgreSQL counterpart (080) carries the full reasoning for
+-- cleat#1570. The PostgreSQL counterpart (081) carries the full reasoning for
 -- why a reference is substituted at the host boundary rather than a value being
 -- handed to the guest; this header records only what differs on MySQL.
 --
--- NUMBER TAKEN BY HAND: 067 is claimed by an open pull request (cleat#1568) and
+-- NUMBER TAKEN BY HAND: 068 is claimed by an open pull request (cleat#1568) and
 -- is not visible on develop. See 080's header.
 --
 -- NO ROW-LEVEL SECURITY, because MySQL has none. Tenant isolation on this

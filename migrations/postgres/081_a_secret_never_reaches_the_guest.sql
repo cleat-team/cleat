@@ -1,11 +1,11 @@
--- cleat migration 080 (postgres): a secret never reaches the guest
+-- cleat migration 081 (postgres): a secret never reaches the guest
 --
 -- cleat#1570. Every playbook in docs/playbooks/ needs per-tenant third-party
 -- credentials -- payment keys, CRM tokens, model API keys -- and kvstore, which
 -- is where they would otherwise go, is a versioned JSONB store with no
 -- encryption, no rotation and no access audit.
 --
--- NUMBER TAKEN BY HAND. 079 is claimed by an open pull request (cleat#1568) and
+-- NUMBER TAKEN BY HAND. 080 is claimed by an open pull request (cleat#1568), which itself moved off 079 when #1590 merged and
 -- is therefore not visible on develop, so the next free number read from the
 -- merged tree is wrong. WORKSTREAM.md records the same hazard for
 -- IMPROVEMENT-PLAN section numbers and the same remedy: take the next one

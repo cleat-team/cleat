@@ -1,9 +1,9 @@
--- cleat migration 072 (mssql): a secret never reaches the guest
+-- cleat migration 073 (mssql): a secret never reaches the guest
 --
--- cleat#1570. The PostgreSQL counterpart (080) carries the full reasoning; this
+-- cleat#1570. The PostgreSQL counterpart (081) carries the full reasoning; this
 -- header records only what differs on SQL Server.
 --
--- NUMBER TAKEN BY HAND: 071 is claimed by an open pull request (cleat#1568) and
+-- NUMBER TAKEN BY HAND: 072 is claimed by an open pull request (cleat#1568) and
 -- is not visible on develop. See 080's header.
 --
 -- SCHEMA-QUALIFIED, AND THE FOREIGN KEY NAMES admin.tenants. Both learned the
