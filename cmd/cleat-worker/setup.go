@@ -148,6 +148,15 @@ type dbServiceCaller struct {
 	workerID    string
 	benchSvcURL string
 
+	// traceID is this run's W3C trace-id, propagated on guest-initiated
+	// fetches so the callee joins the caller's trace. cleat#1596.
+	//
+	// A FIELD, not a context value, because this caller is already per-run:
+	// it is constructed inside executeWorkflow alongside engine.WithTraceID,
+	// from the same traceID. Reaching for context plumbing would add a second
+	// way to answer a question this struct's lifetime already answers.
+	traceID string
+
 	// egress is the network policy for guest-initiated fetches. Nil means the
 	// strict default, which is what production builds -- main.go never sets
 	// this, and TestNoProductionCodeAllowsLoopbackEgress keeps it that way.
@@ -307,6 +316,18 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
 	}
+	// AFTER the guest's headers. SetTraceparent leaves a non-empty traceparent
+	// alone, so a guest that set one deliberately keeps it either way -- the
+	// ordering is NOT what protects that, and an earlier version of this
+	// comment claimed it was. Moving the call above the loop passes every test
+	// but one.
+	//
+	// The one it fails is the reason for the placement: a guest supplying
+	// traceparent as an EMPTY STRING. After the loop, SetTraceparent sees no
+	// usable value and supplies the run's trace; before it, the loop's empty
+	// value wins and the hop goes silent. Pinned by
+	// TestAnEmptyGuestTraceparentDoesNotSilenceTheHop. cleat#1596.
+	plugin.SetTraceparent(httpReq, c.traceID)
 	// The guard is on the TRANSPORT, not on req.URL, and that placement is the
 	// whole point: a stock client follows up to ten redirects and re-resolves
 	// each hop, so a check on the guest's URL says nothing about where the
@@ -2073,6 +2094,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		workerID:    w.id,
 		benchSvcURL: *benchSvcURL,
 		egressAllow: w.egressAllow,
+		traceID:     traceID,
 	}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(execStore.(engine.SignalStore)),
