@@ -718,6 +718,69 @@ edit it, do so before the checks start or after they settle.**
 never adds a column, so a long-lived database keeps its old shape and dozens of tests fail on a
 missing column. Drop and recreate; do not debug the code.
 
+**`go build ./...` and `go vet ./...` cover ONE MODULE, and this repo has seven.** From the root
+they see 58 packages and none of `cleat/`, `cleat/backendkit/`, `examples/`,
+`benchmarks/workflows/`, `tests/cross-language/` or `tests/plugin-harness/`. Measured 2026-09-14 by
+breaking `cleat/embedded/runner.go` on purpose with an undefined identifier:
+
+| | |
+|---|---|
+| `go build ./...` | **exit 0 — misses it** |
+| `go vet ./...` | **exit 0 — misses it** |
+| `go build ./cleat/embedded/` | exit 1 |
+| `go test ./cleat/embedded/` | exit 1 |
+
+Both root-level gates report success on a tree with a package that does not compile. This is not
+the `-json` package-failure case and not a test-file import cycle: the package is simply **not in
+the pattern**. Build every MODULE, not every package:
+
+    for d in $(git ls-files '*go.mod' | xargs -n1 dirname | sort); do
+      (cd "$d" && go build ./... && go vet ./...) || echo "FAILED: $d"
+    done
+
+It bites hardest where a change is deliberately made in two places — `cleat/embedded/runner.go`
+mirrors a `cmd/cleat-worker` path (cleat#1565) — because the root gate covers exactly the half you
+were already thinking about.
+
+**A PR can read all-green and still refuse to merge, and `gh pr checks` cannot see why.** Two run
+sets on one SHA — a double trigger, where `cancel-in-progress` kills one of each pair — leave a
+**cancelled twin beside each successful check**. `gh pr checks` reports the newest per NAME and
+shows only the success; the ruleset evaluates the other one. Measured 2026-09-14 on cleat#1546:
+50 pass, 0 pending, 0 fail, no missing required context, no unresolved threads, and
+`mergeStateStatus` stably `BLOCKED` — against 54 success and **37 cancelled** check runs on the SHA.
+
+**The required-vs-reported `comm` check does not catch this**, which matters because that is the
+remedy this file gives two paragraphs up for a *missing* context. Here every required context is
+present and passing. The tell is a duplicated workflow name:
+
+    gh run list --commit <sha> --limit 40 --json name --jq '.[].name' | sort | uniq -d
+
+Blank means one clean set. The repair is a new SHA — rebase and one `--force-with-lease` — not a
+re-run, which risks a third set that cancels the good one.
+
+**And `gh pr merge` exits 0 whether it QUEUED or REFUSED.** Never for "merged". With `--squash` it
+prints only `! The merge strategy for develop is set by the merge queue`; bare it prints nothing.
+The same command queued the same PR without complaint once it went `CLEAN`. Poll to `MERGED` or
+read the queue; the exit status distinguishes nothing. The only thing that says *why* is an API
+call allowed to refuse in words:
+
+    gh api -X PUT repos/cleat-team/cleat/pulls/<pr>/merge -f merge_method=squash
+    # 405: ... 22 of 32 required status checks are cancelled.
+
+**MySQL's affected-row count is rows CHANGED, not rows MATCHED.** So "0 rows affected" does not
+mean "no such row", and any liveness or existence check built on it reports live things as dead.
+Measured 2026-09-14: an `UPDATE` setting a column to the value it already held returned
+`ROW_COUNT() = 0`. A heartbeat written twice inside one clock tick therefore looked exactly like a
+row somebody had deleted. Where the distinction matters, ask separately — a `SELECT 1` on the zero
+path, not a verdict.
+
+**MySQL binds `?` by APPEARANCE; `$N` and `@pN` bind by NUMBER.** A statement whose placeholder
+numbering disagrees with its text order binds correctly on two dialects and silently swaps the
+arguments on the third. Write the numbers in the order the placeholders appear, and prefer
+`Dialect.placeholder(n)` (`engine/query_builder.go`) over hand-written `$N`, which also carries
+`nowExpr()` and `intervalExpr()` — three helpers that already existed when this was learned by
+writing a fourth.
+
 ---
 
 ## Ground rules for changes
