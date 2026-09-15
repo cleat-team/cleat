@@ -37,6 +37,36 @@ const PythonTarget = "python"
 // symptom as cleat#1005, from the opposite direction.
 var sdkHelperImports = map[string][]string{
 	"Saga.AddStepCall": {"cleat_call"},
+
+	// Saga.Run's own LogKV. The steps' calls are closures the workflow wrote,
+	// so they need nothing here.
+	"Saga.Run": {"cleat_log"},
+
+	// Selector.Select calls five HostCalls methods -- DurableSleep, Now,
+	// AwaitSignals, PollSignal and AwaitChild -- and this list is the union of
+	// what each of those needs, including the update-dispatch imports the
+	// composites pull in.
+	//
+	// Spelled out rather than derived, to match hostFunctions and
+	// compositeRequires, which are hand lists for the same reason: the tables
+	// are the contract and a source-derived TEST is what keeps them honest.
+	// TestEverySDKHelperHasItsImports is that test for this row, and it fails
+	// with the missing import named if Select grows a sixth call.
+	"Selector.Select": {
+		"cleat_sleep",
+		"cleat_now",
+		"cleat_await_signals",
+		"cleat_poll_signal",
+		"cleat_await_child",
+		"cleat_poll_update",
+		"cleat_complete_update",
+		"cleat_log",
+	},
+
+	// AddTimer only reads the clock, and an unwired clock is not a lesser
+	// version of this bug: Now() returns 0, so the deadline is computed from
+	// the epoch and has already passed.
+	"Selector.AddTimer": {"cleat_now"},
 }
 
 // sdkHelperKey renders a selection as "Type.Method", or "" when the receiver is

@@ -158,6 +158,37 @@ func SDKDurableHelper(sel *types.Selection) bool {
 	switch named.Obj().Name() + "." + sel.Obj().Name() {
 	case "Saga.AddStepCall":
 		return true
+	// Selector.Select is the SECOND of these and it was not found the way
+	// Saga.AddStepCall was. Saga.AddStepCall was reasoned about while the
+	// feature was being written; this one shipped, and a cleat.Selector timer
+	// fired instantly in every compiled workflow that did not independently
+	// write h.DurableSleep -- for as long as the type has existed.
+	//
+	// Measured on 8ca97d46 through the ports harness, two guest packages that
+	// differ by exactly one line:
+	//
+	//	no h.DurableSleep in the package: generation 1, 87ms, a 1500ms timer
+	//	                                  fired, durable clock advanced 0ms
+	//	one h.DurableSleep in the package: generation 2, the timer waited, the
+	//	                                  durable clock advanced exactly 1500ms
+	//
+	// Same Selector, same deadline. The variable is whether the WORKFLOW's own
+	// source happens to mention the host call the SDK makes on its behalf.
+	//
+	// AddTimer is here for Now() and looks harmless next to Select. It is not:
+	// an unwired Now() returns 0, so every deadline this Selector computes is
+	// measured from the epoch and is already in the past. A Select that sleeps
+	// correctly would then fire immediately anyway, for a second reason, and
+	// fixing only Select would have looked like fixing nothing.
+	case "Selector.Select", "Selector.AddTimer":
+		return true
+	// Saga.Run's own LogKV, which is not the steps' calls: those are closures
+	// the workflow wrote, so every layer already sees them. This is the one
+	// host call Run makes that no workflow wrote, and without it a saga's
+	// progress logging is silently dropped in any workflow that does not log
+	// on its own account.
+	case "Saga.Run":
+		return true
 	}
 	return false
 }
