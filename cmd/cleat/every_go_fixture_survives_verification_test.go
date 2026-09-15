@@ -50,13 +50,16 @@ var goFixtureExpectations = map[string]string{
 	"sagaparameterised": "",
 	"minimal-wf":        "",
 	"noargs":            "",
-	"nowms":             "",
-	"rejectpromise":     "",
-	"resolvepromise":    "",
-	"scheduleinvoke":    "",
-	"signalworkflow":    "",
-	"spin":              "",
-	"updatedispatch":    "",
+	// cleat#1065: a pointer entry-point parameter means optional. It must
+	// verify cleanly -- the mechanism is additive and breaks no existing rule.
+	"optionalparam":  "",
+	"nowms":          "",
+	"rejectpromise":  "",
+	"resolvepromise": "",
+	"scheduleinvoke": "",
+	"signalworkflow": "",
+	"spin":           "",
+	"updatedispatch": "",
 
 	// cleat#1614's floor assertion. The same Retrier.Wait as methodglobalh
 	// below, reaching the host through a cleat.HostCalls field on the
