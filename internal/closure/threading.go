@@ -47,9 +47,30 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 		// like it had a meaning in the nil case, which it does not.
 		usesGlobalH := findGlobalHUsers(result, globalHObj)
 		for name := range durableSet {
-			if usesGlobalH[name] {
-				threaded[name] = true
+			if !usesGlobalH[name] {
+				continue
 			}
+			// A METHOD is not threaded by referencing the global, because
+			// nothing ever assigns the global. Auto-threading works by adding
+			// h as a first parameter and rewriting call sites, and
+			// transform.go skips anything with a receiver -- you cannot
+			// prepend a parameter to a method without changing its signature.
+			// So the declaration survives (canRemoveGlobalH keeps it, seeing a
+			// user it could not convert) holding the zero value, and
+			// cleat.HostCalls is struct{ *HostCallsImpl }: every promoted call
+			// dereferences a nil pointer.
+			//
+			// Crediting the method here made the verifier vouch for exactly
+			// the case the transform refuses to handle, and the build shipped
+			// a module that panicked on first use (cleat#1614).
+			//
+			// Methods that genuinely reach the host are admitted below and are
+			// unaffected: phase 1b (PluginCaller), phase 3 (the receiver
+			// carries a HostCalls field), phase 3b (a parameter does).
+			if fd := result.Funcs[name]; fd != nil && fd.RecvType != nil {
+				continue
+			}
+			threaded[name] = true
 		}
 	}
 
@@ -171,14 +192,26 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 		if fd.Pkg.Fset != nil {
 			line = fd.Pkg.Fset.Position(fd.Ast.Pos()).Line
 		}
+		msg := fmt.Sprintf(
+			"%s is reachable from a workflow entry point (it calls durable SDK methods) but does not have a HostCalls parameter. "+
+				"Add 'h cleat.HostCalls' as the first parameter, or declare a package-level 'var h cleat.HostCalls' that this function can reference.",
+			analyzer.ShortName(name))
+		// A method gets different advice, because half of the advice above is
+		// actively harmful to it: referencing a package-level h compiles,
+		// passes every check, and nil-panics at run time, since nothing
+		// assigns that global and the transform cannot thread a receiver
+		// (cleat#1614). Name the two routes that do work instead.
+		if fd.RecvType != nil {
+			msg = fmt.Sprintf(
+				"%s is a method reachable from a workflow entry point (it calls durable SDK methods), and a method cannot reach the host through a package-level 'var h cleat.HostCalls' -- that global is never assigned, so the call would panic at run time. "+
+					"Give the receiver type a 'cleat.HostCalls' field and call through it, or make this a function taking 'h cleat.HostCalls' as its first parameter.",
+				analyzer.ShortName(name))
+		}
 		errors = append(errors, ThreadingError{
 			FuncName: name,
 			Chain:    chain,
 			Line:     line,
-			Message: fmt.Sprintf(
-				"%s is reachable from a workflow entry point (it calls durable SDK methods) but does not have a HostCalls parameter. "+
-					"Add 'h cleat.HostCalls' as the first parameter, or declare a package-level 'var h cleat.HostCalls' that this function can reference.",
-				analyzer.ShortName(name)),
+			Message:  msg,
 		})
 	}
 
