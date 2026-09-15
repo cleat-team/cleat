@@ -113,6 +113,44 @@ func LoadPackages(pattern string, fset *token.FileSet) (*AnalysisResult, error) 
 		}
 	}
 
+	// Retain the dependency packages for //cleat:require (see
+	// AnalysisResult.ImportedPkgs). The loop above walks `pkgs`, which is only
+	// what matched the build pattern; the dependency graph is reached with
+	// packages.Visit, which is already used above for error collection.
+	//
+	// Cheap by construction: NeedSyntax|NeedDeps means these ASTs are parsed
+	// whether or not anything looks at them, so this keeps pointers rather
+	// than doing work.
+	seen := map[string]bool{}
+	for _, pkg := range pkgs {
+		seen[pkg.PkgPath] = true
+	}
+	packages.Visit(pkgs, func(pkg *packages.Package) bool {
+		if pkg.Types == nil || seen[pkg.PkgPath] {
+			return true
+		}
+		// A standard-library package has no module. Skipping it is not a
+		// correctness requirement -- stdlib carries no cleat directives -- but
+		// it keeps the set to what a reader would expect.
+		if pkg.Module == nil {
+			return true
+		}
+		seen[pkg.PkgPath] = true
+		result.ImportedPkgs = append(result.ImportedPkgs, &Package{
+			Name:  pkg.Name,
+			Path:  pkg.PkgPath,
+			Dir:   pkgDir(pkg),
+			Files: pkg.Syntax,
+			Fset:  fset,
+			Types: pkg.Types,
+			Info:  pkg.TypesInfo,
+		})
+		return true
+	}, nil)
+	sort.Slice(result.ImportedPkgs, func(i, j int) bool {
+		return result.ImportedPkgs[i].Path < result.ImportedPkgs[j].Path
+	})
+
 	// Detect entry points.
 	for _, fd := range result.Funcs {
 		if IsEntryPoint(fd) {

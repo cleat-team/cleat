@@ -380,8 +380,9 @@ var compositeRequires = map[string][]string{
 	"DurableCallJSONWithOptions":  {"cleat_sleep", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
 }
 
-// collectRequirements scans the target package's source files for
-// //cleat:require directives and adds the listed host functions to info.Used.
+// collectRequirements scans the workflow's package AND every non-stdlib
+// package it imports for //cleat:require directives, adding the listed host
+// functions to info.Used.
 //
 // Directive format:
 //
@@ -389,29 +390,63 @@ var compositeRequires = map[string][]string{
 //
 // The directive names HostCallsOptions field names (not import names). They
 // are resolved to import names via the hostFunctions table.
+//
+// IT READ THE TARGET PACKAGE ALONE UNTIL cleat#1617, and that is the whole
+// defect. A library that makes host calls on the caller's behalf is exactly
+// the thing that needs this directive -- the workflow's own source never
+// mentions the call, so no amount of scanning the workflow finds it -- and the
+// library is by definition an IMPORTED package. So the directive was ignored
+// in precisely the case it exists for.
+//
+// cleat/dagrun had written one, correctly naming what it needs, sitting in the
+// one place that could not act on it. `cleat build` exited 0, the module
+// imported neither cleat_child_workflow_with_options nor cleat_await_any_child,
+// and the workflow died on its first task with "the HostCalls runtime was not
+// initialized". A reader checking "does dagrun declare its imports?" found a
+// line saying yes.
+//
+// WHY EVERY NON-STDLIB PACKAGE AND NOT JUST THE cleat SDK. A user's own helper
+// package, in their own module, is invisible to the old scan for the identical
+// reason -- LoadPackages retains only what matched the build pattern. Scoping
+// this to cleat's module would fix cleat's SDK and leave every user who splits
+// workflows across two packages with the same silent failure.
+//
+// The direction is safe: a directive can only ADD an import, and only one that
+// is already in the hostFunctions table. An import nothing calls costs a line
+// in the module; a missing one is a workflow that dies at run time.
 func collectRequirements(result *analyzer.AnalysisResult, info *UsageInfo) {
 	fieldToImport := make(map[string]string)
 	for _, hf := range hostFunctions {
 		fieldToImport[hf.FieldName] = hf.ImportName
 	}
 
-	for _, file := range result.TargetPkg.Files {
-		for _, cg := range file.Comments {
-			for _, c := range cg.List {
-				text := c.Text
-				const prefix = "//cleat:require "
-				if !strings.HasPrefix(text, prefix) {
-					continue
-				}
-				rest := text[len(prefix):]
-				for _, field := range strings.Split(rest, ",") {
-					field = strings.TrimSpace(field)
-					if importName, ok := fieldToImport[field]; ok {
-						info.Used[importName] = true
+	scan := func(pkg *analyzer.Package) {
+		if pkg == nil {
+			return
+		}
+		for _, file := range pkg.Files {
+			for _, cg := range file.Comments {
+				for _, c := range cg.List {
+					text := c.Text
+					const prefix = "//cleat:require "
+					if !strings.HasPrefix(text, prefix) {
+						continue
+					}
+					rest := text[len(prefix):]
+					for _, field := range strings.Split(rest, ",") {
+						field = strings.TrimSpace(field)
+						if importName, ok := fieldToImport[field]; ok {
+							info.Used[importName] = true
+						}
 					}
 				}
 			}
 		}
+	}
+
+	scan(result.TargetPkg)
+	for _, pkg := range result.ImportedPkgs {
+		scan(pkg)
 	}
 }
 

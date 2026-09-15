@@ -151,22 +151,31 @@ type sdkHelperMethod struct {
 // they constructed themselves with every field populated, so a missing import
 // is not a thing that can happen there.
 //
-// dagrun is DIFFERENT and is excluded for a reason that is a live gap, not a
-// non-problem. cleat/dagrun's DAG.ExecuteWithOptions calls h.AwaitAnyChild and
+// dagrun is excluded for a different reason, and it is no longer a live gap.
+// cleat/dagrun's DAG.ExecuteWithOptions calls h.AwaitAnyChild and
 // DAG.startChild calls h.ChildWorkflowWithOptions, both through a HostCalls
-// parameter -- the same shape as Saga.Run. They are excluded here only because
-// SDKDurableHelper refuses any receiver whose package is not named "cleat", so
-// a row for them would be written and never consulted, and a test asserting one
-// would enforce nothing. Fixing that means widening the analyzer's package
-// check, or teaching collectRequirements to read an imported package's
-// //cleat:require lines; either is a change to what counts as SDK code and
-// belongs in its own review. Measured and filed as cleat#1617: that guest
-// builds clean and fails on its first task.
+// parameter -- the same shape as Saga.Run. A row for them STILL would not be
+// consulted, because SDKDurableHelper refuses any receiver whose package is
+// not named "cleat" and dagrun's package is named dagrun. That has not
+// changed, so dagrun stays out of this scan: this table is not how dagrun
+// declares its needs.
+//
+// What changed is that it now declares them somewhere that works. cleat#1617
+// was the two routes disagreeing -- dagrun had written a //cleat:require
+// directive, correct about what it needs, and collectRequirements read only
+// the workflow's own package, so the directive sat in the one place that could
+// not act on it. It now reads imported packages too, and
+// TestARequiredHostCallIsReadFromAnImportedPackage is the guard for that
+// route, with a testdata guest whose only host-call path is dagrun.
+//
+// So the two routes are deliberate and separate: this table for helpers in
+// package "cleat", the directive for everything else, including a user's own
+// helper package in their own module.
 var sdkHelperScanSkipDirs = map[string]string{
 	"cleattest": "host-side test harness; constructs its own fully-populated HostCalls",
 	"localdev":  "host-side runner; same",
 	"embedded":  "host-side runner; same",
-	"dagrun":    "SDKDurableHelper refuses non-\"cleat\" packages, so a row here would never be read -- cleat#1617",
+	"dagrun":    "SDKDurableHelper refuses non-\"cleat\" packages, so a row here would never be read; dagrun declares its needs with //cleat:require instead -- cleat#1617",
 }
 
 func scanSDKHelperMethods(t *testing.T, sdk string) []sdkHelperMethod {

@@ -32,10 +32,15 @@ var goFixtureExpectations = map[string]string{
 	"clew-lifecycle": "",
 	"crashcall":      "",
 	"crosslang":      "",
-	"deferfunc":      "",
-	"durablesend":    "",
-	"fencereentry":   "",
-	"generics":       "",
+	// cleat#1617: its only host-call route is cleat/dagrun, whose needs are
+	// declared by a //cleat:require directive in that package rather than in
+	// this fixture. It must verify cleanly -- if it does not, the directive is
+	// not being read from imported packages again.
+	"dagguest":     "",
+	"deferfunc":    "",
+	"durablesend":  "",
+	"fencereentry": "",
+	"generics":     "",
 	// cleat#1131. Verifies cleanly BECAUSE of analyzer.SDKDurableHelper: its
 	// saga steps are StepCall data, so the DurableCall lives in the SDK and
 	// nothing in this package writes a HostCalls method. Before that predicate
