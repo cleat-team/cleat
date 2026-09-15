@@ -702,6 +702,44 @@ func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs
 	return packSleepResult(sleepStatusSuspend, durationMs)
 }
 
+// ServeWasiSleep implements HostHandler. See that interface for why this is
+// not DurableSleep and must not become it.
+//
+// cleat#1633. The anchor logic is DurableSleep's, and its reasoning applies
+// unchanged: max() rather than assignment, because Now() reads
+// history[stepCount-1] while stepCount is within history and sleeps do not
+// advance stepCount -- so two sleeps in a row would otherwise read the same
+// anchor and the second would complete a wait it never performed.
+func (s *execSession) ServeWasiSleep(ctx context.Context, durationMs int64) time.Duration {
+	if durationMs <= 0 {
+		return 0
+	}
+
+	anchor := s.nowMs
+	if n := s.Now(ctx); n > anchor {
+		anchor = n
+	}
+	if anchor <= 0 {
+		// No anchor: a fresh run that has recorded nothing and whose nowMs seed
+		// was never set, which is the CLI and embedded paths. An anchor at the
+		// epoch puts every deadline decades in the past, so every sleep would
+		// report "already waited" and nothing would ever block. Same reasoning
+		// as DurableSleep's own zero-anchor branch.
+		anchor = s.engine.realNowMs()
+	}
+	s.nowMs = anchor + durationMs
+
+	remainingMs := s.nowMs - s.engine.realNowMs()
+	if remainingMs <= 0 {
+		// The deadline is already behind real time, so the wait has happened --
+		// whether it was spent replaying, queued, or with the worker down.
+		// Replay and resumed-after-downtime are the same case here, which is
+		// the property that makes this predicate right rather than a flag.
+		return 0
+	}
+	return time.Duration(remainingMs) * time.Millisecond
+}
+
 func (s *execSession) DurableDefer(ctx context.Context, m api.Module, description string, deferIDPtr, deferIDMaxLen uint32) int64 {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {

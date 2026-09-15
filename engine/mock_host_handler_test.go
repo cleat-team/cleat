@@ -10,7 +10,9 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/tetratelabs/wazero/api"
 )
@@ -155,6 +157,15 @@ func (h *mockHostHandler) Now(ctx context.Context) int64 {
 func (h *mockHostHandler) Random(ctx context.Context) int64 {
 	h.record("Random")
 	return h.ret
+}
+
+// ServeWasiSleep records the call and returns 0 so a test using this mock never
+// blocks. The zero is a choice, not a convenient stub value: a mock that really
+// slept would make every test using it as slow as whatever a guest asks for.
+// The call is recorded so a test that IS about sleeping can assert it happened.
+func (h *mockHostHandler) ServeWasiSleep(ctx context.Context, durationMs int64) time.Duration {
+	h.record("ServeWasiSleep", strconv.FormatInt(durationMs, 10))
+	return 0
 }
 func (h *mockHostHandler) CreatePromise(ctx context.Context, m api.Module, name string, promiseIDPtr, promiseIDMaxLen uint32) int64 {
 	h.record("CreatePromise", name)

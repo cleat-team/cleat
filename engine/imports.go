@@ -66,6 +66,30 @@ type HostHandler interface {
 	SetQueryState(ctx context.Context, m api.Module, key, value string) int64
 	Now(ctx context.Context) int64
 	Random(ctx context.Context) int64
+
+	// ServeWasiSleep serves a sleep the guest reached through WASI rather than
+	// through cleat_sleep -- Go's time.Sleep, or anything else landing in
+	// poll_oneoff -- and reports how long the caller must really block. Zero
+	// means the wait has already happened.
+	//
+	// IT IS NOT DurableSleep AND MUST NOT BECOME IT. DurableSleep suspends the
+	// workflow: it returns a SuspendError, the segment ends, and the run is
+	// rescheduled for the deadline. That is right for a durable timer and
+	// impossible here -- a WASI sleep happens inside a guest instruction, with
+	// no way to unwind to a checkpoint. So this one blocks instead.
+	//
+	// THE REPLAY/LIVE DECISION IS DurableSleep'S, deliberately, so that a
+	// guest's time.Sleep and h.DurableSleep agree about what "already waited"
+	// means rather than being two clocks with two answers: compare the virtual
+	// deadline against real time, instead of asking "am I replaying", which a
+	// sleep cannot answer for itself because it records no event
+	// (IMPROVEMENT-PLAN 3.67).
+	//
+	// It advances the durable clock by durationMs in both cases. That is what
+	// makes h.Now() reflect time passing across a guest sleep, and it is
+	// deterministic: a replay performs the same sleeps from the same anchors
+	// and arrives at the same number.
+	ServeWasiSleep(ctx context.Context, durationMs int64) time.Duration
 	CreatePromise(ctx context.Context, m api.Module, name string, promiseIDPtr, promiseIDMaxLen uint32) int64
 	AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64
 	PluginCall(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
