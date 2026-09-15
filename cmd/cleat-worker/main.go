@@ -90,6 +90,7 @@ import (
 	_ "github.com/cleat-team/cleat/plugins/scheduledbackup"
 	_ "github.com/cleat-team/cleat/plugins/scheduler"
 	_ "github.com/cleat-team/cleat/plugins/slacknotify"
+	_ "github.com/cleat-team/cleat/plugins/tenantquota"
 	_ "github.com/cleat-team/cleat/plugins/webhookingest"
 	//
 	// pgvector is deliberately NOT here, and the reason is stronger than the
@@ -1055,6 +1056,25 @@ func main() {
 		}
 	}
 
+	// PLUGIN MIDDLEWARE WRAPS THE CORE API, NOT ONLY PLUGIN ROUTES, and the
+	// three lines below read like the opposite.
+	//
+	// plugMux is not a separate mux for plugin routes. It becomes `mux` further
+	// down (`mux := plugMux`), registerRoutes(mux, api) puts the CORE route
+	// table on it, and `handler := plugHandler` serves the result. So a plugin
+	// implementing HasMiddleware sees POST /api/workflows/:name/start exactly as
+	// it sees its own routes.
+	//
+	// Written here because the misreading is expensive in one direction: it
+	// makes anything that needs to intercept a core request look like it needs
+	// core changes. cleat#1569 (per-tenant consumption quotas) was scoped as
+	// three dialect migrations plus per-dialect store methods before this was
+	// checked; it is a plugin, modelled on plugins/ratelimiter, which enforces
+	// per-tenant rate limits through this same seam.
+	//
+	// Verified rather than assumed, and it took two passes -- the first
+	// concluded plugin middleware did NOT reach core routes, which the
+	// `mux := plugMux` line contradicts.
 	if plugMux != nil {
 		plugHandler = plugMux
 		for _, lp := range plugList {

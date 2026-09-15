@@ -1276,7 +1276,9 @@ faster than reading the remaining sites.
 - `internal/` — Non-public support packages (analyzer, callgraph, closure, plugingen,
   telemetry, transform)
 - `cleat/` — Public Go API (cleattest, embedded, localdev, wasmtest, ai, backendkit)
-- `plugins/` — 21 built-in plugins (llm, slacknotify, pagerdutyalert, scheduler, etc.)
+- `plugins/` — built-in plugins (llm, slacknotify, pagerdutyalert, scheduler, etc.);
+  `ls -d plugins/*/ | wc -l`. This said 21 and was 22 before cleat#1569 added one — a
+  census of a growing population, drifting exactly as this file's own rule predicts.
 - `web/` — Svelte 5 admin dashboard
 - `crates/` — Rust SDK + Java SDK
 - `python-sdk/` — Python SDK
