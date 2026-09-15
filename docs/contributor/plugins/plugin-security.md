@@ -20,6 +20,57 @@ design document and provides day-to-day operational guidance.
 
 ## 1. How tenant isolation works
 
+### What it protects against: two trust surfaces, not one
+
+Almost every design decision in this section turns on a distinction that is easy
+to collapse, and collapsing it produces the wrong answer in a predictable
+direction — reaching for a stricter mechanism to defend against something that
+is not in the model.
+
+**Workflow code is untrusted.** It is WASM, sandboxed, with no database handle
+and no way to issue SQL. It reaches a plugin only through a host call, where
+`engine.pluginCallContext` bridges the workflow's own tenant before the plugin
+function runs. A workflow cannot set a session variable, cannot open a
+connection, and cannot name a tenant other than its own.
+
+**Plugin code is trusted.** It runs in-process, holds a `*sql.DB`, and can issue
+any statement it likes. Plugins are closer to device drivers than to user
+programs: they can wreck things, and the deployment relies on them not to.
+Installing one is a deliberate act by an operator, which is what sections 3 to 6
+of this guide are about.
+
+So the row-level policies on plugin tables **are not a wall against the plugin**.
+A plugin that wanted another tenant's rows does not need to defeat a policy; it
+can simply issue the query. The policies exist to catch the plugin's
+**mistakes** — a forgotten `WHERE tenant_id = $1`, a background sweep that runs
+on a context carrying no tenant — which is the failure cleat#1277 was filed
+about and whose miss rate does not improve on its own.
+
+#### What follows from this, concretely
+
+Two mechanisms can lift the tenant scoping for a legitimate cross-tenant sweep:
+a **granted database role**, which the application cannot give itself, or a
+**session variable**, which it can. The first is strictly stronger against an
+application that has been taken over, and PostgreSQL uses it
+(`SET LOCAL ROLE cleat_sweep`).
+
+SQL Server has no `SET ROLE` — database role membership is a property of the
+connection — so cleat uses a second `SESSION_CONTEXT` key there instead. That is
+a real asymmetry, and it is **acceptable rather than regrettable** for the reason
+above: against trusted code that already holds the connection, the role's one
+advantage does not exist. What it buys against a *mistake* is identical, because
+`plugin.AcrossAllTenants` is an explicit call that refuses an empty reason and
+shows up in a diff.
+
+The risk that remains is not that the bypass can be taken. It is that it is
+**convenient** — one line, and the obvious reach when a fail-closed policy makes
+a sweep return nothing, which is exactly what a correct policy looks like from
+the inside when you forgot to thread the tenant through. That is why every
+cross-tenant bypass in the tree is declared in a ledger with a typed reason
+(`plugin/a_cross_tenant_bypass_is_declared_test.go`, cleat#1623), and why a
+statement naming a tenant-scoped table on a bare context fails at authoring time
+rather than at three in the morning (cleat#1552 step 3).
+
 ### Where the tables are
 
 ```
@@ -207,13 +258,28 @@ does not exist:
 | Layer | Core tables | Plugin tables |
 |---|---|---|
 | Schema isolation | n/a — both live in `public` | **none**; there is no per-plugin or per-tenant schema |
-| Row-level security | yes, on every tenant-scoped table | only where `TenantScoped` is declared — one table today |
+| Row-level security | yes, on every tenant-scoped table | wherever `TenantScoped` is declared, on PostgreSQL and SQL Server |
 | The query's own `WHERE tenant_id` | yes | yes, and for most plugin tables it is the **only** layer |
 | No DDL on `public` | a tenant role does not own the schema | same |
 
 So for a plugin table without a policy, a forgotten `WHERE tenant_id = $1`
 returns another tenant's rows, and nothing below it will catch that. That is
 the gap cleat#1277 opened and cleat#1278 tracks the remainder of.
+
+> **This table said "one table today" until 2026-09-15**, which was true when it
+> was written and wrong by more than an order of magnitude by the time anyone
+> read it again: cleat#1512 scoped ten more, and the count has kept moving. The
+> number is gone rather than updated, because a census of a growing population
+> is guaranteed to go wrong and the only question is when. Ask instead:
+>
+> ```
+> # which plugin tables declare a policy?
+> grep -rhoE 'TenantScoped: \[\]string\{[^}]*\}' plugins/*/*.go |
+>   grep -oE '"[a-z_]+"' | sort -u
+> ```
+>
+> MySQL remains the permanent exception: it has no row-level security, so a
+> declaration there is accepted and installs nothing.
 
 ### Tenant deletion
 
