@@ -201,8 +201,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			//
 			// PostgreSQL and SQL Server need nothing: JSONB preserves, and
 			// SQL Server has always used NVARCHAR(MAX) + ISJSON here.
-			Version: 6,
-			Up:      "",
+			Version:         6,
+			Up:              "",
+			DialectSpecific: "MySQL only: converting this plugin's JSON columns to LONGTEXT. PostgreSQL's JSONB preserves a large number already and SQL Server has always used NVARCHAR(MAX) here, so neither has anything to do and an arm for them would be a statement that must not exist. cleat#1622.",
 			UpMySQL: `
 				ALTER TABLE webhook_events
 					MODIFY payload LONGTEXT NOT NULL DEFAULT ('{}');
