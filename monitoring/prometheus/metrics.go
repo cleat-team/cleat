@@ -81,23 +81,24 @@ type Metrics struct {
 	httpRequests            metric.Int64Counter
 
 	// --- UpDownCounters (Int64UpDownCounter) ---
-	workflowsActive             metric.Int64UpDownCounter
-	workerCount                 metric.Int64UpDownCounter
-	eventHistorySize            metric.Int64UpDownCounter
-	wasmCacheEntries            metric.Int64UpDownCounter
-	wasmCacheBytes              metric.Int64UpDownCounter
-	workflowsStuck              metric.Int64UpDownCounter
-	eventHistoryRowCount        metric.Int64UpDownCounter
-	concurrencyKeysTotal        metric.Int64UpDownCounter
-	concurrencyKeysExpiringSoon metric.Int64UpDownCounter
-	pluginConnectionsInUse      metric.Int64UpDownCounter
-	pluginConnectionsMax        metric.Int64UpDownCounter
-	memoryRSS                   metric.Int64UpDownCounter
-	memoryAvailable             metric.Int64UpDownCounter
-	memoryTotal                 metric.Int64UpDownCounter
-	concurrencyLimit            metric.Int64UpDownCounter
-	desiredConcurrency          metric.Int64UpDownCounter
-	workflowMemoryEstimate      metric.Int64UpDownCounter
+	workflowsActive                metric.Int64UpDownCounter
+	workerCount                    metric.Int64UpDownCounter
+	eventHistorySize               metric.Int64UpDownCounter
+	wasmCacheEntries               metric.Int64UpDownCounter
+	wasmCompiledModuleCacheEntries metric.Int64UpDownCounter
+	wasmCacheBytes                 metric.Int64UpDownCounter
+	workflowsStuck                 metric.Int64UpDownCounter
+	eventHistoryRowCount           metric.Int64UpDownCounter
+	concurrencyKeysTotal           metric.Int64UpDownCounter
+	concurrencyKeysExpiringSoon    metric.Int64UpDownCounter
+	pluginConnectionsInUse         metric.Int64UpDownCounter
+	pluginConnectionsMax           metric.Int64UpDownCounter
+	memoryRSS                      metric.Int64UpDownCounter
+	memoryAvailable                metric.Int64UpDownCounter
+	memoryTotal                    metric.Int64UpDownCounter
+	concurrencyLimit               metric.Int64UpDownCounter
+	desiredConcurrency             metric.Int64UpDownCounter
+	workflowMemoryEstimate         metric.Int64UpDownCounter
 
 	// --- Int64Gauges ---
 	queueDepth                   metric.Int64Gauge
@@ -131,23 +132,24 @@ type Metrics struct {
 	defaultAttrs []attribute.KeyValue
 
 	// Delta tracking for UpDownCounters used as absolute-value gauges.
-	mu                              sync.Mutex
-	lastWorkerCount                 int64
-	lastEventHistorySize            map[string]int64 // keyed by workflowName
-	lastRSS                         int64
-	lastAvailable                   int64
-	lastTotal                       int64
-	lastConcurrencyLimit            int64
-	lastDesiredConcurrency          int64
-	lastWorkflowMemoryEstimate      map[workflowMemoryKey]float64 // keyed by (tenant, defName)
-	lastWasmCacheEntries            int64
-	lastWasmCacheBytes              int64
-	lastWorkflowsStuck              int64
-	lastEventHistoryRowCount        int64
-	lastConcurrencyKeysTotal        int64
-	lastConcurrencyKeysExpiringSoon int64
-	lastPluginConnectionsInUse      int64
-	lastPluginConnectionsMax        int64
+	mu                                 sync.Mutex
+	lastWorkerCount                    int64
+	lastEventHistorySize               map[string]int64 // keyed by workflowName
+	lastRSS                            int64
+	lastAvailable                      int64
+	lastTotal                          int64
+	lastConcurrencyLimit               int64
+	lastDesiredConcurrency             int64
+	lastWorkflowMemoryEstimate         map[workflowMemoryKey]float64 // keyed by (tenant, defName)
+	lastWasmCacheEntries               int64
+	lastWasmCompiledModuleCacheEntries int64
+	lastWasmCacheBytes                 int64
+	lastWorkflowsStuck                 int64
+	lastEventHistoryRowCount           int64
+	lastConcurrencyKeysTotal           int64
+	lastConcurrencyKeysExpiringSoon    int64
+	lastPluginConnectionsInUse         int64
+	lastPluginConnectionsMax           int64
 
 	once sync.Once
 }
@@ -427,7 +429,7 @@ func New(cfg Config) (*Metrics, error) {
 
 	m.wasmCacheEntries, err = meter.Int64UpDownCounter(
 		"cleat_wasm_cache_entries",
-		metric.WithDescription("Number of entries in the WASM module cache"),
+		metric.WithDescription("Number of entries in the WASM BYTE cache (the --wasm-cache-max-entries LRU). NOT the compiled-module cache -- see cleat_wasm_compiled_module_cache_entries."),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_wasm_cache_entries: %w", err)
@@ -435,10 +437,27 @@ func New(cfg Config) (*Metrics, error) {
 
 	m.wasmCacheBytes, err = meter.Int64UpDownCounter(
 		"cleat_wasm_cache_bytes",
-		metric.WithDescription("Total bytes used by the WASM module cache"),
+		metric.WithDescription("Total bytes held by the WASM BYTE cache (the --wasm-cache-max-mb LRU). Compiled modules are not counted here and have no byte accounting."),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_wasm_cache_bytes: %w", err)
+	}
+
+	// cleat#1563. The two gauges above measure the BYTE cache and were
+	// described as "the WASM module cache", which is the name of this one --
+	// so an operator watching them was not watching the cache that, until
+	// #1563, grew without any bound at all.
+	//
+	// The gauge NAMES above are unchanged on purpose: renaming a published
+	// metric breaks every dashboard and alert built on it, and the confusion is
+	// in the description rather than the name. Both descriptions now say which
+	// cache they measure.
+	m.wasmCompiledModuleCacheEntries, err = meter.Int64UpDownCounter(
+		"cleat_wasm_compiled_module_cache_entries",
+		metric.WithDescription("Number of compiled wasmtime Modules retained (the --wasm-module-cache-max-entries LRU). Bounded by ENTRY COUNT; a compiled module exposes no cheap size, so there is deliberately no bytes counterpart."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_wasm_compiled_module_cache_entries: %w", err)
 	}
 
 	m.workflowsStuck, err = meter.Int64UpDownCounter(
@@ -1123,6 +1142,21 @@ func (m *Metrics) SetPluginConnectionsMax(ctx context.Context, count int64, extr
 
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.pluginConnectionsMax.Add(ctx, delta, metric.WithAttributes(attrs...))
+}
+
+// SetWasmCompiledModuleCacheEntries sets the compiled-module cache gauge.
+//
+// cleat#1563: this cache had no bound and no metric, while the similarly-named
+// cleat_wasm_cache_entries measured a different cache entirely.
+// Uses delta tracking to convert absolute values to UpDownCounter deltas.
+func (m *Metrics) SetWasmCompiledModuleCacheEntries(ctx context.Context, count int64, extraAttrs ...attribute.KeyValue) {
+	m.mu.Lock()
+	delta := count - m.lastWasmCompiledModuleCacheEntries
+	m.lastWasmCompiledModuleCacheEntries = count
+	m.mu.Unlock()
+
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.wasmCompiledModuleCacheEntries.Add(ctx, delta, metric.WithAttributes(attrs...))
 }
 
 // SetWasmCacheEntries sets the WASM cache entries gauge.

@@ -91,6 +91,12 @@ type wasmtimeLimits struct {
 type wasmtimeConfig struct {
 	limits wasmtimeLimits
 	logger *slog.Logger
+
+	// moduleCacheMaxEntries bounds the compiled-module cache. 0 means
+	// DefaultModuleCacheMaxEntries; see moduleLRU. Not in wasmtimeLimits
+	// because it bounds a process-wide CACHE rather than anything one
+	// execution may consume, which is what the fields in that struct are.
+	moduleCacheMaxEntries int
 }
 
 // WasmtimeOption configures a wasmtimeBackend, applied at construction time
@@ -167,3 +173,37 @@ func WithWasmtimeMemoryLimits(memoryBytes, tableElements, instances int64) Wasmt
 func WithWasmtimeDeferBudget(d time.Duration) WasmtimeOption {
 	return func(c *wasmtimeConfig) { c.limits.deferBudget = d }
 }
+
+// WithWasmtimeModuleCacheMaxEntries bounds how many compiled modules the
+// backend retains, evicting least-recently-used beyond that.
+//
+// cleat#1563: this cache had no eviction at all, so a long-lived worker
+// retained one compiled module per distinct WASM artifact it had ever run,
+// across every tenant, for the life of the process.
+//
+// ENTRIES, NOT BYTES, and the flag help says so rather than implying a memory
+// bound it cannot enforce: a compiled *wasmtime.Module exposes no cheap size,
+// and Serialize() would cost a serialisation on every insert.
+//
+// n <= 0 uses DefaultModuleCacheMaxEntries.
+func WithWasmtimeModuleCacheMaxEntries(n int) WasmtimeOption {
+	return func(c *wasmtimeConfig) {
+		c.moduleCacheMaxEntries = n
+	}
+}
+
+// DefaultModuleCacheMaxEntries bounds the compiled-module cache when the
+// operator sets no limit.
+//
+// 100 matches --wasm-cache-max-entries, the BYTE cache's default, deliberately:
+// the two caches are keyed the same way and hold entries for the same
+// artifacts, so a worker that can hold 100 distinct WASM binaries has no reason
+// to hold a different number of compiled forms of them.
+//
+// DECLARED HERE, IN AN UNTAGGED FILE, and that placement is load-bearing.
+// moduleLRU lives in a //go:build cgo file because it names *wasmtime.Module,
+// but cmd/cleat-worker/config.go reads this constant for its flag default and
+// is built in every configuration. Putting it beside the type would break the
+// CGO-less build of the whole command -- which `go build ./...` does not catch,
+// because CGO is on by default and that is what CLAUDE.md tells you to use.
+const DefaultModuleCacheMaxEntries = 100

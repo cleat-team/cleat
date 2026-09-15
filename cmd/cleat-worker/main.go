@@ -1121,6 +1121,7 @@ func main() {
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
 		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
 		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
+		engine.WithWasmtimeModuleCacheMaxEntries(*wasmModuleCacheMaxEntries),
 		// Without this the backend writes to slog.Default(), and this worker's
 		// configured handler never sees the one record that says whether a
 		// KILLED workflow's defers ran. See WithWasmtimeLogger.
