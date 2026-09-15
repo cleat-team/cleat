@@ -66,7 +66,7 @@ import (
 //
 //   - tenant_settings, ON DELETE CASCADE from 039_tenant_settings.sql
 //   - tenant_domains, ON DELETE CASCADE from
-//     079_a_hostname_belongs_to_one_tenant.sql (cleat#1568)
+//     080_a_hostname_belongs_to_one_tenant.sql (cleat#1568)
 //   - workflow_defs, ON DELETE CASCADE from
 //     059_a_dropped_tenants_definitions_go_with_it.sql (cleat#1201)
 //
@@ -90,7 +90,7 @@ var dropTenantTables = []struct {
 	{"idempotency_keys", `SELECT count(*) FROM idempotency_keys WHERE tenant_id = $1`},
 	{"tenant_settings", `SELECT count(*) FROM tenant_settings WHERE tenant_id = $1`},
 	// Also ON DELETE CASCADE rather than a DELETE inside admin.drop_tenant --
-	// from 079_a_hostname_belongs_to_one_tenant.sql, which followed 039's
+	// from 080_a_hostname_belongs_to_one_tenant.sql, which followed 039's
 	// reasoning deliberately. Listed here for the same reason 039 is: the
 	// operator wants the count, not the mechanism.
 	{"tenant_domains", `SELECT count(*) FROM tenant_domains WHERE tenant_id = $1`},

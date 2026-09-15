@@ -1,4 +1,4 @@
--- cleat migration 079 (postgres): a hostname belongs to one tenant
+-- cleat migration 080 (postgres): a hostname belongs to one tenant
 --
 -- cleat#1568. Per-tenant URLs -- the headline of the multi-tenant story in
 -- docs/playbooks/b2b-saas-control-plane.md -- have no safe implementation

@@ -1,6 +1,6 @@
--- cleat migration 071 (mssql): a hostname belongs to one tenant
+-- cleat migration 072 (mssql): a hostname belongs to one tenant
 --
--- cleat#1568. The PostgreSQL counterpart (079) carries the full reasoning for
+-- cleat#1568. The PostgreSQL counterpart (080) carries the full reasoning for
 -- why this table exists and why hostname is the primary key; this header
 -- records only what differs on SQL Server.
 --
