@@ -17,16 +17,28 @@ import (
 // MySQL and SQL Server exactly as an UPDATE does -- so leaving this one out
 // would fix the writes and quietly keep the reads broken.
 //
-// WHAT IS ACTUALLY ENFORCED, AND WHERE. Exec is refused in Go on every
-// dialect. The DATABASE additionally refuses a write inside the transaction on
-// PostgreSQL and MySQL, and cannot on SQL Server, which has no read-only
-// transaction -- see readOnlyTxOptions. So do not read "Begin returned a
-// transaction" as "the database is enforcing read-only": on SQL Server it is
-// not, and a mutating statement sent through Query reaches the database there.
+// WHAT IS ACTUALLY ENFORCED, AND WHERE. Three layers, and they do not cover
+// the same ground:
 //
-// That gap is cleat#1621 and is wider than SQL Server: Query and QueryRow fall
-// through to the bare pool whenever beginTenantTx declines, which includes
-// PostgreSQL with no tenant in context.
+//  1. Exec is refused in Go, on ReadOnlyDB and on readOnlyTx, on every
+//     dialect. This is the only layer that is uniform.
+//  2. The DATABASE refuses a write inside the transaction on PostgreSQL and
+//     MySQL. Every read now runs in one (see beginReadTx), so this covers
+//     Query and QueryRow as well as Begin.
+//  3. On SQL Server, layer 2 does not exist. There is no read-only
+//     transaction: go-mssqldb rejects the option and T-SQL has no statement
+//     that makes an open transaction read-only.
+//
+// SO THIS TYPE IS NOT A SECURITY BOUNDARY BY ITSELF. Layer 1 covers the route
+// a caller would use deliberately; it does not cover Query, which takes any
+// statement string and has an ordinary reason to be handed
+// "INSERT ... RETURNING". Layer 2 is what actually stops that, and it is
+// absent on SQL Server.
+//
+// A plugin that must not write should be given a connection whose database
+// user cannot write -- no INSERT, UPDATE or DELETE grant. That is the only
+// guarantee that holds on all three dialects, and it is the one to rely on.
+// Treat this type as defence in depth behind it. cleat#1621.
 type ReadOnlyDB struct {
 	Inner   *sql.DB
 	Dialect plugin.Dialect
@@ -81,34 +93,52 @@ func (r *ReadOnlyDB) Exec(ctx context.Context, query string, args ...any) (int64
 	return 0, fmt.Errorf("read-only: Exec denied")
 }
 
-func (r *ReadOnlyDB) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
-	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, readOnlyTxOptions(r.Dialect))
+// beginReadTx returns the transaction a read runs in.
+//
+// It ALWAYS opens one. The previous code opened a transaction only when
+// beginTenantTx supplied a tenant-scoped one and otherwise ran the statement
+// on the bare pool -- where nothing is read-only. beginTenantTx declines for
+// any non-PostgreSQL dialect and for PostgreSQL with no tenant in context, so
+// that fall-through was the normal path rather than an edge case, and a
+// mutating statement sent through Query reached the database on three of the
+// four configurations. cleat#1621.
+//
+// Where readOnlyTxOptions yields nil -- SQL Server, which has no read-only
+// transaction -- this is a plain transaction and the database still enforces
+// nothing. It is opened anyway so that one code path serves every dialect and
+// the lifetime rules below do not vary; the guarantee there comes from the
+// connection's own privileges. See the type comment.
+func (r *ReadOnlyDB) beginReadTx(ctx context.Context) (*sql.Tx, error) {
+	opts := readOnlyTxOptions(r.Dialect)
+	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, opts)
 	if err != nil {
 		return nil, err
 	}
-	if tx == nil {
-		rows, err := r.Inner.QueryContext(ctx, plugin.Rebind(query, r.Dialect), args...)
-		if err != nil {
-			return nil, err
-		}
-		return &sqlRowsWrapper{rows: rows}, nil
+	if tx != nil {
+		return tx, nil
+	}
+	return r.Inner.BeginTx(ctx, opts)
+}
+
+func (r *ReadOnlyDB) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
+	tx, err := r.beginReadTx(ctx)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := tx.QueryContext(ctx, plugin.Rebind(query, r.Dialect), args...)
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
 	}
+	// done ends the transaction when the rows are exhausted or closed, exactly
+	// as the tenant-scoped path already did -- see sqlRowsWrapper.done.
 	return &sqlRowsWrapper{rows: rows, done: tx.Commit}, nil
 }
 
 func (r *ReadOnlyDB) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
-	tx, err := beginTenantTx(ctx, r.Inner, r.Dialect, readOnlyTxOptions(r.Dialect))
+	tx, err := r.beginReadTx(ctx)
 	if err != nil {
 		return &rowScanner{err: err}
-	}
-	if tx == nil {
-		row := r.Inner.QueryRowContext(ctx, plugin.Rebind(query, r.Dialect), args...)
-		return &rowScanner{row: row}
 	}
 	row := tx.QueryRowContext(ctx, plugin.Rebind(query, r.Dialect), args...)
 	return &rowScanner{row: row, done: tx.Commit}
