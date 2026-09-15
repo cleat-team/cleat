@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -37,15 +39,24 @@ func TestMSSQLCapabilityFollowsTheInstalledPredicate(t *testing.T) {
 	store := NewMSSQLStore(db)
 	ctx := context.Background()
 
-	// The schema as shipped: 074 has run, so the marker says plain.
+	// This test sets its OWN starting state rather than assuming the harness
+	// leaves the shipped default in place, and the reason is worth recording:
+	// testutil.MSSQLAdminDB deliberately applies the cross-tenant opt-in,
+	// because CleanupMSSQLTestData deletes across tenants and cannot work
+	// without it. So by the time any test runs, the database may be opted IN.
+	//
+	// The first version of this test asserted "the shipped schema records
+	// plain" and failed for exactly that reason -- a correct failure about a
+	// premise that is true of a deployment and false of this harness.
+	applyMigrationFileForTest(t, db, "074_the_admin_bypass_is_opt_in.sql")
+
 	var form string
 	if err := db.QueryRow(`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
-		t.Fatalf("the marker table is missing after applying the shipped migrations (%v). "+
-			"074 is what creates it, and without it the capability check cannot answer.", err)
+		t.Fatalf("the marker table is missing after applying 074 (%v). It is what creates "+
+			"it, and without it the capability check cannot answer.", err)
 	}
 	if form != rlsPredicatePlain {
-		t.Fatalf("the shipped schema records form=%q, want %q -- the default is supposed to be "+
-			"the plain predicate", form, rlsPredicatePlain)
+		t.Fatalf("after applying 074 the marker records form=%q, want %q", form, rlsPredicatePlain)
 	}
 
 	// ARM 1: plain predicate. The predicate admits nobody, so the capability
@@ -83,18 +94,7 @@ func TestMSSQLCapabilityFollowsTheInstalledPredicate(t *testing.T) {
 
 	// ARM 2: opt in, and the answer must change. Without this the test above
 	// would pass against a check that reports false unconditionally.
-	optIn, err := os.ReadFile("../migrations/mssql/optional/cross_tenant_claim.sql")
-	if err != nil {
-		t.Fatalf("read the opt-in migration: %v", err)
-	}
-	for _, batch := range splitMSSQLBatchesForTest(string(optIn)) {
-		if strings.TrimSpace(batch) == "" {
-			continue
-		}
-		if _, err := db.Exec(batch); err != nil {
-			t.Fatalf("applying the opt-in migration failed: %v", err)
-		}
-	}
+	applyMigrationFileForTest(t, db, filepath.Join("optional", "cross_tenant_claim.sql"))
 
 	if err := db.QueryRow(`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
 		t.Fatalf("marker unreadable after the opt-in: %v", err)
@@ -133,6 +133,27 @@ func TestMSSQLCapabilityFollowsTheInstalledPredicate(t *testing.T) {
 		t.Errorf("an unreadable marker is reported as if the predicate were known to be "+
 			"plain: %q. Unknown and denied are different answers and want different "+
 			"actions from an operator.", cap3.ClaimReason)
+	}
+}
+
+// applyMigrationFileForTest applies one file from migrations/mssql/ by name.
+//
+// Used to put the database into a known predicate state rather than inheriting
+// whatever the harness left, which is the difference between a test that
+// asserts a property and one that asserts an ordering.
+func applyMigrationFileForTest(t *testing.T, db *sql.DB, name string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "migrations", "mssql", name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	for _, batch := range splitMSSQLBatchesForTest(string(raw)) {
+		if strings.TrimSpace(batch) == "" {
+			continue
+		}
+		if _, err := db.Exec(batch); err != nil {
+			t.Fatalf("applying %s: %v", name, err)
+		}
 	}
 }
 
