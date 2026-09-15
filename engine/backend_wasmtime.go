@@ -56,9 +56,15 @@ type wasmtimeBackend struct {
 	engine  *wasmtime.Engine
 	handler HostHandler // current execution session
 
-	// wasiMonotonicNs backs the synthetic CLOCK_MONOTONIC handed to WASI.
-	// Per-execution, same as handler above, and monotonic by construction.
-	wasiMonotonicNs int64
+	// wasiMonotonicNs backs CLOCK_MONOTONIC handed to WASI, and
+	// wasiMonotonicStart is the instant it counts from. Per-execution, same as
+	// handler above, and monotonic by construction.
+	//
+	// It tracks REAL ELAPSED TIME since cleat#1300. It used to advance a fixed
+	// step per read, which multiplied every guest sleep on this backend by
+	// ~125x: see registerWasiDeterminism.
+	wasiMonotonicNs    int64
+	wasiMonotonicStart time.Time
 
 	// budget bounds GUEST EXECUTION rather than wall clock. Per-execution, and
 	// safe here only because Execute runs on a PerExecution() backend.
@@ -663,6 +669,14 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Wrap context so host functions can find the session.
 	ctx = withHandler(ctx, session)
 	b.handler = session
+
+	// Anchor CLOCK_MONOTONIC at the start of THIS execution, so a guest sees a
+	// clock near zero as a freshly started process does, rather than one
+	// carrying the previous execution's elapsed time. Set beside b.handler
+	// because the two have the same lifetime and the same reason: this backend
+	// is PerExecution(). cleat#1300.
+	b.wasiMonotonicNs = 0
+	b.wasiMonotonicStart = time.Now()
 
 	// Detect Component Model binaries and dispatch to the component execution path.
 	if isComponentWasm(wasmBytes) {

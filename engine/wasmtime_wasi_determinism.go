@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"encoding/binary"
+	"time"
 
 	"github.com/bytecodealliance/wasmtime-go/v44"
 )
@@ -58,7 +59,19 @@ func (b *wasmtimeBackend) registerWasiDeterminism(linker *wasmtime.Linker) error
 					ns = b.handler.Now(context.Background()) * 1_000_000
 				}
 			} else {
-				b.wasiMonotonicNs += wasiMonotonicStepNs
+				// REAL ELAPSED TIME, NOT A COUNT OF READS. cleat#1300, and
+				// this backend is where it mattered: wasmtime's poll_oneoff
+				// really blocks for the relative timeout Go's usleep passes
+				// (measured 500ms -> 502ms), and Go computes that timeout as
+				// deadline - nanotime(). Advancing 1ms per read made the guest
+				// sleep the full duration, wake believing 1ms had passed, and
+				// sleep again -- a real 500ms time.Sleep took 62.5 SECONDS,
+				// against 504ms on the host clock. 125x, on the production
+				// backend, on every sleep.
+				//
+				// Never zero and never backwards, which the Go runtime
+				// requires ("fatal error: nanotime returning zero").
+				b.wasiMonotonicNs = nextMonotonicNs(b.wasiMonotonicNs, b.wasiMonotonicStart, time.Now())
 				ns = b.wasiMonotonicNs
 			}
 			return writeU64(caller, resultPtr, uint64(ns))
