@@ -1036,9 +1036,18 @@ func loadShardConfigs(path string) ([]engine.ShardConfig, error) {
 // worker's clock never enters it. That also keeps the statement portable enough
 // to differ only in the clock function.
 //
-// idempotency_keys carries no RLS policy -- migrations/postgres/061 records why
-// ("read before any RLS context exists") -- so this runs on the plain pool, as
-// it always has.
+// ON POSTGRESQL THIS NO LONGER RUNS ON THE PLAIN POOL. idempotency_keys carried
+// no policy for as long as PostgresStore.startNewRun read it before any RLS
+// context existed -- migrations 031 and 061 both record that as the reason for
+// declining it. cleat#1534 moved those reads onto transactions that have the
+// tenant set and migration 083 gives the table its policy, at which point this
+// statement, which has no tenant predicate and wants none, stops being able to
+// run at all. Measured as cleat_app with no tenant set:
+//
+//	ERROR:  cleat.tenant_id is not set -- tenant context required for RLS-scoped query
+//
+// See sweepExpiredIdempotencyKeys below. MySQL and SQL Server are unchanged:
+// neither has a policy on this table.
 func expiredIdempotencyKeysSQL(driver string) (string, bool) {
 	switch driver {
 	case "postgres":
@@ -1081,11 +1090,59 @@ func idempotencyCleanupLoop(ctx context.Context, db *sql.DB, driver string, inte
 			if db == nil {
 				continue
 			}
-			if _, err := db.ExecContext(ctx, stmt); err != nil {
+			if err := sweepExpiredIdempotencyKeys(ctx, db, driver, stmt); err != nil {
 				slog.Warn("idempotency key cleanup failed", "driver", driver, "error", err)
 			}
 		}
 	}
+}
+
+// sweepExpiredIdempotencyKeys runs one tick's delete.
+//
+// POSTGRESQL runs it inside a transaction that has entered cleat_sweep, because
+// migration 083 gives idempotency_keys a fail-closed policy and this statement
+// is cross-tenant ON PURPOSE -- it collects every tenant's expired keys on one
+// tick, which is the property cleat#1256 fixed and is worth keeping. The shape
+// is migration 077's, established for the plugin tables and measured there:
+//
+//	idempotency_keys_tenant_isolation  TO PUBLIC       USING (tenant_id = cleat.assert_tenant_set())
+//	idempotency_keys_cross_tenant      TO cleat_sweep  USING (true)
+//
+// SET LOCAL, so the role reverts with the transaction and cannot follow the
+// connection back into the pool.
+//
+// A FAILURE TO ENTER THE ROLE IS REPORTED, NOT ABSORBED. The obvious
+// alternative -- fall back to the plain statement when SET ROLE fails -- is the
+// worst of the three options available: under the policy the fallback raises
+// anyway, and on a connection that bypasses RLS it succeeds, so the fallback
+// works exactly where it is not needed and fails silently into a warning
+// everywhere else. The loop already logs and ticks again, so a missing grant
+// shows up as a repeating, nameable error rather than a table that quietly
+// stops being swept.
+//
+// MYSQL AND SQL SERVER keep the plain pool statement. Neither has a policy on
+// this table, and SQL Server has no SET ROLE to enter even if it did -- see
+// engine's markCrossTenantOnTx for why that asymmetry is structural.
+func sweepExpiredIdempotencyKeys(ctx context.Context, db *sql.DB, driver, stmt string) error {
+	if driver != "postgres" {
+		_, err := db.ExecContext(ctx, stmt)
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE cleat_sweep`); err != nil {
+		return fmt.Errorf(
+			"could not enter cleat_sweep: %w (the connecting role needs "+
+				"GRANT cleat_sweep ... WITH INHERIT FALSE; see migrations/postgres/077 and 083)",
+			err)
+	}
+	if _, err := tx.ExecContext(ctx, stmt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---------------------------------------------------------------------------

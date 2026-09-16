@@ -4,9 +4,13 @@
 --
 --     UPDATE idempotency_keys SET result = ... WHERE workflow_id = p_workflow_id;
 --
--- idempotency_keys has NO row-level security on any dialect -- PostgreSQL's RLS
--- covers 11 tables and it is not one of them -- so that predicate was the whole
--- of the protection, and it did not mention the tenant. A workflow_id is
+-- idempotency_keys had NO row-level security on any dialect when this was
+-- written -- so that predicate was the whole of the protection, and it did not
+-- mention the tenant. (Migration 083 gives it one on PostgreSQL, cleat#1534;
+-- MySQL and SQL Server are still in the state described here. The count that
+-- stood here -- "PostgreSQL's RLS covers 11 tables" -- was a census of a
+-- growing population and is dropped rather than corrected: the predicate is
+-- that this table was not among them, and 083 is what changed it.) A workflow_id is
 -- caller-supplied when a run id is given, and migrations/postgres/010 already
 -- records the collision as ordinary rather than adversarial: "two customers
 -- both choosing 'order-123' collided... the expected outcome of ordinary naming

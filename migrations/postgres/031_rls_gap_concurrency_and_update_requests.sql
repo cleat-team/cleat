@@ -9,6 +9,7 @@
 --   concurrency_keys           -- protected here
 --   workflow_update_requests   -- protected here
 --   idempotency_keys           -- deliberately NOT protected; see below
+--                              -- (SUPERSEDED 2026-09-15 by migration 083)
 --   admin.tenant_api_keys      -- deliberately NOT protected; see below
 --   kv_store                   -- cannot be protected from this file; see below
 --   feature_flags              -- cannot be protected from this file; see below
@@ -40,7 +41,16 @@
 -- proof.
 --
 -- ---------------------------------------------------------------------------
--- Why NOT idempotency_keys: engine/store_lifecycle.go's StartNewRun reads
+-- Why NOT idempotency_keys -- SUPERSEDED BY MIGRATION 083 (cleat#1534).
+--
+-- Everything below was accurate when written and is kept because it is the
+-- reasoning 083 had to answer. What changed is the code, not the analysis:
+-- cleat#1534 reordered startNewRun so all three statements run on transactions
+-- that already have the tenant set, and 083 then gives the table its policy.
+-- The line this paragraph ends on -- "left for whoever picks that up next" --
+-- is the thing that was picked up.
+--
+-- engine/store_lifecycle.go's StartNewRun reads
 -- and writes idempotency_keys *before* any RLS context exists on the
 -- connection it uses.
 --
