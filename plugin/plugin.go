@@ -105,7 +105,7 @@ type Environment struct {
 	// plugin endpoint cannot reach cloud instance metadata or the worker's own
 	// admin port. Above it, a tenant's allowlist applies when a tenant is in
 	// context (host-function calls), and the deployment-level
-	// --plugin-egress-allowlist applies when one is not (background loops,
+	// --egress-allowlist applies when one is not (background loops,
 	// which are sweeps and have no tenant -- the same shape as cleat#1278).
 	HTTPTransport EgressTransport
 
