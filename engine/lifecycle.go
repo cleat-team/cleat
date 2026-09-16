@@ -145,7 +145,37 @@ func (s *execSession) exitReplay() {
 // and appends it to the history. It must only be called during fresh
 // execution (not replay).
 
-func (s *execSession) recordEvent(rec EventRecord) {
+// eventPersistence says what happened to an event's durable write, which is
+// three outcomes and not two. cleat#1572.
+//
+// The distinction that matters is NOT ATTEMPTED versus ATTEMPTED AND FAILED.
+// Both leave the row absent, and they mean opposite things:
+//
+//   - Not attempted is a configuration. This engine has no database, or the
+//     operator set --no-per-step-flush and the events land at segment end.
+//     Nothing is wrong and nothing is lost.
+//   - Failed is a refusal. The commonest cause is ErrFenceLost: another worker
+//     has taken this run, so THIS worker's events are not going to be in its
+//     history at all. Anything shown to a user off the back of one is output
+//     the system does not believe happened.
+type eventPersistence int
+
+const (
+	// eventNotAttempted: no database, or per-step flush is off.
+	eventNotAttempted eventPersistence = iota
+	// eventPersisted: the row is in the database now.
+	eventPersisted
+	// eventFlushFailed: the write was attempted and refused or errored.
+	eventFlushFailed
+)
+
+// recordEvent appends an event to the session history and persists it.
+//
+// It returns what became of the durable write. EXISTING CALLERS IGNORE IT and
+// still compile, which is deliberate: the return exists for the one caller
+// that must not show a user a token the database refused, and adding it should
+// not touch the several dozen sites that have no such question.
+func (s *execSession) recordEvent(rec EventRecord) eventPersistence {
 	if rec.TimestampMs == 0 {
 		rec.TimestampMs = time.Now().UnixMilli()
 	}
@@ -203,6 +233,7 @@ func (s *execSession) recordEvent(rec EventRecord) {
 	atomic.AddInt64(&freshStepCount, 1)
 
 	// Persist immediately so events survive worker crashes.
+	outcome := eventNotAttempted
 	if s.engine.db != nil && !s.isReplay {
 		checksum := computeEventChecksum(rec, s.lastChecksum)
 		flushed := false
@@ -224,8 +255,10 @@ func (s *execSession) recordEvent(rec EventRecord) {
 					} else {
 						s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
 					}
+					outcome = eventFlushFailed
 				} else {
 					s.lastChecksum = checksum
+					outcome = eventPersisted
 				}
 				flushed = true
 			}
@@ -238,11 +271,19 @@ func (s *execSession) recordEvent(rec EventRecord) {
 				} else {
 					s.engine.log().ErrorContext(context.Background(), "recordEvent flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "event_type", rec.EventType, "error", flushErr)
 				}
+				outcome = eventFlushFailed
 			} else {
 				s.lastChecksum = checksum
+				// flushEvent returns nil WITHOUT WRITING when per-step flush
+				// is disabled, so a nil error is not on its own evidence that
+				// the row exists.
+				if !s.engine.noPerStepFlush {
+					outcome = eventPersisted
+				}
 			}
 		}
 	}
+	return outcome
 }
 
 func (s *execSession) Now(ctx context.Context) int64 {

@@ -1235,8 +1235,14 @@ type Worker struct {
 	pollInterval         time.Duration
 	pluginRegistry       *engine.PluginRegistry
 	pluginStreamRegistry *engine.PluginStreamRegistry
-	tenantPools          *plugin.TenantPools
-	plugList             []*plugin.LoadedPlugin
+
+	// streamHub is the worker-local live tail of plugin stream chunks, shared
+	// between the engines this worker builds and the SSE route that serves
+	// them. cleat#1572.
+	streamHub *engine.StreamHub
+
+	tenantPools *plugin.TenantPools
+	plugList    []*plugin.LoadedPlugin
 
 	// egressAllow answers "which hosts may this tenant's workflows reach".
 	// Nil denies every guest-initiated fetch. cleat#1565.
@@ -2263,6 +2269,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithChildWorkflowStore(execStore),
 		engine.WithPluginRegistry(w.pluginRegistry),
 		engine.WithPluginStreamRegistry(w.pluginStreamRegistry),
+		engine.WithStreamHub(w.streamHub),
 		engine.WithMaxRetryAttempts(w.maxRetries),
 		engine.WithSchema(w.schemaName),
 		engine.WithEncryption(w.encryption, w.encryptSensitivePayloads),

@@ -108,6 +108,12 @@ type apiServer struct {
 	// was the one with the instance and admin routes on it.
 	plugins http.Handler
 	spa     http.Handler
+
+	// streamHub is the worker-local live tail for plugin stream chunks, shared
+	// with the engines this worker builds. Nil when no worker is attached, in
+	// which case /stream still serves event_history and says the tail is
+	// absent rather than failing. cleat#1572.
+	streamHub *engine.StreamHub
 }
 
 // errNoTenant is returned by storeFor when a request carries no authenticated
@@ -547,6 +553,9 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[1] == "history" && r.Method == http.MethodGet:
 		// GET /api/workflows/:id/history
 		s.handleGetHistory(w, r, id)
+	case len(parts) == 2 && parts[1] == "stream" && r.Method == http.MethodGet:
+		// GET /api/workflows/:id/stream  -- SSE of plugin stream chunks
+		s.handleStreamWorkflow(w, r, id)
 	case len(parts) == 2 && parts[1] == "query" && r.Method == http.MethodGet:
 		// GET /api/workflows/:id/query?key=X
 		s.handleGetQueryState(w, r, id)

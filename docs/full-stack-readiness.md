@@ -130,7 +130,7 @@ evidence and the open design questions, and this section is the summary and the 
 | 5 | Counter-based tenant quotas | [#1569](https://github.com/cleat-team/cleat/issues/1569) | feature | Commercial packaging |
 | 6 | Per-tenant secrets | [#1570](https://github.com/cleat-team/cleat/issues/1570) | security | Secrets |
 | 7 | A queryable read model | [#1571](https://github.com/cleat-team/cleat/issues/1571) | feature | Reading your own data |
-| 8 | `chat_stream` → SSE bridge | [#1572](https://github.com/cleat-team/cleat/issues/1572) | feature | Interactive AI |
+| 8 | `chat_stream` → SSE bridge — **shipped** | [#1572](https://github.com/cleat-team/cleat/issues/1572) | feature | Interactive AI |
 
 Related and filed separately while writing the playbooks:
 [#1563](https://github.com/cleat-team/cleat/issues/1563), the compiled-module cache having no
@@ -245,17 +245,26 @@ A first-class projection mechanism, where workflows publish into a tenant-scoped
 queryable view, would remove the single largest piece of hand-written code from all four playbooks.
 This is the item most likely to change how the product *feels*, and the one needing the most design.
 
-### 8. A `chat_stream` → SSE bridge — *narrow, increasingly table stakes*
+### 8. A `chat_stream` → SSE bridge — **shipped**, cleat#1572
 
-Both halves exist and nothing joins them. `chat_stream` is registered as a streaming host function
-returning a channel of `StreamEvent` (`plugin/plugin.go:262-272`,
-`plugins/llm/host_functions.go:22-26`), consumed by a *workflow*. Separately,
-`plugins/eventstore/routes.go:218-277` serves `text/event-stream` with a real `http.Flusher`, so
-SSE from a worker is a demonstrated pattern.
+`GET /api/workflows/{id}/stream`. See
+[Streaming tokens to a client](how-to/stream-tokens-to-a-client.md).
 
-The missing piece is the path between them, and it carries a real question rather than just
-plumbing: a streamed token is by definition not yet a recorded step, so the durability semantics of
-the partial output need deciding rather than assuming.
+**The design question this section raised was answered, and the answer was not the one implied
+here.** This said "a streamed token is by definition not yet a recorded step". It is: every chunk
+is written to `event_history` as it arrives, under a `(step, index)` pair — measured on the issue,
+with a negative control, after the same claim had been retracted once by reading the call graph
+and got wrong twice by reading alone.
+
+That changed the feature rather than just the wording. On the premise written here, a reconnecting
+client could only be told "start again"; on the measured one it is served exactly what it missed,
+from the durable record. The decision that stands — **the live tail is a preview, the recorded step
+is the truth** — is the same sentence with a much smaller gap behind it: preview and truth differ
+in latency, not in content.
+
+**What remains open:** the live tail is worker-local. A reader that lands on a worker not executing
+the run gets the durable history and is told `"live": false`. Routing a reader to the right worker
+is not solved.
 
 ---
 

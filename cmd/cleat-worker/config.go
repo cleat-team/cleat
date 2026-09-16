@@ -322,6 +322,14 @@ var (
 			"Y between them\": the effective budget is the smaller. A worker shrinks its "+
 			"share the moment another joins, and waits before growing when one leaves, "+
 			"because a crashed worker's connections outlive its heartbeat. cleat#1487")
+	maxStreamReadersFlag = flag.Int("max-stream-readers", 1024,
+		"How many live SSE readers of GET /api/workflows/{id}/stream this worker may hold "+
+			"at once (0 = unlimited). A reader costs a goroutine, a held HTTP connection "+
+			"and a bounded chunk buffer. It HOLDS no database connection, so this is "+
+			"separate from --connection-budget, which bounds database pools -- but each "+
+			"reader does poll the run's status once per 15s heartbeat. Over the ceiling "+
+			"the route answers 503 with Retry-After. "+
+			"cleat#1572")
 	egressAllowlistFlag = flag.String("egress-allowlist", "",
 		"Hosts THIS DEPLOYMENT may reach, comma-separated. Empty (the default) permits "+
 			"every PUBLIC host -- the loopback, link-local and RFC1918 floor still applies, "+

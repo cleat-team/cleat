@@ -547,7 +547,45 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 				StreamChunkIndex: index,
 				StreamFinish:     chunk.Finish,
 			}
-			s.recordEvent(rec)
+			persistence := s.recordEvent(rec)
+
+			// A CHUNK THE DATABASE REFUSED IS NOT SHOWN TO ANYBODY. cleat#1572.
+			//
+			// recordEvent returns nil-and-silent on a failed write -- the
+			// commonest cause being ErrFenceLost, where another worker has
+			// taken this run, so nothing this worker records is going to be in
+			// the run's history. Publishing anyway would put tokens on a user's
+			// screen that the system does not believe happened, which is the
+			// precise failure the preview decision on this issue set out to
+			// prevent. It is also the case a reader cannot recover from: there
+			// is no row to reconnect to.
+			//
+			// eventNotAttempted is DIFFERENT and is published. No database, or
+			// --no-per-step-flush, is a configuration rather than a refusal;
+			// the chunk is carried with Durable false so a reader that cares
+			// can tell, rather than being silently dropped.
+			if persistence == eventFlushFailed {
+				index++
+				continue
+			}
+
+			// AFTER recordEvent, never before -- so a reader that sees a chunk
+			// live can always find it in event_history afterwards, and never
+			// the other way round.
+			// EVERY FIELD COMES OFF rec, not off the locals it was built
+			// from. They are equal today -- rec is assigned from them three
+			// lines up -- and the point is that they stay equal: the whole
+			// contract with a reader is that a chunk seen live can be found
+			// again in event_history under the SAME (step, index). Reading
+			// the published cursor from anywhere but the recorded row leaves
+			// that agreement to be maintained by hand.
+			s.engine.streamHub.Publish(s.workflowID, LiveChunk{
+				Step:    rec.Step,
+				Index:   rec.StreamChunkIndex,
+				Content: rec.PluginOutput,
+				Finish:  rec.StreamFinish,
+				Durable: persistence == eventPersisted,
+			})
 			index++
 		}
 	}

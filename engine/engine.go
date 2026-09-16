@@ -38,6 +38,7 @@ type Engine struct {
 	compactionState      *CompactionState
 	pluginRegistry       *PluginRegistry
 	pluginStreamRegistry *PluginStreamRegistry
+	streamHub            *StreamHub
 	pluginCallGuard      *PluginCallGuard
 	pluginCallObserver   PluginCallObserver
 	tenantID             string
@@ -175,6 +176,15 @@ func WithPluginRegistry(pr *PluginRegistry) EngineOption {
 // WithPluginStreamRegistry sets the streaming plugin registry.
 func WithPluginStreamRegistry(psr *PluginStreamRegistry) EngineOption {
 	return func(e *Engine) { e.pluginStreamRegistry = psr }
+}
+
+// WithStreamHub sets the worker-local live tail for plugin stream chunks.
+//
+// Optional, and absent by default: an engine with no hub records and persists
+// chunks exactly as before and publishes nowhere, which is what an embedded
+// engine or a test wants. Only the worker, which serves the SSE route, sets it.
+func WithStreamHub(h *StreamHub) EngineOption {
+	return func(e *Engine) { e.streamHub = h }
 }
 
 // WithTenantID sets the tenant ID.

@@ -421,13 +421,17 @@ func main() {
 	var (
 		pluginRegistry       = engine.NewPluginRegistry()
 		pluginStreamRegistry = engine.NewPluginStreamRegistry()
-		plugList             []*plugin.LoadedPlugin
-		plugHandler          http.Handler
-		plugMux              *http.ServeMux
-		bgWg                 sync.WaitGroup
-		bgPlugins            []plugin.HasBackground
-		ratelim              *ipRateLimiter
-		tenantLim            *keyedRateLimiter
+		// The live tail for GET /api/workflows/{id}/stream. Built here rather
+		// than inside the API server because the engines this worker executes
+		// runs on are what publish to it. cleat#1572.
+		streamHub   = engine.NewStreamHub(*maxStreamReadersFlag)
+		plugList    []*plugin.LoadedPlugin
+		plugHandler http.Handler
+		plugMux     *http.ServeMux
+		bgWg        sync.WaitGroup
+		bgPlugins   []plugin.HasBackground
+		ratelim     *ipRateLimiter
+		tenantLim   *keyedRateLimiter
 	)
 
 	defaultTenantID := "00000000-0000-0000-0000-000000000000"
@@ -1418,6 +1422,7 @@ func main() {
 		versionGCMaxAge:                  *versionGCMaxAge,
 		pluginRegistry:                   pluginRegistry,
 		pluginStreamRegistry:             pluginStreamRegistry,
+		streamHub:                        streamHub,
 		plugList:                         plugList,
 		tenantPools:                      tenantPools,
 		memorySampleRetention:            *memorySampleRetention,
@@ -1483,6 +1488,7 @@ func main() {
 			factory:     factory,
 			taskQueues:  taskQueues,
 			requireAuth: *requireAuth,
+			streamHub:   streamHub,
 		}
 
 		// Use plugin mux if available, otherwise create a fresh one.
