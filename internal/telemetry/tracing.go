@@ -60,9 +60,50 @@ func InitTracing(ctx context.Context, endpoint, serviceName string) (func(contex
 	return tp.Shutdown, nil
 }
 
-// WorkflowSpan creates a root span for a workflow execution.
-// If traceID is a non-empty 32-char hex string, the span is created with a
-// W3C TraceContext parent link for end-to-end propagation.
+// WorkflowSpan creates the span for a workflow execution, joined to the
+// caller's trace when there is one.
+//
+// IT USED TO LINK RATHER THAN PARENT, and the difference is the whole of
+// cleat#1669. trace.WithLinks does not make Start adopt the caller's trace: the
+// span opens as a NEW ROOT IN A NEW TRACE-ID, with the caller reachable only by
+// following a link. Meanwhile plugin.SetTraceparentFromContext sends the
+// INBOUND trace-id downstream. So a collector held the caller's spans and the
+// callee's spans correctly joined in one trace, and cleat -- the thing in the
+// middle that orchestrated both -- in another. Measured with an in-memory
+// exporter before the change:
+//
+//	INBOUND  traceparent   00-4bf92f35...4736-00f067aa0ba902b7-01
+//	OUTBOUND traceparent   00-4bf92f35...4736-8f8109e582e314e2-01
+//	cleat's own spans       trace bd8e8ad6...d1c1   <- a different trace
+//
+// ContextWithRemoteSpanContext makes Start adopt it, so the whole transaction
+// is one trace. The per-worker tree underneath was always correct --
+// workflow.execute over the event.* spans -- and is unchanged; this only
+// attaches it to the right root.
+//
+// THE PARENT SPAN-ID IS STILL FABRICATED, and that is cleat#1597, not this.
+// The inbound parse keeps the trace-id and discards parts[2], so there is no
+// real caller span-id to name. A collector renders a parent it never receives
+// as a second root WITHIN the trace, which is a far smaller loss than a missing
+// trace: "show me everything in this transaction" now answers, and "what called
+// what" across that one edge still does not.
+//
+// THE LINK IS DROPPED rather than kept alongside the parent. It would point at
+// the same trace by a DIFFERENT fabricated span-id -- spanContextFromTraceID
+// mints a fresh random one per call -- so it would be a self-referential edge
+// to a second span that also does not exist. One fabricated parent is the
+// honest minimum; two is noise.
+//
+// SAMPLING IS UNCHANGED, and this is the part worth checking rather than
+// assuming, because the same constant changes job. TraceFlags(1) is inert on a
+// link and decisive on a parent: the default sampler is
+// ParentBased(AlwaysSample), so a sampled remote parent samples the child and
+// an unsampled one does not. Hardcoding sampled therefore preserves exactly
+// today's outcome -- a root span under ParentBased already falls through to
+// AlwaysSample. Forwarding the CALLER's real flags would be a behaviour change
+// and is not available anyway: they are discarded at the inbound parse, which
+// is the same reason SetTraceparent's comment gives for hardcoding "01"
+// outbound. That belongs with cleat#1597, which widens that parse.
 func WorkflowSpan(ctx context.Context, workflowID, defName string, defVersion int, tenantID string, traceID string) (context.Context, trace.Span) {
 	opts := []trace.SpanStartOption{
 		trace.WithAttributes(
@@ -75,9 +116,14 @@ func WorkflowSpan(ctx context.Context, workflowID, defName string, defVersion in
 	if traceID != "" {
 		opts = append(opts, trace.WithAttributes(attribute.String("trace.id", traceID)))
 		if sc, err := spanContextFromTraceID(traceID); err == nil {
-			opts = append(opts, trace.WithLinks(trace.Link{SpanContext: sc}))
+			ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
 		}
 	}
+	// A run with NO inbound trace still gets one: traceID is empty only when
+	// nothing upstream supplied it, and cmd/cleat-worker substitutes a fresh
+	// generateTraceID() before reaching here. If it ever is empty, Start opens
+	// a root in its own trace exactly as before -- a scheduled or swept run
+	// must not become an orphan because this branch was skipped.
 	return otel.Tracer("cleat").Start(ctx, "workflow.execute", opts...)
 }
 

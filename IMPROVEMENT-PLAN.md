@@ -13350,3 +13350,64 @@ The cross-dialect check is a **source** assertion, the same shape as
 reason: executing it needs all three databases, while what actually breaks is one store edited and
 the others not. It asserts order as well as presence — a delete placed after the insert would
 satisfy a contains-check and remove the row the insert just wrote.
+
+---
+
+### 3.330 cleat's own spans were in a different trace from the transaction they orchestrated — ✅ **FIXED 2026-09-16** (cleat#1669)
+
+`WorkflowSpan` attached the caller's trace with `trace.WithLinks`. That does not make `Start` adopt
+it: the span opened as a **new root in a new trace-id**, with the caller reachable only by following
+a link. Meanwhile `plugin.SetTraceparentFromContext` sends the **inbound** trace-id downstream.
+
+So a collector held the caller's spans and the downstream service's spans correctly joined in one
+trace, and cleat — the thing in the middle that orchestrated both — in another. `WHERE trace_id = T`
+returned both ends and not the middle.
+
+**Measured before the change**, in-memory exporter, exact spans:
+
+```
+INBOUND  traceparent   00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+OUTBOUND traceparent   00-4bf92f3577b34da6a3ce929d0e0e4736-8f8109e582e314e2-01
+cleat's own spans       trace bd8e8ad6c644dfd249c381fea1b0d1c1   <- a different trace
+```
+
+`ContextWithRemoteSpanContext` makes `Start` adopt it. The per-worker tree underneath was always
+correct — `workflow.execute` over the `event.*` spans — and is unchanged; this attaches it to the
+right root.
+
+**The parent span-id is still fabricated, and that is §1597 rather than this.** The inbound parse
+keeps the trace-id and discards `parts[2]`, so there is no real caller span-id to name. A collector
+renders a parent it never receives as a second root *within* the trace — a far smaller loss than a
+missing trace. "Show me everything in this transaction" now answers; "what called what" across that
+one edge still does not.
+
+**Sampling is unchanged, and it is asserted rather than argued.** `TraceFlags(1)` is inert on a link
+and decisive on a parent — the default sampler is `ParentBased(AlwaysSample)` — so the same constant
+changed job. Hardcoding sampled preserves today's outcome exactly, because a root span under
+`ParentBased` already falls through to `AlwaysSample`. Forwarding the caller's real flags would be a
+behaviour change and is not available anyway: they are discarded at the inbound parse, which is the
+reason `SetTraceparent` already gives for hardcoding `01` outbound.
+
+**The link is dropped rather than kept beside the parent.** It would point at the same trace by a
+*different* fabricated span-id — `spanContextFromTraceID` mints a fresh random one per call — so it
+would be a self-referential edge to a second span that also does not exist.
+
+Four assertions, all on what a collector **receives** rather than on what the code appears to do,
+which is the distinction that earned its place here: the defect was invisible from the inbound parse
+the originating issue quoted, because `WithLinks` is three frames away from it.
+
+| assertion | what it stops |
+|---|---|
+| cleat's span carries the caller's trace-id | the defect itself |
+| the parent is marked **remote**, and is not the caller's real span-id | "joined the trace" confused with "started inside an ambient local span" |
+| a run with no inbound trace still gets a valid trace and no parent | scheduled and swept work becoming orphans |
+| a malformed inbound trace-id is not adopted | inventing a trace nobody is in |
+
+**Falsified** by reverting the one line to `WithLinks`: RED, naming both trace-ids.
+
+Section number taken by hand as 3.330 — `scripts/next-section-number.sh` reads `origin/develop` and
+returned 3.329, which is claimed by the still-open #1680. WORKSTREAM.md's protocol table describes
+exactly this case.
+
+Files: `internal/telemetry/tracing.go`,
+`internal/telemetry/a_workflow_span_joins_the_callers_trace_test.go`.
