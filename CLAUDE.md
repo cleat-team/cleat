@@ -271,6 +271,33 @@ A floor does not help, and this is the clearest argument against tuning one: 23 
 low enough to be portable, and the correct total was not knowable at that moment by anything
 sampling the PR. Keep the floor for a total of zero and gate on the state field.
 
+**A THIRD way, and it is the one that looks most settled: a CONFLICTING pr runs only the checks
+that do not need a merge commit, and they all pass.** Measured 2026-09-16 on cleat#1695, the same
+PR before and after a rebase, identical content:
+
+| | checks registered | all passing | `mergeStateStatus` |
+|---|---|---|---|
+| conflicting with `develop` | **7** | yes | `DIRTY` |
+| after one rebase | **51** | (pending) | `BLOCKED` then `CLEAN` |
+
+The seven were `CodeQL`, its five `Analyze (…)` matrix legs, and `Contributor License Agreement`.
+Engine, Tier 1, Multi-DB and cross-language did not run at all.
+
+**The mechanism, and it is not a path filter.** A `pull_request` workflow runs against the MERGE
+COMMIT, `refs/pull/N/merge`. A conflicting PR has no such ref, so none of them can start. What
+survives is exactly the `pull_request_target` and head-ref checks — and those have no reason to
+fail, so the set that remains is small, complete and green.
+
+So this one does not look early the way `total=23 pending=0` does. It looks **finished**. `total=7
+pending=0 fail=0` is a settled green set by every count a parse can take, on a PR that cannot be
+merged at all.
+
+The repair is a rebase, and the conflict that caused it here is worth knowing because it will
+recur: three PRs had landed while the branch was open, each APPENDING a §3.x section to the end of
+`IMPROVEMENT-PLAN.md`. The block scheme in `scripts/section-blocks.sh` keeps the NUMBERS disjoint —
+3.329, 3.330 and 3.261 do not collide — and does nothing about the TEXT colliding at end-of-file.
+Two streams appending sections will conflict in git however well the numbers are allocated.
+
 **And the INVERSE was observed the same day, which together with the above means the count is not
 a weak proxy for mergeability — it is not a proxy for it at all.** On cleat#1355, `total=82`,
 `pending=0`, `fail=0`, all 32 of 32 required contexts enumerated individually against
