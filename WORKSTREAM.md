@@ -441,6 +441,85 @@ see "What did not come across" at the end.
 one from memory: the section around that pointer records a run where doing so produced a tidy
 876 → 581 → 4 skip progression that was 1,086 connection failures wearing the right costume.
 
+---
+
+## ⚠️ CORRECTION 2026-09-16: everything below about *this machine* describes one that is gone
+
+The reasoning about which stream can run what, and why, was measured on a **colima** host with
+three VMs. There is no colima here now. Measured today, from the session sandbox at
+`/Users/Shared/localssd/rcownie/cleat-agent1`:
+
+    docker context ls                 # default, desktop-linux, orbstack (orbstack current)
+    docker info --format '{{.Name}} {{.ServerVersion}} {{.MemTotal}}'
+    # -> orbstack 29.4.0 12600156160
+
+**One VM, 11.73 GiB, running OrbStack.** Not five contexts, not `colima`, `colima-cleat-ws1` or
+`colima-cleat-ws3` — those three do not exist, so every `docker --context colima-…` command below
+fails rather than answering.
+
+**"WS-2 cannot have a local SQL Server 2022 on this machine, and that is a capacity fact" is
+retracted.** It is the sentence most likely to stop someone trying, and it is false here. This
+session ran one for its whole length:
+
+    SELECT @@SERVERNAME, SERVERPROPERTY('ProductVersion'), SERVERPROPERTY('Edition')
+    -- f57f8ff4b368 | 16.0.4275.2 | Developer Edition (64-bit)
+
+That is SQL Server 2022, not Azure SQL Edge 15.0, and it applied every migration in
+`migrations/mssql/` including `011_json_scalar_payloads.sql` — the two-argument `ISJSON` that Edge
+cannot run. The image is amd64 and the host is arm64, so `docker run` warns about the platform and
+the server runs under emulation: **slow, not impossible.** Budget for it — a full `./engine/` sweep
+with an MSSQL DSN set took over 30 minutes and hit a timeout once.
+
+**The capacity fact that replaces it is contention, not architecture.** 24 containers were running
+on that single 11.73 GiB VM, about a dozen of them SQL Server. Under that load a server reports
+
+    Msg 802 ... There is insufficient memory available in the buffer pool
+    Error: 701, Severity: 17 ... insufficient system memory in resource pool 'default'
+
+and the failures look like test failures: this session lost one full-suite run to a 30-minute
+timeout and had another report a red on `TestAClaimDefersARunWhoseConcurrencyKeyIsHeld/mssql` that
+was the container, not the code. `docker stats --no-stream` before a three-dialect run, and
+`docker restart` on your own container, are cheaper than diagnosing either. That is the same
+reading CORRECTION 1 below asks for — treat a startup or buffer-pool error as a memory measurement
+— on a machine where the pressure comes from neighbours rather than from a VM's own `--memory`.
+
+**Eight of the nine ports in the DSN table below are dead, and the ninth is not what the table
+says.** Measured two ways that can disagree, and they agree:
+
+    for p in 1433 1434 1435 5432 5433 5434 3306 3307 3308; do nc -z 127.0.0.1 $p && echo "$p up"; done
+    docker ps --format '{{.Ports}}'
+
+Only 1435 answers, and it is **this session's own container** — not WS-3's `cleat-ws3-mssql` as the
+table records. That is the worse of the two failures to inherit: a dead port refuses and you go
+looking, whereas a live port belonging to someone else connects, accepts your DSN, and answers
+about the wrong database. `SELECT @@SERVERNAME` is what distinguishes them, which is what the
+existing advice at the end of the SQL Server section already says and is the reason to keep saying
+it.
+
+The ports actually published are a different set entirely
+(1466, 1477, 1482, 1487, 1499, 1572, 3309, 3365, …), one cluster per live session, which is what
+the tables below cannot express: containers are now **per session**, created and destroyed with the
+work, not three fixed servers owned by three fixed streams.
+
+**So the rule at the end of the SQL Server section — "probe the port; do not read the table" — is
+the only part of this that still holds, and it is now the whole instruction.**
+
+**One trap in following it.** The obvious probe is broken in this shell:
+
+    (echo >/dev/tcp/127.0.0.1/$p) 2>/dev/null && echo BUSY || echo free   # WRONG here
+
+`/dev/tcp` is a bash feature and the tool shell is **zsh**, where the redirect fails for every port
+— so it answers *"free"* for all of them, including one you are connected to. It fails in the
+direction that looks like success. Use `nc -z`, and check it against a port you know is busy before
+believing a "free".
+
+**What this correction does NOT claim.** I measured the runtime, the memory, the ports and my own
+server. I did **not** verify which sandbox each stream uses now, what DSNs the other sessions hold,
+or when the host changed — so the tables below are left in place rather than rewritten from one
+session's view. Read them as history, and probe.
+
+---
+
 ### Which sandbox is which stream
 
 | | sandbox | docker context |
