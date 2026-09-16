@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -79,6 +81,15 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 	}
 
 	requireMSSQLAdminRole(t, db)
+	// Since cleat#1541 the SHIPPED predicate does not mention IS_ROLEMEMBER, so
+	// membership on its own grants nothing and this whole path would hand back a
+	// pool that deletes silently -- the exact failure the comment below is
+	// about, arriving by a route that comment could not anticipate.
+	//
+	// Test teardown is a legitimate cross-tenant reader: CleanupMSSQLTestData
+	// deletes every tenant's rows by design. So the suite opts in, the way a
+	// deployment that wants --claim-across-tenants does.
+	applyMSSQLCrossTenantOptIn(t, db)
 	provisionMSSQLAdminLogin(t, db)
 
 	u, err := url.Parse(baseDSN)
@@ -106,6 +117,24 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 		t.Fatalf("%s authenticated but reads IS_ROLEMEMBER('cleat_admin') = %v; "+
 			"teardown through this connection would silently delete nothing",
 			mssqlTestAdminLogin, isMember)
+	}
+
+	// AND that membership buys something. Since cleat#1541 the two questions
+	// came apart: a member under the plain predicate reads IS_ROLEMEMBER = 1
+	// and still sees zero rows, so the check above passes while teardown
+	// deletes nothing -- which is precisely what it was written to prevent,
+	// reached by a route that did not exist when it was written.
+	var form string
+	if err := pool.QueryRow(`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
+		t.Fatalf("read admin.rls_predicate_form as %s: %v. Migration 075 creates it; "+
+			"without it there is no way to tell whether cleat_admin membership grants "+
+			"anything", mssqlTestAdminLogin, err)
+	}
+	if form != "admin" {
+		t.Fatalf("%s is a member of cleat_admin but the installed predicate is %q, so "+
+			"membership admits nothing and teardown would silently delete nothing "+
+			"(cleat#1541). applyMSSQLCrossTenantOptIn should have opted this database in",
+			mssqlTestAdminLogin, form)
 	}
 
 	mssqlAdminPools[baseDSN] = pool
@@ -216,4 +245,46 @@ func isMSSQLAlreadyExists(err error) bool {
 	return strings.Contains(msg, "already exists") ||
 		strings.Contains(msg, "is already a member") ||
 		strings.Contains(msg, "already a member of the role")
+}
+
+// applyMSSQLCrossTenantOptIn applies migrations/mssql/optional/cross_tenant_claim.sql.
+//
+// That file is deliberately outside the auto-applied set (cleat#1541): the
+// disjunction it installs costs the index seek on any query that does not carry
+// its own tenant predicate, so a deployment opts in only if it wants
+// --claim-across-tenants. The TEST SUITE wants it for a different reason --
+// CleanupMSSQLTestData deletes across tenants by design -- and that is exactly
+// the shape the opt-in exists to serve.
+//
+// Idempotent, and applied once per database because MSSQLAdminDB caches its
+// pool per DSN and calls this before provisioning.
+func applyMSSQLCrossTenantOptIn(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	path := filepath.Join(repoRootForMSSQLTestutil(t), "migrations", "mssql", "optional", "cross_tenant_claim.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the cross-tenant opt-in migration: %v", err)
+	}
+
+	// GO is a client directive, not T-SQL; database/sql rejects it.
+	for _, batch := range strings.Split(string(raw), "\nGO\n") {
+		if strings.TrimSpace(batch) == "" {
+			continue
+		}
+		if _, err := db.Exec(batch); err != nil {
+			t.Fatalf("applying the cross-tenant opt-in: %v", err)
+		}
+	}
+}
+
+// repoRootForMSSQLTestutil finds the repository root from this package, so the
+// migration path does not depend on which package's test binary is running.
+func repoRootForMSSQLTestutil(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse: %v", err)
+	}
+	return strings.TrimSpace(string(out))
 }

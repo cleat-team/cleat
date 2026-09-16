@@ -890,7 +890,34 @@ func (s *MSSQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedu
 	return schedules, rows.Err()
 }
 
-// CheckCrossTenantCapability answers from SQL Server's role membership.
+// The two values admin.rls_predicate_form can hold. They are spelled here and
+// in migrations/mssql/075 and migrations/mssql/optional/cross_tenant_claim.sql,
+// and the table's own CHECK constraint refuses anything else -- so a typo in a
+// migration fails at apply time rather than reading as "not admin" here.
+const (
+	rlsPredicatePlain = "plain"
+	rlsPredicateAdmin = "admin"
+)
+
+// rlsPredicateForm reports which predicate migration installed, from the marker
+// table rather than from the predicate's definition. See
+// CheckCrossTenantCapability for why the definition cannot be read by the
+// connection that needs the answer.
+//
+// A missing table is an ERROR rather than a default. Treating it as "plain"
+// would make a deployment that has not applied 075 indistinguishable from one
+// that has and chose the default, and the two want different advice.
+func (s *MSSQLStore) rlsPredicateForm(ctx context.Context) (string, error) {
+	var form string
+	err := s.db.QueryRowContext(ctx, `SELECT form FROM admin.rls_predicate_form`).Scan(&form)
+	if err != nil {
+		return "", err
+	}
+	return form, nil
+}
+
+// CheckCrossTenantCapability answers from the installed predicate AND SQL
+// Server's role membership.
 //
 // One question covers both paths here, unlike PostgreSQL's two functions and
 // two grants: dbo.fn_tenant_filter admits on IS_ROLEMEMBER(N'cleat_admin') and
@@ -903,6 +930,50 @@ func (s *MSSQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedu
 // PostgreSQL check exists for cannot arise the same way: dropping the role
 // membership shows up here, and altering the predicate is a schema change.
 func (s *MSSQLStore) CheckCrossTenantCapability(ctx context.Context) CrossTenantCapability {
+	// TWO facts, because since cleat#1541 only one of them is fixed.
+	//
+	// Membership answers "is this principal admitted by the predicate?". The
+	// predicate form answers "is the predicate one that admits anybody?". This
+	// check used to ask only the first, and the comment above justified that
+	// with "altering the predicate is a schema change" -- true while 012 was
+	// applied unconditionally and every deployment had the OR form.
+	//
+	// 075 makes it opt-in, so the two come apart. Measured: plain predicate,
+	// connection IS a member of cleat_admin, IS_ROLEMEMBER returns 1 and the
+	// connection sees ZERO rows. Asking membership alone would report
+	// "cross-tenant claim is available" to a worker that sees nothing, which is
+	// precisely the silent degradation this check exists to catch on
+	// PostgreSQL.
+	//
+	// WHY A TABLE AND NOT THE PREDICATE'S OWN DEFINITION. The obvious check is
+	//
+	//	SELECT 1 FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id
+	//	 WHERE o.name = 'fn_tenant_filter' AND m.definition LIKE '%IS_ROLEMEMBER%'
+	//
+	// It discriminates correctly as sa and is useless from an unprivileged
+	// connection: SQL Server's metadata visibility shows sys.objects rows only
+	// for objects the principal has permission on, so a worker with no rights
+	// on the function reads 0 under BOTH predicates. Measured --
+	// can_see_the_object_at_all was 0. A check that cannot disagree with itself
+	// is worse than no check, because it reports a clean answer.
+	form, err := s.rlsPredicateForm(ctx)
+	if err != nil {
+		// NOT a denial and NOT a grant. An unreadable marker means the question
+		// was not answered, and saying "not available" here would send an
+		// operator to grant a membership they may already have.
+		reason := fmt.Sprintf("could not read admin.rls_predicate_form, so it is unknown whether "+
+			"dbo.fn_tenant_filter admits dbo.cleat_admin at all: %v. Apply "+
+			"migrations/mssql/075_the_admin_bypass_is_opt_in.sql if it is missing", err)
+		return CrossTenantCapability{ClaimReason: reason, SchedulesReason: reason}
+	}
+	if form != rlsPredicateAdmin {
+		const reason = "dbo.fn_tenant_filter is the plain predicate, which admits only rows " +
+			"matching this connection's SESSION_CONTEXT -- no role membership can widen it. " +
+			"Apply migrations/mssql/optional/cross_tenant_claim.sql to opt this deployment in " +
+			"(cleat#1541), then grant dbo.cleat_admin membership"
+		return CrossTenantCapability{ClaimReason: reason, SchedulesReason: reason}
+	}
+
 	var isMember sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, `SELECT IS_ROLEMEMBER(N'cleat_admin')`).Scan(&isMember); err != nil {
 		reason := fmt.Sprintf("could not check dbo.cleat_admin membership: %v", err)
