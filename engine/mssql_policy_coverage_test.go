@@ -51,6 +51,19 @@ import (
 var mssqlFilterPredicateRe = regexp.MustCompile(
 	`ADD FILTER PREDICATE dbo\.fn_tenant_filter\(tenant_id\) ON dbo\.(\w+)`)
 
+// enginePredicateRe recognises the engine's own predicate in the form SQL Server
+// stores it: sys.security_predicates.predicate_definition reads
+// ([dbo].[fn_tenant_filter]([tenant_id])).
+//
+// ANCHORED ON THE BRACKETS, which is what makes it exact rather than nearly
+// exact. A bare substring test for "fn_tenant_filter" would be one rename away
+// from matching "fn_plugin_tenant_filter" -- it does not today, and only
+// because the "fn_" happens not to be adjacent. Brackets are where the
+// catalogue puts an identifier's boundary, so matching them is the same move as
+// anchoring on a declaration site rather than on a name: it cannot match a
+// longer identifier that merely contains this one.
+var enginePredicateRe = regexp.MustCompile(`\[dbo\]\.\[fn_tenant_filter\]`)
+
 // tablesWithShippedPolicies parses migrations/mssql/*.sql for the tables a
 // filter predicate is bound to.
 //
@@ -119,8 +132,30 @@ func TestEveryShippedTenantPolicyExistsInTheBuiltDatabase(t *testing.T) {
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
 
+	// BOTH SIDES MUST ASK ABOUT THE SAME PREDICATE FUNCTION, and until cleat#1629
+	// there was only one, so they did without anyone noticing.
+	//
+	// mssqlFilterPredicateRe above names dbo.fn_tenant_filter specifically. This
+	// query used to return every row of sys.security_predicates regardless of
+	// which function it called, so the two sides asked different questions: the
+	// migrations side "which tables does fn_tenant_filter cover", the database
+	// side "which tables have any predicate at all". cleat#1552 added a SECOND
+	// function, dbo.fn_plugin_tenant_filter, installed at PLUGIN migration time
+	// from Go rather than by any file in migrations/mssql -- so on any database
+	// where plugin migrations have run, 25-odd plugin tables appeared in `got`,
+	// could not appear in `want`, and the "extra" check below reported every one
+	// of them as a schema disagreement.
+	//
+	// It is not one. Those predicates are correct, deliberate, and sourced from
+	// plugin/migration.go; they are simply not this test's subject. That only
+	// stayed green in CI because ./engine/ runs before ./plugins/ in every job
+	// that runs both -- an ordering, not an invariant, and it failed the moment
+	// a local run reused a database.
+	//
+	// The definition is read rather than filtered in SQL so the exclusion can be
+	// REPORTED rather than silently applied; see the log at the end.
 	rows, err := db.Query(`
-		SELECT DISTINCT t.name
+		SELECT DISTINCT t.name, sp.predicate_definition
 		FROM sys.security_predicates sp
 		JOIN sys.tables t ON t.object_id = sp.target_object_id
 		ORDER BY t.name`)
@@ -128,16 +163,32 @@ func TestEveryShippedTenantPolicyExistsInTheBuiltDatabase(t *testing.T) {
 		t.Fatalf("reading sys.security_predicates: %v", err)
 	}
 	defer rows.Close()
-	var got []string
+	var got, otherPredicate []string
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var name, definition string
+		if err := rows.Scan(&name, &definition); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
-		got = append(got, name)
+		if enginePredicateRe.MatchString(definition) {
+			got = append(got, name)
+		} else {
+			otherPredicate = append(otherPredicate, name+" "+definition)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterating: %v", err)
+	}
+	// A parse that matches nothing passes vacuously, and this one would do it in
+	// the direction that reports every shipped table as MISSING -- which reads
+	// as a catastrophe rather than as a broken test. Same rule the `want` bound
+	// above applies to the migration-side regex.
+	if len(got) == 0 {
+		t.Fatalf("no security predicate in this database calls dbo.fn_tenant_filter, but "+
+			"%d predicates exist.\n\nEither enginePredicateRe no longer matches the form "+
+			"SQL Server stores -- it was ([dbo].[fn_tenant_filter]([tenant_id])) when this "+
+			"was written -- or the engine's policies are genuinely gone. Check one "+
+			"predicate_definition by hand before assuming the second.\n\nnot matched: %v",
+			len(otherPredicate), otherPredicate)
 	}
 
 	gotSet := map[string]bool{}
@@ -187,5 +238,16 @@ func TestEveryShippedTenantPolicyExistsInTheBuiltDatabase(t *testing.T) {
 	if !t.Failed() {
 		t.Logf("%d tables carry a shipped tenant filter predicate and the built database "+
 			"has one on each: %v", len(got), got)
+		// Say what was excluded, every time, rather than only when it is
+		// empty. A check that quietly narrows its own population reads as
+		// covering more than it does, and this one narrowed from "every
+		// predicate" to "the engine's predicate" -- which is the right scope
+		// and is worth being visible in the log of a passing run.
+		if len(otherPredicate) > 0 {
+			t.Logf("%d predicate(s) on other functions were excluded, correctly -- plugin "+
+				"tables get dbo.fn_plugin_tenant_filter from plugin/migration.go, which no "+
+				"file in migrations/mssql binds and this test does not cover: %v",
+				len(otherPredicate), otherPredicate)
+		}
 	}
 }
