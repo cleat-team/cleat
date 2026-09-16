@@ -158,9 +158,9 @@ practice it described, and its only effect was to stop *directed* assignment whi
 self-served. A test nobody follows is not a safeguard.
 
 **The candidacy test.** A stream is available if it is idle and every open PR of its own is
-*waiting*: in the merge queue **with an entry state that is not `UNMERGEABLE`**, or with all
-required checks running or green, **nothing red, no conflict, and no cancelled twin**. Red,
-`CONFLICTING`, draft, twinned or `UNMERGEABLE`-in-queue all disqualify — those need their author.
+*waiting*: in the merge queue **with an entry state of `QUEUED`, `AWAITING_CHECKS` or
+`MERGEABLE`**, or with all required checks running or green, **nothing red, no conflict, and no
+cancelled twin**. Red, `CONFLICTING`, draft and twinned all disqualify — those need their author.
 
 **The queue entry has its own state, and it is not the PR's.** `MergeQueueEntryState` is
 `QUEUED | AWAITING_CHECKS | MERGEABLE | UNMERGEABLE | LOCKED`, and an entry can read `UNMERGEABLE`
@@ -176,6 +176,25 @@ gh api graphql -f query='{repository(owner:"cleat-team",name:"cleat"){
 
 This is R6 arriving through a different door — two PRs touching one shared file — and it is why R6
 survives R9 rather than being relaxed by it.
+
+**Name the healthy states, not the unhealthy ones.** This clause first said "not `UNMERGEABLE`",
+which is the state WS-2 happened to trip over. `LOCKED` exists too and neither of us has met it;
+the enum's own descriptions are circular (*"LOCKED: The entry is currently locked"*), so its
+semantics cannot be settled from the schema. A blocklist would have the same hole next time in a
+different costume, and a new enum value would silently read as healthy. The allowlist fails closed
+instead: an unrecognised state means the stream is not offered work, which costs one missed
+assignment rather than one wrongly-directed stream.
+
+**Recovering a wedged entry, since the rule now tells streams to look for one.** Measured by WS-2,
+not re-run here: `gh pr merge --disable-auto` does **not** dequeue an already-queued PR — it
+answers *"already queued to merge"*. The call that works is
+
+```
+gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){clientMutationId}}' -F id=<PR_node_id>
+```
+
+and `id` is the **PullRequest** node id (`PR_…`), not the entry id (`MQE_…`) — the first error
+rejects `pullRequestId` and then demands `id`, which reads as though it wants the entry.
 
 The twin clause is not a detail. A PR can report every required context green and still be
 unmergeable, because branch protection is satisfied by neither member of a duplicated run set, and
