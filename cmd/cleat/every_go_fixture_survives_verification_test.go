@@ -25,13 +25,15 @@ import (
 // stopped checking, which is precisely the defect cleat#1313 is about.
 var goFixtureExpectations = map[string]string{
 	// "" means analysis must report no threading errors.
-	"allhostcalls":   "",
-	"autothread":     "",
-	"basic":          "",
-	"cancelpoll":     "",
-	"clew-lifecycle": "",
-	"crashcall":      "",
-	"crosslang":      "",
+	"allhostcalls": "",
+	"autothread":   "",
+	"basic":        "",
+	// cleat#1065: the Go reader for tests/conformance/entry_point_binding_cases.json.
+	"bindingconformance": "",
+	"cancelpoll":         "",
+	"clew-lifecycle":     "",
+	"crashcall":          "",
+	"crosslang":          "",
 	// cleat#1617: its only host-call route is cleat/dagrun, whose needs are
 	// declared by a //cleat:require directive in that package rather than in
 	// this fixture. It must verify cleanly -- if it does not, the directive is
