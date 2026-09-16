@@ -197,8 +197,33 @@ class CleatEntryTransformer {
     const paramTypes = [];
     const callArgs = ["h"];
 
+    const paramDefaults = [];
+
     for (const p of userParams) {
       const pName = p.name && p.name.text ? p.name.text : "_";
+      // THE DECLARED DEFAULT, AS SOURCE TEXT. cleat#1065.
+      //
+      // AssemblyScript supports `note: string = "FALLBACK"`, and this transform
+      // discarded it: the generated wrapper calls the inner function with EVERY
+      // argument explicitly, so AS's own default never fires, and an absent key
+      // bound the getter's zero ("" for a string) instead. Measured by driving
+      // _generateWrappers with a defaulted parameter -- the emitted wrapper did
+      // not mention the default at all.
+      //
+      // Source text rather than the parsed value, because a default is an
+      // arbitrary expression and only its text reproduces it faithfully. The
+      // shape was confirmed against a REAL asc run, not a mock: the initializer
+      // carries {kind, range, literalKind, value} and range.source.text yields
+      // exactly `"FALLBACK"` and `7` for the two cases below. A mock could not
+      // have answered this -- cleat#1067 is in this file because a mock was
+      // built to satisfy the implementation rather than to model the parser.
+      let pDefault = null;
+      const init = p.initializer;
+      if (init && init.range && init.range.source &&
+          typeof init.range.source.text === "string") {
+        pDefault = init.range.source.text.slice(init.range.start, init.range.end);
+      }
+      paramDefaults.push(pDefault);
       // The declared type. `name.identifier.text` first, `.text` second --
       // the same order this file already uses for type names at the
       // _typeName helper below.
@@ -250,6 +275,7 @@ class CleatEntryTransformer {
       innerName,
       paramNames,
       paramTypes,
+      paramDefaults,
       callArgs,
       retTypeStr,
       isVoid,
@@ -858,6 +884,7 @@ class CleatEntryTransformer {
       innerName,
       paramNames,
       paramTypes,
+      paramDefaults,
       callArgs,
       retTypeStr,
       isVoid,
@@ -929,7 +956,8 @@ class CleatEntryTransformer {
       code += `  }\n\n`;
       code += `  // Extract named params\n`;
       for (let i = 0; i < paramNames.length; i++) {
-        code += this._getDeserializeCode(paramNames[i], paramTypes[i], funcName);
+        code += this._getDeserializeCode(paramNames[i], paramTypes[i], funcName,
+          paramDefaults ? paramDefaults[i] : null);
       }
       if (isVoid) {
         code += `  let _result: string = "";\n`;
@@ -1049,25 +1077,48 @@ class CleatEntryTransformer {
     );
   }
 
-  _getDeserializeCode(pname, ptype, funcName) {
+  // A DECLARED DEFAULT MAKES A PARAMETER OPTIONAL. cleat#1065.
+  //
+  // `pdefault` is the default's source text, or null. When present, an ABSENT
+  // key binds it instead of the getter's zero value.
+  //
+  // WHY THIS IS THE MECHANISM AND NOT A NEW SYNTAX. The contract decided on
+  // cleat#1065 is "an absent declared parameter is an error, unless the
+  // parameter is declared optional". Python spells that with a parameter
+  // default and Rust with Option<T>/#[serde(default)]; AssemblyScript has
+  // neither nullable primitives nor a tag convention, but it DOES have default
+  // parameter values -- the same spelling as Python. So the mechanism already
+  // existed in the language and was being discarded here.
+  //
+  // `_t_<name> == -1` is the absence test the type guard above already emits;
+  // typeOf returns -1 for a missing key. Reusing it means absence has ONE
+  // definition in this wrapper rather than two that can disagree.
+  //
+  // ADDITIVE. Without a default the emitted code is unchanged, so an absent
+  // parameter still binds zero until the contract flips.
+  _getDeserializeCode(pname, ptype, funcName, pdefault) {
     // Map AS types to the correct JsonParser getter
     const g = this._typeGuard(pname, ptype, funcName);
+    const orDefault = (expr) =>
+      pdefault === null || pdefault === undefined
+        ? expr
+        : `_t_${pname} == -1 ? (${pdefault}) : (${expr})`;
     if (ptype === "string" || ptype === "String") {
-      return g + `  let ${pname}: string = _parser.getString(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: string = ${orDefault(`_parser.getString(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "i32") {
-      return g + `  let ${pname}: i32 = <i32>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: i32 = ${orDefault(`<i32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "u32") {
-      return g + `  let ${pname}: u32 = <u32>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: u32 = ${orDefault(`<u32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "i64") {
-      return g + `  let ${pname}: i64 = <i64>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: i64 = ${orDefault(`<i64>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "u64") {
-      return g + `  let ${pname}: u64 = <u64>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: u64 = ${orDefault(`<u64>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "f64") {
-      return g + `  let ${pname}: f64 = _parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: f64 = ${orDefault(`_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "f32") {
-      return g + `  let ${pname}: f32 = <f32>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: f32 = ${orDefault(`<f32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "bool" || ptype === "boolean") {
-      return g + `  let ${pname}: bool = _parser.getBool(_parsed, "${pname}");\n`;
+      return g + `  let ${pname}: bool = ${orDefault(`_parser.getBool(_parsed, "${pname}")`)};\n`;
     } else {
       // Unknown type — throw a compile-time error from the transformer
       throw new Error(

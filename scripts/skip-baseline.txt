@@ -1,6 +1,7 @@
 benchmarks	buildBenchWasm	2
 benchmarks	newBenchEngine	1
 cmd/cleat	TestASTransform	2
+cmd/cleat	TestAnAssemblyScriptDefaultMakesAParameterOptional	2
 cmd/cleat	TestRunBuild_PythonTarget_WasmRoundtrip	2
 cmd/cleat	TestVetAS	2
 cmd/cleat	TestVetExitCode	1
