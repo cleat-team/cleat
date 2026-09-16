@@ -1966,3 +1966,66 @@ func TestRunBuild_EntryPointWithNoArguments(t *testing.T) {
 		t.Error("Greet's argument is not being read out of argsJSON")
 	}
 }
+
+// A guest whose entry-point parameters are ALL scalars must compile.
+// cleat#1697.
+//
+// THE SHAPE, precisely, because the report that reached me said "every guest
+// whose entry point takes a plain string" and that is wider than the truth:
+//
+//	(input string)                  FINE -- a lone string takes the
+//	                                whole-payload fast path and emits no call
+//	(userID string, cart []Item)    FINE -- the slice made the old gate true
+//	(account string, tag string)    BROKEN -- calls emitted, helper was not
+//
+// The generated file called extractJSONRaw and json.Unmarshal while the helper
+// and the encoding/json import were gated on a separate walk of the parameter
+// types that still classified a string as needing neither. The guest failed at
+// `go build` with "undefined: extractJSONRaw".
+//
+// WHY EVERY EXISTING BUILD TEST MISSED IT. TestRunBuild_GoTarget builds
+// testdata/basic, whose `cart []CartItem` makes the old gate true and hides the
+// question; no cleat-side build test used an all-scalar guest at all. The shape
+// lives in cleat-ports, which installs cleat@develop at run time -- so the
+// breakage landed in a different repository from the change and surfaced as a
+// merge-queue ejection rather than a red check here.
+//
+// This builds testdata/sagaparameterised, which is (account string, tag string)
+// and already existed. Nothing was wrong with the fixture; nothing compiled it.
+func TestRunBuild_AllScalarParamsCompile(t *testing.T) {
+	pattern := filepath.Join(testdataDir(t), "sagaparameterised")
+	outDir := t.TempDir()
+
+	runBuild(pattern, outDir, "go", "", "", false, false, false, 1)
+
+	// The .wasm is the assertion. runBuild compiles the generated package, so a
+	// file that references an undefined helper produces no output at all --
+	// which is what this test would have caught.
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("reading the build output: %v", err)
+	}
+	var wasmFiles []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".wasm") {
+			wasmFiles = append(wasmFiles, e.Name())
+		}
+	}
+	if len(wasmFiles) == 0 {
+		t.Fatalf("an all-scalar guest produced no .wasm; got: %v\n\n"+
+			"This is cleat#1697: gen_wasm_exports.go calls extractJSONRaw and "+
+			"json.Unmarshal, and whichever gate decides to emit the helper and "+
+			"the encoding/json import disagreed with the emitter.",
+			entryNames(entries))
+	}
+	for _, wf := range wasmFiles {
+		fi, serr := os.Stat(filepath.Join(outDir, wf))
+		if serr != nil {
+			t.Errorf("stat %s: %v", wf, serr)
+			continue
+		}
+		if fi.Size() == 0 {
+			t.Errorf("wasm file %s is empty", wf)
+		}
+	}
+}
