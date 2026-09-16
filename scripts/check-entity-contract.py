@@ -50,7 +50,10 @@ CLASSES = ("member", "exempt", "not-an-entity")
 # raising it is a deliberate change to the guard, in a diff someone reads.
 #
 # 23 of 40 (10 members x 4 clauses) on 2026-09-16, derived rather than typed.
-GRANDFATHER_CEILING = 23
+# 13 of 40 after cleat#1702's first conversion migration: `disabled_at` now
+# exists on all ten members, so all ten pairs came off the list rather than
+# the ceiling being lowered to match a number somebody hoped for.
+GRANDFATHER_CEILING = 13
 
 
 def strip_sql_comments(src):

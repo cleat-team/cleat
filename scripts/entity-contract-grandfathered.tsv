@@ -19,25 +19,15 @@
 #
 # table					clause
 admin.tenant_api_keys	updated_at
-admin.tenant_api_keys	disabled_at
 admin.tenant_api_keys	no-legacy-retirement
 admin.tenant_egress_allow	updated_at
-admin.tenant_egress_allow	disabled_at
 admin.tenant_roles	updated_at
-admin.tenant_roles	disabled_at
 public.tenant_domains	updated_at
-public.tenant_domains	disabled_at
 public.tenant_secrets	created_at
-public.tenant_secrets	disabled_at
 public.tenant_settings	created_at
-public.tenant_settings	disabled_at
 public.workflow_defs	updated_at
-public.workflow_defs	disabled_at
 public.workflow_defs	no-legacy-retirement
 public.workflow_routing	updated_at
-public.workflow_routing	disabled_at
 public.workflow_schedules	updated_at
-public.workflow_schedules	disabled_at
 public.workflow_schedules	no-legacy-retirement
 public.workflow_tags	updated_at
-public.workflow_tags	disabled_at
