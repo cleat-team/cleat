@@ -125,6 +125,97 @@ and §3.111 measured what that costs: seven remaining calls ≈ 40 guest-side ed
 one thing not to change: WS-1 and WS-2 each caught real errors in the other's work this week, every
 time by re-deriving rather than accepting. Keep the evidence attached.
 
+**R9 — A stream waiting on CI is available for the next item; a stream whose PR needs it is not.**
+"Has an open PR" was the availability test, and it conflates two states that look identical from
+outside: *writing* a change, and *waiting* on a queue that will take most of an hour.
+
+Measured 2026-09-16, every PR merged to `develop` that day:
+
+| | value | note |
+|---|---|---|
+| merged that day | 27 | 3 are dependabot, **excluded** |
+| session-authored | **24** | the population below |
+| median open→merged | **42 min** | q1 38, q3 48 |
+| range | 34–383 min | |
+| total PR-holding | **1460 min** | over 24 hours, in one day |
+
+```
+gh pr list --repo cleat-team/cleat --state merged --search "merged:2026-09-16" \
+  --limit 100 --json number,createdAt,mergedAt,headRefName \
+  | jq -r '.[] | select(.headRefName|startswith("dependabot")|not)
+           | [(.mergedAt|fromdate) - (.createdAt|fromdate)] | .[]/60'
+```
+
+The dependabot exclusion is not tidying: those three were opened days earlier and their median
+open→merged is **10,012 minutes**, which swamps the statistic the rule is about. A first pass
+quoted "8 PRs, median 48" from a hand-picked subset, and the command above returns 27 — R3a caught
+it in the file that states R3a.
+
+**The streams already work around it, which is the actual finding.** On the same day WS-3 held
+`#1682` and `#1683` open together for **36 minutes**, and WS-2 held `#1680` and `#1689` for
+**37 minutes** (`createdAt`/`mergedAt` intersected per pair). So the rule was stricter than the
+practice it described, and its only effect was to stop *directed* assignment while the streams
+self-served. A test nobody follows is not a safeguard.
+
+**The candidacy test.** A stream is available if it is idle and every open PR of its own is
+*waiting*: in the merge queue **with an entry state of `QUEUED`, `AWAITING_CHECKS` or
+`MERGEABLE`**, or with all required checks running or green, **nothing red, no conflict, and no
+cancelled twin**. Red, `CONFLICTING`, draft and twinned all disqualify — those need their author.
+
+**The queue entry has its own state, and it is not the PR's.** `MergeQueueEntryState` is
+`QUEUED | AWAITING_CHECKS | MERGEABLE | UNMERGEABLE | LOCKED`, and an entry can read `UNMERGEABLE`
+while the PR's own `mergeStateStatus` still reads `CLEAN` — WS-2 hit this on 2026-09-16 with two of
+their own PRs both appending to `IMPROVEMENT-PLAN.md`: the first to merge made the second
+unmergeable *in the queue*, and nothing at PR level said so. Reading only `mergeStateStatus` counts
+that stream as waiting when it is blocked:
+
+```
+gh api graphql -f query='{repository(owner:"cleat-team",name:"cleat"){
+  mergeQueue(branch:"develop"){entries(first:20){nodes{state pullRequest{number}}}}}}'
+```
+
+This is R6 arriving through a different door — two PRs touching one shared file — and it is why R6
+survives R9 rather than being relaxed by it.
+
+**Name the healthy states, not the unhealthy ones.** This clause first said "not `UNMERGEABLE`",
+which is the state WS-2 happened to trip over. `LOCKED` exists too and neither of us has met it;
+the enum's own descriptions are circular (*"LOCKED: The entry is currently locked"*), so its
+semantics cannot be settled from the schema. A blocklist would have the same hole next time in a
+different costume, and a new enum value would silently read as healthy. The allowlist fails closed
+instead: an unrecognised state means the stream is not offered work, which costs one missed
+assignment rather than one wrongly-directed stream.
+
+**Recovering a wedged entry, since the rule now tells streams to look for one.** Measured by WS-2,
+not re-run here: `gh pr merge --disable-auto` does **not** dequeue an already-queued PR — it
+answers *"already queued to merge"*. The call that works is
+
+```
+gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){clientMutationId}}' -F id=<PR_node_id>
+```
+
+and `id` is the **PullRequest** node id (`PR_…`), not the entry id (`MQE_…`) — the first error
+rejects `pullRequestId` and then demands `id`, which reads as though it wants the entry.
+
+The twin clause is not a detail. A PR can report every required context green and still be
+unmergeable, because branch protection is satisfied by neither member of a duplicated run set, and
+clearing it needs a **new SHA** rather than a re-run (cleat#1688, three instances in one day):
+
+```
+gh run list --commit <head-sha> --json name --jq '.[].name' | sort | uniq -d
+```
+
+Non-empty means the PR needs its author. Without this clause R9 hands work to precisely the
+streams least able to take it.
+
+**Cap: one held PR plus one new item.** R6 still governs — if the second item would touch the same
+declaration file, it is not eligible regardless of R9.
+
+**It is an offer, and a decline is final.** Both refusals on the day it was written were correct
+and were respected: WS-1 declined `#1410` while mid-task, and declined `#1688` on the grounds that
+"parking that to start something else is the pattern we've both agreed is worth avoiding" — then
+measured the one open question on it anyway and posted the result. Context-switch cost is real and
+the holder is the one who can price it.
+
 ---
 
 ## Verification protocol
