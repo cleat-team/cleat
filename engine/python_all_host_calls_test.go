@@ -32,14 +32,22 @@ import (
 // GUARD_TYPE_MACH_PORT, which has no Linux equivalent. Run it in the container
 // the repo already ships for this:
 //
-//	docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+//	docker run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
 //	  cleat-py-toolchain go test ./engine/ -run TestPythonAllHostCallsWorkflowCompiles
 //
-// --context desktop-linux is not optional on a machine that also runs colima --
-// colima bind-mounts these paths as an EMPTY directory without saying so, and
-// the run then fails with "go.mod file not found", which reads as a broken
-// checkout rather than a wrong context. See
-// scripts/docker/python-toolchain.Dockerfile, which documents both.
+// CHECK THE MOUNT FIRST, because failing it does not look like a mount problem:
+//
+//	docker run --rm -v "$PWD":/src cleat-py-toolchain test -f /src/go.mod
+//
+// A runtime that cannot bind-mount this path produces an EMPTY directory
+// without saying so, and the run then fails with "go.mod file not found",
+// which reads as a broken checkout.
+//
+// This used to prescribe --context desktop-linux, which was correct on a
+// machine that also ran colima and cannot work on this one -- Docker Desktop
+// is not running, so the flag fails to connect, while a plain docker run mounts
+// the tree. cleat#1694; scripts/docker/python-toolchain.Dockerfile carries the
+// dated observations and the recipe for a runtime that genuinely cannot mount.
 func TestPythonAllHostCallsWorkflowCompiles(t *testing.T) {
 	pythonWasm := newPythonWasmTestHelper(t)
 	if !pythonWasm.toolsAvailable() {

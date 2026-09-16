@@ -184,13 +184,17 @@ for l in $LANGS; do
        On macOS componentize-py cannot run natively (it dies on EXC_GUARD /
        GUARD_TYPE_MACH_PORT, a Darwin kernel guard). Use the Linux container:
          docker build -f scripts/docker/python-toolchain.Dockerfile -t cleat-py-toolchain .
-         docker --context desktop-linux run --rm -v \"\$PWD\":/src -w /src -e CGO_ENABLED=1 \\
+         docker run --rm -v \"\$PWD\":/src -w /src -e CGO_ENABLED=1 \\
            cleat-py-toolchain go test ./engine/ -run 'TestPython'
-       Docker Desktop, not colima. Colima cannot bind-mount these paths, and it
-       does not fail: -v \"\$PWD\":/src mounts an empty directory and the run dies
-       with 'go.mod file not found', which reads as a checkout problem. Mounting
-       the repo root under colima is worse still -- it succeeds and shows a
-       different tree. --context desktop-linux is the whole fix."
+       CHECK THE MOUNT FIRST -- a runtime that cannot bind-mount this path does
+       not fail, it mounts an EMPTY directory, and the run then dies with
+       'go.mod file not found', which reads as a checkout problem:
+         docker run --rm -v \"\$PWD\":/src cleat-py-toolchain test -f /src/go.mod
+       This used to prescribe --context desktop-linux, which was right on a
+       machine that also ran colima (2026-08-06) and could not work on this one
+       (2026-09-16: Docker Desktop is not running, so the flag fails to connect
+       while a plain docker run mounts the tree). The check is the instruction;
+       a context name is a property of one machine at one time. cleat#1694."
         fi
       done
       ;;

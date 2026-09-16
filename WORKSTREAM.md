@@ -312,12 +312,20 @@ met this as an unexplained dirty tree with a 20 MB binary diff.
 
 **Python fixtures are verified in the container, not on the host.** `componentize-py` dies on
 Darwin with `EXC_GUARD / GUARD_TYPE_MACH_PORT`; `scripts/docker/python-toolchain.Dockerfile` exists
-for exactly this and has since 2026-08-06. On a Mac running colima, `--context desktop-linux` is
-not optional — colima bind-mounts the repo as an *empty* directory and the failure reads as a
-broken checkout:
+for exactly this and has since 2026-08-06. **Check the mount before trusting a result** — a runtime
+that cannot bind-mount this path produces an *empty* directory without saying so, and the failure
+reads as a broken checkout:
 
-    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+    docker run --rm -v "$PWD":/src cleat-py-toolchain test -f /src/go.mod
+    docker run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
       cleat-py-toolchain go test ./engine/ -run TestPythonAllHostCallsWorkflowCompiles -count=1
+
+This prescribed `--context desktop-linux` until 2026-09-16, which was correct on a Mac that also
+ran colima and **cannot work on this machine**: Docker Desktop is not running, so the flag fails
+with `failed to connect to the docker API`, while a plain `docker run` mounts the tree (measured,
+`go.mod` visible). The check is the instruction; a context name is a property of one machine at one
+time, which is the same reason the correction above says to probe the port rather than read the
+table. cleat#1694, and cleat#1667 for the platform change.
 
 Environmental is not the same as unavoidable — that distinction cost this stream a day, and cost
 WS-2 one too, because I fed them my wrong diagnosis as agreement.
