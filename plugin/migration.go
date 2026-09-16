@@ -358,6 +358,42 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 			// This changes nothing on MySQL beyond removing a misleading log
 			// line: falling through runs an empty statement list, and all three
 			// of the declaration helpers below are no-ops there.
+			//
+			// WHAT THE SKIP BELOW ALSO DROPS, which this comment did not say
+			// and which is not obvious from reading it: the skip `continue`s,
+			// so applyTenantScoping, grantSweepTables and
+			// registerTenantScopedTables are ALL bypassed for that migration on
+			// that dialect. A migration carrying SQL *and* a TenantScoped
+			// declaration therefore loses its POLICY there, not just its DDL --
+			// and it records the version as applied, so it never gets another
+			// chance. The only trace is the log line.
+			//
+			// That is reachable in principle and not in practice today, and the
+			// difference is worth stating rather than trusting. Exactly one
+			// migration in the tree has the shape (SQL, a TenantScoped
+			// declaration, and a missing dialect arm): pgvector's v1, declaring
+			// pgvector_embeddings with an Up arm only. pgvector is deliberately
+			// not linked into cleat-worker -- see the import block in
+			// cmd/cleat-worker/main.go, which explains that its
+			// `embedding vector(1536)` column is fatal on a PostgreSQL without
+			// the extension -- so it runs on no dialect there at all.
+			//
+			// And the entry to the hazard is guarded rather than merely
+			// unoccupied. TestEveryLinkedPluginSupportsEveryDialectTheWorker-
+			// RunsOn reports a LINKED plugin whose migration lacks UpMySQL or
+			// UpMSSQL, naming the plugin and version -- and its two exemptions
+			// (a declaration-only migration, and one marked DialectSpecific)
+			// BOTH require an empty Up, which this shape by definition does not
+			// have. So linking pgvector, or any plugin reaching this shape,
+			// goes red before it can lose a policy silently.
+			//
+			// Note what that does and does not cover: a plugin nobody links is
+			// checked by nothing here, which is exactly why the population
+			// below is worth re-deriving rather than trusting this paragraph:
+			//
+			//	git grep -n 'TenantScoped:' -- plugins/
+			//
+			// and check each hit's Migration literal for UpMySQL and UpMSSQL.
 			declarationOnly := m.Up == "" && m.UpMySQL == "" && m.UpMSSQL == ""
 
 			// Select dialect-appropriate SQL.
