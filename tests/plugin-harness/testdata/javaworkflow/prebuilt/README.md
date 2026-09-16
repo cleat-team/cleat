@@ -9,6 +9,9 @@ Go-only CI job does not have:
   imports, first `teavm.putwcharsOut`, including `env.plugin_call`
 - `cmd/cleat-worker/backend_routing_test.go`, `TestRealFixturesRouteToWasmtime`
   — asserts `DetectLanguage` says `java` and that Java routes to wasmtime
+- `wasm/a_prebuilt_exports_what_its_source_declares_test.go`,
+  `TestAPrebuiltExportsWhatItsSourceDeclares` — compares this binary's export
+  section against the `@CleatEntry` annotations in `../src/main/java/`
 
 It lives here rather than under `../build/`, where Gradle put it, because
 `TestPluginCalls_Wasm_Java` compiles the same workflow on every run and
@@ -24,6 +27,7 @@ cd ..
 ./gradlew build          # writes build/wasm/wasm/workflow.wasm
 cp build/wasm/wasm/workflow.wasm prebuilt/workflow.wasm
 go test ./wasm/ -run TestReadImportSection_ParsesEveryImport
+go test ./wasm/ -run TestAPrebuiltExportsWhatItsSourceDeclares
 go test ./cmd/cleat-worker/ -run TestRealFixturesRouteToWasmtime
 ```
 
@@ -31,7 +35,25 @@ Use the full test names above. `-run` matching nothing prints `ok`, so a
 mistyped pattern looks exactly like a passing test.
 
 Regenerate when the Java source, the TeaVM version, or the host-call ABI
-changes. Nothing detects staleness automatically: `TestPluginCalls_Wasm_Java`
-builds its own copy and would keep passing while the assertions above tested a
-stale artifact. If those two tests fail after a toolchain change, rebuild this
-file before assuming the parser is wrong.
+changes. If those tests fail after a toolchain change, rebuild this file before
+assuming the parser is wrong.
+
+**A missing entry point is now detected; nothing else is.**
+`TestAPrebuiltExportsWhatItsSourceDeclares` fails if this binary lacks an
+export that a `@CleatEntry` annotation declares. It needs no JDK, which is the
+point — the condition under which a stale binary goes unnoticed is exactly the
+condition under which no toolchain is present to rebuild it. cleat#1660.
+
+Everything else is still undetected, and here it is undetectable by
+comparison: `TestPluginCalls_Wasm_Java` builds its own copy and keeps passing
+while the assertions above read a stale artifact, and unlike the
+AssemblyScript fixture these bytes are **not reproducible**, so a hash
+difference against a fresh build proves nothing.
+
+Note that the export name comes from the ANNOTATION here and from the FUNCTION
+NAME in AssemblyScript — `@CleatEntry(name = "CallAllPlugins")` on
+`callAllPlugins` exports `CallAllPlugins`, while `@cleatEntry("CallAllPlugins")`
+on `call_all_plugins` exports `call_all_plugins` and discards the string
+entirely. `CleatEntryProcessor` falls back to the method name when `name()` is
+empty. The two look alike and mean opposite things, so a check written for one
+is wrong about the other.
