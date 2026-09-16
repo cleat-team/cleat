@@ -14123,3 +14123,38 @@ adds membership reach, not clause reach. Clause checks remain single-dialect by 
 
 Files: `scripts/check-entity-contract.py`, `scripts/entity-contract.tsv`,
 `.github/workflows/ci.yml`.
+
+---
+
+### 3.337 A condition that never decides anything cannot be observed to be wrong — ✅ **RECORDED 2026-09-16** (cleat#1723)
+
+Graduates the finding of cleat#1719/#1723 to `CLAUDE.md`, per WORKSTREAM R3. It is a fourth entry
+under *"could this check have disagreed?"*, and it differs from the three already there: those are
+checks that gave the **wrong** answer. This one gives the **right** answer every time, because
+something else is answering.
+
+Four instances in one day, three inside a single PR:
+
+| the check | why its verdict was right | what was actually deciding |
+|---|---|---|
+| self-test for an unterminated `/*` | exit 2, as asserted | the vacuity check — a swallowed file leaves 0 tables |
+| self-test for a dialect-specific hint | it errored, as asserted | the error fired; only its *explanation* was wrong |
+| a watcher's "nothing pending, nothing red" | never merged early | `mergeStateStatus` refusing first, every time |
+| a scan for quoted identifiers | reported 0, and 0 was right | the tree happens to put every name on one line |
+
+**Two remedies, and they are not the same one.** Assert on the **text**, not only the status —
+disable the check under test and the first two cases still exit 2, because a correct second
+mechanism supplies the expected status. And gate on a **denominator the run cannot shrink**: the
+reconstruction on cleat#1718's head found a 24-second window where 2 of an eventual 49 check-runs
+existed, both complete and non-red, with **0 of 32** required contexts green.
+
+**Where to look is the actionable half.** Not the checks you doubt — the ones that have never yet
+refused anything. The watcher's green-set assertion had run on every PR of this session with
+`mergeStateStatus` refusing ahead of it every single time.
+
+**A number in the new text was imprecise and was corrected before merge**, which is the section's
+own rule biting its own paragraph. It said "a whitespace split reports 56" without saying which
+split: `set(...split())` gives 56, a raw token count gives 112, and the answer is 32. All three
+commands are now published beside their results.
+
+Files: `CLAUDE.md`.

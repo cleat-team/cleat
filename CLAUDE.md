@@ -611,9 +611,9 @@ to a file you have never seen, which "write a real parser" is not.
 
 **The unifying question, and it is the one to ask before recording any confirmation: could this
 check have disagreed?** Every trap above is a check that was going to say yes whatever the truth
-was. Three ways that happens — the first two measured 2026-09-08, the third 2026-09-10 — and none
-looks like a weak check at the time. **The first two are checks that could not see far enough. The
-third never ran at all.**
+was. Four ways that happens — the first two measured 2026-09-08, the third 2026-09-10, the fourth
+2026-09-16 — and none looks like a weak check at the time. **The first two are checks that could
+not see far enough. The third never ran at all. The fourth ran, passed, and was never consulted.**
 
 **1. A documented failure mode absorbs every instance of its symptom, including the ones it does
 not explain.** `401 invalid or revoked API key` from the port harness has *four* causes — a stale
@@ -766,6 +766,69 @@ runs no pre-commit hook at all; `git reset --hard` silently reverted the test's 
 registration, so the hook skipped for "unknown stream"; and an already-merged `HEAD` staged nothing,
 so the commit failed with "nothing to commit". Read that issue before writing a test harness for a
 guard.
+
+**4. A CONDITION THAT NEVER DECIDES ANYTHING CANNOT BE OBSERVED TO BE WRONG.** The first three are
+checks that gave the wrong answer. This one gives the *right* answer every time, because something
+else is answering. It is the hardest to find because there is no bad outcome to notice — and the
+place to look is not the checks you doubt, it is **the ones that have never yet refused anything**.
+
+Four instances, 2026-09-16, three of them inside one PR (cleat#1723):
+
+| the check | why its verdict was right | what was actually deciding |
+|---|---|---|
+| a self-test for an unterminated `/*` | exit 2, as asserted | the **vacuity** check — a swallowed file leaves 0 tables |
+| a self-test for a dialect-specific hint | it errored, as asserted | the error fired; only its *explanation* was wrong |
+| a watcher's "nothing pending, nothing red" | never merged early | `mergeStateStatus` refusing first, every time |
+| a scan for quoted identifiers | reported 0, and 0 was correct | the tree happens to put every name on one line |
+
+**Two remedies, and they are different.**
+
+**Assert on the TEXT, not only on the status.** The first two above are caught by nothing else:
+disable the check under test and the case *still exits 2*, because a second, correct mechanism
+supplies the expected status. That is much harder to see through than a bare wrong answer — every
+part of the run looks like the thing you meant to test, because every part of it *is*, except the
+part nobody asserted on. A status-only self-test certifies a guard that has lost exactly the check
+it is named after.
+
+**Gate on a quantity the run cannot shrink.** "Nothing pending, nothing red" is a numerator whose
+denominator the run supplies as it goes. Reconstructed on cleat#1718's head, stepping through every
+`started_at`/`completed_at` instant:
+
+    final check-run count on the SHA:                    49
+    2026-09-16T21:15:27Z  present=2, all complete, none red   <- the predicate ACCEPTS
+    required contexts SUCCESS at that instant:          0 of 32
+
+**A 24-second window where "all green" is true of 4% of the run.** The fixed denominator is
+published, and the two endpoints that serve it disagree:
+
+    gh api repos/<o>/<r>/branches/develop/protection --jq '.required_status_checks.contexts | length'
+    # 32
+    gh api repos/<o>/<r>/rules/branches/develop --jq '[.[]|select(.type=="required_status_checks")]|length'
+    # 0 -- and an empty required list makes every PR trivially complete
+
+**The reassuring endpoint is the one that returns nothing**, which is this section's whole subject
+arriving through an API.
+
+**Read that list a line at a time.** 29 of the 32 names contain a space — `Test Go (core) on 1.26`
+— so a whitespace split does not return 32, and it is worth being exact about what it *does*
+return, because the two obvious ways of asking disagree:
+
+    N=$(gh api repos/<o>/<r>/branches/develop/protection --jq '.required_status_checks.contexts[]')
+    printf '%s\n' "$N" | grep -c .              # 32   -- the answer
+    printf '%s\n' "$N" | tr ' ' '\n' | grep -c . # 112  -- every whitespace token
+    python3 -c "import sys;print(len(set(sys.stdin.read().split())))" <<<"$N"   # 56 -- unique ones
+
+Python's `set(...split())` is what produced **56** here, and a raw token count gives **112**. Same
+trap as `awk -F'\t'` above; note it **inflates** the denominator, making the gate look stricter
+than it is. This paragraph shipped saying "a whitespace split reports 56" without saying which
+split, in the section that exists to say which command produced a number.
+
+**That direction is not luck, and it is the reason to re-derive a number that pleases you.** Every
+instrument error on 2026-09-16 flattered its own conclusion: the `split()` inflated a denominator,
+a line-anchored grep returned a zero that agreed with a correct conclusion, a mutation that never
+applied returned a red that agreed with a wrong one, and a guard's own count read 100 of 121. Errors
+that embarrass get fixed the first time anyone looks. **The ones that survive are the ones nobody
+had a reason to check.**
 
 **A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
