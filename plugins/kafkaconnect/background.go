@@ -144,11 +144,15 @@ func (p *Plugin) pollConfig(ctx context.Context, c configRow) {
 
 // kafkaRecord represents a single Kafka message consumed via the REST Proxy.
 type kafkaRecord struct {
-	Topic     string `json:"topic"`
-	Key       any    `json:"key"`
-	Value     any    `json:"value"`
-	Partition int    `json:"partition"`
-	Offset    int64  `json:"offset"`
+	Topic string `json:"topic"`
+	// RAW, because a Kafka value is arbitrary caller JSON and decoding it into
+	// an `any` rewrote every number float64 cannot hold exactly -- an order id
+	// or a ledger amount larger than 2^53 arrived at the subscribed workflow
+	// as a different number, with no error. cleat#1641.
+	Key       json.RawMessage `json:"key"`
+	Value     json.RawMessage `json:"value"`
+	Partition int             `json:"partition"`
+	Offset    int64           `json:"offset"`
 }
 
 // consumeViaRestProxy uses the Confluent REST Proxy v2 consumer API to poll
@@ -333,7 +337,12 @@ func (p *Plugin) publishRecord(ctx context.Context, c configRow, record kafkaRec
 	}
 
 	// Publish through the event-triggers pipeline.
-	matched, err := eventtriggers.PublishEvent(ctx, p.db, p.logger, p.env, eventID, c.TenantID, c.EventType, eventData)
+	eventDataJSON, err := json.Marshal(eventData)
+	if err != nil {
+		return fmt.Errorf("marshal event data: %w", err)
+	}
+
+	matched, err := eventtriggers.PublishEvent(ctx, p.db, p.logger, p.env, eventID, c.TenantID, c.EventType, eventDataJSON)
 	if err != nil {
 		return fmt.Errorf("publish event: %w", err)
 	}

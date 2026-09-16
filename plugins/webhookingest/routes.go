@@ -227,12 +227,7 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// ---- Publish as an event through the event-triggers system ----
 
 	// Build event data that includes both headers and payload.
-	var payloadData any
-	if json.Valid(body) {
-		json.Unmarshal(body, &payloadData)
-	} else {
-		payloadData = string(body)
-	}
+	payloadData := webhookPayload(body)
 
 	eventData := map[string]any{
 		"source_id":   sourceID.String(),
@@ -243,9 +238,16 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 		"payload":     payloadData,
 	}
 
+	eventDataJSON, err := json.Marshal(eventData)
+	if err != nil {
+		p.logger.Error("webhook-ingest: marshal event data", "error", err)
+		p.writeError(w, 500, "failed to build event")
+		return
+	}
+
 	matched, pubErr := eventtriggers.PublishEvent(
 		tenantCtx, p.db, p.logger, p.env,
-		eventID, source.TenantID, eventType, eventData,
+		eventID, source.TenantID, eventType, eventDataJSON,
 	)
 	if pubErr != nil {
 		p.logger.Error("webhook-ingest: publish event failed", "error", pubErr)
@@ -558,4 +560,26 @@ func (p *Plugin) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.writeJSON(w, 200, events)
+}
+
+// webhookPayload turns an inbound request body into the value that goes into
+// the published event's "payload" key.
+//
+// It returns RAW BYTES for JSON, not a decoded value. Decoding into an `any`
+// and letting the caller's json.Marshal re-encode it rewrote any number the
+// webhook sent that float64 cannot hold exactly -- silently, and before the
+// event reached any database, so converting the column could not have fixed
+// it. A json.RawMessage inside a map[string]any is written back verbatim by
+// encoding/json, so the payload a caller POSTed is the payload a subscriber
+// sees. cleat#1641.
+//
+// It is a named function rather than four inline lines so that the property
+// can be asserted without a database: the handler around it needs one, this
+// does not, and the defect was never in the parts that do.
+func webhookPayload(body []byte) any {
+	if json.Valid(body) {
+		return json.RawMessage(body)
+	}
+	// Not JSON: carried as a string, which json.Marshal will quote and escape.
+	return string(body)
 }

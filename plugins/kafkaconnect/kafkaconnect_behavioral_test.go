@@ -1250,8 +1250,11 @@ func TestKafkaConsumeViaRestProxy(t *testing.T) {
 	if records[0].Topic != "test-topic" {
 		t.Errorf("expected topic 'test-topic', got %q", records[0].Topic)
 	}
-	if records[0].Value != "hello" {
-		t.Errorf("expected value 'hello', got %v", records[0].Value)
+	// Compared as BYTES: Value is raw JSON since cleat#1641, so the quotes are
+	// part of it. Decoding it here to compare a Go string would reintroduce
+	// exactly the narrowing the raw type exists to prevent.
+	if string(records[0].Value) != `"hello"` {
+		t.Errorf("expected value `\"hello\"`, got %s", records[0].Value)
 	}
 }
 
@@ -1379,8 +1382,8 @@ func TestKafkaPublishRecord(t *testing.T) {
 
 	record := kafkaRecord{
 		Topic:     "test-topic",
-		Key:       "my-key",
-		Value:     "hello",
+		Key:       json.RawMessage(`"my-key"`),
+		Value:     json.RawMessage(`"hello"`),
 		Partition: 0,
 		Offset:    1,
 	}

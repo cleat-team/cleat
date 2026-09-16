@@ -559,7 +559,7 @@ func TestUnregisterAwaiterEmptyID(t *testing.T) {
 
 // TestMergeInputAndTemplateNil verifies mergeInputAndTemplate handles nil template.
 func TestMergeInputAndTemplateNil(t *testing.T) {
-	data := map[string]any{"key": "value"}
+	data := json.RawMessage(`{"key": "value"}`)
 	result, err := mergeInputAndTemplate(nil, data)
 	if err != nil {
 		t.Fatalf("mergeInputAndTemplate(nil, data) returned error: %v", err)
@@ -576,7 +576,7 @@ func TestMergeInputAndTemplateNil(t *testing.T) {
 // TestMergeInputAndTemplateNonObject verifies mergeInputAndTemplate handles non-object templates.
 func TestMergeInputAndTemplateNonObject(t *testing.T) {
 	tmpl := json.RawMessage(`"just a string"`)
-	data := map[string]any{"key": "value"}
+	data := json.RawMessage(`{"key": "value"}`)
 	result, err := mergeInputAndTemplate(tmpl, data)
 	if err != nil {
 		t.Fatalf("mergeInputAndTemplate(string, data) returned error: %v", err)
