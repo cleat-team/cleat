@@ -139,6 +139,72 @@ package engine
 //     return out;
 // }
 //
+// // ---- wasi:clocks/wall-clock and wasi:random/random --------------------
+// //
+// // cleat#1410. These two shapes are why that issue was retitled: the seam on
+// // the component linker already existed, and the values could not be built.
+// //
+// // OWNERSHIP, and it is the opposite of what "leak it, wasmtime reads it
+// // later" would suggest -- see the long note below on
+// // component_val_set_call_ok. wasmtime converts a callback's results BY
+// // REFERENCE and then DROPS them, recursively, through the record entries
+// // and the list elements. So every buffer here is C-allocator heap because
+// // wasmtime frees it; static storage would be a free() of a literal.
+//
+// // datetime { seconds: u64, nanoseconds: u32 }
+// //
+// // The same construction as component_val_set_call_failed's {code, message}
+// // record one nesting level down -- no variant and no result around it.
+// static void component_val_set_datetime(wasmtime_component_val_t *v,
+//                                        uint64_t seconds, uint32_t nanos) {
+//     static const char seconds_name[] = "seconds";
+//     static const char nanos_name[] = "nanoseconds";
+//
+//     wasmtime_component_valrecord_entry_t *fields =
+//         (wasmtime_component_valrecord_entry_t *)malloc(2 * sizeof(*fields));
+//     if (fields == NULL) { abort(); }   // dereferenced on the next line
+//     fields[0].name.data = cleat_dup(seconds_name, sizeof(seconds_name) - 1);
+//     fields[0].name.size = sizeof(seconds_name) - 1;
+//     fields[0].val.kind = WASMTIME_COMPONENT_U64;
+//     fields[0].val.of.u64 = seconds;
+//     fields[1].name.data = cleat_dup(nanos_name, sizeof(nanos_name) - 1);
+//     fields[1].name.size = sizeof(nanos_name) - 1;
+//     fields[1].val.kind = WASMTIME_COMPONENT_U32;
+//     fields[1].val.of.u32 = nanos;
+//
+//     v->kind = WASMTIME_COMPONENT_RECORD;
+//     v->of.record.size = 2;
+//     v->of.record.data = fields;
+// }
+//
+// // list<u8>
+// //
+// // A component list is a vec of wasmtime_component_val_t, not a byte buffer:
+// // one full val per byte, each tagged WASMTIME_COMPONENT_U8. That is 16 bytes
+// // of host memory per guest byte, which is why get-random-bytes is bounded by
+// // its caller rather than trusting the guest's length.
+// static void component_val_set_list_u8(wasmtime_component_val_t *v,
+//                                       const uint8_t *bytes, size_t len) {
+//     v->kind = WASMTIME_COMPONENT_LIST;
+//     v->of.list.size = len;
+//     if (len == 0) {
+//         // A zero-length list still needs a non-NULL data pointer only if
+//         // wasmtime dereferences it; it does not, and malloc(0) may return
+//         // NULL legitimately. Set it explicitly rather than leaving whatever
+//         // malloc returned.
+//         v->of.list.data = NULL;
+//         return;
+//     }
+//     wasmtime_component_val_t *elems =
+//         (wasmtime_component_val_t *)malloc(len * sizeof(*elems));
+//     if (elems == NULL) { abort(); }   // dereferenced in the loop
+//     for (size_t i = 0; i < len; i++) {
+//         elems[i].kind = WASMTIME_COMPONENT_U8;
+//         elems[i].of.u8 = bytes[i];
+//     }
+//     v->of.list.data = elems;
+// }
+//
 // // ok(response)
 // //
 // // PRECONDITION: `s` must be C-allocator storage, and ownership passes to
@@ -496,7 +562,17 @@ const (
 	cbTypeDurableSleep // (u64) -> u64
 	cbTypeNow          // () -> u64
 	cbTypeRandom       // () -> u64
-	cbTypeDurableLog   // (string) -> u64
+
+	// wasi:clocks/wall-clock and wasi:random/random, shadowed so a Python
+	// guest's time.time(), random.random() and os.urandom() come from the
+	// durable clock and the seeded source rather than the host's real ones.
+	// cleat#1410. Registered on the component linker only: a core-module guest
+	// reaches these through preview1, which engine/wasi_policy.go covers.
+	cbTypeWasiWallClockNow        // () -> datetime
+	cbTypeWasiWallClockResolution // () -> datetime
+	cbTypeWasiRandomU64           // () -> u64
+	cbTypeWasiRandomBytes         // (u64) -> list<u8>
+	cbTypeDurableLog              // (string) -> u64
 
 	// durable-version interface
 	cbTypeVersion    // () -> u64
@@ -662,6 +738,49 @@ func setResultString(results *C.wasmtime_component_val_t, nresults C.size_t, s s
 	*r = C.make_component_val_string(cStr, C.size_t(len(s)))
 }
 
+// setResultDatetime sets the first result to a WIT
+// `datetime { seconds: u64, nanoseconds: u32 }` built from a millisecond
+// epoch.
+//
+// The durable clock has millisecond resolution, so `nanoseconds` is always a
+// whole number of milliseconds. Said here rather than left to be inferred from
+// a run: a guest that measures elapsed time by subtracting two readings sees
+// millisecond granularity, which is what wall-clock.resolution() below
+// reports.
+func setResultDatetime(results *C.wasmtime_component_val_t, nresults C.size_t, ms int64) {
+	if int(nresults) < 1 {
+		return
+	}
+	// Floor division, not truncation toward zero: a pre-epoch millisecond
+	// must not round up into the following second and leave a negative
+	// nanosecond remainder, and `seconds` is unsigned so the error would be
+	// a wrap rather than a small offset.
+	sec := ms / 1000
+	rem := ms % 1000
+	if rem < 0 {
+		sec--
+		rem += 1000
+	}
+	if sec < 0 {
+		sec = 0 // the WIT type is unsigned; a clock before 1970 clamps
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	C.component_val_set_datetime(r, C.uint64_t(sec), C.uint32_t(rem*1e6))
+}
+
+// setResultListU8 sets the first result to a WIT `list<u8>`.
+func setResultListU8(results *C.wasmtime_component_val_t, nresults C.size_t, b []byte) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	if len(b) == 0 {
+		C.component_val_set_list_u8(r, nil, 0)
+		return
+	}
+	C.component_val_set_list_u8(r, (*C.uint8_t)(unsafe.Pointer(&b[0])), C.size_t(len(b)))
+}
+
 // callOutcome is a host call's packed return value decoded into the three
 // cases the WIT `result<string, call-failure>` distinguishes.
 //
@@ -777,6 +896,14 @@ func goComponentCallback(
 		return entry.backend.dispatchNow(args, nargs, results, nresults)
 	case cbTypeRandom:
 		return entry.backend.dispatchRandom(args, nargs, results, nresults)
+	case cbTypeWasiWallClockNow:
+		return entry.backend.dispatchWasiWallClockNow(args, nargs, results, nresults)
+	case cbTypeWasiWallClockResolution:
+		return entry.backend.dispatchWasiWallClockResolution(args, nargs, results, nresults)
+	case cbTypeWasiRandomU64:
+		return entry.backend.dispatchWasiRandomU64(args, nargs, results, nresults)
+	case cbTypeWasiRandomBytes:
+		return entry.backend.dispatchWasiRandomBytes(args, nargs, results, nresults)
 	case cbTypeDurableLog:
 		return entry.backend.dispatchDurableLog(args, nargs, results, nresults)
 	case cbTypeVersion:
@@ -916,6 +1043,12 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		return nil, fmt.Errorf("wasi add: %s", s)
 	}
 
+	// Shadow the WASI clock and entropy interfaces before cleat's own, inside
+	// the allow_shadowing bracket opened above and after add_wasip2 supplied
+	// the real ones. cleat#1410.
+	if err := b.registerWasiDeterminismImports(linker); err != nil {
+		return nil, fmt.Errorf("register wasi determinism imports: %w", err)
+	}
 	if err := b.registerCleatComponentImports(linker); err != nil {
 		return nil, fmt.Errorf("cleat component imports: %w", err)
 	}
