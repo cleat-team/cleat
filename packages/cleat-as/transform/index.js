@@ -935,8 +935,39 @@ class CleatEntryTransformer {
       } else {
         code += `  const _result: string = ${innerName}(h);\n`;
       }
-    } else if (paramNames.length === 1) {
-      // Single additional param -- pass the raw JSON string
+    } else if (
+      paramNames.length === 1 &&
+      (paramTypes[0] === "string" || paramTypes[0] === "String") &&
+      !(paramDefaults && paramDefaults[0])
+    ) {
+      // Single additional param -- pass the raw JSON string.
+      //
+      // GATED ON THE TYPE AND THE DEFAULT, not on the count alone (cleat#1065).
+      // This branch assigns argsJson to the parameter, so it is only correct
+      // when that parameter is a string that wants the whole payload. It used
+      // to fire on `paramNames.length === 1` by itself, which produced two
+      // separate defects:
+      //
+      //   1. A lone NON-STRING parameter did not compile AT ALL. The wrapper
+      //      emitted `const count: string = argsJson;` and passed it to a
+      //      function declaring i32, so asc reported
+      //      "Type '~lib/string/String' is not assignable to type 'i32'"
+      //      against generated/cleat-wrappers.ts -- a line the author never
+      //      wrote. Go's equivalent fast path has always been gated on the
+      //      type; AssemblyScript's was gated on the count.
+      //
+      //   2. A lone parameter with a declaration-site DEFAULT silently ignored
+      //      it. Defaults are honoured by _getDeserializeCode, which only the
+      //      named-extraction branch below calls, so `note: string = "X"`
+      //      bound the raw payload instead of "X" -- defeating the optional
+      //      mechanism for exactly the one-parameter case.
+      //
+      // Both are strictly additive to fix: case 1 could not compile, so no
+      // workflow can depend on it, and case 2 could not have been relied on
+      // either, since the declared default was never reachable. The
+      // documented lone-STRING behaviour is unchanged, and
+      // tests/conformance/entry_point_binding_cases.json's "lone string
+      // parameter" row asserts it stays that way.
       code += `  const ${paramNames[0]}: string = argsJson;\n`;
       if (isVoid) {
         code += `  let _result: string = "";\n`;
@@ -945,7 +976,12 @@ class CleatEntryTransformer {
         code += `  const _result: string = ${innerName}(h, ${paramNames[0]});\n`;
       }
     } else {
-      // Multiple additional params -- parse JSON and extract each field
+      // Named extraction: every param bound by name from the payload.
+      //
+      // Reached by multi-parameter entries, and -- since cleat#1065 -- also by
+      // a SINGLE parameter that is not a bare string or that declares a
+      // default. Both need the parse; only a lone defaultless string can skip
+      // it.
       code += `  // ---- Parse argsJson for multi-param entry ----\n`;
       code += `  let _parser = new JsonParser();\n`;
       code += `  let _parsed: JsonVal | null = _parser.parse(argsJson);\n`;
