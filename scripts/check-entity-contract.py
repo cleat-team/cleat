@@ -54,14 +54,128 @@ GRANDFATHER_CEILING = 23
 
 
 def strip_sql_comments(src):
-    """Remove /* */ and -- comments.
+    """Remove SQL comments, leaving string literals intact.
 
-    Without this a header that quotes a CREATE TABLE counts as a definition --
-    the same "a text search cannot tell a thing from a sentence about the
-    thing" trap CLAUDE.md records for migration routines.
+    Walks the source rather than running two regexes over it. The regex version
+    modelled comments and not strings, which is the same "a tool applied to a
+    format it does not model" fault this guard exists to catch, and it had two
+    demonstrated failure modes (cleat#1719, raised by a peer session):
+
+    1. A `--` inside a string literal in a CREATE TABLE body dropped every
+       column after it, silently. `DEFAULT 'see migration 064 -- nothing to
+       sync'` removed the following `disabled_at` and reported no error. That is
+       the worst possible shape for cleat#1702's conversion, which adds
+       `disabled_at` to thirteen tables: the guard would report "table X is
+       missing disabled_at", blaming the schema for a fault in the parser.
+
+    2. A `/*` inside a string literal -- or inside a `--` line comment, which
+       offers no protection, because the old code applied the `/* */` rule
+       FIRST over the whole file with re.S, before the per-line `--` rule ran --
+       swallowed everything to the next `*/`.
+
+    The second was one unrelated edit away from firing. `migrations/postgres/072`
+    line 18 and `migrations/mysql/070` line 62 both contain a `/*` inside a line
+    comment, inert only because neither file contains a `*/`. Appending one
+    ordinary block comment to 072 took its stripped length from 375 characters
+    to 18. A defect armed by an edit to an unrelated part of an unrelated file
+    arrives with nothing connecting it to its cause.
+
+    Newlines are preserved so that anything downstream reasoning in lines still
+    can. Dollar-quoted bodies are handled because Postgres migrations use them
+    for routine definitions.
     """
-    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-    return "\n".join(re.sub(r"--.*$", "", line) for line in src.split("\n"))
+    out = []
+    unterminated = []
+    i = 0
+    n = len(src)
+    while i < n:
+        ch = src[i]
+
+        if ch == "'":
+            out.append(ch)
+            i += 1
+            while i < n:
+                if src[i] == "'":
+                    if i + 1 < n and src[i + 1] == "'":   # '' is an escaped quote
+                        out.append("''")
+                        i += 2
+                        continue
+                    out.append("'")
+                    i += 1
+                    break
+                out.append(src[i])
+                i += 1
+            continue
+
+        if ch == "$":
+            tag = re.match(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", src[i:])
+            if tag:
+                body_end = src.find(tag.group(0), i + len(tag.group(0)))
+                if body_end == -1:
+                    out.append(src[i:])
+                    break
+                stop = body_end + len(tag.group(0))
+                out.append(src[i:stop])
+                i = stop
+                continue
+
+        if src.startswith("--", i):
+            while i < n and src[i] != "\n":
+                i += 1
+            continue
+
+        if src.startswith("/*", i):
+            # Postgres and T-SQL nest block comments; MySQL does not. Measured
+            # against live engines rather than recalled, because the comment
+            # here first said the opposite for SQL Server:
+            #
+            #   /* see engine/*.go */ SELECT 1 AS survived;
+            #   postgres 16   ERROR: unterminated /* comment      -> nests
+            #   mysql 8.0     1                                   -> does not
+            #   mssql 2022    Msg 113: Missing end comment mark    -> nests
+            #
+            # Counting is therefore right for two of three. It is NOT "harmless
+            # elsewhere": a comment whose text contains a glob is unnested in
+            # MySQL's reading and depth 2 to this counter, which is exactly the
+            # shape that ate the file in the first place.
+            #
+            # Per-dialect counting would be airtight and is not worth it,
+            # because the failure it leaves is now LOUD rather than silent --
+            # see the unterminated check below, which catches the MySQL case as
+            # an error instead of as fewer tables.
+            depth = 1
+            i += 2
+            comment_start = i - 2
+            while i < n and depth:
+                if src.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif src.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    if src[i] == "\n":
+                        out.append("\n")
+                    i += 1
+            if depth:
+                # Running off the end inside a comment is an ERROR, not a
+                # result. Before this, the rest of the file was swallowed and
+                # nothing downstream learned why: one unterminated /* returned
+                # tables=['public.gadgets'] errors=[], with public.widgets
+                # simply absent.
+                #
+                # That is worse than a wrong count under cleat#1719's logic --
+                # a table missing from one dialect classifies as "defined in
+                # only one dialect". And Postgres and SQL Server both REJECT
+                # such a file, so the guard would report a clean, complete
+                # schema for a migration the database will not run.
+                unterminated.append(src.count("\n", 0, comment_start) + 1)
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out), unterminated
 
 
 def matching_paren(src, open_idx):
@@ -98,12 +212,16 @@ def parse_tables(migrations_dir):
         return tables, errors
 
     for path in files:
-        src = strip_sql_comments(open(path, encoding="utf-8").read())
+        src, unterminated = strip_sql_comments(open(path, encoding="utf-8").read())
+        for lineno in unterminated:
+            errors.append("%s:%d: a /* block comment is never closed, so the "
+                          "rest of the file was discarded. %s"
+                          % (os.path.basename(path), lineno,
+                             unterminated_hint(migrations_dir)))
 
         for m in re.finditer(
-            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_.\"]+)\s*\(",
+            CREATE_TABLE_RE,
             src,
-            re.I,
         ):
             name = qualify(m.group(1))
             close = matching_paren(src, m.end() - 1)
@@ -140,12 +258,125 @@ def parse_tables(migrations_dir):
     return tables, errors
 
 
+# An identifier in any of the three dialects: plain, "quoted", [bracketed]
+# (SQL Server) or `backticked` (MySQL).
+#
+# DEFENSIVE, NOT A FIX -- and this is written down because the opposite was
+# claimed first. The prediction was that cleat#1702's plain-and-quoted pattern
+# would match nothing in migrations/mssql/, find zero tables and report clean:
+# the zero-members trap again. Measured, that is FALSE. Reverting this constant
+# to the old pattern still parses all 24 SQL Server tables, because no CREATE
+# TABLE in this repo quotes its identifier at all:
+#
+#   for d in postgres mysql mssql; do
+#     grep -rhcE 'CREATE[[:space:]]+TABLE[^(]*[][`"]' migrations/$d/*.sql
+#   done
+#   # 0, 0, 0 on 2026-09-16
+#
+# It is kept because all three quotings are legal and a scan that cannot read
+# one parses to nothing rather than failing -- but it earns no credit for a bug
+# it does not currently prevent.
+#
+# THAT ZERO NEEDED A SECOND MEASUREMENT TO MEAN ANYTHING, and the first command
+# published here could not make it. `grep -E 'CREATE[[:space:]]+TABLE[^(]*[][`"]'`
+# is LINE-ANCHORED, so it scores 0 on a file that does exactly what it looks
+# for:
+#
+#     CREATE TABLE            -> grep: 0     CREATE TABLE [dbo].[workers] (...);
+#       [dbo].[workers]                      -> grep: 1
+#       (id INT);
+#
+# Both define [dbo].[workers]. So "0 quoted identifiers" and "0 quoted
+# identifiers I could see" rendered identically, and only a separate check --
+# no CREATE TABLE in the tree puts its name on a later line, 0 across all three
+# dialects -- turns the first into an answer. Raised by a peer session scanning
+# the same tree with a statement-aware parser; the conclusion held, the
+# instrument did not deserve to be believed on its own.
+#
+# Re-derive with something that spans newlines and strips comments:
+#
+#     python3 - <<'EOF'
+#     import glob, re
+#     pat = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(]+)", re.I)
+#     for d in ("postgres", "mysql", "mssql"):
+#         q = 0
+#         for f in glob.glob("migrations/%s/*.sql" % d):
+#             src = re.sub(r"/\*.*?\*/", "", open(f).read(), flags=re.S)
+#             src = "\n".join(re.sub(r"--.*$", "", l) for l in src.split("\n"))
+#             q += sum(1 for m in pat.finditer(src) if re.search(r'[\[\]`"]', m.group(1)))
+#         print(d, "quoted identifiers:", q)
+#     EOF
+#     # 0, 0, 0 on 2026-09-16; reports 2 on a fixture holding one same-line and
+#     # one continuation-line bracketed definition, which is its positive control.
+#
+# The self-test locks the behaviour in and IS a control rather than a hope:
+# dropping the bracket and backtick alternatives from this constant fails four
+# cases, each with "parsed 0 tables" -- the zero-members signature. Verified by
+# doing it.
+IDENT = r'(?:\[[^\]]+\]|`[^`]+`|"[^"]+"|[A-Za-z0-9_]+)'
+CREATE_TABLE_RE = re.compile(
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:%s\.)?%s)\s*\(" % (IDENT, IDENT),
+    re.I,
+)
+
+# SQL Server's admin schema is Postgres's admin schema; dbo is its public.
+SCHEMA_ALIASES = {"dbo": "public"}
+
+
+def split_identifier(raw):
+    """['schema', 'name'] or ['name'], with any quoting removed."""
+    parts = [next(p for p in t if p) for t in
+             re.findall(r"\[([^\]]+)\]|`([^`]+)`|\"([^\"]+)\"|([A-Za-z0-9_]+)", raw)]
+    return parts
+
+
+def unterminated_hint(migrations_dir):
+    """Which way to look when a block comment does not close.
+
+    The dialect decides, and getting this wrong sends the reader to the wrong
+    file. The first version said "Postgres and SQL Server both reject such a
+    file" unconditionally -- true for those two, FALSE for MySQL, and MySQL is
+    the case that produces it most often. Measured:
+
+        /* see engine/*.go */ CREATE TABLE widgets (id INT PRIMARY KEY);
+        mysql 8.0     table created            -> the file is VALID
+        postgres 16   ERROR: unterminated /*   -> the file is rejected
+
+    MySQL does not nest, so it closes that comment at the first */. This
+    scanner counts nesting, which is right for Postgres and T-SQL. So on a
+    MySQL migration the file is fine and the SCANNER is the thing that
+    disagrees with the engine -- and the old message sent its author to audit a
+    correct migration. That is the deliberate residue left by not doing
+    per-dialect counting, and this is the one place anyone will meet it.
+    """
+    if os.path.basename(migrations_dir.rstrip(os.sep)).lower() == "mysql":
+        return ("MySQL closes this comment at the first */ and accepts the "
+                "file; this scanner counts nesting and does not, so the "
+                "migration may well be correct.")
+    return "Postgres and SQL Server both reject such a file."
+
+
 def qualify(raw):
-    raw = raw.strip().strip('"')
-    if "." in raw:
-        schema, _, name = raw.partition(".")
-        return "%s.%s" % (schema.strip('"'), name.strip('"'))
-    return "public.%s" % raw
+    parts = split_identifier(raw.strip())
+    if len(parts) >= 2:
+        schema = parts[0].lower()
+        return "%s.%s" % (SCHEMA_ALIASES.get(schema, schema), parts[1])
+    return "public.%s" % parts[0]
+
+
+def bare(qualified):
+    """The table name without its schema.
+
+    Cross-dialect membership is compared on this, because MySQL CANNOT express
+    the schema: it writes `CREATE TABLE IF NOT EXISTS tenants` where Postgres
+    and SQL Server write `admin.tenants`, and `grep -c 'admin\.'
+    migrations/mysql/*.sql` returns 0. Comparing qualified names reports twelve
+    differences -- the same six tables in both directions -- and every one is
+    spurious, which would bury the one real difference.
+
+    Sound only while bare names are unique, which the registry asserts.
+    """
+    return qualified.split(".", 1)[1]
 
 
 def split_columns(body):
@@ -213,8 +444,16 @@ def read_tsv(path, ncols):
     return rows
 
 
-def check(migrations_dir, registry_path, grandfather_path):
-    """Returns (exit_code, lines)."""
+def check(migrations_dir, registry_path, grandfather_path, sibling_dirs=()):
+    """Returns (exit_code, lines).
+
+    migrations_dir is the reference dialect (Postgres): the contract's clauses
+    are checked there, because TIMESTAMPTZ is a Postgres spelling.
+
+    sibling_dirs are the other dialects. Only MEMBERSHIP is checked against
+    them -- a table defined only in MySQL or SQL Server must still be
+    classified, or total coverage has a hole exactly where nobody is looking.
+    """
     out = []
 
     tables, parse_errors = parse_tables(migrations_dir)
@@ -257,10 +496,59 @@ def check(migrations_dir, registry_path, grandfather_path):
             "  \"nobody looked\" are the same silence otherwise."
             % (registry_path, "".join("    %s\n" % t for t in unclassified))
         )
-    stale = sorted(set(classified) - set(tables))
+    # 1b. Coverage extends to the other dialects, compared on BARE names.
+    #
+    # Scoped to membership on purpose. The clause checks stay single-dialect
+    # because TIMESTAMPTZ is Postgres's spelling; asking SQL Server for it would
+    # fail on a schema that is correct.
+    bare_to_qualified = {}
+    for t in classified:
+        b = bare(t)
+        if b in bare_to_qualified:
+            return 2, ["SCAN FAILED: %s classifies both %s and %s, whose bare "
+                       "names collide. Cross-dialect membership is compared on "
+                       "the bare name because MySQL cannot express a schema, so "
+                       "a collision makes that comparison ambiguous."
+                       % (registry_path, bare_to_qualified[b], t)]
+        bare_to_qualified[b] = t
+
+    sibling_counts = []
+    seen_bare = {bare(t) for t in tables}
+    for sib in sibling_dirs:
+        if not os.path.isdir(sib):
+            return 2, ["SCAN FAILED: %s is not a directory. A sibling dialect "
+                       "that cannot be read must not look like one with nothing "
+                       "in it." % sib]
+        sib_tables, sib_errors = parse_tables(sib)
+        if sib_errors:
+            return 2, ["SCAN FAILED (%s): %s" % (os.path.basename(sib), e)
+                       for e in sib_errors]
+        if not sib_tables:
+            return 2, ["SCAN FAILED: parsed 0 tables from %s." % sib]
+        sibling_counts.append((os.path.basename(sib), len(sib_tables)))
+        seen_bare |= {bare(t) for t in sib_tables}
+
+        unknown = sorted(t for t in sib_tables if bare(t) not in bare_to_qualified)
+        if unknown:
+            failures.append(
+                "these tables are defined in %s and are classified nowhere:\n%s"
+                "  A table that exists in only one dialect is invisible to a\n"
+                "  Postgres-only scan rather than unclassified, which is the one\n"
+                "  place total coverage could still have a hole."
+                % (os.path.basename(sib), "".join("    %s\n" % t for t in unknown))
+            )
+
+    # Staleness is judged against EVERY dialect, not the reference one.
+    #
+    # Written against Postgres alone -- which is how it shipped in cleat#1702,
+    # when Postgres was the only dialect read -- a table that legitimately
+    # exists in one dialect only reads as "no longer exists". Classifying
+    # admin.rls_predicate_form correctly produced exactly that, so the guard
+    # refused the fix for the hole it had just reported.
+    stale = sorted(t for t in classified if bare(t) not in seen_bare)
     if stale:
         failures.append(
-            "these are classified in %s but no longer exist in the migrations:\n%s"
+            "these are classified in %s but exist in no dialect's migrations:\n%s"
             % (registry_path, "".join("    %s\n" % t for t in stale))
         )
 
@@ -322,8 +610,10 @@ def check(migrations_dir, registry_path, grandfather_path):
         )
 
     enforced = len(members) * len(CLAUSES) - len(gf)
-    out.append("tables parsed: %d; members: %d; grandfathered pairs: %d"
-               % (len(tables), len(members), len(gf)))
+    out.append("tables parsed: %d (%s); members: %d; grandfathered pairs: %d"
+               % (len(tables),
+                  ", ".join("%s %d" % (n, c) for n, c in sibling_counts) or "postgres only",
+                  len(members), len(gf)))
     out.append("clauses enforced this run: %d of %d"
                % (enforced, len(members) * len(CLAUSES)))
 
@@ -357,13 +647,20 @@ def main():
     ap.add_argument("--registry", default=os.path.join(root, "scripts", "entity-contract.tsv"))
     ap.add_argument("--grandfathered",
                     default=os.path.join(root, "scripts", "entity-contract-grandfathered.tsv"))
+    ap.add_argument("--sibling", action="append", default=None,
+                    help="another dialect's migrations; membership only. "
+                         "Repeatable. Defaults to mysql and mssql.")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
     if args.self_test:
         sys.exit(self_test())
 
-    code, lines = check(args.migrations, args.registry, args.grandfathered)
+    siblings = args.sibling
+    if siblings is None:
+        siblings = [os.path.join(root, "migrations", d) for d in ("mysql", "mssql")]
+
+    code, lines = check(args.migrations, args.registry, args.grandfathered, siblings)
     for line in lines:
         print(line, file=sys.stderr if code else sys.stdout)
     sys.exit(code)
@@ -419,13 +716,93 @@ SELF_TEST_CASES = [
      CONFORMING + "\nCREATE TABLE public.gadgets (gadget_id UUID PRIMARY KEY);\n",
      "public.widgets\tmember\n", 1, "not classified"),
     ("a registry naming a table that no longer exists",
-     CONFORMING, "public.widgets\tmember\npublic.ghosts\tmember\n", 1, "no longer exist"),
+     CONFORMING, "public.widgets\tmember\npublic.ghosts\tmember\n", 1,
+     "exist in no dialect"),
     ("grandfathering a non-member",
      CONFORMING, "public.widgets\tmember\n", 1, "not a member"),
     ("every clause grandfathered enforces nothing",
      CONFORMING, "public.widgets\tmember\n", 2, "enforced nothing"),
     ("a migrations directory with no SQL at all",
      None, "public.widgets\tmember\n", 2, "no .sql files"),
+
+    # A string literal is not a comment. Both of these dropped or destroyed
+    # columns before cleat#1719, and the first did it SILENTLY -- the guard
+    # reported the table as missing disabled_at, blaming the schema for a fault
+    # in its own parser. That is the exact column cleat#1702 adds to thirteen
+    # tables, so it would have surfaced under the conversion migrations.
+    ("a -- inside a string literal does not eat the columns after it",
+     CONFORMING.replace(
+         "    widget_id   UUID PRIMARY KEY,",
+         "    widget_id   UUID PRIMARY KEY,\n"
+         "    note        TEXT NOT NULL DEFAULT 'see migration 064 -- nothing to sync',"),
+     "public.widgets\tmember\n", 0, None),
+
+    # Inert in the tree today only because no file containing a `/*` inside a
+    # line comment also contains a `*/`. Appending one ordinary block comment to
+    # migrations/postgres/072 took its stripped length from 375 chars to 18.
+    ("a /* inside a string literal does not swallow the file",
+     CONFORMING.replace(
+         "    widget_id   UUID PRIMARY KEY,",
+         "    widget_id   UUID PRIMARY KEY,\n"
+         "    note        TEXT NOT NULL DEFAULT 'engine/*.go',")
+     + "\n/* an ordinary block comment, elsewhere in the file */\n",
+     "public.widgets\tmember\n", 0, None),
+
+    # Running off the end inside a comment is an error, not a result. Before
+    # cleat#1719 this returned the LATER file's tables with errors=[] and the
+    # earlier table simply absent -- which under this guard's own cross-dialect
+    # logic classifies as "defined in only one dialect". Postgres and SQL Server
+    # both reject such a file outright.
+    ("an unterminated /* is an error, not fewer tables",
+     "/* never closed\n" + CONFORMING,
+     "public.widgets\tmember\n", 2, "never closed"),
+
+    # A glob inside a block comment. Postgres and T-SQL nest, so `/*` in the
+    # comment TEXT opens a second level and `*/` closes only one; MySQL does
+    # not nest and reads the same file as fine. Measured on live engines.
+    # Whatever the counting does, it must not be silent.
+    ("a glob inside a block comment does not silently yield zero tables",
+     "/* see engine/*.go */\n" + CONFORMING,
+     "public.widgets\tmember\n", 2, "never closed"),
+]
+
+# Cross-dialect cases (cleat#1719). Each carries a sibling schema as well.
+SIBLING_CASES = [
+    ("a SQL Server-only table classified nowhere",
+     "CREATE TABLE [admin].[gizmos] (\n  gizmo_id UNIQUEIDENTIFIER PRIMARY KEY\n);\n",
+     "public.widgets\tmember\n", 1, "classified nowhere"),
+
+    ("a SQL Server-only table that IS classified",
+     "CREATE TABLE [admin].[gizmos] (\n  gizmo_id UNIQUEIDENTIFIER PRIMARY KEY\n);\n",
+     "public.widgets\tmember\nadmin.gizmos\tnot-an-entity\n", 0, None),
+
+    # The whole reason membership is keyed on the bare name. MySQL writes the
+    # admin tables unqualified; a qualified comparison calls every one of them
+    # missing. If this case ever goes red, the bare-name keying has regressed
+    # and the guard will be reporting spurious gaps rather than real ones.
+    ("MySQL's unqualified spelling of an admin table is not a difference",
+     "CREATE TABLE IF NOT EXISTS `gizmos` (\n  gizmo_id CHAR(36) PRIMARY KEY\n);\n",
+     "public.widgets\tmember\nadmin.gizmos\tnot-an-entity\n", 0, None),
+
+    # A comment is not a definition. The census that prompted this issue
+    # counted two of them as tables.
+    ("a commented-out CREATE TABLE in a sibling is not a table",
+     "-- CREATE TABLE [admin].[ghosts] ( id INT );\n"
+     "CREATE TABLE [admin].[gizmos] (\n  gizmo_id UNIQUEIDENTIFIER PRIMARY KEY\n);\n",
+     "public.widgets\tmember\nadmin.gizmos\tnot-an-entity\n", 0, None),
+
+    ("a sibling dialect with no tables at all",
+     "-- nothing here\n",
+     "public.widgets\tmember\n", 2, "parsed 0 tables"),
+]
+
+# The unterminated-comment diagnosis is dialect-specific, and pointing it the
+# wrong way sends the reader to audit a correct migration. MySQL closes the
+# comment at the first */ and accepts the file; this scanner counts nesting and
+# does not, so on MySQL the SCANNER is what disagrees with the engine.
+DIALECT_HINT_CASES = [
+    ("mysql", "MySQL closes this comment at the first */"),
+    ("mssql", "Postgres and SQL Server both reject"),
 ]
 
 
@@ -435,12 +812,21 @@ def self_test():
 
     fails = 0
     ran = 0
-    for name, schema, registry, want_code, want_text in SELF_TEST_CASES:
+    cases = ([(n, sc, r, wc, wt, None) for n, sc, r, wc, wt in SELF_TEST_CASES] +
+             [(n, CONFORMING, r, wc, wt, sib) for n, sib, r, wc, wt in SIBLING_CASES])
+    for name, schema, registry, want_code, want_text, sibling in cases:
         ran += 1
         tmp = tempfile.mkdtemp()
         try:
             mig = os.path.join(tmp, "migrations")
             os.makedirs(mig)
+            siblings = ()
+            if sibling is not None:
+                sibdir = os.path.join(tmp, "mssql")
+                os.makedirs(sibdir)
+                with open(os.path.join(sibdir, "001_sibling.sql"), "w") as fh:
+                    fh.write(sibling)
+                siblings = (sibdir,)
             if schema is not None:
                 with open(os.path.join(mig, "001_fixture.sql"), "w") as fh:
                     fh.write(schema)
@@ -457,7 +843,7 @@ def self_test():
                     for clause in CLAUSES:
                         fh.write("public.widgets\t%s\n" % clause)
 
-            code, lines = check(mig, reg, gf)
+            code, lines = check(mig, reg, gf, siblings)
             blob = "\n".join(lines)
 
             if code != want_code:
@@ -469,6 +855,28 @@ def self_test():
                 # how a guard passes a case it never actually examined.
                 print("SELF-TEST FAIL [%s]: exit %d as expected, but the output "
                       "never says %r\n%s" % (name, code, want_text, blob),
+                      file=sys.stderr)
+                fails += 1
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    for dialect, want in DIALECT_HINT_CASES:
+        ran += 1
+        tmp = tempfile.mkdtemp()
+        try:
+            d = os.path.join(tmp, dialect)
+            os.makedirs(d)
+            with open(os.path.join(d, "001.sql"), "w") as fh:
+                fh.write("/* see engine/*.go */\n" + CONFORMING)
+            _, errs = parse_tables(d)
+            blob = "\n".join(errs)
+            if not errs:
+                print("SELF-TEST FAIL [%s unterminated hint]: no error at all"
+                      % dialect, file=sys.stderr)
+                fails += 1
+            elif want not in blob:
+                print("SELF-TEST FAIL [%s unterminated hint]: errored, but the "
+                      "message never says %r\n    %s" % (dialect, want, blob),
                       file=sys.stderr)
                 fails += 1
         finally:

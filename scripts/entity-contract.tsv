@@ -1,6 +1,11 @@
 # Membership for the non-workflow entity contract (cleat#1702).
 #
-# Every table that appears in migrations/postgres/ MUST have a row here.
+# Every table that appears in migrations/postgres/, migrations/mysql/ or
+# migrations/mssql/ MUST have a row here. Cross-dialect membership is matched
+# on the BARE name, because MySQL cannot express a schema -- it writes
+# `CREATE TABLE IF NOT EXISTS tenants` where the other two write
+# `admin.tenants`. Comparing qualified names reports twelve differences, the
+# same six tables in both directions, every one spurious (cleat#1719).
 # check-entity-contract.py fails on an unclassified table, which is the whole
 # point: membership in this class is a semantic judgement and cannot be derived
 # from column shape. admin.tenant_egress_allow and public.tenant_domains are
@@ -45,3 +50,4 @@ public.idempotency_keys	not-an-entity	holder-scoped, TTL-reclaimed (workflow_id 
 public.workflow_memory_samples	not-an-entity	stats
 public.workflow_memory_stats	not-an-entity	stats
 admin.workers	not-an-entity	infrastructure; a worker registers itself
+admin.rls_predicate_form	not-an-entity	SQL Server only; single-row config, CHECK (only_row = 1), read from engine/mssql_schedules.go

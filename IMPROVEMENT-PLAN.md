@@ -13935,3 +13935,191 @@ migrations would not be seen. Nothing here claims otherwise.
 
 Files: `scripts/check-entity-contract.py`, `scripts/entity-contract.tsv`,
 `scripts/entity-contract-grandfathered.tsv`, `.github/workflows/ci.yml`.
+
+---
+
+### 3.336 A table defined in only one dialect was invisible, not unclassified — ✅ **FIXED 2026-09-16** (cleat#1719)
+
+§3.335's guard asserts total coverage over `migrations/postgres/` and states that limit. It bites
+once today: `admin.rls_predicate_form` exists only in `migrations/mssql/`, so the guard never saw
+it. Invisible is worse than unclassified — the whole design turns on an unknown table being an
+error, and this was the one place it could be silent instead.
+
+**The right verdict was already known, which is the argument for fixing it now.** It is a
+single-row config table — `only_row BIT`, `CHECK (only_row = 1)` — read from
+`engine/mssql_schedules.go:912` in dialect-specific code, because SQL Server has no equivalent of
+the Postgres predicate mechanism. `not-an-entity`. So the parity code could be verified against a
+case whose answer was settled rather than written alongside a judgement call.
+
+**Membership is compared on the BARE name, and that is the substantive finding.** MySQL cannot
+express a schema: it writes `CREATE TABLE IF NOT EXISTS tenants` where Postgres and SQL Server
+write `admin.tenants`, and `grep -c 'admin\.' migrations/mysql/*.sql` returns **0**. Comparing
+qualified names reports **twelve** differences — the same six tables in both directions — every one
+spurious, which would bury the one that is real.
+
+That is §3.335's schema-qualification trap arriving by the opposite route. There,
+`admin.tenant_api_keys` addressed bare found nothing. Here, qualifying what cannot be qualified
+manufactures gaps. Twice in one day in opposite directions, so the lesson is *schema qualification
+is dialect-dependent*, not either individual fix. Bare-name keying is sound only while bare names
+are unique, which the guard now asserts rather than assumes.
+
+**A correction to the census that prompted this, because it is the trap generalising.** The
+reported table counts were 25 / 24 / 24. They are **23 / 23 / 24**. The Postgres 25 counted two
+comments:
+
+    001_schema.sql:6           -- All CREATE TABLE statements include the final column set.
+    032_drop_tenant_...:22     -- ... rather than the CREATE TABLE text in
+
+`statements` and `text`, read as table names — in the same message that warned about a MySQL
+`guards` table coming from `-- CREATE TABLE IF NOT EXISTS guards idempotency.` A regex that cannot
+model SQL comments reads prose about a definition as a definition, in whichever dialect it is
+pointed at. Both guards strip comments before matching.
+
+**A second defect, which the fix itself exposed.** §3.335's staleness check compared the registry
+against Postgres tables only. Classifying `admin.rls_predicate_form` correctly then reported it as
+*"no longer exists"* — the guard refused the fix for the hole it had just reported. Staleness now
+spans every dialect.
+
+**And a prediction of mine that measurement killed.** I claimed §3.335's plain-and-quoted
+identifier pattern would match nothing in `migrations/mssql/`, parse to zero tables, and report
+clean — the zero-members trap a third time. **False.** Reverting the pattern still parses all 24,
+because no `CREATE TABLE` in this repo quotes its identifier in any dialect:
+
+    # NOT this -- it is line-anchored and cannot see a name on a continuation line:
+    #   grep -rhcE 'CREATE[[:space:]]+TABLE[^(]*[][`"]' migrations/$d/*.sql
+    python3 - <<'EOF'
+    import glob, re
+    pat = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(]+)", re.I)
+    for d in ("postgres", "mysql", "mssql"):
+        q = 0
+        for f in glob.glob("migrations/%s/*.sql" % d):
+            src = re.sub(r"/\*.*?\*/", "", open(f).read(), flags=re.S)
+            src = "\n".join(re.sub(r"--.*$", "", l) for l in src.split("\n"))
+            q += sum(1 for m in pat.finditer(src) if re.search(r'[\[\]`"]', m.group(1)))
+        print(d, "quoted identifiers:", q)
+    EOF
+    # 0, 0, 0 on 2026-09-16
+
+The widened pattern stays, because all three quotings are legal and a scan that cannot read one
+parses to nothing rather than failing. But it is **defensive, not a fix**, and the code comment
+says so. The first version of that comment asserted the bug was real; it had been reasoned from
+`[dbo].[x]` appearing in *queries* rather than checked against the migrations.
+
+**And the zero itself needed a second measurement before it meant anything.** The command first
+published for it was `grep -E 'CREATE[[:space:]]+TABLE[^(]*[][`"]'`, which is **line-anchored**, so
+it scores **0** on a file that does exactly what it looks for:
+
+| file | both define `[dbo].[workers]` | that grep |
+|---|---|---|
+| name on a continuation line | yes | **0** |
+| name on the same line | yes | 1 |
+
+So *"0 quoted identifiers"* and *"0 quoted identifiers I could see"* rendered identically. What
+turns the first into an answer is a separate check the instrument could not make about itself —
+**no `CREATE TABLE` in the tree puts its name on a later line**, 0 across all three dialects. Raised
+by a peer session scanning the same tree with a statement-aware parser and a positive control over
+all four quotings; the conclusion held and the instrument did not deserve to be believed alone.
+
+This is the same shape as the mutation check below, one level out: there the precondition is *did
+the mutation apply*, here it is **could this instrument have disagreed**. The guard's own parser
+does not share the defect — Python's `\s+` spans newlines, verified on the same two fixtures — so
+only the published command was blind, which is the worse place for it, because a command in a
+comment is what the next reader runs.
+
+**The widened pattern is a control rather than a hope, and that was checked rather than asserted.**
+Dropping the bracket and backtick alternatives fails four self-test cases, each reporting
+`parsed 0 tables` — the zero-members signature. So it cannot silently regress to matching nothing.
+
+**What caught the prediction was verifying the mutation applied before reading its result** — the same
+discipline §3.335 records, arriving one step earlier. The first falsification of that pattern
+returned exit 0 and the natural reading was "the trap is real and the guard now covers it". The
+mutation had applied; the prediction was simply wrong. An assertion that the anchor matched and
+the file changed is what separated the two.
+
+**And the inverse of that trap was found in the same function, twice.** `strip_sql_comments`
+modelled comments and not string literals — a tool applied to a format it does not model, which is
+what this guard exists to catch. Both demonstrated through `parse_tables`, the real consumer, not a
+proxy:
+
+| fixture | committed (two regexes) | this branch (a walk) |
+|---|---|---|
+| `DEFAULT 'see migration 064 -- nothing to sync'` | `disabled_at` **gone**, `errors=none` | all three columns |
+| `DEFAULT 'engine/*.go'` + a later `*/` | **NO TABLES**, unbalanced-paren error | both tables |
+
+**The first is the dangerous one and it points at §3.335's own subject.** `disabled_at` is the
+column cleat#1702's conversion adds to thirteen tables. The guard would have reported *"table X has
+no disabled_at"* — blaming the schema for a fault in its own parser — under precisely the
+migrations it exists to check.
+
+**The second was one unrelated edit from firing.** The old code applied the `/* */` rule first,
+over the whole file with `re.S`, before the per-line `--` rule ran, so a `/*` inside a line comment
+was unprotected. `migrations/postgres/072:18` and `migrations/mysql/070:62` each contain one, inert
+only because neither file contains a `*/`. Appending one ordinary block comment to 072 took its
+stripped length from **375 characters to 18**. A defect armed by an edit elsewhere in an unrelated
+file arrives with nothing connecting it to its cause.
+
+Neither fired today: old and new parses of all three dialects are **identical** in table names and
+column sets. Raised by a peer session; the fix is a walk that copies `'...'` and `$$...$$` bodies
+through verbatim, and two self-test cases pin it.
+
+**And a third defect in the same walk, dialect-independent: an unterminated `/*` swallowed the rest
+of the file and reported nothing.**
+
+    unterminated /*   ->  tables=['public.gadgets']   errors=[]
+
+`public.widgets` is simply absent. The loop exits on `i >= n` with `depth` still 1 and nothing
+downstream learns the walk ended inside a comment. That is worse than a wrong count under this
+section's own logic — a table missing from one dialect classifies as *"defined in only one
+dialect"* — and **Postgres and SQL Server both reject such a file**, so the guard would report a
+clean, complete schema for a migration the database will not run. Running off the end inside a
+comment is now an error.
+
+**The nesting comment beside it was wrong, and it was corrected by measurement rather than
+recall.** It claimed Postgres nests and SQL Server does not, and said counting was "harmless
+elsewhere". Run against live engines, `/* see engine/*.go */ SELECT 1 AS survived;`:
+
+| engine | result | nests? |
+|---|---|---|
+| postgres 16 | `ERROR: unterminated /* comment` | **yes** |
+| mysql 8.0 | `1` | **no** |
+| mssql 2022 | `Msg 113 … Missing end comment mark '*/'` | **yes** |
+
+Inverted for SQL Server, and it omitted the one dialect that actually does not nest. The second
+sentence was falsified by the case that started this: a comment whose *text* contains a glob is
+unnested in MySQL's reading and depth 2 to the counter, so it does not "close at depth 1 either
+way". Per-dialect counting would be airtight and is not worth it now that the residue is loud.
+A plain `/* … */` was run on each engine first as a positive control.
+
+**And the diagnosis that fix emits was itself wrong for one dialect.** It said *"Postgres and SQL
+Server both reject such a file"* unconditionally. True for those two; **false for MySQL, which is
+the dialect that produces it.** Measured directly:
+
+    /* see engine/*.go */ CREATE TABLE widgets (id INT PRIMARY KEY);
+    mysql 8.0     table created            -> the file is VALID
+    postgres 16   ERROR: unterminated /*   -> the file is rejected
+
+MySQL does not nest, so it closes that comment at the first `*/`. On a MySQL migration the file is
+fine and **the scanner is what disagrees with the engine** — and the message sent its author to
+audit a correct migration. A failure message that asserts a cause nobody checked is the same fault
+as a check that cannot fail, moved one step downstream: the run it fires on need not be the run it
+describes. The hint is now chosen by the directory being read, which also documents the residue
+left by not doing per-dialect counting, at the only place anyone will meet it.
+
+**The falsification of that fix is the clearest case in this section for asserting on TEXT and not
+only on status.** With the unterminated check disabled, both new self-test cases still exit 2 —
+*"parsed 0 tables"*, the right status for entirely the wrong reason. Only the assertion that the
+output says `never closed` tells them apart. A status-only self-test would have passed a guard that
+had lost the check.
+
+**A proxy disagreed with the real consumer while this was being checked, which is the section's own
+lesson once more.** The first faithful comparison scored columns with a line-oriented regex over
+the stripped text, and it reported `disabled_at` as *present* under the broken version — because
+the truncated line leaves `disabled_at` intact as a line, while `parse_tables` splits on top-level
+commas and glues it onto the previous column. Convenient instrument, wrong answer, in the direction
+that said there was no bug.
+
+Coverage: 23 Postgres tables, 23 MySQL, 24 SQL Server; 17 of 40 clauses enforced, unchanged — this
+adds membership reach, not clause reach. Clause checks remain single-dialect by design.
+
+Files: `scripts/check-entity-contract.py`, `scripts/entity-contract.tsv`,
+`.github/workflows/ci.yml`.

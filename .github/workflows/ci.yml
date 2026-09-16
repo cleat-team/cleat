@@ -378,6 +378,12 @@ jobs:
       # "retired". Members convert one at a time, so most clauses are still
       # grandfathered; the list may only shrink.
       #
+      # Since cleat#1719 it also reads migrations/mysql/ and migrations/mssql/
+      # for MEMBERSHIP -- a table defined in only one dialect was invisible to a
+      # Postgres-only scan rather than unclassified, which was the one place
+      # total coverage still had a hole. Clause checks stay single-dialect,
+      # because TIMESTAMPTZ is Postgres's spelling.
+      #
       # --self-test FIRST, and here it is the only thing that means anything.
       # Today's schema is non-conforming BY CONSTRUCTION -- 23 of 40 clauses are
       # grandfathered -- so a green real run is equally consistent with "the
