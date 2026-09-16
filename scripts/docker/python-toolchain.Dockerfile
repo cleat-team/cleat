@@ -14,22 +14,40 @@
 # so an arm64 container producing a component for an amd64 runner is fine.
 #
 # Build:  docker build -f scripts/docker/python-toolchain.Dockerfile -t cleat-py-toolchain .
-# Use:    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+# Use:    docker run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
 #           cleat-py-toolchain go test ./engine/ -run 'TestPython'
 #
-# --context desktop-linux is not optional on a Mac that also has colima, and
-# getting it wrong does not look like a mount problem. Colima cannot bind-mount
-# these paths and says nothing: -v "$PWD":/src produces an *empty* directory, so
-# the run fails with
+# CHECK THE MOUNT FIRST. This is the one precondition worth a command of its
+# own, because failing it does not look like a mount problem:
+#
+#   docker run --rm -v "$PWD":/src cleat-py-toolchain test -f /src/go.mod \
+#     || echo "your docker runtime is not bind-mounting $PWD"
+#
+# A runtime that cannot mount the path produces an *empty* directory and says
+# nothing, so the run fails with
 #
 #   go: go.mod file not found in current directory or any parent directory
 #
-# which reads as a broken checkout. Mounting the repo root under colima is worse
-# -- it succeeds and serves a different tree entirely. Verified 2026-08-06:
+# which reads as a broken checkout. Mounting the repo root instead is worse --
+# it succeeds and serves a different tree entirely.
 #
-#   docker run --rm -v "$PWD":/src alpine ls /src               # (nothing)
-#   docker --context desktop-linux run --rm -v "$PWD":/src alpine ls /src
-#     ABI.md  ARCHITECTURE.md  BRANCH-TRIAGE.md  CHANGELOG.md  CLAUDE.md ...
+# THIS USED TO NAME A CONTEXT -- `docker --context desktop-linux run ...` -- and
+# that is why the check above replaced it. A context name is a property of one
+# machine at one time; the property that actually matters is whether the mount
+# works. Two dated observations, kept as evidence rather than as instructions:
+#
+#   2026-08-06  colima could not mount /Users/Shared/... at all, silently.
+#               `--context desktop-linux` was the fix on that machine.
+#   2026-09-16  this machine runs orbstack and has no colima. `docker --context
+#               desktop-linux` FAILS outright -- "failed to connect to the
+#               docker API at unix:///Users/rcownie/.docker/run/docker.sock" --
+#               because Docker Desktop is not running, while a plain
+#               `docker run -v "$PWD":/src` mounts the tree correctly (go.mod
+#               visible, 63 entries). See cleat#1694, and cleat#1667 for the
+#               platform change.
+#
+# So the instruction that was right in August could not work in September, and
+# a reader following it got a connection error rather than a hint. Run the check.
 #
 # CGO_ENABLED=1 for the same reason it is pinned everywhere else: without it
 # NewWasmtimeBackend is compiled out and the Python tests would run on wazero,
@@ -38,13 +56,14 @@
 #   wasmtime registered for [go assemblyscript java rust python]
 #
 # ---------------------------------------------------------------------------
-# If this machine has NO desktop-linux context -- colima only
+# If the mount check above FAILS -- recipe verified on colima
 # ---------------------------------------------------------------------------
 #
-# The invocation above then cannot work at all, and the advice "use
-# desktop-linux" has nowhere to go. Verified 2026-09-04 on the WS-3 checkout,
-# where `docker context ls` offers only colima profiles. All six Python
-# component tests pass this way; the recipe is three changes, none obvious:
+# Keyed on the failing check rather than on a runtime name, for the reason the
+# header gives: the name that needed this in September was not the name that
+# needed it in August. Verified 2026-09-04 on the WS-3 checkout, where
+# `docker context ls` offered only colima profiles. All six Python component
+# tests pass this way; the recipe is three changes, none obvious:
 #
 #   1. STAGE THE TREE UNDER $HOME. colima mounts $HOME and does not mount
 #      /Users/Shared/... or /tmp/colima. This is the empty-mount trap above,

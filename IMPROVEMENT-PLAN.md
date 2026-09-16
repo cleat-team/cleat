@@ -13609,3 +13609,56 @@ cleat#1386 measured why — a durable-sourced monotonic clock ran 3 GC cycles in
 reached a 256 MB heap against a 32 MB limit. It is *also* the interface whose functions return
 resource-typed pollables, so leaving it alone is both correct and the cheap option; the coincidence
 is stated in the code, because the cheap reason would otherwise read as the whole reason.
+
+---
+
+### 3.332 The Python container recipe named a docker context that cannot connect on this machine — ✅ **FIXED 2026-09-16** (cleat#1694)
+
+Four live instruction files told a reader to run `docker --context desktop-linux …`. Measured
+today:
+
+| | |
+|---|---|
+| `docker --context desktop-linux ps` | **FAILS** — `failed to connect to the docker API at unix:///Users/rcownie/.docker/run/docker.sock` |
+| `docker run -v "$PWD":/src -w /src alpine:3` | `go.mod` **visible**, 63 entries |
+
+So the prescribed flag does not merely name the wrong runtime — **it cannot work here at all**,
+because Docker Desktop is not running. A reader following the recipe got a connection error, not a
+subtly wrong tree. The platform change behind it is §3.328's correction: this machine runs OrbStack
+and has no colima.
+
+**The fix is not deleting the flag.** `scripts/tier-gate.sh` said *"--context desktop-linux is the
+whole fix"*, and that explained a **real** defect: colima bind-mounts these paths as an empty
+directory *without failing*, so the run dies with `go.mod file not found` and reads as a broken
+checkout. Deleting the flag without replacing the reasoning loses why it was ever there, and the
+hazard returns for anyone who runs colima again.
+
+So the named runtime is replaced by **the property it was standing in for** — does your runtime
+actually bind-mount this path? — with the two runtime observations kept as dated evidence rather
+than as instructions:
+
+```
+docker run --rm -v "$PWD":/src cleat-py-toolchain test -f /src/go.mod
+```
+
+Verified against the real toolchain image, **with a negative control**: exit 0 on the repo path,
+non-zero on a path the runtime will not mount. A check that cannot fail would be worse than the
+instruction it replaces.
+
+This is the same move CLAUDE.md prescribes for counts, applied to configuration: publish the
+predicate, not the census. *"The instruction that was right in August could not work in
+September"* is exactly what a named-runtime instruction buys.
+
+**Scope was narrower than the issue's title, and that is measured rather than assumed.** The grep
+returns **16 lines across 6 files**, but two of those files are history, not instruction:
+
+* `IMPROVEMENT-PLAN-CLOSED.md` is an archive under WORKSTREAM.md R3 — editing it rewrites history.
+* all six `IMPROVEMENT-PLAN.md` hits sit inside **closed** sections (§3.205, §3.306, §3.308, each
+  🟢 **FIXED** and dated), which are history for the same reason.
+
+That leaves **four** live files, not the five a first pass suggests or the six the count implies.
+`engine/python_all_host_calls_test.go`'s mention is a doc comment rather than a code gate — checked
+— so nothing here changes behaviour.
+
+Files: `scripts/docker/python-toolchain.Dockerfile`, `scripts/tier-gate.sh`, `WORKSTREAM.md`,
+`engine/python_all_host_calls_test.go`.
