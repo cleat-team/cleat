@@ -13474,3 +13474,66 @@ exactly this case.
 
 Files: `internal/telemetry/tracing.go`,
 `internal/telemetry/a_workflow_span_joins_the_callers_trace_test.go`.
+
+---
+
+### 3.331 cleat named a parent span that does not exist, and §3.330 moved that lie somewhere it looks true — ✅ **FIXED 2026-09-16** (cleat#1669, corrected)
+
+`spanContextFromTraceID` invented a random span-id so the caller's trace could be attached. Before
+§3.330 that was invisible: cleat's spans sat in a trace of their own, so there was nothing in the
+tree to be wrongly parented. **Joining the caller's trace made it visible and worse** — every cleat
+span then hung off a span-id that does not exist and never will arrive, in a trace that otherwise
+looks complete.
+
+**A zero span-id still joins the trace.** That is the fact that makes the fabrication unnecessary,
+and it is documented SDK behaviour rather than a quirk — `otel/sdk@v1.44.0/trace/tracer.go:97`:
+
+```go
+// If there is a valid parent trace ID, use it to ensure the continuity of
+// the trace. Always generate a new span ID ...
+if !psc.TraceID().IsValid() { tid, sid = ...NewIDs(ctx) } else { tid = psc.TraceID() ... }
+```
+
+It branches on `psc.TraceID().IsValid()`, **not** `psc.IsValid()`. Measured:
+
+```
+                   trace-id                          parentValid  parentSpan
+workflow.execute   4bf92f3577b34da6a3ce929d0e0e4736  false        0000000000000000
+event.call         4bf92f3577b34da6a3ce929d0e0e4736  true         <workflow.execute>
+```
+
+Right trace, no parent, subtree intact, still sampled — `ParentBased` treats an invalid parent as a
+root and falls through to `AlwaysSample`, so the outcome is unchanged.
+
+**Four states, not two**, which is the framing that made the cheap fix visible:
+
+| | trace | parent | what a collector is told |
+|---|---|---|---|
+| before §3.330 | cleat's own | none | two unrelated traces |
+| after §3.330 | the caller's | **invented** | a parent that never arrives |
+| **now** | the caller's | none | cleat is a root *within* the transaction — true |
+| cleat#1597 | the caller's | the real caller | the actual edge |
+
+§3.330's comment said *"one fabricated parent is the honest minimum; two is noise"*. **That was
+wrong — the minimum is none**, and the sentence is corrected in place rather than left to be read.
+
+**The existing assertion was weak and could not have caught the regression it was written for.**
+`a_workflow_span_joins_the_callers_trace_test.go:91` asserted the parent is not the **caller's**
+span-id — which a freshly-invented **random** one also satisfies. Strengthened to assert the span-id
+is invalid at all, with distinct messages for the two ways it can become valid: the caller's real
+one means cleat#1597 landed and the test should be flipped, anything else means the phantom is back.
+
+**A pre-existing test had to be rewritten rather than made to pass.**
+`TestSpanContextFromTraceIDValid` asserted `sc.IsValid()`, which is false without a span-id — so it
+was, precisely, a test that a parent had been invented. It is now
+`TestSpanContextFromTraceIDCarriesATraceAndNoSpan`, pinning the valid trace-id and the absent
+span-id separately.
+
+**Falsified** by reinstating a fabricated span-id: both tests go red, naming it.
+
+This does **not** close cleat#1597, which remains gated by its author pending evidence that the
+missing caller→cleat edge is actually missed. What it removes is the falsehood; the edge is still
+absent and now says so.
+
+Files: `internal/telemetry/tracing.go`, `internal/telemetry/telemetry_test.go`,
+`internal/telemetry/a_workflow_span_joins_the_callers_trace_test.go`.

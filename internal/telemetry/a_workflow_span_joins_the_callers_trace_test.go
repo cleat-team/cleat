@@ -79,19 +79,32 @@ func TestAWorkflowSpanJoinsTheCallersTrace(t *testing.T) {
 		t.Errorf("event.call is in trace %s, want %s", got, callerTrace)
 	}
 
-	// The remote parent is recorded, and is NOT the caller's real span-id --
-	// the inbound parse discards it (cleat#1597), so this one is fabricated.
-	// Asserting it is remote is what distinguishes "joined the trace" from
-	// "happened to be started inside another span".
+	// The parent context is remote -- it came from the inbound traceparent and
+	// not from an ambient local span -- and it names NO span.
 	if !root.Parent.IsRemote() {
 		t.Errorf("workflow.execute's parent is not marked remote; it must come from the "+
 			"inbound traceparent rather than from an ambient local span. parent=%v",
 			root.Parent)
 	}
-	if got := root.Parent.SpanID().String(); got == callerSpan {
-		t.Errorf("the parent span-id is the caller's real one (%s). That would mean the "+
-			"inbound parse now keeps parts[2] -- which is cleat#1597, and if it has "+
-			"landed this test should assert the edge is real rather than fabricated", got)
+	// THE STRONG FORM, and the weak one is why this is spelled out. This used
+	// to assert only `!= callerSpan`, which a REINVENTED random span-id also
+	// satisfies -- so it could not have caught a regression back to the phantom
+	// cleat#1669 removed. Asserting the span-id is invalid catches both: a
+	// random one and the caller's real one.
+	if root.Parent.SpanID().IsValid() {
+		got := root.Parent.SpanID().String()
+		if got == callerSpan {
+			t.Errorf("the parent span-id is the caller's real one (%s). That means the "+
+				"inbound parse now keeps parts[2] -- cleat#1597 -- and this test should "+
+				"be flipped to assert the edge is real, with spanContextFromTraceID's "+
+				"doc updated to match", got)
+		} else {
+			t.Errorf("workflow.execute names a parent span %s that nothing will ever send. "+
+				"cleat does not know its caller's span, so it must name none: a collector "+
+				"told about a parent it cannot receive is being told something false, and "+
+				"since cleat#1689 put these spans in the CALLER's trace that falsehood now "+
+				"sits where it looks plausible. See spanContextFromTraceID", got)
+		}
 	}
 
 	// No link: it would point at the same trace by a second, different

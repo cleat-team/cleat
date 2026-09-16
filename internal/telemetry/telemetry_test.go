@@ -93,13 +93,36 @@ func TestEventSpanWithOperationOnly(t *testing.T) {
 	defer span.End()
 }
 
-func TestSpanContextFromTraceIDValid(t *testing.T) {
+// The span context carries a trace and NO span. cleat#1669, corrected.
+//
+// This asserted sc.IsValid() until the fabricated span-id was removed, and
+// IsValid() is false without a span id -- so the old assertion was, precisely,
+// a test that a parent had been invented. It is rewritten rather than deleted
+// because the property it should always have had is still worth pinning: a
+// valid TRACE id, which is the field otel/sdk's newSpan branches on, and the
+// sampled flag.
+//
+// TestAWorkflowSpanJoinsTheCallersTrace is the other half -- that a context in
+// this shape really does put the span in the caller's trace. Asserting the
+// shape here and the effect there is deliberate: the shape alone would be
+// satisfied by a context nothing honours.
+func TestSpanContextFromTraceIDCarriesATraceAndNoSpan(t *testing.T) {
 	sc, err := spanContextFromTraceID("abcdef0123456789abcdef0123456789")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !sc.IsValid() {
-		t.Error("expected valid SpanContext")
+	if !sc.TraceID().IsValid() {
+		t.Error("the trace id is not valid; nothing downstream will join the caller's trace")
+	}
+	if sc.SpanID().IsValid() {
+		t.Errorf("a span id was produced (%s). cleat does not know its caller's span -- the "+
+			"inbound parse discards parts[2] -- so naming one tells a collector about a "+
+			"parent that will never arrive. Recording the real edge is cleat#1597",
+			sc.SpanID())
+	}
+	if sc.IsValid() {
+		t.Error("the whole SpanContext reports valid, which for W3C means it has a span id; " +
+			"if that is true again, a span id has come back")
 	}
 	if sc.TraceFlags() != trace.TraceFlags(1) {
 		t.Error("expected TraceFlags to be 1 (sampled)")

@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -89,10 +88,13 @@ func InitTracing(ctx context.Context, endpoint, serviceName string) (func(contex
 // what" across that one edge still does not.
 //
 // THE LINK IS DROPPED rather than kept alongside the parent. It would point at
-// the same trace by a DIFFERENT fabricated span-id -- spanContextFromTraceID
-// mints a fresh random one per call -- so it would be a self-referential edge
-// to a second span that also does not exist. One fabricated parent is the
-// honest minimum; two is noise.
+// the same trace by a second span-id that does not exist either, so it would be
+// a self-referential edge to nothing.
+//
+// This comment used to end "one fabricated parent is the honest minimum; two is
+// noise". That was wrong: the honest minimum is NONE, and
+// spanContextFromTraceID no longer mints one -- see its doc for why a zero span
+// id still joins the trace.
 //
 // SAMPLING IS UNCHANGED, and this is the part worth checking rather than
 // assuming, because the same constant changes job. TraceFlags(1) is inert on a
@@ -142,8 +144,45 @@ func EventSpan(ctx context.Context, step int, eventType, service, operation stri
 	return otel.Tracer("cleat").Start(ctx, "event."+eventType, trace.WithAttributes(attrs...))
 }
 
-// spanContextFromTraceID creates a W3C SpanContext from a 32-char hex trace ID.
-// A random span ID is generated and the trace flags are set to sampled (1).
+// spanContextFromTraceID creates a W3C SpanContext from a 32-char hex trace ID,
+// carrying NO span ID. cleat#1669, corrected.
+//
+// IT USED TO INVENT ONE, and #1689 made that worse rather than better. Before
+// #1689 cleat's spans were in a trace of their own, so a fabricated parent was
+// invisible: nothing else was in that tree to be wrongly parented. Once #1689
+// joined the caller's trace, every cleat span hung off a span-id that does not
+// exist and never will arrive -- a collector shown the caller, cleat and the
+// callee in one trace, with cleat rooted at a phantom. That is a falsehood
+// sitting inside a trace that otherwise looks right, which is harder to notice
+// than the obviously-disconnected state it replaced.
+//
+// A ZERO SPAN ID STILL JOINS THE TRACE, which is the fact that makes the
+// fabrication unnecessary, and it is documented SDK behaviour rather than a
+// quirk. otel/sdk/trace/tracer.go's newSpan branches on the TRACE id alone:
+//
+//	// If there is a valid parent trace ID, use it to ensure the continuity of
+//	// the trace. Always generate a new span ID ...
+//	if !psc.TraceID().IsValid() { tid, sid = ...NewIDs(ctx) } else { tid = psc.TraceID() ... }
+//
+// so a SpanContext whose own IsValid() is false -- which is what a zero span id
+// makes it -- still contributes its trace id. Measured: workflow.execute lands
+// in the caller's trace with parentValid=false and parentSpan all zeroes, and
+// the event.* spans stay parented under it.
+//
+// WHAT A COLLECTOR IS TOLD, which is the whole point of the change:
+//
+//	before #1689   cleat's own trace, no parent   two unrelated traces
+//	with a random  the caller's trace, INVENTED   a parent that never arrives
+//	now            the caller's trace, none       cleat is a root WITHIN it
+//
+// The last row is true. cleat genuinely does not know its caller's span -- the
+// inbound parse keeps the trace-id and discards parts[2] -- and saying so is
+// better than naming a span nobody has. Recording the real edge is cleat#1597
+// and needs the span-id persisted across three dialects; this does not.
+//
+// TRACE FLAGS STAY SAMPLED. With no parent the sampler treats the span as a
+// root, and the default ParentBased falls through to AlwaysSample, so the
+// outcome is unchanged either way -- measured, both rows sampled.
 func spanContextFromTraceID(traceID string) (trace.SpanContext, error) {
 	b, err := hex.DecodeString(traceID)
 	if err != nil || len(b) != 16 {
@@ -152,12 +191,8 @@ func spanContextFromTraceID(traceID string) (trace.SpanContext, error) {
 	var tid trace.TraceID
 	copy(tid[:], b)
 
-	var sid trace.SpanID
-	_, _ = rand.Read(sid[:])
-
 	return trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID:    tid,
-		SpanID:     sid,
 		TraceFlags: trace.TraceFlags(1), // sampled
 	}), nil
 }
