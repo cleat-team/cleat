@@ -10,6 +10,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### UPGRADE NOTES — breaking
+
+- **A start payload that omits a declared entry-point parameter is now refused,
+  instead of binding the zero value.** (cleat#1065)
+
+  Previously an absent `string` bound `""` and an absent `int` bound `0`, in Go
+  and AssemblyScript. Python has always refused, and Rust refuses unless the
+  field is `Option<T>` or carries `#[serde(default)]` — so the SDKs disagreed
+  about the same payload.
+
+  Zero-binding **cannot tell "sent zero" from "sent nothing"**, permanently, for
+  every caller. The workflow runs, the result is plausible, and nothing records
+  that the value is not the one that was sent. The information belongs to the
+  caller and was destroyed at the boundary.
+
+  **Declaring a parameter optional is how a workflow says absence is meaningful:**
+
+  | SDK | spelling |
+  |---|---|
+  | Go | `*T` — binds `nil` when absent |
+  | AssemblyScript | a declaration-site default — `note: string = "x"` |
+  | Python | a Python-level default |
+  | Rust | `Option<T>` or `#[serde(default)]` |
+
+  **Consequences.**
+  - **This is a compile-time change, not a runtime one.** The binding lives in
+    code generated into the guest module, so an already-deployed `.wasm` keeps
+    the old behaviour until it is rebuilt. There is no flag day: a workflow
+    adopts the new contract when someone recompiles it.
+  - **No ABI bump.** The wire protocol, function signatures and memory contract
+    are unchanged; what changed is the acceptance rule inside generated guest
+    code, which `CurrentABIVersion` does not describe.
+  - **A single `string` parameter is unaffected.** It receives the whole payload
+    rather than a value looked up by name, so "absent" does not apply to it.
+    Python has no such fast path and still refuses; that divergence is recorded
+    in `tests/conformance/entry_point_binding_cases.json`.
+  - **A composite parameter already refused** on absence. This makes absence
+    uniform across types rather than adding a rule for scalars.
+  - Measured against `cleat-ports` before landing: **0 confirmed omissions in
+    112 literal starts** across all four ports, so the suites there need no
+    change. Two starts build their payload from a variable and were not
+    measured.
+
 ### Changed
 
 - **The rate limiter refuses a cluster-wide limit it cannot honour, instead of quietly giving you

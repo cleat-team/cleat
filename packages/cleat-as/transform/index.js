@@ -1135,26 +1135,57 @@ class CleatEntryTransformer {
   _getDeserializeCode(pname, ptype, funcName, pdefault) {
     // Map AS types to the correct JsonParser getter
     const g = this._typeGuard(pname, ptype, funcName);
+    const hasDefault = !(pdefault === null || pdefault === undefined);
     const orDefault = (expr) =>
-      pdefault === null || pdefault === undefined
-        ? expr
-        : `_t_${pname} == -1 ? (${pdefault}) : (${expr})`;
+      !hasDefault ? expr : `_t_${pname} == -1 ? (${pdefault}) : (${expr})`;
+
+    // AN ABSENT DECLARED PARAMETER IS AN ERROR. cleat#1065 step 4.
+    //
+    // Without a default, absence used to bind the getter's zero value -- ""
+    // for a string, 0 for a number, false for a bool -- which CANNOT TELL
+    // "sent zero" from "sent nothing", permanently, for every caller. The
+    // workflow runs, the result is plausible, and nothing records that the
+    // value is not the one that was sent.
+    //
+    // The information is the CALLER'S, and a declared default is the workflow
+    // author saying absence is meaningful. So absence is refused unless that
+    // declaration is present, which is the same rule Python has always had and
+    // the one Rust gets from Option<T>.
+    //
+    // It reuses `_t_<name> == -1` rather than introducing a second absence
+    // test, for the reason the comment above gives: one definition of absence
+    // in this wrapper cannot disagree with itself.
+    //
+    // NOT the lone-string fast path, which never reaches this function: a
+    // single defaultless string parameter receives the whole payload rather
+    // than a value looked up by name, so "absent" does not apply to it.
+    const requirePresent = hasDefault
+      ? ""
+      : `  if (_t_${pname} == -1) {\n` +
+        this._makeErrorReturn(
+          `entry point parameter ${pname} is absent from the start payload. ` +
+          `An absent declared parameter is an error (cleat#1065): it cannot be told ` +
+          `apart from one sent as the zero value, and that distinction belongs to the ` +
+          `caller. Send ${pname}, or give it a default to declare it optional.`
+        ) +
+        `  }\n`;
+    const g2 = g + requirePresent;
     if (ptype === "string" || ptype === "String") {
-      return g + `  let ${pname}: string = ${orDefault(`_parser.getString(_parsed, "${pname}")`)};\n`;
+      return g2 + `  let ${pname}: string = ${orDefault(`_parser.getString(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "i32") {
-      return g + `  let ${pname}: i32 = ${orDefault(`<i32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
+      return g2 + `  let ${pname}: i32 = ${orDefault(`<i32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "u32") {
-      return g + `  let ${pname}: u32 = ${orDefault(`<u32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
+      return g2 + `  let ${pname}: u32 = ${orDefault(`<u32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "i64") {
-      return g + `  let ${pname}: i64 = ${orDefault(`<i64>_parser.getNumber(_parsed, "${pname}")`)};\n`;
+      return g2 + `  let ${pname}: i64 = ${orDefault(`<i64>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "u64") {
-      return g + `  let ${pname}: u64 = ${orDefault(`<u64>_parser.getNumber(_parsed, "${pname}")`)};\n`;
+      return g2 + `  let ${pname}: u64 = ${orDefault(`<u64>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "f64") {
-      return g + `  let ${pname}: f64 = ${orDefault(`_parser.getNumber(_parsed, "${pname}")`)};\n`;
+      return g2 + `  let ${pname}: f64 = ${orDefault(`_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "f32") {
-      return g + `  let ${pname}: f32 = ${orDefault(`<f32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
+      return g2 + `  let ${pname}: f32 = ${orDefault(`<f32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "bool" || ptype === "boolean") {
-      return g + `  let ${pname}: bool = ${orDefault(`_parser.getBool(_parsed, "${pname}")`)};\n`;
+      return g2 + `  let ${pname}: bool = ${orDefault(`_parser.getBool(_parsed, "${pname}")`)};\n`;
     } else {
       // Unknown type — throw a compile-time error from the transformer
       throw new Error(

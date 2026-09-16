@@ -56,9 +56,9 @@
       ],
       "payload": {},
       "expect": {
-        "go": "bound_zero",
+        "go": "refused",
         "python": "refused",
-        "assemblyscript": "bound_zero"
+        "assemblyscript": "refused"
       }
     },
     {
@@ -72,9 +72,9 @@
       ],
       "payload": {},
       "expect": {
-        "go": "bound_zero",
+        "go": "refused",
         "python": "refused",
-        "assemblyscript": "bound_zero"
+        "assemblyscript": "refused"
       }
     },
     {

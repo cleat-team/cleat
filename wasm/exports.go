@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"go/types"
+	"strconv"
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -520,32 +521,44 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 				continue
 			}
 			switch f.GoType {
-			case "string":
-				fmt.Fprintf(buf, "\t%s := extractJSONString(argsJSON, %q)\n", f.GoName, f.JSONTag)
-			case "int", "int64", "int32":
-				// An ABSENT int binds its zero value; a PRESENT one that will not
-				// decode is an error.
+			case "string", "int", "int64", "int32":
+				// AN ABSENT DECLARED PARAMETER IS AN ERROR. cleat#1065 step 4.
 				//
-				// cleat#1046 removed the hand-rolled digit scanner so ints reach
-				// json.Unmarshal, which is what made a negative expressible. It
-				// also moved absence: extractJSONRaw returns "" for a missing key
-				// and json.Unmarshal("") fails, so an omitted int parameter went
-				// from binding 0 to a hard error that stopped the workflow body
-				// running at all. That broke every caller relying on the documented
-				// zero-value default -- eight cases across three modules in the
-				// ports suite, and the reason this guard exists.
+				// These two arms used to bind the zero value on absence --
+				// "" for a string, 0 for an int -- which CANNOT TELL "sent
+				// zero" from "sent nothing", permanently, for every caller.
+				// The workflow runs, the result is plausible, and nothing
+				// anywhere records that the value is not the one that was
+				// sent. That is the same shape as cleat#1022, where a MySQL
+				// column silently rewrote a caller's value.
 				//
-				// A string parameter has always bound "" when absent, so this
-				// restores ints to the same contract rather than inventing one. A
-				// struct still errors on absence, which is pre-existing and a
-				// separate question: absence is NOT uniform across types here, and
-				// making it so is a design decision that should be taken on its own
-				// rather than folded into a regression fix.
+				// The information is the CALLER'S and it was destroyed at the
+				// boundary. An optional parameter is a declaration by the
+				// workflow author that absence is meaningful, and that is the
+				// thing that should be explicit rather than implied by a
+				// type's zero value -- so absence is refused unless the
+				// parameter is declared optional, which in Go is the pointer
+				// arm above.
+				//
+				// NOT the lone-string fast path, which is above and untouched:
+				// a single string parameter is not bound by name at all, it
+				// receives the whole payload, so "absent" does not apply to
+				// it. Python has no such fast path and refuses; that
+				// divergence has its own row in the shared table.
+				//
+				// Composite parameters already refused on absence before this
+				// change (the default arm below, where json.Unmarshal("")
+				// fails), so this makes absence UNIFORM across types rather
+				// than inventing a rule for scalars. The comment that used to
+				// sit here said making it uniform "is a design decision that
+				// should be taken on its own rather than folded into a
+				// regression fix" -- this is that decision, taken on its own.
 				fmt.Fprintf(buf, "\tvar %s %s\n", f.GoName, f.GoType)
-				fmt.Fprintf(buf, "\tif __raw := extractJSONRaw(argsJSON, %q); __raw != \"\" {\n", f.JSONTag)
-				fmt.Fprintf(buf, "\t\tif err := json.Unmarshal([]byte(__raw), &%s); err != nil {\n", f.GoName)
-				fmt.Fprintf(buf, "\t\t\treturn writeErrorOut(outPtr, maxOutLen, fmt.Errorf(\"unmarshal %s: %%w\", err))\n", f.JSONTag)
-				buf.WriteString("\t\t}\n\t}\n")
+				fmt.Fprintf(buf, "\tif __raw := extractJSONRaw(argsJSON, %q); __raw == \"\" {\n", f.JSONTag)
+				fmt.Fprintf(buf, "\t\treturn writeErrorOut(outPtr, maxOutLen, fmt.Errorf(%q))\n", absentParamMessage(f.JSONTag, f.GoType))
+				fmt.Fprintf(buf, "\t} else if err := json.Unmarshal([]byte(__raw), &%s); err != nil {\n", f.GoName)
+				fmt.Fprintf(buf, "\t\treturn writeErrorOut(outPtr, maxOutLen, fmt.Errorf(\"unmarshal %s: %%w\", err))\n", f.JSONTag)
+				buf.WriteString("\t}\n")
 			default:
 				fmt.Fprintf(buf, "\tvar %s %s\n", f.GoName, f.GoType)
 				fmt.Fprintf(buf, "\tif err := json.Unmarshal([]byte(extractJSONRaw(argsJSON, %q)), &%s); err != nil {\n", f.JSONTag, f.GoName)
@@ -784,17 +797,20 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 					continue
 				}
 				switch f.GoType {
-				case "string":
-					fmt.Fprintf(buf, "\t\t%s := extractJSONString(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
-				case "int", "int64", "int32":
-					// Absent binds zero; present-and-undecodable is an error.
-					// See the note on the sibling site above -- cleat#1046
-					// moved absence for ints and this restores it.
+				case "string", "int", "int64", "int32":
+					// AN ABSENT DECLARED PARAMETER IS AN ERROR. cleat#1065
+					// step 4. The reasoning is on the sibling site above; what
+					// matters here is that BOTH carry it. cleat#1057 left the
+					// int arm of one reporting success while the other errored,
+					// and this dispatch emitter is the path the host actually
+					// calls, so a change made only above would look correct
+					// through the export and behave differently in production.
 					fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
-					fmt.Fprintf(buf, "\t\tif __raw := extractJSONRaw(string(argsJSON), %q); __raw != \"\" {\n", f.JSONTag)
-					fmt.Fprintf(buf, "\t\t\tif err := json.Unmarshal([]byte(__raw), &%s); err != nil {\n", f.GoName)
-					emitDispatchBindFailure(buf, "\t\t\t\t", f.JSONTag)
-					buf.WriteString("\t\t\t}\n\t\t}\n")
+					fmt.Fprintf(buf, "\t\tif __raw := extractJSONRaw(string(argsJSON), %q); __raw == \"\" {\n", f.JSONTag)
+					emitDispatchBindAbsent(buf, "\t\t\t", f.JSONTag, f.GoType)
+					fmt.Fprintf(buf, "\t\t} else if err := json.Unmarshal([]byte(__raw), &%s); err != nil {\n", f.GoName)
+					emitDispatchBindFailure(buf, "\t\t\t", f.JSONTag)
+					buf.WriteString("\t\t}\n")
 				default:
 					// Complex type: use json.Unmarshal.
 					fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
@@ -972,6 +988,36 @@ func __cleat_run_deferred() (ran int64) {
 //
 // The message is encoded once and used for both, so the error channel and the
 // returned body can never disagree about what went wrong.
+// absentParamMessage is the refusal a guest reports when a declared entry-point
+// parameter is missing from the start payload. cleat#1065 step 4.
+//
+// ONE FUNCTION because the message is emitted from two places -- the
+// //go:wasmexport emitter and the cleatDispatch emitter -- and those two have
+// already drifted apart once: cleat#1057 left the int arm of one reporting
+// success while the other errored. A shared message does not prevent that on
+// its own, but it removes the cheapest way for them to disagree.
+//
+// It names the spelling of the fix rather than only the problem. "note is
+// absent" sends the reader to their caller; "declare it *string" tells them
+// the other option, which is the one that exists precisely because absence can
+// be meaningful.
+func absentParamMessage(jsonTag, goType string) string {
+	return "entry point parameter " + strconv.Quote(jsonTag) + " is absent from the start payload. " +
+		"An absent declared parameter is an error (cleat#1065): it cannot be told apart from one " +
+		"sent as the zero value, and that distinction belongs to the caller. Send " +
+		strconv.Quote(jsonTag) + ", or declare the parameter optional as *" + goType +
+		", which binds nil when it is absent."
+}
+
+// emitDispatchBindAbsent is emitDispatchBindFailure's sibling for the case
+// where there is no err to quote: the key was not in the payload at all.
+func emitDispatchBindAbsent(buf *bytes.Buffer, indent, jsonTag, goType string) {
+	fmt.Fprintf(buf, "%s__bindMsg := encodeJSONString(%q)\n", indent, absentParamMessage(jsonTag, goType))
+	fmt.Fprintf(buf, "%s__bindPtr, __bindLen := stringPtr(__bindMsg)\n", indent)
+	fmt.Fprintf(buf, "%scleatCompleteImport(1, __bindPtr, __bindLen)\n", indent)
+	fmt.Fprintf(buf, "%sreturn []byte(`{\"error\":` + __bindMsg + `}`)\n", indent)
+}
+
 func emitDispatchBindFailure(buf *bytes.Buffer, indent, jsonTag string) {
 	fmt.Fprintf(buf, "%s__bindMsg := encodeJSONString(\"unmarshal %s: \" + err.Error())\n", indent, jsonTag)
 	fmt.Fprintf(buf, "%s__bindPtr, __bindLen := stringPtr(__bindMsg)\n", indent)
