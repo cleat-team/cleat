@@ -156,8 +156,44 @@ def parse_tables(migrations_dir):
 #
 # It is kept because all three quotings are legal and a scan that cannot read
 # one parses to nothing rather than failing -- but it earns no credit for a bug
-# it does not currently prevent. The self-test locks the behaviour in; the
-# falsification says it is not load-bearing today.
+# it does not currently prevent.
+#
+# THAT ZERO NEEDED A SECOND MEASUREMENT TO MEAN ANYTHING, and the first command
+# published here could not make it. `grep -E 'CREATE[[:space:]]+TABLE[^(]*[][`"]'`
+# is LINE-ANCHORED, so it scores 0 on a file that does exactly what it looks
+# for:
+#
+#     CREATE TABLE            -> grep: 0     CREATE TABLE [dbo].[workers] (...);
+#       [dbo].[workers]                      -> grep: 1
+#       (id INT);
+#
+# Both define [dbo].[workers]. So "0 quoted identifiers" and "0 quoted
+# identifiers I could see" rendered identically, and only a separate check --
+# no CREATE TABLE in the tree puts its name on a later line, 0 across all three
+# dialects -- turns the first into an answer. Raised by a peer session scanning
+# the same tree with a statement-aware parser; the conclusion held, the
+# instrument did not deserve to be believed on its own.
+#
+# Re-derive with something that spans newlines and strips comments:
+#
+#     python3 - <<'EOF'
+#     import glob, re
+#     pat = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(]+)", re.I)
+#     for d in ("postgres", "mysql", "mssql"):
+#         q = 0
+#         for f in glob.glob("migrations/%s/*.sql" % d):
+#             src = re.sub(r"/\*.*?\*/", "", open(f).read(), flags=re.S)
+#             src = "\n".join(re.sub(r"--.*$", "", l) for l in src.split("\n"))
+#             q += sum(1 for m in pat.finditer(src) if re.search(r'[\[\]`"]', m.group(1)))
+#         print(d, "quoted identifiers:", q)
+#     EOF
+#     # 0, 0, 0 on 2026-09-16; reports 2 on a fixture holding one same-line and
+#     # one continuation-line bracketed definition, which is its positive control.
+#
+# The self-test locks the behaviour in and IS a control rather than a hope:
+# dropping the bracket and backtick alternatives from this constant fails four
+# cases, each with "parsed 0 tables" -- the zero-members signature. Verified by
+# doing it.
 IDENT = r'(?:\[[^\]]+\]|`[^`]+`|"[^"]+"|[A-Za-z0-9_]+)'
 CREATE_TABLE_RE = re.compile(
     r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:%s\.)?%s)\s*\(" % (IDENT, IDENT),

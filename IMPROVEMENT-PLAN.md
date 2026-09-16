@@ -13985,9 +13985,19 @@ identifier pattern would match nothing in `migrations/mssql/`, parse to zero tab
 clean — the zero-members trap a third time. **False.** Reverting the pattern still parses all 24,
 because no `CREATE TABLE` in this repo quotes its identifier in any dialect:
 
-    for d in postgres mysql mssql; do
-      grep -rhcE 'CREATE[[:space:]]+TABLE[^(]*[][`"]' migrations/$d/*.sql
-    done
+    # NOT this -- it is line-anchored and cannot see a name on a continuation line:
+    #   grep -rhcE 'CREATE[[:space:]]+TABLE[^(]*[][`"]' migrations/$d/*.sql
+    python3 - <<'EOF'
+    import glob, re
+    pat = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(]+)", re.I)
+    for d in ("postgres", "mysql", "mssql"):
+        q = 0
+        for f in glob.glob("migrations/%s/*.sql" % d):
+            src = re.sub(r"/\*.*?\*/", "", open(f).read(), flags=re.S)
+            src = "\n".join(re.sub(r"--.*$", "", l) for l in src.split("\n"))
+            q += sum(1 for m in pat.finditer(src) if re.search(r'[\[\]`"]', m.group(1)))
+        print(d, "quoted identifiers:", q)
+    EOF
     # 0, 0, 0 on 2026-09-16
 
 The widened pattern stays, because all three quotings are legal and a scan that cannot read one
@@ -13995,7 +14005,32 @@ parses to nothing rather than failing. But it is **defensive, not a fix**, and t
 says so. The first version of that comment asserted the bug was real; it had been reasoned from
 `[dbo].[x]` appearing in *queries* rather than checked against the migrations.
 
-**What caught it was verifying the mutation applied before reading its result** — the same
+**And the zero itself needed a second measurement before it meant anything.** The command first
+published for it was `grep -E 'CREATE[[:space:]]+TABLE[^(]*[][`"]'`, which is **line-anchored**, so
+it scores **0** on a file that does exactly what it looks for:
+
+| file | both define `[dbo].[workers]` | that grep |
+|---|---|---|
+| name on a continuation line | yes | **0** |
+| name on the same line | yes | 1 |
+
+So *"0 quoted identifiers"* and *"0 quoted identifiers I could see"* rendered identically. What
+turns the first into an answer is a separate check the instrument could not make about itself —
+**no `CREATE TABLE` in the tree puts its name on a later line**, 0 across all three dialects. Raised
+by a peer session scanning the same tree with a statement-aware parser and a positive control over
+all four quotings; the conclusion held and the instrument did not deserve to be believed alone.
+
+This is the same shape as the mutation check below, one level out: there the precondition is *did
+the mutation apply*, here it is **could this instrument have disagreed**. The guard's own parser
+does not share the defect — Python's `\s+` spans newlines, verified on the same two fixtures — so
+only the published command was blind, which is the worse place for it, because a command in a
+comment is what the next reader runs.
+
+**The widened pattern is a control rather than a hope, and that was checked rather than asserted.**
+Dropping the bracket and backtick alternatives fails four self-test cases, each reporting
+`parsed 0 tables` — the zero-members signature. So it cannot silently regress to matching nothing.
+
+**What caught the prediction was verifying the mutation applied before reading its result** — the same
 discipline §3.335 records, arriving one step earlier. The first falsification of that pattern
 returned exit 0 and the natural reading was "the trap is real and the guard now covers it". The
 mutation had applied; the prediction was simply wrong. An assertion that the anchor matched and
