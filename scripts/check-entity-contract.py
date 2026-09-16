@@ -54,14 +54,98 @@ GRANDFATHER_CEILING = 23
 
 
 def strip_sql_comments(src):
-    """Remove /* */ and -- comments.
+    """Remove SQL comments, leaving string literals intact.
 
-    Without this a header that quotes a CREATE TABLE counts as a definition --
-    the same "a text search cannot tell a thing from a sentence about the
-    thing" trap CLAUDE.md records for migration routines.
+    Walks the source rather than running two regexes over it. The regex version
+    modelled comments and not strings, which is the same "a tool applied to a
+    format it does not model" fault this guard exists to catch, and it had two
+    demonstrated failure modes (cleat#1719, raised by a peer session):
+
+    1. A `--` inside a string literal in a CREATE TABLE body dropped every
+       column after it, silently. `DEFAULT 'see migration 064 -- nothing to
+       sync'` removed the following `disabled_at` and reported no error. That is
+       the worst possible shape for cleat#1702's conversion, which adds
+       `disabled_at` to thirteen tables: the guard would report "table X is
+       missing disabled_at", blaming the schema for a fault in the parser.
+
+    2. A `/*` inside a string literal -- or inside a `--` line comment, which
+       offers no protection, because the old code applied the `/* */` rule
+       FIRST over the whole file with re.S, before the per-line `--` rule ran --
+       swallowed everything to the next `*/`.
+
+    The second was one unrelated edit away from firing. `migrations/postgres/072`
+    line 18 and `migrations/mysql/070` line 62 both contain a `/*` inside a line
+    comment, inert only because neither file contains a `*/`. Appending one
+    ordinary block comment to 072 took its stripped length from 375 characters
+    to 18. A defect armed by an edit to an unrelated part of an unrelated file
+    arrives with nothing connecting it to its cause.
+
+    Newlines are preserved so that anything downstream reasoning in lines still
+    can. Dollar-quoted bodies are handled because Postgres migrations use them
+    for routine definitions.
     """
-    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-    return "\n".join(re.sub(r"--.*$", "", line) for line in src.split("\n"))
+    out = []
+    i = 0
+    n = len(src)
+    while i < n:
+        ch = src[i]
+
+        if ch == "'":
+            out.append(ch)
+            i += 1
+            while i < n:
+                if src[i] == "'":
+                    if i + 1 < n and src[i + 1] == "'":   # '' is an escaped quote
+                        out.append("''")
+                        i += 2
+                        continue
+                    out.append("'")
+                    i += 1
+                    break
+                out.append(src[i])
+                i += 1
+            continue
+
+        if ch == "$":
+            tag = re.match(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", src[i:])
+            if tag:
+                body_end = src.find(tag.group(0), i + len(tag.group(0)))
+                if body_end == -1:
+                    out.append(src[i:])
+                    break
+                stop = body_end + len(tag.group(0))
+                out.append(src[i:stop])
+                i = stop
+                continue
+
+        if src.startswith("--", i):
+            while i < n and src[i] != "\n":
+                i += 1
+            continue
+
+        if src.startswith("/*", i):
+            # Postgres block comments nest; SQL Server's do not. Counting is
+            # correct for Postgres and harmless elsewhere, since an unnested
+            # comment closes at depth 1 either way.
+            depth = 1
+            i += 2
+            while i < n and depth:
+                if src.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif src.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    if src[i] == "\n":
+                        out.append("\n")
+                    i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
 
 
 def matching_paren(src, open_idx):
@@ -579,6 +663,29 @@ SELF_TEST_CASES = [
      CONFORMING, "public.widgets\tmember\n", 2, "enforced nothing"),
     ("a migrations directory with no SQL at all",
      None, "public.widgets\tmember\n", 2, "no .sql files"),
+
+    # A string literal is not a comment. Both of these dropped or destroyed
+    # columns before cleat#1719, and the first did it SILENTLY -- the guard
+    # reported the table as missing disabled_at, blaming the schema for a fault
+    # in its own parser. That is the exact column cleat#1702 adds to thirteen
+    # tables, so it would have surfaced under the conversion migrations.
+    ("a -- inside a string literal does not eat the columns after it",
+     CONFORMING.replace(
+         "    widget_id   UUID PRIMARY KEY,",
+         "    widget_id   UUID PRIMARY KEY,\n"
+         "    note        TEXT NOT NULL DEFAULT 'see migration 064 -- nothing to sync',"),
+     "public.widgets\tmember\n", 0, None),
+
+    # Inert in the tree today only because no file containing a `/*` inside a
+    # line comment also contains a `*/`. Appending one ordinary block comment to
+    # migrations/postgres/072 took its stripped length from 375 chars to 18.
+    ("a /* inside a string literal does not swallow the file",
+     CONFORMING.replace(
+         "    widget_id   UUID PRIMARY KEY,",
+         "    widget_id   UUID PRIMARY KEY,\n"
+         "    note        TEXT NOT NULL DEFAULT 'engine/*.go',")
+     + "\n/* an ordinary block comment, elsewhere in the file */\n",
+     "public.widgets\tmember\n", 0, None),
 ]
 
 # Cross-dialect cases (cleat#1719). Each carries a sibling schema as well.

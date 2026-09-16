@@ -14036,6 +14036,39 @@ returned exit 0 and the natural reading was "the trap is real and the guard now 
 mutation had applied; the prediction was simply wrong. An assertion that the anchor matched and
 the file changed is what separated the two.
 
+**And the inverse of that trap was found in the same function, twice.** `strip_sql_comments`
+modelled comments and not string literals — a tool applied to a format it does not model, which is
+what this guard exists to catch. Both demonstrated through `parse_tables`, the real consumer, not a
+proxy:
+
+| fixture | committed (two regexes) | this branch (a walk) |
+|---|---|---|
+| `DEFAULT 'see migration 064 -- nothing to sync'` | `disabled_at` **gone**, `errors=none` | all three columns |
+| `DEFAULT 'engine/*.go'` + a later `*/` | **NO TABLES**, unbalanced-paren error | both tables |
+
+**The first is the dangerous one and it points at §3.335's own subject.** `disabled_at` is the
+column cleat#1702's conversion adds to thirteen tables. The guard would have reported *"table X has
+no disabled_at"* — blaming the schema for a fault in its own parser — under precisely the
+migrations it exists to check.
+
+**The second was one unrelated edit from firing.** The old code applied the `/* */` rule first,
+over the whole file with `re.S`, before the per-line `--` rule ran, so a `/*` inside a line comment
+was unprotected. `migrations/postgres/072:18` and `migrations/mysql/070:62` each contain one, inert
+only because neither file contains a `*/`. Appending one ordinary block comment to 072 took its
+stripped length from **375 characters to 18**. A defect armed by an edit elsewhere in an unrelated
+file arrives with nothing connecting it to its cause.
+
+Neither fired today: old and new parses of all three dialects are **identical** in table names and
+column sets. Raised by a peer session; the fix is a walk that copies `'...'` and `$$...$$` bodies
+through verbatim, and two self-test cases pin it.
+
+**A proxy disagreed with the real consumer while this was being checked, which is the section's own
+lesson once more.** The first faithful comparison scored columns with a line-oriented regex over
+the stripped text, and it reported `disabled_at` as *present* under the broken version — because
+the truncated line leaves `disabled_at` intact as a line, while `parse_tables` splits on top-level
+commas and glues it onto the previous column. Convenient instrument, wrong answer, in the direction
+that said there was no bug.
+
 Coverage: 23 Postgres tables, 23 MySQL, 24 SQL Server; 17 of 40 clauses enforced, unchanged — this
 adds membership reach, not clause reach. Clause checks remain single-dialect by design.
 
