@@ -126,7 +126,7 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 	// reached by a route that did not exist when it was written.
 	var form string
 	if err := pool.QueryRow(`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
-		t.Fatalf("read admin.rls_predicate_form as %s: %v. Migration 074 creates it; "+
+		t.Fatalf("read admin.rls_predicate_form as %s: %v. Migration 075 creates it; "+
 			"without it there is no way to tell whether cleat_admin membership grants "+
 			"anything", mssqlTestAdminLogin, err)
 	}

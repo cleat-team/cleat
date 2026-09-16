@@ -881,7 +881,7 @@ on any future statement that forgets to. Applying the opt-in accepts that on
 every tenant-scoped table, which is why it is a deliberate act rather than the
 default.
 
-To reverse it, re-apply `074_the_admin_bypass_is_opt_in.sql`. It is idempotent
+To reverse it, re-apply `075_the_admin_bypass_is_opt_in.sql`. It is idempotent
 and restores both the plain predicate and the marker the worker reads.
 
 **The worker says which mode it is in at startup**, before either loop ticks, so

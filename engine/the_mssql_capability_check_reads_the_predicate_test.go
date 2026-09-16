@@ -23,7 +23,7 @@ import (
 //	plain predicate + member   -> NOT available, and the reason names the PREDICATE
 //	marker unreadable          -> UNKNOWN, and the reason must NOT say "grant membership"
 //
-// The second arm is the regression: before 074 a member read IS_ROLEMEMBER = 1
+// The second arm is the regression: before 075 a member read IS_ROLEMEMBER = 1
 // and the check said available, while the connection saw zero rows.
 
 func TestMSSQLCapabilityFollowsTheInstalledPredicate(t *testing.T) {
@@ -48,15 +48,15 @@ func TestMSSQLCapabilityFollowsTheInstalledPredicate(t *testing.T) {
 	// The first version of this test asserted "the shipped schema records
 	// plain" and failed for exactly that reason -- a correct failure about a
 	// premise that is true of a deployment and false of this harness.
-	applyMigrationFileForTest(t, db, "074_the_admin_bypass_is_opt_in.sql")
+	applyMigrationFileForTest(t, db, "075_the_admin_bypass_is_opt_in.sql")
 
 	var form string
 	if err := db.QueryRow(`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
-		t.Fatalf("the marker table is missing after applying 074 (%v). It is what creates "+
+		t.Fatalf("the marker table is missing after applying 075 (%v). It is what creates "+
 			"it, and without it the capability check cannot answer.", err)
 	}
 	if form != rlsPredicatePlain {
-		t.Fatalf("after applying 074 the marker records form=%q, want %q", form, rlsPredicatePlain)
+		t.Fatalf("after applying 075 the marker records form=%q, want %q", form, rlsPredicatePlain)
 	}
 
 	// ARM 1: plain predicate. The predicate admits nobody, so the capability
@@ -79,7 +79,7 @@ func TestMSSQLCapabilityFollowsTheInstalledPredicate(t *testing.T) {
 	cap1 := store.CheckCrossTenantCapability(ctx)
 	if cap1.Claim || cap1.Schedules {
 		t.Errorf("reported cross-tenant capability under the PLAIN predicate "+
-			"(claim=%v schedules=%v). This is the regression 074 introduces if the check "+
+			"(claim=%v schedules=%v). This is the regression 075 introduces if the check "+
 			"still asks IS_ROLEMEMBER alone: a member reads 1 and sees zero rows.",
 			cap1.Claim, cap1.Schedules)
 	}
@@ -149,7 +149,7 @@ func applyMigrationFileForTest(t *testing.T, db *sql.DB, name string) {
 	}
 	// ONE connection for every batch, not the pool.
 	//
-	// 074 captures the policy set into a #temp table in one batch and replays
+	// 075 captures the policy set into a #temp table in one batch and replays
 	// it in another; a #temp table lives for the SESSION, so batches issued
 	// through a pool can land on different connections and the second one sees
 	// "Invalid object name '#cleat_bound_policies'". migration.Runner does not

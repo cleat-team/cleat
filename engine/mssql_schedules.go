@@ -891,7 +891,7 @@ func (s *MSSQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedu
 }
 
 // The two values admin.rls_predicate_form can hold. They are spelled here and
-// in migrations/mssql/074 and migrations/mssql/optional/cross_tenant_claim.sql,
+// in migrations/mssql/075 and migrations/mssql/optional/cross_tenant_claim.sql,
 // and the table's own CHECK constraint refuses anything else -- so a typo in a
 // migration fails at apply time rather than reading as "not admin" here.
 const (
@@ -905,7 +905,7 @@ const (
 // connection that needs the answer.
 //
 // A missing table is an ERROR rather than a default. Treating it as "plain"
-// would make a deployment that has not applied 074 indistinguishable from one
+// would make a deployment that has not applied 075 indistinguishable from one
 // that has and chose the default, and the two want different advice.
 func (s *MSSQLStore) rlsPredicateForm(ctx context.Context) (string, error) {
 	var form string
@@ -938,7 +938,7 @@ func (s *MSSQLStore) CheckCrossTenantCapability(ctx context.Context) CrossTenant
 	// with "altering the predicate is a schema change" -- true while 012 was
 	// applied unconditionally and every deployment had the OR form.
 	//
-	// 074 makes it opt-in, so the two come apart. Measured: plain predicate,
+	// 075 makes it opt-in, so the two come apart. Measured: plain predicate,
 	// connection IS a member of cleat_admin, IS_ROLEMEMBER returns 1 and the
 	// connection sees ZERO rows. Asking membership alone would report
 	// "cross-tenant claim is available" to a worker that sees nothing, which is
@@ -963,7 +963,7 @@ func (s *MSSQLStore) CheckCrossTenantCapability(ctx context.Context) CrossTenant
 		// operator to grant a membership they may already have.
 		reason := fmt.Sprintf("could not read admin.rls_predicate_form, so it is unknown whether "+
 			"dbo.fn_tenant_filter admits dbo.cleat_admin at all: %v. Apply "+
-			"migrations/mssql/074_the_admin_bypass_is_opt_in.sql if it is missing", err)
+			"migrations/mssql/075_the_admin_bypass_is_opt_in.sql if it is missing", err)
 		return CrossTenantCapability{ClaimReason: reason, SchedulesReason: reason}
 	}
 	if form != rlsPredicateAdmin {

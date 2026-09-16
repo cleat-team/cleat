@@ -9,7 +9,7 @@ import (
 )
 
 // cleat#1541. Three files have to agree on two string literals: this package's
-// constants, migration 074, and migrations/mssql/optional/cross_tenant_claim.sql.
+// constants, migration 075, and migrations/mssql/optional/cross_tenant_claim.sql.
 //
 // A typo in a migration does not fail loudly. `form = N'admn'` is refused by the
 // table's CHECK constraint at apply time, which is the good case -- but a
@@ -44,16 +44,16 @@ func TestTheMarkerValuesAreSpelledTheSameEverywhere(t *testing.T) {
 		return string(b)
 	}
 
-	seventyFour := read(filepath.Join(dir, "074_the_admin_bypass_is_opt_in.sql"))
+	seventyFour := read(filepath.Join(dir, "075_the_admin_bypass_is_opt_in.sql"))
 	optional := read(filepath.Join(dir, "optional", "cross_tenant_claim.sql"))
 
 	// The value each file WRITES, taken from the statement that writes it rather
 	// than from anywhere the word happens to appear -- both files discuss both
 	// values in their comments, so a substring search would pass on prose.
-	// Both orders, because the two files write it differently: 074 MERGEs with
+	// Both orders, because the two files write it differently: 075 MERGEs with
 	// `N'plain' AS form` (literal first) and the opt-in UPDATEs with
 	// `SET form = N'admin'` (literal second). The first version of this pattern
-	// matched only the second order and reported 074 as writing nothing -- which
+	// matched only the second order and reported 075 as writing nothing -- which
 	// is what a migration that had stopped recording would also look like.
 	writes := regexp.MustCompile(`(?i)(?:SET\s+form\s*=\s*N'([a-z]+)'|N'([a-z]+)'\s+AS\s+form)`)
 
@@ -62,7 +62,7 @@ func TestTheMarkerValuesAreSpelledTheSameEverywhere(t *testing.T) {
 		src  string
 		want string
 	}{
-		{"074_the_admin_bypass_is_opt_in.sql", seventyFour, rlsPredicatePlain},
+		{"075_the_admin_bypass_is_opt_in.sql", seventyFour, rlsPredicatePlain},
 		{"optional/cross_tenant_claim.sql", optional, rlsPredicateAdmin},
 	} {
 		m := writes.FindAllStringSubmatch(tc.src, -1)
@@ -90,7 +90,7 @@ func TestTheMarkerValuesAreSpelledTheSameEverywhere(t *testing.T) {
 	// or a third value could be written that this package reads as "not admin".
 	for _, want := range []string{rlsPredicatePlain, rlsPredicateAdmin} {
 		if !strings.Contains(seventyFour, "N'"+want+"'") {
-			t.Errorf("074 does not mention %q, so its CHECK constraint cannot be admitting it", want)
+			t.Errorf("075 does not mention %q, so its CHECK constraint cannot be admitting it", want)
 		}
 	}
 }
@@ -132,7 +132,7 @@ func TestTheOptInMigrationIsNotInTheAutoAppliedSet(t *testing.T) {
 
 // Neither migration may hard-code the policy list.
 //
-// The first draft of 074 listed eight policy names read out of 012. Thirteen are
+// The first draft of 075 listed eight policy names read out of 012. Thirteen are
 // bound to the predicate on a fresh database, and CREATE OR ALTER FUNCTION fails
 // while ANY policy still references it -- so the migration would have failed at
 // apply time. A hand-written list is also the list that goes stale the next time
@@ -140,7 +140,7 @@ func TestTheOptInMigrationIsNotInTheAutoAppliedSet(t *testing.T) {
 func TestNeitherPredicateMigrationHardCodesThePolicyList(t *testing.T) {
 	dir := migrationsDirForRLSTest(t)
 	for _, name := range []string{
-		filepath.Join(dir, "074_the_admin_bypass_is_opt_in.sql"),
+		filepath.Join(dir, "075_the_admin_bypass_is_opt_in.sql"),
 		filepath.Join(dir, "optional", "cross_tenant_claim.sql"),
 	} {
 		b, err := os.ReadFile(name)

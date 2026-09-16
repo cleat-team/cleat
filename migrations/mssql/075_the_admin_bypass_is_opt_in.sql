@@ -1,5 +1,5 @@
 -- ===========================================================================
--- 074: the cross-tenant admin bypass becomes opt-in, and the predicate says so
+-- 075: the cross-tenant admin bypass becomes opt-in, and the predicate says so
 --
 -- Why
 -- ---
@@ -95,7 +95,7 @@ GO
 DECLARE @fn INT = OBJECT_ID(N'dbo.fn_tenant_filter');
 
 IF @fn IS NULL
-    THROW 50074, N'074: dbo.fn_tenant_filter does not exist; 001_schema.sql has not been applied', 1;
+    THROW 50075, N'075: dbo.fn_tenant_filter does not exist; 001_schema.sql has not been applied', 1;
 
 IF OBJECT_ID(N'tempdb..#cleat_bound_policies') IS NOT NULL DROP TABLE #cleat_bound_policies;
 CREATE TABLE #cleat_bound_policies (policy_name SYSNAME, target_schema SYSNAME, target_name SYSNAME);
@@ -112,7 +112,7 @@ SELECT sp.name, SCHEMA_NAME(o.schema_id), o.name
 -- anything less than one means the capture failed rather than that the schema
 -- is small.
 IF (SELECT COUNT(*) FROM #cleat_bound_policies) = 0
-    THROW 50074, N'074: no security policy references dbo.fn_tenant_filter; refusing to continue rather than leave the tables unguarded', 1;
+    THROW 50075, N'075: no security policy references dbo.fn_tenant_filter; refusing to continue rather than leave the tables unguarded', 1;
 
 DECLARE @sql NVARCHAR(MAX) = N'';
 

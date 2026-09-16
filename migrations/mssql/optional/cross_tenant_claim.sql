@@ -44,7 +44,7 @@
 --
 -- TO REVERSE IT
 -- -------------
--- Re-apply migrations/mssql/074_the_admin_bypass_is_opt_in.sql. It is
+-- Re-apply migrations/mssql/075_the_admin_bypass_is_opt_in.sql. It is
 -- idempotent and restores the plain predicate and the 'plain' marker.
 -- ===========================================================================
 
@@ -59,9 +59,9 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'cleat_admin'
     THROW 50075, N'the dbo.cleat_admin role does not exist; migration 012_admin_role.sql has not been applied', 1;
 
 IF OBJECT_ID(N'admin.rls_predicate_form') IS NULL
-    THROW 50075, N'admin.rls_predicate_form does not exist; migration 074 has not been applied, and without it nothing records which predicate is installed', 1;
+    THROW 50075, N'admin.rls_predicate_form does not exist; migration 075 has not been applied, and without it nothing records which predicate is installed', 1;
 
--- Derived, not listed. See 074 for why: the hand-written list is wrong the
+-- Derived, not listed. See 075 for why: the hand-written list is wrong the
 -- moment a later migration adds a policy, and there are more of them than the
 -- file that introduced them suggests.
 DECLARE @bound TABLE (policy_name SYSNAME, target_schema SYSNAME, target_name SYSNAME);
