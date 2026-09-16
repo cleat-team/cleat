@@ -243,6 +243,68 @@ sample. `pending` was 2 while the total read 4, so the dangerous state — a com
 that is merely the registered subset — did not occur on this run. The floor was never actually
 fooled here; what was demonstrated is that the quantity it gates on moves underneath it.
 
+**That state HAS now been observed, on cleat#1673, 2026-09-16 — the paragraph above no longer
+has to reason about it hypothetically.** A watcher resumed sampling immediately after a job
+re-run and its first sample read
+
+    [try=1 total=23 pending=0 fail=0] OPEN UNKNOWN
+    [try=2 total=52 pending=1 fail=0] OPEN BLOCKED
+    ...
+    [try=7 total=52 pending=0 fail=0] OPEN CLEAN
+
+**23 of the eventual 52 checks registered, every one of them already `pass` or `skipping`, nothing
+pending and nothing failing.** By every count the parse can take, that is a complete green set. It
+is less than half the run.
+
+Note where it came from, because it is reachable on purpose and not only by luck of timing: the
+window opened when a re-run began re-registering checks, so *anything that restarts jobs* — a
+re-run, a push, a body edit — reopens it. A watcher that starts or resumes near one of those is
+sampling into exactly this state rather than merely risking it.
+
+**What refused it was `mergeStateStatus`, which read `UNKNOWN` rather than `CLEAN`.** The
+two-consecutive-samples rule would have refused independently one sample later, when `pending`
+went back to 1 — so both halves of the recommendation above were load-bearing and either alone
+would have sufficed here. A gate written on `pending == 0 && fail == 0`, with or without a floor,
+merges at sample 1.
+
+A floor does not help, and this is the clearest argument against tuning one: 23 clears any floor
+low enough to be portable, and the correct total was not knowable at that moment by anything
+sampling the PR. Keep the floor for a total of zero and gate on the state field.
+
+**And the INVERSE was observed the same day, which together with the above means the count is not
+a weak proxy for mergeability — it is not a proxy for it at all.** On cleat#1355, `total=82`,
+`pending=0`, `fail=0`, all 32 of 32 required contexts enumerated individually against
+`branches/develop/protection` with SUCCESS as their latest run — and `BLOCKED` for fifty
+consecutive samples.
+
+| | cleat#1673 | cleat#1355 |
+|---|---|---|
+| `total` | 23 of an eventual 52 | 82, complete |
+| `pending` / `fail` | 0 / 0 | 0 / 0 |
+| truth | not yet registered | genuinely not mergeable |
+| `mergeStateStatus` | `UNKNOWN` | `BLOCKED` |
+
+The same predicate `pending == 0 && fail == 0` merges in both — early in one, and in the other
+something GitHub is refusing. Opposite errors, one gate catching both.
+
+**cleat#1355's cause is the cancelled twin already described under "A PR can read all-green and
+still refuse to merge", and it is worth following the diagnosis rather than only citing it,**
+because the check that found it is not the one a careful reader reaches for. Enumerating the
+required contexts is what both sessions did and it cannot work here: every required context is
+present and its LATEST run is success. Measured on `431737a0`:
+
+    gh run list --commit <sha> --limit 100 --json name --jq '.[].name' | sort | uniq -d
+    # CI/CD Pipeline, Cross-Language E2E, Multi-DB CI,
+    # Plugin Harness Tests, Tier 1 Gate, Tier 2 Gate
+
+    gh api "repos/<o>/<r>/commits/<sha>/check-runs?per_page=100" --jq '.check_runs[].conclusion' |
+      sort | uniq -c
+    # 37 cancelled, 40 success, 4 skipped, 1 neutral
+
+Two run sets created **one second apart** — 03:47:40Z and 03:47:41Z — so the ruleset evaluates the
+cancelled member of each pair while `gh pr checks` reports only the newest per name. The repair is
+a new SHA, not a re-run.
+
 The second, and it is the mirror image: **a floor tuned to one repo is not a floor in another.**
 That watcher was carried over from this repo with its 40 hardcoded, and `cleat-ports` runs
 **five** checks (`gh pr checks <pr> --repo cleat-team/cleat-ports | grep -c .`). A floor of 40
