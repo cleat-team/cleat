@@ -215,9 +215,9 @@ def parse_tables(migrations_dir):
         src, unterminated = strip_sql_comments(open(path, encoding="utf-8").read())
         for lineno in unterminated:
             errors.append("%s:%d: a /* block comment is never closed, so the "
-                          "rest of the file was discarded. Postgres and SQL "
-                          "Server both reject such a file."
-                          % (os.path.basename(path), lineno))
+                          "rest of the file was discarded. %s"
+                          % (os.path.basename(path), lineno,
+                             unterminated_hint(migrations_dir)))
 
         for m in re.finditer(
             CREATE_TABLE_RE,
@@ -328,6 +328,32 @@ def split_identifier(raw):
     parts = [next(p for p in t if p) for t in
              re.findall(r"\[([^\]]+)\]|`([^`]+)`|\"([^\"]+)\"|([A-Za-z0-9_]+)", raw)]
     return parts
+
+
+def unterminated_hint(migrations_dir):
+    """Which way to look when a block comment does not close.
+
+    The dialect decides, and getting this wrong sends the reader to the wrong
+    file. The first version said "Postgres and SQL Server both reject such a
+    file" unconditionally -- true for those two, FALSE for MySQL, and MySQL is
+    the case that produces it most often. Measured:
+
+        /* see engine/*.go */ CREATE TABLE widgets (id INT PRIMARY KEY);
+        mysql 8.0     table created            -> the file is VALID
+        postgres 16   ERROR: unterminated /*   -> the file is rejected
+
+    MySQL does not nest, so it closes that comment at the first */. This
+    scanner counts nesting, which is right for Postgres and T-SQL. So on a
+    MySQL migration the file is fine and the SCANNER is the thing that
+    disagrees with the engine -- and the old message sent its author to audit a
+    correct migration. That is the deliberate residue left by not doing
+    per-dialect counting, and this is the one place anyone will meet it.
+    """
+    if os.path.basename(migrations_dir.rstrip(os.sep)).lower() == "mysql":
+        return ("MySQL closes this comment at the first */ and accepts the "
+                "file; this scanner counts nesting and does not, so the "
+                "migration may well be correct.")
+    return "Postgres and SQL Server both reject such a file."
 
 
 def qualify(raw):
@@ -770,6 +796,15 @@ SIBLING_CASES = [
      "public.widgets\tmember\n", 2, "parsed 0 tables"),
 ]
 
+# The unterminated-comment diagnosis is dialect-specific, and pointing it the
+# wrong way sends the reader to audit a correct migration. MySQL closes the
+# comment at the first */ and accepts the file; this scanner counts nesting and
+# does not, so on MySQL the SCANNER is what disagrees with the engine.
+DIALECT_HINT_CASES = [
+    ("mysql", "MySQL closes this comment at the first */"),
+    ("mssql", "Postgres and SQL Server both reject"),
+]
+
 
 def self_test():
     import shutil
@@ -820,6 +855,28 @@ def self_test():
                 # how a guard passes a case it never actually examined.
                 print("SELF-TEST FAIL [%s]: exit %d as expected, but the output "
                       "never says %r\n%s" % (name, code, want_text, blob),
+                      file=sys.stderr)
+                fails += 1
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    for dialect, want in DIALECT_HINT_CASES:
+        ran += 1
+        tmp = tempfile.mkdtemp()
+        try:
+            d = os.path.join(tmp, dialect)
+            os.makedirs(d)
+            with open(os.path.join(d, "001.sql"), "w") as fh:
+                fh.write("/* see engine/*.go */\n" + CONFORMING)
+            _, errs = parse_tables(d)
+            blob = "\n".join(errs)
+            if not errs:
+                print("SELF-TEST FAIL [%s unterminated hint]: no error at all"
+                      % dialect, file=sys.stderr)
+                fails += 1
+            elif want not in blob:
+                print("SELF-TEST FAIL [%s unterminated hint]: errored, but the "
+                      "message never says %r\n    %s" % (dialect, want, blob),
                       file=sys.stderr)
                 fails += 1
         finally:

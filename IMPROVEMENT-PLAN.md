@@ -14090,6 +14090,21 @@ unnested in MySQL's reading and depth 2 to the counter, so it does not "close at
 way". Per-dialect counting would be airtight and is not worth it now that the residue is loud.
 A plain `/* … */` was run on each engine first as a positive control.
 
+**And the diagnosis that fix emits was itself wrong for one dialect.** It said *"Postgres and SQL
+Server both reject such a file"* unconditionally. True for those two; **false for MySQL, which is
+the dialect that produces it.** Measured directly:
+
+    /* see engine/*.go */ CREATE TABLE widgets (id INT PRIMARY KEY);
+    mysql 8.0     table created            -> the file is VALID
+    postgres 16   ERROR: unterminated /*   -> the file is rejected
+
+MySQL does not nest, so it closes that comment at the first `*/`. On a MySQL migration the file is
+fine and **the scanner is what disagrees with the engine** — and the message sent its author to
+audit a correct migration. A failure message that asserts a cause nobody checked is the same fault
+as a check that cannot fail, moved one step downstream: the run it fires on need not be the run it
+describes. The hint is now chosen by the directory being read, which also documents the residue
+left by not doing per-dialect counting, at the only place anyone will meet it.
+
 **The falsification of that fix is the clearest case in this section for asserting on TEXT and not
 only on status.** With the unterminated check disabled, both new self-test cases still exit 2 —
 *"parsed 0 tables"*, the right status for entirely the wrong reason. Only the assertion that the
