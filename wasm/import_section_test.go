@@ -31,9 +31,16 @@ func TestReadImportSection_ParsesEveryImport(t *testing.T) {
 		wantHas   wasmImport
 	}{
 		{
+			// 3 until cleat#1660 regenerated this fixture. The binary was
+			// frozen on 2026-09-04, before #1240 added cleat_defer_phase, so
+			// this count was pinned to a shape the SDK had stopped producing
+			// and the test passed by measuring a stale artefact. The count
+			// itself is not the subject here -- what this test is for is that
+			// a LATER import is reached at all -- but leave it exact: a
+			// deliberately loose bound would have hidden the same drift.
 			name:      "assemblyscript",
 			path:      "../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm",
-			wantCount: 3,
+			wantCount: 4,
 			wantFirst: wasmImport{module: "env", field: "abort"},
 			wantHas:   wasmImport{module: "env", field: "plugin_call_streaming"},
 		},
