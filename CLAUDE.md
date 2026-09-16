@@ -243,6 +243,34 @@ sample. `pending` was 2 while the total read 4, so the dangerous state — a com
 that is merely the registered subset — did not occur on this run. The floor was never actually
 fooled here; what was demonstrated is that the quantity it gates on moves underneath it.
 
+**That state HAS now been observed, on cleat#1673, 2026-09-16 — the paragraph above no longer
+has to reason about it hypothetically.** A watcher resumed sampling immediately after a job
+re-run and its first sample read
+
+    [try=1 total=23 pending=0 fail=0] OPEN UNKNOWN
+    [try=2 total=52 pending=1 fail=0] OPEN BLOCKED
+    ...
+    [try=7 total=52 pending=0 fail=0] OPEN CLEAN
+
+**23 of the eventual 52 checks registered, every one of them already `pass` or `skipping`, nothing
+pending and nothing failing.** By every count the parse can take, that is a complete green set. It
+is less than half the run.
+
+Note where it came from, because it is reachable on purpose and not only by luck of timing: the
+window opened when a re-run began re-registering checks, so *anything that restarts jobs* — a
+re-run, a push, a body edit — reopens it. A watcher that starts or resumes near one of those is
+sampling into exactly this state rather than merely risking it.
+
+**What refused it was `mergeStateStatus`, which read `UNKNOWN` rather than `CLEAN`.** The
+two-consecutive-samples rule would have refused independently one sample later, when `pending`
+went back to 1 — so both halves of the recommendation above were load-bearing and either alone
+would have sufficed here. A gate written on `pending == 0 && fail == 0`, with or without a floor,
+merges at sample 1.
+
+A floor does not help, and this is the clearest argument against tuning one: 23 clears any floor
+low enough to be portable, and the correct total was not knowable at that moment by anything
+sampling the PR. Keep the floor for a total of zero and gate on the state field.
+
 The second, and it is the mirror image: **a floor tuned to one repo is not a floor in another.**
 That watcher was carried over from this repo with its 40 hardcoded, and `cleat-ports` runs
 **five** checks (`gh pr checks <pr> --repo cleat-team/cleat-ports | grep -c .`). A floor of 40
