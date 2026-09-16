@@ -79,7 +79,51 @@ updates:
       - "dependencies"
       - "javascript"
     open-pull-requests-limit: 10
+    ignore:
+      # TypeScript 7 is held, not skipped. No svelte-check release supports it:
+      # 4.7.6 (latest) declares `typescript: "^5.0.0 || ^6.0.0"`, and `npm run
+      # check` under TS 7 dies inside svelte-check's own bundle with
+      # `Cannot read properties of undefined (reading 'useCaseSensitiveFileNames')`
+      # before checking a single file. cleat#1357 sat red for that reason and
+      # could not have gone green at any point.
+      #
+      # REMOVE THIS when svelte-check's peerDependencies admit ^7.0.0:
+      #   npm view svelte-check@latest peerDependencies.typescript
+      # Nothing else needs to change; the group below will then carry TS 7 up
+      # together with the svelte-check that accepts it.
+      - dependency-name: "typescript"
+        versions: ["7.x"]
     groups:
+      # The web toolchain moves as a set or not at all. typescript,
+      # svelte-check, vitest, jsdom and undici are one dependency graph, and
+      # proposing corners of it individually produces PRs that cannot go green
+      # at any point in the future rather than PRs that are merely behind:
+      # cleat#1359 (jsdom 25->30) failed on `webidl.util.markAsUncloneable is
+      # not a function`, which is jsdom 30 + undici 8 under vitest 4, and was
+      # fixed by the vitest 5 bump that was sitting in a separate PR. cleat#1709.
+      #
+      # This group is FIRST on purpose. Dependabot places a dependency in the
+      # first group whose patterns match, and npm-minor-and-patch below has no
+      # `patterns` key, so it matches everything -- listing it first would
+      # swallow the minor and patch updates of these packages and split the set
+      # again by update-type instead of by name.
+      web-toolchain:
+        patterns:
+          - "typescript"
+          - "svelte"
+          - "svelte-check"
+          - "@sveltejs/*"
+          - "@tsconfig/svelte"
+          - "vite"
+          - "vitest"
+          - "@vitest/*"
+          - "jsdom"
+          - "undici"
+          - "@testing-library/*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
       npm-minor-and-patch:
         update-types:
           - "minor"
