@@ -13005,3 +13005,53 @@ Files: `migrations/postgres/082_a_dropped_tenants_memory_profile_goes_with_it.sq
 `engine/a_dropped_tenants_rows_all_go_with_it_test.go`,
 `cmd/cleatctl/the_preview_names_every_tenant_owned_table_test.go`,
 `cmd/cleatctl/droptenant.go`, `engine/drop_tenant_test.go`.
+### 3.327 A coverage guard compared two different questions, and only job ordering kept it green — ✅ **FIXED 2026-09-16** (found while landing §3.325)
+
+`TestEveryShippedTenantPolicyExistsInTheBuiltDatabase` parses
+`migrations/mssql/*.sql` for tables bound to **`dbo.fn_tenant_filter`**, then reads the built
+database with
+
+```sql
+SELECT DISTINCT t.name FROM sys.security_predicates sp JOIN sys.tables t ON ...
+```
+
+— **every** predicate, whatever function it calls. Two sides, two questions. That was harmless for
+as long as the schema had exactly one predicate function, which was true when the test was written
+and stopped being true with §3.216's plugin policies: `dbo.fn_plugin_tenant_filter` is installed
+from `plugin/migration.go` at plugin-migration time, so no file in `migrations/mssql` binds it and
+it cannot appear in the `want` set.
+
+The result is that on any database where plugin migrations have run, ~25 correct, deliberate plugin
+predicates were reported as *"the database has a tenant filter predicate on [...], which no
+migration binds one to"* — a schema disagreement that is not one.
+
+**It stayed green in CI on an ordering, not an invariant.** Every job that runs both sweeps
+`./engine/...` before `./plugins/...`, so the guard runs before the plugin tables exist. Nothing
+states that dependency and nothing enforces it; it failed twice locally the first time a database
+was reused, which is how it was found.
+
+**The fix is to make both sides name the same function**, and the anchor matters:
+`predicate_definition` reads `([dbo].[fn_tenant_filter]([tenant_id]))`, so the match is on
+`\[dbo\]\.\[fn_tenant_filter\]` — brackets included. A bare substring test for `fn_tenant_filter`
+is one rename away from also matching `fn_plugin_tenant_filter`; it does not today only because the
+`fn_` happens not to be adjacent. Brackets are where the catalogue puts an identifier's boundary,
+which is the same move as anchoring on a declaration site rather than on a name.
+
+**The narrowing is REPORTED, not applied silently.** A passing run now logs what it excluded and
+why. A guard that quietly shrinks its own population reads as covering more than it does — and this
+one shrank from "every predicate" to "the engine's predicate", which is the right scope and is
+worth seeing.
+
+**Falsified three ways**, the third being the one a careless fix would fail:
+
+| mutation | result |
+|---|---|
+| the pre-fix test, same database | RED — reports the plugin table as a disagreement |
+| a real engine policy dropped | RED — still names `workflow_tags`, so the guard is not blinded |
+| a **plugin** predicate added to `workflow_tags` while its engine policy is missing | RED — still names `workflow_tags` |
+
+The third is the axis test. A fix that excluded *tables which also carry a plugin predicate*,
+rather than *predicates on another function*, would pass the first two and fail this one silently —
+it would let a plugin predicate stand in for a missing engine policy on the same table.
+
+Files: `engine/mssql_policy_coverage_test.go`.
