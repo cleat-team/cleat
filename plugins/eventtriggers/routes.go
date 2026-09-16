@@ -30,9 +30,12 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 // ---- types ----
 
 type publishEventRequest struct {
-	ID        string         `json:"id"`
-	EventType string         `json:"event_type"`
-	Data      map[string]any `json:"data"`
+	ID        string `json:"id"`
+	EventType string `json:"event_type"`
+	// RAW, so the published body reaches storage as the publisher wrote it.
+	// Decoding into a map[string]any here rewrote any number outside float64's
+	// exact range before PublishEvent was even called. cleat#1641.
+	Data json.RawMessage `json:"data"`
 }
 
 type publishEventResponse struct {
@@ -119,8 +122,8 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Data == nil {
-		req.Data = make(map[string]any)
+	if len(req.Data) == 0 {
+		req.Data = json.RawMessage("{}")
 	}
 
 	// Dispatch through the core publish pipeline — stores the event,
@@ -138,18 +141,28 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 
 // mergeInputAndTemplate builds the workflow input JSON by starting with the
 // subscription's input_template and overlaying the published event data.
-func mergeInputAndTemplate(tmpl json.RawMessage, eventData map[string]any) (json.RawMessage, error) {
+//
+// BOTH SIDES ARE RAW and both are decoded without narrowing. The template
+// degraded independently of the event before cleat#1641: a subscription
+// carrying {"account":123456789012345678901234567890} in its input_template
+// handed the workflow 1.2345678901234568e+29 even when the published event
+// contained no number at all. Fixing only the event would have left that, and
+// a test that published a large number would not have noticed.
+func mergeInputAndTemplate(tmpl, eventData json.RawMessage) (json.RawMessage, error) {
 	// Start with input_template as base.
-	base := make(map[string]any)
-	if len(tmpl) > 0 {
-		if err := json.Unmarshal(tmpl, &base); err != nil {
-			// If template is not a JSON object, ignore it.
-			base = make(map[string]any)
-		}
+	base, err := decodeJSONObject(tmpl)
+	if err != nil {
+		// If template is not a JSON object, ignore it.
+		base = make(map[string]any)
+	}
+
+	overlay, err := decodeJSONObject(eventData)
+	if err != nil {
+		return nil, fmt.Errorf("event data is not a JSON object: %w", err)
 	}
 
 	// Overlay event data (event data takes precedence for duplicate keys).
-	for k, v := range eventData {
+	for k, v := range overlay {
 		base[k] = v
 	}
 
@@ -383,13 +396,16 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse event data back into map for dispatch.
-	var eventData map[string]any
-	if err := json.Unmarshal(eventDataRaw, &eventData); err != nil {
-		eventData = make(map[string]any)
+	// Re-dispatch to matching subscriptions, forwarding the STORED BYTES.
+	// This path used to decode them into a map[string]any first, so an event
+	// whose storage was exact was degraded again on every retry -- a fix
+	// confined to the publish path would have left the number wrong here and
+	// nothing would have said so. cleat#1641.
+	eventData := json.RawMessage(eventDataRaw)
+	if len(eventData) == 0 {
+		eventData = json.RawMessage("{}")
 	}
 
-	// Re-dispatch to matching subscriptions.
 	matched, err := triggerMatchingWorkflows(r.Context(), p.db, p.logger, p.env, eventID, tid, eventType, eventData)
 	if err != nil {
 		p.logger.Error("event-triggers: retry dispatch", "error", err)

@@ -338,7 +338,7 @@ func TestAwaitEvent_InputValidation(t *testing.T) {
 func TestMergeInputAndTemplate(t *testing.T) {
 	t.Run("empty template uses event data only", func(t *testing.T) {
 		tmpl := json.RawMessage("")
-		data := map[string]any{"order_id": "123", "amount": 99.5}
+		data := json.RawMessage(`{"order_id": "123", "amount": 99.5}`)
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
@@ -359,7 +359,7 @@ func TestMergeInputAndTemplate(t *testing.T) {
 
 	t.Run("template with event data merge", func(t *testing.T) {
 		tmpl := json.RawMessage(`{"source": "webhook", "version": "1.0"}`)
-		data := map[string]any{"order_id": "456", "amount": 50.0}
+		data := json.RawMessage(`{"order_id": "456", "amount": 50.0}`)
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
@@ -386,7 +386,7 @@ func TestMergeInputAndTemplate(t *testing.T) {
 
 	t.Run("event data overrides template on key conflict", func(t *testing.T) {
 		tmpl := json.RawMessage(`{"priority": "low", "source": "template"}`)
-		data := map[string]any{"priority": "high", "extra": "value"}
+		data := json.RawMessage(`{"priority": "high", "extra": "value"}`)
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
@@ -410,7 +410,7 @@ func TestMergeInputAndTemplate(t *testing.T) {
 
 	t.Run("invalid template JSON is silently ignored", func(t *testing.T) {
 		tmpl := json.RawMessage(`{not valid}`)
-		data := map[string]any{"key": "value"}
+		data := json.RawMessage(`{"key": "value"}`)
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
@@ -528,7 +528,7 @@ func TestTypesJSONRoundtrip(t *testing.T) {
 		original := publishEventRequest{
 			ID:        "123e4567-e89b-12d3-a456-426614174000",
 			EventType: "order.created",
-			Data:      map[string]any{"amount": 99.5, "currency": "USD"},
+			Data:      json.RawMessage(`{"amount":99.5,"currency":"USD"}`),
 		}
 
 		data, err := json.Marshal(original)
@@ -547,11 +547,10 @@ func TestTypesJSONRoundtrip(t *testing.T) {
 		if decoded.EventType != original.EventType {
 			t.Errorf("EventType: got %q, want %q", decoded.EventType, original.EventType)
 		}
-		if decoded.Data["amount"] != 99.5 {
-			t.Errorf("Data.amount: got %v, want 99.5", decoded.Data["amount"])
-		}
-		if decoded.Data["currency"] != "USD" {
-			t.Errorf("Data.currency: got %v, want USD", decoded.Data["currency"])
+		// Data is raw JSON since cleat#1641, so the round trip is exact and
+		// this compares the BYTES rather than two decoded values.
+		if string(decoded.Data) != string(original.Data) {
+			t.Errorf("Data: got %s, want %s", decoded.Data, original.Data)
 		}
 	})
 

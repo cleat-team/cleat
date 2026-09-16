@@ -105,12 +105,15 @@ func (p *Plugin) processBatch(parentCtx context.Context) {
 		"duration_ms", elapsed.Milliseconds())
 }
 
-// retryEvent processes a single unprocessed event: parses its data, matches
-// subscriptions, dispatches workflows, and updates the event status.
+// retryEvent processes a single unprocessed event: checks that its stored data
+// is a JSON object, matches subscriptions, dispatches workflows, and updates
+// the event status.
 func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, tenantID uuid.UUID, eventType string, eventDataJSON []byte, retryCount int) {
-	// Parse event data back into the map expected by the matching logic.
-	var eventData map[string]any
-	if err := json.Unmarshal(eventDataJSON, &eventData); err != nil {
+	// Validate the stored bytes without adopting the decode's result: the
+	// matching logic is given the BYTES, so a number that storage preserved is
+	// not re-narrowed on the retry path. cleat#1641.
+	var probe map[string]any
+	if err := json.Unmarshal(eventDataJSON, &probe); err != nil {
 		p.logger.Error("event-triggers: unmarshal event data for retry",
 			"event_id", eventID, "error", err)
 		p.db.Exec(ctx, `
@@ -122,7 +125,7 @@ func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, tenantID uui
 	}
 
 	// Look up matching subscriptions and dispatch workflows.
-	matched, err := triggerMatchingWorkflows(ctx, p.db, p.logger, p.env, eventID, tenantID, eventType, eventData)
+	matched, err := triggerMatchingWorkflows(ctx, p.db, p.logger, p.env, eventID, tenantID, eventType, json.RawMessage(eventDataJSON))
 	if err != nil {
 		p.logger.Warn("event-triggers: retry failed to query subscriptions",
 			"event_id", eventID, "error", err)
