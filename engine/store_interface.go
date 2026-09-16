@@ -649,6 +649,31 @@ type WorkflowStore interface {
 	// are excluded from the count.
 	GetChildCount(ctx context.Context, parentWorkflowID string) (int, error)
 
+	// OriginalChildRunIDs returns the run IDs of children this parent STARTED,
+	// excluding runs that exist only because a child continued as new.
+	//
+	// It exists for one check: every child a parent started has a
+	// child_workflow event in that parent's history, written ATOMICALLY with
+	// the child row (StartChildWorkflowAtomic -- one transaction, both
+	// INSERTs, on all three dialects). A child with no such event is therefore
+	// not a race; it means the event was removed after the fact, and the parent
+	// is about to start a duplicate because replay could not see it. That is
+	// cleat#1661.
+	//
+	// EXCLUDING CONTINUED RUNS IS NOT AN OPTIMISATION. Continue-as-new INHERITS
+	// parent_workflow_id (engine/store_lifecycle.go:307, deliberately -- a
+	// child that continues is still its parent's child, cleat#955) and records
+	// NO new event in the parent. So a parent whose single child continued
+	// three times has four rows pointing at it and one child_workflow event,
+	// and a check that did not exclude them would report three orphans on a
+	// perfectly healthy workflow.
+	//
+	// Compaction needs no such exclusion, and that was checked rather than
+	// assumed: CompactionState preserves child_workflow events WITH their RunID
+	// (engine/compaction.go:713), and buildFullHistoryFromCompaction puts them
+	// back, so a compacted parent's history still names every child it started.
+	OriginalChildRunIDs(ctx context.Context, parentWorkflowID string) ([]string, error)
+
 	// GetConcurrencyKeyCount returns the number of non-expired concurrency keys
 	// held by the given workflow. This is used for per-workflow concurrency key
 	// quota enforcement. Keys whose expires_at is in the past are excluded.

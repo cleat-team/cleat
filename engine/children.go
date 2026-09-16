@@ -222,6 +222,22 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 			TimestampMs:       time.Now().UnixMilli(),
 		}
 
+		// AN ORPHAN CHILD MEANS REPLAY COULD NOT SEE A CHILD WE ALREADY
+		// STARTED, and we are about to start a duplicate. cleat#1661.
+		//
+		// Checked HERE and not at replay entry, deliberately. This is the
+		// instant the defect acts, and it is the only instant where the cost is
+		// proportionate: most workflows never start a child, and a check at
+		// replay entry would charge every one of them for a question that
+		// cannot apply to them. This path is already opening a transaction.
+		//
+		// WHY AN ORPHAN IS ANOMALOUS RATHER THAN A RACE. The child row and the
+		// parent's child_workflow event are written by ONE transaction --
+		// StartChildWorkflowAtomic, both INSERTs, on all three dialects -- so
+		// "the child exists but the event does not" is not a window that
+		// ordinary crash timing can open. Something removed it.
+		s.reportOrphanChildren(ctx, parentID)
+
 		var err error
 		s.engine.log().InfoContext(ctx, "calling StartChildWorkflowAtomic",
 			"name", name, "parent_id", parentID, "child_version", childVersion)
@@ -920,4 +936,65 @@ func (s *execSession) runDetached(ctx context.Context, m api.Module, name, input
 		return n, 0
 	}
 	return 0, 0
+}
+
+// reportOrphanChildren names a child this parent started whose child_workflow
+// event is absent from the history being replayed. cleat#1661.
+//
+// IT REPORTS AND DOES NOT REFUSE, and that is a decision rather than caution.
+// The parent is mid-execution: refusing the start fails a workflow that is
+// otherwise healthy, and the orphan is evidence of something that ALREADY
+// happened -- the duplicate is a consequence, not the cause. Turning a silent
+// wrong answer into a loud one is the whole ask of cleat#1661; turning it into
+// a failure is a separate decision with a blast radius nobody has measured.
+//
+// A FAILED LOOKUP SAYS NOTHING. If the query errors we do not report, because
+// "no children found" and "I could not ask" are the same empty slice, and a
+// check that cannot tell those apart must not speak -- the same rule
+// reportShortReplayHistory follows for an unread event count.
+func (s *execSession) reportOrphanChildren(ctx context.Context, parentID string) {
+	if s.engine == nil || s.engine.childWfStore == nil {
+		return
+	}
+	lister, ok := s.engine.childWfStore.(interface {
+		OriginalChildRunIDs(context.Context, string) ([]string, error)
+	})
+	if !ok {
+		return
+	}
+	started, err := lister.OriginalChildRunIDs(ctx, parentID)
+	if err != nil || len(started) == 0 {
+		return
+	}
+
+	known := make(map[string]struct{}, len(s.history))
+	for _, rec := range s.history {
+		if rec.EventType == EventTypeChildWorkflow && rec.RunID != "" {
+			known[rec.RunID] = struct{}{}
+		}
+	}
+
+	var orphans []string
+	for _, id := range started {
+		if _, ok := known[id]; !ok {
+			orphans = append(orphans, id)
+		}
+	}
+	if len(orphans) == 0 {
+		return
+	}
+
+	if s.engine.Metrics != nil {
+		s.engine.Metrics.RecordReplayShortHistory(ctx)
+	}
+	s.engine.log().ErrorContext(ctx,
+		"this parent already started a child that its history does not record, and is about to start another",
+		"workflow_id", s.workflowID, "tenant_id", s.tenantID,
+		"orphan_child_run_ids", strings.Join(orphans, ","),
+		"children_started", len(started),
+		"child_events_in_history", len(known),
+		"step", s.stepCount,
+		"note", "cleat#1661: the child row and the parent's child_workflow event are written in ONE "+
+			"transaction, so this is not crash timing -- the event was removed after the fact. The "+
+			"duplicate child about to be started is the consequence, not the cause.")
 }

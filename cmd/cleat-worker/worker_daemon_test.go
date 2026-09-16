@@ -3387,6 +3387,18 @@ func (m *mockStore) AdminReReplay(ctx context.Context, workflowID string, genera
 func (m *mockStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	return 0, nil
 }
+
+// OriginalChildRunIDs returns nothing: no test in this package is about
+// cleat#1661's orphan check, and a double that invented children would make the
+// check fire on unrelated tests. Recorded as a choice rather than left as
+// another empty return.
+//
+// Four other doubles in this package embed *mockStore -- crossTenantMockStore,
+// unsupportedCrossTenantStore, holderAwareStore, deferPhaseStore -- so this one
+// method satisfies all five.
+func (m *mockStore) OriginalChildRunIDs(context.Context, string) ([]string, error) {
+	return nil, nil
+}
 func (m *mockStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
 	return 0, nil
 }

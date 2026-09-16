@@ -1559,6 +1559,28 @@ func (s *MySQLStore) GetChildCount(ctx context.Context, parentWorkflowID string)
 	return count, nil
 }
 
+// OriginalChildRunIDs implements WorkflowStore. See the interface for why
+// continued runs are excluded.
+func (s *MySQLStore) OriginalChildRunIDs(ctx context.Context, parentWorkflowID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE parent_workflow_id = ? AND continued_from IS NULL AND tenant_id = ?
+	`, parentWorkflowID, s.tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("original child run ids for %s: %w", parentWorkflowID, err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("original child run ids for %s: scan: %w", parentWorkflowID, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // GetConcurrencyKeyCount returns the number of non-expired concurrency keys
 // held by the given workflow.
 func (s *MySQLStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
