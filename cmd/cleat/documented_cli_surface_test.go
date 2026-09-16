@@ -56,7 +56,6 @@ var docBaseline = map[string]string{
 	"docs/contributor/plugins/plugin-migration-guide.md|cleat tenant":   "`cleatctl drop-tenant` is the nearest real command",
 	"docs/contributor/plugins/plugin-migration-guide.md|cleat migrate":  "the same absent subcommand the upgrade runbook had",
 	"docs/contributor/plugins/plugin-security.md|cleat config":          "no config subcommand on either binary",
-	"docs/operations/abi-migration.md|cleat start":                      "`cleat run` and `cleat dev` are the nearest real commands",
 	"examples/third-party-plugin/README.md|cleat workflow":              "no workflow subcommand on either binary",
 
 	// `cleatctl <sub>` -- found by this guard, not by the issue that prompted
