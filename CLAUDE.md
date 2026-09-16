@@ -320,17 +320,42 @@ because the check that found it is not the one a careful reader reaches for. Enu
 required contexts is what both sessions did and it cannot work here: every required context is
 present and its LATEST run is success. Measured on `431737a0`:
 
-    gh run list --commit <sha> --limit 100 --json name --jq '.[].name' | sort | uniq -d
-    # CI/CD Pipeline, Cross-Language E2E, Multi-DB CI,
-    # Plugin Harness Tests, Tier 1 Gate, Tier 2 Gate
-
-    gh api "repos/<o>/<r>/commits/<sha>/check-runs?per_page=100" --jq '.check_runs[].conclusion' |
-      sort | uniq -c
-    # 37 cancelled, 40 success, 4 skipped, 1 neutral
+    gh api --paginate "repos/<o>/<r>/commits/<FULL-40-char-sha>/check-runs?per_page=100" \
+      --jq '.check_runs[].conclusion' | sort | uniq -c
+    # 55 cancelled, 1 neutral, 6 skipped, 59 success   (re-derived 2026-09-16)
 
 Two run sets created **one second apart** — 03:47:40Z and 03:47:41Z — so the ruleset evaluates the
 cancelled member of each pair while `gh pr checks` reports only the newest per name. The repair is
 a new SHA, not a re-run.
+
+**Both halves of that command carry a trap, and this file published both of them.** It used to
+give a name-based detector — `gh run list --commit <sha> … | sort | uniq -d` — beside a
+`?per_page=100` conclusion count reading *37 cancelled*. Measured 2026-09-16 against this same
+`431737a0` as known-positive and `cab6353741afd57203d338f06b79b24334baee34` (cleat#1699, merged
+cleanly) as negative control, there are **three** ways it says "no twin" (cleat#1703):
+
+| | what it does | why it is silent |
+|---|---|---|
+| an **abbreviated** SHA | `gh run list --commit` returns **0 runs** | `head_sha=` is an exact string match, not a prefix resolve — `total_count` is 0, not an error |
+| **`uniq -d` on names** | reports `CLA Assistant` as a twin | `pull_request_target`'s `closed` type fires a legitimate second run at merge |
+| **`?per_page=100`** | reported 38 cancelled of **121** | the page cap truncates, and nothing says so |
+
+The first is the expensive one, because **the sibling endpoint resolves a prefix perfectly well** —
+`…/commits/<abbrev>/check-runs` and `…/commits/<full>/check-runs` both return 49 on cleat#1699's
+head — so nothing in the surrounding practice teaches you that the other one cannot. And every
+place this was written, here included, spelled the argument `<sha>`, which is what
+`git log --oneline` and `git rev-parse --short` hand you.
+
+The second is the one that lands where it hurts. Correlating `merged_at` against CLA run times on
+four PRs merged 2026-09-16 — #1695, #1698, #1700, #1699 — the second run starts **2 to 3 seconds
+after the merge**, every time, and both members are `success`. So a name-only detector reports a
+twin on a healthy PR at *precisely* the last sample a watcher polling to `MERGED` takes. It is
+invisible on an open PR, which is why cleat#1688 recorded "plus one `pull_request_target` for CLA
+Assistant" — singular, and correct, because those PRs had not merged.
+
+**Prefer the conclusion over the name**: it names the hazard instead of a proxy for it, resolves an
+abbreviated SHA, and has no benign-duplicate class. Non-zero `cancelled` is the hazard — 55 on the
+known-positive, 0 on the control.
 
 The second, and it is the mirror image: **a floor tuned to one repo is not a floor in another.**
 That watcher was carried over from this repo with its 40 hardcoded, and `cleat-ports` runs
@@ -840,12 +865,20 @@ shows only the success; the ruleset evaluates the other one. Measured 2026-09-14
 
 **The required-vs-reported `comm` check does not catch this**, which matters because that is the
 remedy this file gives two paragraphs up for a *missing* context. Here every required context is
-present and passing. The tell is a duplicated workflow name:
+present and passing. The tell is a `cancelled` conclusion on the SHA:
 
-    gh run list --commit <sha> --limit 40 --json name --jq '.[].name' | sort | uniq -d
+    gh api --paginate "repos/<o>/<r>/commits/<FULL-40-char-sha>/check-runs?per_page=100" \
+      --jq '.check_runs[].conclusion' | sort | uniq -c
 
-Blank means one clean set. The repair is a new SHA — rebase and one `--force-with-lease` — not a
-re-run, which risks a third set that cancels the good one.
+No `cancelled` line means one clean set. The repair is a new SHA — rebase and one
+`--force-with-lease` — not a re-run, which risks a third set that cancels the good one.
+
+**This said `gh run list --commit <sha> … | uniq -d` until 2026-09-16, and a duplicated workflow
+NAME is the wrong tell in two directions** (cleat#1703, measured; the long form is under *"cleat#1355's
+cause is the cancelled twin"* above). It over-reports, because `CLA Assistant` runs a second time
+at merge by design. And it under-reports to **nothing at all** if the SHA is abbreviated, since
+`gh run list --commit` filters on `head_sha=` as an exact string. Use the full 40 characters, and
+ask about the conclusion rather than the name.
 
 **And `gh pr merge` exits 0 whether it QUEUED or REFUSED.** Never for "merged". With `--squash` it
 prints only `! The merge strategy for develop is set by the merge queue`; bare it prints nothing.
