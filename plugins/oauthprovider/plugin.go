@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -34,6 +35,23 @@ type Plugin struct {
 	logger     *slog.Logger
 	httpClient *http.Client
 	dialect    plugin.Dialect
+
+	// OIDC discovery + JWKS cache for the generic `oidc` provider (cleat#1582).
+	// Reached through p.cache() rather than directly: several tests construct a
+	// Plugin without calling Init, and a nil map there would panic inside a
+	// login rather than fail a check.
+	oidcOnce sync.Once
+	oidc     *oidcCache
+}
+
+// cache returns the OIDC discovery cache, creating it on first use.
+func (p *Plugin) cache() *oidcCache {
+	p.oidcOnce.Do(func() {
+		if p.oidc == nil {
+			p.oidc = newOIDCCache()
+		}
+	})
+	return p.oidc
 }
 
 // Info returns plugin metadata for discovery and documentation.

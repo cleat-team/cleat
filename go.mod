@@ -71,6 +71,8 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
+require github.com/golang-jwt/jwt/v5 v5.3.1
+
 // No replace directives, on purpose. `go install pkg@version` fails outright on
 // a module whose go.mod has any of them ("...contains one or more replace
 // directives"), and cmd/cleat, cmd/cleatctl and cmd/cleat-worker are all meant

@@ -59,10 +59,58 @@ var endpoints = map[string]providerEndpoints{
 	},
 }
 
+// validProviders is no longer the list of IdPs cleat supports -- `oidc` covers
+// any of them. It is the list of provider KINDS. The three named entries are
+// sugar over the same path: their endpoints are known so they need no discovery
+// round trip, but nothing else about them is special. cleat#1582.
 var validProviders = map[string]bool{
 	"google": true,
 	"github": true,
 	"okta":   true,
+	"oidc":   true,
+}
+
+// providerOIDC is the generic kind, configured with an issuer URL instead of
+// an entry in the endpoints table.
+const providerOIDC = "oidc"
+
+// resolveEndpoints produces the endpoint set for a configured provider.
+//
+// ONE function for both kinds, called by both handlers, because the failure
+// this design is avoiding is login and callback disagreeing about where the
+// token endpoint is. For google/github/okta it reads the hardcoded table; for
+// `oidc` it performs discovery, which is a network call and can fail.
+//
+// The scope for a discovered issuer is the OIDC minimum plus email. `openid`
+// is what makes the request an OIDC one at all and is what causes an ID token
+// to be issued.
+func (p *Plugin) resolveEndpoints(ctx context.Context, provider string, cfg *oauthConfigRow) (providerEndpoints, error) {
+	if provider != providerOIDC {
+		ep, ok := endpoints[provider]
+		if !ok {
+			return providerEndpoints{}, fmt.Errorf("no endpoints for provider %q", provider)
+		}
+		return providerEndpoints{
+			authURL:     formatProviderURL(ep.authURL, cfg.Domain),
+			tokenURL:    formatProviderURL(ep.tokenURL, cfg.Domain),
+			userinfoURL: formatProviderURL(ep.userinfoURL, cfg.Domain),
+			scope:       ep.scope,
+		}, nil
+	}
+
+	if strings.TrimSpace(cfg.Issuer) == "" {
+		return providerEndpoints{}, fmt.Errorf("provider %q requires an issuer URL in oauth_config.issuer", providerOIDC)
+	}
+	doc, _, err := p.discover(ctx, cfg.Issuer)
+	if err != nil {
+		return providerEndpoints{}, err
+	}
+	return providerEndpoints{
+		authURL:     doc.AuthorizationEndpoint,
+		tokenURL:    doc.TokenEndpoint,
+		userinfoURL: doc.UserinfoEndpoint,
+		scope:       "openid email profile",
+	}, nil
 }
 
 // oauthConfigRow represents a row from the oauth_config table.
@@ -73,6 +121,7 @@ type oauthConfigRow struct {
 	ClientSecret string
 	RedirectURL  string
 	Domain       string
+	Issuer       string
 	Enabled      bool
 }
 
@@ -121,12 +170,12 @@ func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider str
 	ctx = plugin.ForTenant(ctx, tenantID)
 	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
 			SELECT tenant_id, provider, client_id, client_secret, redirect_url,
-			       COALESCE(domain, '') AS domain, enabled
+			       COALESCE(domain, '') AS domain, COALESCE(issuer, '') AS issuer, enabled
 			FROM oauth_config
 			WHERE tenant_id = $1 AND provider = $2 AND enabled = true
 		`, p.dialect), tenantID, provider),
 		&cfg.TenantID, &cfg.Provider, &cfg.ClientID, &cfg.ClientSecret,
-		&cfg.RedirectURL, &cfg.Domain, &cfg.Enabled,
+		&cfg.RedirectURL, &cfg.Domain, &cfg.Issuer, &cfg.Enabled,
 	)
 	if err != nil {
 		return nil, err
@@ -255,6 +304,27 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	h := sha256.Sum256([]byte(codeVerifier))
 	codeChallenge := base64.RawURLEncoding.EncodeToString(h[:])
 
+	// Resolve endpoints BEFORE writing the session row. For `oidc` this is a
+	// network call to the issuer, and a failure here means no login is
+	// possible -- writing the row first would leave a usable state value
+	// behind for a flow that never started.
+	ep, err := p.resolveEndpoints(r.Context(), provider, cfg)
+	if err != nil {
+		p.logger.Error("oauth: resolve endpoints", "provider", provider, "error", err)
+		p.writeError(w, http.StatusBadGateway, "provider discovery failed")
+		return
+	}
+
+	// Mint a nonce for OIDC. It goes out on the authorize request and must
+	// come back inside the signed ID token; storing it here is what lets the
+	// callback tell this login apart from a replayed one.
+	nonceBytes := make([]byte, 32)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		p.writeError(w, http.StatusInternalServerError, "failed to generate nonce")
+		return
+	}
+	nonce := hex.EncodeToString(nonceBytes)
+
 	// Store state + code_verifier in oauth_sessions with 5-minute expiry.
 	sessionID := uuid.New()
 	sessionExpiresAt := time.Now().Add(5 * time.Minute)
@@ -262,17 +332,14 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// definition -- it may have come from ?tenant_id= -- so nothing has put it
 	// in the context carrier the policy reads. cleat#1512.
 	_, err = p.db.Exec(plugin.ForTenant(r.Context(), tid), plugin.Rebind(`
-			INSERT INTO oauth_sessions (id, tenant_id, provider, state, code_verifier, expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
-		`, p.dialect), sessionID, tid, provider, state, codeVerifier, sessionExpiresAt)
+			INSERT INTO oauth_sessions (id, tenant_id, provider, state, code_verifier, nonce, expires_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, p.dialect), sessionID, tid, provider, state, codeVerifier, nonce, sessionExpiresAt)
 	if err != nil {
 		p.logger.Error("oauth: store state", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to initialize login")
 		return
 	}
-
-	ep := endpoints[provider]
-	authURL := formatProviderURL(ep.authURL, cfg.Domain)
 
 	v := url.Values{}
 	v.Set("client_id", cfg.ClientID)
@@ -282,8 +349,17 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	v.Set("scope", ep.scope)
 	v.Set("code_challenge", codeChallenge)
 	v.Set("code_challenge_method", "S256")
+	if provider == providerOIDC {
+		v.Set("nonce", nonce)
+	}
 
-	http.Redirect(w, r, authURL+"?"+v.Encode(), http.StatusFound)
+	// The authorize endpoint may already carry a query string -- a discovered
+	// one legitimately can. Appending "?" unconditionally would corrupt it.
+	sep := "?"
+	if strings.Contains(ep.authURL, "?") {
+		sep = "&"
+	}
+	http.Redirect(w, r, ep.authURL+sep+v.Encode(), http.StatusFound)
 }
 
 // ---- GET /oauth/{provider}/callback ----
@@ -310,6 +386,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	var tid uuid.UUID
 	var storedProvider string
 	var codeVerifier sql.NullString
+	var storedNonce sql.NullString
 	var sessionID uuid.UUID
 
 	// CROSS-TENANT and deriving, like the token-hash lookups. cleat#1512.
@@ -322,10 +399,10 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	err := plugin.ScanRow(p.db.QueryRow(
 		plugin.AcrossAllTenants(r.Context(), "oauth callback: the state parameter identifies the tenant, so there is none to scope by"),
 		plugin.Rebind(`
-			SELECT id, tenant_id, provider, code_verifier
+			SELECT id, tenant_id, provider, code_verifier, nonce
 			FROM oauth_sessions
 			WHERE state = $1 AND expires_at > now()
-		`, p.dialect), state), &sessionID, &tid, &storedProvider, &codeVerifier)
+		`, p.dialect), state), &sessionID, &tid, &storedProvider, &codeVerifier, &storedNonce)
 	if err != nil {
 		p.logger.Error("oauth: state lookup", "error", err)
 		p.writeError(w, http.StatusBadRequest, "invalid or expired state")
@@ -350,8 +427,13 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ep := endpoints[provider]
-	tokenURL := formatProviderURL(ep.tokenURL, cfg.Domain)
+	ep, err := p.resolveEndpoints(r.Context(), provider, cfg)
+	if err != nil {
+		p.logger.Error("oauth: resolve endpoints", "provider", provider, "error", err)
+		p.writeError(w, http.StatusBadGateway, "provider discovery failed")
+		return
+	}
+	tokenURL := ep.tokenURL
 
 	// Exchange authorization code for tokens with PKCE code_verifier.
 	data := url.Values{}
@@ -381,6 +463,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	var tokenResult struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
 		ExpiresIn    int    `json:"expires_in"`
 		Error        string `json:"error"`
 		ErrorDesc    string `json:"error_description"`
@@ -399,8 +482,42 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the ID token whenever one came back.
+	//
+	// Userinfo remains authoritative for identity -- it is the path every
+	// provider here has always used -- but a token that fails validation is a
+	// HARD failure, not something to shrug off and fall back from. A validator
+	// that can be skipped on error is the permissive validator
+	// docs/enterprise-identity-decision.md warns about, and skipping it is
+	// indistinguishable from a forged token succeeding.
+	var idTokenEmail string
+	if tokenResult.IDToken != "" && provider == providerOIDC {
+		claims, err := p.validateIDToken(r.Context(), tokenResult.IDToken, cfg.Issuer, cfg.ClientID, storedNonce.String)
+		if err != nil {
+			p.logger.Error("oauth: id_token validation", "provider", provider, "error", err)
+			p.writeError(w, http.StatusUnauthorized, "id_token validation failed")
+			return
+		}
+		idTokenEmail = claims.Email
+	}
+
 	// Fetch user info from the provider.
-	userinfoURL := formatProviderURL(ep.userinfoURL, cfg.Domain)
+	//
+	// userinfo_endpoint is RECOMMENDED rather than required by OIDC Discovery,
+	// so a conforming issuer may publish none. When that happens the validated
+	// ID token is the only identity available, and it has already passed
+	// signature, issuer, audience, expiry and nonce -- so it is a sound source
+	// here, unlike the unvalidated case this code is careful never to reach.
+	userinfoURL := ep.userinfoURL
+	if userinfoURL == "" {
+		if idTokenEmail == "" {
+			p.logger.Error("oauth: no identity source", "provider", provider)
+			p.writeError(w, http.StatusBadGateway, "issuer publishes no userinfo endpoint and returned no usable id_token")
+			return
+		}
+		p.finishLogin(w, r, tid, provider, sessionID, cfg, idTokenEmail, tokenResult.AccessToken, tokenResult.RefreshToken, tokenResult.ExpiresIn)
+		return
+	}
 	userReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, userinfoURL, nil)
 	if err != nil {
 		p.writeError(w, http.StatusInternalServerError, "failed to create userinfo request")
@@ -429,6 +546,33 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if email == "" {
 		email = userInfo.Login
 	}
+	// Only as a fallback, and only from a token that passed every check above:
+	// some issuers put the address in the ID token and omit it from userinfo.
+	if email == "" {
+		email = idTokenEmail
+	}
+
+	p.finishLogin(w, r, tid, provider, sessionID, cfg, email,
+		tokenResult.AccessToken, tokenResult.RefreshToken, tokenResult.ExpiresIn)
+}
+
+// finishLogin turns a verified identity into a session row and a response.
+//
+// Extracted so the two ways a callback can arrive here -- via userinfo, or via
+// a validated ID token when the issuer publishes no userinfo endpoint -- write
+// the session exactly the same way. A second copy of this is how the two paths
+// would drift on something like clearing the nonce.
+func (p *Plugin) finishLogin(
+	w http.ResponseWriter, r *http.Request,
+	tid uuid.UUID, provider string, sessionID uuid.UUID,
+	cfg *oauthConfigRow, email string,
+	accessToken, refreshToken string, expiresIn int,
+) {
+	if email == "" {
+		p.logger.Error("oauth: no email resolved", "provider", provider, "tenant", tid)
+		p.writeError(w, http.StatusBadGateway, "provider returned no usable identity")
+		return
+	}
 
 	// Generate a 32-byte hex session token.
 	sessionToken, err := generateSessionToken()
@@ -441,13 +585,15 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	tokenHash := sha256Hex(sessionToken)
 
 	var expiresAt *time.Time
-	if tokenResult.ExpiresIn > 0 {
-		t := time.Now().Add(time.Duration(tokenResult.ExpiresIn) * time.Second)
+	if expiresIn > 0 {
+		t := time.Now().Add(time.Duration(expiresIn) * time.Second)
 		expiresAt = &t
 	}
 
 	// Update the pre-inserted state row with the actual session data and clear
-	// the PKCE fields.
+	// the PKCE fields. The nonce is cleared with them: it is single-use by
+	// definition, and a spent nonce left in the row is a replay waiting for a
+	// state collision.
 	// ForTenant with the tid the state lookup above derived. The UPDATE
 	// addresses the row BY ID with no tenant predicate, so the policy is what
 	// keeps a state collision from writing another tenant's session.
@@ -455,10 +601,10 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 			UPDATE oauth_sessions
 			SET session_token = $1, token_hash = $2, user_email = $3,
 			    access_token = $4, refresh_token = $5, expires_at = $6,
-			    state = NULL, code_verifier = NULL
+			    state = NULL, code_verifier = NULL, nonce = NULL
 			WHERE id = $7
-		`, p.dialect), sessionToken, tokenHash, email, tokenResult.AccessToken,
-		tokenResult.RefreshToken, expiresAt, sessionID)
+		`, p.dialect), sessionToken, tokenHash, email, accessToken,
+		refreshToken, expiresAt, sessionID)
 	if err != nil {
 		p.logger.Error("oauth: create session", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to create session")

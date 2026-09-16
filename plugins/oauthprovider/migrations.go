@@ -171,5 +171,47 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Version:      3,
 			TenantScoped: []string{"oauth_config", "oauth_sessions"},
 		},
+		{
+			// A generic OIDC issuer, so a customer is not limited to the three
+			// providers cleat happens to name. cleat#1582, implementing
+			// docs/enterprise-identity-decision.md.
+			//
+			// TWO columns, and they are on different tables for different
+			// reasons.
+			//
+			// oauth_config.issuer holds the issuer URL for provider 'oidc'.
+			// It is empty for google/github/okta, whose endpoints stay in the
+			// hardcoded table -- those become sugar over the same path rather
+			// than a second mechanism.
+			//
+			// oauth_sessions.nonce is what makes an ID token checkable. The
+			// nonce is minted at login, sent on the authorize request, and
+			// must come back inside the signed token; without somewhere to
+			// remember it between the two requests there is nothing to compare
+			// against, and an unchecked nonce is a replay.
+			//
+			// Nullable with no default, because every row written before this
+			// migration legitimately has neither. The callback treats absent
+			// as "this flow predates the column" rather than as a mismatch.
+			Version: 4,
+			Up: `
+				ALTER TABLE oauth_config ADD COLUMN IF NOT EXISTS issuer TEXT NOT NULL DEFAULT '';
+				ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS nonce TEXT;
+			`,
+			UpMySQL: `
+				ALTER TABLE oauth_config ADD COLUMN issuer VARCHAR(900) NOT NULL DEFAULT '';
+				ALTER TABLE oauth_sessions ADD COLUMN nonce VARCHAR(255);
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_config') AND name = 'issuer')
+				ALTER TABLE oauth_config ADD issuer NVARCHAR(900) NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_sessions') AND name = 'nonce')
+				ALTER TABLE oauth_sessions ADD nonce NVARCHAR(255);
+			`,
+			Down: `
+				ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS nonce;
+				ALTER TABLE oauth_config DROP COLUMN IF EXISTS issuer;
+			`,
+		},
 	}
 }

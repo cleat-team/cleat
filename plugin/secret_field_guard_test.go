@@ -77,6 +77,20 @@ func TestPluginCredentialFieldsUseTheSecretType(t *testing.T) {
 		// anything.
 		"blobstore.Config.AccessKeyID": {reason: "public half of an AWS key pair, not a secret"},
 
+		// NOT A CREDENTIAL. token_endpoint is a URL out of an issuer's OIDC
+		// discovery document -- where cleat should POST to exchange a code --
+		// and it is published at a well-known path for anyone to read. It
+		// matches here on the word "token" alone.
+		//
+		// The name is not ours to change: "token_endpoint" is the field name
+		// in OpenID Connect Discovery, so renaming it out of this guard's way
+		// would mean the JSON no longer decodes. Narrowed to this one field
+		// rather than the type, so the ClientSecret-shaped things this guard
+		// exists for stay in scope if discoveryDoc ever grows one. cleat#1582.
+		"oauthprovider.discoveryDoc.TokenEndpoint": {
+			reason: "a public URL from OIDC discovery, not a credential; the field name is fixed by the OIDC spec",
+		},
+
 		// This is the OUTBOUND request body to PagerDuty's Events API, not a
 		// response to one of our callers. plugin.Secret would be exactly wrong
 		// here: MarshalJSON would put "[redacted]" in the routing_key field and
