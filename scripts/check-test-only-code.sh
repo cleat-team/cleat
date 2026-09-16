@@ -103,11 +103,26 @@ modules() {
     LC_ALL=C sort
 }
 
+# Emitted by scan() when it cannot produce a trustworthy result, so callers can
+# distinguish a failed scan from a clean tree across the command-substitution
+# boundary. Defined ABOVE scan() rather than below it: under `set -u` a use
+# before assignment is a fatal error, and scan() now references it on the
+# install path as well as at the end.
+SCAN_FAILED="__scan_failed__"
+
 scan() {
   if [ ! -x "$TOOLDIR/staticcheck" ]; then
     if ! GOBIN="$TOOLDIR" go install "$STATICCHECK" >&2; then
       echo "ERROR: could not install $STATICCHECK" >&2
-      exit 1
+      # NOT exit -- same reason as the sentinel below, which this line used to
+      # contradict: scan() runs inside a command substitution, so `exit` ends
+      # only the subshell. This script sets -uo pipefail and NOT -e, so the
+      # caller carried on with an empty result and printed
+      #   OK: no new test-only code (0 known entries in the baseline).
+      # and exited 0 -- a vacuous pass by the guard against vacuous passes,
+      # in the one function that documents the hazard (cleat#1707).
+      echo "$SCAN_FAILED"
+      return
     fi
   fi
 
@@ -182,15 +197,54 @@ EOF
   printf '%s\n' "$findings"
 }
 
-# Emitted by scan() when it produced nothing, so callers can distinguish a
-# failed scan from a clean tree across the command-substitution boundary.
-SCAN_FAILED="__scan_failed__"
 
 die_if_scan_failed() {
   if [ "$1" = "$SCAN_FAILED" ]; then
     exit 1
   fi
 }
+
+# --self-test: a KNOWN-POSITIVE, not a negative control.
+#
+# CLAUDE.md's rule is that "it passes when everything is fine" is satisfied by
+# every broken version of a guard, so the case to assert is one already known to
+# be broken. Here that case is cleat#1707: with the tool uninstallable this
+# script printed its own ERROR line, then "OK", then exited 0.
+#
+# The failure is forced with BOTH an empty module cache and GOPROXY=off.
+# GOPROXY=off alone is not deterministic -- on a machine where staticcheck is
+# already in the module cache `go install` succeeds offline, and the self-test
+# would silently stop exercising the path it exists to exercise.
+#
+# Both assertions are on PRESENCE, never on absence: an exit status alone cannot
+# tell "the guard failed for the right reason" from "the harness never started"
+# (PATH broken, wrong directory, script not executable). The ERROR line is the
+# evidence that the install path was actually reached.
+if [ "${1:-}" = "--self-test" ]; then
+  st_cache="$(mktemp -d)"
+  st_out="$(GOPROXY=off GOMODCACHE="$st_cache/modcache" "$0" 2>&1)"
+  st_rc=$?
+  rm -rf "$st_cache"
+
+  st_fails=0
+  if ! printf '%s\n' "$st_out" | grep -q "^ERROR: could not install "; then
+    echo "SELF-TEST FAIL: the run never reached the install path." >&2
+    echo "  Without that line the exit status below says nothing." >&2
+    printf '%s\n' "$st_out" | tail -5 | sed 's/^/    /' >&2
+    st_fails=$((st_fails + 1))
+  fi
+  if [ "$st_rc" = 0 ]; then
+    echo "SELF-TEST FAIL: could not install the tool, yet exited 0 (cleat#1707)." >&2
+    printf '%s\n' "$st_out" | tail -3 | sed 's/^/    /' >&2
+    st_fails=$((st_fails + 1))
+  fi
+
+  if [ "$st_fails" != 0 ]; then
+    exit 1
+  fi
+  echo "OK: self-test passed, an uninstallable tool fails the guard (exit $st_rc)."
+  exit 0
+fi
 
 if [ "${1:-}" = "--update" ]; then
   fresh="$(scan)"
