@@ -31,6 +31,7 @@ type fakeSession struct {
 	Provider     string
 	State        driver.Value // nil or string (for callback flow)
 	CodeVerifier driver.Value // nil or string
+	Nonce        driver.Value // nil or string (OIDC replay check, cleat#1582)
 	UserEmail    driver.Value // nil or string
 	TokenHash    driver.Value // nil or string (sha256 hex of session token)
 	CreatedAt    time.Time
@@ -840,7 +841,11 @@ func (c *fakeConn) execInsertSession(args []driver.NamedValue) (driver.Result, e
 	if err != nil {
 		return nil, err
 	}
-	expiresAt, err := argAny(args, 6)
+	nonce, err := argString(args, 6)
+	if err != nil {
+		return nil, err
+	}
+	expiresAt, err := argAny(args, 7)
 	if err != nil {
 		return nil, err
 	}
@@ -851,6 +856,7 @@ func (c *fakeConn) execInsertSession(args []driver.NamedValue) (driver.Result, e
 		Provider:     provider,
 		State:        state,
 		CodeVerifier: codeVerifier,
+		Nonce:        nonce,
 		CreatedAt:    c.store.now(),
 		ExpiresAt:    expiresAt,
 	}
@@ -901,12 +907,12 @@ func (c *fakeConn) queryOAuthConfig(args []driver.NamedValue) (driver.Rows, erro
 	cfg, ok := c.store.configs[key]
 	if !ok || !cfg.Enabled {
 		return &fakeRows{
-			columns: []string{"tenant_id", "provider", "client_id", "client_secret", "redirect_url", "domain", "enabled"},
+			columns: []string{"tenant_id", "provider", "client_id", "client_secret", "redirect_url", "domain", "issuer", "enabled"},
 		}, nil
 	}
 
 	return &fakeRows{
-		columns: []string{"tenant_id", "provider", "client_id", "client_secret", "redirect_url", "domain", "enabled"},
+		columns: []string{"tenant_id", "provider", "client_id", "client_secret", "redirect_url", "domain", "issuer", "enabled"},
 		data: [][]driver.Value{{
 			cfg.TenantID.String(),
 			cfg.Provider,
@@ -914,6 +920,7 @@ func (c *fakeConn) queryOAuthConfig(args []driver.NamedValue) (driver.Rows, erro
 			cfg.ClientSecret,
 			cfg.RedirectURL,
 			cfg.Domain,
+			cfg.Issuer,
 			cfg.Enabled,
 		}},
 	}, nil
@@ -937,16 +944,17 @@ func (c *fakeConn) querySessionByState(args []driver.NamedValue) (driver.Rows, e
 			}
 		}
 		return &fakeRows{
-			columns: []string{"id", "tenant_id", "provider", "code_verifier"},
+			columns: []string{"id", "tenant_id", "provider", "code_verifier", "nonce"},
 			data: [][]driver.Value{{
 				s.ID.String(),
 				s.TenantID.String(),
 				s.Provider,
 				s.CodeVerifier,
+				s.Nonce,
 			}},
 		}, nil
 	}
-	return &fakeRows{columns: []string{"id", "tenant_id", "provider", "code_verifier"}}, nil
+	return &fakeRows{columns: []string{"id", "tenant_id", "provider", "code_verifier", "nonce"}}, nil
 }
 
 func TestOA_Login_Google_Redirect(t *testing.T) {
