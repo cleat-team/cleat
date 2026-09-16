@@ -1280,8 +1280,34 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 		}
 		defer tx.Rollback()
 
+		// Clear this key's row if its TTL has passed, so the insert below can
+		// take the key over.
+		//
+		// WITHOUT THIS, `n == 0` BELOW HAS TWO CAUSES AND THE CODE ASSUMES
+		// ONE: an expired row still blocks the insert and still reports no
+		// rows affected, identical to the concurrent-insert case it is read
+		// as. Only one of the two has a winner to re-read, and the re-read
+		// filters on expiry, so for the other it looks for a row it cannot see
+		// and the caller gets sql.ErrNoRows instead of a new run. cleat#1671.
+		//
+		// Not a visibility fix: letting the re-read see the expired row would
+		// hand the caller a workflow id whose key the TTL already retired.
+		//
+		// The expiry predicate is load bearing -- a row refreshed by a
+		// concurrent starter is LIVE, and deleting it would let two runs hold
+		// one key. Then this matches nothing, the insert reports the conflict,
+		// and that path is already correct.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM idempotency_keys
+			 WHERE key_hash = @p1 AND tenant_id = @p2 AND expires_at <= SYSUTCDATETIME()`,
+			keyHash[:], tenantID); err != nil {
+			return "", false, fmt.Errorf("start new run: clear expired idempotency key: %w", err)
+		}
+
 		// Insert idempotency key record. INSERT...WHERE NOT EXISTS handles the
-		// race where two requests arrive with the same key simultaneously.
+		// race where two requests arrive with the same key simultaneously --
+		// and, since the delete above, ONLY that: a row the NOT EXISTS finds
+		// is necessarily live.
 		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		result, err := tx.ExecContext(ctx,
 			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name, input_digest)
@@ -1297,7 +1323,12 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 
 		n, _ := result.RowsAffected()
 		if n == 0 {
-			// Key was inserted concurrently — rollback and return the existing one.
+			// A LIVE row exists, so someone else won the race. After the
+			// delete above the NOT EXISTS can only match a row whose TTL has
+			// not passed, so the re-read's own expiry filter will find it
+			// (cleat#1671).
+			//
+			// Rollback and return the existing one.
 			tx.Rollback()
 			err := s.db.QueryRowContext(ctx,
 				`SELECT workflow_id, def_name, input_digest FROM idempotency_keys

@@ -13261,3 +13261,92 @@ worth having.
 The floor now counts only statements the guard has an opinion about, and the log line states both
 numbers — `cleared 167 … could not read 1` — because a single figure was correct on every run and
 read as ordinary while the guard was near-blind.
+
+### 3.260 An expired idempotency key made the next start fail, on all three dialects — ✅ **FIXED 2026-09-16** (cleat#1671)
+
+A key whose TTL had passed, and whose row the sweeper had not yet collected, made the **next** start
+with that key return `sql.ErrNoRows` instead of starting a new run.
+
+#### The defect is neither the expiry filter nor the ON CONFLICT
+
+`RowsAffected() == 0` from the key insert has **two causes**, and the code assumed one:
+
+| cause | is there a winner to re-read? |
+|---|---|
+| a concurrent starter won the race | yes |
+| an expired row is still sitting there | **no** |
+
+Both report no rows affected, through three different idioms that all say nothing about expiry —
+`ON CONFLICT (key_hash, tenant_id) DO NOTHING`, `INSERT IGNORE`, and
+`INSERT … WHERE NOT EXISTS (key_hash AND tenant_id)`. The re-read that follows filters on
+`expires_at > now()`, so in the second case it looks for a row it cannot see.
+
+So the branch is entered because `ON CONFLICT` cannot tell *"another request won"* from *"a dead row
+is still there"*. A fix aimed at the filter or at the TTL does not touch it.
+
+#### All three dialects, and that is the point
+
+`store_lifecycle.go`, `mysql_lifecycle.go` and `mssql_lifecycle.go` each carry the same shape. The
+issue was filed as PostgreSQL; reading the other two to confirm the shape is what found them.
+cleat#1256 is this table's precedent for the one-dialect fix: the sweeper ran on PostgreSQL only, so
+a key was honoured forever on the other two for the life of the deployment.
+
+#### The fix, and the fix that would have been wrong
+
+Delete the row **before** the insert, scoped by expiry. That collapses the two causes: a conflict
+now means a **live** row, and the re-read's own filter will find it.
+
+Two rejected alternatives, both of which pass an expired-row test:
+
+- **Drop `expires_at > now()` from the re-read.** Makes the expired row visible and hands the caller
+  a workflow id whose key the TTL already retired — silently joining an expired run, which is worse
+  than the error.
+- **Delete by key alone.** Removes a *live* row a concurrent starter just wrote, so two callers each
+  get their own run for one key — the defect migration 010 exists to prevent, reintroduced by the
+  fix.
+
+#### Both arms, because one alone ships the second mistake
+
+| falsification | what went red |
+|---|---|
+| remove the delete | the expired-key test, with `sql: no rows in result set` |
+| keep it, drop its expiry scope | the **concurrency** test — `2 of 8 starters were told they started the run` |
+| remove it from MySQL only | the cross-dialect assertion, naming `mysql_lifecycle.go` |
+| remove it from SQL Server only | the same, naming `mssql_lifecycle.go` |
+
+The expired-row fixture is deterministic and needs no race: an expired row is invisible to the
+lookup and still collides with the insert. The concurrency arm is the one that is tempting to skip,
+and skipping it is exactly how the second mistake above ships green.
+
+#### The fix broke its own neighbour's fixture, and the neighbour said so
+
+`TestTheConcurrentIdempotencyRereadRunsWithTheTenantSet` (cleat#1534) reached the concurrent-re-read
+branch by seeding an **expired row** — invisible to the lookup, still colliding with the insert.
+This fix deletes the dead row before the insert, which removed that test's only way in. It did not
+go quietly green:
+
+    PRECONDITION FAILED: the start succeeded, so the INSERT did not conflict
+    and the concurrent re-read was never reached. Nothing below was measured.
+
+That is the whole argument for printing preconditions beside verdicts, demonstrated inside one PR: a
+test asserting only "no error" would have passed while measuring nothing, and the RLS coverage
+cleat#1534 added for that statement would have been silently gone.
+
+Rewritten to reach the branch through **real contention**, which is also more faithful: a raw
+transaction inserts the key and does not commit, the store's lookup cannot see it, and the store's
+insert blocks on the unique index. The test waits for that block to appear in `pg_locks` rather than
+sleeping — a conflicting insert waits on the inserting *transaction*, so `pg_locks.relation` is null
+and the waiting backend's own query text is what identifies it. Scoped to this database and this
+statement, because the engine suite shares a database and a bare `NOT granted` count is true of any
+contention anywhere in the instance.
+
+The precondition is then self-proving: the store can only return the competitor's workflow id by
+having re-read it, since its own lookup ran before that row was committed. Verified in both
+directions — reverting cleat#1534's `tx2` still produces `cleat.tenant_id is not set (P0001)`, and
+committing the competitor early makes the precondition fire rather than passing through the lookup.
+
+The cross-dialect check is a **source** assertion, the same shape as
+`TestEveryDialectRefusesAnIdempotencyKeyReusedForAnotherDefinition` beside it, and for the same
+reason: executing it needs all three databases, while what actually breaks is one store edited and
+the others not. It asserts order as well as presence — a delete placed after the insert would
+satisfy a contains-check and remove the row the insert just wrote.

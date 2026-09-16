@@ -26,11 +26,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -283,25 +281,37 @@ func TestAnIdempotencyKeyBelongsToOneTenant(t *testing.T) {
 // not reach.
 //
 // WHY IT NEEDS ITS OWN TEST. The re-read only runs when the INSERT ... ON
-// CONFLICT DO NOTHING affects no row -- the concurrent-insert path -- so an
-// uncontended start never touches it. Left untested it is the statement most
-// likely to have been missed: it is the one that ran on s.db AFTER a
-// tx.Rollback(), so it is not covered by the transaction the other two now
-// share, and it needed a second one of its own.
+// CONFLICT DO NOTHING affects no row, so an uncontended start never touches it.
+// Left untested it is the statement most likely to have been missed: it is the
+// one that ran on s.db AFTER a tx.Rollback(), so it is not covered by the
+// transaction the other two share and needed a second one of its own.
 //
-// HOW THE PATH IS REACHED WITHOUT A RACE. A row whose expires_at has passed is
-// invisible to the lookup, which filters `expires_at > now()`, and still
-// collides with the INSERT, whose conflict target is (key_hash, tenant_id) and
-// says nothing about expiry. So seeding one expired row drives exactly the
-// branch two concurrent starts would, deterministically.
+// THIS FIXTURE REPLACED AN EXPIRED-ROW ONE, AND THE REPLACEMENT IS THE POINT.
+// cleat#1534 reached this branch by seeding a row whose TTL had passed: it was
+// invisible to the lookup and still collided with the insert. cleat#1671 then
+// established that an expired row reaching this branch AT ALL is the defect --
+// there is no concurrent winner to re-read, so the caller got sql.ErrNoRows --
+// and the fix deletes the dead row before the insert. Which removed this test's
+// only way in, and the test said so rather than passing:
 //
-// WHAT IS ASSERTED, AND WHAT IS NOT. That the re-read RUNS -- that it reaches
-// the database and comes back with an ordinary result rather than
-// "cleat.tenant_id is not set". It is deliberately not asserted that the call
-// SUCCEEDS: with the key's only row expired, the re-read's own `expires_at >
-// now()` filter matches nothing and the caller gets sql.ErrNoRows. That is
-// this repo's existing behaviour on an expired-but-unswept key and is
-// untouched here; it is filed separately rather than fixed in a PR about RLS.
+//	PRECONDITION FAILED: the start succeeded, so the INSERT did not conflict
+//	and the concurrent re-read was never reached. Nothing below was measured.
+//
+// That is the whole argument for writing preconditions beside verdicts. The
+// fixture stopped working inside the same PR that broke it, and a test asserting
+// only "no error" would have gone green while measuring nothing at all.
+//
+// HOW THE PATH IS REACHED NOW, deterministically and without a sleep. A raw
+// transaction inserts the key and does NOT commit. The store's lookup cannot
+// see an uncommitted row, so it finds nothing and proceeds; its insert then
+// BLOCKS on the unique index. Waiting for that block to appear in pg_locks is
+// what makes the ordering observable rather than assumed -- only once it is
+// visible does the raw transaction commit, and the store's insert resumes into
+// the conflict this branch exists for.
+//
+// The precondition is then self-proving: the store can only return the raw
+// transaction's workflow id by having re-read it, because its own lookup ran
+// before that row was committed.
 func TestTheConcurrentIdempotencyRereadRunsWithTheTenantSet(t *testing.T) {
 	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
 	defer adminDB.Close()
@@ -315,6 +325,7 @@ func TestTheConcurrentIdempotencyRereadRunsWithTheTenantSet(t *testing.T) {
 	stamp := time.Now().UnixNano()
 	def := fmt.Sprintf("idem-reread-%d", stamp)
 	key := fmt.Sprintf("order-reread-%d", stamp)
+	const winnerID = "wf-concurrent-winner"
 
 	appDB := testutil.OpenPostgresRLSTestDB(t, adminDB)
 	defer appDB.Close()
@@ -326,7 +337,6 @@ func TestTheConcurrentIdempotencyRereadRunsWithTheTenantSet(t *testing.T) {
 		_, _ = adminDB.ExecContext(bg, `DELETE FROM workflow_instances WHERE tenant_id = $1`, tenant)
 		_, _ = adminDB.ExecContext(bg, `DELETE FROM workflow_defs WHERE tenant_id = $1`, tenant)
 	})
-
 	if _, err := adminDB.ExecContext(ctx,
 		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, tenant_id)
 		 VALUES ($1, 1, $2, 1, 0, $3)`,
@@ -335,35 +345,92 @@ func TestTheConcurrentIdempotencyRereadRunsWithTheTenantSet(t *testing.T) {
 	}
 
 	keyHash := sha256.Sum256([]byte(key))
-	if _, err := adminDB.ExecContext(ctx,
+
+	// The competitor: holds the key, uncommitted.
+	winner, err := adminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin the competing transaction: %v", err)
+	}
+	defer winner.Rollback()
+	if _, err := winner.ExecContext(ctx,
 		`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name)
-		 VALUES ($1, $2, now() - INTERVAL '1 hour', $3, $4)`,
-		keyHash[:], "wf-already-expired", tenant, def); err != nil {
-		t.Fatalf("seed the expired key: %v", err)
-	}
-	var present int
-	if err := adminDB.QueryRowContext(ctx,
-		`SELECT count(*) FROM idempotency_keys WHERE tenant_id = $1`, tenant).Scan(&present); err != nil {
-		t.Fatalf("count the seeded key: %v", err)
-	}
-	if present != 1 {
-		t.Fatalf("PRECONDITION FAILED: %d of 1 expired keys seeded. With no row to collide "+
-			"with, the INSERT succeeds and the re-read this test exists for never runs.", present)
+		 VALUES ($1, $2, now() + INTERVAL '1 hour', $3, $4)`,
+		keyHash[:], winnerID, tenant, def); err != nil {
+		t.Fatalf("competitor insert: %v", err)
 	}
 
-	_, _, err := NewPostgresStore(appDB).WithTenant(tenant).StartNewRunWithOptions(
-		ctx, "", def, 1, json.RawMessage(`{}`), key, tenant, 0, StartOptions{})
-	if err == nil {
-		t.Fatal("PRECONDITION FAILED: the start succeeded, so the INSERT did not conflict and " +
-			"the concurrent re-read was never reached. Nothing below was measured.")
+	type result struct {
+		id      string
+		existed bool
+		err     error
 	}
-	if strings.Contains(err.Error(), "cleat.tenant_id is not set") {
-		t.Fatalf("the concurrent re-read ran without the tenant established: %v\n\n"+
-			"This is the third of startNewRun's idempotency_keys statements -- the one that "+
-			"ran on s.db after tx.Rollback(). cleat#1534 gives it a transaction of its own.", err)
+	done := make(chan result, 1)
+	go func() {
+		id, existed, err := NewPostgresStore(appDB).WithTenant(tenant).StartNewRunWithOptions(
+			ctx, "", def, 1, json.RawMessage(`{}`), key, tenant, 0, StartOptions{})
+		done <- result{id, existed, err}
+	}()
+
+	// Wait for the store's insert to BLOCK, rather than sleeping and hoping.
+	// An ungranted lock held by some other backend is the observable that says
+	// the lookup has already run and found nothing.
+	blocked := false
+	for i := 0; i < 200; i++ {
+		var n int
+		// Scoped to a backend blocked ON THIS STATEMENT, in this database. A
+		// bare `NOT granted` count is true of any contention anywhere in the
+		// instance, and the engine suite shares a database -- so the loop would
+		// then proceed on somebody else's wait and commit too early, which
+		// reads as a pass through the LOOKUP rather than the re-read.
+		//
+		// A conflicting insert waits on the inserting TRANSACTION, not on the
+		// relation, so pg_locks.relation is null here and joining on it finds
+		// nothing. The waiting backend's own query text is what identifies it.
+		if err := adminDB.QueryRowContext(ctx,
+			`SELECT count(*) FROM pg_locks l
+			   JOIN pg_stat_activity a ON a.pid = l.pid
+			  WHERE NOT l.granted
+			    AND a.datname = current_database()
+			    AND a.query ILIKE '%INSERT INTO idempotency_keys%'`).Scan(&n); err != nil {
+			t.Fatalf("poll pg_locks: %v", err)
+		}
+		if n > 0 {
+			blocked = true
+			break
+		}
+		select {
+		case r := <-done:
+			t.Fatalf("PRECONDITION FAILED: the start finished (%+v) before blocking on the "+
+				"competitor's uncommitted row, so it never reached the concurrent re-read. "+
+				"Nothing below was measured.", r)
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Logf("the re-read reached the database and returned %v (not the RLS raise, which is "+
-			"what this test asserts)", err)
+	if !blocked {
+		t.Fatal("PRECONDITION FAILED: no backend ever blocked, so the start did not reach the " +
+			"conflicting insert. Nothing below was measured.")
+	}
+
+	if _, err := winner.ExecContext(ctx,
+		`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id)
+		 VALUES ($1, $2, 1, 'ready', '{}', $3)`, winnerID, def, tenant); err != nil {
+		t.Fatalf("competitor workflow row: %v", err)
+	}
+	if err := winner.Commit(); err != nil {
+		t.Fatalf("competitor commit: %v", err)
+	}
+
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("the start failed on the concurrent path: %v\n\n"+
+			"If this is \"cleat.tenant_id is not set\", the re-read ran without the tenant "+
+			"established -- the third of startNewRun's idempotency_keys statements, the one "+
+			"that ran on s.db after tx.Rollback(). cleat#1534 gives it a transaction of its "+
+			"own.", r.err)
+	}
+	if !r.existed || r.id != winnerID {
+		t.Fatalf("the loser was given (id=%q existed=%v), want (%q true). Its own lookup ran "+
+			"before the winner's row was committed, so returning that id is only possible "+
+			"by re-reading it -- which is what this test measures.", r.id, r.existed, winnerID)
 	}
 }

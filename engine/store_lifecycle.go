@@ -1024,8 +1024,43 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 
 		// Use the provided runID (already generated above).
 
+		// Clear this key's row if its TTL has passed, so the INSERT below can
+		// take the key over.
+		//
+		// WITHOUT THIS, `n == 0` BELOW HAS TWO CAUSES AND THE CODE ASSUMES
+		// ONE. `ON CONFLICT (key_hash, tenant_id)` says nothing about expiry,
+		// so an expired row still conflicts and still reports no rows
+		// affected -- identical to the concurrent-insert case it is read as.
+		// Only one of the two has a winner to re-read, and the re-read filters
+		// on `expires_at > now()`, so for the other it looks for a row it
+		// cannot see and the caller gets sql.ErrNoRows instead of a new run.
+		// cleat#1671.
+		//
+		// Not a visibility fix: making the re-read see the expired row would
+		// hand the caller a workflow id whose key the TTL already retired,
+		// which is worse than the error. The dead row has to go.
+		//
+		// `expires_at <= now()` and not the key alone -- a row refreshed by a
+		// concurrent starter between the lookup above and here is LIVE, and
+		// deleting it would let two runs hold one key. In that case this
+		// matches nothing and the INSERT below reports the conflict, which is
+		// the outcome that path already handles correctly.
+		//
+		// Inside this transaction, so the delete and the insert commit or roll
+		// back together. Scoped by the primary key, so it is a no-op lookup on
+		// every start whose key is live or absent -- which is nearly all of
+		// them.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM idempotency_keys
+			 WHERE key_hash = $1 AND tenant_id = $2 AND expires_at <= now()`,
+			keyHash[:], tenantID); err != nil {
+			return "", false, fmt.Errorf("start new run: clear expired idempotency key: %w", err)
+		}
+
 		// Insert idempotency key record. ON CONFLICT DO NOTHING handles the
-		// race where two requests arrive with the same key simultaneously.
+		// race where two requests arrive with the same key simultaneously --
+		// and, since the delete above, ONLY that: a row that conflicts here is
+		// necessarily live.
 		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name, input_digest)
@@ -1038,8 +1073,12 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 
 		n, _ := res.RowsAffected()
 		if n == 0 {
-			// Key was inserted concurrently — roll back to release the lock at
-			// once, then re-read the winner's row.
+			// A LIVE row exists, so someone else won the race. The expired
+			// case cannot reach here any more (cleat#1671): the delete above
+			// removed it, so a conflict means a row whose TTL has not passed,
+			// and the re-read's own `expires_at > now()` will find it.
+			//
+			// Roll back to release the lock at once, then re-read the winner.
 			//
 			// The re-read needs a transaction of its own: this one is being
 			// abandoned, and the row it is looking for belongs to whoever won
