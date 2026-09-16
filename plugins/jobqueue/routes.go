@@ -62,6 +62,28 @@ type JobResponse struct {
 	CreatedAt   time.Time       `json:"created_at"`
 	StartedAt   *time.Time      `json:"started_at,omitempty"`
 	CompletedAt *time.Time      `json:"completed_at,omitempty"`
+
+	// RunID names the workflow run this job started, or is empty when it
+	// started none.
+	//
+	// THE COLUMN EXISTED AND NOTHING SELECTED IT. The dispatcher has written
+	// task_queue.run_id since the column was added, and no query read it back
+	// and no response carried it -- so the link from a job to its run existed
+	// in the database and was reachable through no API at all. cleat#1715.
+	//
+	// That is what made a job's status unfalsifiable from outside. A job whose
+	// workflow failed and one whose workflow did the work both read
+	// `"status": "completed"`, because status is written when the run is
+	// STARTED, and the only field that could have distinguished them was not
+	// returned. Exposing it does not fix the status semantics -- that is the
+	// rest of cleat#1715 -- but it makes the claim checkable, which is the
+	// precondition for anyone noticing it is wrong.
+	//
+	// Empty rather than null-typed: a job with no def_name never dispatches a
+	// workflow, and "no run" is not an error or an unknown. omitempty keeps it
+	// out of those responses instead of showing a null the reader has to
+	// interpret.
+	RunID string `json:"run_id,omitempty"`
 }
 
 // ---- POST /jobqueue/{queue_name}/jobs ----
@@ -151,7 +173,7 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := `
-			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
+			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at, run_id
 			FROM task_queue
 			WHERE tenant_id = $1 AND queue_name = $2
 		`
@@ -183,11 +205,12 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			payloadRaw  []byte
 			startedAt   sql.NullTime
 			completedAt sql.NullTime
+			runID       sql.NullString
 		)
 		if err := plugin.ScanRow(rows,
 			&j.JobID, &j.QueueName, &j.Status,
 			&payloadRaw, &j.CreatedAt,
-			&startedAt, &completedAt,
+			&startedAt, &completedAt, &runID,
 		); err != nil {
 			p.logger.Error("jobqueue: scan row", "error", err)
 			continue
@@ -199,6 +222,7 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		if completedAt.Valid {
 			j.CompletedAt = &completedAt.Time
 		}
+		j.RunID = runID.String
 		jobs = append(jobs, j)
 	}
 
@@ -234,15 +258,16 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	var j JobResponse
 	var payloadRaw []byte
 	var startedAt, completedAt sql.NullTime
+	var runID sql.NullString
 
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
+			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at, run_id
 			FROM task_queue
 			WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3
 		`, p.dialect), tid, queueName, jobID),
 		&j.JobID, &j.QueueName, &j.Status,
 		&payloadRaw, &j.CreatedAt,
-		&startedAt, &completedAt,
+		&startedAt, &completedAt, &runID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "job not found")
@@ -261,6 +286,7 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	if completedAt.Valid {
 		j.CompletedAt = &completedAt.Time
 	}
+	j.RunID = runID.String
 
 	p.writeJSON(w, 200, j)
 }

@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -179,7 +180,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	case strings.Contains(query, "AND job_id"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
-		return c.queryJobByID(args)
+		return c.queryJobByID(query, args)
 	case strings.Contains(query, "tenant_id = $1 AND queue_name = $2"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
@@ -540,12 +541,85 @@ func (c *fakeConn) queryPendingJobs(_ []driver.NamedValue) (driver.Rows, error) 
 	return &fakeRows{columns: columns, data: data}, nil
 }
 
+// selectedColumns returns the column list a SELECT actually asks for.
+//
+// WHY THE FAKE PARSES THE QUERY INSTEAD OF RETURNING A FIXED LIST. It used to
+// return a hardcoded set of columns whatever the statement said, which made
+// every test here blind to the one thing a column change gets wrong: dropping a
+// column from the SELECT while the scan still expects it. Against a real
+// database that is an immediate "expected N destination arguments in Scan";
+// against the old fake it was invisible, and a falsification that removed
+// run_id from either SELECT came back GREEN. cleat#1715.
+//
+// Deliberately crude -- it splits on commas between SELECT and FROM -- because
+// it only has to model the statements in this file, and a real parser here
+// would be a second thing that can be wrong.
+var selectListRe = regexp.MustCompile(`(?is)\bSELECT\s+(.+?)\s+FROM\b`)
+
+func selectedColumns(query string) []string {
+	// A REGEXP RATHER THAN strings.Index(" FROM "), because the statements here
+	// are formatted across lines: FROM is preceded by a newline and tabs, not a
+	// space, so the literal search found nothing and every read returned 500.
+	// That is the "a tool applied to a format it does not model" trap, and it
+	// failed loudly, which is the good direction.
+	m := selectListRe.FindStringSubmatch(query)
+	if m == nil {
+		return nil
+	}
+	var cols []string
+	for _, c := range strings.Split(m[1], ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			cols = append(cols, c)
+		}
+	}
+	return cols
+}
+
+// projectRow renders one stored row as the columns a query asked for, and fails
+// loudly on a column it does not know rather than returning a silent nil.
+func projectRow(row *jqRow, cols []string) ([]driver.Value, error) {
+	out := make([]driver.Value, 0, len(cols))
+	for _, c := range cols {
+		var v driver.Value
+		switch c {
+		case "job_id":
+			v = row.jobID
+		case "queue_name":
+			v = row.queueName
+		case "status":
+			v = row.status
+		case "payload":
+			v = row.payload
+		case "created_at":
+			v = row.createdAt
+		case "started_at":
+			if row.startedAt != nil {
+				v = *row.startedAt
+			}
+		case "completed_at":
+			if row.completedAt != nil {
+				v = *row.completedAt
+			}
+		case "run_id":
+			if row.runID != nil {
+				v = *row.runID
+			}
+		default:
+			return nil, fmt.Errorf("fake jobqueue store: query selects unknown column %q; "+
+				"add it to projectRow or the test is asserting against a column the fake "+
+				"invented", c)
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
 // queryJobByID handles:
 //
 //	SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
 //	FROM task_queue
 //	WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3
-func (c *fakeConn) queryJobByID(args []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeConn) queryJobByID(query string, args []driver.NamedValue) (driver.Rows, error) {
 	tid, err := argString(args, 1)
 	if err != nil {
 		return nil, err
@@ -559,34 +633,22 @@ func (c *fakeConn) queryJobByID(args []driver.NamedValue) (driver.Rows, error) {
 		return nil, err
 	}
 
+	cols := selectedColumns(query)
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("fake jobqueue store: could not read a column list from %q", query)
+	}
+
 	key := rowKey(tid, queueName, jobID)
 	row, ok := c.store.rows[key]
 	if !ok {
-		return &fakeRows{
-			columns: []string{"job_id", "queue_name", "status", "payload", "created_at", "started_at", "completed_at"},
-		}, nil
+		return &fakeRows{columns: cols}, nil
 	}
 
-	var startedAtVal, completedAtVal driver.Value
-	if row.startedAt != nil {
-		startedAtVal = *row.startedAt
+	values, err := projectRow(row, cols)
+	if err != nil {
+		return nil, err
 	}
-	if row.completedAt != nil {
-		completedAtVal = *row.completedAt
-	}
-
-	return &fakeRows{
-		columns: []string{"job_id", "queue_name", "status", "payload", "created_at", "started_at", "completed_at"},
-		data: [][]driver.Value{{
-			row.jobID,
-			row.queueName,
-			row.status,
-			row.payload,
-			row.createdAt,
-			startedAtVal,
-			completedAtVal,
-		}},
-	}, nil
+	return &fakeRows{columns: cols, data: [][]driver.Value{values}}, nil
 }
 
 // queryListJobs handles:
@@ -648,25 +710,17 @@ func (c *fakeConn) queryListJobs(query string, args []driver.NamedValue) (driver
 		results = results[:limit]
 	}
 
-	columns := []string{"job_id", "queue_name", "status", "payload", "created_at", "started_at", "completed_at"}
+	columns := selectedColumns(query)
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("fake jobqueue store: could not read a column list from %q", query)
+	}
 	var data [][]driver.Value
 	for _, row := range results {
-		var startedAtVal, completedAtVal driver.Value
-		if row.startedAt != nil {
-			startedAtVal = *row.startedAt
+		values, err := projectRow(row, columns)
+		if err != nil {
+			return nil, err
 		}
-		if row.completedAt != nil {
-			completedAtVal = *row.completedAt
-		}
-		data = append(data, []driver.Value{
-			row.jobID,
-			row.queueName,
-			row.status,
-			row.payload,
-			row.createdAt,
-			startedAtVal,
-			completedAtVal,
-		})
+		data = append(data, values)
 	}
 	return &fakeRows{columns: columns, data: data}, nil
 }
