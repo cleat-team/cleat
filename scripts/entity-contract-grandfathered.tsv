@@ -1,0 +1,43 @@
+# Clauses of the entity contract that are NOT enforced yet (cleat#1702).
+#
+# The design converts existing members one at a time, workflow_schedules last
+# because it carries an API break. Each line is one (table, clause) pair that
+# the guard will skip. Delete a line when the migration for it lands.
+#
+# THIS LIST MAY ONLY SHRINK. The ceiling is GRANDFATHER_CEILING in
+# check-entity-contract.py -- deliberately in the guard rather than in this
+# file, so that growing it is an edit to a different file that a reviewer sees,
+# rather than one more line in a list that is already long.
+#
+# The reason that matters: for a plain allowlist, the cheapest way to make the
+# guard pass is to add a name to it, and a pass bought that way is
+# indistinguishable from conforming.
+#
+# Generated 2026-09-16 from the guard's own parse, not typed by hand, so the
+# list cannot disagree with what the guard checks. Re-derive:
+#   python3 scripts/check-entity-contract.py --grandfathered /dev/null
+#
+# table					clause
+admin.tenant_api_keys	updated_at
+admin.tenant_api_keys	disabled_at
+admin.tenant_api_keys	no-legacy-retirement
+admin.tenant_egress_allow	updated_at
+admin.tenant_egress_allow	disabled_at
+admin.tenant_roles	updated_at
+admin.tenant_roles	disabled_at
+public.tenant_domains	updated_at
+public.tenant_domains	disabled_at
+public.tenant_secrets	created_at
+public.tenant_secrets	disabled_at
+public.tenant_settings	created_at
+public.tenant_settings	disabled_at
+public.workflow_defs	updated_at
+public.workflow_defs	disabled_at
+public.workflow_defs	no-legacy-retirement
+public.workflow_routing	updated_at
+public.workflow_routing	disabled_at
+public.workflow_schedules	updated_at
+public.workflow_schedules	disabled_at
+public.workflow_schedules	no-legacy-retirement
+public.workflow_tags	updated_at
+public.workflow_tags	disabled_at

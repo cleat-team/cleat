@@ -13856,3 +13856,82 @@ failure is known to be the mutation rather than a dead harness. Restore verified
 own step, per *Ground rules for changes*.
 
 Files: `scripts/check-test-only-code.sh`, `.github/workflows/ci.yml`.
+
+---
+
+### 3.335 One contract for the non-workflow entities, enforced by total coverage — ✅ **GUARD LANDED 2026-09-16** (cleat#1702)
+
+The design was approved by the repository owner on 2026-09-16: `created_at`, `updated_at`,
+`disabled_at TIMESTAMPTZ` as the single retirement spelling, and none of the four older ones. This
+section covers the **guard and its grandfather list**; the migrations that make members conform
+land one at a time after it, `workflow_schedules` last because it carries an API break.
+
+**The class is thirteen, not eleven, and the two missing ones were found by applying the issue's
+own rule instead of reading the list it produced.** The rule — *does the row carry `workflow_id`,
+and does it carry `expires_at`* — reproduces its own first claim exactly: two tables carry both,
+`concurrency_keys` and `idempotency_keys`. It then does **not** yield the stated membership. 17
+carry neither, against a list of eleven. Four of the six extra are correctly out (the run table,
+two stats tables, `admin.workers`). Two were missed:
+
+| | migration | shape |
+|---|---|---|
+| `admin.tenant_egress_allow` | 079 | `tenant_id`, `host`, `created_at` |
+| `public.tenant_domains` | 080 | `hostname`, `tenant_id`, `created_at` |
+
+**Note the migration numbers.** These are the two newest entities before `tenant_secrets` at 081,
+which *is* in the list. So this was not a stale corner — the list was assembled from what came to
+mind, and what came to mind omitted the most recent arrivals. The staging plan's "new entities
+conform immediately" would have started from a baseline that already excluded them. And it
+flatters: an undercount makes the conversion look 18% smaller than it is.
+
+**Membership cannot be derived structurally, and that is what decided the design.** It was tested
+rather than assumed: `admin.tenant_egress_allow` and `public.tenant_domains` are column-identical
+to `public.workflow_routing` and `public.workflow_tags`, both members. No predicate over columns
+separates them, so membership is a semantic judgement.
+
+A guard built on a *members list* is therefore only ever as complete as whoever wrote the list —
+and that list had already gone wrong by hand once. So the guard asserts **total coverage**: every
+table it finds in the migrations must be classified `member`, `exempt` or `not-an-entity`, and an
+unclassified table is an error. Entity number twelve inherits the rule without anyone rewriting the
+eleven, which was the stated requirement, and the specific omission above becomes impossible rather
+than merely corrected.
+
+**Two of the eight named in the issue are in the `admin` schema** — `admin.tenant_api_keys` and
+`admin.tenant_roles`. Addressed as bare names they resolve to nothing in `public` and a guard
+reports clean: the zero-members trap arriving through the *name* rather than through the count.
+The registry is qualified throughout.
+
+**Exit status is three-valued on purpose**: 0 conforming, 1 a violation, **2 the scan could not
+establish what it was measuring**. A guard that cannot parse its input must not be able to report
+what a clean tree reports.
+
+**Three things the falsification found that reading did not:**
+
+  * **A stale registry entry crashed the clause loop** with a `KeyError` instead of reporting the
+    stale name. Caught by the self-test on its first run — a guard that dies gives a traceback
+    where the finding should be.
+  * **Vacuity was checked after the ceiling**, so grandfathering the whole tree tripped the
+    ceiling and returned 1. Exit 2 means *this told you nothing*, and it was unreachable in the one
+    case it exists for. Reordered.
+  * **Alignment padding in the registry made two readers disagree.** The file was tab-aligned for
+    readability; `read_tsv` drops empty fields and read it correctly, while
+    `awk -F'\t' '$2=="member"'` returns **zero** rows, because `$2` is a padding tab. This is not
+    hypothetical — it silently emptied a mutation *during this guard's own falsification*, and the
+    resulting red was read as the mutation working. The file now uses exactly one tab and the guard
+    **refuses** consecutive tabs, so the trap is a check rather than a comment.
+
+That third one is the section's own subject turned on itself: a census that disagreed between two
+readers, inside the guard written to stop censuses disagreeing between two readers.
+
+**Coverage today: 17 of 40 clauses enforced** (10 members × 4 clauses, 23 grandfathered). The
+grandfather list was generated from the guard's own parse rather than typed, so it cannot disagree
+with what the guard checks, and its ceiling lives in `check-entity-contract.py` rather than in the
+list — growing it is an edit to a different file that a reviewer sees.
+
+**Scope limit, stated rather than left to be discovered:** the guard reads
+`migrations/postgres/` only. Postgres is the reference dialect for this contract and
+`TIMESTAMPTZ` is a Postgres spelling. A member that exists only in the MySQL or SQL Server
+migrations would not be seen. Nothing here claims otherwise.
+
+Files: `scripts/check-entity-contract.py`, `scripts/entity-contract.tsv`,
+`scripts/entity-contract-grandfathered.tsv`, `.github/workflows/ci.yml`.
