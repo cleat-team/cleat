@@ -198,10 +198,15 @@ pause pay for the wait.
 after a dropped connection is served exactly what it missed, from `event_history`, because every
 chunk is persisted as it arrives.
 
-**The limit: the live tail is worker-local.** A request landing on a worker that is not executing
-the run gets the durable history and then nothing live, and says so (`"live": false`). Behind a
-load balancer with N workers, expect that on a proportionate share of connections. Routing a
-reader to the right worker is not solved — cleat#1639.
+**Any worker can serve the stream.** The live tail is in memory on the worker executing the run,
+so a request landing anywhere else follows the run from `event_history` instead, reading from its
+cursor on an interval — which every worker can do, because every worker can read the table. The
+`attached` event reports which it got as `transport: "live"` or `"poll"`. Both carry every token;
+they differ in latency. cleat#1639.
+
+So a load balancer needs no stickiness for this endpoint, and behind one you should expect
+`"live": false` on a share of connections proportional to your worker count **without** those
+connections being degraded in content.
 
 (This section said flatly that nothing bridged the two halves, and before that, that the worker had
 no SSE support at all. The second came from a grep scoped to `cmd/` and `engine/`, which is where
@@ -277,9 +282,10 @@ tells you what happened; it does not tell you whether it was any good.
    `db` mode. What you have to do is turn it on and verify it took, since the default is `memory`
    and the fallback is silent. Listed here because an unconfigured default looks identical to a
    missing feature.
-3. **Nothing, for token streaming — it shipped.** `GET /api/workflows/{id}/stream`, cleat#1572.
-   What is still yours: routing a reader to the worker running the job, if `"live": false` on a
-   share of connections is not acceptable to your front end. Tracked as cleat#1639.
+3. **Nothing, for token streaming — it shipped.** `GET /api/workflows/{id}/stream`, cleat#1572,
+   and it works on every worker as of cleat#1639, so no load-balancer stickiness is yours to
+   arrange. What is still yours is a sizing decision: `--stream-poll-interval` is latency your
+   users see and `--max-stream-poll-readers` is load your database takes.
 4. **An eval and prompt-regression harness.** Entirely absent, and entirely your problem.
 5. **The front-end.** As designed.
 

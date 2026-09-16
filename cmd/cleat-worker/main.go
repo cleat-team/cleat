@@ -1489,6 +1489,9 @@ func main() {
 			taskQueues:  taskQueues,
 			requireAuth: *requireAuth,
 			streamHub:   streamHub,
+
+			maxStreamPollReaders: *maxStreamPollReadersFlag,
+			streamPollInterval:   *streamPollIntervalFlag,
 		}
 
 		// Use plugin mux if available, otherwise create a fresh one.
