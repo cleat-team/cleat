@@ -13055,3 +13055,72 @@ rather than *predicates on another function*, would pass the first two and fail 
 it would let a plugin predicate stand in for a missing engine policy on the same table.
 
 Files: `engine/mssql_policy_coverage_test.go`.
+
+---
+
+### 3.328 Nothing checked that a plugin table with a tenant column is declared TenantScoped — ✅ **FIXED 2026-09-16**
+
+`Migration.TenantScoped` is the **only** input to `applyTenantScoping`: a plugin table gets a
+row-level security policy because it is declared, and for no other reason. So a table carrying a
+`tenant_id` column and missing the declaration is tenant-owned data with no policy on any dialect,
+and nothing said so — the declaration is an opt-in, and an omitted opt-in is indistinguishable from
+a table that does not need one.
+
+**Nothing is wrong today, and that is why this is a guard rather than a fix.** Measured on develop:
+19 plugin directories, 26 tables carrying a `tenant_id` column, 26 declarations, matching per
+plugin with no gap in either direction. What was missing is anything that keeps it that way.
+
+Migration 056 states the shape, about a different guard:
+
+> so it answers "is every statement against a KNOWN tenant-scoped table scoped?" and cannot answer
+> "is every table that should be tenant-scoped actually one?"
+
+Every existing check is on the first side of that. `TestAPluginTableIsFilteredToItsTenantOnSQLServer`
+(cleat#1629) proves a **declared** table gets its policy;
+`TestEveryTenantScopedStatementNamesItsContext` (cleat#1640) proves a statement **names a
+context**. This is the second side.
+
+Cited by test name rather than by section number deliberately: three §-references written into the
+first draft of this entry — 3.216, 3.243, 3.324 — were all wrong, each naming a real section about
+something else, and each looked plausible enough to ship. A test name is greppable and moves with
+the thing it names.
+
+**The file set is the part that took the work.** `TestPluginDialectArmsDeclareTheSameColumns` scans
+`plugins/*/migrations.go`, and `plugins/pgvector` keeps its `Migration` literal in `plugin.go` — so
+it is outside that set entirely, and it is the plugin whose table is easiest to forget, being the
+only deliberately PostgreSQL-only one. That costs the older guard nothing, checked rather than
+assumed: pgvector declares only an `Up` arm, and that guard compares a table only when two or more
+arms declare it.
+
+It would have cost this guard its most likely finding. Measured by narrowing the set and re-running:
+
+| file set | verdict | population |
+|---|---|---|
+| `plugins/` (shipped) | PASS | **26 tables across 19 plugins** |
+| `plugins/*/migrations.go` | **PASS** | 25 tables across 18 plugins |
+
+Both green. The narrowed one simply covers one plugin fewer and says nothing about it — a check
+telling you it is consistent with itself while not looking at the thing most likely to be wrong.
+So `TestTheTenantScopedScanReachesEveryPlugin` asserts the scan's own scope, from a **different
+command** (`git grep -l TenantScoped:`) rather than a restatement of the glob, and falsifying it by
+narrowing the set names `plugins/pgvector/plugin.go` exactly.
+
+**A regex cannot read this and the neighbouring guard already paid to learn it.** A Go raw string
+cannot contain a backtick, so a MySQL arm with a reserved column name is written as
+`` `CREATE TABLE ...` + "`key`" + ` ...` ``, and a textual scan captures the first fragment and
+stops — which would silently drop the `tenant_id` column and score the table as needing no
+declaration. This reuses `evalStringExpr` and `createTableColumns` from
+`TestPluginDialectArmsDeclareTheSameColumns` (cleat#1291) rather than reimplementing them, and the
+fixture carries a concatenated case so that reading is exercised.
+
+My own first census of this question used a regex and reported **21** tables against 26
+declarations. The disagreement was the tell: a body captured with `.{0,4000}?\)` stops at the first
+`NVARCHAR(200)`.
+
+**Falsified three ways**: removing a real declaration (`kvstore.kv_store` — reported by name);
+narrowing the file set (pgvector — reported by path); and a `testdata` fixture carrying all three
+shapes at once, where the undeclared and concatenated tables must be reported and the declared one
+must not, so the scanner is shown to discriminate rather than to flag everything.
+
+Files: `plugin/every_plugin_tenant_table_is_declared_tenant_scoped_test.go`,
+`plugin/testdata/tenantscoped/undeclared.go`.
