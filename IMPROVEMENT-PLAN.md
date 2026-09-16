@@ -14158,3 +14158,49 @@ split: `set(...split())` gives 56, a raw token count gives 112, and the answer i
 commands are now published beside their results.
 
 Files: `CLAUDE.md`.
+
+---
+
+### 3.338 A resolver that answers every time is a lookup of who talks most — ✅ **RECORDED 2026-09-16** (cleat#1715)
+
+Graduates to `CLAUDE.md` the attribution lesson from mis-crediting cleat#1715's claim, per
+WORKSTREAM R3. It sits under *"Claim outright or not at all"*, because claiming only works if the
+next reader can resolve **whose** claim it is, and every marker that would let them is optional at
+the point of writing.
+
+**The measurement that makes it a rule rather than a resolution.** Resolving the claimant of the
+ten open issues two ways:
+
+| how the claimant is resolved | result |
+|---|---|
+| any `Claude-Session` id present in the thread | a confident id for **10 of 10** |
+| the marker on the claim comment itself | a marker on **4 of 19** claim comments; UNKNOWN for 15 |
+
+The honest resolver declines four times out of five; the presence-based one never declines. The
+known-positive was #1717, whose claimant I had been told independently — presence returns the wrong
+session for it.
+
+**Three scans, three ways to be wrong, and one anchor that is wrong in neither direction.** Measured
+over every commit message in `develop` at `b6e88452`:
+
+    B=$(git log --format=%B origin/develop)
+    grep -cE '^Claude-Session:' <<<"$B"                                       # 741 — the answer
+    grep -cE '^Claude-Session:[[:space:]]*https://claude\.ai/code/' <<<"$B"   # 735 — loses 6
+    grep -oE 'session_[A-Za-z0-9_]+' <<<"$B" | sort -u | grep -c .            # 10 — invents 5
+
+The 6 it loses are one participant's consistent habit, not a uniform miss rate. Among the 5 it
+invents is `session_01` — a real id, truncated, quoted in `74b6bcd0`'s own message as it removes a
+literal `"session_01..."` ellipsis from a doc comment.
+
+**Two further traps recorded with it.** `git log` indents bodies by four spaces, so the correct
+field anchor returns **0 of 741** if pointed at `git log` rather than `git log --format=%B` — a
+blank that reads as "nobody here uses session trailers". And a squash concatenates its
+constituents' bodies: 121 of the 554 trailered commits carry the marker more than once, every one a
+single id, which a per-line count reads as multi-session collaboration.
+
+**Why no hook fixes this.** `CLAUDE_CODE_SESSION_ID` is exported to hooks but is a UUID, and 0 of
+the 741 trailers use that form; the id they do use lives in `CLAUDE_CODE_BRIDGE_SESSION_ID`, whose
+presence depends on how the session was launched. A hook keyed on the obvious name emits a
+well-formed marker that resolves to nothing and passes every scan above.
+
+Files: `CLAUDE.md`.

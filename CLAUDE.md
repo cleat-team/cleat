@@ -1430,6 +1430,100 @@ Claiming on the issue is the other half and it only works if the next person rea
 order is: search, claim, then build. **Claim outright or not at all** — "I might pick this up
 later" has produced duplicate work here more than once.
 
+**And when you resolve WHO claimed it, the resolver must be able to answer UNKNOWN.** Claiming only
+works if the next reader can tell whose claim it is, and every mechanism for that is *optional at
+the point of writing*: a comment need not be signed, a commit need not carry a `Claude-Session`
+trailer. Three ways of getting the resolution wrong, all measured 2026-09-16, and **all three fail
+open** — each returns a confident answer where it should return none.
+
+**1. A resolver with no UNKNOWN branch falls through to the nearest id it can find.** Mine
+attributed cleat#1715's claim to the wrong session by adjacency: it found the claim, found no marker
+on it, and resolved the claimant from the closest trailer-bearing artifact, which belonged to
+somebody else. The branch that would have said *"I cannot tell"* was never written, so it could
+never fire — the *"condition that never decides anything"* case above, arriving in attribution.
+
+**UNKNOWN is not the edge case here; it is the usual answer.** Measured across the ten open issues
+on 2026-09-16, resolving two ways:
+
+| how the claimant is resolved | result |
+|---|---|
+| any `Claude-Session` id **present in the thread** | a confident id for **10 of 10** issues |
+| the marker **on the claim comment itself** | a marker on **4 of 19** claim comments; UNKNOWN for 15 |
+
+So the honest resolver declines four times out of five, and the presence-based one never declines at
+all. **A resolver that answers every time is not a resolver, it is a lookup of who talks most** —
+the peer's id appears in nearly every thread because the peer comments in nearly every thread.
+
+**And I had a known-positive in hand: #1717.** My user had told me WS-1 took it. The presence scan
+returns the peer's id. One case whose answer I already knew, disagreeing with the instrument — which
+is the only thing that separates "this resolver works" from "this resolver has never been asked
+anything it could get wrong". Hold one back before believing any attribution.
+
+A confident wrong name is worse than silence, because it is actionable: "claimed, claimant unknown"
+sends you to ask, and a wrong name sends you to the wrong person.
+
+**2. "No marker found" and "a marker I could not parse" are different answers, and a pattern
+cannot tell you which it gave.** The trailer appears in two forms in this tree —
+`https://claude.ai/code/session_…` and a bare `session_…` — so a scan anchored on the URL reports
+the bare form as an absence. That is not a uniform 1% miss. **The bare form is one participant's
+consistent habit**: all 6 of its occurrences, over 4 commits and six days, are one session. The scan
+does not lose a little of everyone; it loses one person entirely, and the person it loses is the one
+whose habit differs.
+
+**3. The inverse invents participants.** A bare substring scan over the same text finds five ids
+that do not exist, in 22 occurrences — `session_context`, `session_context_test`, `session_token`,
+`session_connect_attrs`, and **`session_01`, which is a real id truncated**: `74b6bcd0`'s message
+says it is dropping a literal `"session_01..."` ellipsis from a doc comment. A commit message *about*
+a truncated session id, counted as a sixth session, sitting beside five whose every digit checks out.
+
+**One anchor is wrong in neither direction: anchor at the FIELD NAME and stay permissive about the
+value.** `^Claude-Session:` cannot match `session_connect_attrs`, which has no field name in front
+of it, and does not care which form the value takes. Over every commit message in `develop`'s
+history:
+
+    B=$(git log --format=%B origin/develop)
+    grep -cE '^Claude-Session:' <<<"$B"                                       # 741 — the answer
+    grep -cE '^Claude-Session:[[:space:]]*https://claude\.ai/code/' <<<"$B"   # 735 — loses 6
+    grep -oE 'session_[A-Za-z0-9_]+' <<<"$B" | sort -u | grep -c .            # 10 — invents 5
+
+The tight pattern was chosen to defeat the false positive, and bought the false negative with it.
+Both were written by people being careful.
+
+**That `--format=%B` is load-bearing, and dropping it turns the correct pattern into a total false
+negative.** `git log` indents the body by four spaces, so the field anchor matches nothing at all:
+
+| over all of `develop`, 2026-09-16 | |
+|---|---|
+| `git log --format=%B \| grep -cE '^Claude-Session:'` | **741** |
+| `git log \| grep -cE '^Claude-Session:'` | **0** |
+| `git log \| grep -cE 'Claude-Session:'` | 741 |
+
+A zero there reads as *"nobody in this repo uses session trailers"*, which is a conclusion someone
+would act on. It is the most convincing form of the trap because the pattern is the right one —
+only the text it was pointed at is wrong. Before believing this or any blank, make the same command
+return a non-blank on a case whose answer you already know.
+
+**Count distinct VALUES, never lines.** Those 741 lines are 554 commits and 5 sessions, and **121
+of the 554 carry the trailer more than once** — a squash concatenates its constituents' bodies, so
+a commit carrying it three times is one session committing three times. A per-line count reads
+close to a quarter of this history as multi-session collaborations. `.githooks/prepare-commit-msg` cannot dedupe
+them and should not: it exits early on `SOURCE=squash` by design, because the trailer belongs on the
+commits being squashed.
+
+**The mechanism that would make all of this unnecessary does not exist, and the obvious candidate is
+a trap worth not re-discovering.** `CLAUDE_CODE_SESSION_ID` is exported to hooks, so
+`prepare-commit-msg` could stamp it — but it is a UUID, and **0 of those 741 trailers use that
+form**. The variable carrying the id the trailers actually use is `CLAUDE_CODE_BRIDGE_SESSION_ID`,
+whose presence depends on how the session was launched. A hook keyed on the obvious name would
+produce a well-formed marker that resolves to nothing, and every scan above would pass it. Writing
+the trailer is the author's job; the hook adds `Signed-off-by` and nothing else.
+
+**And this is not a discipline that survives deciding to have it.** cleat#1724 — which added the
+fourth entry under *"could this check have disagreed?"*, written by an author who had spent that
+afternoon measuring exactly this absence — merged without a trailer. Five of my six merges that day
+lacked one. That is the argument for recording the *resolver* rule rather than chasing the markers:
+**plan for the marker to be missing, because the person most aware of it is still missing it.**
+
 **One PR, one thing.** Every PR that bundled a second concern was harder to review than the two
 would have been apart.
 
