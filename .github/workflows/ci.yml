@@ -958,6 +958,24 @@ jobs:
           # check-ci-package-coverage.sh exists to refuse.
           - name: support
             path: ./plugin/... ./pluginapi/... ./auth/... ./migration/... ./monitoring/... ./packaging/...
+            # -p 1 for the same reason the engine entry above carries it, and
+            # this entry did not until cleat#1666. THREE of these packages are
+            # database-backed -- plugin, auth and migration -- and they point at
+            # the one PostgreSQL service this job provides. `go test` runs
+            # packages in parallel by default, so plugin and migration overlapped
+            # for migration's entire 6.36s life in run 35047859194, and migration
+            # failed at ~4.5s into that window with `tuple concurrently updated`
+            # while applying 005_app_role.sql -- on a PR whose diff touched only
+            # wasm/ and two testdata READMEs.
+            #
+            # CLAUDE.md states the rule: "Use -p 1 when running more than one
+            # database-backed package in one invocation."
+            #
+            # NECESSARY, NOT SUFFICIENT. cleat#1599 already records that -p 1
+            # does nothing across two `go test` PROCESSES; the cluster-wide
+            # advisory lock is what covers that, and cleat#1666 is the half of it
+            # that ./migration/ was missing. Both layers, or neither works.
+            flags: -p 1
           - name: commands
             path: ./cmd/...
           # tests/ is otherwise not in this matrix -- cluster/scale/soak need

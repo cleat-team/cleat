@@ -42,7 +42,7 @@ func TestRunner_AppliesShippedMySQLMigrations(t *testing.T) {
 	ctx := context.Background()
 
 	r := migration.NewRunner(db, migration.DialectMySQL, migrationsRoot(t))
-	if err := r.Run(ctx); err != nil {
+	if err := runMigrations(t, ctx, r, migration.DialectMySQL); err != nil {
 		t.Fatalf("Run against the shipped MySQL migrations failed: %v\n\n"+
 			"This is the code path every cleat-worker takes at boot. If it "+
 			"fails, no worker can start against a MySQL deployment whose "+
@@ -112,7 +112,9 @@ func TestRunner_SecondMySQLRunAppliesNothing(t *testing.T) {
 	ctx := context.Background()
 	root := migrationsRoot(t)
 
-	if err := migration.NewRunner(db, migration.DialectMySQL, root).Run(ctx); err != nil {
+	if err := runMigrations(t, ctx,
+		migration.NewRunner(db, migration.DialectMySQL, root),
+		migration.DialectMySQL); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
 	var firstApplied string
@@ -121,7 +123,9 @@ func TestRunner_SecondMySQLRunAppliesNothing(t *testing.T) {
 		t.Fatalf("read applied_at: %v", err)
 	}
 
-	if err := migration.NewRunner(db, migration.DialectMySQL, root).Run(ctx); err != nil {
+	if err := runMigrations(t, ctx,
+		migration.NewRunner(db, migration.DialectMySQL, root),
+		migration.DialectMySQL); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
 	var secondApplied string
