@@ -1,0 +1,47 @@
+# Membership for the non-workflow entity contract (cleat#1702).
+#
+# Every table that appears in migrations/postgres/ MUST have a row here.
+# check-entity-contract.py fails on an unclassified table, which is the whole
+# point: membership in this class is a semantic judgement and cannot be derived
+# from column shape. admin.tenant_egress_allow and public.tenant_domains are
+# structurally identical to public.workflow_routing and public.workflow_tags,
+# and no predicate over columns separates them.
+#
+# That is not hypothetical. The issue's own membership rule -- "does the row
+# carry workflow_id, and does it carry expires_at" -- reproduces its first claim
+# exactly (only concurrency_keys and idempotency_keys carry both) and then does
+# NOT yield its list: 17 tables carry neither, against a stated eleven. Four of
+# the six extra are correctly out. Two were simply missed, and they are the two
+# NEWEST entities before tenant_secrets. A hand-kept list went wrong once; total
+# coverage makes the next one impossible instead of merely corrected.
+#
+# class is one of:
+#   member         subject to the contract: created_at, updated_at, disabled_at,
+#                  and none of the legacy retirement spellings
+#   exempt         in the class but deliberately outside the contract (decided)
+#   not-an-entity  a run, stats or infrastructure table
+#
+# table					class		why
+admin.tenants	exempt	the tenant itself; its lifecycle is the thing others hang off
+admin.plugin_tables	exempt	registry of plugin-owned tables, not operator-created
+public.plugin_defs	exempt	derived from plugin binaries, not operator-created
+admin.tenant_api_keys	member
+admin.tenant_roles	member
+public.workflow_defs	member
+public.workflow_schedules	member
+public.workflow_routing	member
+public.workflow_tags	member
+public.tenant_settings	member
+public.tenant_secrets	member
+admin.tenant_egress_allow	member	migration 079; absent from the issue's list of eleven
+public.tenant_domains	member	migration 080; absent from the issue's list of eleven
+public.workflow_instances	not-an-entity	the run
+public.event_history	not-an-entity	run events
+public.workflow_promises	not-an-entity	run-scoped
+public.workflow_signals	not-an-entity	run-scoped
+public.workflow_update_requests	not-an-entity	run-scoped
+public.concurrency_keys	not-an-entity	holder-scoped, TTL-reclaimed (workflow_id + expires_at)
+public.idempotency_keys	not-an-entity	holder-scoped, TTL-reclaimed (workflow_id + expires_at)
+public.workflow_memory_samples	not-an-entity	stats
+public.workflow_memory_stats	not-an-entity	stats
+admin.workers	not-an-entity	infrastructure; a worker registers itself

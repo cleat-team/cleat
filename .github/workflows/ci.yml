@@ -373,6 +373,22 @@ jobs:
       - name: Cross-module go.mod tidiness guard
         run: scripts/check-go-mod-tidy.sh
 
+      # One contract for the non-workflow entities (cleat#1702): created_at,
+      # updated_at, disabled_at, and none of the four older spellings of
+      # "retired". Members convert one at a time, so most clauses are still
+      # grandfathered; the list may only shrink.
+      #
+      # --self-test FIRST, and here it is the only thing that means anything.
+      # Today's schema is non-conforming BY CONSTRUCTION -- 23 of 40 clauses are
+      # grandfathered -- so a green real run is equally consistent with "the
+      # guard works" and "the grandfather list is carrying all of it". The
+      # self-test builds a synthetic entity that breaks each clause separately
+      # and requires a separate red for each.
+      - name: Entity contract guard
+        run: |
+          python3 scripts/check-entity-contract.py --self-test
+          python3 scripts/check-entity-contract.py
+
       # Catches code that is written, tested, passing, and wired to nothing --
       # which a test suite cannot catch, because the tests pass precisely
       # because they are the only callers. The baseline records the existing
