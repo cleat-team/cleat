@@ -119,6 +119,40 @@ func TestMSSQLCapabilityFollowsTheInstalledPredicate(t *testing.T) {
 	// ARM 3: the marker unreadable. Must be UNKNOWN, not a denial -- "not
 	// available" would send an operator to grant a membership they may already
 	// have, and the whole point of the marker is to distinguish the two.
+	// RESTORE WHAT THIS ARM DESTROYS, AND REGISTER IT BEFORE DESTROYING IT.
+	//
+	// The drop below is against a database the whole suite shares, and nothing
+	// else recreates the marker: migration 075 creates it, and the runner only
+	// applies versions schema_migrations has not recorded -- so once dropped it
+	// stays dropped, through this run and every later one, while
+	// schema_migrations goes on reporting 75 as applied.
+	//
+	// Measured 2026-09-16 on the WS-3 SQL Server. This test PASSED and left the
+	// table absent; the next full `go test ./engine/` run reported 701 test
+	// failures, every one of them tracing to "migration 075 has not been
+	// applied" and none of them related to the change under test. The failures
+	// appear at the START of the following run, which is what makes it
+	// expensive to attribute: the test that caused them already passed, in a
+	// different run, and reading its source shows a green arm doing exactly
+	// what it meant to do.
+	//
+	// CI never sees this. Each CI run gets a fresh database, and this file
+	// sorts late enough that the tests it breaks have already run.
+	//
+	// Registered as a cleanup rather than written after the assertions below,
+	// because a t.Fatalf added to this arm later would jump over a trailing
+	// restore and reintroduce the poisoning silently.
+	//
+	// Both files, in this order. 075 recreates the marker recording `plain`;
+	// the opt-in is then what the harness expects to find installed, since
+	// testutil.MSSQLAdminDB applies it because CleanupMSSQLTestData deletes
+	// across tenants and cannot work without it. Restoring only the table would
+	// leave the database in a state nothing sets up and several tests need.
+	t.Cleanup(func() {
+		applyMigrationFileForTest(t, db, "075_the_admin_bypass_is_opt_in.sql")
+		applyMigrationFileForTest(t, db, filepath.Join("optional", "cross_tenant_claim.sql"))
+	})
+
 	if _, err := db.Exec(`DROP TABLE admin.rls_predicate_form`); err != nil {
 		t.Fatalf("dropping the marker: %v", err)
 	}
