@@ -158,9 +158,24 @@ practice it described, and its only effect was to stop *directed* assignment whi
 self-served. A test nobody follows is not a safeguard.
 
 **The candidacy test.** A stream is available if it is idle and every open PR of its own is
-*waiting*: in the merge queue, or with all required checks running or green, **nothing red, no
-conflict, and no cancelled twin**. Red, `CONFLICTING`, draft or twinned all disqualify — those
-need their author.
+*waiting*: in the merge queue **with an entry state that is not `UNMERGEABLE`**, or with all
+required checks running or green, **nothing red, no conflict, and no cancelled twin**. Red,
+`CONFLICTING`, draft, twinned or `UNMERGEABLE`-in-queue all disqualify — those need their author.
+
+**The queue entry has its own state, and it is not the PR's.** `MergeQueueEntryState` is
+`QUEUED | AWAITING_CHECKS | MERGEABLE | UNMERGEABLE | LOCKED`, and an entry can read `UNMERGEABLE`
+while the PR's own `mergeStateStatus` still reads `CLEAN` — WS-2 hit this on 2026-09-16 with two of
+their own PRs both appending to `IMPROVEMENT-PLAN.md`: the first to merge made the second
+unmergeable *in the queue*, and nothing at PR level said so. Reading only `mergeStateStatus` counts
+that stream as waiting when it is blocked:
+
+```
+gh api graphql -f query='{repository(owner:"cleat-team",name:"cleat"){
+  mergeQueue(branch:"develop"){entries(first:20){nodes{state pullRequest{number}}}}}}'
+```
+
+This is R6 arriving through a different door — two PRs touching one shared file — and it is why R6
+survives R9 rather than being relaxed by it.
 
 The twin clause is not a detail. A PR can report every required context green and still be
 unmergeable, because branch protection is satisfied by neither member of a duplicated run set, and
