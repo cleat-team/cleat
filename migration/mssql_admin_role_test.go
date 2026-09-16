@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -112,6 +113,18 @@ func setupAdminRoleDB(t *testing.T) *sql.DB {
 	if err := migration.NewRunner(db, migration.DialectMSSQL, migrationsRoot(t)).Run(ctx); err != nil {
 		t.Fatalf("apply the shipped SQL Server migrations: %v", err)
 	}
+
+	// The tests in this file are ABOUT the cleat_admin bypass, and since
+	// cleat#1541 the shipped predicate does not grant it: 074 makes the
+	// disjunction opt-in, so a member reads IS_ROLEMEMBER = 1 and still sees
+	// nothing. Without this the cross-tenant assertions below fail for a
+	// correct reason, which is the least useful kind of red.
+	//
+	// Applied on ONE connection: 074 captures the policy set into a #temp table
+	// in one batch and replays it in another, and a #temp table lives for the
+	// session. migration.Runner opens one connection per file for the same
+	// reason.
+	applyMSSQLOptIn(t, db)
 
 	// Seeded with no session context at all, which works because 001 declares
 	// FILTER predicates and a FILTER predicate constrains reads, not writes.
@@ -348,4 +361,30 @@ func mssqlCredentials(t *testing.T) (string, string) {
 	}
 	password, _ := u.User.Password()
 	return u.User.Username(), password
+}
+
+// applyMSSQLOptIn applies migrations/mssql/optional/cross_tenant_claim.sql,
+// which the runner never picks up because it lives in a subdirectory and
+// readMigrations skips directory entries (cleat#1541).
+func applyMSSQLOptIn(t *testing.T, db *sql.DB) {
+	t.Helper()
+	path := filepath.Join(migrationsRoot(t), "mssql", "optional", "cross_tenant_claim.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the cross-tenant opt-in: %v", err)
+	}
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire one connection: %v", err)
+	}
+	defer conn.Close()
+	for _, batch := range strings.Split(string(raw), "\nGO\n") {
+		if strings.TrimSpace(batch) == "" {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, batch); err != nil {
+			t.Fatalf("apply the cross-tenant opt-in: %v", err)
+		}
+	}
 }
