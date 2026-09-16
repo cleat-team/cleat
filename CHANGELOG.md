@@ -49,12 +49,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **A composite parameter already refused** on absence. This makes absence
     uniform across types rather than adding a rule for scalars.
   - **A STORED payload is bound by whichever guest is current when it fires,
-    not by the one that was current when it was written.** A cron schedule's
-    input is persisted once and replayed on every firing, so rebuilding the
-    target workflow changes the contract that payload is judged against. The
-    schedule is not re-validated at registration and cannot be: the module's
-    `cleat.metadata` section carries no entry-point parameter list, so the host
-    has nothing to check an input against.
+    not by the one that was current when it was written.** Rebuilding a target
+    workflow changes the contract every payload already persisted for it is
+    judged against. It is not re-validated at write time and cannot be: the
+    module's `cleat.metadata` section carries no entry-point parameter list, so
+    the host has nothing to check an input against.
+
+    **Three dispatch paths do this, not one.** A cron schedule is the one that
+    surfaced it (cleat#1705); naming only that one would describe the exposure
+    as narrower than it is.
+
+    | plugin | stored input | written by |
+    |---|---|---|
+    | `scheduler` | `schedules.input` | whoever registered the schedule |
+    | `jobqueue` | `task_queue.input` | whoever enqueued the job |
+    | `eventtriggers` | `event_subscriptions.input_template`, merged with the event body | an operator, plus the publisher |
+
+        grep -rln 'env.StartWorkflow' --include='*.go' plugins/ | grep -v _test.go
+
+    `jobqueue` is the sharpest of the three: a row whose `input` is NULL is
+    dispatched as `{}` (`plugins/jobqueue/background.go`), which refuses **every**
+    declared parameter rather than one. `eventtriggers` is the most exposed,
+    because the workflow author controls neither half of the payload — the
+    template is an operator's and the event body is a publisher's.
 
     There is no "bind it the old way" mode, and the reason is structural rather
     than a decision deferred: the binding lives in generated guest code, so a
