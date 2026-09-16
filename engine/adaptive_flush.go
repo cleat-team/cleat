@@ -200,12 +200,18 @@ func (af *AdaptiveFlusher) onTimer() {
 // partitionFencedBatch splits batch into entries whose claim still holds
 // (held) and entries whose claim was lost (lost), renewing the lease for
 // every distinct (workflow_id, worker_id, generation) triple in the batch in
-// one round trip -- the batch-mode counterpart to Engine.flushEvent's single
+// one STATEMENT -- the batch-mode counterpart to Engine.flushEvent's single
 // Heartbeat call (B4). A single Heartbeat call cannot fence a whole batch
 // because one AdaptiveFlusher accumulates events from every workflow this
 // worker process is running, each claimed under its own generation, so this
 // does the same (assigned_to, generation) check for all of them at once
 // instead of one at a time.
+//
+// One statement, not one round trip: since cleat#1677 the statement runs
+// inside a transaction that sets the tenant first, because the RLS policy on
+// workflow_instances raises rather than filters when it is unset. The point
+// the sentence above is making survives that -- it is one query for every
+// claim in the batch, not one Heartbeat per workflow.
 //
 // Entries with workerID == "" (fencing not requested for that entry) always
 // come back in held, regardless of generation.
@@ -242,6 +248,27 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 		return batch, nil, nil
 	}
 
+	// THE FENCE CHECK RUNS IN A TENANT-SCOPED TRANSACTION. cleat#1677.
+	//
+	// workflow_instances is ENABLE + FORCE ROW LEVEL SECURITY, and the policy
+	// is USING (tenant_id = cleat.assert_tenant_set()) -- a function that
+	// RAISES when the tenant is unset rather than filtering to nothing. On the
+	// pool this statement did not return the wrong rows; it could not run at
+	// all, failing with "cleat.tenant_id is not set (P0001)".
+	//
+	// A `WITH cfg AS (SELECT set_config(...))` CTE WAS TRIED FIRST AND DOES NOT
+	// WORK HERE, which is worth recording because the two other writes in this
+	// file use exactly that and do work (:382 and :596). Measured against the
+	// NOSUPERUSER app role, both ways:
+	//
+	//	cfg declared, never referenced   -> P0001, the CTE is not evaluated
+	//	cfg referenced via FROM ..., cfg -> P0001 ANYWAY
+	//
+	// The policy on the UPDATE's target is evaluated before the CTE's
+	// set_config has taken effect, so the idiom that carries an INSERT does not
+	// carry this. Preferring consistency with the neighbours over the mechanism
+	// the guard actually recommends was the wrong call and the test is what
+	// said so.
 	valuesSQL := make([]string, len(claims))
 	args := make([]interface{}, 0, len(claims)*3)
 	for i, c := range claims {
@@ -250,7 +277,24 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 		args = append(args, c.workflowID, c.workerID, c.generation)
 	}
 
-	rows, qerr := af.db.QueryContext(ctx, fmt.Sprintf(`
+	tx, terr := af.db.BeginTx(ctx, nil)
+	if terr != nil {
+		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check: begin: %w", terr)
+	}
+	defer tx.Rollback()
+	// setRLSOnFlushTx rather than an inline set_config, and the difference is
+	// not style. The two are the same statement, but
+	// postgres_rls_reachability_test.go recognises tenant establishment by
+	// CALL -- beginTxWithRLS, setRLSOnTx, setRLSOnFlushTx -- so a hand-written
+	// equivalent leaves the guard reporting this statement as unscoped. It
+	// did, on the first version of this fix: a correct statement that the
+	// guard could not see was correct is the same cost to the next reader as
+	// an incorrect one.
+	if serr := setRLSOnFlushTx(ctx, tx, af.tenantID); serr != nil {
+		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check: set tenant: %w", serr)
+	}
+
+	rows, qerr := tx.QueryContext(ctx, fmt.Sprintf(`
 		WITH claims(workflow_id, worker_id, generation) AS (VALUES %s)
 		UPDATE workflow_instances wi
 		SET heartbeat_at = now()
@@ -273,6 +317,15 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 	}
 	if rerr := rows.Err(); rerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check rows: %w", rerr)
+	}
+	// Commit, or the heartbeat_at renewal this statement performs rolls back
+	// with the transaction and the lease is not actually refreshed. rows must
+	// be drained first, which the loop above has done.
+	if cerr := rows.Close(); cerr != nil {
+		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check close: %w", cerr)
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check commit: %w", cerr)
 	}
 
 	for _, e := range batch {

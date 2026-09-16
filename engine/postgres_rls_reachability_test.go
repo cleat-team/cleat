@@ -238,14 +238,12 @@ type rlsFault struct{ pos, table, why string }
 // written on s.db against an RLS table is the case it exists for, and it will
 // be reported rather than exempted.
 var knownRLSFaults = map[string]string{
-	"adaptive_flush.go:253": "cleat#1677 -- AdaptiveFlusher.partitionFencedBatch UPDATEs " +
-		"workflow_instances on af.db, the pool, with no transaction and so no set_config. " +
-		"MEASURED to raise `cleat.tenant_id is not set (P0001)` on a non-superuser connection, " +
-		"with a positive control showing the same statement returning its row once the tenant " +
-		"is set. Reachable from cmd/cleat-worker. Listed rather than fixed here because the " +
-		"fix is a choice between opening a transaction and carrying set_config in the " +
-		"statement, and this PR is about the guard; the liveness check above forces this entry " +
-		"out when cleat#1677 lands",
+	// Empty again as of cleat#1677. The adaptive_flush.go:253 entry that stood
+	// here was written by cleat#1672 -- which found the fault, could not choose
+	// its fix, and listed it so that this guard's liveness check would force the
+	// entry out the moment somebody did. That is what happened: the fix opens a
+	// transaction and calls setRLSOnFlushTx, the exemption stopped matching any
+	// statement, and the guard said so in CI before any human looked.
 }
 
 // statementsWithoutATenantByDesign reach an RLS table with no tenant AND ARE
