@@ -39,6 +39,7 @@ type mockStore struct {
 	claimStickyWorkflowsFn             func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error)
 	loadEventHistoryFn                 func(ctx context.Context, workflowID string) ([]engine.EventRecord, error)
 	loadEventHistoryPaginatedFn        func(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error)
+	loadStreamChunksAfterFn            func(ctx context.Context, workflowID string, afterStep, limit int) ([]engine.EventRecord, error)
 	countEventHistoryFn                func(ctx context.Context, workflowID string) (int, error)
 	appendEventHistoryFn               func(ctx context.Context, workflowID string, rec engine.EventRecord) error
 	appendEventHistoryBatchFn          func(ctx context.Context, workflowID string, recs []engine.EventRecord) error
@@ -4086,4 +4087,18 @@ func (m *mockStore) CountWorkflows(ctx context.Context, filter engine.WorkflowFi
 		return 0, err
 	}
 	return len(wfs), nil
+}
+
+// LoadStreamChunksAfter makes mockStore an engine.StreamChunkTailReader, so a
+// handler test can exercise the durable tail cleat#1639 added.
+//
+// A nil loadStreamChunksAfterFn returns nothing rather than panicking: most
+// tests in this package do not stream, and a double that refuses every call it
+// was not explicitly given makes unrelated tests fail for reasons about this
+// one.
+func (m *mockStore) LoadStreamChunksAfter(ctx context.Context, workflowID string, afterStep, limit int) ([]engine.EventRecord, error) {
+	if m.loadStreamChunksAfterFn != nil {
+		return m.loadStreamChunksAfterFn(ctx, workflowID, afterStep, limit)
+	}
+	return nil, nil
 }

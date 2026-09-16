@@ -13727,3 +13727,76 @@ cleat#1688's own body still carries the name-based form — it is not mine to re
 measurement went there as a comment instead.
 
 Files: `CLAUDE.md`, `WORKSTREAM.md`.
+
+### 3.262 A run's live token stream works on every worker — ✅ fixed in cleat#1639
+
+`GET /api/workflows/{id}/stream` (#1572) held its live tail in memory on the worker executing the
+run, so a request landing anywhere else got the durable history and then silence. Behind a load
+balancer with N workers that is roughly (N-1)/N of readers.
+
+**Routing was priced first, because the issue's own question 4 said the polling mode was redundant
+if routing was feasible.** It is not feasible, and the reason is a measurement rather than an
+effort estimate:
+
+| | |
+|---|---|
+| `admin.workers` columns (migration 076) | `worker_id, hostname, pid, concurrency, connection_budget, started_at, last_heartbeat_at` |
+| a port or scheme among them | **none** — "membership, and nothing else" |
+| `--api-addr` default | **empty**, and it is a BIND address (`:8080`) |
+
+So a worker can hold a live tail while serving no HTTP at all, and no dialable URL can be derived
+for one that does. Redirecting needs the client to reach an individual worker, which behind a load
+balancer is exactly what is not true; proxying would be cleat's first worker-to-worker link and
+would turn an honest degraded stream into a hard failure whenever the owning worker is unreachable.
+
+**The answer was already in the tree, and it is neither of the issue's two options.**
+`engine/store_notify.go` and `cmd/cleat-worker/notify.go` solve "one worker must learn promptly
+about another's work" as *poll for correctness, NOTIFY to collapse the latency where the dialect
+has it* — `mysql_store.go:70` and `mssql_store.go:181` already carry the disabled `notifyChannel`
+with that reasoning. This change lands the polling half, which is the correctness floor and works
+on all three dialects; NOTIFY is a follow-up, not a prerequisite.
+
+**One correction to the issue's costing, and it changed the design.** The issue priced this as
+"one query per reader per interval". The query the handler had was `LoadEventHistory` — the WHOLE
+history, 31 columns, decrypt and redact per row, no step predicate. Three runs, 20 reps, postgres
+16:
+
+| chunks in run | `LoadEventHistory` | `LoadStreamChunksAfter`, steady state |
+|---|---|---|
+| 100 | 2.46 / 3.25 / 3.06 ms | 0.95 / 1.12 / 0.75 ms |
+| 1000 | 12.49 / 9.54 / 10.91 ms | 1.91 / 0.68 / 1.19 ms |
+| 5000 | 42.55 / 39.53 / 44.74 ms | 1.05 / 0.87 / 1.24 ms |
+
+The full read is linear; the cursor read is **flat** — its spread within one history size is as
+large as its spread across all three. One reader polling the full read on a 5000-chunk run would
+spend ~17% of a core. It needs no new index: `idx_event_history_tenant_wf` is an exact prefix
+match, and `EXPLAIN` reports 2-3 buffers with execution at 0.016-0.018 ms.
+
+**The number worth carrying forward is that execution is 2% of the cost.** A poll measures 0.7-1.9
+ms in Go against a 0.016 ms query, because `beginTxWithRLS` makes it BEGIN + `set_config` + SELECT
++ COMMIT — four round trips, one carrying data. At 1024 readers and 250ms that is ~4k polls/sec but
+~16k round trips/sec, so the ceiling is a connection-pool question, not a query-cost one.
+
+**Three things found while building it, none of them the subject:**
+
+- **`replay` had two definitions in `stream-tokens-to-a-client.md`, in consecutive sentences** —
+  provenance ("came from event_history") and novelty ("a re-sent token from a new one"). They
+  already disagreed before this change: history past a reconnecting reader's cursor is emitted
+  `replay: true` and that reader has never seen it. Resolved towards provenance, which is what the
+  code does, and the doc now says to dedupe on `step`.
+- **#1572 took a hub slot for a subscription that could never deliver.** It subscribed whenever a
+  hub existed rather than when this worker owned the run. Measured by reverting the condition:
+  `hub.Readers()` reads 1 for a reader of another worker's run.
+- **A refusal test that hangs reports the clock, not the guard.** The ceiling test used a bare
+  `<-done`; with the ceiling removed the handler streams forever, so falsification cost 362
+  seconds and produced `panic: test timed out` naming nothing. With a 5s `waitDone` it is 5.6
+  seconds and names the guard. Every test here whose subject is a refusal now uses it.
+
+**Falsified, ten mutations, each red for its own reason** — the durable tail never chosen, the
+cursor not carried, `?mode=live` ignored, the ceiling never refusing, the status never read, an
+unknown mode ignored, a non-executing reader subscribing anyway, an inclusive cursor (all three
+dialects), no event-type filter (all three), and `-1` clamped to 0.
+
+Re-derive the costing:
+
+    go test ./engine/ -run TestTheStreamChunkTailIsAnExclusiveCursorOnEveryDialect -count=1 -v

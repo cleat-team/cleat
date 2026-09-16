@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cleat-team/cleat/auth"
@@ -114,6 +115,38 @@ type apiServer struct {
 	// which case /stream still serves event_history and says the tail is
 	// absent rather than failing. cleat#1572.
 	streamHub *engine.StreamHub
+
+	// streamPollReaders counts readers currently following a run from
+	// event_history rather than from the hub, and maxStreamPollReaders is what
+	// they are counted against. cleat#1639.
+	//
+	// A SEPARATE BUDGET FROM --max-stream-readers, because the two bound
+	// different resources and one number does not fit both. A hub subscriber
+	// costs a buffer and a goroutine on this worker and no database work at
+	// all; a poll reader costs no buffer and a steady query rate -- four round
+	// trips per tick on PostgreSQL, of which one carries data. Sizing the
+	// second against the first would either starve readers this worker could
+	// serve for free or admit a query rate its database cannot take.
+	//
+	// Non-positive means unlimited, which is for tests rather than for a
+	// worker -- the same convention, and the same reason, as NewStreamHub's.
+	streamPollReaders    atomic.Int64
+	maxStreamPollReaders int
+
+	// streamPollInterval is the base gap between two reads of a followed run's
+	// chunks. Zero means defaultStreamPollInterval.
+	streamPollInterval time.Duration
+
+	// streamStatusInterval is how often a followed run's STATUS is read, as
+	// opposed to its chunks. Zero means streamHeartbeat, which is what the live
+	// path's ticker already pays and is the reason there is no flag for it.
+	//
+	// It is a field rather than a constant because it bounds a real latency --
+	// how long after a run ends WITHOUT a final chunk its readers are released
+	// -- and a test that asserts that behaviour against a 15s constant takes
+	// 15s to do it. A deployment that wants to differ can, but nothing here
+	// argues it should.
+	streamStatusInterval time.Duration
 }
 
 // errNoTenant is returned by storeFor when a request carries no authenticated

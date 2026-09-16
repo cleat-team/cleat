@@ -45,10 +45,18 @@ Every event is JSON in `data:`. Chunks carry an `id:`, which is the cursor.
 **`attached`** — sent once, first.
 
 ```json
-{"workflow_id":"…","generation":3,"status":"running","live":true,"resumed":false}
+{"workflow_id":"…","generation":3,"status":"running","live":true,
+ "transport":"live","resumed":false}
 ```
 
-`live` is false when this worker is not the one executing the run; see *Worker-local*, below.
+`transport` is **`live`** or **`poll`** and says which tail is feeding this stream — the
+in-memory one on the worker executing the run, or `event_history` read on an interval. Both
+deliver every token; they differ in latency. See *Every worker can serve a stream*, below.
+
+`live` is true only for `transport: "live"`. It kept its original meaning when `poll` was added,
+so a client written before that still reads it correctly — but note that **`live: false` no
+longer means the stream will be silent**, which is what it meant in the first release.
+
 `resumed` is true when the request carried a cursor.
 
 **`chunk`** — one streamed chunk.
@@ -73,9 +81,17 @@ from and `index` is what tells you where one answer ends and the next begins.
 `finish` marks the last chunk of an answer. `durable` says the chunk's row was in `event_history`
 before it was sent — see *Durability*.
 
-`replay` distinguishes a chunk served from `event_history` from one that arrived live. It exists
-so a client can tell a re-sent token from a new one — a resumed stream that cannot say which is
-which forces the client to guess, and a wrong guess duplicates a paragraph.
+`replay` says the chunk came from `event_history` rather than from the in-memory tail. It is
+**provenance, not novelty** — and that distinction is worth stating because this page used to give
+both readings in consecutive sentences, and they disagree.
+
+A chunk past your cursor, served from history on reconnect, is `replay: true` and you have never
+seen it. Every chunk on a `poll` stream is `replay: true` for the same reason: that transport
+reads `event_history` and nothing else. So `replay` tells you where a token came from, which is
+useful for rendering — catch-up can appear at once where live output is animated.
+
+**To decide whether you have already rendered a chunk, use `step`, not `replay`.** `step` is
+exact, unique and strictly increasing; `replay` is advisory.
 
 **`gap`** — chunks in a range are no longer in `event_history` and cannot be replayed.
 
@@ -96,8 +112,9 @@ exists rather than the endpoint quietly serving what it has.
 Reconnect with `Last-Event-ID` and the missing chunks are served from `event_history`. Nothing is
 lost; see *Backpressure*, below.
 
-**`end`** — the stream is over, with a `reason`: the stream finished, the run reached a terminal
-status, or there is no live tail on this worker.
+**`end`** — the stream is over, with a `reason`: the run reached a terminal status, the live tail
+closed, or the stream was asked for a tail this worker cannot give it (`?mode=live` on a worker
+that is not executing the run, or a store that cannot read chunks from a cursor).
 
 **`error`** — the history read failed.
 
@@ -184,23 +201,70 @@ down it.
 
 ---
 
-## Worker-local
+## Every worker can serve a stream
 
-The live tail is in memory on the worker executing the run. A request that lands on a different
-worker gets:
+The live tail is in memory on the worker executing the run, so a reader that lands anywhere else
+cannot see it. Behind a load balancer with N workers that is roughly (N-1)/N of readers, which is
+why the stream does not depend on reaching the right worker:
 
-- the durable history, complete as of the moment it read, and
-- `attached` with `live: false`, and
-- `end` if the run has already finished.
+| where the reader lands | `transport` | how tokens arrive |
+|---|---|---|
+| the worker executing the run | `live` | pushed from memory, milliseconds behind the guest |
+| any other worker | `poll` | `event_history` read from your cursor on an interval |
 
-It is not wrong — the history it served is real — but it is degraded, and the response says so
-rather than letting a client conclude the model stopped producing tokens. **Routing a reader to
-the worker running the job is not solved in this version** — cleat#1639. Behind a load balancer,
-expect `live: false` on a fraction of connections proportional to your worker count. A client that
-sees it can poll `GET /api/workflows/{id}` for the recorded result instead, or reconnect and hope
-for a better worker.
+**Both carry every token.** They differ in latency, not in content, and for the same reason the
+preview is trustworthy in the first place: chunks are written to `event_history` as they arrive,
+so the durable record is complete and any worker can read it.
 
----
+The default picks for you — live where it is available, poll where it is not — so a client needs
+no configuration and no retry to get a working stream from any worker.
+
+### `?mode=`
+
+| | |
+|---|---|
+| absent (default) | live when this worker is executing the run, poll when it is not |
+| `?mode=poll` | never use the in-memory tail, on any worker |
+| `?mode=live` | never poll: if this worker is not executing the run, serve history and end |
+
+`?mode=poll` gives one predictable latency and one predictable cost regardless of which worker a
+request reaches, which is what you want if you are measuring the endpoint or holding many
+connections open.
+
+`?mode=live` is for a caller that would rather be refused than served slowly. Its `end` reason
+names the parameter, because the remedy is the caller's own.
+
+An unrecognised mode is a **400**, not an ignored parameter — a typo that silently downgraded you
+to the behaviour this section exists to describe would be hard to notice.
+
+### What it costs
+
+A poll reader issues one indexed read per interval against `event_history`, from its cursor. The
+read is flat in the run's history size — `(tenant_id, workflow_id, step)` is an exact prefix match
+for the predicate — so a long run costs no more per poll than a short one.
+
+| | |
+|---|---|
+| `--stream-poll-interval` | base gap between reads, default `250ms`. Latency you see. |
+| backoff | a read that finds nothing backs off to at most 2s; any chunk resets it |
+| `--max-stream-poll-readers` | how many such readers one worker holds, default 1024 |
+
+`--max-stream-poll-readers` is **separate from `--max-stream-readers`** because the resources are
+different: a live reader costs a buffer on the worker and no database work, a poll reader costs no
+buffer and a steady query rate. Over either ceiling the endpoint answers 503 with `Retry-After`.
+
+### Why not route the reader to the right worker instead
+
+It was priced and it is not available. cleat has no concept of a worker address: `admin.workers`
+records `worker_id`, `hostname` and `pid` with no port and no scheme — deliberately, it is
+membership and nothing else — and the only address a worker knows about itself is `--api-addr`,
+which is a *bind* address and defaults to empty, so a worker can hold a live tail while serving no
+HTTP at all.
+
+Redirecting needs the client to reach an individual worker, which behind a load balancer is
+exactly what is not true. Proxying would make this cleat's first worker-to-worker link and would
+replace a working degraded stream with a hard failure whenever the owning worker is unreachable.
+Neither is better than reading the record every worker already shares. See cleat#1639.
 
 ## Backpressure
 

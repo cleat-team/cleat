@@ -330,6 +330,22 @@ var (
 			"reader does poll the run's status once per 15s heartbeat. Over the ceiling "+
 			"the route answers 503 with Retry-After. "+
 			"cleat#1572")
+	maxStreamPollReadersFlag = flag.Int("max-stream-poll-readers", 1024,
+		"How many readers of GET /api/workflows/{id}/stream this worker may hold at once "+
+			"that are following a run from event_history rather than from the in-memory "+
+			"tail (0 = unlimited). That is every reader of a run this worker is NOT "+
+			"executing, which behind a load balancer with N workers is roughly (N-1)/N of "+
+			"them. A SEPARATE number from --max-stream-readers because the resource is "+
+			"different: these readers hold no chunk buffer and instead issue a steady "+
+			"query rate -- four round trips per interval on PostgreSQL, of which one "+
+			"carries data. Over the ceiling the route answers 503 with Retry-After. "+
+			"cleat#1639")
+	streamPollIntervalFlag = flag.Duration("stream-poll-interval", defaultStreamPollInterval,
+		"Base gap between two reads of a followed run's chunks from event_history. This is "+
+			"latency the reader SEES, so it trades directly against query rate. It is a "+
+			"base, not a period: a read that finds nothing backs off to at most "+
+			"2s and any chunk resets it, so an idle run costs a fraction of this rate. "+
+			"Only reached for readers on a worker not executing the run. cleat#1639")
 	egressAllowlistFlag = flag.String("egress-allowlist", "",
 		"Hosts THIS DEPLOYMENT may reach, comma-separated. Empty (the default) permits "+
 			"every PUBLIC host -- the loopback, link-local and RFC1918 floor still applies, "+
