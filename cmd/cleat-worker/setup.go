@@ -1232,6 +1232,7 @@ type Worker struct {
 	bgWg                 *sync.WaitGroup
 	maxQueued            int
 	heartbeatInterval    time.Duration
+	reclaimTimeout       time.Duration // 0 = derive from heartbeatInterval; see reclaimAfter
 	pollInterval         time.Duration
 	pluginRegistry       *engine.PluginRegistry
 	pluginStreamRegistry *engine.PluginStreamRegistry
@@ -2660,6 +2661,37 @@ func (w *Worker) heartbeatLoop() {
 	}
 }
 
+// reclaimAfter is how long a run may go without a heartbeat before another
+// worker may claim it.
+//
+// WHY THIS IS A SEPARATE KNOB FROM --heartbeat. It used to be
+// max(heartbeatInterval*2, 10s) inline, which welded two unrelated questions
+// together: how often a LIVE worker checks in, and how long a DEAD worker's
+// work stays stranded. The rule that a run must miss two consecutive heartbeats
+// before it is stale is a sound default -- a slow heartbeat should not cause
+// false-positive reaping -- but it is only a default.
+//
+// A DATABASE OUTAGE STOPS THE HEARTBEAT WITHOUT THE WORKER BEING DEAD, and that
+// is the case the coupling served badly. The heartbeat is written to the same
+// database the workflow's events are, so a failover silences every worker at
+// once; at the default 5s heartbeat every run in the fleet is reclaimable ten
+// seconds in. Buying tolerance for that by raising --heartbeat also made
+// heartbeats sparse, so a genuinely crashed worker's runs sat stranded for just
+// as long -- paying for an occasional outage with every crash. cleat#1717.
+//
+// Zero means derive, so an operator who tuned --heartbeat keeps exactly the
+// window they had.
+//
+// It deliberately does NOT govern the worker-membership lease in
+// worker_membership.go, which answers a different question -- which workers
+// exist, for shard distribution -- and still follows --heartbeat.
+func (w *Worker) reclaimAfter() time.Duration {
+	if w.reclaimTimeout > 0 {
+		return w.reclaimTimeout
+	}
+	return max(w.heartbeatInterval*2, 10*time.Second)
+}
+
 func (w *Worker) reaperLoop() {
 	defer w.wg.Done()
 	// Reap stale instances on a configurable interval derived from the
@@ -2677,10 +2709,7 @@ func (w *Worker) reaperLoop() {
 		case <-ticker.C:
 			w.healthTracker.recordRun("reaper")
 			reaperStart := time.Now()
-			// A workflow must miss at least two consecutive heartbeats
-			// before it is considered stale — otherwise a slow heartbeat
-			// could cause false-positive reaping.
-			staleTimeout := max(w.heartbeatInterval*2, 10*time.Second)
+			staleTimeout := w.reclaimAfter()
 			reaped, err := w.store.ReapStaleInstances(w.ctx, staleTimeout, w.maxReclaimPerTick)
 			if err != nil {
 				if isConnectionError(err) {

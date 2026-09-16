@@ -701,12 +701,17 @@ claims. If workers are fighting over instances, check the sticky worker fast pat
 2. **Reduce the number of workers**: If too many workers are polling the same
    queue, reduce the worker count or increase the poll interval.
 
-3. **Check the reaper interval**: The reaper reclaims instances with stale
-   heartbeats every 30 seconds. If instances are being claimed and then quickly
-   released, the heartbeat interval (default 5s) may be too long for your
-   workload:
+3. **Check the reaper interval**: The reaper runs every
+   `max(--heartbeat, 10s)` -- 10 seconds at the default, not 30. If instances
+   are being claimed and then quickly released, note that lowering the
+   heartbeat below 5s does **not** speed reclaim: the window is
+   `max(2 x --heartbeat, 10s)` and the 10-second floor makes every value at or
+   below 5s identical. To shorten reclaim you must lower the floor's effect,
+   which `--reclaim-timeout` cannot do either -- it is refused below
+   `2 x --heartbeat`. To LENGTHEN it, which is the case a database failover
+   needs:
    ```bash
-   cleat-worker --heartbeat 2s
+   cleat-worker --heartbeat 5s --reclaim-timeout 5m
    ```
 
 See [Execution Engine: Claim Loop](explanation/execution-engine.md#claim-loop)
@@ -722,9 +727,16 @@ reaper: reclaimed instances from worker dead-worker-123 (stale heartbeat)
 
 **Diagnosis: How to confirm**
 
-The reaper reclaims instances where `heartbeat_at` is older than 30 seconds
-(6x the default 5s heartbeat interval). This indicates the worker stopped
-sending heartbeats.
+The reaper reclaims instances where `heartbeat_at` is older than
+`--reclaim-timeout`, or when that is unset, `max(2 x --heartbeat, 10s)` -- **10
+seconds** at the defaults, which is 2x the 5s heartbeat and not 30s/6x as this
+page previously said.
+
+This indicates the worker stopped sending heartbeats, which is **not** the same
+as the worker being dead: the heartbeat is written to the same database the
+workflow's events are, so a database failover silences every worker at once and
+makes every run reclaimable ten seconds in. If that is what you are seeing, see
+`--reclaim-timeout` in [tuning](operations/tuning.md).
 
 **Fix: How to resolve**
 
