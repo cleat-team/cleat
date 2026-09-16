@@ -150,6 +150,23 @@ jobs:
           scripts/check-required-contexts.py --self-test
           scripts/check-required-contexts.py
 
+      # go.work's `go` directive must be >= every module it uses, and dependabot
+      # raises those module directives while having no updater for go.work. So
+      # every Go bump that moves the floor arrives with the workspace one
+      # version behind, and `go build` refuses before compiling a line --
+      # surfacing as eight red jobs whose logs each say something different,
+      # none of them named for the two files that disagree. cleat#1708.
+      #
+      # --self-test first, for the same reason as the guard above: this check's
+      # "OK" and a check that cannot fail look identical from the outside. Its
+      # known-positive is the real #1607 state, and its parse failures exit 2
+      # rather than 0, so a use block this script cannot read is reported
+      # instead of being read as a clean workspace.
+      - name: go.work floor guard
+        run: |
+          scripts/check-go-work-floor.sh --self-test
+          scripts/check-go-work-floor.sh
+
       # Secret scanning. Nothing in this repo looked for credentials until
       # 2026-09-05: gosec's G101 is not that tool (it fired 3 times here and was
       # wrong all 3), and #731 excluded G306 and every _test.go from gosec, both
@@ -760,7 +777,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          # Derived from go.work rather than pinned to a literal. This job was
+          # the last place asserting a 1.25 floor -- eleven required contexts
+          # are named "on 1.26" and two workflows set 1.26 in an env var -- so
+          # the literal was not holding a supported minimum, it was drifting
+          # from one. cleat#1708: it also meant the obvious repair for a
+          # go.work/go.mod skew (raise go.work) moved this job from green to
+          # red, which is how a one-line fix turned into a policy question.
+          go-version-file: 'go.work'
       # gofmt as its own step, not as a golangci-lint linter.
       #
       # This file's header comment has listed gofmt among the enabled linters
