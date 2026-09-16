@@ -101,9 +101,8 @@ def parse_tables(migrations_dir):
         src = strip_sql_comments(open(path, encoding="utf-8").read())
 
         for m in re.finditer(
-            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_.\"]+)\s*\(",
+            CREATE_TABLE_RE,
             src,
-            re.I,
         ):
             name = qualify(m.group(1))
             close = matching_paren(src, m.end() - 1)
@@ -140,12 +139,63 @@ def parse_tables(migrations_dir):
     return tables, errors
 
 
+# An identifier in any of the three dialects: plain, "quoted", [bracketed]
+# (SQL Server) or `backticked` (MySQL).
+#
+# DEFENSIVE, NOT A FIX -- and this is written down because the opposite was
+# claimed first. The prediction was that cleat#1702's plain-and-quoted pattern
+# would match nothing in migrations/mssql/, find zero tables and report clean:
+# the zero-members trap again. Measured, that is FALSE. Reverting this constant
+# to the old pattern still parses all 24 SQL Server tables, because no CREATE
+# TABLE in this repo quotes its identifier at all:
+#
+#   for d in postgres mysql mssql; do
+#     grep -rhcE 'CREATE[[:space:]]+TABLE[^(]*[][`"]' migrations/$d/*.sql
+#   done
+#   # 0, 0, 0 on 2026-09-16
+#
+# It is kept because all three quotings are legal and a scan that cannot read
+# one parses to nothing rather than failing -- but it earns no credit for a bug
+# it does not currently prevent. The self-test locks the behaviour in; the
+# falsification says it is not load-bearing today.
+IDENT = r'(?:\[[^\]]+\]|`[^`]+`|"[^"]+"|[A-Za-z0-9_]+)'
+CREATE_TABLE_RE = re.compile(
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:%s\.)?%s)\s*\(" % (IDENT, IDENT),
+    re.I,
+)
+
+# SQL Server's admin schema is Postgres's admin schema; dbo is its public.
+SCHEMA_ALIASES = {"dbo": "public"}
+
+
+def split_identifier(raw):
+    """['schema', 'name'] or ['name'], with any quoting removed."""
+    parts = [next(p for p in t if p) for t in
+             re.findall(r"\[([^\]]+)\]|`([^`]+)`|\"([^\"]+)\"|([A-Za-z0-9_]+)", raw)]
+    return parts
+
+
 def qualify(raw):
-    raw = raw.strip().strip('"')
-    if "." in raw:
-        schema, _, name = raw.partition(".")
-        return "%s.%s" % (schema.strip('"'), name.strip('"'))
-    return "public.%s" % raw
+    parts = split_identifier(raw.strip())
+    if len(parts) >= 2:
+        schema = parts[0].lower()
+        return "%s.%s" % (SCHEMA_ALIASES.get(schema, schema), parts[1])
+    return "public.%s" % parts[0]
+
+
+def bare(qualified):
+    """The table name without its schema.
+
+    Cross-dialect membership is compared on this, because MySQL CANNOT express
+    the schema: it writes `CREATE TABLE IF NOT EXISTS tenants` where Postgres
+    and SQL Server write `admin.tenants`, and `grep -c 'admin\.'
+    migrations/mysql/*.sql` returns 0. Comparing qualified names reports twelve
+    differences -- the same six tables in both directions -- and every one is
+    spurious, which would bury the one real difference.
+
+    Sound only while bare names are unique, which the registry asserts.
+    """
+    return qualified.split(".", 1)[1]
 
 
 def split_columns(body):
@@ -213,8 +263,16 @@ def read_tsv(path, ncols):
     return rows
 
 
-def check(migrations_dir, registry_path, grandfather_path):
-    """Returns (exit_code, lines)."""
+def check(migrations_dir, registry_path, grandfather_path, sibling_dirs=()):
+    """Returns (exit_code, lines).
+
+    migrations_dir is the reference dialect (Postgres): the contract's clauses
+    are checked there, because TIMESTAMPTZ is a Postgres spelling.
+
+    sibling_dirs are the other dialects. Only MEMBERSHIP is checked against
+    them -- a table defined only in MySQL or SQL Server must still be
+    classified, or total coverage has a hole exactly where nobody is looking.
+    """
     out = []
 
     tables, parse_errors = parse_tables(migrations_dir)
@@ -257,10 +315,59 @@ def check(migrations_dir, registry_path, grandfather_path):
             "  \"nobody looked\" are the same silence otherwise."
             % (registry_path, "".join("    %s\n" % t for t in unclassified))
         )
-    stale = sorted(set(classified) - set(tables))
+    # 1b. Coverage extends to the other dialects, compared on BARE names.
+    #
+    # Scoped to membership on purpose. The clause checks stay single-dialect
+    # because TIMESTAMPTZ is Postgres's spelling; asking SQL Server for it would
+    # fail on a schema that is correct.
+    bare_to_qualified = {}
+    for t in classified:
+        b = bare(t)
+        if b in bare_to_qualified:
+            return 2, ["SCAN FAILED: %s classifies both %s and %s, whose bare "
+                       "names collide. Cross-dialect membership is compared on "
+                       "the bare name because MySQL cannot express a schema, so "
+                       "a collision makes that comparison ambiguous."
+                       % (registry_path, bare_to_qualified[b], t)]
+        bare_to_qualified[b] = t
+
+    sibling_counts = []
+    seen_bare = {bare(t) for t in tables}
+    for sib in sibling_dirs:
+        if not os.path.isdir(sib):
+            return 2, ["SCAN FAILED: %s is not a directory. A sibling dialect "
+                       "that cannot be read must not look like one with nothing "
+                       "in it." % sib]
+        sib_tables, sib_errors = parse_tables(sib)
+        if sib_errors:
+            return 2, ["SCAN FAILED (%s): %s" % (os.path.basename(sib), e)
+                       for e in sib_errors]
+        if not sib_tables:
+            return 2, ["SCAN FAILED: parsed 0 tables from %s." % sib]
+        sibling_counts.append((os.path.basename(sib), len(sib_tables)))
+        seen_bare |= {bare(t) for t in sib_tables}
+
+        unknown = sorted(t for t in sib_tables if bare(t) not in bare_to_qualified)
+        if unknown:
+            failures.append(
+                "these tables are defined in %s and are classified nowhere:\n%s"
+                "  A table that exists in only one dialect is invisible to a\n"
+                "  Postgres-only scan rather than unclassified, which is the one\n"
+                "  place total coverage could still have a hole."
+                % (os.path.basename(sib), "".join("    %s\n" % t for t in unknown))
+            )
+
+    # Staleness is judged against EVERY dialect, not the reference one.
+    #
+    # Written against Postgres alone -- which is how it shipped in cleat#1702,
+    # when Postgres was the only dialect read -- a table that legitimately
+    # exists in one dialect only reads as "no longer exists". Classifying
+    # admin.rls_predicate_form correctly produced exactly that, so the guard
+    # refused the fix for the hole it had just reported.
+    stale = sorted(t for t in classified if bare(t) not in seen_bare)
     if stale:
         failures.append(
-            "these are classified in %s but no longer exist in the migrations:\n%s"
+            "these are classified in %s but exist in no dialect's migrations:\n%s"
             % (registry_path, "".join("    %s\n" % t for t in stale))
         )
 
@@ -322,8 +429,10 @@ def check(migrations_dir, registry_path, grandfather_path):
         )
 
     enforced = len(members) * len(CLAUSES) - len(gf)
-    out.append("tables parsed: %d; members: %d; grandfathered pairs: %d"
-               % (len(tables), len(members), len(gf)))
+    out.append("tables parsed: %d (%s); members: %d; grandfathered pairs: %d"
+               % (len(tables),
+                  ", ".join("%s %d" % (n, c) for n, c in sibling_counts) or "postgres only",
+                  len(members), len(gf)))
     out.append("clauses enforced this run: %d of %d"
                % (enforced, len(members) * len(CLAUSES)))
 
@@ -357,13 +466,20 @@ def main():
     ap.add_argument("--registry", default=os.path.join(root, "scripts", "entity-contract.tsv"))
     ap.add_argument("--grandfathered",
                     default=os.path.join(root, "scripts", "entity-contract-grandfathered.tsv"))
+    ap.add_argument("--sibling", action="append", default=None,
+                    help="another dialect's migrations; membership only. "
+                         "Repeatable. Defaults to mysql and mssql.")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
     if args.self_test:
         sys.exit(self_test())
 
-    code, lines = check(args.migrations, args.registry, args.grandfathered)
+    siblings = args.sibling
+    if siblings is None:
+        siblings = [os.path.join(root, "migrations", d) for d in ("mysql", "mssql")]
+
+    code, lines = check(args.migrations, args.registry, args.grandfathered, siblings)
     for line in lines:
         print(line, file=sys.stderr if code else sys.stdout)
     sys.exit(code)
@@ -419,13 +535,44 @@ SELF_TEST_CASES = [
      CONFORMING + "\nCREATE TABLE public.gadgets (gadget_id UUID PRIMARY KEY);\n",
      "public.widgets\tmember\n", 1, "not classified"),
     ("a registry naming a table that no longer exists",
-     CONFORMING, "public.widgets\tmember\npublic.ghosts\tmember\n", 1, "no longer exist"),
+     CONFORMING, "public.widgets\tmember\npublic.ghosts\tmember\n", 1,
+     "exist in no dialect"),
     ("grandfathering a non-member",
      CONFORMING, "public.widgets\tmember\n", 1, "not a member"),
     ("every clause grandfathered enforces nothing",
      CONFORMING, "public.widgets\tmember\n", 2, "enforced nothing"),
     ("a migrations directory with no SQL at all",
      None, "public.widgets\tmember\n", 2, "no .sql files"),
+]
+
+# Cross-dialect cases (cleat#1719). Each carries a sibling schema as well.
+SIBLING_CASES = [
+    ("a SQL Server-only table classified nowhere",
+     "CREATE TABLE [admin].[gizmos] (\n  gizmo_id UNIQUEIDENTIFIER PRIMARY KEY\n);\n",
+     "public.widgets\tmember\n", 1, "classified nowhere"),
+
+    ("a SQL Server-only table that IS classified",
+     "CREATE TABLE [admin].[gizmos] (\n  gizmo_id UNIQUEIDENTIFIER PRIMARY KEY\n);\n",
+     "public.widgets\tmember\nadmin.gizmos\tnot-an-entity\n", 0, None),
+
+    # The whole reason membership is keyed on the bare name. MySQL writes the
+    # admin tables unqualified; a qualified comparison calls every one of them
+    # missing. If this case ever goes red, the bare-name keying has regressed
+    # and the guard will be reporting spurious gaps rather than real ones.
+    ("MySQL's unqualified spelling of an admin table is not a difference",
+     "CREATE TABLE IF NOT EXISTS `gizmos` (\n  gizmo_id CHAR(36) PRIMARY KEY\n);\n",
+     "public.widgets\tmember\nadmin.gizmos\tnot-an-entity\n", 0, None),
+
+    # A comment is not a definition. The census that prompted this issue
+    # counted two of them as tables.
+    ("a commented-out CREATE TABLE in a sibling is not a table",
+     "-- CREATE TABLE [admin].[ghosts] ( id INT );\n"
+     "CREATE TABLE [admin].[gizmos] (\n  gizmo_id UNIQUEIDENTIFIER PRIMARY KEY\n);\n",
+     "public.widgets\tmember\nadmin.gizmos\tnot-an-entity\n", 0, None),
+
+    ("a sibling dialect with no tables at all",
+     "-- nothing here\n",
+     "public.widgets\tmember\n", 2, "parsed 0 tables"),
 ]
 
 
@@ -435,12 +582,21 @@ def self_test():
 
     fails = 0
     ran = 0
-    for name, schema, registry, want_code, want_text in SELF_TEST_CASES:
+    cases = ([(n, sc, r, wc, wt, None) for n, sc, r, wc, wt in SELF_TEST_CASES] +
+             [(n, CONFORMING, r, wc, wt, sib) for n, sib, r, wc, wt in SIBLING_CASES])
+    for name, schema, registry, want_code, want_text, sibling in cases:
         ran += 1
         tmp = tempfile.mkdtemp()
         try:
             mig = os.path.join(tmp, "migrations")
             os.makedirs(mig)
+            siblings = ()
+            if sibling is not None:
+                sibdir = os.path.join(tmp, "mssql")
+                os.makedirs(sibdir)
+                with open(os.path.join(sibdir, "001_sibling.sql"), "w") as fh:
+                    fh.write(sibling)
+                siblings = (sibdir,)
             if schema is not None:
                 with open(os.path.join(mig, "001_fixture.sql"), "w") as fh:
                     fh.write(schema)
@@ -457,7 +613,7 @@ def self_test():
                     for clause in CLAUSES:
                         fh.write("public.widgets\t%s\n" % clause)
 
-            code, lines = check(mig, reg, gf)
+            code, lines = check(mig, reg, gf, siblings)
             blob = "\n".join(lines)
 
             if code != want_code:

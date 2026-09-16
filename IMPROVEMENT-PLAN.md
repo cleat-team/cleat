@@ -13935,3 +13935,74 @@ migrations would not be seen. Nothing here claims otherwise.
 
 Files: `scripts/check-entity-contract.py`, `scripts/entity-contract.tsv`,
 `scripts/entity-contract-grandfathered.tsv`, `.github/workflows/ci.yml`.
+
+---
+
+### 3.336 A table defined in only one dialect was invisible, not unclassified — ✅ **FIXED 2026-09-16** (cleat#1719)
+
+§3.335's guard asserts total coverage over `migrations/postgres/` and states that limit. It bites
+once today: `admin.rls_predicate_form` exists only in `migrations/mssql/`, so the guard never saw
+it. Invisible is worse than unclassified — the whole design turns on an unknown table being an
+error, and this was the one place it could be silent instead.
+
+**The right verdict was already known, which is the argument for fixing it now.** It is a
+single-row config table — `only_row BIT`, `CHECK (only_row = 1)` — read from
+`engine/mssql_schedules.go:912` in dialect-specific code, because SQL Server has no equivalent of
+the Postgres predicate mechanism. `not-an-entity`. So the parity code could be verified against a
+case whose answer was settled rather than written alongside a judgement call.
+
+**Membership is compared on the BARE name, and that is the substantive finding.** MySQL cannot
+express a schema: it writes `CREATE TABLE IF NOT EXISTS tenants` where Postgres and SQL Server
+write `admin.tenants`, and `grep -c 'admin\.' migrations/mysql/*.sql` returns **0**. Comparing
+qualified names reports **twelve** differences — the same six tables in both directions — every one
+spurious, which would bury the one that is real.
+
+That is §3.335's schema-qualification trap arriving by the opposite route. There,
+`admin.tenant_api_keys` addressed bare found nothing. Here, qualifying what cannot be qualified
+manufactures gaps. Twice in one day in opposite directions, so the lesson is *schema qualification
+is dialect-dependent*, not either individual fix. Bare-name keying is sound only while bare names
+are unique, which the guard now asserts rather than assumes.
+
+**A correction to the census that prompted this, because it is the trap generalising.** The
+reported table counts were 25 / 24 / 24. They are **23 / 23 / 24**. The Postgres 25 counted two
+comments:
+
+    001_schema.sql:6           -- All CREATE TABLE statements include the final column set.
+    032_drop_tenant_...:22     -- ... rather than the CREATE TABLE text in
+
+`statements` and `text`, read as table names — in the same message that warned about a MySQL
+`guards` table coming from `-- CREATE TABLE IF NOT EXISTS guards idempotency.` A regex that cannot
+model SQL comments reads prose about a definition as a definition, in whichever dialect it is
+pointed at. Both guards strip comments before matching.
+
+**A second defect, which the fix itself exposed.** §3.335's staleness check compared the registry
+against Postgres tables only. Classifying `admin.rls_predicate_form` correctly then reported it as
+*"no longer exists"* — the guard refused the fix for the hole it had just reported. Staleness now
+spans every dialect.
+
+**And a prediction of mine that measurement killed.** I claimed §3.335's plain-and-quoted
+identifier pattern would match nothing in `migrations/mssql/`, parse to zero tables, and report
+clean — the zero-members trap a third time. **False.** Reverting the pattern still parses all 24,
+because no `CREATE TABLE` in this repo quotes its identifier in any dialect:
+
+    for d in postgres mysql mssql; do
+      grep -rhcE 'CREATE[[:space:]]+TABLE[^(]*[][`"]' migrations/$d/*.sql
+    done
+    # 0, 0, 0 on 2026-09-16
+
+The widened pattern stays, because all three quotings are legal and a scan that cannot read one
+parses to nothing rather than failing. But it is **defensive, not a fix**, and the code comment
+says so. The first version of that comment asserted the bug was real; it had been reasoned from
+`[dbo].[x]` appearing in *queries* rather than checked against the migrations.
+
+**What caught it was verifying the mutation applied before reading its result** — the same
+discipline §3.335 records, arriving one step earlier. The first falsification of that pattern
+returned exit 0 and the natural reading was "the trap is real and the guard now covers it". The
+mutation had applied; the prediction was simply wrong. An assertion that the anchor matched and
+the file changed is what separated the two.
+
+Coverage: 23 Postgres tables, 23 MySQL, 24 SQL Server; 17 of 40 clauses enforced, unchanged — this
+adds membership reach, not clause reach. Clause checks remain single-dialect by design.
+
+Files: `scripts/check-entity-contract.py`, `scripts/entity-contract.tsv`,
+`.github/workflows/ci.yml`.
