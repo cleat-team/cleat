@@ -1,0 +1,149 @@
+{
+  "what": "Entry-point parameter binding, shared by every SDK that binds parameters by name.",
+  "why": [
+    "cleat#1065 found that the five SDKs do not share an entry-point shape at all.",
+    "They differ on absent scalars and absent composites INDEPENDENTLY, which is",
+    "four contracts rather than four implementations of one -- and the divergence",
+    "survived because nothing compared them. cleat#1046 is what it cost: absent",
+    "ints became a hard bind error, it passed cleat's ENTIRE suite, and it was",
+    "caught downstream by cleat-ports. #1057 reverted it.",
+    "",
+    "This file is that comparison. It is deliberately a CHARACTERIZATION of what",
+    "each SDK does today, not of what the contract will be: the owner's decision",
+    "is 'an absent declared parameter is an error unless declared optional', and",
+    "the flip is a versioned breaking change that has not happened. Recording",
+    "today's behaviour is what makes the flip visible when it lands."
+  ],
+  "how": [
+    "Each SDK's own test runner reads this file and drives its own binding path.",
+    "A case names the payload and what each SDK is EXPECTED to do with it, so a",
+    "divergence fails somewhere rather than nowhere.",
+    "",
+    "WHICH SDKS APPEAR HERE, AND WHY NOT ALL FIVE. Only Go, Python and",
+    "AssemblyScript bind parameters BY NAME. Rust (crates/cleat-macro/src/entry.rs:79)",
+    "and Java (CleatEntryProcessor) accept exactly ONE user parameter and hand it",
+    "the whole payload, so 'an absent parameter' is not a concept they have --",
+    "absence of a FIELD is delegated to serde and to JsonHelper. Listing them with",
+    "a null would suggest a gap that is not there; they are named in",
+    "no_per_parameter_binding instead, with the reason.",
+    "",
+    "outcome is a semantic tag, never a message. The SDKs word their errors",
+    "differently and always will; each test maps a tag to its own check. Asserting",
+    "the string here would make this a translation table instead of a behavioural",
+    "one -- the same reasoning quorum_cases.json gives for error_kind."
+  ],
+  "outcomes": {
+    "bound_zero": "The parameter bound its type's zero value and the workflow RAN.",
+    "bound_default": "The parameter bound the default its declaration supplied, and the workflow RAN.",
+    "refused": "The start was refused before the workflow body ran.",
+    "bound_absent_marker": "The parameter bound a value meaning 'the caller sent nothing' -- Go's nil for a *T -- and the workflow RAN, deciding its own fallback.",
+    "bound_value": "The parameter bound the value the payload carried.",
+    "bound_whole_payload": "The parameter received the ENTIRE payload rather than a value extracted by name -- Go's and AssemblyScript's single-string fast path."
+  },
+  "no_per_parameter_binding": {
+    "rust": "exactly one user parameter, whole payload through serde_json::from_str; crates/cleat-macro/src/entry.rs:79 rejects a second at compile time",
+    "java": "one user parameter through JsonHelper.parse; a second generates an uncallable wrapper and a typed one throws at run time (cleat#1636)"
+  },
+  "cases": [
+    {
+      "name": "absent scalar string",
+      "why": "The row the contract has to decide. Go and AssemblyScript bind zero; Python refuses. A workflow computing on a '' it was never sent is the silent-corruption shape of cleat#1022.",
+      "declared": [
+        {
+          "name": "note",
+          "kind": "string"
+        }
+      ],
+      "payload": {},
+      "expect": {
+        "go": "bound_zero",
+        "python": "refused",
+        "assemblyscript": "bound_zero"
+      }
+    },
+    {
+      "name": "absent scalar int",
+      "why": "The case cleat#1046 broke and cleat#1057 restored. It passed cleat's whole suite and was caught by cleat-ports, which is why this table exists.",
+      "declared": [
+        {
+          "name": "count",
+          "kind": "int"
+        }
+      ],
+      "payload": {},
+      "expect": {
+        "go": "bound_zero",
+        "python": "refused",
+        "assemblyscript": "bound_zero"
+      }
+    },
+    {
+      "name": "present scalar",
+      "why": "The control. Without it, every 'bound_zero' above is equally satisfied by an SDK that ignores the payload entirely.",
+      "declared": [
+        {
+          "name": "note",
+          "kind": "string"
+        }
+      ],
+      "payload": {
+        "note": "hello"
+      },
+      "expect": {
+        "go": "bound_value",
+        "python": "bound_value",
+        "assemblyscript": "bound_value"
+      }
+    },
+    {
+      "name": "absent composite",
+      "why": "Already unanimous, and that is the finding: every SDK refuses or cannot express it, so the contract only ever had to decide the scalar row. AssemblyScript rejects a composite parameter at COMPILE time, which is a refusal earlier than the others rather than a different answer.",
+      "declared": [
+        {
+          "name": "item",
+          "kind": "composite"
+        }
+      ],
+      "payload": {},
+      "expect": {
+        "go": "refused",
+        "python": "refused",
+        "assemblyscript": "refused_at_compile_time"
+      }
+    },
+    {
+      "name": "absent, declared optional",
+      "why": "The mechanism the contract's 'unless declared optional' rests on, and the SDKs DO NOT AGREE about what it binds -- which is why this row is here rather than assumed. Python and AssemblyScript spell optional with a parameter default, so absence binds THE DECLARED VALUE. Go spells it *T (cleat#1645), so absence binds nil and the workflow decides its own fallback. Both satisfy the contract, which is about absence not being an ERROR; neither supplies the other's answer. Recording that here stops a later reader assuming one shape and writing a cross-SDK test that cannot pass.",
+      "declared": [
+        {
+          "name": "note",
+          "kind": "string",
+          "optional_default": "FALLBACK",
+          "go_spelling": "*string -- Go has no declaration-site default; absence is nil"
+        }
+      ],
+      "payload": {},
+      "expect": {
+        "go": "bound_absent_marker",
+        "python": "bound_default",
+        "assemblyscript": "bound_default"
+      }
+    },
+    {
+      "name": "lone string parameter",
+      "why": "A divergence nobody had recorded, and it is not a corner: a single string parameter is the SHAPE ALMOST EVERY SHIPPED WORKFLOW USES. Go and AssemblyScript both skip named binding entirely and hand the parameter the whole payload, so an entry point declaring one parameter and started with {} receives the two-character string \"{}\" -- not \"\", and not an error. Python binds by name always and refuses. Found because the Go fixture for 'absent scalar string' used a lone parameter and reported bound_other(\"{}\"), which read as a binding defect and is a documented fast path.",
+      "declared": [
+        {
+          "name": "note",
+          "kind": "lone_string"
+        }
+      ],
+      "payload": {},
+      "expect": {
+        "go": "bound_whole_payload",
+        "python": "refused",
+        "assemblyscript": "bound_whole_payload"
+      }
+    }
+  ]
+}
