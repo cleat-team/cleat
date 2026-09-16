@@ -13537,3 +13537,75 @@ absent and now says so.
 
 Files: `internal/telemetry/tracing.go`, `internal/telemetry/telemetry_test.go`,
 `internal/telemetry/a_workflow_span_joins_the_callers_trace_test.go`.
+### 3.261 A Python guest's clock and entropy were the host's, not the workflow's — ✅ **FIXED 2026-09-16** (cleat#1410)
+
+componentize-py's CPython satisfies `time.time()`, `random.random()` and `os.urandom()` through WASI
+Preview 2 interfaces — `wasi:clocks/wall-clock` and `wasi:random/random` — which cleat did not
+register on the component linker. So they reached the host's real clock and real entropy, and a
+replay diverged.
+
+#### The gate question was answered by running a guest, not by reading its imports
+
+Prior sessions established that `wasi:clocks/wall-clock@0.2.9` appears in a real guest's **import
+section**. That establishes *reachable*, not *used* — and the issue's own history records why the
+distinction matters: on the preview1 side, concluding "Go guests import `poll_oneoff` without
+calling it" from three zero-count runs made an OOM-killed workflow report `result="ok"`.
+
+Two executions of one workflow id, durable clock pinned to 2001-09-09T01:46:40Z:
+
+| | before | after |
+|---|---|---|
+| `h.now()` (cleat's own) | `1e12` / `1e12` | same |
+| `h.random()` (cleat's own) | identical | same |
+| `time.time()` | **1.7895622924e9 / 1.7895622951e9** | the pinned value |
+| `random.random()` | **0.367… / 0.357…** | reproducible |
+| `os.urandom(8)` | **715cc1e5… / fd6da07d…** | reproducible |
+
+**The first two rows are why the other three mean anything.** They are cleat's host calls, read by
+the same guest in the same two runs, and they were already stable — so the divergence was the guest
+reaching past cleat, not a harness that reproduces nothing.
+
+#### The work was the value layer, which is why the issue was retitled
+
+The linker seam already existed — `allow_shadowing` on, `add_wasip2` before cleat's own
+registration. What did not exist was any way to construct the values:
+
+| function | returns | constructor |
+|---|---|---|
+| `wall-clock.now()` | `datetime { seconds: u64, nanoseconds: u32 }` | a record — none, but `component_val_set_call_failed` is a worked example one level deeper |
+| `random.get-random-bytes(len)` | `list<u8>` | **none anywhere in the tree** |
+| `random.get-random-u64()` | `u64` | existed |
+
+A component list is a **vec of `wasmtime_component_val_t`, one full val per byte** — not a byte
+buffer — so it costs 16 host bytes per guest byte, and `get-random-bytes` is bounded host-side
+because the guest supplies the length.
+
+Ownership runs the opposite way to the neighbouring string helper's first impression: wasmtime
+converts a callback's results **by reference and then drops them recursively**, so every buffer is
+C-allocator heap because wasmtime frees it. Static storage would be a `free()` of a literal. That is
+recorded above `component_val_set_call_ok`, in a comment that notes it previously said the opposite.
+
+#### The one-function slice would have compiled, registered, passed and achieved nothing
+
+`get-random-u64` is the function that looks like the RNG. CPython seeds the Mersenne Twister from
+`os.urandom` at import, so shadowing the scalar alone leaves `random.random()` live while every
+check of the shadowed function passes.
+
+#### The version is part of the name, and a wrong one is silent
+
+Measured by setting `wasiDeterminismVersion` to `@0.2.0` against a guest importing `@0.2.9`:
+**registration returns no error** and the guest keeps the real clock. That is the known-positive for
+the tests — a case already proven broken, checked to confirm they report it — and they do, on both
+the clock and the entropy.
+
+A separate "the registered names match the guest's imports" guard was planned and **not built**: a
+mismatched name produces exactly that failure, because the tests assert the effect rather than the
+registration, so the guard would add a clearer message and no detection. The message went into the
+failure text instead, with the `wasm-tools` command that confirms it.
+
+#### Not shadowed: `monotonic-clock`
+
+cleat#1386 measured why — a durable-sourced monotonic clock ran 3 GC cycles instead of 17 and
+reached a 256 MB heap against a 32 MB limit. It is *also* the interface whose functions return
+resource-typed pollables, so leaving it alone is both correct and the cheap option; the coincidence
+is stated in the code, because the cheap reason would otherwise read as the whole reason.
