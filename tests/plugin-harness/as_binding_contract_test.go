@@ -59,19 +59,50 @@ func TestASBindingContract(t *testing.T) {
 		}
 	})
 
-	// The control that stops "wrong-typed is refused" from being satisfied by a
-	// build where everything is refused -- and the case that must NOT change.
-	t.Run("absent arguments bind zero and the body runs", func(t *testing.T) {
-		got, err := run(t, `{}`)
+	// THE CONTROL that stops "wrong-typed is refused" from being satisfied by a
+	// build where EVERYTHING is refused. Without it, a transform that rejected
+	// every payload would pass every arm below.
+	//
+	// IT MOVED FROM AN EMPTY PAYLOAD TO A FULL ONE, and the move is the point.
+	// It used to send `{}` and assert the parameters bound zero, which was both
+	// the control and an assertion of the old contract. cleat#1065 step 4 made
+	// an absent declared parameter an error, so `{}` is now refused -- and a
+	// control that is refused controls nothing. A fully specified, correctly
+	// typed payload still separates "refuses wrong types" from "refuses
+	// everything", which is the property the arms below need.
+	t.Run("a fully specified payload binds and the body runs", func(t *testing.T) {
+		got, err := run(t, `{"note":"hi","count":7,"flag":true}`)
 		if err != nil {
-			t.Fatalf("an empty payload was refused: %v\n\n"+
-				"Absent must bind the zero value: it is how an AS workflow expresses "+
-				"an optional parameter. See cleat#1067.", err)
+			t.Fatalf("a correct payload was refused: %v\n\n"+
+				"Every arm below asserts a REFUSAL, so if this one also refuses they "+
+				"are all satisfied by a build that accepts nothing.", err)
 		}
-		for _, want := range []string{`"note":""`, `"count":0`, `"flag":false`} {
+		for _, want := range []string{`"note":"hi"`, `"count":7`, `"flag":true`} {
 			if !strings.Contains(got, want) {
-				t.Errorf("result %s does not contain %s: the parameter did not bind zero", got, want)
+				t.Errorf("result %s does not contain %s: the parameter did not bind", got, want)
 			}
+		}
+	})
+
+	// ABSENT IS NOW REFUSED. cleat#1065 step 4.
+	//
+	// This arm used to assert the opposite -- that absence binds zero, because
+	// that was how an AS workflow expressed an optional parameter (cleat#1067).
+	// It now has a better way to say so: a declaration-site DEFAULT, which is
+	// the same spelling Python uses. Zero-binding could not tell "sent zero"
+	// from "sent nothing"; a default is the author stating that absence is
+	// meaningful, which is the thing that should be explicit.
+	t.Run("an absent argument is refused", func(t *testing.T) {
+		got, err := run(t, `{}`)
+		if err == nil {
+			t.Fatalf("an empty payload bound zero and the body ran; result = %s\n\n"+
+				"An absent declared parameter is an error since cleat#1065. A workflow "+
+				"that accepts absence declares a default on the parameter.", got)
+		}
+		if !strings.Contains(err.Error(), "absent") {
+			t.Errorf("the refusal does not say the parameter was absent: %v\n\n"+
+				"Absent and wrong-typed want different fixes, so the message must "+
+				"separate them -- the arms below assert the wrong-typed wording.", err)
 		}
 	})
 

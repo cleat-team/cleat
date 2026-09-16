@@ -35,8 +35,16 @@ type Item struct {
 // Python has no such fast path; it binds by name always. That is a real
 // cross-SDK divergence and it has its own row in the table.
 //
+// `other` is OPTIONAL (*int) since cleat#1065 step 4, and that is not a
+// workaround. It exists only to stop this entry point being a lone string; its
+// value is no part of any case, and the table's payloads never send it. Once an
+// absent declared parameter became an error, a required `other` would have made
+// every case using this entry refuse -- which it did, and "present scalar"
+// caught it. Declaring it optional says what was always true: this parameter is
+// not part of the measurement.
+//
 //cleat:entry
-func BindString(h cleat.HostCalls, note string, other int) (string, error) {
+func BindString(h cleat.HostCalls, note string, other *int) (string, error) {
 	return fmt.Sprintf(`{"bound":%q}`, note), nil
 }
 

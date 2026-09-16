@@ -145,27 +145,41 @@ func TestAnIntParameterIsDecodedRatherThanScanned(t *testing.T) {
 		}
 	})
 
-	t.Run("an ABSENT int binds zero rather than erroring", func(t *testing.T) {
-		// cleat#1046 removed the digit scanner so ints reach json.Unmarshal.
-		// That also moved ABSENCE: extractJSONRaw returns "" for a missing key
-		// and json.Unmarshal("") fails, so an omitted int went from binding 0
-		// to a hard error that stopped the body running at all -- eight cases
-		// across three modules of the ports suite, found by its CI going red.
+	t.Run("an ABSENT int is REFUSED", func(t *testing.T) {
+		// THIS ARM WAS INVERTED BY cleat#1065 step 4, and the history is worth
+		// keeping because it is the reason the old behaviour existed.
 		//
-		// A string parameter has always bound "" when absent. This asserts ints
-		// match, which is the contract callers already relied on.
+		// cleat#1046 removed the digit scanner so ints reach json.Unmarshal.
+		// That also moved ABSENCE by accident: extractJSONRaw returns "" for a
+		// missing key and json.Unmarshal("") fails, so an omitted int went from
+		// binding 0 to a hard error -- eight cases across three modules of the
+		// ports suite, found by its CI going red. This arm was added to restore
+		// zero-binding, matching what a string had always done.
+		//
+		// cleat#1065 made that refusal DELIBERATE and extended it to strings.
+		// The argument is that zero-binding cannot tell "sent zero" from "sent
+		// nothing", permanently, for every caller -- the information is the
+		// caller's and it was destroyed at the boundary. An author who means
+		// absence declares it: *int in Go, a default in AssemblyScript and
+		// Python, Option<T> in Rust.
+		//
+		// So the difference from #1046 is not the behaviour, which is the same
+		// refusal; it is that a workflow can now SAY it accepts absence, which
+		// in #1046 it could not.
 		got, raw := run(t, `{"note":"no-amount"}`)
-		if raw != "" {
-			t.Fatalf("an omitted int parameter was refused: %s\n\n"+
-				"Absent is not malformed. The zero value is the documented default "+
-				"and the body must still run.", raw)
+		if raw == "" {
+			t.Fatalf("an omitted int parameter bound %d and the body ran. An absent "+
+				"declared parameter is an error since cleat#1065; declare amountCents "+
+				"as *int if absence is meaningful.", got.AmountCents)
 		}
-		if got.Note != "no-amount" {
-			t.Fatalf("the run did not bind its string either (note=%q); the body may "+
-				"not have executed at all", got.Note)
+		if !strings.Contains(raw, "amountCents") {
+			t.Errorf("the refusal does not name the parameter that was missing: %s\n\n"+
+				"An operator reading this needs to know WHICH parameter to send.", raw)
 		}
-		if got.AmountCents != 0 {
-			t.Errorf("an omitted amountCents bound %d, want 0", got.AmountCents)
+		if !strings.Contains(raw, "absent") {
+			t.Errorf("the refusal does not say the parameter was absent: %s\n\n"+
+				"Absent and malformed want different fixes, so the message must "+
+				"separate them.", raw)
 		}
 	})
 

@@ -76,6 +76,7 @@ func TestAnOptionalEntryParameterMayBeAbsent(t *testing.T) {
 		name         string
 		payload      string
 		wantIn       string
+		wantRefused  string // non-empty: expect a refusal naming this
 		whyItMatters string
 	}{
 		{
@@ -97,17 +98,38 @@ func TestAnOptionalEntryParameterMayBeAbsent(t *testing.T) {
 				"'unexpected end of JSON input', so the workflow never ran",
 		},
 		{
-			name:    "optional absent, control param also absent",
-			payload: `{}`,
-			wantIn:  `"user":""`,
-			whyItMatters: "the pre-existing zero-binding of an absent string is NOT " +
-				"changed by this. The contract flip is a separate, later change",
+			// INVERTED BY cleat#1065 step 4, which this row named in advance as
+			// "a separate, later change". It asserted that an absent userID
+			// bound "" -- the zero-binding the flip removed.
+			//
+			// It still earns its place: it is the row that proves the pointer
+			// arm and the REQUIRED arm are different code paths. The optional
+			// `promo` is absent here too and does not refuse; only `userID`
+			// does. A change that made the emitter refuse every absent key
+			// would pass "optional absent" above and fail here.
+			name:        "the REQUIRED param is refused when absent, the optional is not",
+			payload:     `{}`,
+			wantRefused: "userID",
+			whyItMatters: "an absent declared parameter is an error since cleat#1065, " +
+				"and declaring it optional is what exempts it -- so this row separates " +
+				"the two arms rather than testing one of them twice",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			res, _, _, _, _, err := eng.Execute(ctx, wasmBytes, "apply_coupon", []byte(tc.payload))
+			if tc.wantRefused != "" {
+				if err == nil {
+					t.Fatalf("the run was accepted and returned %q, want a refusal naming %q"+
+						"\n\nwhy this case matters: %s", res, tc.wantRefused, tc.whyItMatters)
+				}
+				if !strings.Contains(err.Error(), tc.wantRefused) {
+					t.Errorf("the refusal does not name %q: %v\n\nwhy this case matters: %s",
+						tc.wantRefused, err, tc.whyItMatters)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Execute: %v\n\nwhy this case matters: %s", err, tc.whyItMatters)
 			}

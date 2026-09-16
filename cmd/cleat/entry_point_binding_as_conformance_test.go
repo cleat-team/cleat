@@ -285,13 +285,20 @@ function jsonString(s: string): string {
   return out + "\"";
 }
 
-// bind_string carries a SECOND parameter on purpose. A lone string parameter is
+// bind_string's SECOND parameter is optional -- it carries a default -- and that
+// is not a workaround. It exists only to stop this entry being a lone string;
+// its value is no part of any case and the table never sends it. Once an absent
+// declared parameter became an error (cleat#1065 step 4) a required "other"
+// would make every case using this entry refuse. The default says what was
+// always true: this parameter is not part of the measurement.
+//
+// A lone string parameter is
 // not bound by name at all -- the transform passes the whole payload straight
 // through, the same fast path Go's generator has -- so a one-string entry point
 // given {} binds the two-character string "{}" rather than "". That is a
 // separate row in the table, and bind_lone_string below is it.
 @cleatEntry("BindString")
-export function bind_string(h: HostCalls, note: string, other: i32): string {
+export function bind_string(h: HostCalls, note: string, other: i32 = 0): string {
   return "{\"bound\":" + jsonString(note) + "}";
 }
 

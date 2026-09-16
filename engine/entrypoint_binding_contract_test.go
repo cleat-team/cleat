@@ -67,15 +67,30 @@ func TestEntryPointBindingContract(t *testing.T) {
 	// long_running(iterations int) loops `iterations` times and returns "done",
 	// so iterations=0 is observable as a normal completion rather than as an
 	// absence of failure. This is the exact case cleat#1046 broke.
-	t.Run("an absent int binds zero and the workflow runs", func(t *testing.T) {
+	t.Run("an absent int is REFUSED, like the composite", func(t *testing.T) {
+		// INVERTED BY cleat#1065 step 4. This arm asserted the opposite --
+		// that an absent int binds 0 and the workflow runs -- which was the
+		// contract cleat#1046 accidentally broke and this test was written to
+		// protect.
+		//
+		// The composite arm below anticipated this exact edit: "If this is now
+		// intended, the two scalar cases above should be reviewed at the same
+		// time so all three agree." They now agree, which is the whole point --
+		// absence is uniform across types rather than a rule per type.
 		res, _, _, _, _, err := eng.Execute(ctx, wasmBytes, "long_running", []byte(`{}`))
-		if err != nil {
-			t.Fatalf("an omitted int parameter failed to bind: %v\n\n"+
-				"This is cleat#1046: absence became a hard error. The contract is "+
-				"that an absent scalar binds its zero value and the workflow runs.", err)
+		if err == nil {
+			t.Fatalf("an omitted int parameter bound and the workflow ran; result = %q.\n\n"+
+				"An absent declared parameter is an error since cleat#1065. A workflow "+
+				"that accepts absence declares the parameter as *int.", res)
 		}
-		if res != "done" {
-			t.Errorf("result = %q, want \"done\": iterations should have bound 0", res)
+		var gre *GuestReturnedError
+		if !errors.As(err, &gre) {
+			t.Errorf("error is %T, want *GuestReturnedError: %v\n\n"+
+				"A refused parameter must be a clean guest-reported failure, not a "+
+				"trap -- the property cleat#1059 established for every bind failure.", err, err)
+		}
+		if !strings.Contains(err.Error(), "iterations") {
+			t.Errorf("the refusal does not name the parameter: %v", err)
 		}
 	})
 
@@ -94,21 +109,30 @@ func TestEntryPointBindingContract(t *testing.T) {
 	// place_order(userID string, cart []CartItem). Omitting userID must still
 	// reach the workflow body, which is observable because the body runs far
 	// enough to produce a tracking id.
-	t.Run("an absent string binds empty and the workflow runs", func(t *testing.T) {
+	t.Run("an absent string is REFUSED, like the composite", func(t *testing.T) {
+		// INVERTED BY cleat#1065 step 4, with the int arm above. A string has
+		// bound "" on absence since the first generator; that is the behaviour
+		// that could not tell an empty string from a missing key.
+		//
+		// place_order(userID string, cart []CartItem) -- so this payload supplies
+		// the composite and omits the scalar, isolating the scalar rule.
 		res, _, _, _, _, err := eng.Execute(ctx, wasmBytes,
 			"place_order", []byte(`{"cart":[{"sku":"a","qty":1}]}`))
-		if err != nil {
-			t.Fatalf("an omitted string parameter failed to bind: %v", err)
+		if err == nil {
+			t.Fatalf("an omitted string parameter bound and the workflow ran; result = %q.\n\n"+
+				"An absent declared parameter is an error since cleat#1065. Declare "+
+				"userID as *string if absence is meaningful.", res)
 		}
-		if !strings.Contains(res, "tracking_id") {
-			t.Errorf("result = %q: the workflow body did not run to completion", res)
+		if !strings.Contains(err.Error(), "userID") {
+			t.Errorf("the refusal does not name the parameter: %v", err)
 		}
 	})
 
-	// The composite case, which does NOT match the two above. Asserted as it
-	// behaves, with the difference named, so that a future change to unify
-	// these is a deliberate edit to this test rather than a silent drift.
-	t.Run("an absent composite is a bind error, unlike the scalars", func(t *testing.T) {
+	// The composite case, which since cleat#1065 step 4 matches the two above
+	// rather than differing from them. It was asserted here as it behaved, with
+	// the difference named, precisely so that unifying them would be a
+	// deliberate edit to this test -- which is what it was.
+	t.Run("an absent composite is a bind error, like the scalars", func(t *testing.T) {
 		res, _, _, _, _, err := eng.Execute(ctx, wasmBytes,
 			"place_order", []byte(`{"userID":"u"}`))
 		if err == nil {
