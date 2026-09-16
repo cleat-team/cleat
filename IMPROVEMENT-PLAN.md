@@ -13350,6 +13350,69 @@ The cross-dialect check is a **source** assertion, the same shape as
 reason: executing it needs all three databases, while what actually breaks is one store edited and
 the others not. It asserts order as well as presence — a delete placed after the insert would
 satisfy a contains-check and remove the row the insert just wrote.
+---
+
+### 3.329 Nothing asserted that a durable call's event is on disk before the call returns — ✅ **FIXED 2026-09-16** (cleat#1670)
+
+`recordEvent` blocks until its event is durable — a receive on the flusher's `done` channel on the
+batch arm, an inline `flushEvent` on the direct one — and `freshCall` records before it returns
+(`durablecalls.go:158` `callService`, `:175` `recordEvent`). That ordering is what **bounds** the
+crash window `docs/durable-calls.md` §2 describes: the window opens when the external service
+returns and closes when the flush commits, so it cannot outlive the host call. Once the guest
+resumes, the event is on disk.
+
+Nothing asserted it. Making the flush fire-and-forget is an obvious performance change — it takes a
+commit off the hot path — and it would extend that window across the guest's next durable step, its
+next sleep, and everything after, **with every existing test still green**.
+
+The nearest test is `tests/crash/crash_test.go`'s `TestEventsArePersistedDuringExecution`, which
+sleeps **two seconds** and says why: *"the adaptive flusher batches with an 8ms window, so this is
+generous by three orders of magnitude"*. Two seconds proves durability *eventually*; it cannot
+separate "durable before the call returned" from "durable within two seconds of it" — identical
+today, divergent after the change.
+
+**No clock in the test, deliberately.** "Durable within N ms" goes green on a machine that is merely
+fast. The direct arm asserts an ORDER from a counter both sides stamp, and it is sound both ways:
+
+|  | flush stamps | return stamps | verdict |
+|---|---|---|---|
+| synchronous | 1 | 2 | passes |
+| fire-and-forget | 2 | 1 | fails |
+
+The wait on `flushed` before comparing is load-bearing: without it a fire-and-forget flush leaves the
+stamp at zero, and `0 < returnSeq` is true — the check would pass the very thing it exists to catch.
+
+**The batch arm is tested separately and asserts the row, not a stand-in.** The instant `recordEvent`
+returns, the event must already be `SELECT`able. That arm matters more: its wait is a bare
+`if err := <-done`, whose own comment notes it *"was a select with one case and no default"*, and a
+reader asking why the hot path blocks on a batch would not be obviously wrong.
+
+**Falsified against the engine, not just against the harness** — both mutations on `lifecycle.go`,
+each restored by content:
+
+| mutation | result |
+|---|---|
+| direct flush spawned in a goroutine | RED — *"the flush completed at 2 and recordEvent returned at 1"* |
+| `<-done` replaced by a non-blocking discard | RED — *"event_history holds 0 rows … the instant recordEvent returned"* |
+
+**The exception is asserted as the exception.** `recordEvent` blocks and then *continues* on failure:
+`ErrFenceLost` at Debug, anything else at Error, checksum unadvanced, guest resumes with no durable
+event. The unqualified property is therefore false today — on purpose for the fence-lost case, where
+the claim was lost and this worker must not write. A test written without that qualifier fails
+against correct behaviour, which is the known-positive trap arriving from the other direction.
+
+**Two harness defects found by measuring rather than assuming**, both of which would have been read
+as engine defects:
+
+* The batch arm first reported 0 rows. Instrumenting `Flush` directly gave
+  `pq: invalid input syntax for type uuid: ""` — an empty tenant in the fixture, which `recordEvent`
+  logs and swallows. `<-done` had returned *after* the failed attempt, so the ordering held all
+  along.
+* The test first gated on `CLEAT_TEST_POSTGRES` alone. **CI sets `CLEAT_TEST_DB`**, so it would have
+  skipped in every job and reported `ok`. `testutil.TestDB` already gates on either and skips
+  itself; the private check is gone.
+
+Files: `engine/a_durable_calls_event_is_durable_before_the_call_returns_test.go`.
 
 ---
 
