@@ -1864,6 +1864,13 @@ func (m *mockStore) AdminReReplay(ctx context.Context, workflowID string, genera
 func (m *mockStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	return 0, nil
 }
+
+// OriginalChildRunIDs returns nothing: no cleatctl test is about cleat#1661's
+// orphan check, and a double that invented children would make the check fire
+// on unrelated tests.
+func (m *mockStore) OriginalChildRunIDs(context.Context, string) ([]string, error) {
+	return nil, nil
+}
 func (m *mockStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
 	return 0, nil
 }

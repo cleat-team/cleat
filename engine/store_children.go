@@ -239,6 +239,45 @@ func (s *PostgresStore) GetChildCount(ctx context.Context, parentWorkflowID stri
 	return count, tx.Commit()
 }
 
+// OriginalChildRunIDs implements WorkflowStore. See the interface for why
+// continued runs are excluded.
+func (s *PostgresStore) OriginalChildRunIDs(ctx context.Context, parentWorkflowID string) ([]string, error) {
+	// A TENANT-SCOPED TRANSACTION, not the bare pool, and not an
+	// `AND tenant_id = $2` predicate either. workflow_instances is under
+	// row-level security: the policy raises on the first candidate row
+	// whatever the WHERE clause says, so a tenant predicate does not
+	// substitute for setting the tenant on the transaction. Written the bare
+	// way first and caught by
+	// TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet, which says
+	// exactly that.
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("original child run ids for %s: begin: %w", parentWorkflowID, err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE parent_workflow_id = $1 AND continued_from IS NULL
+	`, parentWorkflowID)
+	if err != nil {
+		return nil, fmt.Errorf("original child run ids for %s: %w", parentWorkflowID, err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("original child run ids for %s: scan: %w", parentWorkflowID, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("original child run ids for %s: %w", parentWorkflowID, err)
+	}
+	return ids, tx.Commit()
+}
+
 // ReapStaleInstances reclaims workflow instances with stale heartbeats.
 
 // GetChildCompletedAtMs returns the child's completion instant in Unix

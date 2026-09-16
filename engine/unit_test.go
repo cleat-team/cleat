@@ -2533,6 +2533,14 @@ func (s *stubWorkflowStore) GetChildCount(ctx context.Context, parentWorkflowID 
 	return 0, nil
 }
 
+// OriginalChildRunIDs returns nothing: no test using this double is about
+// cleat#1661's orphan check, and a double that invented children would make
+// the check fire on unrelated tests. Recorded as a choice rather than left as
+// another empty return.
+func (s *stubWorkflowStore) OriginalChildRunIDs(context.Context, string) ([]string, error) {
+	return nil, nil
+}
+
 func (s *stubWorkflowStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
 	return 0, nil
 }

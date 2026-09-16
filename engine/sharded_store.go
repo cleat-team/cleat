@@ -1345,6 +1345,16 @@ func (s *ShardedStore) GetChildCount(ctx context.Context, parentWorkflowID strin
 	return shard.Store.GetChildCount(ctx, parentWorkflowID)
 }
 
+// OriginalChildRunIDs routes to the shard holding the parent, exactly as
+// GetChildCount does: children live on their parent's shard.
+func (s *ShardedStore) OriginalChildRunIDs(ctx context.Context, parentWorkflowID string) ([]string, error) {
+	shard := s.getShard(parentWorkflowID)
+	if shard == nil {
+		return nil, fmt.Errorf("original_child_run_ids: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.OriginalChildRunIDs(ctx, parentWorkflowID)
+}
+
 // GetConcurrencyKeyCount routes by workflow ID.
 func (s *ShardedStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
 	shard := s.getShard(workflowID)

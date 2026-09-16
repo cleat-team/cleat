@@ -415,6 +415,51 @@ func (s *MSSQLStore) GetChildCount(ctx context.Context, parentWorkflowID string)
 	return count, tx.Commit()
 }
 
+// OriginalChildRunIDs implements WorkflowStore. See the interface for why
+// continued runs are excluded.
+func (s *MSSQLStore) OriginalChildRunIDs(ctx context.Context, parentWorkflowID string) ([]string, error) {
+	// BOTH a tenant-scoped transaction AND an explicit tenant predicate, and
+	// the predicate is the load-bearing half here.
+	//
+	// dbo.fn_tenant_filter is OFF for any dbo.cleat_admin connection
+	// (migrations/mssql/012_admin_role.sql), which is what a multi-tenant
+	// deployment must use -- so on this dialect the WHERE clause is the whole
+	// of the isolation, not defence in depth behind it. Written without the
+	// predicate first and caught by
+	// TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate.
+	//
+	// The transaction still matters for the single-tenant deployments where the
+	// policy IS on: a filter predicate exempts nobody, so a read with no
+	// session context returns zero rows rather than erroring, and an orphan
+	// check that silently sees nothing reports every parent as clean.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("original child run ids for %s: begin: %w", parentWorkflowID, err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE parent_workflow_id = @p1 AND continued_from IS NULL AND tenant_id = @p2
+	`, parentWorkflowID, s.tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("original child run ids for %s: %w", parentWorkflowID, err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("original child run ids for %s: scan: %w", parentWorkflowID, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("original child run ids for %s: %w", parentWorkflowID, err)
+	}
+	return ids, tx.Commit()
+}
+
 func (s *MSSQLStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO workflow_promises (workflow_id, promise_name, promise_id, tenant_id)

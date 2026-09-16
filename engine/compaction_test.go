@@ -1784,6 +1784,14 @@ func (m *mockCompactStore) IncrementEventCount(ctx context.Context, tx *sql.Tx, 
 func (m *mockCompactStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	return 0, nil
 }
+
+// OriginalChildRunIDs returns nothing: no test using this double is about
+// cleat#1661's orphan check, and a double that invented children would make
+// the check fire on unrelated tests. Recorded as a choice rather than left as
+// another empty return.
+func (m *mockCompactStore) OriginalChildRunIDs(context.Context, string) ([]string, error) {
+	return nil, nil
+}
 func (m *mockCompactStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
 	return 0, nil
 }
