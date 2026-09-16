@@ -59,7 +59,11 @@ var portedOn = map[string][]string{
 	// They are listed with the dialects they are KNOWN to work on rather than
 	// omitted, so that adding a dialect here is a deliberate act with a test
 	// behind it, and so the refusal message can say what does work.
-	"drop-tenant":        {"postgres"},
+	// drop-tenant gained SQL Server in cleat#1635, with
+	// migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql defining
+	// admin.drop_tenant there and TestATenantCanBeDroppedOnSQLServer behind it.
+	// MySQL still has no `admin` schema, which is the reason this map exists.
+	"drop-tenant":        {"postgres", "mssql"},
 	"revoke-api-key":     {"postgres"},
 	"set-tenant-setting": {"postgres"},
 	"deploy":             {"postgres"},

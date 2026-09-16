@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -93,13 +94,15 @@ func TestMigrations(t *testing.T) {
 		// file alone to avoid conflicting with this branch. Once it lands,
 		// replace this block with the helper rather than leaving a fourteenth
 		// variant behind. cleat#1512.
-		if m.Up == "" && len(m.TenantScoped) == 0 {
-			t.Errorf("migrations[%d] has neither Up SQL nor TenantScoped tables, so it does nothing", i)
-		}
-		if m.Down == "" && len(m.TenantScoped) == 0 {
-			t.Errorf("migrations[%d].Down is empty", i)
-		}
+		_ = i
 	}
+	// cleat#1513 has landed and the comment above says what to do about it:
+	// replace this block with the helper rather than leave a fourteenth
+	// variant. Done here rather than later because this copy had already
+	// drifted -- it asked `m.Up == ""`, so a MySQL-only migration read as
+	// doing nothing, which is the same defect the shared helper carried until
+	// cleat#1622 fixed it there.
+	plugintest.AssertMigrationsDoSomething(t, migs)
 
 	// Versions should be sequential starting from 1.
 	prevVersion := 0
@@ -127,8 +130,11 @@ func TestMigrations(t *testing.T) {
 			continue
 		}
 		hasSQL := false
+		// All three arms: a MySQL-only migration carries its DDL in UpMySQL,
+		// and asking only about Up reports it as containing no SQL.
+		allUp := m.Up + "\n" + m.UpMySQL + "\n" + m.UpMSSQL
 		for _, kw := range sqlKeywords {
-			if strings.Contains(m.Up, kw) {
+			if strings.Contains(allUp, kw) {
 				hasSQL = true
 				break
 			}
@@ -138,8 +144,9 @@ func TestMigrations(t *testing.T) {
 		}
 
 		hasDownSQL := false
+		allDown := m.Down + "\n" + m.DownMySQL + "\n" + m.DownMSSQL
 		for _, kw := range sqlKeywords {
-			if strings.Contains(m.Down, kw) {
+			if strings.Contains(allDown, kw) {
 				hasDownSQL = true
 				break
 			}

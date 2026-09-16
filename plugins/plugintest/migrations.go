@@ -89,12 +89,26 @@ func migrationProblems(migrations []plugin.Migration) []string {
 		// carries no tenant column (cleat#1490) -- without it the sweep gets
 		// "permission denied for table X (42501)".
 		declares := len(m.TenantScoped) > 0 || len(m.SweepTables) > 0
-		if m.Up == "" && !declares {
+
+		// ALL THREE ARMS, not Up alone. This asked `m.Up == ""` and so
+		// reported a MySQL-only migration as doing nothing -- while the
+		// RUNNER (plugin/migration.go, `declarationOnly`) and the reversal
+		// path (plugin.declaresDDL) both already used the three-field form.
+		// Three components, one predicate, and this was the odd one out.
+		//
+		// It never surfaced because every migration in the tree had a
+		// non-empty Up as well as its dialect arms, until cleat#1622 needed a
+		// change that PostgreSQL and SQL Server do not want.
+		writesSQL := m.Up != "" || m.UpMySQL != "" || m.UpMSSQL != ""
+		if !writesSQL && !declares {
 			problems = append(problems, fmt.Sprintf(
 				"migration %d (version %d): has neither Up SQL nor a TenantScoped/"+
 					"SweepTables declaration, so applying it does nothing", i, m.Version))
 		}
-		if m.Down == "" && !declares {
+		// A reversal is required for each dialect this migration WRITES on,
+		// and Down/DownMySQL/DownMSSQL are the places to put it.
+		hasDown := m.Down != "" || m.DownMySQL != "" || m.DownMSSQL != ""
+		if writesSQL && !hasDown && !declares {
 			problems = append(problems, fmt.Sprintf(
 				"migration %d (version %d): has no Down SQL and declares no "+
 					"TenantScoped/SweepTables entries. A migration that writes SQL must "+

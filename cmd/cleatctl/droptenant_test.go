@@ -118,7 +118,7 @@ func TestRunDropTenant_RefusesDefaultTenant(t *testing.T) {
 	ctx := context.Background()
 
 	stderr := withExitPanic(t, func() {
-		runDropTenant(ctx, db, []string{engine.DefaultTenantUUID})
+		runDropTenant(ctx, db, dialectPostgres, []string{engine.DefaultTenantUUID})
 	})
 	if !strings.Contains(stderr, "refusing to drop the default tenant") {
 		t.Errorf("expected refusal message in stderr, got: %s", stderr)
@@ -138,7 +138,7 @@ func TestRunDropTenant_NoTenantIDArgument(t *testing.T) {
 	ctx := context.Background()
 
 	stderr := withExitPanic(t, func() {
-		runDropTenant(ctx, db, []string{})
+		runDropTenant(ctx, db, dialectPostgres, []string{})
 	})
 	if !strings.Contains(stderr, "Usage:") {
 		t.Errorf("expected usage text in stderr, got: %s", stderr)
@@ -167,7 +167,7 @@ func TestRunDropTenant_DryRunDeletesNothing(t *testing.T) {
 	}
 
 	stdout, stderr := captureOutputs(t, func() {
-		runDropTenant(ctx, db, []string{tenant, "--dry-run"})
+		runDropTenant(ctx, db, dialectPostgres, []string{tenant, "--dry-run"})
 	})
 	if stderr != "" {
 		t.Errorf("unexpected stderr: %s", stderr)
@@ -200,7 +200,7 @@ func TestRunDropTenant_ConfirmationMismatchCancels(t *testing.T) {
 	var stdout string
 	withStdin(t, "not-the-tenant-id\n", func() {
 		stdout, _ = captureOutputs(t, func() {
-			runDropTenant(ctx, db, []string{tenant})
+			runDropTenant(ctx, db, dialectPostgres, []string{tenant})
 		})
 	})
 	if !strings.Contains(stdout, "cancelled") {
@@ -243,7 +243,7 @@ func TestRunDropTenant_YesFlagDeletesWithoutPrompt(t *testing.T) {
 	// No stdin provided: --yes must skip the confirmation read entirely, or
 	// this would block/read EOF and fail the wrong way.
 	stdout, stderr := captureOutputs(t, func() {
-		runDropTenant(ctx, db, []string{tenant, "--yes"})
+		runDropTenant(ctx, db, dialectPostgres, []string{tenant, "--yes"})
 	})
 	if stderr != "" {
 		t.Errorf("unexpected stderr: %s", stderr)
@@ -279,7 +279,7 @@ func TestRunDropTenant_MatchingConfirmationDeletes(t *testing.T) {
 	var stdout string
 	withStdin(t, tenant+"\n", func() {
 		stdout, _ = captureOutputs(t, func() {
-			runDropTenant(ctx, db, []string{tenant})
+			runDropTenant(ctx, db, dialectPostgres, []string{tenant})
 		})
 	})
 	if !strings.Contains(stdout, "Deleted tenant "+tenant) {
@@ -301,7 +301,7 @@ func TestRunDropTenant_NothingToDelete(t *testing.T) {
 
 	const tenant = "d70e0000-0000-4000-8000-000000000005"
 	stdout, stderr := captureOutputs(t, func() {
-		runDropTenant(ctx, db, []string{tenant})
+		runDropTenant(ctx, db, dialectPostgres, []string{tenant})
 	})
 	if stderr != "" {
 		t.Errorf("unexpected stderr: %s", stderr)

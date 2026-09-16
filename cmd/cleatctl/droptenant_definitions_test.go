@@ -74,7 +74,7 @@ func TestRunDropTenant_TakesTheTenantsDefinitionsAndLeavesPluginDefs(t *testing.
 	}
 
 	stdout, stderr := captureOutputs(t, func() {
-		runDropTenant(ctx, db, []string{tenant, "--yes"})
+		runDropTenant(ctx, db, dialectPostgres, []string{tenant, "--yes"})
 	})
 	if stderr != "" {
 		t.Errorf("unexpected stderr: %s", stderr)

@@ -217,7 +217,43 @@ type Migration struct {
 	Up      string // required — SQL for PostgreSQL (the default)
 	UpMySQL string // optional — MySQL DDL. Empty means PG-only for this version.
 	UpMSSQL string // optional — MSSQL DDL. Empty means PG-only for this version.
-	Down    string // optional — SQL to roll back
+	Down    string // optional — SQL to roll back (PostgreSQL, and the default)
+
+	// DownMySQL and DownMSSQL are the dialect-specific reversals, symmetric
+	// with UpMySQL and UpMSSQL.
+	//
+	// They exist because a migration whose Up is dialect-specific could not be
+	// reversed before cleat#1622. Every migration in the tree until then had a
+	// non-empty Up as WELL as its dialect arms, so the asymmetry never
+	// surfaced: the first MySQL-only migration -- converting a plugin's JSON
+	// columns to LONGTEXT, which PostgreSQL and SQL Server do not need -- had
+	// nowhere to put a reversal that is also MySQL-only. A single Down would
+	// have been run verbatim against all three.
+	// DialectSpecific explains why this migration deliberately has no arm for
+	// one or more dialects, and must say which and why.
+	//
+	// It exists because "no arm for this dialect" has two causes that look
+	// identical: an author forgot, or the dialect genuinely needs nothing.
+	// cmd/cleat-worker's TestEveryLinkedPluginSupportsEveryDialectTheWorkerRuns
+	// On refuses the first, correctly -- a skipped migration has its version
+	// recorded as done, so a plugin can initialise against tables that were
+	// never created (cleat#1157). That guard's own comment already says a
+	// migration with no Up at all is "a different defect and not this test's
+	// subject"; this field is how an author says so, rather than the guard
+	// guessing.
+	//
+	// NARROW BY DESIGN, like TenantScoped and SweepTables: the exemption
+	// requires this to be NON-EMPTY, so a migration missing an arm by accident
+	// still trips the guard. A reason is required, not a boolean, because the
+	// next reader has to be able to check the claim.
+	//
+	// cleat#1622 is the first use: converting MySQL's JSON columns to LONGTEXT
+	// is work PostgreSQL's JSONB and SQL Server's NVARCHAR(MAX) do not need
+	// and must not have.
+	DialectSpecific string
+
+	DownMySQL string // optional — MySQL reversal. Falls back to Down when empty.
+	DownMSSQL string // optional — MSSQL reversal. Falls back to Down when empty.
 
 	// TenantScoped names tables this migration creates whose rows belong to
 	// one tenant, identified by a tenant_id column. The runtime enables

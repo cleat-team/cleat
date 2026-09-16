@@ -72,6 +72,19 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 	// allowlist, and an allowlist is how a guard stops guarding.
 	pinned := map[string]string{
 		"SELECT COUNT(*) FROM %s": "a format string: the table name is substituted at the call site, so there is no statement here to parse",
+
+		// Both are SQL Server-only, from drop-tenant's port in cleat#1635.
+		//
+		// Pinned rather than written as a plugin.Query MSSQL arm -- which is
+		// what the pruning above would recognise -- because Query.Default is
+		// required and is PostgreSQL. There is no PostgreSQL statement these
+		// are the SQL Server arm OF: the whole point of the first one is that
+		// it asks sys.columns, and PostgreSQL's answer to the same question
+		// comes from a different catalogue with different column names. A
+		// Default written only to satisfy the struct would be dead code that
+		// reads like a supported path.
+		"SELECT s.name, t.name FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = t.object_id AND c.name = 'tenant_id') ORDER BY s.name, t.name": "SQL Server catalogue views; cleat#1635. PostgreSQL has no sys.tables",
+		"SELECT count(*) FROM %s.%s WHERE tenant_id = @p1": "a format string, and SQL Server-only: the schema and table come from the row above, so there is no statement here to parse. cleat#1635",
 	}
 
 	// A template is not checkable as written, and saying so out loud is the

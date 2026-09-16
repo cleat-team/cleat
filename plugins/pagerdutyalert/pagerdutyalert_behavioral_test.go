@@ -880,8 +880,23 @@ func TestTriggerIncidentMissingAPIKey(t *testing.T) {
 	p, _, _ := setupTestPlugin(t, nil)
 
 	// First create a config that exists.
+	//
+	// SCOPED, because the guard in plugin/ asks every statement naming a
+	// tenant-scoped table to say which tenant it is for, and pd_config is one.
+	// It changes nothing at runtime here -- p.db wraps fakeDBStore, an
+	// in-memory fake with no policy to satisfy -- but writing it means this
+	// site needs no exception, and an exception would silently cover the day
+	// somebody points this test at a real database.
+	//
+	// THE RESULT IS STILL DISCARDED, which is pre-existing rather than
+	// deliberate: checking it fails with "arg 5 not found" from the fake, which
+	// counts this statement's placeholders differently than the seed supplies
+	// them. So this seed may create nothing, and the assertion below -- that
+	// triggerIncident reports a missing API key -- may be passing for a config
+	// that is not there. That is worth its own look and is NOT fixed here;
+	// naming it is the point.
 	cfgID := uuid.New().String()
-	p.db.Exec(context.Background(), `
+	p.db.Exec(plugin.ForTenant(context.Background(), testTenantID), `
 		INSERT INTO pd_config (tenant_id, id, name, routing_key, enabled, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, true, now(), now())
 	`, testTenantStr, cfgID, "test", "rk_test")

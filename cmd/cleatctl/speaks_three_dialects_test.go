@@ -112,15 +112,40 @@ func TestUnportedCommandsRefuseBeforeTheyMutateAnything(t *testing.T) {
 	// The destructive ones must NOT claim dialects they have not been written
 	// for. This is the assertion that goes red if someone widens portedOn
 	// without porting the SQL underneath it.
-	for _, cmd := range []string{"drop-tenant", "revoke-api-key"} {
-		if isPortedFor(cmd, dialectMySQL) || isPortedFor(cmd, dialectMSSQL) {
-			t.Errorf("%s claims a non-PostgreSQL dialect. Its SQL is unqualified `admin.*` "+
-				"with $N placeholders; if it has genuinely been ported, this test should "+
-				"be updated in the same commit as the port and not before", cmd)
+	//
+	// drop-tenant gained SQL Server in cleat#1635 and is listed here with the
+	// dialect it is still refused on, rather than removed from the table: the
+	// ratchet is worth more than the one line it costs. MySQL remains the
+	// refusal for both, and for the reason this whole file exists -- there is
+	// no `admin` schema there, so `admin.tenants` reads as a database named
+	// admin and fails with "Unknown database 'admin'".
+	for _, tc := range []struct {
+		cmd       string
+		refusedOn []dialect
+	}{
+		{"drop-tenant", []dialect{dialectMySQL}},
+		{"revoke-api-key", []dialect{dialectMySQL, dialectMSSQL}},
+	} {
+		for _, d := range tc.refusedOn {
+			if isPortedFor(tc.cmd, d) {
+				t.Errorf("%s claims %s. Its SQL is unqualified `admin.*` with $N "+
+					"placeholders there; if it has genuinely been ported, this test "+
+					"should be updated in the same commit as the port and not before",
+					tc.cmd, d.name)
+			}
 		}
-		if !isPortedFor(cmd, dialectPostgres) {
-			t.Errorf("%s should still work on postgres", cmd)
+		if !isPortedFor(tc.cmd, dialectPostgres) {
+			t.Errorf("%s should still work on postgres", tc.cmd)
 		}
+	}
+
+	// And the other direction, which the loop above cannot express: the port
+	// claimed by cleat#1635 is present. Without this, deleting the mssql entry
+	// from portedOn would leave every assertion in this test green.
+	if !isPortedFor("drop-tenant", dialectMSSQL) {
+		t.Errorf("drop-tenant no longer claims mssql. migrations/mssql/074 defines " +
+			"admin.drop_tenant there and droptenant_mssql.go binds to it; if that " +
+			"port has been reverted, revert this assertion with it")
 	}
 }
 

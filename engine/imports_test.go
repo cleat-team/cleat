@@ -21,6 +21,15 @@ func (h *stubHostHandler) DurableCall(_ context.Context, _ api.Module, _, _, _ s
 	return 0
 }
 func (h *stubHostHandler) DurableSleep(_ context.Context, _ api.Module, _ int64) int64 { return 0 }
+
+// ServeWasiSleep returns 0 -- "the wait has already happened" -- so nothing
+// using this stub blocks. cleat#1633.
+//
+// RECORDED AS A CHOICE rather than left as another zero in a file of zeros: a
+// stub that really slept would make every embedder as slow as whatever a guest
+// asks for, and none of them is about sleeping. A test that IS about sleeping
+// must not use this stub, because it would be asserting against the stub.
+func (h *stubHostHandler) ServeWasiSleep(_ context.Context, _ int64) time.Duration { return 0 }
 func (h *stubHostHandler) DurableAwaitSignals(_ context.Context, _ api.Module, _ string, _ int64, _, _, _, _ uint32) int64 {
 	return 0
 }
