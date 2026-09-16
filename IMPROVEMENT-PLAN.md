@@ -14062,6 +14062,40 @@ Neither fired today: old and new parses of all three dialects are **identical** 
 column sets. Raised by a peer session; the fix is a walk that copies `'...'` and `$$...$$` bodies
 through verbatim, and two self-test cases pin it.
 
+**And a third defect in the same walk, dialect-independent: an unterminated `/*` swallowed the rest
+of the file and reported nothing.**
+
+    unterminated /*   ->  tables=['public.gadgets']   errors=[]
+
+`public.widgets` is simply absent. The loop exits on `i >= n` with `depth` still 1 and nothing
+downstream learns the walk ended inside a comment. That is worse than a wrong count under this
+section's own logic — a table missing from one dialect classifies as *"defined in only one
+dialect"* — and **Postgres and SQL Server both reject such a file**, so the guard would report a
+clean, complete schema for a migration the database will not run. Running off the end inside a
+comment is now an error.
+
+**The nesting comment beside it was wrong, and it was corrected by measurement rather than
+recall.** It claimed Postgres nests and SQL Server does not, and said counting was "harmless
+elsewhere". Run against live engines, `/* see engine/*.go */ SELECT 1 AS survived;`:
+
+| engine | result | nests? |
+|---|---|---|
+| postgres 16 | `ERROR: unterminated /* comment` | **yes** |
+| mysql 8.0 | `1` | **no** |
+| mssql 2022 | `Msg 113 … Missing end comment mark '*/'` | **yes** |
+
+Inverted for SQL Server, and it omitted the one dialect that actually does not nest. The second
+sentence was falsified by the case that started this: a comment whose *text* contains a glob is
+unnested in MySQL's reading and depth 2 to the counter, so it does not "close at depth 1 either
+way". Per-dialect counting would be airtight and is not worth it now that the residue is loud.
+A plain `/* … */` was run on each engine first as a positive control.
+
+**The falsification of that fix is the clearest case in this section for asserting on TEXT and not
+only on status.** With the unterminated check disabled, both new self-test cases still exit 2 —
+*"parsed 0 tables"*, the right status for entirely the wrong reason. Only the assertion that the
+output says `never closed` tells them apart. A status-only self-test would have passed a guard that
+had lost the check.
+
 **A proxy disagreed with the real consumer while this was being checked, which is the section's own
 lesson once more.** The first faithful comparison scored columns with a line-oriented regex over
 the stripped text, and it reported `disabled_at` as *present* under the broken version — because

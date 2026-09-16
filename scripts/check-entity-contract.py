@@ -85,6 +85,7 @@ def strip_sql_comments(src):
     for routine definitions.
     """
     out = []
+    unterminated = []
     i = 0
     n = len(src)
     while i < n:
@@ -124,11 +125,27 @@ def strip_sql_comments(src):
             continue
 
         if src.startswith("/*", i):
-            # Postgres block comments nest; SQL Server's do not. Counting is
-            # correct for Postgres and harmless elsewhere, since an unnested
-            # comment closes at depth 1 either way.
+            # Postgres and T-SQL nest block comments; MySQL does not. Measured
+            # against live engines rather than recalled, because the comment
+            # here first said the opposite for SQL Server:
+            #
+            #   /* see engine/*.go */ SELECT 1 AS survived;
+            #   postgres 16   ERROR: unterminated /* comment      -> nests
+            #   mysql 8.0     1                                   -> does not
+            #   mssql 2022    Msg 113: Missing end comment mark    -> nests
+            #
+            # Counting is therefore right for two of three. It is NOT "harmless
+            # elsewhere": a comment whose text contains a glob is unnested in
+            # MySQL's reading and depth 2 to this counter, which is exactly the
+            # shape that ate the file in the first place.
+            #
+            # Per-dialect counting would be airtight and is not worth it,
+            # because the failure it leaves is now LOUD rather than silent --
+            # see the unterminated check below, which catches the MySQL case as
+            # an error instead of as fewer tables.
             depth = 1
             i += 2
+            comment_start = i - 2
             while i < n and depth:
                 if src.startswith("/*", i):
                     depth += 1
@@ -140,12 +157,25 @@ def strip_sql_comments(src):
                     if src[i] == "\n":
                         out.append("\n")
                     i += 1
+            if depth:
+                # Running off the end inside a comment is an ERROR, not a
+                # result. Before this, the rest of the file was swallowed and
+                # nothing downstream learned why: one unterminated /* returned
+                # tables=['public.gadgets'] errors=[], with public.widgets
+                # simply absent.
+                #
+                # That is worse than a wrong count under cleat#1719's logic --
+                # a table missing from one dialect classifies as "defined in
+                # only one dialect". And Postgres and SQL Server both REJECT
+                # such a file, so the guard would report a clean, complete
+                # schema for a migration the database will not run.
+                unterminated.append(src.count("\n", 0, comment_start) + 1)
             continue
 
         out.append(ch)
         i += 1
 
-    return "".join(out)
+    return "".join(out), unterminated
 
 
 def matching_paren(src, open_idx):
@@ -182,7 +212,12 @@ def parse_tables(migrations_dir):
         return tables, errors
 
     for path in files:
-        src = strip_sql_comments(open(path, encoding="utf-8").read())
+        src, unterminated = strip_sql_comments(open(path, encoding="utf-8").read())
+        for lineno in unterminated:
+            errors.append("%s:%d: a /* block comment is never closed, so the "
+                          "rest of the file was discarded. Postgres and SQL "
+                          "Server both reject such a file."
+                          % (os.path.basename(path), lineno))
 
         for m in re.finditer(
             CREATE_TABLE_RE,
@@ -686,6 +721,23 @@ SELF_TEST_CASES = [
          "    note        TEXT NOT NULL DEFAULT 'engine/*.go',")
      + "\n/* an ordinary block comment, elsewhere in the file */\n",
      "public.widgets\tmember\n", 0, None),
+
+    # Running off the end inside a comment is an error, not a result. Before
+    # cleat#1719 this returned the LATER file's tables with errors=[] and the
+    # earlier table simply absent -- which under this guard's own cross-dialect
+    # logic classifies as "defined in only one dialect". Postgres and SQL Server
+    # both reject such a file outright.
+    ("an unterminated /* is an error, not fewer tables",
+     "/* never closed\n" + CONFORMING,
+     "public.widgets\tmember\n", 2, "never closed"),
+
+    # A glob inside a block comment. Postgres and T-SQL nest, so `/*` in the
+    # comment TEXT opens a second level and `*/` closes only one; MySQL does
+    # not nest and reads the same file as fine. Measured on live engines.
+    # Whatever the counting does, it must not be silent.
+    ("a glob inside a block comment does not silently yield zero tables",
+     "/* see engine/*.go */\n" + CONFORMING,
+     "public.widgets\tmember\n", 2, "never closed"),
 ]
 
 # Cross-dialect cases (cleat#1719). Each carries a sibling schema as well.
