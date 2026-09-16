@@ -12923,3 +12923,85 @@ and a guard on that row would refuse exactly the cleanup it exists to perform.
 Files: `migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql`,
 `cmd/cleatctl/droptenant_mssql.go`, `cmd/cleatctl/droptenant.go`, `cmd/cleatctl/ported.go`,
 `engine/a_tenant_can_be_dropped_on_sql_server_test.go`.
+
+---
+
+### 3.326 A dropped tenant's memory profile survived, and the list that missed it had already drifted twice — ✅ **FIXED 2026-09-15** (cleat#1644)
+
+`admin.drop_tenant` deleted from a hand-maintained array of seven core tables.
+`workflow_memory_stats` and `workflow_memory_samples` have carried `tenant_id` since migration 056
+(cleat#1040), neither has a foreign key to anything, and neither was named — so nothing deleted
+them and nothing cascaded them.
+
+**Measured** on a database built from `migrations/postgres/*.sql`, two tenants seeded, in migration
+066's own three-number shape:
+
+```
+SEEDED  stats A=1 B=1   samples A=1 B=1
+AFTER   stats A=1 B=1   samples A=1 B=1   admin.tenants A=0 B=1
+```
+
+`A=1` after is the bug. `B=1` says a fix must not become "delete everything". `admin.tenants A=0`
+says the drop genuinely ran — without it, a drop that silently did nothing produces the same
+surviving rows and reads as the same bug.
+
+What survived is not an implementation detail: `workflow_memory_samples` is keyed
+`(tenant_id, def_name)` and `def_name` is the tenant's own workflow name, so what outlived the
+tenant was a list of the workflows it ran and how much memory each used.
+
+**The two names are the small half.** The list has now drifted three times, and so has its twin in
+`cmd/cleatctl/droptenant.go`:
+
+| | added by | missing until |
+|---|---|---|
+| `tenant_settings` | 039 | "twenty migrations", per `droptenant.go`'s own comment |
+| `workflow_defs` | 001 | #1201 |
+| `workflow_memory_{stats,samples}` | 056 | this |
+
+Migration 056 named the mechanism, about a different guard: *"it answers 'is every statement
+against a KNOWN tenant-scoped table scoped?' and cannot answer 'is every table that should be
+tenant-scoped actually one?'"* `admin.drop_tenant` has that blind spot with the roles reversed.
+
+**So the durable half is two tests whose universe comes from `information_schema.columns`** — a
+derivation that can disagree with the lists rather than one that restates them:
+
+* `TestEveryTenantOwnedTableIsEmptiedByDropTenant` (engine) requires a **seed for every member of
+  the universe** before it checks emptiness. That ordering is the whole design: "zero rows
+  afterwards" is satisfied by a table that was never seeded, which is how cleat#1265 published
+  "4 of 4 clean" off a run where two of six seeds had failed. A new tenant-owned table fails in
+  the seed precondition, naming itself.
+* `TestThePreviewNamesEveryTenantOwnedTable` (cleatctl) compares `dropTenantTables` against the
+  same universe in both directions.
+
+**The preview was short by THREE, not two**, and the third is the argument for deriving rather than
+reading: `admin.tenant_egress_allow` is deleted correctly, by `ON DELETE CASCADE` from
+`admin.tenants`, and had never been counted. No amount of reading `admin.drop_tenant` finds it —
+nothing in the function names it. That matters because `drop-tenant` prints those counts twice,
+once as the thing the operator confirms and once as the audit record the command has instead of an
+audit table, so an uncounted table is deleted silently and recorded as not having existed.
+
+**Falsified five ways**, each restored by content as its own step:
+
+| mutation | which assertion fired |
+|---|---|
+| the two names removed from the array | emptiness, naming both tables |
+| a brand-new `tenant_id` table created in the database | the seed ratchet, naming it |
+| one seed redirected to a different tenant | the precondition, naming the table |
+| one entry removed from `dropTenantTables` | preview coverage |
+| a preview label transposed onto another table's query | the label/query agreement check |
+
+The second is the known-positive: the case the test exists for, and the one no previous guard
+could see.
+
+**Not derived the way SQL Server's is**, and deliberately. `migrations/mssql/074` (§3.325) sweeps
+`sys.columns` and carries no list at all. PostgreSQL cannot copy that as cheaply: `--schema`
+(cleat#1287) means an install's tables are not all in one known schema, and per-tenant
+`tenant_<uuid>` schemas hold tables with a `tenant_id` column belonging to *other* tenants — two
+were present on the test database while this was written. Rewriting how the most destructive
+routine in the schema chooses its tables is a change with a different risk profile from adding two
+names, and the tests close the drift class either way.
+
+Files: `migrations/postgres/082_a_dropped_tenants_memory_profile_goes_with_it.sql`,
+`engine/a_dropped_tenants_rows_all_go_with_it_test.go`,
+`cmd/cleatctl/the_preview_names_every_tenant_owned_table_test.go`,
+`cmd/cleatctl/droptenant.go`, `engine/drop_tenant_test.go`.

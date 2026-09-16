@@ -102,9 +102,20 @@ var dropTenantTables = []struct {
 	// most: an operator deleting a tenant wants to see that its credentials
 	// went with it.
 	{"tenant_secrets", `SELECT count(*) FROM tenant_secrets WHERE tenant_id = $1`},
+	// cleat#1644. Both carry tenant_id since 056 and neither has a foreign key
+	// to anything, so neither was deleted OR counted: a dropped tenant's memory
+	// profile -- which workflows it ran, and how much memory each used --
+	// survived, and did not appear in the preview an operator confirms.
+	{"workflow_memory_stats", `SELECT count(*) FROM workflow_memory_stats WHERE tenant_id = $1`},
+	{"workflow_memory_samples", `SELECT count(*) FROM workflow_memory_samples WHERE tenant_id = $1`},
 	{"workflow_defs", `SELECT count(*) FROM workflow_defs WHERE tenant_id = $1`},
 	{"admin.tenant_api_keys", `SELECT count(*) FROM admin.tenant_api_keys WHERE tenant_id = $1`},
 	{"admin.tenant_roles", `SELECT count(*) FROM admin.tenant_roles WHERE tenant_id = $1`},
+	// ON DELETE CASCADE from admin.tenants, like tenant_settings above and for
+	// the same reason: the operator wants the count, not the mechanism. Found
+	// by the coverage test rather than by reading the function -- it is deleted
+	// correctly and was simply never counted. cleat#1644.
+	{"admin.tenant_egress_allow", `SELECT count(*) FROM admin.tenant_egress_allow WHERE tenant_id = $1`},
 	{"admin.tenants", `SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`},
 }
 

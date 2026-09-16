@@ -63,6 +63,7 @@ var dropTenantDefiningMigrations = []string{
 	"059_a_dropped_tenants_definitions_go_with_it.sql",
 	"066_a_dropped_tenants_plugin_rows_go_with_it.sql",
 	"069_drop_tenant_takes_the_schema_it_deletes_from.sql",
+	"082_a_dropped_tenants_memory_profile_goes_with_it.sql",
 }
 
 // apply032DropTenantMigration installs the CURRENT admin.drop_tenant by
