@@ -33,28 +33,64 @@ concurrency = (target_throughput_rps × avg_workflow_duration_s)
 `--concurrency` interacts with `--memory-soft-limit`. When system memory exceeds the
 soft limit, the worker stops claiming new work even if concurrency slots are available.
 
-## Heartbeat (`--heartbeat`)
+## Heartbeat (`--heartbeat`) and reclaim (`--reclaim-timeout`)
 
-Controls how often the worker updates its liveness in the database. If a worker
-crashes, its claimed workflows are reclaimed after two missed heartbeats.
+`--heartbeat` controls how often a worker proves it is alive by updating its
+liveness row. `--reclaim-timeout` controls how long a run may go without one of
+those before another worker may claim it.
 
-### Tradeoff
+**They used to be one knob and are now two.** The reclaim window was derived as
+`max(2 x --heartbeat, 10s)`, so the only way to a longer window was a sparser
+heartbeat. `--reclaim-timeout` defaults to `0`, which keeps exactly that
+derivation — setting nothing changes nothing.
 
-| Heartbeat | Recovery time | DB write rate |
-|-----------|---------------|---------------|
-| 2 s | ~4 s | High |
-| 5 s (default) | ~10 s | Moderate |
-| 15 s | ~30 s | Low |
-| 30 s | ~60 s | Very low |
+### Why you might want them apart
+
+A database failover stops the heartbeat **without the worker being dead**. The
+heartbeat is written to the same database the workflow's events are, so an
+outage silences every worker at once, and at the default every run in the fleet
+is reclaimable ten seconds in. Buying tolerance for that by raising
+`--heartbeat` also makes heartbeats sparse, so a genuinely crashed worker's runs
+stay stranded just as long — paying for an occasional outage with every crash.
+
+```bash
+# a 5-minute reclaim window while still checking in every 5 seconds
+cleat-worker --heartbeat 5s --reclaim-timeout 5m
+```
+
+A value below `2 x --heartbeat` is **refused**, not clamped: it would reclaim
+runs from workers that are alive and checking in normally.
+
+### The derived window, if you leave `--reclaim-timeout` at 0
+
+| `--heartbeat` | Reclaim window | Reaper poll | DB write rate |
+|---|---|---|---|
+| 2 s | **10 s** | 10 s | High |
+| 5 s (default) | 10 s | 10 s | Moderate |
+| 15 s | 30 s | 15 s | Low |
+| 30 s | 60 s | 30 s | Very low |
+
+**The 10-second floor is why the first two rows are the same.** Every heartbeat
+of 5 s or below produces an identical 10 s reclaim window — `max(2 x hb, 10s)`.
+Going below 5 s buys no reclaim speed at all; it only adds write load. This
+table previously said a 2 s heartbeat gave ~4 s recovery, which the floor makes
+impossible.
+
+Re-derive rather than trusting the table:
+
+```
+max(2 x --heartbeat, 10s)     # cmd/cleat-worker/setup.go, Worker.reclaimAfter
+```
 
 ### Recommendations
 
-| Deployment | Heartbeat | Reason |
-|------------|-----------|--------|
-| Single worker | 15–30 s | No other workers to reclaim; fast recovery is irrelevant |
-| Multi-worker (stable) | 5–10 s | Balanced — fast enough for HA, low enough DB load |
-| Kubernetes (preemptible) | 2–5 s | Nodes can disappear suddenly; fast reclaim prevents long stalls |
-| Development | 30 s+ | Minimizes DB writes during debugging |
+| Deployment | Heartbeat | Reclaim | Reason |
+|---|---|---|---|
+| Single worker | 15–30 s | leave at 0 | No other worker can reclaim, so the window is irrelevant |
+| Multi-worker (stable) | 5–10 s | leave at 0 | Balanced |
+| Kubernetes (preemptible) | 5 s | leave at 0 | Nodes vanish suddenly; **do not go below 5 s** — the floor means it changes nothing |
+| Managed DB with failover | 5 s | `2–5 m` | Survive the failover without making crash recovery slower |
+| Development | 30 s+ | leave at 0 | Minimizes DB writes while debugging |
 
 ## Poll interval (`--poll`)
 

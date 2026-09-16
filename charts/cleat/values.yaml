@@ -20,7 +20,17 @@ worker:
   # --tenant-resolver, which defaults to single-tenant; this chart does not
   # expose it yet.
   # -- Heartbeat interval for claimed workflow instances (--heartbeat).
+  # This also derives the reclaim window below when that is "0".
   heartbeatInterval: "5s"
+  # -- How long a run may go without a heartbeat before another worker claims it
+  # (--reclaim-timeout). "0" derives it as max(2 x heartbeatInterval, 10s),
+  # which is the historical behaviour and changes nothing.
+  #
+  # Raise it on a managed database that fails over: the heartbeat is written to
+  # the same database, so a failover silences every worker at once and makes
+  # every run reclaimable ten seconds in. Setting this instead of raising
+  # heartbeatInterval keeps crash recovery fast. Refused below 2 x the heartbeat.
+  reclaimTimeout: "0"
   # -- Poll interval when no work is available (--poll).
   pollInterval: "500ms"
 

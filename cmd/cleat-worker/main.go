@@ -108,6 +108,11 @@ import (
 func main() {
 	flag.Parse()
 
+	if err := validateReclaimTimeout(*reclaimTimeout, *heartbeatInterval); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	// Before anything else, and before any database is needed: --verify-backend
 	// answers "does this binary have the wasmtime backend?" and exits.
 	if *verifyBackend {
@@ -1399,6 +1404,7 @@ func main() {
 		bgWg:                             &bgWg,
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,
+		reclaimTimeout:                   *reclaimTimeout,
 		egressAllow:                      egressAllow,
 		operatorEgress:                   operatorEgress,
 		workerRegistry:                   workerRegistry,
@@ -1781,4 +1787,31 @@ func main() {
 		logger.WarnContext(context.Background(), "timed out waiting for background workers after 30s", "worker_id", workerID)
 	}
 	logger.InfoContext(context.Background(), "shutdown complete", "worker_id", workerID)
+}
+
+// validateReclaimTimeout refuses a --reclaim-timeout that would reap runs from
+// workers that are alive and heartbeating normally.
+//
+// REFUSED, NOT CLAMPED. Clamping would mean the operator asked for one recovery
+// window and silently got another, and this flag exists precisely to stop the
+// window being derived behind their back -- the same argument the rate limiter
+// makes for refusing a cluster-wide limit it cannot honour (cleat#1581) rather
+// than quietly serving a per-process one.
+//
+// A SEPARATE FUNCTION so it can be tested. Inline in main() the only way to
+// exercise it is to run the binary, which is why the condition it replaced had
+// no test. cleat#1717.
+func validateReclaimTimeout(reclaim, heartbeat time.Duration) error {
+	if reclaim <= 0 {
+		return nil // derive from the heartbeat, as before
+	}
+	if floor := 2 * heartbeat; reclaim < floor {
+		return fmt.Errorf(
+			"--reclaim-timeout %v is below two heartbeats (2 x --heartbeat %v = %v).\n"+
+				"A run is considered stale when it misses that window, so this would reclaim "+
+				"runs from workers that are alive and checking in normally.\n"+
+				"Raise --reclaim-timeout to at least %v, or lower --heartbeat.",
+			reclaim, heartbeat, floor, floor)
+	}
+	return nil
 }
