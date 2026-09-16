@@ -201,11 +201,26 @@ unmergeable, because branch protection is satisfied by neither member of a dupli
 clearing it needs a **new SHA** rather than a re-run (cleat#1688, three instances in one day):
 
 ```
-gh run list --commit <head-sha> --json name --jq '.[].name' | sort | uniq -d
+gh api --paginate "repos/cleat-team/cleat/commits/<FULL-40-char-sha>/check-runs?per_page=100" \
+  --jq '.check_runs[].conclusion' | sort | uniq -c
 ```
 
-Non-empty means the PR needs its author. Without this clause R9 hands work to precisely the
-streams least able to take it.
+A non-zero `cancelled` count means the PR needs its author. Without this clause R9 hands work to
+precisely the streams least able to take it.
+
+**This clause prescribed `gh run list --commit <head-sha> … | uniq -d` until 2026-09-16, and that
+form answers "no twin" three ways** (cleat#1703). An **abbreviated** SHA returns zero runs and no
+error, because `head_sha=` is an exact string match rather than a prefix resolve — and the sibling
+`…/commits/<sha>/check-runs` endpoint *does* resolve a prefix, so nothing teaches you the
+difference. A `?per_page=100` conclusion count silently truncated **121** check runs to 100, which
+cost 17 of the cancelled ones on the very SHA the rule cites as its example. And `uniq -d` over
+names over-reports: `cla-assistant.yml` subscribes to `pull_request_target: closed`, so a second
+`CLA Assistant` run starts 2–3 seconds after `merged_at` — measured on four PRs merged that day,
+both members `success` every time. That last one lands at exactly the sample a watcher polling to
+`MERGED` takes last, which is the worst possible moment for a false alarm.
+
+Known-positive `431737a0` reports **55 cancelled**; negative control
+`cab6353741afd57203d338f06b79b24334baee34`, which merged, reports **0**.
 
 **Cap: one held PR plus one new item.** R6 still governs — if the second item would touch the same
 declaration file, it is not eligible regardless of R9.

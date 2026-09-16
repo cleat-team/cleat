@@ -13662,3 +13662,68 @@ That leaves **four** live files, not the five a first pass suggests or the six t
 
 Files: `scripts/docker/python-toolchain.Dockerfile`, `scripts/tier-gate.sh`, `WORKSTREAM.md`,
 `engine/python_all_host_calls_test.go`.
+
+---
+
+### 3.333 The cancelled-twin detector answered "no twin" three ways — ✅ **FIXED 2026-09-16** (cleat#1703)
+
+`CLAUDE.md` published the detector twice and `WORKSTREAM.md`'s R9 candidacy test a third time, all
+in the name-based form:
+
+    gh run list --commit <sha> --json name --jq '.[].name' | sort | uniq -d
+
+Three failure modes, measured 2026-09-16 against `431737a0fc24f6571d72114cc3c02c39383263cb`
+(cleat#1355, `BLOCKED` for 50+ samples) as known-positive and
+`cab6353741afd57203d338f06b79b24334baee34` (cleat#1699, merged an hour earlier) as negative
+control. **All three report the safe answer**, which is the asymmetry *Is this result real?*
+already names — a measurement error that flatters is one nobody re-derives.
+
+| | what it does | why it is silent |
+|---|---|---|
+| an **abbreviated** SHA | returns **0 runs**, so `uniq -d` is empty | `head_sha=` is an exact string match; `total_count` is 0, not an error |
+| **`uniq -d` over names** | reports `CLA Assistant` as a twin | `pull_request_target`'s `closed` type fires a second run at merge, by design |
+| **`?per_page=100`** | 38 cancelled reported of **121** check runs | the page cap truncates and says nothing |
+
+**The first is the expensive one, and not because a prefix is an unreasonable thing to paste.** The
+sibling endpoint in the same API family resolves one perfectly well — `…/commits/<abbrev>/check-runs`
+and `…/commits/<full>/check-runs` both return 49 on cleat#1699's head — so the surrounding practice
+actively teaches that abbreviations are fine here. Every publication site spelled the argument
+`<sha>`, and `git log --oneline` and `git rev-parse --short` are what hand you one.
+
+**The second lands at the worst available moment.** Correlating `merged_at` against CLA run times
+for four PRs merged that day:
+
+| PR | `merged_at` | CLA runs on that head SHA | delta |
+|---|---|---|---|
+| #1695 | 16:01:30Z | 15:24:29Z, **16:01:33Z** | +3s |
+| #1698 | 16:08:30Z | 15:34:01Z, **16:08:33Z** | +3s |
+| #1700 | 16:41:38Z | 16:02:55Z, **16:41:41Z** | +3s |
+| #1699 | 17:36:12Z | 16:59:38Z, **17:36:14Z** | +2s |
+
+Four for four, both members `success`. So a watcher polling to `MERGED` sees a "twin" on the very
+last sample it takes — this session's own watcher printed `twin='CLA Assistant,'` on the line that
+read `MERGED`, and survived only because it happened to test `MERGED` first. The duplicate is
+invisible on an **open** PR, which is why cleat#1688's mechanism section recorded "plus one
+`pull_request_target` for CLA Assistant" — singular, and correct, because those three had not
+merged. A detector whose false positive appears only at the finish line is one you cannot discover
+by watching it work.
+
+**The fix is to ask about the conclusion rather than the name** — it names the hazard instead of a
+proxy for it, resolves an abbreviated SHA, and has no benign-duplicate class:
+
+    gh api --paginate "repos/<o>/<r>/commits/<FULL-40-char-sha>/check-runs?per_page=100" \
+      --jq '.check_runs[].conclusion' | sort | uniq -c
+
+| | known-positive `431737a0…` | control `cab63537…` |
+|---|---|---|
+| `cancelled` | **55** | none |
+| outcome | `BLOCKED` 50+ samples | merged |
+
+Run verbatim under `bash -c`, per *"run it the way the reader will run it"*.
+
+**What this does NOT claim.** The truncation was found on one SHA and the CLA correlation on four
+PRs from one day; neither is a claim about other repositories or other workflow sets. And
+cleat#1688's own body still carries the name-based form — it is not mine to rewrite, so the
+measurement went there as a comment instead.
+
+Files: `CLAUDE.md`, `WORKSTREAM.md`.
