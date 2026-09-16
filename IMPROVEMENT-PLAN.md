@@ -13800,3 +13800,59 @@ dialects), no event-type filter (all three), and `-1` clamped to 0.
 Re-derive the costing:
 
     go test ./engine/ -run TestTheStreamChunkTailIsAnExclusiveCursorOnEveryDialect -count=1 -v
+---
+
+### 3.334 The test-only-code guard reported OK and exited 0 when it could not install staticcheck — ✅ **FIXED 2026-09-16** (cleat#1707)
+
+`scripts/check-test-only-code.sh` exists to catch a vacuous pass. It had one. With the tool
+uninstallable it printed its own error and then passed:
+
+    $ GOPROXY=off ./scripts/check-test-only-code.sh ; echo "exit=$?"
+    go: honnef.co/go/tools/cmd/staticcheck@2026.2.1: module lookup disabled by GOPROXY=off
+    ERROR: could not install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+    OK: no new test-only code (0 known entries in the baseline).
+    exit=0
+
+**The author had already written the hazard down, in the same function.** Sixty lines below the
+defect, `scan()` carries a comment explaining that `exit` cannot work there — *"scan runs inside a
+command substitution, so exit would only leave the subshell and the caller would carry on with an
+empty result and report OK — a vacuous pass by the guard against vacuous passes"* — and a
+`SCAN_FAILED` sentinel built for exactly that. The install path a few lines up used a bare
+`exit 1`. So this is not a missing insight; it is one path that did not get the insight.
+
+**What decides it is a shell option, and that is what makes the blast radius small.** An `exit`
+inside `$( … )` ends only the subshell; whether the parent then stops depends on `-e`:
+
+| | parent after `v="$(f)"` where `f` exits 1 |
+|---|---|
+| `set -uo pipefail` (this script) | **continues, exits 0** |
+| `set -euo pipefail` | dies, exits 1 |
+
+A survey of every `scripts/*.sh` for a command-substituted function containing a bare `exit`
+returned exactly two: this one and `check-unreachable-main.sh`. **The second is not affected** —
+it sets `-e`, *and* its caller rejects an empty scan explicitly. It was checked rather than
+assumed, and the mechanism table above is why it could be cleared without a second fix.
+
+The repair is the sentinel the file already defines. `SCAN_FAILED` also moved above `scan()`,
+since under `set -u` a reference before assignment is fatal and the install path now uses it.
+
+**The regression test is a `--self-test`, following the convention of
+`check_migration_numbers.py` and `check-required-contexts.py`, wired in CI ahead of the real run.**
+Two details are load-bearing:
+
+  * **It forces the failure with an empty `GOMODCACHE` as well as `GOPROXY=off`.** Proxy-off alone
+    is not deterministic: where staticcheck is already in the module cache `go install` succeeds
+    offline, and the self-test would quietly stop exercising the path it exists to exercise —
+    passing, of course.
+  * **Both assertions are on PRESENCE.** A non-zero exit alone cannot separate *"the guard failed
+    for the right reason"* from *"the harness never started"*. The `ERROR: could not install` line
+    is the evidence the install path was reached; the exit status is only meaningful once it is
+    there. (The obvious control, `PATH=/nonexistent`, hides the shell itself and produces silence
+    that reads identically to success.)
+
+Falsified by restoring the bare `exit 1`: the self-test fails, names cleat#1707, and prints the
+captured `OK … exit=0`. The presence assertion still passed during that run, which is how the
+failure is known to be the mutation rather than a dead harness. Restore verified by content as its
+own step, per *Ground rules for changes*.
+
+Files: `scripts/check-test-only-code.sh`, `.github/workflows/ci.yml`.

@@ -376,10 +376,22 @@ jobs:
       # Catches code that is written, tested, passing, and wired to nothing --
       # which a test suite cannot catch, because the tests pass precisely
       # because they are the only callers. The baseline records the existing
-      # backlog; only new additions fail. Count, 2026-08-30:
-      #   wc -l < scripts/deadcode-baseline.txt   # 69
+      # backlog; only new additions fail. The size of that backlog moves with
+      # ordinary work, so carry the command rather than the number -- this said
+      # "69" from 2026-08-30 and was 60 when checked on 2026-09-16:
+      #   grep -c . scripts/deadcode-baseline.txt
       - name: Test-only code guard
-        run: scripts/check-test-only-code.sh
+        # --self-test FIRST, same as the guards above, and for the reason this
+        # step itself demonstrated: until cleat#1707 this guard printed
+        #   ERROR: could not install honnef.co/go/tools/cmd/staticcheck@...
+        #   OK: no new test-only code (0 known entries in the baseline).
+        # and exited 0. A green step here meant "the tool ran and found
+        # nothing new" OR "the tool was never installed", with nothing in the
+        # exit status to tell them apart. The self-test asserts the second case
+        # now fails.
+        run: |
+          scripts/check-test-only-code.sh --self-test
+          scripts/check-test-only-code.sh
 
       # Sibling to the guard above: that one catches code called only from
       # tests (staticcheck U1000, -tests=false), but U1000 never reports
