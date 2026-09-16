@@ -96,6 +96,13 @@ var notYetPropagating = map[string]string{
 		"there is no CallContext here. Joining it means parsing the incoming traceparent on the " +
 		"plugin mux the way cmd/cleat-worker does on its own routes: a third mechanism, not this " +
 		"issue's propagation.",
+	"plugins/oauthprovider/oidc.go:getJSON": "OIDC discovery and JWKS fetches (cleat#1582), reached ONLY from handleLogin and " +
+		"handleCallback -- so this is the same debt as the entry above it, for the same reason, " +
+		"and it should be paid at the same time by the same mechanism. Checked rather than " +
+		"inherited: the only production site that sets a CallContext is execSession." +
+		"pluginCallContext (engine/plugin_call_context.go:72), which is a workflow host-call " +
+		"path, so plugin.CallContextFromContext returns nil on every HTTP handler and there is " +
+		"no TraceID to propagate. Fixing the sibling fixes this without touching oidc.go.",
 }
 
 // TestEveryOutboundCallJoinsTheTrace fails when an outbound HTTP request is
