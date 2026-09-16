@@ -48,10 +48,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in `tests/conformance/entry_point_binding_cases.json`.
   - **A composite parameter already refused** on absence. This makes absence
     uniform across types rather than adding a rule for scalars.
-  - Measured against `cleat-ports` before landing: **0 confirmed omissions in
-    112 literal starts** across all four ports, so the suites there need no
-    change. Two starts build their payload from a variable and were not
-    measured.
+  - **A STORED payload is bound by whichever guest is current when it fires,
+    not by the one that was current when it was written.** Rebuilding a target
+    workflow changes the contract every payload already persisted for it is
+    judged against. It is not re-validated at write time and cannot be: the
+    module's `cleat.metadata` section carries no entry-point parameter list, so
+    the host has nothing to check an input against.
+
+    **Three dispatch paths do this, not one.** A cron schedule is the one that
+    surfaced it (cleat#1705); naming only that one would describe the exposure
+    as narrower than it is.
+
+    | plugin | stored input | written by |
+    |---|---|---|
+    | `scheduler` | `schedules.input` | whoever registered the schedule |
+    | `jobqueue` | `task_queue.input` | whoever enqueued the job |
+    | `eventtriggers` | `event_subscriptions.input_template`, merged with the event body | an operator, plus the publisher |
+
+        grep -rln 'env.StartWorkflow' --include='*.go' plugins/ | grep -v _test.go
+
+    `jobqueue` is the sharpest of the three: a row whose `input` is NULL is
+    dispatched as `{}` (`plugins/jobqueue/background.go`), which refuses **every**
+    declared parameter rather than one. `eventtriggers` is the most exposed,
+    because the workflow author controls neither half of the payload — the
+    template is an operator's and the event body is a publisher's.
+
+    There is no "bind it the old way" mode, and the reason is structural rather
+    than a decision deferred: the binding lives in generated guest code, so a
+    payload has no contract version to pin to. Pinning one would mean carrying
+    a declared-parameter list and a binding epoch through every SDK's metadata.
+    **The migration is the same as for any caller** — send the parameter, or
+    declare it optional.
+
+    **Where it surfaces.** The schedule fires, the run is claimed, and the guest
+    refuses it, once per occurrence for as long as the schedule exists. The
+    refusal reaches `workflow_instances.error_msg` and the API's `error` field,
+    so it is queryable — but the scheduler counts the firing as *started*,
+    because it only reports failures from `StartWorkflow`, and nothing links a
+    failed run back to the schedule that started it.
+
+  - **The pre-landing measurement did not cover this, and the denominator is
+    why.** It was quoted as "0 confirmed omissions in 112 literal starts",
+    which is accurate and answers a narrower question than it appears to: it
+    scanned literal **start** calls. A cron payload is not a start call — it is
+    a `ScheduleCron` argument, or a `POST /api/schedules` body — so the whole
+    population of stored inputs was outside the scan. Re-measured across
+    `cleat-ports` after the fact (cleat#1705):
+
+    | | count |
+    |---|---|
+    | literal starts scanned before landing | 112, **0** omissions |
+    | `ScheduleCron` call sites | 1, and it **omits** a declared parameter |
+    | `create_schedule` **with** an input | 5, all complete |
+    | `create_schedule` **without** an input | 7 |
+
+    The one `ScheduleCron` site is what broke. The 7 input-less schedules are
+    latent rather than failing: their crons (`*/5 * * * *`, `0 7 * * *`, daily)
+    do not fire inside a test run, so nothing exercises them.
+
+    Parse that population rather than grepping it — three of those
+    `create_schedule` calls carry `inp=` on a continuation line, and a
+    line-oriented count reports them as input-less, which inflates the
+    omission count in the alarming direction.
 
 ### Changed
 
