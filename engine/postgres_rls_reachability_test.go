@@ -84,8 +84,14 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 		t.Fatalf("only %d PostgreSQL store files found; the file walk is broken", len(files))
 	}
 
-	var found []rlsFault
-	stmts := 0
+	consts := collectSQLConsts(t, files)
+	if len(consts) == 0 {
+		t.Fatal("resolved no package-level string constants; every query held in a const " +
+			"would be reported unreadable and the allowlist below would be meaningless")
+	}
+
+	var found, unreadable []rlsFault
+	cleared := 0
 	for _, path := range files {
 		f, fset := parseGo(t, path)
 		if f == nil {
@@ -100,14 +106,20 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 			if receiversWithoutRLS[recv] || receiversWithNoProductionConstructor[recv] {
 				continue
 			}
-			fs, n := rlsFaultsInFunc(fn, fset, rls)
+			fs, un, n := rlsFaultsInFunc(fn, fset, rls, consts)
 			found = append(found, fs...)
-			stmts += n
+			unreadable = append(unreadable, un...)
+			cleared += n
 		}
 	}
 
-	if stmts == 0 {
-		t.Fatal("examined no statements at all; the AST match is broken and a pass here " +
+	// THE FLOOR COUNTS ONLY STATEMENTS THIS GUARD HAS AN OPINION ABOUT --
+	// covered by a tenant, or with a query it could resolve. It used to count
+	// unreadable statements too, so "the AST match is broken" could not be
+	// distinguished from "the AST match works and the guard understood none of
+	// it" -- cleat#1672, and the reason that issue exists.
+	if cleared == 0 {
+		t.Fatal("cleared no statements at all; the AST match is broken and a pass here " +
 			"means nothing")
 	}
 
@@ -119,11 +131,19 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 	for k, v := range knownRLSFaults {
 		remaining[k] = v
 	}
+	byDesign := map[string]string{}
+	for k, v := range statementsWithoutATenantByDesign {
+		byDesign[k] = v
+	}
 	var unexpected []string
 	for _, f := range found {
 		key := shortPos(f.pos)
 		if _, ok := remaining[key]; ok {
 			delete(remaining, key)
+			continue
+		}
+		if _, ok := byDesign[key]; ok {
+			delete(byDesign, key)
 			continue
 		}
 		unexpected = append(unexpected, key+"  ->  "+f.table+"  ("+f.why+")")
@@ -141,8 +161,55 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 			"fixed or moved -- delete the entry rather than leaving an allowance whose "+
 			"cause is gone", key, reason)
 	}
-	t.Logf("examined %d statements across %d files against %d RLS tables; %d known faults "+
-		"exempted", stmts, len(files), len(rls), len(knownRLSFaults))
+
+	for key, reason := range byDesign {
+		t.Errorf("the by-design entry for %s no longer matches any statement (%s). The gate it "+
+			"describes has moved or gone -- re-read it rather than leaving a standing "+
+			"allowance for a line that may no longer have one", key, reason)
+	}
+
+	// An unreadable statement is NOT evidence of safety, so it fails unless
+	// someone has written down why the guard cannot read it. Same liveness rule
+	// as above: an entry matching nothing is a grant covering something that is
+	// not there.
+	stillUnreadable := map[string]string{}
+	for k, v := range knownUnreadableStatements {
+		stillUnreadable[k] = v
+	}
+	var unexplained []string
+	for _, u := range unreadable {
+		key := shortPos(u.pos)
+		if _, ok := stillUnreadable[key]; ok {
+			delete(stillUnreadable, key)
+			continue
+		}
+		unexplained = append(unexplained, key)
+	}
+	sort.Strings(unexplained)
+	if len(unexplained) > 0 {
+		t.Errorf("%d statement(s) reach the database with a query this guard cannot resolve "+
+			"from the source, and are not in knownUnreadableStatements:\n  %s\n\n"+
+			"An unreadable statement is not a safe statement -- it is one nothing has "+
+			"checked. Either give the query a form that can be read (a literal, a "+
+			"concatenation of literals and package constants, or fmt.Sprintf over one), or "+
+			"add an entry saying why it cannot be.",
+			len(unexplained), strings.Join(unexplained, "\n  "))
+	}
+	for key, reason := range stillUnreadable {
+		t.Errorf("the unreadable-statement entry for %s no longer matches anything (%s). The "+
+			"query became readable or moved -- delete the entry rather than leaving a "+
+			"standing excuse for a statement that no longer needs one", key, reason)
+	}
+
+	// BOTH NUMBERS, ALWAYS. A single figure here was correct on every run and
+	// read as ordinary while the transaction arm was examining almost nothing
+	// (cleat#1672: 17 against 168 on one tree). A reader who wants to know
+	// whether this guard is looking needs the denominator beside the verdict.
+	t.Logf("cleared %d statements and could not read %d, across %d files against %d RLS "+
+		"tables; %d known faults, %d by design, %d unreadable statements exempted",
+		cleared, len(unreadable), len(files), len(rls),
+		len(knownRLSFaults), len(statementsWithoutATenantByDesign),
+		len(knownUnreadableStatements))
 }
 
 type rlsFault struct{ pos, table, why string }
@@ -170,7 +237,69 @@ type rlsFault struct{ pos, table, why string }
 // An empty map is not a reason to delete the mechanism. The next statement
 // written on s.db against an RLS table is the case it exists for, and it will
 // be reported rather than exempted.
-var knownRLSFaults = map[string]string{}
+var knownRLSFaults = map[string]string{
+	"adaptive_flush.go:253": "cleat#1677 -- AdaptiveFlusher.partitionFencedBatch UPDATEs " +
+		"workflow_instances on af.db, the pool, with no transaction and so no set_config. " +
+		"MEASURED to raise `cleat.tenant_id is not set (P0001)` on a non-superuser connection, " +
+		"with a positive control showing the same statement returning its row once the tenant " +
+		"is set. Reachable from cmd/cleat-worker. Listed rather than fixed here because the " +
+		"fix is a choice between opening a transaction and carrying set_config in the " +
+		"statement, and this PR is about the guard; the liveness check above forces this entry " +
+		"out when cleat#1677 lands",
+}
+
+// statementsWithoutATenantByDesign reach an RLS table with no tenant AND ARE
+// CORRECT, because they only execute in a configuration where there is no
+// tenant to set.
+//
+// SEPARATE FROM knownRLSFaults ON PURPOSE. That map carries real, unfixed
+// defects and its stated goal is to reach zero; an entry that is correct as
+// written can never leave it, so mixing the two would quietly retire the "may
+// only shrink" property that makes it worth having. Two maps, two invariants:
+// one shrinks, this one does not.
+//
+// Each entry still has to name the gate, and the gate has to be checkable by
+// reading one `if`. "It is fine" is not a reason.
+var statementsWithoutATenantByDesign = map[string]string{
+	"flush.go:453": "the UNTENANTED path of Engine.flushEvent, guarded by `if e.tenantID != \"\"` " +
+		"immediately above it -- the tenanted branch opens a transaction, calls " +
+		"setRLSOnFlushTx and returns, so this line runs only when there is no tenant to set. " +
+		"Not reached by a worker: cmd/cleat-worker/setup.go:2260 always passes " +
+		"engine.WithTenantID(wf.TenantID), and workflow_instances.tenant_id is NOT NULL with " +
+		"a default, so wf.TenantID is never empty there. It serves the embedded and test " +
+		"engines, against databases where no policy is installed",
+}
+
+// knownUnreadableStatements are the statements whose query this guard cannot
+// resolve from the source, each with the reason it cannot.
+//
+// WHY THIS IS A LIST AND NOT A COUNTER. Before cleat#1672 an unreadable
+// statement incremented the same counter as one the guard had read, so 19 of
+// the 168 it reported as "examined" were statements it had no opinion about,
+// and nothing in the output said which. A count cannot be reviewed; a list can,
+// and the liveness check below means an entry cannot outlive its cause.
+//
+// TWO CLASSES, AND ONLY ONE OF THEM CAN SHRINK:
+//
+//	built at runtime   the query is assembled from user input, sort orders or
+//	                   filter clauses. No static pass can read these, and that
+//	                   is a property of the code rather than of this guard.
+//	                   Permanent.
+//	everything else    a form this guard has not been taught. Should not
+//	                   appear -- concatenations, package constants, fmt.Sprintf
+//	                   and leading SQL comments are all resolved now. A new
+//	                   entry here is a prompt to teach sqlTextOf, not to write
+//	                   a reason.
+//
+// Keep the two labelled, so the second class is visibly zero rather than
+// buried among the first.
+var knownUnreadableStatements = map[string]string{
+	"db.go:1900": "built at runtime: `CREATE SCHEMA IF NOT EXISTS ` + pq.QuoteIdentifier(" +
+		"f.schemaName), where the schema name is a field. The literal half is DDL naming no " +
+		"table, but the guard reports the statement rather than the half it can read -- a " +
+		"partial resolution could be dropping a FROM clause, which is the failure this whole " +
+		"file exists to prevent, reintroduced as a convenience",
+}
 
 // receiversWithoutRLS are store types whose backends have no row-level
 // security, so a statement of theirs naming one of these tables is not a
@@ -315,67 +444,85 @@ func dbStatementKind(call *ast.CallExpr) (string, bool) {
 // transaction-matching rules below can be exercised against synthetic source,
 // which a scan wired only to the real tree cannot be once the real tree is
 // clean.
-func rlsFaultsInFunc(fn *ast.FuncDecl, fset *token.FileSet, rls map[string]bool) ([]rlsFault, int) {
-	var found []rlsFault
-	stmts := 0
+func rlsFaultsInFunc(fn *ast.FuncDecl, fset *token.FileSet, rls map[string]bool,
+	consts map[string]string) (faults, unreadable []rlsFault, cleared int) {
+
 	ests := tenantEstablishments(fn)
 	opensTx := functionOpensTx(fn)
+	consts = withLocalConsts(fn, consts)
+
+	note := func(call *ast.CallExpr, table, why string) {
+		faults = append(faults, rlsFault{
+			pos: fset.Position(call.Pos()).String(), table: table, why: why,
+		})
+	}
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		// A statement on the pool. There is no transaction for a set_config to
-		// live on, so nothing the function does elsewhere can cover it.
-		if kind, isDBStmt := dbStatementKind(call); isDBStmt {
+
+		// Classify the statement: on the pool, on a transaction, or neither.
+		var why string
+		var isStmt bool
+		if kind, isDB := dbStatementKind(call); isDB {
 			if kind == "BeginTx" {
 				return true // reached through its tx statements instead
 			}
-			stmts++
-			sql := sqlArgOf(call)
-			if sql == "" || setsTenantInSQL(sql) {
-				return true
+			isStmt = true
+			why = "s.db." + kind + " runs outside any transaction, so the tenant can never be set for it"
+		} else if opensTx {
+			if txVar, isTx := txStatementVar(call); isTx {
+				isStmt = true
+				if establishedBefore(ests, txVar, call.Pos()) {
+					// COVERED, AND COUNTED. The tenant is established on this
+					// transaction before this point, so the answer is "not a
+					// fault" whatever the SQL says -- there is no need to
+					// resolve it, and demanding a readability entry for it
+					// would be noise. It is still a statement this guard has an
+					// opinion about, so it counts toward the floor.
+					cleared++
+					return true
+				}
+				why = "runs on " + txVar + " in " + fn.Name.Name + ", which has no setRLSOnTx or " +
+					"beginTxWithRLS for " + txVar + " ahead of this point"
 			}
-			if hit := namesRLSTable(sql, rls); hit != "" {
-				found = append(found, rlsFault{
-					pos: fset.Position(call.Pos()).String(), table: hit,
-					why: "s.db." + kind + " runs outside any transaction, so the tenant can never be set for it",
-				})
-			}
+		}
+		if !isStmt {
 			return true
 		}
-		// A statement on a transaction, checked only where the function opened
-		// one itself. A function handed a *sql.Tx is the caller's to establish,
-		// and reporting it would be a non-fault -- a guard that reports
-		// non-faults gets switched off.
-		if !opensTx {
+
+		sql, kind := queryArgOf(call, consts)
+		switch kind {
+		case argUnreadable:
+			// NOT counted as examined. cleat#1672: this used to increment the
+			// same counter as a statement the guard had actually read, so the
+			// floor assertion below was satisfied by statements it could say
+			// nothing about.
+			unreadable = append(unreadable, rlsFault{
+				pos: fset.Position(call.Pos()).String(), table: "?",
+				why: "the query is not resolvable from the source, so this guard has no opinion about it",
+			})
+			return true
+		case argNonSQL:
+			// SAVEPOINT, ROLLBACK TO SAVEPOINT, CREATE SCHEMA. Resolved, reads
+			// no row of any table, and therefore not a fault -- but it IS read,
+			// which is why it is counted rather than filed as unreadable.
+			cleared++
 			return true
 		}
-		txVar, isTx := txStatementVar(call)
-		if !isTx {
+
+		cleared++
+		if setsTenantInSQL(sql) {
 			return true
 		}
-		stmts++
-		sql := sqlArgOf(call)
-		if sql == "" || setsTenantInSQL(sql) {
-			return true
+		if hit := namesRLSTable(sql, rls); hit != "" {
+			note(call, hit, why)
 		}
-		hit := namesRLSTable(sql, rls)
-		if hit == "" {
-			return true
-		}
-		if establishedBefore(ests, txVar, call.Pos()) {
-			return true
-		}
-		found = append(found, rlsFault{
-			pos: fset.Position(call.Pos()).String(), table: hit,
-			why: "runs on " + txVar + " in " + fn.Name.Name + ", which has no setRLSOnTx or " +
-				"beginTxWithRLS for " + txVar + " ahead of this point",
-		})
 		return true
 	})
-	return found, stmts
+	return faults, unreadable, cleared
 }
 
 // tenantEstablishment records WHERE the tenant was set and on WHICH transaction
@@ -530,19 +677,221 @@ func assignsFrom(as *ast.AssignStmt, name string) bool {
 
 var reSQLString = regexp.MustCompile(`(?is)^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)\b`)
 
-func sqlArgOf(call *ast.CallExpr) string {
-	for _, a := range call.Args {
-		b, ok := a.(*ast.BasicLit)
-		if !ok || b.Kind != token.STRING {
-			continue
-		}
-		s, err := strconv.Unquote(b.Value)
-		if err != nil || !reSQLString.MatchString(s) {
-			continue
-		}
-		return s
+// reLeadingSQLComment strips comment lines from the FRONT of a statement only.
+//
+// Not a general SQL comment stripper, deliberately: `--` inside a quoted
+// literal is not a comment, and this runs before namesRLSTable has stripped
+// the quotes. Anchored at the start, it can only ever consume text that
+// precedes the verb, which is the one thing it is for -- db.go:1028 is a
+// complete UPDATE whose first line is
+//
+//	-- No AND tenant_id, deliberately: RLS bounds this.
+//
+// and `^\s*(SELECT|...)` does not match it. The statement was invisible to
+// this guard for that reason alone, with the answer sitting in the source.
+var reLeadingSQLComment = regexp.MustCompile(`(?m)\A(?:[ \t\r\n]*--[^\n]*\n)+`)
+
+// argKind is the three-way outcome of looking at a statement's query argument.
+// TWO outcOMES ARE NOT ENOUGH, and that is the whole of cleat#1672: "not SQL
+// this guard should check" and "SQL this guard cannot read" were both reported
+// as the empty string, so an unreadable statement was indistinguishable from a
+// SAVEPOINT.
+type argKind int
+
+const (
+	argSQL        argKind = iota // resolved, and it reads or writes rows
+	argNonSQL                    // resolved, and it does not -- SAVEPOINT, CREATE SCHEMA
+	argUnreadable                // NOT resolved; the guard has no opinion and must say so
+)
+
+// queryArgOf returns the statement's query text and how much of it is known.
+//
+// It takes the query by POSITION rather than hunting for the first string
+// argument that looks like SQL. The position is fixed by the database/sql
+// method being called, and keying on it removes a guessing step that could
+// silently pick a different argument.
+func queryArgOf(call *ast.CallExpr, consts map[string]string) (string, argKind) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", argUnreadable
 	}
-	return ""
+	idx := 0
+	if strings.HasSuffix(sel.Sel.Name, "Context") {
+		idx = 1 // (ctx, query, args...)
+	}
+	if len(call.Args) <= idx {
+		return "", argUnreadable
+	}
+	text, ok := sqlTextOf(call.Args[idx], consts)
+	if !ok {
+		return "", argUnreadable
+	}
+	if !reSQLString.MatchString(reLeadingSQLComment.ReplaceAllString(text, "")) {
+		return text, argNonSQL
+	}
+	return text, argSQL
+}
+
+// sqlTextOf resolves an expression to the SQL it produces, or reports that it
+// cannot.
+//
+// FAILING IS THE SAFE DIRECTION AND IS TAKEN DELIBERATELY. A concatenation
+// with one unresolvable part could be dropping the FROM clause, so a partial
+// resolution would let a statement name an RLS table invisibly -- the exact
+// failure this guard exists to prevent, reintroduced by a convenience. Any
+// unresolvable part makes the whole expression unreadable, and unreadable is
+// reported rather than skipped.
+func sqlTextOf(e ast.Expr, consts map[string]string) (string, bool) {
+	switch x := e.(type) {
+	case *ast.BasicLit:
+		if x.Kind != token.STRING {
+			return "", false
+		}
+		s, err := strconv.Unquote(x.Value)
+		if err != nil {
+			return "", false
+		}
+		return s, true
+
+	case *ast.Ident:
+		// A package-level string constant, which is where several of these
+		// statements keep their query. Moving a literal into a const is an
+		// unambiguous improvement in review and used to remove the statement
+		// from this guard's coverage with nothing failing.
+		s, ok := consts[x.Name]
+		return s, ok
+
+	case *ast.ParenExpr:
+		return sqlTextOf(x.X, consts)
+
+	case *ast.BinaryExpr:
+		if x.Op != token.ADD {
+			return "", false
+		}
+		l, lok := sqlTextOf(x.X, consts)
+		if !lok {
+			return "", false
+		}
+		r, rok := sqlTextOf(x.Y, consts)
+		if !rok {
+			return "", false
+		}
+		return l + r, true
+
+	case *ast.CallExpr:
+		// fmt.Sprintf's FORMAT string carries the table names; the verbs it
+		// interpolates carry values and predicates. adaptive_flush.go:253 is
+		// this shape, and cleat#1677 is the live fault it was hiding.
+		if f, ok := x.Fun.(*ast.SelectorExpr); ok {
+			if pkg, ok := f.X.(*ast.Ident); ok && pkg.Name == "fmt" && f.Sel.Name == "Sprintf" && len(x.Args) > 0 {
+				return sqlTextOf(x.Args[0], consts)
+			}
+		}
+		return "", false
+	}
+	return "", false
+}
+
+// withLocalConsts layers a function's own `const q = ...` declarations over the
+// package-level ones.
+//
+// A function-local const is where CheckCrossTenantCapability keeps its query,
+// and scoping is the reason it needs its own pass rather than being swept into
+// the package map: two functions may both declare `q`, and merging them into
+// one namespace would let one function's query answer for another's. Layered
+// per function, the local declaration shadows, which is what Go does.
+//
+// Returns the original map unchanged when there is nothing local, so the common
+// case allocates nothing.
+func withLocalConsts(fn *ast.FuncDecl, pkg map[string]string) map[string]string {
+	var local map[string]string
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		ds, ok := n.(*ast.DeclStmt)
+		if !ok {
+			return true
+		}
+		gd, ok := ds.Decl.(*ast.GenDecl)
+		if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
+			return true
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Names) != len(vs.Values) {
+				continue
+			}
+			for i, name := range vs.Names {
+				if text, ok := sqlTextOf(vs.Values[i], pkg); ok {
+					if local == nil {
+						local = map[string]string{}
+					}
+					local[name.Name] = text
+				}
+			}
+		}
+		return true
+	})
+	if local == nil {
+		return pkg
+	}
+	merged := make(map[string]string, len(pkg)+len(local))
+	for k, v := range pkg {
+		merged[k] = v
+	}
+	for k, v := range local {
+		merged[k] = v
+	}
+	return merged
+}
+
+// collectSQLConsts reads every package-level string const and var in the files
+// given, so an identifier used as a query can be resolved to its text.
+//
+// Two passes, because a const may be built from other consts. Two rather than
+// a fixed point: one is demonstrably not enough in this package and a loop
+// would need a cycle guard for no benefit that exists here. A name that is
+// still unresolved after the second pass stays unresolved, and its statement
+// is reported as unreadable rather than quietly skipped -- which is the whole
+// point of this change, so the limit fails in the direction that tells you.
+func collectSQLConsts(t *testing.T, files []string) map[string]string {
+	t.Helper()
+	type pending struct {
+		name string
+		expr ast.Expr
+	}
+	var todo []pending
+	out := map[string]string{}
+	for _, path := range files {
+		f, _ := parseGo(t, path)
+		if f == nil {
+			continue
+		}
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) != len(vs.Values) {
+					continue
+				}
+				for i, name := range vs.Names {
+					todo = append(todo, pending{name.Name, vs.Values[i]})
+				}
+			}
+		}
+	}
+	for pass := 0; pass < 2; pass++ {
+		for _, p := range todo {
+			if _, done := out[p.name]; done {
+				continue
+			}
+			if s, ok := sqlTextOf(p.expr, out); ok {
+				out[p.name] = s
+			}
+		}
+	}
+	return out
 }
 
 var reSQLLiteral = regexp.MustCompile(`'[^']*'`)
@@ -723,6 +1072,115 @@ func TestTheRLSGuardsPartsCanDisagree(t *testing.T) {
 		}
 	})
 
+	// WHAT THE GUARD CAN READ, and what it must refuse to guess at. cleat#1672:
+	// 19 of the 168 statements it reported as examined were ones it had not
+	// read, and one of those was a live fault (cleat#1677).
+
+	t.Run("a table named in a concatenated package constant is found", func(t *testing.T) {
+		faults, unreadable, _ := scanSource(t, "const src = ` FROM workflow_instances WHERE id = $1`\n"+
+			"func (s *PostgresStore) f(ctx context.Context) error {\n"+
+			"\ttx, _ := s.db.BeginTx(ctx, nil)\n"+
+			"\t_, _ = tx.ExecContext(ctx, `SELECT id`+src, 1)\n"+
+			"\treturn nil\n}")
+		if len(unreadable) != 0 {
+			t.Fatalf("a concatenation of literals and a package const should be readable: %v", unreadable)
+		}
+		if len(faults) != 1 {
+			t.Fatalf("the table lives in the CONSTANT half; want 1 fault, got %d", len(faults))
+		}
+	})
+
+	t.Run("a table named inside fmt.Sprintf's format string is found", func(t *testing.T) {
+		faults, unreadable, _ := scanSource(t, "func (s *PostgresStore) f(ctx context.Context) error {\n"+
+			"\t_, _ = s.db.QueryContext(ctx, fmt.Sprintf(`UPDATE workflow_instances SET x = %s`, v))\n"+
+			"\treturn nil\n}")
+		if len(unreadable) != 0 {
+			t.Fatalf("fmt.Sprintf's format string should be readable: %v", unreadable)
+		}
+		if len(faults) != 1 {
+			t.Fatalf("want the Sprintf'd statement reported; got %d faults. This is the exact "+
+				"shape of adaptive_flush.go:253, which was invisible until cleat#1672", len(faults))
+		}
+	})
+
+	t.Run("a statement whose first line is a SQL comment is still SQL", func(t *testing.T) {
+		faults, unreadable, _ := scanSource(t, "func (s *PostgresStore) f(ctx context.Context) error {\n"+
+			"\t_, _ = s.db.ExecContext(ctx, `\n\t-- why this carries no tenant predicate\n"+
+			"\tUPDATE workflow_instances SET x = 1\n`)\n\treturn nil\n}")
+		if len(unreadable) != 0 {
+			t.Fatalf("a leading SQL comment should not make a literal unreadable: %v", unreadable)
+		}
+		if len(faults) != 1 {
+			t.Fatalf("want 1 fault, got %d -- `^\\s*(SELECT|...)` does not match a leading "+
+				"`--`, which is how db.go:1028 stayed invisible", len(faults))
+		}
+	})
+
+	t.Run("a query built at runtime is reported, not cleared", func(t *testing.T) {
+		faults, unreadable, cleared := scanSource(t, "func (s *PostgresStore) f(ctx context.Context, q string) error {\n"+
+			"\t_, _ = s.db.QueryContext(ctx, q)\n\treturn nil\n}")
+		if len(unreadable) != 1 {
+			t.Fatalf("want the unresolvable query reported as unreadable, got %d", len(unreadable))
+		}
+		if cleared != 0 {
+			t.Errorf("an unreadable statement was counted as cleared (%d). That is the whole "+
+				"of cleat#1672: the floor assertion is then satisfied by statements the "+
+				"guard has no opinion about", cleared)
+		}
+		if len(faults) != 0 {
+			t.Errorf("an unreadable statement is not a fault either; got %v", faults)
+		}
+	})
+
+	t.Run("a PARTLY resolvable concatenation is unreadable, not partly read", func(t *testing.T) {
+		// The safe direction, asserted rather than assumed. The readable half
+		// names no table, so a partial resolution would CLEAR this statement
+		// while the runtime half could carry `FROM workflow_instances`.
+		faults, unreadable, cleared := scanSource(t, "func (s *PostgresStore) f(ctx context.Context, rest string) error {\n"+
+			"\t_, _ = s.db.QueryContext(ctx, `SELECT id `+rest)\n\treturn nil\n}")
+		if len(unreadable) != 1 {
+			t.Fatalf("a concatenation with an unresolvable part must be unreadable, got %d "+
+				"unreadable and %d faults", len(unreadable), len(faults))
+		}
+		if cleared != 0 {
+			t.Errorf("the readable half cleared the statement; the other half could name any " +
+				"table at all")
+		}
+	})
+
+	t.Run("a resolved statement that reads no rows is neither fault nor unreadable", func(t *testing.T) {
+		faults, unreadable, cleared := scanSource(t, "func (s *PostgresStore) f(ctx context.Context) error {\n"+
+			"\ttx, _ := s.db.BeginTx(ctx, nil)\n"+
+			"\t_, _ = tx.ExecContext(ctx, `SAVEPOINT before_thing`)\n\treturn nil\n}")
+		if len(faults) != 0 || len(unreadable) != 0 {
+			t.Fatalf("SAVEPOINT names no table and is fully readable; got %d faults, %d unreadable",
+				len(faults), len(unreadable))
+		}
+		if cleared != 1 {
+			t.Errorf("want it counted as cleared, got %d -- otherwise the guard reports a "+
+				"non-fault, and a guard that reports non-faults gets switched off", cleared)
+		}
+	})
+
+	t.Run("a function-local const does not answer for another function's", func(t *testing.T) {
+		// Two functions, each with its own `q`. If the local scope leaked into
+		// a shared namespace, the second would be read using the first's SQL
+		// and scored a fault.
+		faults, unreadable, _ := scanSource(t, "func (s *PostgresStore) a(ctx context.Context) error {\n"+
+			"\tconst q = `SELECT id FROM workflow_instances`\n"+
+			"\t_, _ = s.db.QueryContext(ctx, q)\n\treturn nil\n}\n"+
+			"func (s *PostgresStore) b(ctx context.Context) error {\n"+
+			"\tconst q = `SELECT 1`\n"+
+			"\t_, _ = s.db.QueryContext(ctx, q)\n\treturn nil\n}")
+		if len(unreadable) != 0 {
+			t.Fatalf("both queries are function-local consts and should be readable: %v", unreadable)
+		}
+		if len(faults) != 1 {
+			t.Fatalf("want exactly a's statement reported, got %d -- b's `q` is `SELECT 1` and "+
+				"names no table", len(faults))
+		}
+	})
+
 	t.Run("the migration scan finds the tables and not the prose about them", func(t *testing.T) {
 		got := rlsTablesFromMigrations(t)
 		for _, want := range []string{"workflow_instances", "event_history"} {
@@ -740,22 +1198,53 @@ func TestTheRLSGuardsPartsCanDisagree(t *testing.T) {
 // faultsInSource runs the guard's scan over a single synthetic function.
 func faultsInSource(t *testing.T, fn string) ([]rlsFault, int) {
 	t.Helper()
+	faults, _, cleared := scanSource(t, fn)
+	return faults, cleared
+}
+
+// scanSource runs the whole scan over synthetic source, package-level consts
+// included, and returns all three outcomes.
+func scanSource(t *testing.T, src string) (faults, unreadable []rlsFault, cleared int) {
+	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "synthetic.go", "package engine\n"+fn, 0)
+	f, err := parser.ParseFile(fset, "synthetic.go", "package engine\n"+src, 0)
 	if err != nil {
 		t.Fatalf("parse synthetic source: %v", err)
 	}
-	rls := map[string]bool{"workflow_instances": true}
-	var out []rlsFault
-	stmts := 0
+	rls := map[string]bool{"workflow_instances": true, "event_history": true}
+
+	// The same two-pass package-const collection the real scan does, over this
+	// one synthetic file.
+	consts := map[string]string{}
+	for pass := 0; pass < 2; pass++ {
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) != len(vs.Values) {
+					continue
+				}
+				for i, name := range vs.Names {
+					if text, ok := sqlTextOf(vs.Values[i], consts); ok {
+						consts[name.Name] = text
+					}
+				}
+			}
+		}
+	}
+
 	for _, decl := range f.Decls {
 		d, ok := decl.(*ast.FuncDecl)
 		if !ok || d.Body == nil {
 			continue
 		}
-		fs, n := rlsFaultsInFunc(d, fset, rls)
-		out = append(out, fs...)
-		stmts += n
+		fs, un, n := rlsFaultsInFunc(d, fset, rls, consts)
+		faults = append(faults, fs...)
+		unreadable = append(unreadable, un...)
+		cleared += n
 	}
-	return out, stmts
+	return faults, unreadable, cleared
 }

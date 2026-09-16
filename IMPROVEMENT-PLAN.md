@@ -13192,3 +13192,72 @@ into a warning everywhere else.
 031's reasoning is what 083 had to answer. 050 also carried a census ("PostgreSQL's RLS covers 11
 tables"); it is dropped rather than corrected, since the predicate — *this table was not among them* —
 is what the sentence needed.
+
+### 3.259 The RLS guard counted 19 statements it could not read as examined, and one was a live fault — ✅ **FIXED 2026-09-16** (cleat#1672)
+
+`TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet` read a statement's SQL by taking the
+first argument that is an `*ast.BasicLit` matching `^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)`. When
+that found nothing it returned `""`, the scan moved on — **and the statement had already been
+counted.** So the floor assertion, `stmts == 0`, was satisfied by statements the guard had no
+opinion about.
+
+#### It was hiding a live fault, which is why this is not tidiness
+
+`adaptive_flush.go:253` wraps its query in `fmt.Sprintf`, so the argument is an `*ast.CallExpr` and
+`sqlArgOf` returned `""`. The statement is
+
+    UPDATE workflow_instances wi SET heartbeat_at = now() FROM claims c WHERE ...
+
+on `af.db` — **the pool**, no transaction, no `set_config` — against a table that is `ENABLE` +
+`FORCE ROW LEVEL SECURITY` with a fail-closed policy. Measured, PostgreSQL 16.15, with a positive
+control:
+
+| connection | result |
+|---|---|
+| `cleat_app`, no transaction, no tenant — the production condition | `ERROR: cleat.tenant_id is not set … (P0001)` |
+| `cleat_app`, tenant set in a transaction | returns its row |
+
+Same role, same statement, same seeded row. It is reachable from `cmd/cleat-worker`. Filed as
+cleat#1677 and listed in `knownRLSFaults`, whose liveness check forces the entry out when the fix
+lands. **This guard exists for exactly that defect class** (cleat#1177, `successorOfRun`) and it
+walked the line, could not read it, and reported a clean run.
+
+#### The issue's own characterisation was wrong, and correcting it shrank the work
+
+cleat#1672 said the 19 were queries "built, held in a constant, or passed through a rewrite". True
+of six. The rest were readable all along:
+
+| class | n | why it was invisible |
+|---|---|---|
+| string concatenation | 3 | an `*ast.BinaryExpr` fails the `*ast.BasicLit` type assertion |
+| `fmt.Sprintf` | 1 | an `*ast.CallExpr`, same |
+| first line is a SQL comment | 3 | `^\s*(SELECT\|…)` does not match a leading `--` |
+| package constant | 4 | an `*ast.Ident` |
+| built at runtime | 5 | irreducible |
+| not DML at all | 3 | `SAVEPOINT`, `CREATE SCHEMA` — correctly not checked, wrongly indistinguishable from the above |
+
+`db.go:1028` is the sharpest: a complete `UPDATE workflow_instances` sitting in a plain literal,
+invisible because its first line is `-- No AND tenant_id, deliberately: RLS bounds this.`
+
+#### What changed
+
+`sqlTextOf` resolves literals, concatenations, package constants, function-local constants and
+`fmt.Sprintf` format strings. **A partial resolution is refused**: one unresolvable part makes the
+whole expression unreadable, because the missing half could be the `FROM` clause, which is the
+failure this file exists to prevent reintroduced as a convenience.
+
+`argKind` replaces the empty string with three outcomes — `argSQL`, `argNonSQL`, `argUnreadable` —
+because "not a statement to check" and "a statement I cannot read" were the same value.
+
+**19 unreadable-and-counted became 1 unreadable-and-reported.** The remaining one, `db.go:1900`
+(`CREATE SCHEMA IF NOT EXISTS ` + a runtime schema name), is in `knownUnreadableStatements`.
+
+Three maps, three invariants, kept apart on purpose: `knownRLSFaults` must shrink to zero,
+`statementsWithoutATenantByDesign` does not shrink (`flush.go:453` is the untenanted path, gated by
+`if e.tenantID != ""` and never reached by a worker), and `knownUnreadableStatements` shrinks toward
+the irreducible. Merging them would retire the "may only shrink" property that makes the first
+worth having.
+
+The floor now counts only statements the guard has an opinion about, and the log line states both
+numbers — `cleared 167 … could not read 1` — because a single figure was correct on every run and
+read as ordinary while the guard was near-blind.
