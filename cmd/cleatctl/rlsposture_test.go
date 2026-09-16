@@ -28,7 +28,7 @@ func TestRLSPostureOfClassifiesARealConnection(t *testing.T) {
 
 	ctx := context.Background()
 
-	superPosture, superReasons, err := rlsPostureOf(ctx, superDB)
+	superPosture, superReasons, err := rlsPostureOf(ctx, superDB, "postgres")
 	if err != nil {
 		t.Fatalf("posture of the superuser connection: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestRLSPostureOfClassifiesARealConnection(t *testing.T) {
 			superPosture, superReasons)
 	}
 
-	appPosture, _, err := rlsPostureOf(ctx, appDB)
+	appPosture, _, err := rlsPostureOf(ctx, appDB, "postgres")
 	if err != nil {
 		t.Fatalf("posture of the RLS-subject connection: %v", err)
 	}

@@ -129,12 +129,20 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	// return one tenant's rows, and without this line the operator is left to
 	// infer a permissions problem from a count. Telling them what their
 	// database looks like is this command's whole job. cleat#1184.
-	switch posture, reasons, rerr := rlsPostureFn(ctx, db); {
+	switch posture, reasons, rerr := rlsPostureFn(ctx, db, d.name); {
 	case rerr != nil:
 		fmt.Fprintf(os.Stderr, "RLS: WARNING: cannot determine enforcement: %v\n", rerr)
 		issues = append(issues, fmt.Sprintf("row-level security check failed: %v", rerr))
+	case posture == rlsNotApplicable:
+		fmt.Printf("RLS: %s has no row-level security -- reads are cluster-wide\n", d.name)
 	case posture == rlsExempt:
-		fmt.Println("RLS: connection is exempt (superuser or BYPASSRLS) -- reads are cluster-wide")
+		// The REASON differs by dialect and naming the wrong one sends an
+		// operator after a privilege that does not exist. cleat#1646.
+		if d.name == "mssql" {
+			fmt.Println("RLS: connection is exempt (member of dbo.cleat_admin) -- reads are cluster-wide")
+		} else {
+			fmt.Println("RLS: connection is exempt (superuser or BYPASSRLS) -- reads are cluster-wide")
+		}
 	case posture == rlsSubject:
 		fmt.Fprintln(os.Stderr, "RLS: connection IS subject to row-level security -- reads below "+
 			"are scoped to one tenant, or fail")

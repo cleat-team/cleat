@@ -89,7 +89,7 @@ func main() {
 	// Say once, up front, that this connection cannot answer the questions
 	// cleatctl asks. Before the store is opened, so it is the first thing on
 	// stderr rather than something to find after a wrong answer. cleat#1184.
-	warnIfTenantScoped(ctx, db)
+	warnIfTenantScoped(ctx, db, d.name)
 
 	factory, err := d.openStoreFactory(db, *dsn, "public")
 	if err != nil {
