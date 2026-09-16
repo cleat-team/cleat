@@ -1316,7 +1316,20 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          # Node 22, not 20: the web toolchain's own engines require it.
+          # undici 8.10.2 (pulled by jsdom 30) declares node >=22.19.0; jsdom
+          # 30.0.1 declares ^22.22.2 || ^24.15.0 || >=26.0.0; vitest 5.0.1
+          # declares ^22.12.0 || ^24.0.0 || >=26.0.0. npm does NOT enforce
+          # `engines` unless engine-strict is set, so on Node 20 all three
+          # install happily and fail at runtime with
+          # `webidl.util.markAsUncloneable is not a function` -- cleat#1359's
+          # exact symptom, which persisted here after the version bumps because
+          # the blocker was never the package pairing. cleat#1709.
+          #
+          # Bumped for this job only. The other three setup-node jobs
+          # (AssemblyScript, AssemblyScript WASM, Build) do not use this
+          # toolchain and are left on 20 rather than moved speculatively.
+          node-version: "22"
 
       - name: Install dependencies
         working-directory: web
