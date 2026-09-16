@@ -48,10 +48,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in `tests/conformance/entry_point_binding_cases.json`.
   - **A composite parameter already refused** on absence. This makes absence
     uniform across types rather than adding a rule for scalars.
-  - Measured against `cleat-ports` before landing: **0 confirmed omissions in
-    112 literal starts** across all four ports, so the suites there need no
-    change. Two starts build their payload from a variable and were not
-    measured.
+  - **A STORED payload is bound by whichever guest is current when it fires,
+    not by the one that was current when it was written.** A cron schedule's
+    input is persisted once and replayed on every firing, so rebuilding the
+    target workflow changes the contract that payload is judged against. The
+    schedule is not re-validated at registration and cannot be: the module's
+    `cleat.metadata` section carries no entry-point parameter list, so the host
+    has nothing to check an input against.
+
+    There is no "bind it the old way" mode, and the reason is structural rather
+    than a decision deferred: the binding lives in generated guest code, so a
+    payload has no contract version to pin to. Pinning one would mean carrying
+    a declared-parameter list and a binding epoch through every SDK's metadata.
+    **The migration is the same as for any caller** — send the parameter, or
+    declare it optional.
+
+    **Where it surfaces.** The schedule fires, the run is claimed, and the guest
+    refuses it, once per occurrence for as long as the schedule exists. The
+    refusal reaches `workflow_instances.error_msg` and the API's `error` field,
+    so it is queryable — but the scheduler counts the firing as *started*,
+    because it only reports failures from `StartWorkflow`, and nothing links a
+    failed run back to the schedule that started it.
+
+  - **The pre-landing measurement did not cover this, and the denominator is
+    why.** It was quoted as "0 confirmed omissions in 112 literal starts",
+    which is accurate and answers a narrower question than it appears to: it
+    scanned literal **start** calls. A cron payload is not a start call — it is
+    a `ScheduleCron` argument, or a `POST /api/schedules` body — so the whole
+    population of stored inputs was outside the scan. Re-measured across
+    `cleat-ports` after the fact (cleat#1705):
+
+    | | count |
+    |---|---|
+    | literal starts scanned before landing | 112, **0** omissions |
+    | `ScheduleCron` call sites | 1, and it **omits** a declared parameter |
+    | `create_schedule` **with** an input | 5, all complete |
+    | `create_schedule` **without** an input | 7 |
+
+    The one `ScheduleCron` site is what broke. The 7 input-less schedules are
+    latent rather than failing: their crons (`*/5 * * * *`, `0 7 * * *`, daily)
+    do not fire inside a test run, so nothing exercises them.
+
+    Parse that population rather than grepping it — three of those
+    `create_schedule` calls carry `inp=` on a continuation line, and a
+    line-oriented count reports them as input-less, which inflates the
+    omission count in the alarming direction.
 
 ### Changed
 
