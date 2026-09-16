@@ -100,69 +100,12 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 			if receiversWithoutRLS[recv] || receiversWithNoProductionConstructor[recv] {
 				continue
 			}
-			// Scan the WHOLE function, not a line window. StartNewRun calls
-			// setRLSOnTx after its idempotency_keys work and before it touches
-			// workflow_instances; a fixed window scores it a fault.
-			tenantSet := functionEstablishesTenant(fn)
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				kind, isDBStmt := dbStatementKind(call)
-				if !isDBStmt {
-					return true
-				}
-				if kind == "BeginTx" {
-					return true // handled via the tx statements below
-				}
-				stmts++
-				sql := sqlArgOf(call)
-				if sql == "" {
-					return true
-				}
-				if setsTenantInSQL(sql) {
-					return true
-				}
-				if hit := namesRLSTable(sql, rls); hit != "" {
-					found = append(found, rlsFault{
-						pos: fset.Position(call.Pos()).String(), table: hit,
-						why: "s.db." + kind + " runs outside any transaction, so the tenant can never be set for it",
-					})
-				}
-				return true
-			})
-			// Statements on a transaction this function opened without ever
-			// establishing the tenant context.
-			if !tenantSet && functionOpensRawTx(fn) {
-				ast.Inspect(fn.Body, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					if !isTxStatement(call) {
-						return true
-					}
-					stmts++
-					sql := sqlArgOf(call)
-					if sql == "" {
-						return true
-					}
-					if setsTenantInSQL(sql) {
-						return true
-					}
-					if hit := namesRLSTable(sql, rls); hit != "" {
-						found = append(found, rlsFault{
-							pos: fset.Position(call.Pos()).String(), table: hit,
-							why: "runs on a transaction from s.db.BeginTx, and " + fn.Name.Name +
-								" never calls setRLSOnTx or beginTxWithRLS",
-						})
-					}
-					return true
-				})
-			}
+			fs, n := rlsFaultsInFunc(fn, fset, rls)
+			found = append(found, fs...)
+			stmts += n
 		}
 	}
+
 	if stmts == 0 {
 		t.Fatal("examined no statements at all; the AST match is broken and a pass here " +
 			"means nothing")
@@ -366,59 +309,223 @@ func dbStatementKind(call *ast.CallExpr) (string, bool) {
 	return "", false
 }
 
-func isTxStatement(call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	id, ok := sel.X.(*ast.Ident)
-	if !ok || id.Name != "tx" {
-		return false
-	}
-	switch sel.Sel.Name {
-	case "QueryRowContext", "QueryContext", "ExecContext", "Exec", "Query", "QueryRow":
+// rlsFaultsInFunc reports every statement in fn that reaches an RLS table with
+// no tenant established on the transaction it runs on, and how many statements
+// it examined. Extracted from the test body so the ordering and
+// transaction-matching rules below can be exercised against synthetic source,
+// which a scan wired only to the real tree cannot be once the real tree is
+// clean.
+func rlsFaultsInFunc(fn *ast.FuncDecl, fset *token.FileSet, rls map[string]bool) ([]rlsFault, int) {
+	var found []rlsFault
+	stmts := 0
+	ests := tenantEstablishments(fn)
+	opensTx := functionOpensTx(fn)
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		// A statement on the pool. There is no transaction for a set_config to
+		// live on, so nothing the function does elsewhere can cover it.
+		if kind, isDBStmt := dbStatementKind(call); isDBStmt {
+			if kind == "BeginTx" {
+				return true // reached through its tx statements instead
+			}
+			stmts++
+			sql := sqlArgOf(call)
+			if sql == "" || setsTenantInSQL(sql) {
+				return true
+			}
+			if hit := namesRLSTable(sql, rls); hit != "" {
+				found = append(found, rlsFault{
+					pos: fset.Position(call.Pos()).String(), table: hit,
+					why: "s.db." + kind + " runs outside any transaction, so the tenant can never be set for it",
+				})
+			}
+			return true
+		}
+		// A statement on a transaction, checked only where the function opened
+		// one itself. A function handed a *sql.Tx is the caller's to establish,
+		// and reporting it would be a non-fault -- a guard that reports
+		// non-faults gets switched off.
+		if !opensTx {
+			return true
+		}
+		txVar, isTx := txStatementVar(call)
+		if !isTx {
+			return true
+		}
+		stmts++
+		sql := sqlArgOf(call)
+		if sql == "" || setsTenantInSQL(sql) {
+			return true
+		}
+		hit := namesRLSTable(sql, rls)
+		if hit == "" {
+			return true
+		}
+		if establishedBefore(ests, txVar, call.Pos()) {
+			return true
+		}
+		found = append(found, rlsFault{
+			pos: fset.Position(call.Pos()).String(), table: hit,
+			why: "runs on " + txVar + " in " + fn.Name.Name + ", which has no setRLSOnTx or " +
+				"beginTxWithRLS for " + txVar + " ahead of this point",
+		})
 		return true
+	})
+	return found, stmts
+}
+
+// tenantEstablishment records WHERE the tenant was set and on WHICH transaction
+// variable. The guard had neither, and cleat#1534 is what makes both load
+// bearing.
+//
+// ORDER. This was a boolean over the whole function body, on the stated grounds
+// that StartNewRun does its idempotency_keys work first and calls setRLSOnTx
+// after. That was sound only while idempotency_keys carried no policy. Give it
+// one and the very statement that comment points at becomes the fault -- and a
+// whole-body boolean scores it covered, so the guard would pass the tree this
+// change exists to fix.
+//
+// VARIABLE. A call establishes the tenant on the transaction it is HANDED.
+// setRLSOnTx(tx1) says nothing about tx2. Name alone cannot separate them in
+// startNewRun, which has two transactions in sibling scopes BOTH CALLED tx;
+// position can, and does.
+type tenantEstablishment struct {
+	name string // the transaction variable it was applied to; "" means all
+	pos  token.Pos
+}
+
+func tenantEstablishments(fn *ast.FuncDecl) []tenantEstablishment {
+	var out []tenantEstablishment
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		// tx, err := s.beginTxWithRLS(ctx) -- the variable is on the left, and
+		// the transaction is established the moment it exists.
+		if as, ok := n.(*ast.AssignStmt); ok {
+			if !assignsFrom(as, "beginTxWithRLS") {
+				return true
+			}
+			for _, lhs := range as.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" && id.Name != "err" {
+					out = append(out, tenantEstablishment{name: id.Name, pos: as.Pos()})
+				}
+			}
+			return true
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch calleeName(call) {
+		case "setRLSOnTx", "setRLSOnFlushTx":
+			// The transaction is an argument. Record every ident argument
+			// rather than a fixed position: the two have it at different
+			// indices, a spurious name matches no statement, and a missed one
+			// would hide a fault.
+			for _, a := range call.Args {
+				if id, ok := a.(*ast.Ident); ok {
+					out = append(out, tenantEstablishment{name: id.Name, pos: call.Pos()})
+				}
+			}
+		case "withRLSTx":
+			// A closure form: the transaction is created inside and never
+			// named at the call site, so there is no variable to key on.
+			// Recorded as covering everything after it, which is what the
+			// boolean did for all four names. There is no such function in the
+			// tree today -- grep says so -- and this entry is inherited rather
+			// than measured. If one is written, check it against the ordering
+			// rule above before trusting this line.
+			out = append(out, tenantEstablishment{name: "", pos: call.Pos()})
+		}
+		return true
+	})
+	return out
+}
+
+// establishedBefore reports whether the tenant was set on txVar EARLIER IN THE
+// SOURCE than pos.
+//
+// Source order is not execution order in general: two sibling branches are laid
+// out in an order neither of them runs in. Requiring the variable to match as
+// well is what makes that safe here -- a statement on tx2 is not covered by an
+// establishment on tx1 however the two are arranged, and two transactions
+// sharing a name in sibling scopes are separated by position, which is exactly
+// startNewRun's shape.
+func establishedBefore(ests []tenantEstablishment, txVar string, pos token.Pos) bool {
+	for _, e := range ests {
+		if e.name != "" && e.name != txVar {
+			continue
+		}
+		if e.pos < pos {
+			return true
+		}
 	}
 	return false
 }
 
-func functionOpensRawTx(fn *ast.FuncDecl) bool {
-	found := false
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if k, ok := dbStatementKind(call); ok && k == "BeginTx" {
-				found = true
-			}
-		}
-		return true
-	})
-	return found
+// txStatementVar reports a statement run on a transaction, and the variable it
+// runs on. Every transaction in the PostgreSQL store is called tx today
+//
+//	grep -nE '\b[A-Za-z_][A-Za-z0-9_]*, err :?= s\.(db\.BeginTx|beginTxWithRLS)\(' engine/*.go
+//
+// so the prefix admits a second one -- tx2 -- rather than silently not checking
+// it. Over-matching is the safe direction: a non-transaction identifier with an
+// ExecContext method and a tx-shaped name would be reported, not missed.
+func txStatementVar(call *ast.CallExpr) (string, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	if !ok || !strings.HasPrefix(id.Name, "tx") {
+		return "", false
+	}
+	switch sel.Sel.Name {
+	case "QueryRowContext", "QueryContext", "ExecContext", "Exec", "Query", "QueryRow":
+		return id.Name, true
+	}
+	return "", false
 }
 
-// functionEstablishesTenant reports whether the function sets the RLS tenant
-// anywhere in its body. Anywhere, not "before the first statement": StartNewRun
-// legitimately does its idempotency_keys work first.
-func functionEstablishesTenant(fn *ast.FuncDecl) bool {
+// functionOpensTx reports whether the function opens a transaction of its own,
+// by either route.
+func functionOpensTx(fn *ast.FuncDecl) bool {
 	found := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		var name string
-		switch f := call.Fun.(type) {
-		case *ast.SelectorExpr:
-			name = f.Sel.Name
-		case *ast.Ident:
-			name = f.Name
+		if k, ok := dbStatementKind(call); ok && k == "BeginTx" {
+			found = true
 		}
-		switch name {
-		case "setRLSOnTx", "beginTxWithRLS", "setRLSOnFlushTx", "withRLSTx":
+		if calleeName(call) == "beginTxWithRLS" {
 			found = true
 		}
 		return true
 	})
 	return found
+}
+
+func calleeName(call *ast.CallExpr) string {
+	switch f := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	case *ast.Ident:
+		return f.Name
+	}
+	return ""
+}
+
+func assignsFrom(as *ast.AssignStmt, name string) bool {
+	for _, rhs := range as.Rhs {
+		if call, ok := rhs.(*ast.CallExpr); ok && calleeName(call) == name {
+			return true
+		}
+	}
+	return false
 }
 
 var reSQLString = regexp.MustCompile(`(?is)^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)\b`)
@@ -536,6 +643,86 @@ func TestTheRLSGuardsPartsCanDisagree(t *testing.T) {
 		}
 	})
 
+	// ORDER AND TRANSACTION IDENTITY, the two things the guard could not see
+	// until cleat#1534. These are synthetic on purpose: the real site that
+	// proved them is startNewRun, and this PR fixes it, so a check wired to the
+	// real tree would have nothing left to report the day it landed.
+	//
+	// Measured against the real tree before the fix, with idempotency_keys
+	// added to the RLS set the migration in this PR gives it:
+	//
+	//	guard before this change   2 faults -- store_lifecycle.go:980, :1026
+	//	guard after this change    3 faults -- and :1013, the INSERT on a
+	//	                           transaction whose setRLSOnTx comes later
+	//
+	// :1013 is the statement the old comment on functionEstablishesTenant cited
+	// as its reason for scanning the whole body. It was right that the scan
+	// must not use a line window, and wrong that a boolean is the alternative.
+
+	t.Run("a statement before setRLSOnTx is reported", func(t *testing.T) {
+		faults, n := faultsInSource(t, `
+			func (s *PostgresStore) f(ctx context.Context) error {
+				tx, _ := s.db.BeginTx(ctx, nil)
+				_, _ = tx.ExecContext(ctx, `+"`"+`INSERT INTO workflow_instances (id) VALUES ($1)`+"`"+`, 1)
+				_ = s.setRLSOnTx(tx)
+				return nil
+			}`)
+		if n == 0 {
+			t.Fatal("examined no statements; the synthetic parse is broken and this " +
+				"subtest asserts nothing")
+		}
+		if len(faults) != 1 {
+			t.Fatalf("want exactly the statement ahead of setRLSOnTx, got %d: %v", len(faults), faults)
+		}
+	})
+
+	t.Run("a statement after setRLSOnTx is not reported", func(t *testing.T) {
+		// The negative control for the subtest above: same function, one line
+		// moved. Without it, a guard that reports every tx statement passes the
+		// known-positive and is useless.
+		faults, n := faultsInSource(t, `
+			func (s *PostgresStore) f(ctx context.Context) error {
+				tx, _ := s.db.BeginTx(ctx, nil)
+				_ = s.setRLSOnTx(tx)
+				_, _ = tx.ExecContext(ctx, `+"`"+`INSERT INTO workflow_instances (id) VALUES ($1)`+"`"+`, 1)
+				return nil
+			}`)
+		if n == 0 {
+			t.Fatal("examined no statements; the synthetic parse is broken")
+		}
+		if len(faults) != 0 {
+			t.Fatalf("reported a statement that runs after setRLSOnTx: %v", faults)
+		}
+	})
+
+	t.Run("setRLSOnTx on one transaction does not cover another", func(t *testing.T) {
+		faults, _ := faultsInSource(t, `
+			func (s *PostgresStore) f(ctx context.Context) error {
+				tx, _ := s.db.BeginTx(ctx, nil)
+				_ = s.setRLSOnTx(tx)
+				tx2, _ := s.db.BeginTx(ctx, nil)
+				_, _ = tx2.ExecContext(ctx, `+"`"+`INSERT INTO workflow_instances (id) VALUES ($1)`+"`"+`, 1)
+				return nil
+			}`)
+		if len(faults) != 1 {
+			t.Fatalf("a set_config on tx was read as covering tx2; want 1 fault, got %d: %v",
+				len(faults), faults)
+		}
+	})
+
+	t.Run("a function handed a transaction is the caller's to establish", func(t *testing.T) {
+		// The other direction, and the reason the tx arm is gated on opening a
+		// transaction at all. Reporting these would bury the real findings.
+		faults, _ := faultsInSource(t, `
+			func (s *PostgresStore) f(ctx context.Context, tx *sql.Tx) error {
+				_, _ = tx.ExecContext(ctx, `+"`"+`INSERT INTO workflow_instances (id) VALUES ($1)`+"`"+`, 1)
+				return nil
+			}`)
+		if len(faults) != 0 {
+			t.Fatalf("reported a statement on a caller-supplied transaction: %v", faults)
+		}
+	})
+
 	t.Run("the migration scan finds the tables and not the prose about them", func(t *testing.T) {
 		got := rlsTablesFromMigrations(t)
 		for _, want := range []string{"workflow_instances", "event_history"} {
@@ -548,4 +735,27 @@ func TestTheRLSGuardsPartsCanDisagree(t *testing.T) {
 			t.Errorf("only %d RLS tables parsed out of the migrations", len(got))
 		}
 	})
+}
+
+// faultsInSource runs the guard's scan over a single synthetic function.
+func faultsInSource(t *testing.T, fn string) ([]rlsFault, int) {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", "package engine\n"+fn, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	rls := map[string]bool{"workflow_instances": true}
+	var out []rlsFault
+	stmts := 0
+	for _, decl := range f.Decls {
+		d, ok := decl.(*ast.FuncDecl)
+		if !ok || d.Body == nil {
+			continue
+		}
+		fs, n := rlsFaultsInFunc(d, fset, rls)
+		out = append(out, fs...)
+		stmts += n
+	}
+	return out, stmts
 }

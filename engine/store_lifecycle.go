@@ -963,6 +963,29 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 		keyHash := sha256.Sum256([]byte(idempotencyKey))
 		inputDigest := IdempotencyInputDigest(input)
 
+		// EVERY statement against idempotency_keys below runs on a transaction
+		// with the tenant established, the two lookups included. They ran on
+		// the pool until cleat#1534, which is correct for a table with no
+		// policy and unable to run at all once it has one: a policy's USING is
+		// evaluated per candidate row and cleat.assert_tenant_set() raises
+		// there, so the `AND tenant_id = $2` these statements already carry is
+		// not what scopes them. Nothing about the statements changes; where
+		// they run does.
+		//
+		// This adds no precondition. The no-key path at the bottom of this
+		// function has always opened with beginTxWithRLS, so a start already
+		// required a tenant on the majority of its calls; presenting an
+		// Idempotency-Key was the way to reach the database without one.
+		tx, err := s.beginTxWithRLS(ctx)
+		if err != nil {
+			return "", false, fmt.Errorf("start new run: begin: %w", err)
+		}
+		// The rollback covers the early returns below as well as the failure
+		// paths. An explicit tx.Rollback() still precedes the concurrent-insert
+		// re-read, where releasing the lock immediately is the point rather
+		// than a tidy-up.
+		defer tx.Rollback()
+
 		// Check for existing idempotency key, within this tenant.
 		//
 		// The tenant filter is not defence in depth: idempotency_keys was
@@ -977,7 +1000,7 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 		var existingWfID string
 		var existingDef sql.NullString
 		var existingDigest sql.NullString
-		err := s.db.QueryRowContext(ctx,
+		err = tx.QueryRowContext(ctx,
 			`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
 			 WHERE key_hash = $1 AND tenant_id = $2 AND expires_at > now()`,
 			keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
@@ -1001,12 +1024,6 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 
 		// Use the provided runID (already generated above).
 
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return "", false, err
-		}
-		defer tx.Rollback() // Note: explicit tx.Rollback() below when wfs is empty is intentional — the defer would also catch it, but early rollback releases the lock immediately rather than waiting for function return.
-
 		// Insert idempotency key record. ON CONFLICT DO NOTHING handles the
 		// race where two requests arrive with the same key simultaneously.
 		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
@@ -1021,9 +1038,20 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 
 		n, _ := res.RowsAffected()
 		if n == 0 {
-			// Key was inserted concurrently — rollback and return the existing one.
+			// Key was inserted concurrently — roll back to release the lock at
+			// once, then re-read the winner's row.
+			//
+			// The re-read needs a transaction of its own: this one is being
+			// abandoned, and the row it is looking for belongs to whoever won
+			// the race. It ran on the pool until cleat#1534, which is the same
+			// statement as the lookup above and the same reason it had to move.
 			_ = tx.Rollback()
-			err := s.db.QueryRowContext(ctx,
+			tx2, err := s.beginTxWithRLS(ctx)
+			if err != nil {
+				return "", false, fmt.Errorf("start new run: begin re-read: %w", err)
+			}
+			defer tx2.Rollback()
+			err = tx2.QueryRowContext(ctx,
 				`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
 				 WHERE key_hash = $1 AND tenant_id = $2 AND expires_at > now()`,
 				keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
@@ -1044,9 +1072,9 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 			return existingWfID, true, nil
 		}
 
-		if err := s.setRLSOnTx(tx); err != nil {
-			return "", false, fmt.Errorf("start new run: set rls: %w", err)
-		}
+		// The tenant was established when this transaction was opened, above.
+		// It used to be set HERE, after the idempotency_keys work, and that
+		// ordering is the whole of cleat#1534.
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `

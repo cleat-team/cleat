@@ -46,7 +46,13 @@
 -- one it declined -- idempotency_keys is read before any RLS context exists,
 -- admin.tenant_api_keys is read by the authenticator before a tenant is known,
 -- kv_store and feature_flags are plugin-owned and not created by this file --
--- and none of those reasons has changed. A blanket apply would make this
+-- and none of those reasons has changed.
+--
+-- ONE OF THEM HAS SINCE. Migration 083 (cleat#1534) gives idempotency_keys a
+-- policy, having first moved startNewRun's three statements onto transactions
+-- that have the tenant set -- the same restructure-then-protect shape this
+-- migration used, and this paragraph is where the next reader would otherwise
+-- learn that it was still declined. The other three stand. A blanket apply would make this
 -- migration a claim rather than a check.
 ALTER TABLE workflow_memory_stats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workflow_memory_samples ENABLE ROW LEVEL SECURITY;

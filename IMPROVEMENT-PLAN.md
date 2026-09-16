@@ -11621,7 +11621,9 @@ would have silently kept passing.
 **Scope is two tables, deliberately.** 031's header reasons about each table it declined —
 `idempotency_keys` is read before any RLS context exists, `admin.tenant_api_keys` before a tenant is
 known, `kv_store` and `feature_flags` are plugin-owned — and none of those reasons has changed. A
-blanket apply would make the migration a claim rather than a check. cleat#1097, the in-memory gauge,
+blanket apply would make the migration a claim rather than a check.
+(`idempotency_keys` stopped being one of them on 2026-09-15: cleat#1534 reordered `startNewRun` onto
+RLS transactions and migration 083 gave the table its policy. The other three stand.) cleat#1097, the in-memory gauge,
 is a metric-labelling decision and stays where it is.
 
 ### 3.429 `cleatctl deploy plugin` wrote to a table that has never existed — ✅ **FIXED 2026-09-11** (cleat#1226)
@@ -13124,3 +13126,69 @@ must not, so the scanner is shown to discriminate rather than to flag everything
 
 Files: `plugin/every_plugin_tenant_table_is_declared_tenant_scoped_test.go`,
 `plugin/testdata/tenantscoped/undeclared.go`.
+
+### 3.258 `idempotency_keys` had no policy because one function read it too early — ✅ **FIXED 2026-09-15** (cleat#1534)
+
+**cleat#1534.** `idempotency_keys` has carried `tenant_id` since migration 010 and an explicit
+`AND tenant_id = $N` on every statement since. It never carried a policy. Migration 031 declined it,
+migration 061 repeated the decline, and both gave the same reason: the table is *read before any RLS
+context exists*. That was accurate, and it was about **one function**.
+
+`PostgresStore.startNewRun` reaches the table three times. Enumerated by parsing SQL literals rather
+than grepping — two derivations, 67 loose and 60 tight, with all 7 dropped rows inspected and none a
+statement:
+
+| | ran on | now |
+|---|---|---|
+| the live-key lookup | `s.db` — no transaction at all | `tx` from `beginTxWithRLS` |
+| `INSERT ... ON CONFLICT DO NOTHING` | `tx`, with `setRLSOnTx` **eleven lines later** | the same `tx` |
+| the concurrent re-read | `s.db`, after `tx.Rollback()` | `tx2`, its own RLS transaction |
+
+The PostgreSQL production surface is **eight** statements and five were already under
+`beginTxWithRLS`, so 031's stated reason was exactly right and exactly complete. Migration 083 is
+what the reorder buys — the same restructure-then-protect shape 061 used and named.
+
+#### The guard would have passed the broken tree
+
+`TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet` asked
+`functionEstablishesTenant(fn)` — a boolean over the **whole function body**, with a comment saying
+so deliberately, because `StartNewRun` legitimately did its idempotency_keys work first. The comment
+was right that a line window is wrong and wrong that a boolean is the alternative. It is **order-blind**
+(a statement before the call scores covered) and **transaction-blind** (`setRLSOnTx(tx1)` covers a
+statement on `tx2`), and `startNewRun` is both at once — it has two transactions in sibling scopes,
+**both named `tx`**, so name alone cannot separate them either.
+
+Measured against develop with `idempotency_keys` in the RLS set and no other change:
+
+| | faults named |
+|---|---|
+| guard as it was | **2** — `store_lifecycle.go:980`, `:1026` |
+| guard as it is now | **3** — and `:1013`, the INSERT |
+
+The one it missed is the statement its own comment pointed at. The guard now records *where* and
+*on which variable* the tenant was established and requires a match on both.
+
+#### It was also barely looking
+
+Widening it moved the examined count from **17 to 168** on an unchanged tree. The tx arm was gated on
+`!tenantSet && functionOpensRawTx`, a combination almost nothing in the store satisfies, so the guard
+had been very nearly a "no statement on the pool" check wearing a broader name. 19 of the 168 are
+still unreadable — non-literal SQL — and are counted as examined; that is cleat#1672, filed rather
+than folded in.
+
+#### The sweep is cross-tenant and stays cross-tenant
+
+`idempotencyCleanupLoop` deletes every tenant's expired keys on one tick, with no tenant predicate
+and wanting none. A fail-closed policy stops it dead — measured as `cleat_app` with no tenant set,
+`cleat.tenant_id is not set (P0001)`. It now enters `cleat_sweep` for the duration of its
+transaction, which is migration 077's shape. **Not** a fallback to the plain statement on failure:
+that would succeed exactly where it is not needed (a connection bypassing RLS) and fail silently
+into a warning everywhere else.
+
+#### Prose corrected in four places, none of which would have failed
+
+031, 050, 061 and this document each asserted the absence as a standing fact — 061 in the words
+"none of those reasons has changed". Each is now marked superseded rather than rewritten, because
+031's reasoning is what 083 had to answer. 050 also carried a census ("PostgreSQL's RLS covers 11
+tables"); it is dropped rather than corrected, since the predicate — *this table was not among them* —
+is what the sentence needed.
