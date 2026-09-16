@@ -176,7 +176,47 @@ jobs:
           # jobs, the absolute path does not depend on it. It also matches how
           # the binary is invoked locally, so a local run and CI exercise the
           # same command.
-          "$(go env GOPATH)/bin/gitleaks" dir . \
+          #
+          # The path is resolved into a VARIABLE first, and that is the whole
+          # of cleat#1674. A command substitution used as part of a word has
+          # its exit status DISCARDED -- only the outer command's status
+          # counts -- so `set -euo pipefail` could not see `go env GOPATH`
+          # fail. On cleat#1673 its toolchain download failed transiently, the
+          # substitution produced nothing, and the step tried to run
+          # `/bin/gitleaks`. Measured, bash 3.2:
+          #
+          #   set -euo pipefail; "$(false)/bin/nope"   -> reaches the exec
+          #   set -euo pipefail; x=$(false)            -> aborts, rc=1
+          #   set -euo pipefail; x=$(sh -c 'exit 3')   -> aborts, rc=3
+          #
+          # The -n test is NOT belt-and-braces for the same failure, it is a
+          # SECOND one: the assignment aborts only when `go env` exits
+          # non-zero. If it ever exits 0 and prints an empty line, the
+          # assignment succeeds and the path degenerates exactly as before.
+          #   set -euo pipefail; x=$(printf '')        -> continues, x=""
+          #
+          # Why this is worth a guard rather than a re-run: the symptom is
+          # exit 127, "binary not found" -- indistinguishable at a glance from
+          # the failure the comment above describes as already fixed, which
+          # gives a reader a documented, plausible, locally-correct story to
+          # stop at. The discriminator is the path in the message:
+          # `/bin/gitleaks` means GOPATH was empty; `gitleaks: command not
+          # found` means the bare-name bug is back. The message below says so
+          # rather than leaving it to be rediscovered.
+          #
+          # And exit 127 is loud today only because nothing follows it. Any
+          # future `|| true`, `continue-on-error`, or tolerate-a-missing-tool
+          # wrapper turns this into a green Lint with NO SECRET SCAN RUN,
+          # which is the checks-never-started shape.
+          gopath="$(go env GOPATH)"
+          if [ -z "$gopath" ]; then
+            echo "go env GOPATH returned empty, so the gitleaks path would" >&2
+            echo "degenerate to /bin/gitleaks and the secret scan would not" >&2
+            echo "run. This is cleat#1674, NOT the bare-name bug: that one" >&2
+            echo "reports 'gitleaks: command not found'." >&2
+            exit 1
+          fi
+          "$gopath/bin/gitleaks" dir . \
             --config .gitleaks.toml --no-banner --exit-code 1
 
       # A t.Skip is reported by `go test` as neither a pass nor a failure, and
