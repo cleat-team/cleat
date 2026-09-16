@@ -46,8 +46,9 @@ func TestMigrationsHonourANonDefaultSchema(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newScratchDB(t, "cleat_schema_"+strings.ReplaceAll(tc.name, "-", "_"))
 
-			if err := migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t)).
-				WithSchema(tc.schema).Run(ctx); err != nil {
+			if err := runMigrations(t, ctx,
+				migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t)).WithSchema(tc.schema),
+				migration.DialectPostgres); err != nil {
 				t.Fatalf("run with WithSchema(%q): %v", tc.schema, err)
 			}
 
@@ -84,8 +85,9 @@ func TestMigrationsHonourANonDefaultSchema(t *testing.T) {
 			// versions somewhere it cannot read them back from, this is where
 			// that shows up -- as a re-apply, which for 001 means a pile of
 			// "already exists".
-			if err := migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t)).
-				WithSchema(tc.schema).Run(ctx); err != nil {
+			if err := runMigrations(t, ctx,
+				migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t)).WithSchema(tc.schema),
+				migration.DialectPostgres); err != nil {
 				t.Fatalf("second run with WithSchema(%q): %v", tc.schema, err)
 			}
 

@@ -110,7 +110,9 @@ func setupAdminRoleDB(t *testing.T) *sql.DB {
 	db := newMSSQLScratchDB(t, adminRoleTestDB)
 	ctx := context.Background()
 
-	if err := migration.NewRunner(db, migration.DialectMSSQL, migrationsRoot(t)).Run(ctx); err != nil {
+	if err := runMigrations(t, ctx,
+		migration.NewRunner(db, migration.DialectMSSQL, migrationsRoot(t)),
+		migration.DialectMSSQL); err != nil {
 		t.Fatalf("apply the shipped SQL Server migrations: %v", err)
 	}
 

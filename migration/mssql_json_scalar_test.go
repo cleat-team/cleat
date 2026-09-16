@@ -30,7 +30,9 @@ func TestMSSQLPayloadConstraintsAcceptJSONScalars(t *testing.T) {
 	db := newMSSQLScratchDB(t, "cleat_migration_json_scalar_test")
 	ctx := context.Background()
 
-	if err := migration.NewRunner(db, migration.DialectMSSQL, migrationsRoot(t)).Run(ctx); err != nil {
+	if err := runMigrations(t, ctx,
+		migration.NewRunner(db, migration.DialectMSSQL, migrationsRoot(t)),
+		migration.DialectMSSQL); err != nil {
 		t.Fatalf("apply the shipped SQL Server migrations: %v", err)
 	}
 

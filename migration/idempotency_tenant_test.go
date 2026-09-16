@@ -49,7 +49,8 @@ func TestIdempotencyTenantMigrationPreservesExistingKeys(t *testing.T) {
 			// Before: the schema as it shipped, with no tenant_id on
 			// idempotency_keys at all.
 			before := stageMigrations(t, d.dialect, "001_schema.sql")
-			if err := migration.NewRunner(db, d.dialect, before).Run(ctx); err != nil {
+			if err := runMigrations(t, ctx,
+				migration.NewRunner(db, d.dialect, before), d.dialect); err != nil {
 				t.Fatalf("apply 001_schema.sql: %v", err)
 			}
 
@@ -64,7 +65,8 @@ func TestIdempotencyTenantMigrationPreservesExistingKeys(t *testing.T) {
 
 			// After.
 			after := stageMigrations(t, d.dialect, "001_schema.sql", "010_idempotency_keys_tenant_id.sql")
-			if err := migration.NewRunner(db, d.dialect, after).Run(ctx); err != nil {
+			if err := runMigrations(t, ctx,
+				migration.NewRunner(db, d.dialect, after), d.dialect); err != nil {
 				t.Fatalf("apply 010_idempotency_keys_tenant_id.sql: %v", err)
 			}
 

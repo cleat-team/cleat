@@ -37,6 +37,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/cleat-team/cleat/internal/pgclusterlock"
 	"github.com/cleat-team/cleat/migration"
 )
 
@@ -141,7 +142,7 @@ func applyMigrations(t *testing.T, db *sql.DB, dialect Dialect) {
 		// concurrency note above is correct per database and silent about
 		// several: roles are cluster-wide and six migrations create one.
 		// cleat#1599, cluster_wide_migration_lock.go.
-		withClusterMigrationLock(PostgresTestDSN(), run)
+		pgclusterlock.WithClusterMigrationLock(PostgresTestDSN(), run)
 		return
 	}
 	run()

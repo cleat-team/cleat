@@ -126,8 +126,9 @@ func TestTheSharedSchemaSurfaceIsADeclaredList(t *testing.T) {
 	db := newScratchDB(t, "cleat_shared_surface_1375")
 
 	const schema = "shared_surface_1375"
-	if err := migration.NewRunner(db, migration.DialectPostgres, "../migrations").
-		WithSchema(schema).Run(context.Background()); err != nil {
+	if err := runMigrations(t, context.Background(),
+		migration.NewRunner(db, migration.DialectPostgres, "../migrations").WithSchema(schema),
+		migration.DialectPostgres); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 

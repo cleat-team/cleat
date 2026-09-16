@@ -53,8 +53,9 @@ func TestAnExtensionIsPerDatabaseNotPerSchema(t *testing.T) {
 	// have sent the next reader looking in the wrong place.
 	runPool := func(schema string) {
 		t.Helper()
-		err := migration.NewRunner(db, migration.DialectPostgres, "../migrations").
-			WithSchema(schema).Run(context.Background())
+		err := runMigrations(t, context.Background(),
+			migration.NewRunner(db, migration.DialectPostgres, "../migrations").WithSchema(schema),
+			migration.DialectPostgres)
 		if err == nil {
 			return
 		}

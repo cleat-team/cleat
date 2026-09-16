@@ -43,7 +43,9 @@ func TestShippedMySQLSchemaAcceptsEventsWithEmptyCallColumns(t *testing.T) {
 	db := newMySQLScratchDB(t, "cleat_migration_mysql_event_columns_test")
 	ctx := context.Background()
 
-	if err := migration.NewRunner(db, migration.DialectMySQL, migrationsRoot(t)).Run(ctx); err != nil {
+	if err := runMigrations(t, ctx,
+		migration.NewRunner(db, migration.DialectMySQL, migrationsRoot(t)),
+		migration.DialectMySQL); err != nil {
 		t.Fatalf("apply shipped MySQL migrations: %v", err)
 	}
 

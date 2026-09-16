@@ -62,8 +62,9 @@ func TestARoleNamedSchemaDoesNotCaptureTheMigrations(t *testing.T) {
 			"nothing", role, firstSchema)
 	}
 
-	if err := migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t)).
-		Run(ctx); err != nil {
+	if err := runMigrations(t, ctx,
+		migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t)),
+		migration.DialectPostgres); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 

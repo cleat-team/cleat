@@ -1,4 +1,18 @@
-package testutil
+// Package pgclusterlock serialises migrations across one PostgreSQL instance.
+//
+// WHY THIS IS NOT IN engine/testutil, WHERE IT STARTED. cleat#1603 put it
+// there and it worked for the one caller it had. cleat#1666 measured the
+// other caller: ./migration/'s own tests build scratch databases in
+// newScratchDB and run migration.Runner directly, and could not take the lock
+// because it was unexported in a package they must not depend on -- a
+// low-level package's tests should not pull in the engine's harness.
+//
+// So the protection read as present and was absent on exactly the side the
+// failure was observed from. A lock held by one of two contending paths is not
+// a lock. This package is the neutral home both sides can import: it depends
+// on nothing but database/sql, so migration's external tests can use it
+// without acquiring the engine.
+package pgclusterlock
 
 import (
 	"context"
@@ -52,7 +66,7 @@ const (
 //
 // Returns "" when the DSN is not a form this understands, which the caller
 // treats as "no lock available" rather than as an error -- see
-// withClusterMigrationLock.
+// WithClusterMigrationLock.
 func maintenanceDSN(dsn string) string {
 	u, err := url.Parse(dsn)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -65,7 +79,7 @@ func maintenanceDSN(dsn string) string {
 	return u.String()
 }
 
-// withClusterMigrationLock runs fn while holding an instance-wide advisory
+// WithClusterMigrationLock runs fn while holding an instance-wide advisory
 // lock, so that only one process in this PostgreSQL instance applies
 // migrations at a time.
 //
@@ -75,7 +89,7 @@ func maintenanceDSN(dsn string) string {
 // harness that refused to run because it could not take a lock would turn a
 // flake into an outage, and the lock is an improvement rather than a
 // correctness requirement.
-func withClusterMigrationLock(dsn string, fn func()) {
+func WithClusterMigrationLock(dsn string, fn func()) {
 	mdsn := maintenanceDSN(dsn)
 	if mdsn == "" {
 		fn()

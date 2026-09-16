@@ -34,7 +34,7 @@ func TestMySQLRefusesASecondTenant(t *testing.T) {
 	ctx := context.Background()
 
 	r := migration.NewRunner(db, migration.DialectMySQL, migrationsRoot(t))
-	if err := r.Run(ctx); err != nil {
+	if err := runMigrations(t, ctx, r, migration.DialectMySQL); err != nil {
 		t.Fatalf("applying the shipped MySQL migrations failed: %v", err)
 	}
 
@@ -80,7 +80,7 @@ func TestPostgresStillAcceptsASecondTenant(t *testing.T) {
 	ctx := context.Background()
 
 	r := migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t))
-	if err := r.Run(ctx); err != nil {
+	if err := runMigrations(t, ctx, r, migration.DialectPostgres); err != nil {
 		t.Fatalf("applying the shipped PostgreSQL migrations failed: %v", err)
 	}
 
