@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 	"github.com/tetratelabs/wazero/api"
 )
 

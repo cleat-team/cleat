@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 	"github.com/cleat-team/cleat/wasm"
 	"github.com/tetratelabs/wazero/api"
 )

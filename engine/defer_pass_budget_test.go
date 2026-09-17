@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // IMPROVEMENT-PLAN 3.31 recorded that the post-trap defers get the backend-wide

@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // skipIfNotNeeded returns true if the named import should be skipped because

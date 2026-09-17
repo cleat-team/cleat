@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 func putUint32LE(b []byte, v uint32) {

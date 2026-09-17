@@ -5,7 +5,7 @@ package engine
 import (
 	"context"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // Cron schedule host calls on the wasmtime backend. The wazero counterparts

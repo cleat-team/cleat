@@ -2,7 +2,7 @@
 
 // This file (plus component_callbacks.go and cgo_test_helpers.go) calls the
 // wasmtime Component Model C API directly via cgo, using types like
-// wasmtime_component_val_t that github.com/bytecodealliance/wasmtime-go/v44
+// wasmtime_component_val_t that github.com/bytecodealliance/wasmtime-go/v48
 // does not expose through its Go bindings -- the module ships exactly one
 // component-related Go file, config_feat_component_model.go, and it is a
 // config flag.
@@ -336,7 +336,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // -- engine ptr access -------------------------------------------------------

@@ -14,7 +14,7 @@ import (
 // introduces.
 //
 // engine/wasmtimeinc holds a verbatim copy of the C headers from
-// github.com/bytecodealliance/wasmtime-go/v44's build/include, because cgo
+// github.com/bytecodealliance/wasmtime-go/v48's build/include, because cgo
 // cannot express an -I into another module (see component_cgo.go). Nothing
 // links against those copies: the actual libwasmtime comes from wasmtime-go's
 // own #cgo LDFLAGS, combined at final link time. So the headers here describe
@@ -36,7 +36,7 @@ func TestVendoredWasmtimeHeadersMatchModule(t *testing.T) {
 	vendored := "wasmtimeinc"
 
 	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}",
-		"github.com/bytecodealliance/wasmtime-go/v44").Output()
+		"github.com/bytecodealliance/wasmtime-go/v48").Output()
 	if err != nil {
 		// Deliberately not a skip. A skip is indistinguishable from a pass,
 		// and this test exists precisely to be the thing that notices.

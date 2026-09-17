@@ -7,7 +7,7 @@ import (
 	"encoding/binary"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // registerPollOneoff replaces wasmtime's poll_oneoff so a guest sleep is served

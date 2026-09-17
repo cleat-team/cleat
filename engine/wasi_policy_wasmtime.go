@@ -3,7 +3,7 @@
 package engine
 
 import (
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // registerWasiPolicy re-binds every refused WASI function the module imports to
