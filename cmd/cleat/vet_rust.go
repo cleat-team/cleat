@@ -10,30 +10,6 @@ import (
 	"strings"
 )
 
-// forbiddenRustPatterns lists Rust APIs that are not allowed in workflow code.
-var forbiddenRustPatterns = []struct {
-	pattern    string
-	code       string
-	message    string
-	suggestion string
-}{
-	{`use std::fs`, "R001", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
-	{`std::fs::`, "R001", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
-	{`use std::net`, "R002", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
-	{`std::net::`, "R002", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
-	{`use std::process`, "R003", "process spawning is non-deterministic across replays (OS process state differs between runs)", "Use h.DurableCall() for side effects"},
-	{`std::process::Command`, "R003", "process spawning is non-deterministic across replays (OS process state differs between runs)", "Use h.DurableCall() for side effects"},
-	{`use rand`, "R004", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness"},
-	{`rand::`, "R004", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness"},
-	{`std::time::SystemTime::now`, "R005", "wall-clock time is non-deterministic across replays", "Use h.Now() for deterministic time"},
-	{`std::time::Instant::now`, "R005", "wall-clock time is non-deterministic across replays", "Use h.Now() for deterministic time"},
-	{`use std::thread`, "R006", "threading is non-deterministic across replays (thread scheduling differs between runs)", "Workflow code is single-threaded by design"},
-	{`std::thread::`, "R006", "threading is non-deterministic across replays (thread scheduling differs between runs)", "Workflow code is single-threaded by design"},
-	{`use std::sync`, "R007", "synchronization primitives are non-deterministic across replays", "Workflow code is single-threaded by design"},
-	{`std::sync::`, "R007", "synchronization primitives are non-deterministic across replays", "Workflow code is single-threaded by design"},
-	{`use std::time::Duration`, "", "", ""}, // Allowed — used for h.DurableSleep()
-}
-
 // rustCodeOnly returns src with every comment and every string or character
 // literal replaced by spaces, byte offsets and line endings untouched.
 //
@@ -302,8 +278,8 @@ var forbiddenRustPaths = []struct {
 }
 
 type rustFinding struct {
-	line, col                      int
-	code, message, suggestion, why string
+	line, col                 int
+	code, message, suggestion string
 }
 
 var (

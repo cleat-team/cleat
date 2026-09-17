@@ -57,7 +57,7 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 	}
 
 	// ARM 1 -- KNOWN POSITIVE. A plain single-module import of the standard
-	// filesystem module is on forbiddenRustPatterns, so the gate must refuse
+	// filesystem module resolves to a path on forbiddenRustPaths, so the gate must refuse
 	// the build and must do so BEFORE cargo runs: an artifact that was never
 	// compiled cannot be deployed by accident.
 	t.Run("known positive is refused, and for the determinism reason", func(t *testing.T) {
