@@ -52,6 +52,16 @@ var portedOn = map[string][]string{
 	// the test this entry is supposed to have behind it.
 	"egress-allow": {"postgres", "mysql", "mssql"},
 
+	// reseal-payloads, cleat#1794: PostgreSQL only, and that is the FEATURE's
+	// scope rather than this command's. Encryption at rest is refused unless
+	// --driver=postgres (cmd/cleat-worker/main.go:742), the encryptor is
+	// attached behind a type assertion to *engine.PostgresStoreFactory, and
+	// the encrypting write path's INSERT is Postgres syntax. The mysql and
+	// mssql stores' decrypt blocks say so themselves: "encryption is not yet
+	// supported and will never be true". So there are no legacy ciphertexts to
+	// re-seal on the other two, and a port would be a sweep over nothing.
+	"reseal-payloads": {"postgres"},
+
 	// Not ported. These carry unqualified `admin.` SQL, which is correct on
 	// PostgreSQL and SQL Server and wrong on MySQL, plus $N placeholders that
 	// have not been routed through plugin.Rebind.

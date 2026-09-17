@@ -127,15 +127,63 @@ func (pe *PayloadEncryption) Encrypt(tenantID string, plaintext []byte) ([]byte,
 	return ciphertext, nil
 }
 
+// ErrNotTenantBound reports a ciphertext that opens only with nil AAD -- a row
+// written before cleat#1776 and not yet re-sealed.
+//
+// Exported now that there is a caller: `cleatctl reseal-payloads` (cleat#1794)
+// has to tell a blob it must rewrite from one it must not. #1792 deliberately
+// did NOT export this, because at that point its only caller would have been a
+// test -- and an exported symbol whose only caller is a test is reported by
+// neither guard meant to catch dead code (cleat#1795). The sequence is the
+// point: the primitive lands with the thing that needs it.
+var ErrNotTenantBound = errors.New("payload encryption: ciphertext is not bound to a tenant (sealed before cleat#1776)")
+
+// DecryptTenantBound opens data only if it is bound to tenantID, with no
+// fallback to the legacy nil-AAD form.
+//
+// Decrypt cannot answer "is this bound?" -- it falls back and succeeds either
+// way, which is the residual hole rather than a defect in it. A re-seal needs
+// the distinction, and needs it to be exact: ErrNotTenantBound means "opens
+// with nil AAD and not with this tenant", which is a positive identification
+// of a legacy blob rather than an inference from a failure.
+func (pe *PayloadEncryption) DecryptTenantBound(tenantID string, data []byte) ([]byte, error) {
+	if tenantID == "" {
+		return nil, ErrNoTenantForEncryption
+	}
+	plaintext, err := pe.open(data, []byte(tenantID))
+	if err == nil {
+		return plaintext, nil
+	}
+	if _, lerr := pe.open(data, nil); lerr == nil {
+		return nil, ErrNotTenantBound
+	}
+	return nil, err
+}
+
+// DecryptLegacyUnbound opens data as a pre-cleat#1776 nil-AAD ciphertext, and
+// refuses anything else.
+//
+// The re-seal's read half. It is deliberately NOT Decrypt: Decrypt tries the
+// bound form first and falls back, so it happily returns a plaintext for an
+// already-converted row, and a re-seal built on it would re-encrypt rows it
+// had already done -- harmless per row, and fatal to the count that says the
+// sweep is finished.
+//
+// It is also what tells a legacy ciphertext from a column holding PLAINTEXT
+// (written before encryption was switched on) or "" (never encrypted). Only a
+// real ciphertext authenticates under the key; there is no length rule, no
+// base64 sniffing and no magic prefix involved.
+func (pe *PayloadEncryption) DecryptLegacyUnbound(data []byte) ([]byte, error) {
+	return pe.open(data, nil)
+}
+
 // Decrypt opens data produced by Encrypt (nonce || ciphertext) for one tenant.
 //
 // It tries AAD = tenantID first, then AAD = nil. The second attempt is the only
 // thing keeping rows written before cleat#1776 readable, and it is also the
 // residual hole: such a row is not bound to any tenant and never will be until
-// it is re-sealed. Distinguishing the two forms needs an open with no fallback,
-// which nothing in production asks for yet -- the re-seal that will ask for it
-// can export one then. The tests do it directly, in
-// payload_ciphertext_is_bound_to_its_tenant_test.go.
+// it is re-sealed. DecryptTenantBound above is the no-fallback form, for
+// callers that need to tell the two apart -- `cleatctl reseal-payloads` does.
 //
 // The order matters and is not arbitrary: a tenant-bound blob does NOT open with
 // nil AAD (measured), so trying the bound form first can never mistake a new

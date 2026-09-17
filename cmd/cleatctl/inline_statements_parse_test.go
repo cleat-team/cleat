@@ -73,6 +73,21 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 	pinned := map[string]string{
 		"SELECT COUNT(*) FROM %s": "a format string: the table name is substituted at the call site, so there is no statement here to parse",
 
+		// reseal-payloads (cleat#1794) builds both of its statements by
+		// concatenating engine.EncryptedEventColumns, so what is in the source
+		// is a PREFIX and not a statement. Pinned for the same reason as the
+		// format string above: there is nothing here to parse.
+		//
+		// The coverage is not lost, which is the part that matters --
+		// TestResealBindsLegacyCiphertextAndPreservesThePlaintext issues both
+		// of these, fully assembled, against a real database with the schema
+		// applied, so a wrong column name fails there instead of here. Writing
+		// the eleven columns out as a literal to satisfy this test would
+		// duplicate the list that TestEncryptedEventColumnsIsComplete exists to
+		// keep single.
+		"UPDATE event_history SET":                   "a prefix: the SET list is built from engine.EncryptedEventColumns, so there is no statement here to parse. Exercised assembled by TestResealBindsLegacyCiphertextAndPreservesThePlaintext",
+		"SELECT workflow_id, step, tenant_id::text,": "a prefix: the column list is built from engine.EncryptedEventColumns. Same coverage note as the UPDATE above",
+
 		// Both are SQL Server-only, from drop-tenant's port in cleat#1635.
 		//
 		// Pinned rather than written as a plugin.Query MSSQL arm -- which is
