@@ -364,7 +364,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	// read, so a payload built from an encrypted record would put ciphertext
 	// there. encodeEventForStorage preserves both orderings -- see its doc.
 	checksum := computeEventChecksum(rec, prevChecksum)
-	stored, encodeErr := encodeEventForStorage(rec, e.encryption, e.encryptSensitivePayloads)
+	stored, encodeErr := encodeEventForStorage(rec, e.encryption, e.encryptSensitivePayloads, tenantForAAD(e.tenantID))
 	if encodeErr != nil {
 		return fmt.Errorf("flush event: %w", encodeErr)
 	}

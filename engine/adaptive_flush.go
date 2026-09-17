@@ -740,7 +740,7 @@ func (af *AdaptiveFlusher) prepareEntry(workflowID string, rec EventRecord, chec
 	// The checksum is computed by the caller over the plaintext record, and the
 	// payload is built from it here for the same reason -- see
 	// encodeEventForStorage, which is the single encoding all five writers use.
-	stored, err := encodeEventForStorage(rec, enc, encrypt)
+	stored, err := encodeEventForStorage(rec, enc, encrypt, tenantForAAD(af.tenantID))
 	if err != nil {
 		return batchEntry{}, fmt.Errorf("prepare entry: %w", err)
 	}

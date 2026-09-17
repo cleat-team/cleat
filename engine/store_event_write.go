@@ -113,7 +113,7 @@ func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflow
 	// The checksum is over the PLAINTEXT record, and stays that way:
 	// VerifyWorkflowEvents recomputes it from the decrypted record it loads.
 	checksum := computeEventChecksum(rec, prevChecksum)
-	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
 	if err != nil {
 		// cleat#1317: encryption failures were counted nowhere, while their
 		// decryption twin has been counted since db.go:176. The asymmetry was
@@ -155,7 +155,7 @@ func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflow
 // execEventStmt executes a prepared INSERT for a single event.
 func (s *PostgresStore) execEventStmt(ctx context.Context, stmt *sql.Stmt, workflowID string, rec EventRecord, prevChecksum string) error {
 	checksum := computeEventChecksum(rec, prevChecksum)
-	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
 	if err != nil {
 		// cleat#1317: encryption failures were counted nowhere, while their
 		// decryption twin has been counted since db.go:176. The asymmetry was

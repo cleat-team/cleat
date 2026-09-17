@@ -99,7 +99,13 @@ type storedEvent struct {
 // returns at least a nonce and a GCM tag, so it cannot produce "", which is
 // what lets decryptField read an empty stored value as "never encrypted"
 // rather than as a decryption failure (cleat#1377).
-func encodeEventForStorage(rec EventRecord, enc *PayloadEncryption, encrypt bool) (storedEvent, error) {
+// tenantID is the tenant every sealed field is bound to (cleat#1776). It is a
+// parameter rather than a field of rec because EventRecord carries no tenant --
+// 82 fields and none of them is one -- and because all five writers are already
+// tenant-scoped: the stores have s.tenantID and AdaptiveFlusher has af.tenantID,
+// which it also uses to set RLS on its own flush transaction. An empty value
+// here is refused by Encrypt rather than silently sealing unbound.
+func encodeEventForStorage(rec EventRecord, enc *PayloadEncryption, encrypt bool, tenantID string) (storedEvent, error) {
 	out := storedEvent{
 		Request:       tryEncodeBase64(rec.Request),
 		Response:      tryEncodeBase64(rec.Response),
@@ -147,14 +153,14 @@ func encodeEventForStorage(rec EventRecord, enc *PayloadEncryption, encrypt bool
 		if f.plain == "" {
 			continue
 		}
-		ciphertext, err := enc.EncryptString(f.plain)
+		ciphertext, err := enc.EncryptString(tenantID, f.plain)
 		if err != nil {
 			return storedEvent{}, fmt.Errorf("encode event for storage: encrypt %s: %w", f.name, err)
 		}
 		*f.dst = ciphertext
 	}
 
-	out.Payload, err = encodePayloadForStorage(out.Payload.String, enc, encrypt)
+	out.Payload, err = encodePayloadForStorage(out.Payload.String, enc, encrypt, tenantID)
 	if err != nil {
 		return storedEvent{}, fmt.Errorf("encode event for storage: %w", err)
 	}
@@ -175,14 +181,14 @@ func encodeEventForStorage(rec EventRecord, enc *PayloadEncryption, encrypt bool
 // An empty payload stays empty and invalid rather than becoming the ciphertext
 // of nothing, which is what every writer stored before encryption existed and
 // is what decryptPayloadJSON's own `payloadStr != ""` guard expects.
-func encodePayloadForStorage(payload string, enc *PayloadEncryption, encrypt bool) (sql.NullString, error) {
+func encodePayloadForStorage(payload string, enc *PayloadEncryption, encrypt bool, tenantID string) (sql.NullString, error) {
 	if payload == "" {
 		return sql.NullString{}, nil
 	}
 	if !encrypt || enc == nil {
 		return sql.NullString{String: payload, Valid: true}, nil
 	}
-	encrypted, err := enc.EncryptJSON([]byte(payload))
+	encrypted, err := enc.EncryptJSON(tenantID, []byte(payload))
 	if err != nil {
 		return sql.NullString{}, fmt.Errorf("encrypt payload: %w", err)
 	}
