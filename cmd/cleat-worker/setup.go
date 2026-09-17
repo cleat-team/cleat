@@ -1075,6 +1075,11 @@ func expiredIdempotencyKeysSQL(driver string) (string, bool) {
 // forever doing nothing, so a dialect added later fails loudly here instead of
 // silently inheriting the old behaviour.
 func idempotencyCleanupLoop(ctx context.Context, db *sql.DB, driver string, interval time.Duration) {
+	// Started with `go` from two sites in main.go. cleat#1769: this ran
+	// unrecovered, and it is a ticker loop doing database work, so a driver
+	// panic or a nil dereference here killed the worker process.
+	defer recoverBackgroundGoroutine(slog.Default(), "", "idempotency-cleanup")
+
 	stmt, ok := expiredIdempotencyKeysSQL(driver)
 	if !ok {
 		slog.Warn("idempotency key cleanup not started: no delete for this driver", "driver", driver)
@@ -1165,6 +1170,33 @@ func (w *Worker) withPanicRecovery(name string, fn func()) func() {
 		}()
 		fn()
 	}
+}
+
+// recoverBackgroundGoroutine is withPanicRecovery for goroutines that have no
+// Worker to hang off. Use it as the FIRST deferred call in the goroutine body:
+//
+//	go func() {
+//		defer recoverBackgroundGoroutine(logger, workerID, "plugin-pool-monitor")
+//		...
+//	}()
+//
+// Two such goroutines exist: the plugin connection pool monitor, which starts in
+// main() well before the Worker is constructed, and idempotencyCleanupLoop,
+// which is a package-level function started with `go` from two call sites. Both
+// ran unrecovered until cleat#1769; a panic in either took the process down.
+//
+// This deliberately does NOT touch healthTracker or Metrics. Neither exists yet
+// at the pool monitor's call site, and a helper that works in one of its two
+// callers is the kind of partial fix cleat#1769 is about. The log line carries
+// the stack, which is what an operator needs to act.
+func recoverBackgroundGoroutine(logger *slog.Logger, workerID, name string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	logger.ErrorContext(context.Background(),
+		"PANIC in background goroutine — this loop has stopped; the worker continues",
+		"worker_id", workerID, "loop", name, "error", r, "stack", string(debug.Stack()))
 }
 
 // ---------------------------------------------------------------------------

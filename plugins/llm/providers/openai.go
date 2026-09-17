@@ -119,44 +119,46 @@ func OpenAIChatStream(ctx context.Context, client *http.Client, apiKey, baseURL 
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
+		plugin.RecoverGoroutine("llm/openai", nil, func() {
 
-		scanner := bufio.NewScanner(resp.Body)
-		index := 0
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			payload := strings.TrimPrefix(line, "data: ")
-			if payload == "[DONE]" {
-				return
-			}
+			scanner := bufio.NewScanner(resp.Body)
+			index := 0
+			for scanner.Scan() {
+				line := scanner.Text()
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				payload := strings.TrimPrefix(line, "data: ")
+				if payload == "[DONE]" {
+					return
+				}
 
-			var sseData struct {
-				Choices []struct {
-					Delta struct {
-						Content string `json:"content"`
-					} `json:"delta"`
-					FinishReason *string `json:"finish_reason"`
-				} `json:"choices"`
+				var sseData struct {
+					Choices []struct {
+						Delta struct {
+							Content string `json:"content"`
+						} `json:"delta"`
+						FinishReason *string `json:"finish_reason"`
+					} `json:"choices"`
+				}
+				if err := json.Unmarshal([]byte(payload), &sseData); err != nil {
+					continue
+				}
+				if len(sseData.Choices) == 0 {
+					continue
+				}
+				content := sseData.Choices[0].Delta.Content
+				chunk := StreamChunk{
+					Content: content,
+					Index:   index,
+				}
+				index++
+				if sseData.Choices[0].FinishReason != nil {
+					chunk.Done = true
+				}
+				ch <- chunk
 			}
-			if err := json.Unmarshal([]byte(payload), &sseData); err != nil {
-				continue
-			}
-			if len(sseData.Choices) == 0 {
-				continue
-			}
-			content := sseData.Choices[0].Delta.Content
-			chunk := StreamChunk{
-				Content: content,
-				Index:   index,
-			}
-			index++
-			if sseData.Choices[0].FinishReason != nil {
-				chunk.Done = true
-			}
-			ch <- chunk
-		}
+		})
 	}()
 
 	return ch, nil

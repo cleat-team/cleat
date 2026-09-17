@@ -147,41 +147,43 @@ func OllamaChatStream(ctx context.Context, client *http.Client, baseURL string, 
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
+		plugin.RecoverGoroutine("llm/ollama", nil, func() {
 
-		scanner := bufio.NewScanner(resp.Body)
-		index := 0
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
+			scanner := bufio.NewScanner(resp.Body)
+			index := 0
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" {
+					continue
+				}
 
-			var sseData struct {
-				Message *struct {
-					Content string `json:"content"`
-				} `json:"message,omitempty"`
-				Done bool `json:"done"`
-			}
-			if err := json.Unmarshal([]byte(line), &sseData); err != nil {
-				continue
-			}
+				var sseData struct {
+					Message *struct {
+						Content string `json:"content"`
+					} `json:"message,omitempty"`
+					Done bool `json:"done"`
+				}
+				if err := json.Unmarshal([]byte(line), &sseData); err != nil {
+					continue
+				}
 
-			var text string
-			if sseData.Message != nil {
-				text = sseData.Message.Content
-			}
+				var text string
+				if sseData.Message != nil {
+					text = sseData.Message.Content
+				}
 
-			ch <- StreamChunk{
-				Content: text,
-				Index:   index,
-				Done:    sseData.Done,
-			}
-			index++
+				ch <- StreamChunk{
+					Content: text,
+					Index:   index,
+					Done:    sseData.Done,
+				}
+				index++
 
-			if sseData.Done {
-				return
+				if sseData.Done {
+					return
+				}
 			}
-		}
+		})
 	}()
 
 	return ch, nil

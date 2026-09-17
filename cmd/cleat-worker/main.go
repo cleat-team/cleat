@@ -1158,6 +1158,9 @@ func main() {
 		bgWg.Add(1)
 		go func() {
 			defer bgWg.Done()
+			// cleat#1769. This is newer than the panic-recovery fix it was
+			// missing, and sits a few hundred lines from it.
+			defer recoverBackgroundGoroutine(logger, workerID, "plugin-pool-monitor")
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 			for {
@@ -1720,12 +1723,14 @@ func main() {
 			IdleTimeout:  *httpIdleTimeout,
 		}
 		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "http-api-listener")
 			logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", workerID, "addr", *apiAddr)
 			if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 				logger.ErrorContext(context.Background(), "HTTP server error", "worker_id", workerID, "error", err)
 			}
 		}()
 		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "http-api-shutdown")
 			<-ctx.Done()
 			srv.Shutdown(context.Background())
 		}()
@@ -1734,6 +1739,7 @@ func main() {
 	// Start pprof server on a separate port for CPU profiling.
 	if *pprofAddr != "" {
 		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "pprof-listener")
 			logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", *pprofAddr)
 			// An explicit Server rather than http.ListenAndServe, for the
 			// ReadHeaderTimeout (gosec G114/G112): the convenience function
@@ -1761,6 +1767,9 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
+		// A panic here would leave the worker running with no path to a clean
+		// shutdown: cancel() never fires, so nothing drains. cleat#1769.
+		defer recoverBackgroundGoroutine(logger, workerID, "signal-handler")
 		<-sigCh
 		logger.InfoContext(context.Background(), "shutting down", "worker_id", workerID)
 		cancel()
@@ -1790,6 +1799,7 @@ func main() {
 	// Wait for background workers to finish.
 	bgDone := make(chan struct{})
 	go func() {
+		defer recoverBackgroundGoroutine(logger, workerID, "background-waiter")
 		bgWg.Wait()
 		close(bgDone)
 	}()
