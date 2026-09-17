@@ -632,6 +632,24 @@ server. I did **not** verify which sandbox each stream uses now, what DSNs the o
 or when the host changed — so the tables below are left in place rather than rewritten from one
 session's view. Read them as history, and probe.
 
+**The second independent measurement arrived on 2026-09-17, which is what the paragraph above was
+waiting for.** WS-2, from their own sandbox: OrbStack 29.4.0, and SQL Server 2022 16.0.4275.2 on
+**1434** — the port this file's table calls Azure SQL Edge 15.0 — applying all 54 `migrations/mssql/`
+files. WS-3 independently reported `docker ps -a` showing every container on the host as
+`Exited (255)` after the reboot, so the containers live at any moment are ones a session rebuilt,
+not survivors; ports are per session and there is no fixed assignment to recover.
+
+Two operational notes from those runs, recorded because each cost someone time:
+
+- **`sqlcmd -I`** (QUOTED_IDENTIFIER ON) is required, or migration `001` fails on `CREATE INDEX`
+  with `Msg 1934`. Measured by WS-2.
+- **`ssh-add -l` can come back empty after a host restart** and `gh` keeps working throughout on its
+  own token, so only git-over-ssh is broken and nothing says so until a push fails. It is **per
+  session** — one session had three identities loaded while two had none. Check with
+  `ssh -o BatchMode=yes -T git@github.com`; repair with `ssh-add --apple-load-keychain`. Note that
+  `ssh-add <key>` returns 0 having added nothing when the passphrase prompt is swallowed, so the
+  exit status cannot tell you.
+
 ---
 
 ### Which sandbox is which stream
@@ -689,10 +707,15 @@ schema** — not an error, half a schema, which is the failure mode this whole s
 That is also the hazard behind `engine/flush_rls_test.go`'s connection-pinning comment: the
 symptom is `relation "<table>" does not exist` from a test whose neighbours pass.
 
-### SQL Server: two of the three streams can run it locally
+### SQL Server: ~~two of the three streams can run it locally~~ — HISTORY, see the ⚠️ CORRECTION
 
 Every part of this has cost a session at least once. Rewritten 2026-09-04 after 1433 was revived;
 the three corrections are marked, because each of them was believed for weeks.
+
+**The heading itself is one of the stale claims.** It asserts a capacity conclusion, so it is read
+even by someone who reads nothing under it. All three streams can run SQL Server 2022 locally on
+the current host; the tables below describe `colima` VMs and ports that no longer exist. Probe, do
+not read.
 
 | port | server | version | state |
 |---|---|---|---|
@@ -742,10 +765,17 @@ uses the two-argument `ISJSON`, introduced in SQL Server 2022; Edge is 15.0, so 
 come from that one file. CI covers MSSQL, so this bounds local work only — but a "passes on three
 dialects" claim made from that sandbox is not one.
 
-**WS-2 cannot have a local SQL Server 2022 on this machine, and that is a capacity fact.** The host
-has 24 GiB; the three VMs now commit 20 (default 8, cleat-ws1 6, cleat-ws3 6). A fourth Rosetta VM
-does not fit. Shrinking `default` is the only route and it runs all six Postgres and MySQL
-containers.
+**~~WS-2 cannot have a local SQL Server 2022 on this machine, and that is a capacity fact.~~
+RETRACTED — see the ⚠️ CORRECTION above.** The host had 24 GiB and three VMs committing 20
+(default 8, cleat-ws1 6, cleat-ws3 6), so a fourth Rosetta VM did not fit and shrinking `default`
+was the only route. **None of those VMs exists now**: the runtime is OrbStack, one VM, and two
+sessions have since run SQL Server 2022 locally.
+
+The retraction is repeated here rather than only 170 lines above because **this is where the claim
+is read**. A reader who wants to run SQL Server opens `### SQL Server: …` and meets this paragraph
+with the correction off-screen and under a different heading — which is how it was met on
+2026-09-17, by a session that had read the correction. A retraction that lives only at the top of a
+document is a retraction the copy does not carry.
 
 **`colima start` rewrites the global docker context.** Set it back with `docker context use colima`
 or every other stream's bare `docker` silently retargets.
@@ -784,6 +814,68 @@ tenant (`default`), one `tenant_` schema. Re-derive:
      where table_name='tenant_api_keys';
 
 ### Shared files, and the protocol for each
+
+**A checkout is a shared file too, and so is a WORKTREE inside it.** Added 2026-09-17, after
+three sessions spent an hour failing to attribute three PRs and one of us rewrote a branch
+another session was holding.
+
+The commits behind `#1729`, `#1732` and `#1733` were created in checkouts two streams each
+believed were theirs, by a session that was neither of them. The evidence is a reflog, and it is
+worth stating because it is stronger than the caveat it replaces:
+
+    # in WS-2's OWN checkout, worktrees/cleat-wt-proto/HEAD
+    20:44:38  commit: fix: a member the scan did not parse was skipped and passed
+    21:55:28  rebase (finish) onto 4fc62f8a          <- the only entries WS-2 made
+
+So `git worktree list` showing you a worktree is **not** evidence you own it. WS-2 read "in my
+checkout" as "mine", rebased and force-pushed — `--force-with-lease` protected the remote ref and
+protected nothing about the other session's working tree.
+
+**THE TRAILER SAYS WHO WORKED; THE REFLOG SAYS WHERE. They answer different questions and
+neither substitutes for the other.** The failure mode to design against is not a session stamping
+the wrong stream on purpose — it is a session stamping the **right** one for a commit produced in
+another stream's working tree. That is exactly tonight's case: whichever session made `54b94a19`
+would have marked it with its own stream, correctly, while the tree belonged to someone else. The
+trailer would have been true and still would not have answered the question anyone was asking.
+Only the reflog is unforgeable by typing, and only the trailer names a person. (WS-1's framing.)
+
+**What follows for attribution.** Two signals exist and both resolve to the *working tree*, not the
+session: the reflog says which checkout created an object, and the checkout has no single occupant.
+The `Claude-Stream:` trailer — `WS-1`, `WS-2`, `WS-3`, `coordinator`, adopted 2026-09-17 — is the
+only stream-scoped signal, and it replaced a session id for one reason: **a stream survives a host
+restart and a session id does not.** Every `session_…` mapping recorded before 2026-09-16 now names
+a session that no longer exists. A stream name is also a value each session can assert from its own
+evidence rather than resolve from an id it cannot read.
+
+The older `Claude-Session:` trailer was **absent** for at least two streams — one omits it deliberately because `CLAUDE_CODE_SESSION_ID` is a UUID, the
+form that appears in 0 of 741 trailers, and emitting a well-formed marker that resolves to nothing
+is worse than emitting none. **So `UNKNOWN` is the correct answer for an unmarked commit, and
+looking for a fourth signal is how you get a confident wrong one.** Session ids also rotate on a
+host restart, so an id-to-stream table is only as good as its date — every mapping in this repo's
+notes predates 2026-09-16 and several are now stale in both directions.
+
+**The cheap check before touching a worktree you did not create is its own HEAD reflog**, not the
+branch's: `git reflog worktrees/<name>/HEAD`. Prefer that targeted form because it is unambiguous
+and does not depend on the reader knowing what `--all` sweeps.
+
+**It is NOT true that `git reflog --all` misses other worktrees' HEADs**, and this file said so
+until it was measured. On **git 2.50.1 (Apple Git-155)** `--all` walks `worktrees/<name>/HEAD`
+along with the branch refs — a commit made in a worktree appears twice, once via its branch and
+once via that HEAD:
+
+    $ git reflog --all --format='%gD' | sed 's/@.*//' | sort -u
+    HEAD
+    refs/heads/main
+    refs/heads/probebranch
+    worktrees/wt/HEAD
+
+So a negative from `--all` **is** informative here, and the retracted clause was the dangerous
+half: a reader who believed it would discard a true negative and re-derive by hand. Measured
+independently by two sessions on this host, each with a known-positive on the grep so it was not a
+search that could only say no. **Pin the version rather than the fact** — per-worktree coverage in
+`--all` is exactly the sort of thing that changed at some release, and neither measurement tested
+an older git. Re-derive elsewhere: `git init`, commit, `git worktree add`, commit inside it,
+`git reflog --all`.
 
 | file | protocol |
 |---|---|
