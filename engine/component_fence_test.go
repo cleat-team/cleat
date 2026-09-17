@@ -79,6 +79,27 @@ func TestComponentPathResourceLimitClassification(t *testing.T) {
 			wantText:  "instruction limit exceeded (5000000 fuel units",
 		},
 		{
+			// THE SECOND DOOR. The cases above are shaped the way componentCall
+			// wraps; this is the way componentInstantiate wraps
+			// (component_cgo.go's `fmt.Errorf("component instantiate: %s", s)`),
+			// and the fence reaches it whenever the budget is exhausted before
+			// the export is called -- which a ~19 MB componentize-py build,
+			// whose instantiation runs CPython's own module initialisation,
+			// makes entirely reachable.
+			//
+			// This case pins the CONTRACT between that wrapping and this
+			// classifier: reword line 384 to drop the cause and this goes red.
+			// It does NOT prove the instantiate path consults the classifier at
+			// all -- that is what TestPythonComponentExecutionFence measures,
+			// and it needs componentize-py, so it runs in CI and skips locally.
+			// Recorded rather than implied, because a green here with that call
+			// site removed is exactly the "measured nothing" reading.
+			name:      "epoch interrupt during instantiate",
+			err:       fmt.Errorf("component instantiate: %s", "wasm trap: interrupt"),
+			wantLimit: true,
+			wantText:  "execution time limit exceeded (2s wall-clock budget",
+		},
+		{
 			// The guest failing on its own must not be mistaken for the host
 			// stopping it: that direction is what decides whether Execute
 			// falls back to decomposition, and suppressing a real fallback
