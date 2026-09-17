@@ -73,6 +73,39 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 		}
 	}
 
+	// Determinism gate. The Go target runs the whole-program analysis in
+	// runBuild before emitting anything; every other target reached its builder
+	// through an early return and emitted an artifact with no determinism
+	// checking at all (cleat#1770). Rust closed that in #1784, Java in #1791,
+	// and AssemblyScript never had it open in the same way -- asc is invoked
+	// with --transform, and the transform throws from afterParse, so the
+	// compiler itself refuses. Python was the last target without a gate.
+	//
+	// It runs BEFORE entry-point detection and before any toolchain lookup,
+	// deliberately: a file with determinism errors is refused on a machine that
+	// has no componentize-py and could not have built it either way. Refusing
+	// for the real reason beats refusing for an incidental one.
+	//
+	// A CHECK THAT CANNOT LOOK MUST NOT REPORT SUCCESS, which is why this gates
+	// on any non-zero and not on a "violations" code specifically. runVetPython
+	// already separates the two causes -- cleat_sdk.vet exiting 1 with findings
+	// on stdout, versus python3 exiting 1 because the module would not import --
+	// and reports each in its own words. Both refuse the build. An unrunnable
+	// determinism check that emitted an artifact anyway would be the exact
+	// green-that-measured-nothing this repo keeps finding.
+	//
+	// NOTE WHAT THIS CHECK IS AND IS NOT, because passing it is weaker evidence
+	// than passing the Go analysis. cleat_sdk.vet walks a real AST, but matches
+	// forbidden APIs by the literal name written at the call site: `import os as
+	// o; o.getenv(...)` and `from os import getenv; getenv(...)` both pass it
+	// today. It is also per-file, so a helper in another module is not analysed
+	// from here. It refuses what it recognises; it does not certify determinism.
+	if code := runVetPython(pyFile, false); code != 0 {
+		fmt.Fprintf(os.Stderr, "\nError: determinism check failed for %s -- no artifact was emitted.\n", pyFile)
+		fmt.Fprintf(os.Stderr, "Fix the errors above, or run 'cleat vet --lang python %s' to see them again.\n", pyFile)
+		os.Exit(1)
+	}
+
 	// If no function name was specified, try to auto-detect it from the file.
 	if funcName == "" {
 		fn, err := detectEntryFunction(pyFile)

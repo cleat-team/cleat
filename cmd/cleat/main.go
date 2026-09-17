@@ -806,15 +806,23 @@ func runVetPython(dir string, jsonOut bool) int {
 	if dir == "" {
 		dir = "."
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: cannot read directory %s: %v\n", dir, err)
-		return 1
-	}
-	// Also check if dir itself is a .py file.
+	// THE SINGLE-FILE CASE IS CHECKED FIRST, and the order is the bug.
+	//
+	// This block called os.ReadDir(dir) before looking at whether dir was
+	// itself a .py file, so `cleat vet --lang python workflow.py` -- the form
+	// the flag's own help text shows -- died on "cannot read directory
+	// workflow.py: not a directory" and never reached the branch written three
+	// lines below to handle it. Surfaced by wiring this into `cleat build
+	// --target python`, which names the one file it is about to compile rather
+	// than the directory around it.
 	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() && strings.HasSuffix(dir, ".py") {
 		pyFiles = append(pyFiles, dir)
 	} else {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot read directory %s: %v\n", dir, err)
+			return 1
+		}
 		for _, e := range entries {
 			if !e.IsDir() && strings.HasSuffix(e.Name(), ".py") {
 				pyFiles = append(pyFiles, filepath.Join(dir, e.Name()))
