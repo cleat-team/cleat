@@ -348,6 +348,25 @@ jobs:
           scripts/check-section-numbers.sh --self-test
           scripts/check-section-numbers.sh
 
+      # IMPROVEMENT-PLAN.md's status markers are read by hand, by the archiver,
+      # and by the scan CLAUDE.md publishes. The scan was two clauses joined by
+      # OR that matched ZERO headings in common for its whole history -- the word
+      # clause allowed nothing between the em-dash and the marker word, so any
+      # symbol defeated it, which meant the fallback was guaranteed to be absent
+      # in exactly the case it existed for. Measured 2026-09-16 over 295
+      # headings: 0 overlap, now 238.
+      #
+      # Only the self-test runs here, and deliberately. The reporting mode lists
+      # headings carrying no status at all, and two on develop (2.8, 2.12) have
+      # carried none since 2026-09-08 -- gating on it would turn this into a red
+      # that this change is not the one to fix. The self-test is the part with a
+      # known-positive behind it: six fixtures, each of which fails if ONE clause
+      # is reverted rather than being rescued by the other, plus a check that the
+      # copy of the scan published in CLAUDE.md still agrees with the script.
+      - name: Plan status-marker guard
+        run: scripts/check-plan-markers.py --self-test
+
+
       # Two migration files in one dialect must not share a version number.
       # The runner keys schema_migrations on the filename's numeric prefix, so
       # they collapse to one row: a fresh database applies both (which is why
