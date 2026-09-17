@@ -9749,7 +9749,7 @@ Re-derive everything above with:
 
 ---
 
-### 3.316 No migration pins a collation, so string equality means different things per dialect — 🔴 **OPEN** (WS-2, 2026-09-07)
+### 3.316 No migration pins a collation, so string equality means different things per dialect — 🟡 **MEASURED 2026-09-16 AND THE MAJORITY WAS BACKWARDS; THE DECISION IS STILL OPEN** (WS-2, 2026-09-07)
 
 Found while deciding D4 of the event-routing design (§3.313's neighbour,
 `docs/contributor/design/event-routing-design.md`), which needed a byte-exact comparison
@@ -9765,9 +9765,25 @@ Not in the DDL, not at table level, not in any compose file, not in a CI service
 So every string column inherits the **server** default, which is a property of whichever
 image or managed instance the operator happens to run.
 
-**The defaults are not the same, and one of them is not case-sensitive.** MySQL 8's
-default is `utf8mb4_0900_ai_ci` — accent-insensitive **and case-insensitive**. PostgreSQL
-and SQL Server default to case-sensitive comparison in the configurations this repo tests.
+**The defaults are not the same, and TWO of the three are not case-sensitive.** MySQL 8's
+default is `utf8mb4_0900_ai_ci` — accent-insensitive **and case-insensitive**. SQL Server's
+container default is `SQL_Latin1_General_CP1_CI_AS`, where the `CI` is case-insensitive too.
+PostgreSQL is the only one of the three whose `=` is exact.
+
+**This paragraph said "PostgreSQL and SQL Server default to case-sensitive comparison in the
+configurations this repo tests" until it was measured, and that was wrong about SQL Server** —
+which inverts the whole item. The minority dialect is PostgreSQL, not MySQL, so "make the odd
+one out agree with the others" points in the opposite direction from the one this section
+implied for nine days.
+
+**cleat#936 got this right and said so, and its correctness was not usable.** It recorded
+*"SQL Server not yet measured; its default collations are also `_CI_`, so I would expect it to
+behave like MySQL, but that is an expectation and not a measurement"* — accurate, honestly
+labelled, and then this section asserted the opposite as fact. An expectation explicitly
+flagged as unmeasured lost to a confident sentence, because only one of the two reads like a
+finding. The lesson is not "#936 should have been bolder": it is that **an unmeasured
+expectation and a false assertion are indistinguishable to the next reader**, so the only
+repair is the measurement.
 
 So `WHERE def_name = ?` is a case-sensitive lookup on two dialects and a case-insensitive
 one on the third, and the affected columns are the user-supplied ones:
@@ -9780,31 +9796,107 @@ unique index, and `WHERE def_name = 'placeorder'` returns the wrong one. Same in
 tier-1 dialect matrix, different behaviour — and nothing in the tree says which is
 intended.
 
-**NOT MEASURED, and that is the first thing to do.** No database is listening on this
-machine (5434 / 3308 / 1435 all closed, the DSNs in `WORKSTREAM.md`), so the above is
-derived from the absence of any `COLLATE` plus MySQL's documented default, not from a
-query. Before anything is changed, run this on each dialect:
+**MEASURED 2026-09-16**, against databases built by applying the shipped migrations from
+scratch (64 postgres / 48 mysql / 54 mssql), on the images CI pins in
+`.github/workflows/*.yml`:
 
-    -- MySQL: what did we actually get?
+| dialect | version | collation of `workflow_defs.name` | `WHERE name = 'placeorder'` finds `PlaceOrder` | registering both spellings |
+|---|---|---|---|---|
+| PostgreSQL | 16.15 | `en_US.utf8`, deterministic `=` | **no** | **succeeds** — two definitions |
+| MySQL | 8.4.11 | `utf8mb4_0900_ai_ci` | **YES** | rejected, `1062 Duplicate entry` |
+| SQL Server | 2022 16.0.4275.2 | `SQL_Latin1_General_CP1_CI_AS` | **YES** | rejected, `Msg 2627` |
+
+So the same pair of workflow definitions **deploys on PostgreSQL and is impossible on the other
+two**, and `WHERE name = ?` is an exact lookup on one dialect of three.
+
+**The SQL Server column was measured wrong the first time, and the control is the only thing
+that caught it.** The first run reported exact-match `0` and mis-cased `0` — which reads as a
+clean case-sensitive result, and is the answer this section had already predicted. It was a row
+the connection could not see: `workflow_defs` carries a tenant FILTER predicate, `sa` set no
+`SESSION_CONTEXT`, so the count is 0 with no error (the #982/#1732 mechanism). The row was
+physically there, and the *mis-cased INSERT proved it* by being refused with
+`duplicate key value is (00000000-…, placeorder, 1)` — the server had folded the case while
+reporting nothing to see. **A wrong answer that matches your hypothesis is the one you do not
+re-run**, so the exact-match control is not ceremony here; it is the entire difference between
+this item's conclusion and its opposite.
+
+Both controls are therefore carried in the test: an exact match that must return 1, and a
+never-inserted name that must return 0. The first separates "case-sensitive" from "measured
+nothing"; the second separates "the server matched" from "the predicate matches everything."
+
+    -- what did we actually get?  (MySQL form; the section formerly stopped here)
     SELECT table_name, column_name, collation_name
     FROM information_schema.columns
     WHERE table_schema = DATABASE() AND collation_name IS NOT NULL;
 
-and confirm the behaviour directly — insert `PlaceOrder`, select `placeorder`, see whether
-a row comes back. **A grep for what is missing is not a measurement of what the server
-does**, which is this document's own recurring lesson.
+**A grep for what is missing is not a measurement of what the server does** — which is this
+document's own recurring lesson, and the `COLLATE` grep above is still the *only* part of this
+section that was ever evidence.
+
+**The affected population is much larger than cleat#936 concluded, and the reason is a
+scope error worth naming.** That issue swept the MySQL store for columns compared against
+string **literals**, found five, observed that four hold engine-written values whose case is
+fixed at both ends, and concluded *"the class has exactly one member"* — `parent_close_policy`.
+That is correct about its own population and blind by construction to two others: a column
+compared against a **bound parameter** (`WHERE name = ?` matches no literal), and a column
+whose exposure is a **UNIQUE INDEX** rather than a predicate at all. Both are where the
+user-supplied names live.
+
+Derived from the database rather than by reading DDL — 39 unique-index columns on MySQL carry
+a case-insensitive collation and exactly **two** are immune:
+
+    SELECT s.table_name, s.column_name, IFNULL(c.collation_name,'(binary - immune)')
+    FROM information_schema.statistics s JOIN information_schema.columns c
+      ON c.table_schema=s.table_schema AND c.table_name=s.table_name
+         AND c.column_name=s.column_name
+    WHERE s.table_schema=DATABASE() AND s.non_unique=0
+      AND c.data_type IN ('varchar','char','text','varbinary','binary');
+
+The two immune ones are `concurrency_keys.key_hash` and `idempotency_keys.key_hash`, both
+`VARBINARY` — a binary type has no collation, so **hashing is what makes them safe**, not
+anything anyone decided about collation.
+
+**That yields the sharpest single instance: the project has two idempotency mechanisms with
+opposite exposure.** `idempotency_keys.key_hash` is hashed and immune;
+`workflow_schedules.idempotency_key` is a `VARCHAR` in a unique index, so two idempotency keys
+differing only in case are **the same key** on two dialects of three and different keys on the
+third.
+
+**And not every column here is a defect, which is why this wants a decision per class rather
+than one blanket `COLLATE`.** `tenant_domains.hostname` and `tenant_egress_allow.host` hold
+hostnames, and DNS is case-insensitive — folding is arguably *correct* for those two. A sweep
+that pins `utf8mb4_bin` everywhere would make them wrong in the other direction.
 
 **Why it has stayed invisible.** Every cross-dialect test uses generated identifiers —
 UUIDs and fixed lowercase names — so no test has ever compared two strings that differ
-only in case. The divergence is not hidden behind a skip; it is behind the *absence of a
+only in case. Nor does any test read a server or column collation
+(`git ls-files '*_test.go' | xargs grep -lniE 'collation_name|@@collation|datcollate'` → nothing
+before this item). The divergence is not hidden behind a skip; it is behind the *absence of a
 case that would show it*, which is the third state §3.211 describes: not bound / bound but
 never executed / executed with a recorded outcome.
 
-**The fix is a decision before it is a migration.** Pinning `utf8mb4_bin` everywhere makes
-MySQL match the others and is a schema change to existing tables. Pinning `ai_ci` on all
-three makes them agree the other way and would change PostgreSQL's behaviour. Doing
-nothing keeps a documented boundary — but it is not documented, and `tiers.yaml` grants
-tier 1 on all three dialects without qualifying it.
+**The fix is a decision before it is a migration, and the measurement changes which option
+is the cheap one.** Written when SQL Server was believed case-sensitive, "pin a binary
+collation and make the odd one out agree" meant changing MySQL alone. It now means changing
+**two of the three** — MySQL and SQL Server — and an `ALTER` on every string column in a unique
+index of a live database. Conversely "make them agree the other way" now means changing
+PostgreSQL alone, which is the *smaller* schema change and the one that makes
+`workflow_schedules.idempotency_key` fold case everywhere, which is worse behaviour. Neither
+direction is obviously right; what is no longer available is choosing without knowing that
+PostgreSQL is the minority.
+
+Doing nothing keeps a boundary that is still not documented, and `tiers.yaml` grants tier 1 on
+all three dialects without qualifying it.
+
+**What landed 2026-09-16 is the measurement and a guard, not a fix.**
+`engine/a_miscased_name_matches_on_two_of_three_dialects_test.go` pins the behaviour per
+dialect with a recorded reason for each, carries both controls above, and reddens naming the
+dialect that moved if a future migration pins a collation. Falsified three ways: each
+dialect's expectation flipped in turn (each arm reddens on its own), and the seed redirected
+to a different name (all three report `UNMEASURED`, as a `Fatal`, rather than a verdict).
+That is the "convert a gap into a failing test rather than describing it" move, and the reason
+it is worth doing here specifically is that **this section's prose was wrong for nine days and
+nothing failed.**
 
 The event-routing design does not wait for this: D4 pins a binary collation on its own key
 slots explicitly, which is correct regardless of what is decided here.
