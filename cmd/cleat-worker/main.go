@@ -26,6 +26,7 @@ import (
 	_ "net/http/pprof" //nolint:gosec // G108: registers /debug/pprof on DefaultServeMux, which this worker never serves. The API listener builds its own http.NewServeMux; pprof gets a separate opt-in listener behind --pprof-addr, empty by default. See the comment at the pprof server below.
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -868,6 +869,24 @@ func main() {
 	// transport needs it too (open question 4) and Go wants it declared before
 	// use. It was below, next to the Worker literal, when only the service
 	// caller consumed it.
+	// PARSED AND VALIDATED AT BOOT, not at the call site. A malformed endpoint is
+	// a configuration mistake, and the moment to report one is startup -- not
+	// the first time a workflow reaches that service, where it arrives as a
+	// failed DurableCall inside a retry rather than as a bad flag.
+	serviceEndpoints, seErr := parseServiceEndpoints(*serviceEndpointsFlag)
+	if seErr != nil {
+		logger.Error("--service-endpoints is not usable", "error", seErr)
+		os.Exit(1)
+	}
+	if len(serviceEndpoints) > 0 {
+		names := make([]string, 0, len(serviceEndpoints))
+		for n := range serviceEndpoints {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		logger.Info("service endpoints registered", "services", strings.Join(names, ","))
+	}
+
 	egressAllow := &engine.TenantEgressStore{DB: db, Dialect: engine.Dialect(*driver)}
 
 	// cleat#1565: egress needs BOTH the operator's permission and the
@@ -1424,6 +1443,7 @@ func main() {
 		reclaimTimeout:                   *reclaimTimeout,
 		flushRetryWindow:                 *flushRetryWindow,
 		privateHosts:                     pluginPrivateHosts,
+		serviceEndpoints:                 serviceEndpoints,
 		egressAllow:                      egressAllow,
 		secrets:                          secretStore,
 		operatorEgress:                   operatorEgress,

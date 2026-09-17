@@ -451,12 +451,22 @@ var (
 	maxPluginConnections = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
 	otelEndpoint         = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
 	otelDisabled         = flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
-	benchSvcURL          = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
-	tenantPoolMaxConns   = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool, used by --tenant-isolation=role. PostgreSQL only: plugin.TenantPools authenticates as a PostgreSQL login role (cleat#1307). The help text said MySQL/MSSQL, which was the opposite of the implementation.")
-	logLevel             = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-	enableAdminAPI       = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
-	verifyBackend        = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
-	listPlugins          = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
+	serviceEndpointsFlag = flag.String("service-endpoints", "",
+		"Comma-separated name=url pairs mapping a service to the base URL that serves it, "+
+			"e.g. \"billing=https://billing.internal,crm=https://crm.internal\". A workflow's "+
+			"h.DurableCall(\"billing\", \"charge\", ...) is POSTed to {url}/call/billing/charge "+
+			"with the caller's traceparent and a replay-stable Idempotency-Key. Registering a "+
+			"service here needs no plugin and no worker rebuild. Keyed by SERVICE, not "+
+			"service.operation: the operation is a route on the service. Every outbound call "+
+			"goes through the egress guard, so the host must also satisfy --egress-allowlist "+
+			"and the non-overridable floor. A malformed entry stops the worker at boot.")
+
+	benchSvcURL        = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
+	tenantPoolMaxConns = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool, used by --tenant-isolation=role. PostgreSQL only: plugin.TenantPools authenticates as a PostgreSQL login role (cleat#1307). The help text said MySQL/MSSQL, which was the opposite of the implementation.")
+	logLevel           = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	enableAdminAPI     = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
+	verifyBackend      = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
+	listPlugins        = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
 )
 
 func applyChildBindingOverrideEnv() {
