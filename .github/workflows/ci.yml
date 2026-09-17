@@ -1005,6 +1005,40 @@ jobs:
   # -------------------------------------------------------------------------
   # Vulnerability check (govulncheck)
   # -------------------------------------------------------------------------
+  build-documented-examples:
+    name: Documented example builds
+    runs-on: ubuntu-latest
+    # Every `cleat build` an example README documents is run, and must succeed.
+    # cleat#1814.
+    #
+    # Measured 2026-09-17: 18 example directories, 10 documenting a `cleat
+    # build`, ZERO built by any workflow -- every `cleat build` string in this
+    # file was inside a comment. So the commands we tell users to run were the
+    # commands nothing ran, and that was load-bearing twice in one day: two
+    # independent implementations of the Python determinism gate both refused
+    # examples/python-langchain's documented command (cleat#1813), and cleat#1809
+    # reached 51 passing checks with one unrelated lint failure between it and
+    # develop.
+    #
+    # Go only for now, which is 8 of the 10. The two Python examples are excluded
+    # BY NAME in the script, against cleat#1836 -- their documented command is
+    # broken today for a reason that has nothing to do with this job. Adding the
+    # Python toolchain here is worth doing once that is fixed; until then it
+    # would be a job that installs componentize-py to skip two examples.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION_STABLE }}
+          cache: true
+
+      - name: Build the cleat CLI
+        run: go build -o .bin/cleat ./cmd/cleat
+
+      - name: Run every documented example build
+        run: scripts/build-documented-examples.sh
+
   vulncheck:
     name: Vulnerability Check
     runs-on: ubuntu-latest
