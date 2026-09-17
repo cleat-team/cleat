@@ -104,7 +104,9 @@ CREATE TABLE admin.tenant_api_keys (
     key_hash    VARBINARY(32)    NOT NULL,
     description NVARCHAR(MAX)    NOT NULL DEFAULT '',
     created_at  DATETIMEOFFSET   NOT NULL DEFAULT SYSUTCDATETIME(),
-    revoked_at  DATETIMEOFFSET   NULL,
+    -- cleat#1702: contract retirement spelling; migration 079 removes
+    -- revoked_at. This file carries the final column set.
+    disabled_at DATETIMEOFFSET   NULL,
     CONSTRAINT pk_admin_tenant_api_keys PRIMARY KEY (key_id),
     CONSTRAINT fk_admin_api_keys_tenant FOREIGN KEY (tenant_id)
         REFERENCES admin.tenants(tenant_id)
@@ -508,7 +510,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_update_requests_pend
 -- a duplicate table nothing wrote -- so the auth lookup, which runs on every
 -- authenticated request and filters on key_hash, had no index at all.
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_api_keys_hash' AND object_id = OBJECT_ID(N'admin.tenant_api_keys'))
-    CREATE INDEX idx_api_keys_hash ON admin.tenant_api_keys(key_hash) WHERE revoked_at IS NULL;
+    CREATE INDEX idx_api_keys_hash ON admin.tenant_api_keys(key_hash) WHERE disabled_at IS NULL;
 
 -- Tenant + task-queue-scoped ready instance claims (includes priority)
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_tenant_queue_ready' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))

@@ -118,7 +118,7 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select name, def_name, entry_point, cron_expression, input, enabled, next_run_",
 		Reason: mysqlDeliberatelyCrossTenant,
 	},
-	"mysql_store.go:ResolveTenantFromAPIKey#66c48155fa04": {
+	"mysql_store.go:ResolveTenantFromAPIKey#fec661be20f9": {
 		SQL:    "select tenant_id from tenant_api_keys where key_hash = ? and disabled_at is nul",
 		Reason: mysqlMustNotScope,
 	},

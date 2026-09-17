@@ -222,7 +222,12 @@ CREATE TABLE IF NOT EXISTS admin.tenant_api_keys (
     key_hash    BYTEA NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    revoked_at  TIMESTAMPTZ
+    -- cleat#1702: the contract retirement spelling. This file carries the
+    -- FINAL column set by design (see the header), so it names disabled_at
+    -- rather than the revoked_at that migration 087 removes -- otherwise
+    -- re-applying 001 to an already-migrated database fails on a column
+    -- that is gone, which TestShippedSchema_IsIdempotent exists to catch.
+    disabled_at TIMESTAMPTZ
 );
 
 -- ── Workflow definition tables ──────────────────────────────────────────────
@@ -478,7 +483,7 @@ CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys(expires_a
 CREATE INDEX IF NOT EXISTS idx_update_requests_pending ON workflow_update_requests(workflow_id, status);
 
 -- API key
-CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON admin.tenant_api_keys(key_hash) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON admin.tenant_api_keys(key_hash) WHERE disabled_at IS NULL;
 
 -- Tenant-scoped indexes
 CREATE INDEX IF NOT EXISTS idx_instances_tenant_ready ON workflow_instances(tenant_id, status, next_wake_at) WHERE status = 'ready';

@@ -25,7 +25,7 @@ type fakeAPIKeyRow struct {
 	tenantID    string
 	keyHashHex  string
 	description string
-	disabledAt   *time.Time
+	disabledAt  *time.Time
 }
 
 // fakeDBStore holds the in-memory data used by the fake SQL driver.

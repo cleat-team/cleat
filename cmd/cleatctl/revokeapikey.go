@@ -243,7 +243,7 @@ type apiKeyRow struct {
 	tenantID    uuid.UUID
 	description string
 	createdAt   sql.NullTime
-	disabledAt   sql.NullTime
+	disabledAt  sql.NullTime
 }
 
 // findAPIKey looks a key up by whichever selector was given. It deliberately
