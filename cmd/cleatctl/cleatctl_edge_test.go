@@ -99,7 +99,7 @@ func TestRunVersions_DispatchGC(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {

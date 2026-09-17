@@ -121,6 +121,7 @@ engine	mssqlTenantTestPool	2
 engine	mysqlIntegrationStore	2
 engine	pythonDeferSegment	1
 engine	pythonDeterminismWasm	1
+engine	requireDialectDSN	1
 engine	setupMSSQLIntegrationTest	2
 engine	withWasmtimeBackend	1
 engine/testutil	MSSQLTestDB	1

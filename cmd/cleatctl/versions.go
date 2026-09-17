@@ -102,7 +102,7 @@ func listVersions(ctx context.Context, store engine.WorkflowStore, args []string
 	fmt.Fprintln(w, "-------\t---\t------\t----------\t-------\t----------")
 	for _, def := range defs {
 		dep := "no"
-		if def.Deprecated {
+		if def.Disabled() {
 			dep = "yes"
 		}
 		count, err := store.CountActiveInstances(ctx, def.Name, def.Version)
@@ -195,7 +195,7 @@ func activeInstances(ctx context.Context, store engine.WorkflowStore, args []str
 				continue
 			}
 			dep := "no"
-			if def.Deprecated {
+			if def.Disabled() {
 				dep = "yes"
 			}
 			fmt.Fprintf(w, "%d\t%d\t%s\n", def.Version, count, dep)

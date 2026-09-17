@@ -31,10 +31,10 @@ func gcPolicyStore() *mockStore {
 	return &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, _ string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
-				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: old},
-				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: old},
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: old},
+				{Name: "wf", Version: 4, GCEligible: false, CreatedAt: time.Now()},
+				{Name: "wf", Version: 3, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: old},
+				{Name: "wf", Version: 2, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: old},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: old},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {

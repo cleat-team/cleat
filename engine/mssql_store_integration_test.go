@@ -131,7 +131,7 @@ func TestMSSQLIntegration_DeployAndGetWorkflowDef(t *testing.T) {
 	if got.MinVersion != 1 {
 		t.Errorf("MinVersion = %d, want 1", got.MinVersion)
 	}
-	if got.Deprecated {
+	if got.Disabled() {
 		t.Error("Deprecated should be false")
 	}
 	if len(got.PluginDeps) != 0 {

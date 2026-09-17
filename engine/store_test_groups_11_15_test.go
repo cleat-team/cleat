@@ -932,7 +932,7 @@ func TestMarkVersionDeprecated(t *testing.T) {
 			if got == nil {
 				t.Fatal("GetWorkflowDef returned nil after deprecation")
 			}
-			if !got.Deprecated {
+			if !got.Disabled() {
 				t.Error("expected Deprecated=true after MarkVersionDeprecated")
 			}
 		})

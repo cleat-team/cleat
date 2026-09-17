@@ -813,7 +813,7 @@ func TestMSSQLStore_GetWorkflowDef_Success(t *testing.T) {
 	pluginDepsJSON := []byte(`{"plugin1":"v1.0"}`)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_defs", data: [][]driver.Value{
-			{"test-wf", int64(3), wasmBytes, int64(2), int64(1), pluginDepsJSON, createdAt, false},
+			{"test-wf", int64(3), wasmBytes, int64(2), int64(1), pluginDepsJSON, createdAt, nil, false},
 		}},
 	}, nil)
 	defer db.Close()
@@ -841,7 +841,7 @@ func TestMSSQLStore_GetWorkflowDef_Success(t *testing.T) {
 	if !def.CreatedAt.Equal(createdAt) {
 		t.Errorf("created_at: %v, want %v", def.CreatedAt, createdAt)
 	}
-	if def.Deprecated {
+	if def.Disabled() {
 		t.Error("should not be deprecated")
 	}
 	if len(def.PluginDeps) != 1 || def.PluginDeps["plugin1"] != "v1.0" {
@@ -853,7 +853,7 @@ func TestMSSQLStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 	createdAt := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_defs", data: [][]driver.Value{
-			{"test-wf", int64(1), []byte("wasm"), int64(1), int64(0), nil, createdAt, false},
+			{"test-wf", int64(1), []byte("wasm"), int64(1), int64(0), nil, createdAt, nil, false},
 		}},
 	}, nil)
 	defer db.Close()

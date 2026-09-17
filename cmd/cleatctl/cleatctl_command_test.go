@@ -839,8 +839,8 @@ func TestListVersions_All(t *testing.T) {
 				return nil, nil
 			}
 			return []engine.WorkflowDef{
-				{Name: "wf-a", Version: 2, ABIVersion: 1, MinVersion: 1, Deprecated: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
-				{Name: "wf-a", Version: 1, ABIVersion: 1, MinVersion: 0, Deprecated: true, CreatedAt: time.Now().Add(-48 * time.Hour)},
+				{Name: "wf-a", Version: 2, ABIVersion: 1, MinVersion: 1, GCEligible: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
+				{Name: "wf-a", Version: 1, ABIVersion: 1, MinVersion: 0, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-48 * time.Hour)},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {
@@ -871,8 +871,8 @@ func TestListVersions_WithName(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: name, Version: 2, ABIVersion: 1, MinVersion: 1, Deprecated: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
-				{Name: name, Version: 1, ABIVersion: 1, MinVersion: 0, Deprecated: true, CreatedAt: time.Now().Add(-48 * time.Hour)},
+				{Name: name, Version: 2, ABIVersion: 1, MinVersion: 1, GCEligible: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
+				{Name: name, Version: 1, ABIVersion: 1, MinVersion: 0, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-48 * time.Hour)},
 			}, nil
 		},
 		countActiveInstancesFn: func(_ context.Context, name string, version int) (int, error) {
@@ -1125,8 +1125,8 @@ func TestActiveInstances_WithName(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: name, Version: 2, Deprecated: false, CreatedAt: time.Now()},
-				{Name: name, Version: 1, Deprecated: true, CreatedAt: time.Now()},
+				{Name: name, Version: 2, GCEligible: false, CreatedAt: time.Now()},
+				{Name: name, Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now()},
 			}, nil
 		},
 		countActiveInstancesFn: func(_ context.Context, name string, version int) (int, error) {
@@ -1182,10 +1182,10 @@ func TestGCVersions_Success(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
-				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 4, GCEligible: false, CreatedAt: time.Now()},
+				{Name: "wf", Version: 3, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 2, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {
@@ -1213,10 +1213,10 @@ func TestGCVersions_DryRun(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
-				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 4, GCEligible: false, CreatedAt: time.Now()},
+				{Name: "wf", Version: 3, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 2, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {
@@ -1652,7 +1652,7 @@ func TestActiveInstances_WithNameCountError(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: name, Version: 1, Deprecated: false, CreatedAt: time.Now()},
+				{Name: name, Version: 1, GCEligible: false, CreatedAt: time.Now()},
 			}, nil
 		},
 		countActiveInstancesFn: func(_ context.Context, name string, version int) (int, error) {
@@ -1677,10 +1677,10 @@ func TestGCVersions_WithErrors(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
-				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 4, GCEligible: false, CreatedAt: time.Now()},
+				{Name: "wf", Version: 3, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 2, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {
@@ -1745,10 +1745,10 @@ func TestGCVersions_ArgsNotDryRun(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
-				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 4, GCEligible: false, CreatedAt: time.Now()},
+				{Name: "wf", Version: 3, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 2, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {

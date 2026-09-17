@@ -153,7 +153,12 @@ CREATE TABLE dbo.workflow_defs (
     task_queue      NVARCHAR(255)   NOT NULL DEFAULT 'default',
     abi_version     INT             NOT NULL DEFAULT 1,
     plugin_deps     NVARCHAR(MAX)   NOT NULL DEFAULT '{}',
-    deprecated      BIT             NOT NULL DEFAULT 0,
+    -- cleat#1702: admission control (disabled_at) and collection
+    -- eligibility (gc_eligible) are SEPARATE, and their equality in
+    -- practice is incidental, not invariant -- migration 088 says why.
+    -- This file carries the final column set, so `deprecated` is gone.
+    disabled_at     DATETIMEOFFSET  NULL,
+    gc_eligible     BIT             NOT NULL DEFAULT 0,
     CONSTRAINT pk_workflow_defs PRIMARY KEY (name, version)
 );
 

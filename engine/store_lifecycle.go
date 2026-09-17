@@ -1155,7 +1155,7 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 // StartChildWorkflow creates a child workflow instance linked to a parent.
 // The child is created with its own independent workflow instance.
 // If defVersion > 0, that version is used explicitly; otherwise the latest
-// non-deprecated version is used (SELECT MAX(version)).
+// non-disabled version is used (SELECT MAX(version)).
 
 // reapLimitArg turns the interface's "limit <= 0 is unbounded" into a value a
 // LIMIT clause accepts on every dialect. math.MaxInt32 rather than NULL: NULL

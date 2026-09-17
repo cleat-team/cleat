@@ -107,7 +107,7 @@ func NewWorkflowLoader(db *sql.DB, rt *Runtime, diskCache *WasmDiskCache, maxSiz
 // SQL: SELECT wasm_bytes, abi_version, plugin_deps, min_version
 //
 //	FROM workflow_defs
-//	WHERE name = $1 AND version = $2 AND NOT deprecated
+//	WHERE name = $1 AND version = $2 AND disabled_at IS NULL
 func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wazero.CompiledModule, error) {
 	key := defKey{Name: name, Version: version}
 
@@ -129,7 +129,7 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 		err := l.db.QueryRowContext(ctx, `
 			SELECT wasm_bytes, abi_version, plugin_deps, min_version
 			FROM workflow_defs
-			WHERE name = $1 AND version = $2 AND NOT deprecated
+			WHERE name = $1 AND version = $2 AND disabled_at IS NULL
 		`, name, version).Scan(&wasmBytes, &abiVersion, &pluginDepsJSON, &minVer)
 		if errors.Is(err, sql.ErrNoRows) {
 			l.misses.Add(1)
@@ -165,7 +165,7 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 //	VALUES ($1, $2, $3, $4, $5, $6)
 //	ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 //	  wasm_bytes = $3, abi_version = $4, plugin_deps = $5, min_version = $6,
-//	  deprecated = false, created_at = now()
+//	  disabled_at IS NULL, created_at = now()
 func (l *WorkflowLoader) Deploy(ctx context.Context, name string, version int, wasmBytes []byte, pluginDeps map[string]string, minVersion int) error {
 	pluginDepsJSON, err := json.Marshal(pluginDeps)
 	if err != nil {
@@ -180,7 +180,7 @@ func (l *WorkflowLoader) Deploy(ctx context.Context, name string, version int, w
 			abi_version = EXCLUDED.abi_version,
 			plugin_deps = EXCLUDED.plugin_deps,
 			min_version = EXCLUDED.min_version,
-			deprecated = false,
+			disabled_at IS NULL,
 			created_at = now()
 	`, name, version, wasmBytes, pluginDepsJSON, minVersion)
 	if err != nil {
@@ -196,10 +196,20 @@ func (l *WorkflowLoader) Deploy(ctx context.Context, name string, version int, w
 // Active instances will continue to run, but new instances will not be
 // created with this version (unless explicitly requested).
 //
-// SQL: UPDATE workflow_defs SET deprecated = true WHERE name = $1 AND version = $2
+// WRITES BOTH COLUMNS, like the stores' MarkVersionDeprecated. This is the
+// SECOND shipped writer of the pair -- cleat#1702's note that `cleatctl
+// versions deprecate` is the only one was wrong, and this path is why the
+// "both writes move together" property is asserted per writer rather than
+// argued once. A version left eligible but not disabled is live and
+// collectable.
+//
+// SQL: UPDATE workflow_defs SET disabled_at = COALESCE(disabled_at, now()), gc_eligible = true
 func (l *WorkflowLoader) Deprecate(ctx context.Context, name string, version int) error {
 	result, err := l.db.ExecContext(ctx, `
-		UPDATE workflow_defs SET deprecated = true WHERE name = $1 AND version = $2
+		UPDATE workflow_defs
+		   SET disabled_at = COALESCE(disabled_at, now()),
+		       gc_eligible = true
+		 WHERE name = $1 AND version = $2
 	`, name, version)
 	if err != nil {
 		return fmt.Errorf("deprecate %s v%d: %w", name, version, err)
@@ -220,12 +230,12 @@ func (l *WorkflowLoader) Deprecate(ctx context.Context, name string, version int
 // ListVersions returns all deployed versions of a workflow definition,
 // ordered by version descending.
 //
-// SQL: SELECT name, version, wasm_bytes, abi_version, plugin_deps, min_version, created_at, deprecated
+// SQL: SELECT name, version, wasm_bytes, abi_version, plugin_deps, min_version, created_at, disabled_at, gc_eligible
 //
 //	FROM workflow_defs WHERE name = $1 ORDER BY version DESC
 func (l *WorkflowLoader) ListVersions(ctx context.Context, name string) ([]WorkflowDef, error) {
 	rows, err := l.db.QueryContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, plugin_deps, min_version, created_at, deprecated
+		SELECT name, version, wasm_bytes, abi_version, plugin_deps, min_version, created_at, disabled_at, gc_eligible
 		FROM workflow_defs
 		WHERE name = $1
 		ORDER BY version DESC
@@ -241,7 +251,7 @@ func (l *WorkflowLoader) ListVersions(ctx context.Context, name string) ([]Workf
 		var pluginDeps sql.NullString
 		if err := rows.Scan(&def.Name, &def.Version, &def.WASMBytes,
 			&def.ABIVersion, &pluginDeps, &def.MinVersion,
-			&def.CreatedAt, &def.Deprecated); err != nil {
+			&def.CreatedAt, &def.DisabledAt, &def.GCEligible); err != nil {
 			return nil, fmt.Errorf("scan workflow def: %w", err)
 		}
 		if pluginDeps.Valid {
@@ -297,12 +307,12 @@ func (l *WorkflowLoader) ActiveVersions(ctx context.Context) (map[string][]int, 
 //
 // SQL: SELECT COALESCE(MAX(version), 0) FROM workflow_defs
 //
-//	WHERE name = $1 AND NOT deprecated
+//	WHERE name = $1 AND disabled_at IS NULL
 func (l *WorkflowLoader) ResolveLatestVersion(ctx context.Context, name string) (int, error) {
 	var version int
 	err := l.db.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(version), 0) FROM workflow_defs
-		WHERE name = $1 AND NOT deprecated
+		WHERE name = $1 AND disabled_at IS NULL
 	`, name).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("resolve latest version for %s: %w", name, err)

@@ -13,7 +13,28 @@ type WorkflowDef struct {
 	MinVersion int               `json:"min_version"`
 	PluginDeps map[string]string `json:"plugin_deps,omitempty"`
 	CreatedAt  time.Time         `json:"created_at"`
-	Deprecated bool              `json:"deprecated"`
+
+	// DisabledAt carries ADMISSION CONTROL, and only that. A disabled version
+	// cannot be started, cannot be routed to, cannot be pointed at by a tag,
+	// and is not chosen for a child workflow. NULL means live.
+	//
+	// It does NOT make the version collectable. That is GCEligible, and the
+	// separation is the point of cleat#1702: a generic entity helper reaching
+	// for the contract's `disabled_at` must not arm a permanent deletion.
+	DisabledAt *time.Time `json:"disabled_at,omitempty"`
+
+	// GCEligible carries COLLECTION ELIGIBILITY, and only that.
+	// engine/version_gc.go keys on this to decide what PurgeWorkflowDef may
+	// delete permanently once it is older than --version-gc-max-age.
+	//
+	// THE EQUALITY OF THESE TWO FIELDS IS INCIDENTAL, NOT INVARIANT. Today
+	// `cleatctl versions deprecate` writes both and is the only shipped path
+	// that writes either, so every row in every deployment has them agreeing.
+	// That is not a reason to merge them -- it is the state cleat#1702 calls
+	// "bound but never executed", and the difference is pinned by
+	// engine/gc_eligibility_is_not_retirement_test.go rather than by any
+	// production row.
+	GCEligible bool `json:"gc_eligible"`
 
 	// MaxHistoryLength caps this definition's event history before compaction,
 	// overriding the global threshold. 0 means "use the global", which is the
@@ -27,6 +48,18 @@ type WorkflowDef struct {
 	// chosen for. See cleat#889.
 	MaxHistoryLength int `json:"max_history_length,omitempty"`
 }
+
+// RetiredAt returns a pointer for DisabledAt. Paired with GCEligible: true it
+// is the state `cleatctl versions deprecate` produces, and it exists because a
+// struct literal cannot take the address of a time.Time.
+func RetiredAt(t time.Time) *time.Time { return &t }
+
+// Disabled reports whether admission control refuses this version.
+//
+// A predicate rather than exported pointer comparison at every call site: the
+// question callers ask is "may this version be used", and DisabledAt != nil is
+// easy to write as DisabledAt == nil by accident in a negated condition.
+func (d WorkflowDef) Disabled() bool { return d.DisabledAt != nil }
 
 // WorkflowInstance is a row from workflow_instances.
 type WorkflowInstance struct {

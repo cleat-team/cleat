@@ -227,16 +227,17 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	// redeploy of the same version, which is an ordinary upsert.
 	// IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id, max_history_length)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, gc_eligible, tenant_id, max_history_length)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 			wasm_bytes = EXCLUDED.wasm_bytes,
 			abi_version = EXCLUDED.abi_version,
 			min_version = EXCLUDED.min_version,
 			plugin_deps = EXCLUDED.plugin_deps,
-			deprecated = EXCLUDED.deprecated,
+			disabled_at = EXCLUDED.disabled_at,
+			gc_eligible = EXCLUDED.gc_eligible,
 			max_history_length = EXCLUDED.max_history_length
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, tenantID, def.MaxHistoryLength)
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.DisabledAt, def.GCEligible, tenantID, def.MaxHistoryLength)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}
@@ -256,12 +257,12 @@ func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wo
 	var rows *sql.Rows
 	if name == "" {
 		rows, err = tx.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
 			FROM workflow_defs ORDER BY name, version DESC
 		`)
 	} else {
 		rows, err = tx.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
 			FROM workflow_defs WHERE name = $1 ORDER BY version DESC
 		`, name)
 	}
@@ -276,7 +277,7 @@ func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wo
 		var pluginDepsRaw []byte
 		var createdAt time.Time
 		if err := rows.Scan(&def.Name, &def.Version, &def.ABIVersion, &def.MinVersion,
-			&pluginDepsRaw, &createdAt, &def.Deprecated); err != nil {
+			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible); err != nil {
 			return nil, fmt.Errorf("scan workflow def: %w", err)
 		}
 		def.CreatedAt = createdAt
@@ -308,10 +309,10 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	var wasmBytes []byte
 	var createdAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, deprecated
+		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
 		FROM workflow_defs WHERE name = $1 AND version = $2
 	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
-		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.Deprecated)
+		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
@@ -329,8 +330,25 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	return &def, tx.Commit()
 }
 
-// MarkVersionDeprecated sets the deprecated flag on a workflow version.
-
+// MarkVersionDeprecated retires a workflow version, or restores it.
+//
+// IT WRITES BOTH COLUMNS, AND THAT IS THE SAFETY PROPERTY OF cleat#1702's
+// SPLIT. `disabled_at` is admission control and `gc_eligible` is collection
+// eligibility; deprecating a version means both, which is what `cleatctl
+// versions deprecate` has always meant and keeps the operator workflow
+// unchanged. What the split removes is a GENERIC writer of `disabled_at` being
+// able to arm a deletion.
+//
+// A PARTIAL WRITE HERE WOULD BE WORSE THAN THE COLUMN IT REPLACED. This
+// function also UN-deprecates (the bool), so clearing retirement without
+// clearing eligibility leaves a version that is LIVE AND COLLECTABLE -- a state
+// neither the old `deprecated` boolean nor either new column can express alone.
+// The two writes are therefore one statement in one transaction, and
+// engine/gc_eligibility_is_not_retirement_test.go asserts they move together
+// rather than trusting the call sites to stay in step.
+//
+// COALESCE, not a bare now(): re-deprecating an already-disabled version must
+// not reset the instant it was disabled.
 func (s *PostgresStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -339,7 +357,10 @@ func (s *PostgresStore) MarkVersionDeprecated(ctx context.Context, name string, 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_defs SET deprecated = $3 WHERE name = $1 AND version = $2
+		UPDATE workflow_defs
+		   SET disabled_at = CASE WHEN $3 THEN COALESCE(disabled_at, now()) ELSE NULL END,
+		       gc_eligible = $3
+		 WHERE name = $1 AND version = $2
 	`, name, version, deprecated)
 	if err != nil {
 		return fmt.Errorf("mark version deprecated: %w", err)
@@ -434,7 +455,7 @@ func (s *PostgresStore) ResolveLatestVersion(ctx context.Context, defName string
 	var version int
 	err = tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(version), 0) FROM workflow_defs
-		WHERE name = $1 AND NOT deprecated AND tenant_id = $2
+		WHERE name = $1 AND disabled_at IS NULL AND tenant_id = $2
 	`, defName, s.tenantID).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("resolve latest version: %w", err)
@@ -446,7 +467,7 @@ func (s *PostgresStore) ResolveLatestVersion(ctx context.Context, defName string
 // exists and is not deprecated. Returns true if the version can be used.
 //
 //	SQL: SELECT EXISTS(SELECT 1 FROM workflow_defs
-//	     WHERE name = $1 AND version = $2 AND NOT deprecated)
+//	     WHERE name = $1 AND version = $2 AND disabled_at IS NULL)
 
 func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -459,7 +480,7 @@ func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, def
 	err = tx.QueryRowContext(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM workflow_defs
-			WHERE name = $1 AND version = $2 AND NOT deprecated
+			WHERE name = $1 AND version = $2 AND disabled_at IS NULL
 		)
 	`, defName, defVersion).Scan(&exists)
 	if err != nil {
