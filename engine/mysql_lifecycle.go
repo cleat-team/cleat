@@ -1340,29 +1340,33 @@ func (s *MySQLStore) tryStartNewRunUnderIdempotencyKey(
 	}
 	defer tx.Rollback()
 
-	// Clear this key's row if its TTL has passed, so the insert below can
-	// take the key over.
+	// THE EXPIRED-ROW SWEEP RUNS ONLY WHEN THERE IS ONE, AND THAT ORDERING IS
+	// THE FIX. cleat#1753, second round.
 	//
-	// WITHOUT THIS, `n == 0` BELOW HAS TWO CAUSES AND THE CODE ASSUMES
-	// ONE: an expired row still blocks the insert and still reports no
-	// rows affected, identical to the concurrent-insert case it is read
-	// as. Only one of the two has a winner to re-read, and the re-read
-	// filters on expiry, so for the other it looks for a row it cannot see
-	// and the caller gets sql.ErrNoRows instead of a new run. cleat#1671.
+	// It used to run unconditionally, before the insert. Under REPEATABLE READ
+	// -- the default, and what cleat runs on -- an equality DELETE that matches
+	// NO row takes a gap lock on the gap where the row would go, and gap locks
+	// are mutually COMPATIBLE. So every concurrent starter acquired one, and
+	// then every one of them needed an insert-intention lock inside a gap the
+	// others held. That is a guaranteed cycle rather than an unlucky one, and
+	// InnoDB resolved it by killing starters.
 	//
-	// Not a visibility fix: letting the re-read see the expired row would
-	// hand the caller a workflow id whose key the TTL already retired.
+	// RETRYING IT WAS THE FIRST FIX AND IT WAS THE WRONG SHAPE. The deadlock is
+	// structural, so more attempts only means more contenders re-entering the
+	// same cycle. It held at 8 racers locally and exhausted 8 attempts on a
+	// loaded CI runner -- measured on develop, after it merged.
 	//
-	// The expiry predicate is load bearing -- a row refreshed by a
-	// concurrent starter is LIVE, and deleting it would let two runs hold
-	// one key. Then this matches nothing, the insert reports the conflict,
-	// and that path is already correct.
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM idempotency_keys
-		 WHERE key_hash = ? AND tenant_id = ? AND expires_at <= NOW(6)`,
-		keyHash[:], tenantID); err != nil {
-		return "", false, fmt.Errorf("start new run: clear expired idempotency key: %w", err)
-	}
+	// Inserting FIRST removes the lock on the common path: with no prior DELETE
+	// nobody holds a gap lock, so racers serialise on the key itself and the
+	// losers get a duplicate rather than a deadlock. The sweep still happens,
+	// below, on the one path that needs it -- and there it MATCHES a row, so it
+	// takes a record lock and not a gap lock.
+	//
+	// cleat#1671 is why the sweep cannot simply be deleted: an expired row
+	// blocks the insert and reports 0 rows affected, identical to the
+	// concurrent-insert case, and the re-read filters on expiry -- so without a
+	// sweep that caller looks for a row it cannot see and gets sql.ErrNoRows
+	// instead of a new run.
 
 	// Insert idempotency key record. INSERT IGNORE handles the race where
 	// two requests arrive with the same key simultaneously -- and, since
@@ -1379,10 +1383,45 @@ func (s *MySQLStore) tryStartNewRunUnderIdempotencyKey(
 
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		// A LIVE row exists, so someone else won the race. INSERT IGNORE
-		// reports 0 only for a row it could not add, and after the delete
-		// above the only such row is one whose TTL has not passed -- so
-		// the re-read's own expiry filter will find it (cleat#1671).
+		// A row exists. It is EITHER a live winner to replay OR an expired row
+		// to sweep, and the affected count alone cannot tell them apart --
+		// which is precisely what cleat#1671 was. Ask which.
+		var expired bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT expires_at <= NOW(6) FROM idempotency_keys
+			 WHERE key_hash = ? AND tenant_id = ?`,
+			keyHash[:], tenantID).Scan(&expired); err != nil {
+			return "", false, fmt.Errorf("start new run: classify the blocking idempotency key: %w", err)
+		}
+		if expired {
+			// Sweep it and take the key over. This DELETE matches a row, so it
+			// takes a record lock rather than the gap lock that made the
+			// unconditional sweep deadlock.
+			//
+			// The expiry predicate is still load bearing: a row refreshed by a
+			// concurrent starter is LIVE, and deleting it would let two runs
+			// hold one key. If it was refreshed between the SELECT and here this
+			// matches nothing, the insert below reports the conflict again, and
+			// the live branch answers it.
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM idempotency_keys
+				 WHERE key_hash = ? AND tenant_id = ? AND expires_at <= NOW(6)`,
+				keyHash[:], tenantID); err != nil {
+				return "", false, fmt.Errorf("start new run: clear expired idempotency key: %w", err)
+			}
+			res, err = tx.ExecContext(ctx,
+				`INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name, input_digest)
+				 VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?, ?, ?)`,
+				keyHash[:], runID, ttlSeconds, tenantID, defName, inputDigest)
+			if err != nil {
+				return "", false, err
+			}
+			n, _ = res.RowsAffected()
+		}
+	}
+	if n == 0 {
+		// A LIVE row exists, so someone else won the race, and the re-read's own
+		// expiry filter will find it (cleat#1671).
 		//
 		// Rollback and return the existing one.
 		tx.Rollback()

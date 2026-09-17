@@ -244,10 +244,37 @@ func TestConcurrentStartsOnOneKeyStillYieldOneRun(t *testing.T) {
 // TestConcurrentStartsOnOneKeyStillYieldOneRun catches that on PostgreSQL; this
 // is what catches it on the other two.
 func TestEveryDialectClearsAnExpiredIdempotencyKeyBeforeInserting(t *testing.T) {
-	for _, c := range []struct{ file, nowExpr, insert string }{
-		{"store_lifecycle.go", "now()", "INSERT INTO idempotency_keys"},
-		{"mysql_lifecycle.go", "NOW(6)", "INSERT IGNORE INTO idempotency_keys"},
-		{"mssql_lifecycle.go", "SYSUTCDATETIME()", "INSERT INTO idempotency_keys"},
+	// sweepsFirst says whether this dialect clears the dead row BEFORE
+	// attempting the insert.
+	//
+	// MYSQL NO LONGER DOES, AND THAT IS THE FIX FOR cleat#1753, not a
+	// regression of cleat#1671. An unconditional equality DELETE that matches
+	// nothing takes a gap lock under REPEATABLE READ, gap locks are mutually
+	// compatible, and every concurrent starter then needed an insert-intention
+	// lock inside a gap the others held -- a guaranteed deadlock cycle. MySQL
+	// now sweeps inside the conflict branch, where the DELETE matches a row and
+	// takes a record lock instead.
+	//
+	// THE HAZARD THIS ORDERING CHECK NAMES CANNOT ARISE THERE. It exists to stop
+	// a delete that "removes the row the insert just wrote" -- and on that path
+	// the insert wrote nothing, which is why the branch was entered at all.
+	//
+	// The other two clauses below still apply to every dialect and are the ones
+	// carrying the weight: the sweep must EXIST, and it must be scoped by
+	// expiry. What is given up is a proxy for the property, so the property is
+	// now checked directly instead, on all three dialects and against real
+	// databases, by TestAnExpiredIdempotencyKeyStartsANewRunOnEveryDialect --
+	// which fails with `sql: no rows in result set` when the sweep is removed.
+	// That test was written BECAUSE this clause was being relaxed; before it,
+	// this file's behavioural half was PostgreSQL only and this guard was the
+	// only thing covering the other two.
+	for _, c := range []struct {
+		file, nowExpr, insert string
+		sweepsFirst           bool
+	}{
+		{"store_lifecycle.go", "now()", "INSERT INTO idempotency_keys", true},
+		{"mysql_lifecycle.go", "NOW(6)", "INSERT IGNORE INTO idempotency_keys", false},
+		{"mssql_lifecycle.go", "SYSUTCDATETIME()", "INSERT INTO idempotency_keys", true},
 	} {
 		t.Run(c.file, func(t *testing.T) {
 			src := stripGoComments(readSourceForTest(t, c.file))
@@ -263,10 +290,18 @@ func TestEveryDialectClearsAnExpiredIdempotencyKeyBeforeInserting(t *testing.T) 
 				t.Fatalf("%s no longer contains %q -- this test is matching on a form the "+
 					"file has stopped using, so it asserts nothing", c.file, c.insert)
 			}
-			if del > ins {
+			if c.sweepsFirst && del > ins {
 				t.Errorf("%s deletes the expired key AFTER inserting (delete at %d, insert at "+
 					"%d). That removes the row the insert just wrote and leaves cleat#1671 "+
 					"in place", c.file, del, ins)
+			}
+			// And the inverse, so `sweepsFirst: false` cannot be set on a
+			// dialect that still sweeps first and quietly disable the check.
+			if !c.sweepsFirst && del < ins {
+				t.Errorf("%s is declared as sweeping inside the conflict branch, but its "+
+					"delete (at %d) precedes its insert (at %d). Either the ordering changed "+
+					"back -- in which case set sweepsFirst -- or this entry is wrong and the "+
+					"check above has been silently switched off.", c.file, del, ins)
 			}
 
 			// The delete statement itself, not merely somewhere in the file.
