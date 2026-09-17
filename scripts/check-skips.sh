@@ -199,6 +199,37 @@ total_skips() {
   awk -F'\t' '{ n += $3 } END { print n + 0 }' <<<"$1"
 }
 
+# stale_entries prints the baseline lines whose (dir, function) key the current
+# scan does not produce at all. cleat#1746.
+#
+# KEYED ON THE FIRST TWO FIELDS, not on the whole line. A key present with a
+# different count is already handled as grown or shrunk; this is for a key that
+# has vanished, which is the only case neither of those can see.
+#
+# A SEPARATE FUNCTION so the self-test can drive it against a fixture. The
+# comparison it belongs to is inline in the script body and cannot be exercised
+# without running the whole guard over a staged repo -- and a check whose
+# correctness is only ever asserted by running it on a healthy tree is the
+# defect this whole change is about.
+#
+# $1 is the current scan; the baseline path comes from $BASELINE, or $2 when
+# given, which is what the self-test passes.
+stale_entries() {
+  local current="$1" baseline="${2:-$BASELINE}" line key out=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in \#*) continue ;; esac
+    key="$(cut -f1,2 <<<"$line")"
+    # A literal tab terminates the key, so `engine Setup` cannot match
+    # `engine SetupForTenant` -- the prefix collision this file already has
+    # four live instances of.
+    if ! printf '%s\n' "$current" | grep -qF "$key	"; then
+      out="${out}${line}"$'\n'
+    fi
+  done < "$baseline"
+  printf '%s' "$out"
+}
+
 # self_test builds a fixture tree and asserts what scan() attributes a skip to.
 #
 # WHY THIS EXISTS AT ALL: until cleat#1740 this script had no self-test, and the
@@ -277,6 +308,36 @@ FIXTURE
   # The defect itself, stated as a refusal.
   _refute "helperAboveTheMethods"            "no skip may be credited to the function above a method"
 
+  # cleat#1746: a baseline key the scan no longer produces must be REPORTED.
+  # Driven against a fixture baseline, because on a healthy tree "no stale
+  # entries" and "the check does not run" print identically -- which is exactly
+  # how this went unnoticed while develop carried one.
+  local fixture="$tmp/baseline.txt"
+  printf 'pkg\tTestPlainFunction\t1\npkg\tGoneAway\t2\npkg\tMySQLBackend.Setup\t1\n' > "$fixture"
+  local scan_out
+  scan_out="$(printf 'pkg\tTestPlainFunction\t1\npkg\tMySQLBackend.Setup\t1\n')"
+
+  local got
+  got="$(stale_entries "$scan_out" "$fixture")"
+  if ! printf '%s' "$got" | grep -qF 'GoneAway'; then
+    echo "SELF-TEST FAILED: a baseline entry the scan does not produce was not reported stale" >&2
+    ok=1
+  fi
+  # The negative control, and it is the half that catches an over-eager check:
+  # keys the scan DOES produce must not be reported, or every run fails and the
+  # guard gets switched off.
+  if printf '%s' "$got" | grep -qE 'TestPlainFunction|MySQLBackend'; then
+    echo "SELF-TEST FAILED: a live baseline entry was reported stale" >&2
+    ok=1
+  fi
+  # Prefix safety: `pkg Setup` must not be satisfied by `pkg SetupForTenant`.
+  # This file has four live keys with that shape.
+  printf 'pkg\tSetup\t1\n' > "$fixture"
+  if ! stale_entries "$(printf 'pkg\tSetupForTenant\t1\n')" "$fixture" | grep -qF 'Setup	1'; then
+    echo "SELF-TEST FAILED: a key matched a longer key sharing its prefix" >&2
+    ok=1
+  fi
+
   if [ "$ok" -eq 0 ]; then
     echo "self-test passed"
   fi
@@ -324,6 +385,16 @@ die_if_scan_failed "$current"
 # and the CI runner.
 new="$(printf '%s\n' "$current" | grep -Fxv -f "$BASELINE" || true)"
 
+# AND THE OTHER DIRECTION, which this script did not compute until cleat#1746.
+# `new` is `current - BASELINE`. A baseline key the scanner no longer produces
+# AT ALL appears in neither set: not added, not grown, not even shrunk, because
+# every one of those is derived from a line that is present in `current`.
+#
+# So a grant covering something that is not there was invisible, and the guard
+# exited 0 over it. The skip LEDGER next door has always checked this -- "a line
+# matching fewer is stale ... and fails" -- and the baseline did not.
+stale="$(stale_entries "$current")"
+
 # An entry can be "new" for two different reasons, and they deserve different
 # messages: a function that had no skips before, or one whose count changed.
 # A count that fell is progress, so it is reported and not failed on.
@@ -357,6 +428,23 @@ if [ -n "$grown" ]; then
   echo "ERROR: skip count grew in:" >&2
   echo >&2
   printf '%s' "$grown" | sed 's/^/  /' >&2
+  status=1
+fi
+
+if [ -n "$stale" ]; then
+  echo "ERROR: baseline entries that match nothing in the tree:" >&2
+  echo >&2
+  printf '%s' "$stale" | sed 's/^/  /' >&2
+  echo >&2
+  echo "Each of these grants a skip for a function the scan no longer reports." >&2
+  echo "That is either progress -- the test was deleted or stopped skipping --" >&2
+  echo "or a stale regeneration that silently reinstated an older scan. Both" >&2
+  echo "are fixed the same way, and the point of failing is that the second" >&2
+  echo "one is otherwise invisible:" >&2
+  echo "  scripts/check-skips.sh --update" >&2
+  echo >&2
+  echo "cleat#1746: a baseline regenerated from a base that predates a change" >&2
+  echo "to this scanner merges CLEANLY over the newer one and reverts it." >&2
   status=1
 fi
 
