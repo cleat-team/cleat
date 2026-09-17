@@ -243,25 +243,19 @@ def parse_tables(migrations_dir):
             for col, typ in split_columns(src[m.end():close]):
                 tables[name][col] = typ
 
-        for m in re.finditer(
-            r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_.\"]+)\s+"
-            r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s+([A-Za-z0-9_ ]*)",
-            src,
-            re.I,
-        ):
+        for m in re.finditer(ALTER_ADD_RE, src):
             name = qualify(m.group(1))
             if name in tables:
                 tables[name][m.group(2).lower()] = m.group(3).strip().upper()
+            else:
+                errors.append(unattributable_alter(path, "ADD", name, m.group(2)))
 
-        for m in re.finditer(
-            r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_.\"]+)\s+"
-            r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?([a-z_][a-z0-9_]*)",
-            src,
-            re.I,
-        ):
+        for m in re.finditer(ALTER_DROP_RE, src):
             name = qualify(m.group(1))
             if name in tables:
                 tables[name].pop(m.group(2).lower(), None)
+            else:
+                errors.append(unattributable_alter(path, "DROP", name, m.group(2)))
 
     return tables, errors
 
@@ -326,6 +320,44 @@ CREATE_TABLE_RE = re.compile(
     r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:%s\.)?%s)\s*\(" % (IDENT, IDENT),
     re.I,
 )
+
+# The ALTER scans take the SAME identifier grammar as CREATE_TABLE_RE. They did
+# not until cleat#1730: they matched `[A-Za-z0-9_."]+`, so a bracketed T-SQL or
+# backticked MySQL target did not match and the column was dropped in silence.
+#
+# Measured at b6e88452, that discarded nothing -- 0 unattributable ALTERs in all
+# three dialects -- and it had no path to a wrong verdict either, because the
+# sibling dialects are compared on membership only and Postgres's two live
+# spellings were both already matched. It is fixed anyway, and the WIDENING is
+# the smaller half. The `else` below is the larger one: a scan that cannot
+# attribute a statement now says so instead of quietly knowing less.
+ALTER_ADD_RE = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?((?:%s\.)?%s)\s+"
+    r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s+([A-Za-z0-9_ ]*)"
+    % (IDENT, IDENT),
+    re.I,
+)
+ALTER_DROP_RE = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?((?:%s\.)?%s)\s+"
+    r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?([a-z_][a-z0-9_]*)" % (IDENT, IDENT),
+    re.I,
+)
+
+
+def unattributable_alter(path, verb, name, column):
+    """An ALTER naming a table this scan never parsed.
+
+    Reported rather than skipped. The column it carries would otherwise vanish
+    from the schema the contract is checked against, and a smaller schema is
+    one a guard agrees with more easily -- the failure always points at "clean".
+    """
+    return ("%s: ALTER TABLE %s %s COLUMN %s names a table this scan never "
+            "parsed, so the column was discarded. Either its CREATE TABLE is "
+            "written in a form this scan does not read, or the table is created "
+            "outside %s."
+            % (os.path.basename(path), name, verb, column,
+               os.path.basename(os.path.dirname(path)) or "these migrations"))
+
 
 # SQL Server's admin schema is Postgres's admin schema; dbo is its public.
 SCHEMA_ALIASES = {"dbo": "public"}
@@ -581,16 +613,29 @@ def check(migrations_dir, registry_path, grandfather_path, sibling_dirs=()):
         gf.add((table, clause))
 
     # 3. The contract, per member, per clause.
+    #
+    # `evaluated` counts clauses this loop ACTUALLY checked. Everything else in
+    # this function is arithmetic over the registry and the grandfather list,
+    # which is what cleat#1730 was about: a number derived from the inputs
+    # cannot notice that the loop skipped a member, so it reported the same
+    # "17 of 40" on a tree where one member had vanished from the scan.
+    stale_set = set(stale)
+    evaluated = 0
+    unparsed = []
     for table in members:
         if table not in tables:
-            # Already reported as stale above. Indexing here would raise, and a
-            # guard that crashes on a bad registry gives a traceback instead of
-            # the finding -- which the self-test caught on its first run.
+            # Stale -- absent from EVERY dialect -- is already reported above.
+            # Absent from this dialect while present in a sibling is not, and
+            # that is the case that used to pass: not stale, so no failure; not
+            # parsed, so no clause of it was ever checked.
+            if table not in stale_set:
+                unparsed.append(table)
             continue
         cols = tables[table]
         for clause in CLAUSES:
             if (table, clause) in gf:
                 continue
+            evaluated += 1
             if clause == "no-legacy-retirement":
                 present = [c for c in LEGACY_RETIREMENT if c in cols]
                 if present:
@@ -617,13 +662,66 @@ def check(migrations_dir, registry_path, grandfather_path, sibling_dirs=()):
             % (grandfather_path, len(gf), GRANDFATHER_CEILING)
         )
 
-    enforced = len(members) * len(CLAUSES) - len(gf)
+    total = len(members) * len(CLAUSES)
+    enforced = total - len(gf)
     out.append("tables parsed: %d (%s); members: %d; grandfathered pairs: %d"
                % (len(tables),
                   ", ".join("%s %d" % (n, c) for n, c in sibling_counts) or "postgres only",
                   len(members), len(gf)))
-    out.append("clauses enforced this run: %d of %d"
-               % (enforced, len(members) * len(CLAUSES)))
+    # The reported figure is the COUNTED one. It was the arithmetic one until
+    # cleat#1730, and the two agree only when every member was parsed -- which
+    # is exactly the condition the figure exists to establish.
+    out.append("clauses enforced this run: %d of %d" % (evaluated, total))
+
+    if unparsed:
+        return 2, out + ["", "SCAN FAILED: these members are classified, exist "
+                             "in another dialect's migrations, and were not "
+                             "parsed here, so no clause of theirs was checked:\n"
+                         + "".join("    %s\n" % t for t in sorted(unparsed))
+                         + "  A member the scan missed is not a member that passes."]
+
+    # The expectation excludes members already reported stale: those are a
+    # registry failure (exit 1) rather than evidence the scan misread anything.
+    #
+    # NO FIXTURE CAN REACH THIS, AND THAT IS SAID OUT LOUD RATHER THAN LEFT FOR
+    # SOMEONE TO DISCOVER. Every way the loop currently skips a member is either
+    # stale (excluded from `expected`) or unparsed (returned just above), so the
+    # two agree by construction. It is a backstop against a FUTURE skip added to
+    # the loop, and by CLAUDE.md's own rule a branch nothing can reach has never
+    # been observed to be wrong. So it was observed on purpose, twice:
+    #
+    #   a skip the `unparsed` list cannot see --
+    #       if table.endswith("workflow_routing"): continue
+    #   -> 15 of 40; "the loop checked 15 ... predict 17"
+    #
+    #   the whole loop, from the cleat-ports session on cleat#1731 --
+    #       for table in []:
+    #   -> 0 of 40; "the loop checked 0 ... predict 35"
+    #
+    # The second is the one to keep. Before this change the SAME sabotage printed
+    # `clauses enforced this run: 35 of 40` and `OK: the entity contract holds`
+    # and exited 0, character for character identical to a real run -- so the
+    # VERDICT line was blind to the clause checks not running, not just the
+    # figure.
+    #
+    # WHY THIS CHECK IS ORDERED BEFORE THE `evaluated == 0` GATE BELOW, and it is
+    # not cosmetic. Both fire on `for table in []`. The vacuity gate's message
+    # says every clause is grandfathered, which here is FALSE -- 5 of 40 are. A
+    # correct status with a wrong explanation sends the reader to the grandfather
+    # list rather than to the loop, and is the failure mode CLAUDE.md records as
+    # "the error fired; only its explanation was wrong".
+    #
+    # A recorded observation is weaker than a test and much stronger than a
+    # branch nobody has run. If you make this reachable by fixture, add the case
+    # and delete this comment.
+    expected = sum(1 for t in members if t not in stale_set
+                   for c in CLAUSES if (t, c) not in gf)
+    if evaluated != expected:
+        return 2, out + ["", "SCAN FAILED: the loop checked %d clauses where the "
+                             "registry and grandfather list predict %d. The two "
+                             "disagree only if a member was skipped, which means "
+                             "this run does not measure what it reports."
+                             % (evaluated, expected)]
 
     # Vacuity is checked BEFORE the ordinary failures, and the order is not
     # cosmetic. Exit 2 means "the scan did not establish what it was measuring",
@@ -632,7 +730,7 @@ def check(migrations_dir, registry_path, grandfather_path, sibling_dirs=()):
     # over-grandfathering the whole tree tripped the ceiling and reported 1, so
     # the one status that means "this told you nothing" was unreachable in the
     # case it exists for. Found by falsifying, not by reading.
-    if enforced == 0:
+    if evaluated == 0:
         return 2, out + ["", "SCAN FAILED: every clause of every member is "
                              "grandfathered, so this run enforced nothing. That "
                              "agrees with every schema, conforming or not."]
@@ -700,6 +798,19 @@ CREATE TABLE public.widgets (
 
 SELF_TEST_CASES = [
     ("a conforming entity passes", CONFORMING, "public.widgets\tmember\n", 0, None),
+
+    # cleat#1730, the two halves of the ALTER change. The first is the widening:
+    # a bracketed target used to match nothing, so the column it adds vanished
+    # and the member read as missing disabled_at. The second is the recording,
+    # which is the half that catches the form nobody thought of.
+    ("a bracketed ALTER supplies a column the CREATE lacks",
+     CONFORMING.replace("    disabled_at TIMESTAMPTZ,\n", "")
+     + "ALTER TABLE [public].[widgets] ADD COLUMN disabled_at TIMESTAMPTZ;\n",
+     "public.widgets\tmember\n", 0, None),
+
+    ("an ALTER naming a table the scan never parsed is reported, not dropped",
+     CONFORMING + "ALTER TABLE [dbo].[nowhere] ADD COLUMN disabled_at TIMESTAMPTZ;\n",
+     "public.widgets\tmember\n", 2, "names a table this scan never parsed"),
     ("missing created_at",
      CONFORMING.replace("    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),\n", ""),
      "public.widgets\tmember\n", 1, "has no created_at"),
@@ -802,6 +913,16 @@ SIBLING_CASES = [
     ("a sibling dialect with no tables at all",
      "-- nothing here\n",
      "public.widgets\tmember\n", 2, "parsed 0 tables"),
+
+    # cleat#1730. This case PASSED until the clause loop counted its own work:
+    # public.gadgets is a member, exists in the sibling so it is not stale, and
+    # is absent from the reference dialect's parse -- so every clause of it was
+    # skipped and nothing said so. The reported "clauses enforced" did not move
+    # either, because it was arithmetic over the registry rather than a count.
+    ("a member the reference dialect's scan did not parse",
+     "CREATE TABLE [dbo].[gadgets] (\n  gadget_id UNIQUEIDENTIFIER PRIMARY KEY\n);\n",
+     "public.widgets\tmember\npublic.gadgets\tmember\n",
+     2, "A member the scan missed is not a member that passes"),
 ]
 
 # The unterminated-comment diagnosis is dialect-specific, and pointing it the
