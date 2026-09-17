@@ -348,6 +348,45 @@ jobs:
           scripts/check-section-numbers.sh --self-test
           scripts/check-section-numbers.sh
 
+      # A declaration inserted between a doc comment and the declaration it
+      # documents. Go attaches doc comments by ADJACENCY, so the whole block
+      # silently becomes the newcomer's documentation and the original is left
+      # with none -- and nothing complains: gofmt accepts it, `go vet` accepts
+      # it, and the golangci-lint config here enables no doc-comment linter
+      # (measured 2026-09-16 with an unused variable as the known-positive, so
+      # the silence is a result rather than a vacuous run).
+      #
+      # It is invisible in review -- the diff shows a function being added, with
+      # correct content, in a plausible place -- and invisible in `git log`,
+      # because the comment's text does not change. What changes is what it sits
+      # above. Two instances: cleat#1717's PR, caught by hand, and
+      # `wasm/exports.go` in f01e3973, which this guard found and which shipped.
+      #
+      # PULL REQUESTS ONLY, and that is a real limit rather than a convenience:
+      # the check is a comparison, so a push build has no base to compare
+      # against. A defect already on the base branch is invisible by
+      # construction. Run it over history to find those.
+      #
+      # The base SHA is fetched explicitly because this job's checkout is
+      # shallow (depth 1, the merge commit), so `origin/develop` does not exist
+      # here and the guard would report UNMEASURED for every PR.
+      - name: Doc-comment reattachment guard
+        if: github.event_name == 'pull_request'
+        run: |
+          # --self-test first, and it is the half that matters. On a tree where
+          # nothing moved, "no declaration lost its doc comment" is the same
+          # output a guard that did nothing would print, so the self-test is
+          # what distinguishes them: it requires the detector to REPORT a
+          # planted defect, stay quiet on the control, key a method on its own
+          # name, and not read a `func` inside a raw string literal as a
+          # declaration. That last case was written as a limitation to document
+          # and turned out to be a bug -- it was dropping 169 phantom
+          # declarations' worth of noise from cmd/cleat-gen's code templates.
+          python3 scripts/check-doc-comment-reattachment.py --self-test
+          git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}
+          python3 scripts/check-doc-comment-reattachment.py \
+            ${{ github.event.pull_request.base.sha }} HEAD
+
       # Two migration files in one dialect must not share a version number.
       # The runner keys schema_migrations on the filename's numeric prefix, so
       # they collapse to one row: a fresh database applies both (which is why
