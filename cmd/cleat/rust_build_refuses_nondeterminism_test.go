@@ -52,8 +52,7 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 	build := func(t *testing.T, fixture string) string {
 		t.Helper()
 		dir := filepath.Join("..", "..", "testdata", "vet-checks", "rust", fixture)
-		out, _ := exec.Command(cleatBinary, "build", "--target", "rust", dir,
-			"-o", t.TempDir()).CombinedOutput()
+		out, _ := exec.Command(cleatBinary, "build", "--target", "rust", "-o", t.TempDir(), dir).CombinedOutput()
 		return string(out)
 	}
 
