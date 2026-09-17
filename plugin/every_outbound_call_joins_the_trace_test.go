@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,7 +150,16 @@ func TestEveryOutboundCallJoinsTheTrace(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		lines := strings.Split(string(src), "\n")
+		blanked, err := withoutComments(f, src)
+		if err != nil {
+			// NOT a skip. A tracked .go file that does not parse is
+			// UNMEASURED, and an unmeasured file reads exactly like one with
+			// no outbound calls in it. All 520 non-test sources parse today,
+			// so this firing means something is genuinely wrong.
+			t.Errorf("%s: does not parse, so its outbound calls were not checked: %v", f, err)
+			continue
+		}
+		lines := strings.Split(string(blanked), "\n")
 		// Precompute the enclosing function for each line.
 		enclosing := make([]string, len(lines))
 		cur := "(package level)"
@@ -218,8 +229,68 @@ func TestEveryOutboundCallJoinsTheTrace(t *testing.T) {
 	}
 }
 
+// withoutComments returns src with every comment's text replaced by spaces,
+// byte offsets and line numbers untouched.
+//
+// WHY, AND IT IS THE WHOLE OF THIS CHANGE. functionPropagates below asks
+// whether the enclosing function MENTIONS SetTraceparent. A mention in a
+// comment is a mention. Measured on develop by commenting out the call at
+// cmd/cleat-worker/setup.go:228 and leaving its name behind:
+//
+//   - plugin.SetTraceparent(req, c.traceID)
+//
+//   - // sabotage: plugin.SetTraceparent(req, c.traceID)
+//
+//     ok  github.com/cleat-team/cleat/plugin  0.312s
+//
+// The tree still builds, and an outbound request that no longer carries the
+// caller's trace passes a test called "every outbound call joins the trace".
+// The negative control is what makes that a blind spot rather than a broken
+// guard: DELETING the same line fails it correctly. It is blind to exactly the
+// form a developer produces -- a call disabled in place, or a name left in a
+// doc comment after a refactor. Two comments in that same file already mention
+// SetTraceparent, so the masking text was already there. (cleat#1768.)
+//
+// Blanking rather than deleting, because every line index in this guard -- the
+// enclosing-function table, the reported line number, the debt-list key -- is
+// an index into the ORIGINAL file. A comment stripper that shortens anything
+// silently re-points all of them.
+//
+// It also fixes the over-reporting direction, which nobody had hit: the site
+// scan skips a line whose FIRST non-space is "//", so a trailing
+// "// http.NewRequest(" would have been counted as a real call site.
+func withoutComments(path string, src []byte) ([]byte, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, src, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(src))
+	copy(out, src)
+	base := fset.File(file.Pos()).Base()
+	for _, group := range file.Comments {
+		lo := int(group.Pos()) - base
+		hi := int(group.End()) - base
+		if lo < 0 || hi > len(out) || lo > hi {
+			continue
+		}
+		for i := lo; i < hi; i++ {
+			if out[i] != '\n' {
+				out[i] = ' '
+			}
+		}
+	}
+	return out, nil
+}
+
 // functionPropagates reports whether the function enclosing line idx mentions
 // SetTraceparent anywhere in its body.
+//
+// Still a mention rather than a call, deliberately: propagation reaches a
+// request through helpers and wrappers here, and requiring the CallExpr in the
+// same function would report sites that are correct. What it is no longer
+// satisfied by is a mention in a COMMENT -- withoutComments above blanks those
+// before this ever sees them.
 func functionPropagates(lines, enclosing []string, idx int) bool {
 	fn := enclosing[idx]
 	for i := range lines {
@@ -228,4 +299,95 @@ func functionPropagates(lines, enclosing []string, idx int) bool {
 		}
 	}
 	return false
+}
+
+// TestTheTraceScanIsNotSatisfiedByAComment is the known-positive this guard did
+// not have.
+//
+// Every outbound site in the tree either propagates or is declared, so a run
+// over the repo is green whether functionPropagates is right, wrong, or
+// deleted. That is how a substring match survived: nothing ever handed it a
+// case that should fail. These fixtures do.
+//
+// It drives withoutComments and functionPropagates together, over the same
+// enclosing-function table the real scan builds, because asserting on
+// withoutComments alone would leave the JOIN between them untested -- and the
+// join is where the defect lived.
+func TestTheTraceScanIsNotSatisfiedByAComment(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool // does the function enclosing the NewRequest site propagate?
+	}{{
+		name: "a real call propagates",
+		src: "package p\n\nfunc send() {\n\treq, _ := http.NewRequest(\"GET\", u, nil)\n" +
+			"\tplugin.SetTraceparent(req, id)\n}\n",
+		want: true,
+	}, {
+		name: "the call commented out, its name left behind -- the defect",
+		src: "package p\n\nfunc send() {\n\treq, _ := http.NewRequest(\"GET\", u, nil)\n" +
+			"\t// plugin.SetTraceparent(req, id)\n}\n",
+		want: false,
+	}, {
+		name: "a doc comment mentioning it, above a function that does not call it",
+		src: "package p\n\n// send would SetTraceparent if it had a trace to join.\n" +
+			"func send() {\n\treq, _ := http.NewRequest(\"GET\", u, nil)\n}\n",
+		want: false,
+	}, {
+		name: "a trailing comment on the request line itself",
+		src:  "package p\n\nfunc send() {\n\treq, _ := http.NewRequest(\"GET\", u, nil) // no SetTraceparent yet\n}\n",
+		want: false,
+	}, {
+		name: "a block comment",
+		src: "package p\n\nfunc send() {\n\treq, _ := http.NewRequest(\"GET\", u, nil)\n" +
+			"\t/* plugin.SetTraceparent(req, id) */\n}\n",
+		want: false,
+	}, {
+		name: "the neighbour must not vouch: another function calls it",
+		src: "package p\n\nfunc other() {\n\tplugin.SetTraceparent(req, id)\n}\n\n" +
+			"func send() {\n\treq, _ := http.NewRequest(\"GET\", u, nil)\n}\n",
+		want: false,
+	}}
+
+	newReq := regexp.MustCompile(`http\.NewRequest(WithContext)?\(`)
+	funcDecl := regexp.MustCompile(`^func (?:\([^)]*\) )?([A-Za-z_][A-Za-z0-9_]*)`)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			blanked, err := withoutComments("fixture.go", []byte(tc.src))
+			if err != nil {
+				t.Fatalf("the fixture does not parse, so this case asserts nothing: %v", err)
+			}
+			// Line numbers must survive the blanking, or every key this guard
+			// reports points at the wrong line.
+			if got, want := strings.Count(string(blanked), "\n"), strings.Count(tc.src, "\n"); got != want {
+				t.Fatalf("blanking changed the line count: %d, want %d", got, want)
+			}
+
+			lines := strings.Split(string(blanked), "\n")
+			enclosing := make([]string, len(lines))
+			cur := "(package level)"
+			for i, ln := range lines {
+				if m := funcDecl.FindStringSubmatch(ln); m != nil {
+					cur = m[1]
+				}
+				enclosing[i] = cur
+			}
+			idx := -1
+			for i, ln := range lines {
+				if strings.HasPrefix(strings.TrimSpace(ln), "//") || !newReq.MatchString(ln) {
+					continue
+				}
+				idx = i
+			}
+			if idx < 0 {
+				t.Fatalf("UNMEASURED: no outbound request site found in the fixture, so "+
+					"nothing was asked about it.\n%s", string(blanked))
+			}
+			if got := functionPropagates(lines, enclosing, idx); got != tc.want {
+				t.Errorf("functionPropagates = %v, want %v, for the site in %q",
+					got, tc.want, enclosing[idx])
+			}
+		})
+	}
 }
