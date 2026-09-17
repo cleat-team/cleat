@@ -90,6 +90,7 @@ CREATE TABLE workflow_defs (
     abi_version INTEGER NOT NULL DEFAULT 1,
     plugin_deps JSONB NOT NULL DEFAULT '{}',
     deprecated BOOLEAN NOT NULL DEFAULT false,
+    disabled_at TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, name, version)
 );
 ```
@@ -345,6 +346,7 @@ CREATE TABLE workflow_schedules (
     last_run_id TEXT,
     idempotency_key TEXT,
     request_digest TEXT,
+    disabled_at TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, name)
 );
 
