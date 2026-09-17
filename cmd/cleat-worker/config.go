@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+
+	"github.com/cleat-team/cleat/migration"
 )
 
 // Config holds structured configuration for the cleat worker.
@@ -390,11 +392,21 @@ var (
 			"Entry forms: an exact host as it appears in the endpoint URL. Matching is on "+
 			"the HOST, so \"localhost\" and \"127.0.0.1\" are different entries. cleat#1627")
 	encryptSensitivePayloads = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
-	maxQuotaEvents           = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
-	maxQuotaChildren         = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
-	maxQuotaConcurrencyKeys  = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
-	maxQuotaSchedules        = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
-	claimAcrossTenants       = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. "+
+	migrationLockTimeout     = flag.Duration("migration-lock-timeout", migration.DefaultLockTimeout,
+		"How long a migration statement waits for a lock before failing. A migration needing ACCESS EXCLUSIVE "+
+			"(ALTER TABLE, CREATE INDEX without CONCURRENTLY, DROP) otherwise waits forever behind any conflicting "+
+			"lock -- an idle-in-transaction session is enough -- and queues every later reader behind itself. It is "+
+			"worse than a slow boot: every worker migrates at boot, a worker stuck in migrations is not heartbeating, "+
+			"so its runs go stale and the reaper collects them while the database is mid-DDL. 0 disables the bound and "+
+			"restores the historical behaviour of waiting indefinitely, which is a real choice for a first migration "+
+			"onto a large busy table. PostgreSQL only: the other dialects have no pinned migration session to set it "+
+			"on, and setting it on a pooled handle would leak the bound into application traffic. See cleat#1775.")
+
+	maxQuotaEvents          = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
+	maxQuotaChildren        = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
+	maxQuotaConcurrencyKeys = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
+	maxQuotaSchedules       = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
+	claimAcrossTenants      = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. "+
 		"Requires a database-side grant, and on SQL Server it now requires TWO steps rather than one.\n"+
 		"PostgreSQL: migrations/postgres/023_cross_tenant_claim.sql.\n"+
 		"SQL Server: apply migrations/mssql/optional/cross_tenant_claim.sql -- which is NOT applied "+

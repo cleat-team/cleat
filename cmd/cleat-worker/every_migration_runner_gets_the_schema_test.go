@@ -51,8 +51,8 @@ func TestEveryMigrationRunnerGetsTheConfiguredSchema(t *testing.T) {
 				// whose receiver is this NewRunner call instead.
 				if !hasWithSchema(f, call) {
 					pos := fset.Position(call.Pos())
-					t.Errorf("%s:%d: migration.NewRunner(...) is not followed by "+
-						".WithSchema(*schemaName).\n\n"+
+					t.Errorf("%s:%d: migration.NewRunner(...) has no .WithSchema(*schemaName) "+
+						"anywhere in its chain.\n\n"+
 						"Without it this runner builds into public while the "+
 						"runtime pool looks in --schema, which is cleat#1287.",
 						pos.Filename, pos.Line)
@@ -104,7 +104,15 @@ func hasWithSchema(f *ast.File, target *ast.CallExpr) bool {
 		if !ok || sel.Sel.Name != "WithSchema" {
 			return true
 		}
-		if sel.X == ast.Expr(target) {
+		// CHAIN MEMBERSHIP, NOT ADJACENCY. This compared sel.X to target by
+		// identity, which requires WithSchema to be the call IMMEDIATELY after
+		// NewRunner. That is stricter than the property this guard is for --
+		// its own heading says every runner must "be told the configured
+		// schema", not that WithSchema must come first -- and it made any
+		// legitimately inserted option a failure whose message said WithSchema
+		// was missing when it was three characters away. cleat#1775 inserted
+		// WithLockTimeout and hit exactly that.
+		if containsCall(sel.X, target) {
 			found = true
 			return false
 		}
@@ -154,4 +162,18 @@ func trackedGoFiles(t *testing.T) []string {
 		files = append(files, line)
 	}
 	return files
+}
+
+// containsCall reports whether target appears anywhere inside expr, which is
+// what makes the receiver test see through an intervening .WithX(...) in the
+// same chain.
+func containsCall(expr ast.Expr, target *ast.CallExpr) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if n == ast.Node(target) {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
