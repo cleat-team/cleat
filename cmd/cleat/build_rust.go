@@ -24,6 +24,28 @@ func runBuildRust(pattern, outDir, channel string, workflowVersion int) {
 		os.Exit(1)
 	}
 
+	// Determinism gate. The Go target runs the whole-program analysis in
+	// runBuild before emitting anything; every other target reached its
+	// builder through an early return and emitted an artifact with no
+	// determinism checking at all (cleat#1770).
+	//
+	// It runs BEFORE the cargo lookup deliberately. runVetRust is pure Go and
+	// needs no toolchain, so a crate with determinism errors is refused on a
+	// machine that could not have compiled it either way. Refusing for the
+	// real reason beats refusing for an incidental one -- see the comment on
+	// the known-limit fixture in rust_build_refuses_nondeterminism_test.go for
+	// what that distinction costs when it is missing.
+	//
+	// Note what this check is and is not. forbiddenRustPatterns is literal
+	// substring matching, so passing it is not evidence of determinism; it is
+	// evidence that none of a short list of spellings appeared. The fixture
+	// pair in that test states the limit rather than leaving it implied.
+	if code := runVetRust(cargoDir); code != 0 {
+		fmt.Fprintf(os.Stderr, "\nError: determinism check failed for %s -- no artifact was emitted.\n", cargoDir)
+		fmt.Fprintf(os.Stderr, "Fix the errors above, or run 'cleat vet --lang rust %s' to see them again.\n", cargoDir)
+		os.Exit(1)
+	}
+
 	// Check for cargo.
 	if _, err := exec.LookPath("cargo"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cargo not found. Install Rust: https://rustup.rs\n")

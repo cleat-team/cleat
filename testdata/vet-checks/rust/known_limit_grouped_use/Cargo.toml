@@ -1,0 +1,4 @@
+[package]
+name = "cleat-test-known-limit-grouped-use"
+version = "0.1.0"
+edition = "2021"
