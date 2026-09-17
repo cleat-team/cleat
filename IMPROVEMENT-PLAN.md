@@ -14382,3 +14382,69 @@ Note which way round the two instruments point: a deletion audit alone would hav
 "nothing deleted it", been right, and been useless. And note what the reproduction does NOT show —
 that this is what happened in the observed runs. That is unknowable after the fact, which is the
 whole reason the instrument has to be armed before a failure rather than read after one.
+---
+
+### 3.339 A figure derived from the inputs cannot notice that the run skipped work — ✅ **FIXED 2026-09-17** (cleat#1730)
+
+`check-entity-contract.py`'s clause loop skipped any member missing from the reference
+dialect's parse, on a comment that was true only sometimes:
+
+    for table in members:
+        if table not in tables:
+            # Already reported as stale above.
+            continue
+
+`stale` is computed against the union of all three dialects' bare names, so a member whose
+Postgres `CREATE TABLE` the scan failed to read — while MySQL or SQL Server still defines it —
+is **not** stale, is skipped past every clause, and the guard exits 0.
+
+Measured by making `workflow_tags`'s Postgres CREATE unmatchable and leaving the siblings
+intact, with the mutation asserted applied before the result was read:
+
+| | clean | one member unparsed in Postgres |
+|---|---|---|
+| `tables parsed` | 23 | **22** |
+| `clauses enforced this run` | 17 of 40 | **17 of 40** |
+| verdict | `OK`, exit 0 | `OK`, exit 0 |
+
+**The second half is the one worth carrying.** `clauses enforced this run` existed to stop a
+run that agrees with every schema because it checked nothing — the §3.335 vacuity gate. It
+could not, because it was arithmetic over two TSV files:
+
+    enforced = len(members) * len(CLAUSES) - len(gf)
+
+Whether the loop evaluated a single column never reaches it. `CLAUDE.md` says to gate on a
+quantity **the run cannot shrink**; this gated on one **the run cannot touch**, which is the
+degenerate case — a restatement of the inputs wearing the costume of a measurement. The
+distinction is not academic: the figure is the only thing standing between a partial run and a
+green one, and it was inert.
+
+The repair is to count what the loop evaluated and report *that*; the arithmetic becomes an
+expectation to disagree with rather than the answer. A member absent here but present in a
+sibling is now named at exit 2. `ALTER_ADD_RE`/`ALTER_DROP_RE` also take the same `IDENT`
+alternation `CREATE_TABLE_RE` uses, and an ALTER naming an unparsed table is recorded rather
+than discarded — the widening closed a gap that discarded nothing (0 unattributable ALTERs in
+all three dialects at `b6e88452`), and the recording is the half that catches the form nobody
+thought of.
+
+**Three self-test cases, each falsified by reverting ONE part at a time.** Reverting the whole
+fix goes red and reads as confirmation of all of it; reverting one part at a time is what
+attributes each case to its own mechanism:
+
+    revert widening (ALTER_ADD_RE grammar)      exit=1  names its own case
+    revert recording (else: errors.append)      exit=1  names its own case
+    revert unparsed-member detection            exit=1  names its own case
+    restored                                    26/26 pass, rc=0
+
+**One branch is untested and says so in the source.** The `evaluated != expected` backstop is
+unreachable by any fixture — every current skip is either stale or unparsed — so by this repo's
+own rule it has never been observed to be wrong. It was observed deliberately by injecting a
+skip the `unparsed` list cannot see, and the injection and its output sit in the comment beside
+it, with instructions to delete the comment when someone makes it fixture-reachable. A recorded
+observation is weaker than a test and much stronger than a branch nobody has run.
+
+Found while prototyping a different fix. The original report (the `ALTER` identifier asymmetry)
+overstated its own impact in the flattering direction, and the correction is in cleat#1730's
+comments rather than silently edited away.
+
+Files: `scripts/check-entity-contract.py`.
