@@ -1758,7 +1758,6 @@ func TestMySQLIntegration_ScheduleLifecycle(t *testing.T) {
 		EntryPoint:     "main",
 		CronExpression: "*/5 * * * *",
 		Input:          json.RawMessage(`{"scheduled":true}`),
-		Enabled:        true,
 		NextRunAt:      time.Now().Add(-1 * time.Hour), // due now
 	}
 	if err := s.CreateSchedule(ctx, sched); err != nil {
@@ -1781,8 +1780,8 @@ func TestMySQLIntegration_ScheduleLifecycle(t *testing.T) {
 			if sc.DefName != "test-workflow" {
 				t.Errorf("DefName = %q, want %q", sc.DefName, "test-workflow")
 			}
-			if !sc.Enabled {
-				t.Error("Enabled should be true")
+			if sc.Disabled() {
+				t.Error("schedule should be live, but disabled_at is set")
 			}
 			break
 		}

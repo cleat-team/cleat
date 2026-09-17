@@ -1474,7 +1474,7 @@ type CrossTenantScheduleReader interface {
 // rows it exists to find.
 func (s *PostgresStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled,
+		SELECT name, def_name, entry_point, cron_expression, input, disabled_at,
 		       next_run_at, last_run_at, timezone, tenant_id, misfire_policy,
 		       catch_up_limit, overlap_policy, last_run_id
 		FROM admin.get_due_schedules()
@@ -1523,7 +1523,7 @@ func scanDueSchedules(rows *sql.Rows) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.Input, &sch.DisabledAt, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
 			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, fmt.Errorf("get due schedules scan: %w", err)
 		}

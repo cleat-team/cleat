@@ -419,7 +419,6 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      now.Add(time.Hour),
 			}); err != nil {
 				t.Fatalf("CreateSchedule on store A: %v", err)
@@ -432,7 +431,6 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      now.Add(time.Hour),
 			}); err != nil {
 				t.Fatalf("CreateSchedule on store B: %v", err)

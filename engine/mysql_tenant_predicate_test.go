@@ -114,8 +114,13 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
 		Reason: mysqlDeliberatelyCrossTenant,
 	},
-	"mysql_ops.go:GetDueSchedulesAcrossTenants#145bfdc4ffef": {
-		SQL:    "select name, def_name, entry_point, cron_expression, input, enabled, next_run_",
+	// DIGEST MOVED IN cleat#1702; see the mssql twin for the full note. The
+	// column list changed `enabled` to `disabled_at` (migration 077) and
+	// nothing else: re-checked against the new text, this is still the
+	// cross-tenant due read with no tenant predicate and no tenant parameter,
+	// which is the property the exemption is about.
+	"mysql_ops.go:GetDueSchedulesAcrossTenants#94fc5e397863": {
+		SQL:    "select name, def_name, entry_point, cron_expression, input, disabled_at, next_",
 		Reason: mysqlDeliberatelyCrossTenant,
 	},
 	"mysql_store.go:ResolveTenantFromAPIKey#fec661be20f9": {

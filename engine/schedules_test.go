@@ -85,7 +85,7 @@ func TestScheduleCron_WritesTheScheduleTheGuestAskedFor(t *testing.T) {
 			if got.Timezone != "America/New_York" {
 				t.Errorf("timezone = %q, want America/New_York", got.Timezone)
 			}
-			if !got.Enabled {
+			if got.Disabled() {
 				t.Error("schedule was created disabled; a guest that asked for a cron expects it to run")
 			}
 			if !got.NextRunAt.After(time.Now().Add(-time.Minute)) {

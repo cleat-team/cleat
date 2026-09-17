@@ -1200,12 +1200,17 @@ func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 
 func TestPostgresStore_ListSchedules(t *testing.T) {
 	nextRunAt := time.Date(2025, 1, 1, 2, 0, 0, 0, time.UTC)
+	// disabled_at replaced an `enabled` BOOLEAN in cleat#1702, inverting
+	// polarity: nil is LIVE. The instant differs from next_run_at and
+	// last_run_at on purpose -- it sits between them in the scan, so three
+	// equal timestamps would let a misread column pass.
+	disabledAt := nextRunAt.Add(-72 * time.Hour)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nextRunAt, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
-				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
+				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), nil, nextRunAt, nextRunAt, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
+				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), disabledAt, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
 			},
 		},
 	}, nil)
@@ -1219,7 +1224,7 @@ func TestPostgresStore_ListSchedules(t *testing.T) {
 	if len(scheds) != 2 {
 		t.Fatalf("expected 2 schedules, got %d", len(scheds))
 	}
-	if scheds[0].Name != "sched-1" || !scheds[0].Enabled {
+	if scheds[0].Name != "sched-1" || scheds[0].Disabled() {
 		t.Errorf("unexpected first schedule: %+v", scheds[0])
 	}
 	if scheds[1].Name != "sched-2" || scheds[1].LastRunAt != nil {
@@ -1242,7 +1247,7 @@ func TestPostgresStore_GetDueSchedules(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
+				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), nil, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
 			},
 		},
 	}, nil)
@@ -3009,7 +3014,7 @@ func TestPostgresStore_SetScheduleEnabled_BeginError(t *testing.T) {
 
 func TestPostgresStore_SetScheduleEnabled_ExecError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_schedules SET enabled", err: errors.New("update failed")},
+		{match: "UPDATE workflow_schedules", err: errors.New("update failed")},
 	})
 	defer db.Close()
 

@@ -313,7 +313,21 @@ CREATE TABLE dbo.workflow_schedules (
     entry_point     NVARCHAR(255)   NOT NULL DEFAULT '',
     cron_expression NVARCHAR(255)   NOT NULL,
     input           NVARCHAR(MAX)   NOT NULL DEFAULT '{}',
+    -- cleat#1702: BOTH SPELLINGS ARE HERE, DELIBERATELY. `enabled BIT` is the
+    -- legacy retirement column, dropped by migration 081; `disabled_at` is the
+    -- contract spelling, added by 076. An existing database carries both
+    -- between those two migrations, and declaring both here makes a fresh
+    -- database traverse the same window rather than a shortcut, so the
+    -- conversion's guards and backfill are one code path on every dialect.
+    -- PostgreSQL is the dialect that FORCES this -- its 001 cannot drop the
+    -- column without breaking a fresh bootstrap at migration 024, and the
+    -- alternative was rejected by routine_definition_drift_test.go; these two
+    -- follow so the three 001 files tell the same story. The header's
+    -- invariant is about re-applying this file, and that still holds: the
+    -- INDEX below, which is the part that would break on a dropped column, is
+    -- final. See migrations/postgres/089.
     enabled         BIT             NOT NULL DEFAULT 1,
+    disabled_at     DATETIMEOFFSET  NULL,
     next_run_at     DATETIMEOFFSET  NOT NULL DEFAULT SYSUTCDATETIME(),
     last_run_at     DATETIMEOFFSET  NULL,
     created_at      DATETIMEOFFSET  NOT NULL DEFAULT SYSUTCDATETIME(),
@@ -532,8 +546,8 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_signals_tenant_wf' A
     CREATE INDEX idx_signals_tenant_wf ON dbo.workflow_signals(tenant_id, workflow_id, signal_name);
 
 -- Tenant-scoped schedule due lookups
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_schedules_tenant_enabled' AND object_id = OBJECT_ID(N'dbo.workflow_schedules'))
-    CREATE INDEX idx_schedules_tenant_enabled ON dbo.workflow_schedules(tenant_id, enabled, next_run_at);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_schedules_tenant_due' AND object_id = OBJECT_ID(N'dbo.workflow_schedules'))
+    CREATE INDEX idx_schedules_tenant_due ON dbo.workflow_schedules(tenant_id, next_run_at) WHERE disabled_at IS NULL;
 
 -- Idempotency key lookups by workflow
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_idempotency_workflow_id' AND object_id = OBJECT_ID(N'dbo.idempotency_keys'))

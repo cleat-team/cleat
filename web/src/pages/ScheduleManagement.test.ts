@@ -26,7 +26,8 @@ const mockSchedule: Schedule = {
   def_name: 'process-orders',
   entry_point: '',
   input: '',
-  enabled: true,
+  // No disabled_at: a live schedule OMITS the key. cleat#1702 replaced an
+  // `enabled: true` boolean here, inverting the polarity.
   next_run_at: '2024-01-01T02:00:00Z',
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
@@ -42,6 +43,29 @@ describe('ScheduleManagement', () => {
     vi.resetAllMocks();
     listSchedules.mockResolvedValue([mockSchedule]);
     createSchedule.mockResolvedValue(undefined);
+  });
+
+  // The toggle is the one place the cleat#1702 polarity inversion could land
+  // backwards without anything failing to compile: `disabled_at` is truthy for
+  // a RETIRED schedule, where `enabled` was truthy for a live one. A button
+  // wired the old way disables what is already disabled and reads as a no-op.
+  it('offers Disable for a live schedule, and calls disableSchedule', async () => {
+    render(ScheduleManagement);
+    const btn = await screen.findByText('Disable');
+    await fireEvent.click(btn);
+    expect(disableSchedule).toHaveBeenCalledWith('hourly-job');
+    expect(enableSchedule).not.toHaveBeenCalled();
+  });
+
+  it('offers Enable for a retired schedule, and calls enableSchedule', async () => {
+    listSchedules.mockResolvedValue([
+      { ...mockSchedule, disabled_at: '2024-01-01T01:00:00Z' },
+    ]);
+    render(ScheduleManagement);
+    const btn = await screen.findByText('Enable');
+    await fireEvent.click(btn);
+    expect(enableSchedule).toHaveBeenCalledWith('hourly-job');
+    expect(disableSchedule).not.toHaveBeenCalled();
   });
 
   it('shows each schedule\'s timezone in the table', async () => {

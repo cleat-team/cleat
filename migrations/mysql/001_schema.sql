@@ -188,7 +188,21 @@ CREATE TABLE IF NOT EXISTS workflow_schedules (
     entry_point        VARCHAR(255) NOT NULL DEFAULT '',
     cron_expression    TEXT NOT NULL,
     input              JSON NOT NULL DEFAULT ('{}'),
+    -- cleat#1702: BOTH SPELLINGS ARE HERE, DELIBERATELY. `enabled TINYINT(1)` is the
+    -- legacy retirement column, dropped by migration 077; `disabled_at` is the
+    -- contract spelling, added by 072. An existing database carries both
+    -- between those two migrations, and declaring both here makes a fresh
+    -- database traverse the same window rather than a shortcut, so the
+    -- conversion's guards and backfill are one code path on every dialect.
+    -- PostgreSQL is the dialect that FORCES this -- its 001 cannot drop the
+    -- column without breaking a fresh bootstrap at migration 024, and the
+    -- alternative was rejected by routine_definition_drift_test.go; these two
+    -- follow so the three 001 files tell the same story. The header's
+    -- invariant is about re-applying this file, and that still holds: the
+    -- INDEX below, which is the part that would break on a dropped column, is
+    -- final. See migrations/postgres/089.
     enabled            TINYINT(1) NOT NULL DEFAULT 1,
+    disabled_at        TIMESTAMP(6) NULL DEFAULT NULL,
     next_run_at        TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
     last_run_at        TIMESTAMP(6),
     created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
@@ -287,7 +301,9 @@ CREATE INDEX idx_defs_tenant_name_version ON workflow_defs(tenant_id, name, vers
 CREATE INDEX idx_instances_tenant_ready ON workflow_instances(tenant_id, status, next_wake_at);
 CREATE INDEX idx_event_history_tenant_wf ON event_history(tenant_id, workflow_id, step);
 CREATE INDEX idx_signals_tenant_wf ON workflow_signals(tenant_id, workflow_id, signal_name);
-CREATE INDEX idx_schedules_tenant_enabled ON workflow_schedules(tenant_id, enabled, next_run_at);
+-- No partial indexes in MySQL, so disabled_at stays in the key rather than
+-- becoming a predicate; postgres and mssql filter instead. See 077.
+CREATE INDEX idx_schedules_tenant_due ON workflow_schedules(tenant_id, disabled_at, next_run_at);
 CREATE INDEX idx_instances_tenant_queue_ready ON workflow_instances(tenant_id, task_queue, status, priority, next_wake_at);
 CREATE INDEX idx_idempotency_workflow_id ON idempotency_keys(workflow_id);
 CREATE INDEX idx_idempotency_expires ON idempotency_keys(expires_at);

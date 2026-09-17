@@ -24,7 +24,6 @@ func TestScheduleTenantID_IsPopulatedOnRead(t *testing.T) {
 				DefName:        "test-workflow",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(-time.Hour),
 			}); err != nil {
 				t.Fatalf("CreateSchedule: %v", err)
@@ -69,7 +68,6 @@ func TestScheduleTenantID_IsTheStoresOwnNotTheCallers(t *testing.T) {
 				DefName:        "test-workflow",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 				TenantID:       someoneElse, // ignored on write
 			}); err != nil {
@@ -156,7 +154,6 @@ func TestScheduleLoop_OnlySeesItsOwnTenantsSchedules(t *testing.T) {
 				DefName:        "test-workflow",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(-time.Hour), // already due
 			}); err != nil {
 				t.Fatalf("CreateSchedule as the other tenant: %v", err)

@@ -29,9 +29,9 @@ func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy, idempotency_key, request_digest)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy, idempotency_key, request_digest)
 		VALUES (@p1, @p2, @p3, @p4, CAST(@p5 AS NVARCHAR(MAX)), @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputJSON(sch.Input), sch.Enabled, sch.NextRunAt, s.tenantID,
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputJSON(sch.Input), sch.DisabledAt, sch.NextRunAt, s.tenantID,
 		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
 		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy),
 		nullableScheduleKey(sch.IdempotencyKey), digest)
@@ -71,7 +71,7 @@ func (s *MSSQLStore) lookupScheduleKey(ctx context.Context, key string) (sql.Nul
 
 func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone,
+		SELECT name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, last_run_at, timezone,
 		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
 		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WHERE tenant_id = @p1 ORDER BY name
@@ -87,7 +87,7 @@ func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		var lastRunAt sql.NullTime
 		var inputStr string
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&inputStr, &sch.DisabledAt, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
 			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, err
 		}
@@ -133,14 +133,16 @@ func (s *MSSQLStore) SetScheduleEnabled(ctx context.Context, name string, enable
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_schedules SET enabled = @p2 WHERE name = @p1 AND tenant_id = @p3
+		UPDATE workflow_schedules
+		   SET disabled_at = CASE WHEN @p2 = 1 THEN NULL ELSE COALESCE(disabled_at, SYSUTCDATETIME()) END
+		 WHERE name = @p1 AND tenant_id = @p3
 	`, name, enabled, s.tenantID)
 	return err
 }
 
 func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone,
+		SELECT name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, last_run_at, timezone,
 		       -- CONVERT, not the raw column. go-mssqldb scans UNIQUEIDENTIFIER
 		       -- into a Go string as its 16 raw storage bytes, not the canonical
 		       -- text. The scheduler loop reads Schedule.TenantID and passes it
@@ -153,7 +155,7 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
 		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WITH (READPAST, UPDLOCK, ROWLOCK)
-		WHERE enabled = 1 AND next_run_at <= SYSUTCDATETIME() AND tenant_id = @p1
+		WHERE disabled_at IS NULL AND next_run_at <= SYSUTCDATETIME() AND tenant_id = @p1
 		ORDER BY next_run_at
 	`, s.tenantID)
 	if err != nil {
@@ -167,7 +169,7 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		var lastRunAt sql.NullTime
 		var inputStr string
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&inputStr, &sch.DisabledAt, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
 			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, err
 		}
@@ -854,7 +856,7 @@ func (s *MSSQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedu
 	// acts on the rows, and ClaimDueSchedule's compare-and-swap is what makes
 	// delivery at-least-once. See 024_cross_tenant_schedules.sql.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone,
+		SELECT name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, last_run_at, timezone,
 		       -- CONVERT, not the raw column: go-mssqldb scans UNIQUEIDENTIFIER
 		       -- into a Go string as 16 raw bytes. This value is load-bearing
 		       -- here in a way it is nowhere else -- the caller re-scopes the
@@ -863,7 +865,7 @@ func (s *MSSQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedu
 		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
 		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules
-		WHERE enabled = 1 AND next_run_at <= SYSUTCDATETIME()
+		WHERE disabled_at IS NULL AND next_run_at <= SYSUTCDATETIME()
 		ORDER BY next_run_at
 	`)
 	if err != nil {
@@ -877,7 +879,7 @@ func (s *MSSQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedu
 		var lastRunAt sql.NullTime
 		var inputStr string
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&inputStr, &sch.DisabledAt, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
 			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, fmt.Errorf("get due schedules across tenants scan: %w", err)
 		}

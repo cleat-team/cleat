@@ -36,7 +36,6 @@ func TestASecondScheduleUnderOneNameIsErrScheduleExists(t *testing.T) {
 				EntryPoint:     "Handle",
 				CronExpression: "0 3 * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 			}
 

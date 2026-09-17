@@ -911,7 +911,6 @@ func TestCreateSchedule(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 			}
 
@@ -978,7 +977,6 @@ func TestSetScheduleEnabled(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "0 * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(-time.Hour),
 			}
 			if err := store.CreateSchedule(ctx, sch); err != nil {
@@ -1020,7 +1018,6 @@ func TestDeleteSchedule(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "0 * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 			}
 			if err := store.CreateSchedule(ctx, sch); err != nil {

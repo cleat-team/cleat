@@ -1031,7 +1031,6 @@ func TestMSSQLIntegration_Schedules(t *testing.T) {
 		EntryPoint:     "main",
 		CronExpression: "*/5 * * * *",
 		Input:          json.RawMessage(`{"type":"test"}`),
-		Enabled:        true,
 		NextRunAt:      time.Now().Add(-1 * time.Hour),
 	}
 	if err := store.CreateSchedule(ctx, sch); err != nil {
@@ -1052,7 +1051,7 @@ func TestMSSQLIntegration_Schedules(t *testing.T) {
 	if schedules[0].CronExpression != "*/5 * * * *" {
 		t.Errorf("cron = %s", schedules[0].CronExpression)
 	}
-	if !schedules[0].Enabled {
+	if schedules[0].Disabled() {
 		t.Error("schedule should be enabled")
 	}
 
@@ -1111,7 +1110,7 @@ func TestMSSQLIntegration_Schedules(t *testing.T) {
 	if len(schedules2) != 1 {
 		t.Fatalf("expected 1 schedule, got %d", len(schedules2))
 	}
-	if schedules2[0].Enabled {
+	if !schedules2[0].Disabled() {
 		t.Error("schedule should be disabled")
 	}
 

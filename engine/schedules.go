@@ -188,9 +188,12 @@ func (s *execSession) createCronSchedule(ctx context.Context, workflowName, cron
 		DefName:        workflowName,
 		CronExpression: cronExpr,
 		Input:          json.RawMessage(inputJSON),
-		Enabled:        true,
-		NextRunAt:      NextCronTimeIn(cronExpr, time.Now(), loc),
-		Timezone:       tz,
+		// No retirement field: after cleat#1702 a LIVE schedule is the zero
+		// value (DisabledAt nil), which is the one upside of the polarity
+		// change -- `Enabled: true` used to be mandatory here, and forgetting
+		// it created a schedule that never fired.
+		NextRunAt: NextCronTimeIn(cronExpr, time.Now(), loc),
+		Timezone:  tz,
 	}); err != nil {
 		return "", fmt.Errorf("schedule_cron %q: %w", workflowName, err)
 	}
@@ -327,7 +330,12 @@ func (s *execSession) listCronSchedules(ctx context.Context) (string, error) {
 			CronExpr:     schedules[i].CronExpression,
 			Timezone:     scheduleTimezoneOrDefault(schedules[i].Timezone),
 			Input:        string(schedules[i].Input),
-			Enabled:      schedules[i].Enabled,
+			// Still `enabled`, and still inverted from the column: this view
+			// is the guest-visible shape of list_crons, versioned with the
+			// WASM ABI rather than with the entity contract. cleat#1702
+			// converted workflow_schedules.enabled to disabled_at; an SDK
+			// compiled before that change still reads this field.
+			Enabled: !schedules[i].Disabled(),
 		})
 	}
 	out, err := json.Marshal(views)

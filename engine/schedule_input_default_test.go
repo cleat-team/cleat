@@ -68,7 +68,6 @@ func TestCreateSchedule_AnOmittedInputBecomesAnEmptyObject(t *testing.T) {
 						EntryPoint:     "main",
 						CronExpression: "0 7 * * *",
 						Input:          tc.input,
-						Enabled:        true,
 						NextRunAt:      time.Now().Add(time.Hour),
 					}); err != nil {
 						t.Fatalf("CreateSchedule with %s: %v\n\n"+

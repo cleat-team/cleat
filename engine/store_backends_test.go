@@ -353,7 +353,6 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 		EntryPoint:     "main",
 		CronExpression: "* * * * *",
 		Input:          json.RawMessage(`{}`),
-		Enabled:        true,
 		NextRunAt:      now.Add(-1 * time.Hour), // due now
 	})
 	if err != nil {

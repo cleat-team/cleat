@@ -718,10 +718,16 @@ func TestMSSQLStore_BeginTxWithContext_Failure(t *testing.T) {
 
 func TestMSSQLStore_ListSchedules(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
+	// A DISTINCT instant for disabled_at, not `now`: the column sits next to
+	// next_run_at and last_run_at in the scan, so three equal timestamps would
+	// let a scan that read the wrong one still pass. Same reasoning as the
+	// per-row timezones below. nil is live -- the column replaced an `enabled`
+	// BOOLEAN in cleat#1702, and the polarity inverted with it.
+	disabledAt := now.Add(-72 * time.Hour)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_schedules", data: [][]driver.Value{
-			{"schedule-1", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
-			{"schedule-2", "wf-b", "entry2", "0 * * * *", `[]`, false, now, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
+			{"schedule-1", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, nil, now, now, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
+			{"schedule-2", "wf-b", "entry2", "0 * * * *", `[]`, disabledAt, now, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
 		}},
 	}, nil)
 	defer db.Close()
@@ -745,7 +751,7 @@ func TestMSSQLStore_ListSchedules(t *testing.T) {
 	if string(s1.Input) != `{"k":"v"}` {
 		t.Errorf("schedule 1 input: %q", string(s1.Input))
 	}
-	if !s1.Enabled {
+	if s1.Disabled() {
 		t.Error("schedule 1 should be enabled")
 	}
 	if !s1.NextRunAt.Equal(now) {
@@ -764,8 +770,12 @@ func TestMSSQLStore_ListSchedules(t *testing.T) {
 	if s2.Name != "schedule-2" {
 		t.Errorf("schedule 2 name: %q", s2.Name)
 	}
-	if s2.Enabled {
+	if !s2.Disabled() {
 		t.Error("schedule 2 should be disabled")
+	} else if !s2.DisabledAt.Equal(disabledAt) {
+		// Disabled() only asks whether the pointer is non-nil, which a scan
+		// that landed next_run_at in this field would also satisfy.
+		t.Errorf("schedule 2 disabled_at = %v, want %v", s2.DisabledAt, disabledAt)
 	}
 	if s2.LastRunAt != nil {
 		t.Error("schedule 2 LastRunAt should be nil")
@@ -1820,7 +1830,6 @@ func TestMSSQLStore_CreateSchedule_Success(t *testing.T) {
 		EntryPoint:     "main",
 		CronExpression: "0 * * * *",
 		Input:          json.RawMessage(`{}`),
-		Enabled:        true,
 		NextRunAt:      now,
 	}
 	err := store.CreateSchedule(context.Background(), sch)
@@ -1853,7 +1862,7 @@ func TestMSSQLStore_SetScheduleEnabled_Success(t *testing.T) {
 	db := newMockDBForPostgres(t,
 		[]mockRowsResult{queryRowOk("SELECT count(*) FROM workflow_schedules", int64(1))},
 		[]mockExecResult{
-			{match: "UPDATE workflow_schedules SET enabled"},
+			{match: "UPDATE workflow_schedules"},
 		})
 	defer db.Close()
 
@@ -1868,7 +1877,7 @@ func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "READPAST", data: [][]driver.Value{
-			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
+			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, nil, now, now, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -1881,7 +1890,7 @@ func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
 	if len(schedules) != 1 {
 		t.Fatalf("expected 1 schedule, got %d", len(schedules))
 	}
-	if schedules[0].Name != "due-sch" || !schedules[0].Enabled {
+	if schedules[0].Name != "due-sch" || schedules[0].Disabled() {
 		t.Errorf("unexpected schedule: %+v", schedules[0])
 	}
 	// The scheduler computes the next firing from this field; without it

@@ -568,9 +568,9 @@ func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error 
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy, idempotency_key, request_digest)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy, idempotency_key, request_digest)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputOrDefault(sch.Input), sch.Enabled, sch.NextRunAt, s.tenantID,
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputOrDefault(sch.Input), sch.DisabledAt, sch.NextRunAt, s.tenantID,
 		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
 		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy),
 		key, digest)
@@ -621,7 +621,7 @@ func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
+		SELECT name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
 		FROM workflow_schedules WHERE tenant_id = $1 ORDER BY name
 	`, s.tenantID)
 	if err != nil {
@@ -634,7 +634,7 @@ func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.Input, &sch.DisabledAt, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
 			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, err
 		}
@@ -695,7 +695,9 @@ func (s *PostgresStore) SetScheduleEnabled(ctx context.Context, name string, ena
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_schedules SET enabled = $2 WHERE name = $1 AND tenant_id = $3
+		UPDATE workflow_schedules
+		   SET disabled_at = CASE WHEN $2 THEN NULL ELSE COALESCE(disabled_at, now()) END
+		 WHERE name = $1 AND tenant_id = $3
 	`, name, enabled, s.tenantID)
 	if err != nil {
 		return err
@@ -711,9 +713,9 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
+		SELECT name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
 		FROM workflow_schedules
-		WHERE enabled = true AND next_run_at <= now() AND tenant_id = $1
+		WHERE disabled_at IS NULL AND next_run_at <= now() AND tenant_id = $1
 		FOR UPDATE SKIP LOCKED
 	`, s.tenantID)
 	if err != nil {
