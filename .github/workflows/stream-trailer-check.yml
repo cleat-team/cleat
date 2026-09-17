@@ -1,0 +1,156 @@
+# ---------------------------------------------------------------------------
+# Stream Trailer Check — every commit names the workstream that wrote it
+#
+# Commits carry `Claude-Stream: <WS-1|WS-2|WS-3|coordinator>`. The convention
+# replaced a session id on 2026-09-17 for one reason: a session id does not
+# survive a host restart and a stream does. After the 2026-09-16 reboot every
+# recorded `session_…` mapping named a session that no longer existed, three
+# PRs could not be attributed at all, and one session merged two PRs it had not
+# authored on the strength of a dead id.
+#
+# WHY A CHECK RATHER THAN A CONVENTION. Measured 2026-09-17, over the commits
+# since the convention began at 02:45 rather than over all of develop -- the
+# denominator matters, and "9 of the last 60" would have said 15%:
+#
+#   first=$(git log origin/develop --format='%H' -200 | while read -r c; do \
+#     git log -1 --format='%B' "$c" | grep -qE '^Claude-Stream:' && echo "$c"; done | tail -1)
+#   git log --format='%H' "$first"..origin/develop   # 17 commits
+#                                                    # 9 carry the trailer -> 53%
+#
+# Half. The repo's own answer to "a discipline people have to remember" is the
+# DCO arrangement -- a hook that adds it, a check that enforces it -- and this
+# is the second half of that pair for this trailer.
+#
+# WHICH COMMITS THIS READS, AND WHY IT IS NOT NEGOTIABLE.
+#
+# `%(trailers:key=…)` returns EMPTY on develop's commits even when they plainly
+# carry the line: 9 of 9 measured on 2026-09-17. They are SQUASH commits, and
+# `squash_merge_commit_message=COMMIT_MESSAGES` concatenates every constituent
+# message, so each one's trailer block lands mid-body and git parses only the
+# final paragraph -- whichever `Signed-off-by` the hook appended last.
+#
+# On the PULL REQUEST's own commits the trailer parses correctly. So:
+#
+#   base..head, %(trailers:…)          <- robust, ignores prose. This job.
+#   develop's squashes, ^-anchored grep <- the only thing that works there.
+#
+# Both predicates are right in one place and wrong in the other. A version of
+# this job that read develop would fail every commit in the repo, including the
+# correctly-marked ones.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO. It does not try to verify that the stream
+# named is the stream that wrote it. It cannot: the trailer is a CLAIM, exactly
+# as the session id was, and the gain is stability under restart rather than
+# unforgeability. The reflog says which working tree produced an object and no
+# working tree here has a single occupant. See WORKSTREAM.md, "Shared files".
+# ---------------------------------------------------------------------------
+name: Stream Trailer Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+  # The merge queue tests required checks against the projected tip on a
+  # `gh-readonly-queue/...` ref, which fires merge_group and not pull_request.
+  # Without this the check never starts in queue context and nothing merges,
+  # with no check going red.
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  stream-trailer:
+    name: Stream Trailer
+    runs-on: ubuntu-latest
+
+    steps:
+      # REPORTS rather than skipping, for the reason the DCO check gives: a job
+      # that fails to start is indistinguishable to the queue from one that has
+      # not finished, and it waits forever. A commit's trailers cannot change
+      # between the pull request and here.
+      - name: Already checked on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "stream trailer validated when the pull request was opened"
+
+      - if: github.event_name != 'merge_group'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check stream trailers
+        if: github.event_name != 'merge_group'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # pipefail: without it a `git log` that fails on a bad range yields an
+          # empty FAILING, which reads as "every commit is marked" -- a green
+          # that measured nothing, which is the failure mode the DCO check spent
+          # months in.
+          set -euo pipefail
+
+          # Bots do not belong to a workstream. Matched on the AUTHOR, not on a
+          # branch-name prefix: a prefix is a pattern someone can land on by
+          # accident, and an exemption list keyed on one is the shape that has
+          # gone wrong twice in this repo (scripts/check-go-mod-tidy.sh's
+          # EXEMPT_PREFIX, where blanking the variable made the pattern `*`).
+          # QUOTED. Unquoted, `[bot]` is a character class matching one of
+          # b/o/t, so `dependabot[bot]` matches the login `dependabob` and NOT
+          # the actual `dependabot[bot]`. The exemption would then never fire
+          # and every bot pull request would fail this required check. Caught by
+          # the known-positive below, not by reading.
+          case "$PR_AUTHOR" in
+            "dependabot[bot]"|"dependabot-preview[bot]"|"github-actions[bot]")
+              echo "author $PR_AUTHOR is a bot and belongs to no workstream; nothing to check."
+              exit 0
+              ;;
+          esac
+
+          VALID='^(WS-1|WS-2|WS-3|coordinator)$'
+          COUNT=0
+          FAILING=$(git log --no-merges "${BASE}..${HEAD}" --format='%H' | while read -r commit; do
+            value=$(git show -s --format='%(trailers:key=Claude-Stream,valueonly)' "$commit" | head -1 | tr -d '\r')
+            if [ -z "$value" ]; then
+              echo "  $(git log -1 --format='%h %s' "$commit")  -- no Claude-Stream trailer"
+            elif ! printf '%s' "$value" | grep -qE "$VALID"; then
+              echo "  $(git log -1 --format='%h %s' "$commit")  -- Claude-Stream: '$value' is not one of WS-1, WS-2, WS-3, coordinator"
+            fi
+          done)
+
+          # A range with no commits is not a pass. An empty base..head means the
+          # range was wrong, not that every commit is marked -- the same
+          # zero-denominator trap this repo records about check-runs, grep and
+          # docker ps.
+          COUNT=$(git log --no-merges "${BASE}..${HEAD}" --format='%H' | grep -c . || true)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "UNMEASURED: base..head contains no non-merge commits, so nothing was checked." >&2
+            echo "This is a failure of the check, not a finding about the pull request." >&2
+            exit 2
+          fi
+          echo "commits examined: $COUNT"
+
+          if [ -n "$FAILING" ]; then
+            echo "============================================"
+            echo "  STREAM TRAILER CHECK — FAILED"
+            echo "============================================"
+            echo ""
+            echo "$FAILING"
+            echo ""
+            echo "Add the trailer to each commit, e.g.:"
+            echo "  git commit --amend --trailer 'Claude-Stream: WS-1'"
+            echo "  git rebase --exec \"git commit --amend --no-edit --trailer 'Claude-Stream: WS-1'\" ${BASE}"
+            echo "  git push --force-with-lease"
+            echo ""
+            echo "Valid values: WS-1, WS-2, WS-3, coordinator."
+            echo "It is a claim about which workstream wrote the commit, not a"
+            echo "credential -- see WORKSTREAM.md, 'Shared files'."
+            exit 1
+          fi
+
+          echo "All commits carry a valid Claude-Stream trailer."
