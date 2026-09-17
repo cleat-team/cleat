@@ -59,11 +59,11 @@ completion in a loop and its exit code trusted.
 // "done" without one is indistinguishable from a sweep that matched no rows.
 type resealStats struct {
 	Rows       int // event_history rows examined
-	Legacy     int // column values found sealed with nil AAD
+	Older      int // column values found in an older form (legacy or bound)
 	Rewrote    int // column values re-sealed and written
-	Bound      int // column values already bound: nothing to do
+	Current    int // already the newest form: nothing to do
 	NotCipher  int // values that are not ciphertext at all (plaintext, or "")
-	Unreadable int // values that open neither way -- reported, never touched
+	Unreadable int // values that open in no form -- reported, never touched
 }
 
 // resealPayloads is the whole of the sweep, separated from flag parsing so a
@@ -126,11 +126,11 @@ func resealPayloads(ctx context.Context, db *sql.DB, enc *engine.PayloadEncrypti
 			}
 			next, kind, verr := resealValue(enc, tenant, holders[i].String)
 			switch kind {
-			case valueLegacy:
-				st.Legacy++
+			case valueConverted:
+				st.Older++
 				changed[col] = next
-			case valueBound:
-				st.Bound++
+			case valueCurrent:
+				st.Current++
 			case valueNotCiphertext:
 				st.NotCipher++
 			case valueUnreadable:
@@ -189,14 +189,22 @@ func resealPayloads(ctx context.Context, db *sql.DB, enc *engine.PayloadEncrypti
 type valueKind int
 
 const (
-	valueLegacy        valueKind = iota // nil-AAD ciphertext: must be re-sealed
-	valueBound                          // already bound to this tenant
+	valueConverted     valueKind = iota // was an older form, now re-sealed
+	valueCurrent                        // already the newest form
 	valueNotCiphertext                  // plaintext, or not base64: leave alone
-	valueUnreadable                     // base64 but opens neither way
+	valueUnreadable                     // base64 but opens in no form
 )
 
-// resealValue classifies one stored value and, when it is legacy, returns its
-// replacement in the SAME stored form.
+// resealValue classifies one stored value and, when it is not already in the
+// newest form, returns its replacement in the SAME stored form.
+//
+// TWO OLDER FORMS NOW, NOT ONE. cleat#1793 made the payload key per-tenant, so
+// a value can be: derived-key + tenant AAD (current), master-key + tenant AAD
+// (cleat#1792, and what THIS command wrote before #1793), or master-key + nil
+// AAD (pre-#1792). The middle one is why a boolean "is it bound" stopped being
+// enough -- this command wrote those itself, and they still need converting
+// because one recovered key reads every tenant's payloads. engine.OpenAndClassify
+// answers with the form rather than a yes/no.
 //
 // THE FORM IS SELF-DESCRIBING, which is why there is no per-column table here.
 // Measured against a real row: the ten string columns hold bare base64 of the
@@ -204,12 +212,6 @@ const (
 // because EncryptJSON writes a JSON string literal into a JSONB column. This
 // detects the quoting and restores it, so a column cannot be rewritten in the
 // wrong encoding by a table entry being wrong.
-//
-// CLASSIFICATION IS BY AUTHENTICATION, NOT BY INSPECTION. A legacy ciphertext
-// is one that opens with nil AAD; an already-converted one opens bound; a
-// column holding plaintext opens as neither. There is no length rule, no magic
-// prefix, and no attempt to guess -- which matters because a wrong guess here
-// either double-encrypts a plaintext column or skips a real legacy row.
 func resealValue(enc *engine.PayloadEncryption, tenant, stored string) (string, valueKind, error) {
 	body, quoted := stored, false
 	if len(stored) >= 2 && stored[0] == '"' && stored[len(stored)-1] == '"' {
@@ -220,21 +222,14 @@ func resealValue(enc *engine.PayloadEncryption, tenant, stored string) (string, 
 		return "", valueNotCiphertext, nil
 	}
 
-	if _, err := enc.DecryptTenantBound(tenant, raw); err == nil {
-		return "", valueBound, nil
-	} else if !errors.Is(err, engine.ErrNotTenantBound) {
-		// Neither bound nor legacy. Could be plaintext that happens to be valid
-		// base64, or a row sealed under a different key. Either way: reported,
-		// not touched.
+	plain, form, err := enc.OpenAndClassify(tenant, raw)
+	switch {
+	case err != nil:
+		// Opens in no form: plaintext that happens to be valid base64, or a
+		// row sealed under a different key. Reported, not touched.
 		return "", valueUnreadable, err
-	}
-
-	plain, err := enc.DecryptLegacyUnbound(raw)
-	if err != nil {
-		// ErrNotTenantBound said it opens with nil AAD, so this cannot fail.
-		// If it does, something is inconsistent and guessing is worse than
-		// stopping.
-		return "", valueUnreadable, err
+	case form == engine.PayloadFormDerived:
+		return "", valueCurrent, nil
 	}
 
 	sealed, err := enc.Encrypt(tenant, plain)
@@ -242,13 +237,17 @@ func resealValue(enc *engine.PayloadEncryption, tenant, stored string) (string, 
 		return "", valueUnreadable, err
 	}
 
-	// VERIFY BEFORE WRITING. A re-seal that corrupts a payload is worse than
-	// the hole it closes, because the plaintext is gone and no backup of the
-	// ciphertext helps. So the new blob is opened, bound, and compared against
-	// what went in -- and only then returned for writing.
-	back, err := enc.DecryptTenantBound(tenant, sealed)
+	// VERIFY BEFORE WRITING, and verify the FORM and not just the round trip. A
+	// re-seal that corrupts a payload is worse than the hole it closes, because
+	// the plaintext is gone and no backup of the ciphertext helps -- and a
+	// re-seal that quietly produced an older form again would leave the sweep
+	// reporting progress it did not make.
+	back, gotForm, err := enc.OpenAndClassify(tenant, sealed)
 	if err != nil {
-		return "", valueUnreadable, fmt.Errorf("re-sealed value does not open bound: %w", err)
+		return "", valueUnreadable, fmt.Errorf("re-sealed value does not open: %w", err)
+	}
+	if gotForm != engine.PayloadFormDerived {
+		return "", valueUnreadable, fmt.Errorf("re-sealed value is %s, not derived", gotForm)
 	}
 	if string(back) != string(plain) {
 		return "", valueUnreadable, errors.New("re-sealed value does not round-trip")
@@ -258,7 +257,7 @@ func resealValue(enc *engine.PayloadEncryption, tenant, stored string) (string, 
 	if quoted {
 		next = `"` + next + `"`
 	}
-	return next, valueLegacy, nil
+	return next, valueConverted, nil
 }
 
 func quoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
@@ -312,15 +311,15 @@ func runResealPayloads(ctx context.Context, db *sql.DB, args []string) {
 		verb = "would re-seal"
 	}
 	fmt.Printf("rows examined:      %d\n", st.Rows)
-	fmt.Printf("values %-12s %d of %d legacy\n", verb+":", st.Rewrote, st.Legacy)
-	fmt.Printf("already bound:      %d\n", st.Bound)
+	fmt.Printf("values %-12s %d of %d in an older form\n", verb+":", st.Rewrote, st.Older)
+	fmt.Printf("already current:    %d\n", st.Current)
 	fmt.Printf("not ciphertext:     %d\n", st.NotCipher)
 	fmt.Printf("unreadable:         %d\n", st.Unreadable)
 
 	// Non-zero while anything is left, so this can be looped on and its exit
 	// code trusted. A dry run that found work is also non-zero: it is a report
 	// that the database is not converted.
-	if st.Unreadable > 0 || (*dryRun && st.Legacy > 0) {
+	if st.Unreadable > 0 || (*dryRun && st.Older > 0) {
 		osExit(1)
 		return
 	}

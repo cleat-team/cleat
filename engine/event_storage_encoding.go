@@ -163,8 +163,18 @@ func encodeEventForStorage(rec EventRecord, enc *PayloadEncryption, encrypt bool
 		return out, nil
 	}
 
+	// ONE DERIVATION FOR THE WHOLE EVENT. cleat#1793 made the payload key
+	// per-tenant, and a derivation costs about what a seal costs, so deriving
+	// per field would DOUBLE the crypto on this path. The ratio is measured by
+	// engine/payload_key_derivation_bench_test.go and quoted only there, so
+	// there is one number to keep true rather than four.
+	tc, err := enc.forTenant(tenantID)
+	if err != nil {
+		return storedEvent{}, fmt.Errorf("encode event for storage: %w", err)
+	}
+
 	// Request and Response are stored as base64 of the ciphertext, not as
-	// base64 of base64: EncryptString already base64-encodes, and the read
+	// base64 of base64: sealString already base64-encodes, and the read
 	// path's tryDecodeBase64 undoes exactly one layer before handing the
 	// bytes to Decrypt.
 	for _, f := range []struct {
@@ -186,14 +196,14 @@ func encodeEventForStorage(rec EventRecord, enc *PayloadEncryption, encrypt bool
 		if f.plain == "" {
 			continue
 		}
-		ciphertext, err := enc.EncryptString(tenantID, f.plain)
+		ciphertext, err := tc.sealString(f.plain)
 		if err != nil {
 			return storedEvent{}, fmt.Errorf("encode event for storage: encrypt %s: %w", f.name, err)
 		}
 		*f.dst = ciphertext
 	}
 
-	out.Payload, err = encodePayloadForStorage(out.Payload.String, enc, encrypt, tenantID)
+	out.Payload, err = encodePayloadForStorageWith(out.Payload.String, tc)
 	if err != nil {
 		return storedEvent{}, fmt.Errorf("encode event for storage: %w", err)
 	}
@@ -221,7 +231,23 @@ func encodePayloadForStorage(payload string, enc *PayloadEncryption, encrypt boo
 	if !encrypt || enc == nil {
 		return sql.NullString{String: payload, Valid: true}, nil
 	}
-	encrypted, err := enc.EncryptJSON(tenantID, []byte(payload))
+	tc, err := enc.forTenant(tenantID)
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("encrypt payload: %w", err)
+	}
+	return encodePayloadForStorageWith(payload, tc)
+}
+
+// encodePayloadForStorageWith is the half that does not derive, for the caller
+// that already has a tenantCipher for this event.
+func encodePayloadForStorageWith(payload string, tc *tenantCipher) (sql.NullString, error) {
+	if payload == "" {
+		return sql.NullString{}, nil
+	}
+	if tc == nil {
+		return sql.NullString{String: payload, Valid: true}, nil
+	}
+	encrypted, err := tc.sealJSON([]byte(payload))
 	if err != nil {
 		return sql.NullString{}, fmt.Errorf("encrypt payload: %w", err)
 	}

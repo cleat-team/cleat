@@ -2462,7 +2462,11 @@ func TestPostgresStore_DecryptField_DecryptError(t *testing.T) {
 	store.encryption = pe
 	store.encryptSensitivePayloads = true
 
-	result := store.decryptField("not-valid-ciphertext", "Request", "wf-1", 0, false)
+	tc, terr := pe.forTenant(DefaultTenantUUID)
+	if terr != nil {
+		t.Fatalf("forTenant: %v", terr)
+	}
+	result := store.decryptField(tc, "not-valid-ciphertext", "Request", "wf-1", 0, false)
 	if result != "[DECRYPTION_FAILED]" {
 		t.Errorf("expected [DECRYPTION_FAILED], got %q", result)
 	}
@@ -4632,7 +4636,7 @@ func TestDecryptPayloadJSON_DecryptionFailure(t *testing.T) {
 func TestDecryptPayloadJSON_Success(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
-	encrypted, err := enc.EncryptJSON(DefaultTenantUUID, []byte(`{"secret":"data"}`))
+	encrypted, err := mustSeal(t, enc, DefaultTenantUUID).sealJSON([]byte(`{"secret":"data"}`))
 	if err != nil {
 		t.Fatalf("EncryptJSON: %v", err)
 	}
@@ -5334,7 +5338,7 @@ func TestDecryptAndRedactEventRecord_SuccessfulDecryption(t *testing.T) {
 	// Err is stored as a base64-encoded ciphertext, so decryptField uses
 	// encryption.DecryptString (useBytesDecrypt=false).
 	plainErr := "operation failed"
-	encodedErr, err := enc.EncryptString(DefaultTenantUUID, plainErr)
+	encodedErr, err := mustSeal(t, enc, DefaultTenantUUID).sealString(plainErr)
 	if err != nil {
 		t.Fatalf("EncryptString: %v", err)
 	}

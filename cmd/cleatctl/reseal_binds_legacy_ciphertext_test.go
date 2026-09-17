@@ -58,6 +58,36 @@ func sealNilAAD(t *testing.T, keyBase64 string, plaintext string) string {
 	return base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, []byte(plaintext), nil))
 }
 
+// sealMasterKeyBound produces cleat#1792's form: the MASTER key with the tenant
+// as AAD.
+//
+// Hand-rolled for the same reason sealNilAAD is: there is no API left that
+// produces it. Encrypt now derives a per-tenant key (cleat#1793), so the only
+// way to test that the sweep converts the middle form is to build the middle
+// form. Without this the test would silently only cover legacy -> derived and
+// the bound -> derived path -- the one this command itself wrote rows in --
+// would be exercised by nothing.
+func sealMasterKeyBound(t *testing.T, keyBase64, tenantID, plaintext string) []byte {
+	t.Helper()
+	key, err := base64.StdEncoding.DecodeString(keyBase64)
+	if err != nil {
+		t.Fatalf("decode key: %v", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("gcm: %v", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+	return gcm.Seal(nonce, nonce, []byte(plaintext), []byte(tenantID))
+}
+
 func resealKey(t *testing.T) string {
 	t.Helper()
 	b := make([]byte, 32)
@@ -125,23 +155,31 @@ func TestResealBindsLegacyCiphertextAndPreservesThePlaintext(t *testing.T) {
 	legacyErr := sealNilAAD(t, key, errPlain)
 	legacyPayload := `"` + sealNilAAD(t, key, payloadPlain) + `"`
 
-	// The control: a value ALREADY bound to this tenant. A sweep that rewrote
-	// everything unconditionally would also pass the assertions above, and this
-	// is what stops it.
-	boundRaw, err := enc.Encrypt(resealTenant, []byte("already bound"))
+	// THE SECOND OLDER FORM, and its meaning changed with cleat#1793. A value
+	// sealed with the MASTER key and the tenant as AAD is what cleat#1792 wrote
+	// -- and what this very command wrote before #1793. It cannot be moved
+	// between tenants, but one recovered key reads every tenant's payloads, so
+	// it is still work. Seeded by hand because Encrypt now produces the newest
+	// form and there is no API left that makes this one.
+	boundChild := base64.StdEncoding.EncodeToString(sealMasterKeyBound(t, key, resealTenant, "already bound"))
+
+	// The control that stops a sweep which rewrites everything: a value already
+	// in the NEWEST form must be left untouched.
+	currentRaw, err := enc.Encrypt(resealTenant, []byte("already current"))
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	boundChild := base64.StdEncoding.EncodeToString(boundRaw)
+	currentPlugin := base64.StdEncoding.EncodeToString(currentRaw)
 
 	// And a column holding PLAINTEXT, which must not be double-encrypted.
 	const plaintextCol = "this was never encrypted"
 
 	seedResealRow(t, db, ctx, resealTenant, "reseal-wf-1", map[string]string{
-		"error":       legacyErr,
-		"payload":     legacyPayload,
-		"child_input": boundChild,
-		"new_input":   plaintextCol,
+		"error":        legacyErr,
+		"payload":      legacyPayload,
+		"child_input":  boundChild,
+		"plugin_input": currentPlugin,
+		"new_input":    plaintextCol,
 	})
 
 	// PRECONDITION: the legacy value really is readable by the WRONG tenant
@@ -161,11 +199,14 @@ func TestResealBindsLegacyCiphertextAndPreservesThePlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resealPayloads: %v", err)
 	}
-	if st.Legacy != 2 || st.Rewrote != 2 {
-		t.Errorf("stats: Legacy=%d Rewrote=%d, want 2 and 2", st.Legacy, st.Rewrote)
+	// THREE older-form values now: the two legacy ones plus the master-key
+	// bound child_input that cleat#1792 (and this command's own earlier
+	// version) would have written.
+	if st.Older != 3 || st.Rewrote != 3 {
+		t.Errorf("stats: Older=%d Rewrote=%d, want 3 and 3", st.Older, st.Rewrote)
 	}
-	if st.Bound != 1 {
-		t.Errorf("stats: Bound=%d, want 1 (the already-bound child_input)", st.Bound)
+	if st.Current != 1 {
+		t.Errorf("stats: Current=%d, want 1 (the already-derived plugin_input)", st.Current)
 	}
 	if st.NotCipher != 1 {
 		t.Errorf("stats: NotCipher=%d, want 1 (the plaintext new_input)", st.NotCipher)
@@ -174,11 +215,11 @@ func TestResealBindsLegacyCiphertextAndPreservesThePlaintext(t *testing.T) {
 		t.Errorf("stats: Unreadable=%d, want 0", st.Unreadable)
 	}
 
-	var gotErr, gotPayload, gotChild, gotNew string
+	var gotErr, gotPayload, gotChild, gotPlugin, gotNew string
 	if err := db.QueryRowContext(ctx,
-		`SELECT "error", payload::text, child_input, new_input
+		`SELECT "error", payload::text, child_input, plugin_input, new_input
 		   FROM event_history WHERE workflow_id = 'reseal-wf-1' AND step = 0`).
-		Scan(&gotErr, &gotPayload, &gotChild, &gotNew); err != nil {
+		Scan(&gotErr, &gotPayload, &gotChild, &gotPlugin, &gotNew); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
 
@@ -198,10 +239,16 @@ func TestResealBindsLegacyCiphertextAndPreservesThePlaintext(t *testing.T) {
 			t.Errorf("%s: stored value is not base64 after the sweep: %v", c.name, err)
 			continue
 		}
-		back, err := enc.DecryptTenantBound(resealTenant, raw)
+		back, form, err := enc.OpenAndClassify(resealTenant, raw)
 		if err != nil {
-			t.Errorf("%s: not bound to its own tenant after the sweep: %v", c.name, err)
+			t.Errorf("%s: does not open at all after the sweep: %v", c.name, err)
 			continue
+		}
+		// The FORM, not just "it opens": a value re-sealed into an older form
+		// would still open for its own tenant and still fail the foreign-tenant
+		// check below, so neither of those can tell the difference.
+		if form != engine.PayloadFormDerived {
+			t.Errorf("%s: is %s after the sweep, want derived", c.name, form)
 		}
 		if string(back) != c.want {
 			t.Errorf("%s: plaintext changed: got %q, want %q", c.name, back, c.want)
@@ -216,9 +263,21 @@ func TestResealBindsLegacyCiphertextAndPreservesThePlaintext(t *testing.T) {
 	if !strings.HasPrefix(gotPayload, `"`) || !strings.HasSuffix(gotPayload, `"`) {
 		t.Errorf("payload lost its JSON string quoting: %q", gotPayload)
 	}
-	// The untouched ones, byte for byte.
-	if gotChild != boundChild {
-		t.Errorf("an already-bound value was rewritten: got %q", gotChild)
+	// The master-key bound value must have CHANGED, and must now be derived.
+	if gotChild == boundChild {
+		t.Error("a master-key bound value was left alone: cleat#1793 converts that " +
+			"form too, because one recovered key reads every tenant's payloads")
+	} else if raw, derr := base64.StdEncoding.DecodeString(gotChild); derr != nil {
+		t.Errorf("child_input is not base64 after the sweep: %v", derr)
+	} else if pt, form, oerr := enc.OpenAndClassify(resealTenant, raw); oerr != nil || form != engine.PayloadFormDerived {
+		t.Errorf("child_input is %s after the sweep (err=%v), want derived", form, oerr)
+	} else if string(pt) != "already bound" {
+		t.Errorf("child_input plaintext changed: %q", pt)
+	}
+
+	// The already-newest one, byte for byte.
+	if gotPlugin != currentPlugin {
+		t.Errorf("an already-derived value was rewritten: got %q", gotPlugin)
 	}
 	if gotNew != plaintextCol {
 		t.Errorf("a plaintext value was rewritten: got %q", gotNew)
@@ -229,8 +288,8 @@ func TestResealBindsLegacyCiphertextAndPreservesThePlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second resealPayloads: %v", err)
 	}
-	if st2.Legacy != 0 || st2.Rewrote != 0 {
-		t.Errorf("second sweep still found work: Legacy=%d Rewrote=%d", st2.Legacy, st2.Rewrote)
+	if st2.Older != 0 || st2.Rewrote != 0 {
+		t.Errorf("second sweep still found work: Older=%d Rewrote=%d", st2.Older, st2.Rewrote)
 	}
 }
 
@@ -263,9 +322,9 @@ func TestResealRefusesAnRLSRestrictedConnection(t *testing.T) {
 
 	// CONTROL: the superuser connection CAN do the sweep, so a failure below is
 	// about the role and not about the fixture.
-	if st, err := resealPayloads(ctx, superDB, enc, true, io.Discard); err != nil || st.Legacy != 1 {
+	if st, err := resealPayloads(ctx, superDB, enc, true, io.Discard); err != nil || st.Older != 1 {
 		t.Fatalf("UNMEASURED: the privileged connection could not see the work "+
-			"(err=%v Legacy=%d), so the refusal below says nothing about RLS", err, st.Legacy)
+			"(err=%v Older=%d), so the refusal below says nothing about RLS", err, st.Older)
 	}
 
 	if _, err := resealPayloads(ctx, appDB, enc, true, io.Discard); err == nil {
