@@ -99,6 +99,39 @@ type storedEvent struct {
 // returns at least a nonce and a GCM tag, so it cannot produce "", which is
 // what lets decryptField read an empty stored value as "never encrypted"
 // rather than as a decryption failure (cleat#1377).
+// EncryptedEventColumns names every event_history column this file seals when
+// --encrypt-sensitive-payloads is on.
+//
+// It exists because `cleatctl reseal-payloads` (cleat#1794) has to rewrite
+// exactly these and no others, and a second hand-maintained list would drift
+// from this one silently -- the failure being that an eleventh sealed column is
+// added here, the sweep skips it, and reports zero remaining while unbound
+// ciphertext stays on disk. TestEncryptedEventColumnsIsComplete asserts the two
+// agree BEHAVIOURALLY, by encoding a record with every field populated and
+// counting which stored fields came back as ciphertext, so adding a column
+// without adding it here fails rather than going unnoticed.
+//
+// THE STORED FORM IS SELF-DESCRIBING, which is why one list covers all of them
+// despite `payload` differing. Measured against a real row: the ten string
+// columns hold bare base64 of the ciphertext, and `payload` holds the same
+// base64 wrapped in double quotes, because EncryptJSON produces a JSON string
+// literal for a JSONB column. A re-seal detects the quoting from the value and
+// restores it, rather than carrying a per-column encoding table that could be
+// wrong for one entry.
+var EncryptedEventColumns = []string{
+	"request",
+	"response",
+	"error",
+	"signal_payload",
+	"child_input",
+	"new_input",
+	"plugin_input",
+	"plugin_output",
+	"promise_result",
+	"promise_error",
+	"payload",
+}
+
 // tenantID is the tenant every sealed field is bound to (cleat#1776). It is a
 // parameter rather than a field of rec because EventRecord carries no tenant --
 // 82 fields and none of them is one -- and because all five writers are already
