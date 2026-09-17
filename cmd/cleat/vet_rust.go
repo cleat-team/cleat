@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -187,6 +188,82 @@ func rustCodeOnly(src []byte) []byte {
 	return out
 }
 
+// withoutCfgTest blanks every item annotated #[cfg(test)], byte offsets and
+// line endings untouched.
+//
+// WHY A SECOND PASS AND NOT A DIRECTORY RULE. Skipping <crate>/tests handles
+// Cargo's integration-test target. It does nothing for the commoner form --
+// a unit-test module inside the file the gate MUST scan:
+//
+//	#[cfg(test)]
+//	mod tests {
+//	    use std::fs;                       // <- reported, before this
+//	    #[test] fn reads_a_fixture() { ... }
+//	}
+//
+// Measured on develop (cleat#1789): a probe crate with an ordinary integration
+// test, a bench, and a cfg(test) module produced three errors from three files,
+// none of which reach the cdylib. examples/rust-workflow has such a module and
+// vets clean only because it happens to use nothing forbidden.
+//
+// EXPECTS ALREADY-BLANKED INPUT. It counts braces, so it must run after
+// rustCodeOnly or a brace inside a comment or a string closes the wrong item.
+// The call site composes them in that order for this reason.
+//
+// WHAT IT MATCHES: #[cfg(test)] and #[cfg(all(test, ...))] -- any attribute
+// whose text contains "cfg(" and the word test -- followed by an item with a
+// body. It blanks from the attribute to the item's closing brace.
+//
+// WHAT IT DOES NOT: a bodyless item (`#[cfg(test)] mod tests;`, a file module)
+// is left alone, because there is no brace to match and the file it names is
+// scanned on its own. That is the over-reporting direction.
+func withoutCfgTest(src []byte) []byte {
+	out := make([]byte, len(src))
+	copy(out, src)
+	attr := regexp.MustCompile(`#\[\s*cfg\s*\([^\]]*\btest\b[^\]]*\)\s*\]`)
+	for _, loc := range attr.FindAllIndex(src, -1) {
+		// Find the item's opening brace, refusing to cross a `;` -- a bodyless
+		// item ends there and the next `{` belongs to something else.
+		open := -1
+		for i := loc[1]; i < len(src); i++ {
+			if src[i] == ';' {
+				break
+			}
+			if src[i] == '{' {
+				open = i
+				break
+			}
+		}
+		if open < 0 {
+			continue
+		}
+		depth, end := 0, -1
+		for i := open; i < len(src); i++ {
+			switch src[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = i
+				}
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end < 0 {
+			continue
+		}
+		for i := loc[0]; i <= end; i++ {
+			if out[i] != '\n' {
+				out[i] = ' '
+			}
+		}
+	}
+	return out
+}
+
 // runVetRust performs static analysis on a Rust crate.
 // Returns 0 on success (no errors), 1 if errors were found.
 func runVetRust(crateDir string) int {
@@ -202,7 +279,7 @@ func runVetRust(crateDir string) int {
 	crateName := extractCrateName(cargoToml)
 	fmt.Fprintf(os.Stderr, "Vetting Rust crate %q in %s...\n", crateName, crateDir)
 
-	// Find all .rs files.
+	// Find all .rs files that can reach the artifact.
 	var rsFiles []string
 	err := filepath.WalkDir(crateDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -212,6 +289,36 @@ func runVetRust(crateDir string) int {
 			// Skip the 'target' directory (build artifacts) and hidden dirs.
 			if d.Name() == "target" || d.Name() == ".git" || strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
+			}
+			// And Cargo's test, bench and example TARGETS, which are compiled
+			// separately and are never part of the cdylib this gate guards.
+			// cleat#1789: reading a fixture file in a test is what tests are
+			// FOR, so before this the first project with an integration test
+			// stopped building, pointed at a file that is not in the artifact.
+			//
+			// ANCHORED AT THE CRATE ROOT, because Cargo's convention is
+			// POSITIONAL: <crate>/tests, <crate>/benches, <crate>/examples. A
+			// directory with one of those names anywhere else means nothing to
+			// Cargo and is ordinary library code.
+			//
+			// Two cases a name-only rule gets wrong, both measured rather than
+			// imagined -- the first draft of this comment justified the
+			// anchoring with examples/rust-workflow, which is NOT one of them
+			// (the walk root there is named rust-workflow, so a name-only rule
+			// would have been fine):
+			//
+			//   src/tests/mod.rs   a library module that happens to be called
+			//                      tests -- compiled into the cdylib, and its
+			//                      violation is a real finding
+			//   <crate> named tests  WalkDir's first callback is the root
+			//                      itself, so a name-only rule skips the whole
+			//                      crate and reports it clean having read none
+			//                      of it
+			if rel, relErr := filepath.Rel(crateDir, path); relErr == nil {
+				switch rel {
+				case "tests", "benches", "examples":
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
@@ -253,7 +360,7 @@ func runVetRust(crateDir string) int {
 		// still says "read the list there rather than here" for that reason.
 		// Since #1784 this decides whether an artifact is emitted, so the same
 		// comment now fails a BUILD.
-		lines := strings.Split(string(rustCodeOnly(data)), "\n")
+		lines := strings.Split(string(withoutCfgTest(rustCodeOnly(data))), "\n")
 		for lineIdx, line := range lines {
 			lineNum := lineIdx + 1 // 1-based
 			trimmed := strings.TrimSpace(line)
