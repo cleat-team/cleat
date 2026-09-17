@@ -1317,11 +1317,43 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 			     WHERE key_hash = @p1 AND tenant_id = @p4
 			 )`,
 			keyHash[:], runID, ttlSeconds, tenantID, defName, inputDigest)
-		if err != nil {
-			return "", false, err
-		}
 
-		n, _ := result.RowsAffected()
+		// A DUPLICATE KEY HERE IS THE RACE, NOT A FAILURE. cleat#1753.
+		//
+		// `INSERT ... WHERE NOT EXISTS` is two operations, and SQL Server does
+		// not hold a lock between them at READ COMMITTED: two starters can both
+		// find NOT EXISTS true and both proceed, and the loser's insert violates
+		// pk_idempotency_keys with 2627. That is precisely the condition the
+		// `n == 0` branch below already handles -- a live row exists and this
+		// caller should replay it -- so it is routed there rather than returned.
+		//
+		// MEASURED. Six rounds of eight racers on one key, before this:
+		//
+		//	Violation of PRIMARY KEY constraint 'pk_idempotency_keys'.
+		//	Cannot insert duplicate key in object 'dbo.idempotency_keys'. (2627)
+		//
+		// A single round passed, repeatedly, which is why this survived: the
+		// window needs more than one race to show up reliably.
+		//
+		// NOT AN UPDLOCK/HOLDLOCK HINT, which is the other standard repair.
+		// That serialises the check and the insert, and it converts this into
+		// the classic SQL Server upsert deadlock under the same contention --
+		// trading a duplicate-key error every caller can recover from for a
+		// 1205 that needs its own retry. Reading the outcome is cheaper than
+		// preventing it, and the outcome is already meaningful here.
+		//
+		// The statement is rolled back, not the transaction: a constraint
+		// violation does not abort under the default XACT_ABORT OFF, and this
+		// path rolls the transaction back itself a few lines down regardless.
+		var n int64
+		if err != nil {
+			if !isMSSQLDuplicateKey(err) {
+				return "", false, err
+			}
+			n = 0
+		} else {
+			n, _ = result.RowsAffected()
+		}
 		if n == 0 {
 			// A LIVE row exists, so someone else won the race. After the
 			// delete above the NOT EXISTS can only match a row whose TTL has
