@@ -175,6 +175,25 @@ type dbServiceCaller struct {
 	// operator layer defaults open where the tenant layer defaults closed,
 	// because the floor sits underneath it. cleat#1565.
 	operatorEgress *engine.HostAllowlist
+
+	// secrets resolves ${secret:name} in a request on the way OUT to the
+	// service, and the direction is the whole point.
+	//
+	// THE ORDERING IS WHAT KEEPS THE SECRET OUT OF THE HISTORY, exactly as it
+	// does for plugins at withSecrets. engine/durablecalls.go calls
+	// callService(..., requestJSON, ...) and then records `Request:
+	// requestJSON` from the SAME variable; freshCallWithIntent writes its
+	// intent row from that variable too, before dispatch. Because the
+	// substitution happens in HERE -- past both of those -- neither the event
+	// nor the intent can observe it: history keeps the reference the workflow
+	// wrote.
+	//
+	// Move this any earlier -- into callService, into the host call, into the
+	// guest -- and the recorded request becomes the plaintext credential. The
+	// only thing standing between that and an operator reading it is
+	// engine.Redact, a field-name heuristic that matches seven substrings and
+	// returns non-JSON input untouched. That is a guess; this is a guarantee.
+	secrets *engine.SecretStore
 }
 
 func (c *dbServiceCaller) Call(ctx context.Context, service, operation, requestJSON string) (string, error) {
@@ -198,6 +217,10 @@ func (c *dbServiceCaller) CallWithIdempotencyKey(ctx context.Context, service, o
 }
 
 func (c *dbServiceCaller) call(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, error) {
+	requestJSON, err := c.resolveSecrets(ctx, service, operation, requestJSON)
+	if err != nil {
+		return "", err
+	}
 	if service == "http" && operation == "fetch" {
 		return c.handleHTTPFetch(ctx, requestJSON)
 	}
@@ -205,6 +228,47 @@ func (c *dbServiceCaller) call(ctx context.Context, service, operation, requestJ
 		return c.forwardToBenchSvc(ctx, service, operation, requestJSON, idempotencyKey)
 	}
 	return "", engine.NewPermanentError("call", "", fmt.Errorf("service %s.%s not configured: no endpoint registered", service, operation))
+}
+
+// resolveSecrets substitutes ${secret:name} in a request on its way to the
+// service, and is the ONE funnel both entry points already share -- Call and
+// CallWithIdempotencyKey both delegate to call, so a single resolution here
+// covers the plain path, the idempotency-key path, and (because callService
+// and freshCallWithIntent both dispatch through engine.ServiceCaller) the
+// write-ahead-intent path as well.
+//
+// DONE HERE RATHER THAN IN A DECORATOR, and that is not a style preference.
+// engine.IdempotentCaller EMBEDS engine.ServiceCaller, and
+// engine/idempotency.go type-asserts `s.engine.caller.(IdempotentCaller)` to
+// decide whether to forward an idempotency key at all. A wrapper implementing
+// only Call would fail that assertion silently: every call would keep working,
+// keys would stop being forwarded, and exactly-once would quietly degrade to
+// at-least-once with nothing red anywhere. Resolving inside the existing type
+// cannot make that mistake.
+//
+// A tenantless context passes through rather than guessing. This mirrors
+// withSecrets: one worker serves many tenants, a reference cannot be resolved
+// against "some default tenant", and letting the literal text reach the service
+// fails loudly at the far end instead of silently sending another tenant's
+// credential.
+//
+// A reference naming a secret the tenant does not have is PERMANENT, not
+// retryable. ResolveSecretRefs already refuses to substitute empty for a
+// missing name; retrying cannot create the secret, and a retry budget spent on
+// a typo is a worse diagnostic than one clear failure.
+func (c *dbServiceCaller) resolveSecrets(ctx context.Context, service, operation, requestJSON string) (string, error) {
+	if c.secrets == nil {
+		return requestJSON, nil
+	}
+	tid, ok := tenantctx.From(ctx)
+	if !ok {
+		return requestJSON, nil
+	}
+	resolved, err := engine.ResolveSecretRefs(ctx, c.secrets, tid.String(), requestJSON)
+	if err != nil {
+		return "", engine.NewPermanentError(service+"."+operation, "", err)
+	}
+	return resolved, nil
 }
 
 // benchSvcHTTPClient is a shared HTTP client for bench-svc forwarding with
@@ -1291,6 +1355,12 @@ type Worker struct {
 	// Egress needs both this and the tenant's permission. cleat#1565.
 	operatorEgress *engine.HostAllowlist
 
+	// secrets resolves ${secret:name} in a DurableCall's request, on the way
+	// out to the service. Nil leaves references as literal text -- the same
+	// pass-through a worker started without CLEAT_SECRET_MASTER_KEY has always
+	// had for plugins.
+	secrets *engine.SecretStore
+
 	// Worker membership and this worker's slice of the cluster connection
 	// budget. cleat#1487.
 	//
@@ -2258,6 +2328,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		egressAllow:    w.egressAllow,
 		operatorEgress: w.operatorEgress,
 		traceID:        traceID,
+		secrets:        w.secrets,
 	}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(execStore.(engine.SignalStore)),

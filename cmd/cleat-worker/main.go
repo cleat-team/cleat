@@ -1424,6 +1424,7 @@ func main() {
 		reclaimTimeout:                   *reclaimTimeout,
 		flushRetryWindow:                 *flushRetryWindow,
 		egressAllow:                      egressAllow,
+		secrets:                          secretStore,
 		operatorEgress:                   operatorEgress,
 		workerRegistry:                   workerRegistry,
 		connectionShare:                  share,
