@@ -18,16 +18,8 @@
 #   python3 scripts/check-entity-contract.py --grandfathered /dev/null
 #
 # table					clause
-admin.tenant_api_keys	updated_at
 admin.tenant_api_keys	no-legacy-retirement
-admin.tenant_egress_allow	updated_at
-admin.tenant_roles	updated_at
-public.tenant_domains	updated_at
 public.tenant_secrets	created_at
 public.tenant_settings	created_at
-public.workflow_defs	updated_at
 public.workflow_defs	no-legacy-retirement
-public.workflow_routing	updated_at
-public.workflow_schedules	updated_at
 public.workflow_schedules	no-legacy-retirement
-public.workflow_tags	updated_at

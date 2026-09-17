@@ -53,7 +53,12 @@ CLASSES = ("member", "exempt", "not-an-entity")
 # 13 of 40 after cleat#1702's first conversion migration: `disabled_at` now
 # exists on all ten members, so all ten pairs came off the list rather than
 # the ceiling being lowered to match a number somebody hoped for.
-GRANDFATHER_CEILING = 13
+# 5 of 40 after the second: `updated_at` now exists on the eight members that
+# lacked it, the other two having carried it since migrations 039 and 081. What
+# is left is two created_at pairs and the three legacy retirement spellings --
+# `revoked_at`, `deprecated` and `enabled` -- of which `enabled` is the one
+# carrying the approved API break and converts last.
+GRANDFATHER_CEILING = 5
 
 
 def strip_sql_comments(src):
