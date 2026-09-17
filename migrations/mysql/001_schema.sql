@@ -23,7 +23,12 @@ CREATE TABLE IF NOT EXISTS workflow_defs (
     task_queue VARCHAR(255) NOT NULL DEFAULT 'default',
     abi_version INTEGER NOT NULL DEFAULT 1,
     plugin_deps JSON NOT NULL DEFAULT ('{}'),
-    deprecated TINYINT(1) NOT NULL DEFAULT 0,
+    -- cleat#1702: admission control (disabled_at) and collection
+    -- eligibility (gc_eligible) are SEPARATE, and their equality in
+    -- practice is incidental, not invariant -- migration 088 says why.
+    -- This file carries the final column set, so `deprecated` is gone.
+    disabled_at        TIMESTAMP(6) NULL DEFAULT NULL,
+    gc_eligible        TINYINT(1) NOT NULL DEFAULT 0,
     PRIMARY KEY (name, version)
 ) ENGINE=InnoDB;
 

@@ -580,7 +580,8 @@ func TestPostgresStore_GetWorkflowDef_Success(t *testing.T) {
 				int64(0),              // min_version
 				[]byte(`{"p":"1.0"}`), // plugin_deps
 				createdAt,             // created_at
-				false,                 // deprecated
+				nil,                   // disabled_at
+				false,                 // gc_eligible
 			}},
 		},
 	}, nil)
@@ -618,7 +619,8 @@ func TestPostgresStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 				int64(0),    // min_version
 				[]byte(nil), // plugin_deps (NULL)
 				createdAt,   // created_at
-				false,       // deprecated
+				nil,         // disabled_at
+				false,       // gc_eligible
 			}},
 		},
 	}, nil)
@@ -845,8 +847,8 @@ func TestPostgresStore_ListWorkflowDefs_All(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, false},
-				{"wf-a", int64(1), int64(1), int64(0), []byte(`{"p":"1.0"}`), createdAt, true},
+				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, nil, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(`{"p":"1.0"}`), createdAt, createdAt, true},
 			},
 		},
 	}, nil)
@@ -863,7 +865,7 @@ func TestPostgresStore_ListWorkflowDefs_All(t *testing.T) {
 	if defs[0].Name != "wf-a" || defs[0].Version != 2 {
 		t.Errorf("unexpected first def: %s v%d", defs[0].Name, defs[0].Version)
 	}
-	if defs[1].Deprecated != true {
+	if !defs[1].Disabled() {
 		t.Error("expected second def to be deprecated")
 	}
 }
@@ -874,7 +876,7 @@ func TestPostgresStore_ListWorkflowDefs_ByName(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, nil, false},
 			},
 		},
 	}, nil)
@@ -899,7 +901,7 @@ func TestPostgresStore_ListWorkflowDefs_NilPluginDeps(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(1), int64(1), int64(0), []byte(nil), createdAt, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(nil), createdAt, nil, false},
 			},
 		},
 	}, nil)
@@ -1031,7 +1033,7 @@ func TestPostgresStore_GetWorkflowDef_QueryError(t *testing.T) {
 func TestPostgresStore_MarkVersionDeprecated_QueryError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{
-			match: "UPDATE workflow_defs SET deprecated",
+			match: "UPDATE workflow_defs",
 			err:   fmt.Errorf("simulated exec error"),
 		},
 	})

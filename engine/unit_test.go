@@ -1705,9 +1705,9 @@ func TestCollectVersionMetrics_WithData(t *testing.T) {
 	store := &mockCollectMetricsStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf-alpha", Version: 2, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour), ABIVersion: 1, MinVersion: 1},
-			{Name: "wf-alpha", Version: 1, Deprecated: true, CreatedAt: now.Add(-72 * time.Hour), ABIVersion: 1, MinVersion: 1},
-			{Name: "wf-beta", Version: 1, Deprecated: false, CreatedAt: now.Add(-48 * time.Hour), ABIVersion: 2, MinVersion: 2},
+			{Name: "wf-alpha", Version: 2, GCEligible: false, CreatedAt: now.Add(-24 * time.Hour), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-alpha", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-72 * time.Hour), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-beta", Version: 1, GCEligible: false, CreatedAt: now.Add(-48 * time.Hour), ABIVersion: 2, MinVersion: 2},
 		},
 		counts: map[string]int{
 			"wf-alpha:2": 5,
@@ -1758,7 +1758,7 @@ func TestCheckStaleVersions_NoAlerts(t *testing.T) {
 	store := &mockCheckStaleStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf-fresh", Version: 1, Deprecated: false, CreatedAt: time.Now()},
+			{Name: "wf-fresh", Version: 1, GCEligible: false, CreatedAt: time.Now()},
 		},
 		counts: map[string]int{"wf-fresh:1": 0},
 	}
@@ -1775,7 +1775,7 @@ func TestCheckStaleVersions_StaleNonDeprecated(t *testing.T) {
 	store := &mockCheckStaleStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf-old", Version: 1, Deprecated: false, CreatedAt: time.Now().Add(-14 * 24 * time.Hour)},
+			{Name: "wf-old", Version: 1, GCEligible: false, CreatedAt: time.Now().Add(-14 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf-old:1": 3},
 	}
@@ -1798,7 +1798,7 @@ func TestCheckStaleVersions_DeprecatedWithInstances(t *testing.T) {
 	store := &mockCheckStaleStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf-dep", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-14 * 24 * time.Hour)},
+			{Name: "wf-dep", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-14 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf-dep:1": 2},
 	}
@@ -1821,7 +1821,7 @@ func TestCheckStaleVersions_DeprecatedNoInstancesGC(t *testing.T) {
 	store := &mockCheckStaleStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf-gc", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
+			{Name: "wf-gc", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf-gc:1": 0},
 	}
@@ -1868,7 +1868,7 @@ func TestGarbageCollectVersions_NothingToGC(t *testing.T) {
 	store := &mockGCStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 1, Deprecated: false, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, GCEligible: false, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{},
 	}
@@ -1885,9 +1885,9 @@ func TestGarbageCollectVersions_RemovesDeprecatedOld(t *testing.T) {
 	store := &mockGCStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 3, Deprecated: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
-			{Name: "wf", Version: 2, Deprecated: true, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)},
+			{Name: "wf", Version: 3, GCEligible: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
+			{Name: "wf", Version: 2, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)},
 		},
 		counts: map[string]int{},
 	}
@@ -1910,9 +1910,9 @@ func TestGarbageCollectVersions_ProtectedByMinKeep(t *testing.T) {
 	store := &mockGCStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 3, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour)},
-			{Name: "wf", Version: 2, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-90 * 24 * time.Hour)},
+			{Name: "wf", Version: 3, GCEligible: false, CreatedAt: now.Add(-24 * time.Hour)},
+			{Name: "wf", Version: 2, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-90 * 24 * time.Hour)},
 		},
 		counts: map[string]int{},
 	}
@@ -1935,8 +1935,8 @@ func TestGarbageCollectVersions_SkippedActiveInstances(t *testing.T) {
 	store := &mockGCStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 2, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour)},
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 2, GCEligible: false, CreatedAt: now.Add(-24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf:1": 3},
 	}
@@ -1962,8 +1962,8 @@ func TestGarbageCollectVersions_DryRun(t *testing.T) {
 	store := &mockGCStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 2, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour)},
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 2, GCEligible: false, CreatedAt: now.Add(-24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{},
 	}
@@ -2029,8 +2029,8 @@ func TestPurgeVersions_RemovesOldDeprecated(t *testing.T) {
 	store := &mockPurgeStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 2, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-90 * 24 * time.Hour)},
+			{Name: "wf", Version: 2, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-90 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf:1": 0, "wf:2": 0},
 	}
@@ -2048,7 +2048,7 @@ func TestPurgeVersions_NotOldEnough(t *testing.T) {
 	store := &mockPurgeStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-10 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-10 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf:1": 0},
 	}
@@ -2066,7 +2066,7 @@ func TestPurgeVersions_NotDeprecated(t *testing.T) {
 	store := &mockPurgeStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 1, Deprecated: false, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, GCEligible: false, CreatedAt: now.Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf:1": 0},
 	}
@@ -2084,7 +2084,7 @@ func TestPurgeVersions_SkippedActiveInstances(t *testing.T) {
 	store := &mockPurgeStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf:1": 5},
 	}

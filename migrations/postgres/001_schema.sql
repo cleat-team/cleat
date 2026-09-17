@@ -245,7 +245,12 @@ CREATE TABLE IF NOT EXISTS workflow_defs (
     task_queue TEXT NOT NULL DEFAULT 'default',
     abi_version INTEGER NOT NULL DEFAULT 1,
     plugin_deps JSONB NOT NULL DEFAULT '{}',
-    deprecated BOOLEAN NOT NULL DEFAULT false,
+    -- cleat#1702: admission control (disabled_at) and collection
+    -- eligibility (gc_eligible) are SEPARATE, and their equality in
+    -- practice is incidental, not invariant -- migration 088 says why.
+    -- This file carries the final column set, so `deprecated` is gone.
+    disabled_at TIMESTAMPTZ,
+    gc_eligible BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (name, version)
 );
 

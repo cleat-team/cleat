@@ -1463,7 +1463,7 @@ func TestMySQLIntegration_MarkVersionDeprecated(t *testing.T) {
 	if def == nil {
 		t.Fatal("GetWorkflowDef returned nil")
 	}
-	if !def.Deprecated {
+	if !def.Disabled() {
 		t.Error("expected Deprecated=true after MarkVersionDeprecated")
 	}
 
@@ -1479,7 +1479,7 @@ func TestMySQLIntegration_MarkVersionDeprecated(t *testing.T) {
 	if def == nil {
 		t.Fatal("GetWorkflowDef returned nil")
 	}
-	if def.Deprecated {
+	if def.Disabled() {
 		t.Error("expected Deprecated=false after MarkVersionDeprecated(false)")
 	}
 }

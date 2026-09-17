@@ -25,7 +25,7 @@ type ChildWorkflowOptions struct {
 //  3. Latest compatible: if the parent's version does not exist for the
 //     child workflow name, fall back to:
 //     SELECT MAX(version) FROM workflow_defs
-//     WHERE name = $1 AND min_version <= parentVersion AND NOT deprecated
+//     WHERE name = $1 AND min_version <= parentVersion AND disabled_at IS NULL
 //
 // Args:
 //   - db: database connection (may be nil; if nil, rule 3 is skipped)
@@ -97,7 +97,7 @@ func versionExists(ctx context.Context, db *sql.DB, name string, version int) (b
 	var count int
 	err := db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_defs
-		WHERE name = $1 AND version = $2 AND NOT deprecated
+		WHERE name = $1 AND version = $2 AND disabled_at IS NULL
 	`, name, version).Scan(&count)
 	if err != nil {
 		return false, err
@@ -111,7 +111,7 @@ func latestCompatibleVersion(ctx context.Context, db *sql.DB, name string, paren
 	var version int
 	err := db.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(version), 0) FROM workflow_defs
-		WHERE name = $1 AND min_version <= $2 AND NOT deprecated
+		WHERE name = $1 AND min_version <= $2 AND disabled_at IS NULL
 	`, name, parentVersion).Scan(&version)
 	if err != nil {
 		return 0, err
@@ -124,7 +124,7 @@ func latestVersion(ctx context.Context, db *sql.DB, name string) (int, error) {
 	var version int
 	err := db.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(version), 0) FROM workflow_defs
-		WHERE name = $1 AND NOT deprecated
+		WHERE name = $1 AND disabled_at IS NULL
 	`, name).Scan(&version)
 	if err != nil {
 		return 0, err

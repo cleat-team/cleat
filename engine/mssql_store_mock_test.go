@@ -688,7 +688,7 @@ func TestMSSQLClearStickyWorker(t *testing.T) {
 
 func TestMSSQLMarkVersionDeprecated(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET deprecated", affected: 1},
+		{match: "SET disabled_at", affected: 1},
 	})
 	defer db.Close()
 
@@ -701,7 +701,7 @@ func TestMSSQLMarkVersionDeprecated(t *testing.T) {
 
 func TestMSSQLMarkVersionDeprecated_Error(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET deprecated", err: errors.New("update failed")},
+		{match: "SET disabled_at", err: errors.New("update failed")},
 	})
 	defer db.Close()
 

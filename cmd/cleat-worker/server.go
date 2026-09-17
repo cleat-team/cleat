@@ -2449,12 +2449,18 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 	for _, def := range defs {
 		count, _ := st.CountActiveInstances(r.Context(), def.Name, def.Version)
 		dr := defResponse{
-			Name:            def.Name,
-			Version:         def.Version,
-			ABIVersion:      def.ABIVersion,
-			MinVersion:      def.MinVersion,
-			CreatedAt:       def.CreatedAt,
-			Deprecated:      def.Deprecated,
+			Name:       def.Name,
+			Version:    def.Version,
+			ABIVersion: def.ABIVersion,
+			MinVersion: def.MinVersion,
+			CreatedAt:  def.CreatedAt,
+			// json:"deprecated" is kept and DERIVED from disabled_at, so
+			// cleat#1702's column split carries no HTTP break -- the API
+			// break in that issue is reserved for workflow_schedules.
+			// "deprecated" here has always meant admission control, which is
+			// what disabled_at now carries; gc_eligible is deliberately not
+			// exposed, because nothing outside the worker decides collection.
+			Deprecated:      def.Disabled(),
 			ActiveInstances: count,
 		}
 		if ms, ok := memoryStats[def.Name]; ok {

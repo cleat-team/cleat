@@ -18,5 +18,4 @@
 #   python3 scripts/check-entity-contract.py --grandfathered /dev/null
 #
 # table					clause
-public.workflow_defs	no-legacy-retirement
 public.workflow_schedules	no-legacy-retirement

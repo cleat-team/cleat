@@ -731,7 +731,7 @@ type WorkflowStore interface {
 	// ---- Version Resolution ----
 
 	// ResolveVersionByTag resolves a version tag to a version number.
-	// Special case: tag "latest" returns MAX(version) WHERE NOT deprecated.
+	// Special case: tag "latest" returns MAX(version) WHERE disabled_at IS NULL.
 	ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error)
 
 	// ---- Admin operations ----

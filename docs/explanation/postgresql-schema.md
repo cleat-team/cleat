@@ -89,7 +89,7 @@ CREATE TABLE workflow_defs (
     task_queue TEXT NOT NULL DEFAULT 'default',
     abi_version INTEGER NOT NULL DEFAULT 1,
     plugin_deps JSONB NOT NULL DEFAULT '{}',
-    deprecated BOOLEAN NOT NULL DEFAULT false,
+    gc_eligible BOOLEAN NOT NULL DEFAULT false,
     disabled_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, name, version)
