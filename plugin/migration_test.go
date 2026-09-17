@@ -94,7 +94,8 @@ func (c *migrationTestConn) ExecContext(ctx context.Context, query string, args 
 	// index and count in this file and say nothing extra; it is tracked
 	// separately instead, and TestRunMigrations_PostgresSessionSetup asserts
 	// on it.
-	if strings.Contains(query, "pg_advisory_") || strings.Contains(query, "search_path") {
+	if strings.Contains(query, "pg_advisory_") || strings.Contains(query, "search_path") ||
+		strings.Contains(query, "lock_timeout") {
 		c.lockCalls = append(c.lockCalls, query)
 		return &migrationTestResult{rowsAffected: 1}, nil
 	}
@@ -582,6 +583,11 @@ func TestRunMigrations_PostgresSessionSetup(t *testing.T) {
 				"pg_advisory_lock",
 				"SET search_path = public",
 				"RESET search_path",
+				// cleat#1775. Both halves: setting the bound without
+				// restoring it leaks it onto a pooled connection, where it
+				// would bound locks for ordinary application traffic.
+				"SET lock_timeout = 30000",
+				"RESET lock_timeout",
 				"pg_advisory_unlock",
 			} {
 				if !strings.Contains(joined, want) {
