@@ -72,17 +72,55 @@ STATICCHECK="honnef.co/go/tools/cmd/staticcheck@2026.2.1"
 # LC_ALL=C pins the collation, which otherwise differs between a developer's
 # locale and the runner's.
 #
-# KNOWN BLIND SPOT: CGO_ENABLED=0 is forced by the cross-compile, and it hides
-# every file behind `//go:build cgo` -- which is the whole wasmtime backend
-# (engine/backend_wasmtime.go, engine/wasmtime_*.go). A helper whose only
-# caller lives there is reported as unused, and it is not: the scan simply
-# cannot see the call. `contextWithRawMemBuf` and `guestErrorText` are in the
-# baseline for exactly that reason, not because they are test-only.
+# THE CGO BLIND SPOT, AND WHY THERE ARE NOW TWO PASSES.
 #
-# So before concluding that a finding is dead code, check whether its callers
-# are cgo-gated. Deleting one of these on the strength of this guard would
-# remove live code from the primary backend -- the same trap CLAUDE.md
-# describes for building and testing with CGO off.
+# CGO_ENABLED=0 is forced by the cross-compile, and it hides every file behind
+# `//go:build cgo` -- 16 files and ~6,000 lines, including the whole wasmtime
+# backend, which is the ONLY backend a production worker runs.
+#
+# This comment used to describe that blind spot in one direction: a helper
+# whose only CALLER is cgo-gated is reported unused when it is not.
+# `contextWithRawMemBuf` and `guestErrorText` were baselined for exactly that
+# reason. True, and only half of it.
+#
+# The other half is worse, because it is silent. A symbol DEFINED inside a
+# cgo-gated file is not reported at all -- the scan cannot see the definition
+# either, so dead code there is invisible rather than mis-reported. Measured on
+# ./engine/ at the time this was written:
+#
+#   CGO off (what this guard saw):   19 findings
+#   CGO on  (native):                33 findings
+#   only with CGO on:                18, all in cgo-gated files
+#   only with CGO off:                4, all cgo-caller false positives
+#
+# The 18 included `isExecutionLimit`, whose doc comment describes gating a
+# fallback that no longer exists, and thirteen `_dispatcher*` constants.
+#
+# So the scan runs TWICE and the results are combined per file, rather than one
+# pass being trusted everywhere:
+#
+#   file is `//go:build cgo`   -> only the CGO-on pass can see it; trust it
+#   file is `//go:build !cgo`  -> only the CGO-off pass can see it; trust it
+#   file has no build tag      -> BOTH passes see it, so a finding counts only
+#                                 if both report it. One pass alone reporting
+#                                 it means the other pass found a caller, which
+#                                 is precisely the false positive above.
+#
+# That last rule is what lets the four cgo-caller entries leave the baseline
+# instead of living there forever with a comment explaining why they are wrong.
+#
+# PORTABILITY. The second pass cannot set GOOS, because cgo cross-compilation
+# needs a cross toolchain, so it runs natively. That is safe HERE and the
+# reason is measured, not assumed: this repo has no OS-specific build tags and
+# no OS- or arch-suffixed filenames, so the file set depends on CGO_ENABLED
+# alone and a native scan sees the same files on darwin and on the runner.
+# Re-derive before trusting it:
+#
+#   grep -rh '^//go:build' --include='*.go' . | sort | uniq -c
+#   find . -name '*.go' | grep -cE '_(linux|darwin|windows|amd64|arm64)(_test)?\.go$'
+#
+# If either ever stops holding, this second pass stops being portable and the
+# baseline will churn per platform.
 TOOLDIR="$(mktemp -d)"
 trap 'rm -rf "$TOOLDIR"' EXIT
 
@@ -111,6 +149,7 @@ modules() {
 SCAN_FAILED="__scan_failed__"
 
 scan() {
+  local cgo="$1"
   if [ ! -x "$TOOLDIR/staticcheck" ]; then
     if ! GOBIN="$TOOLDIR" go install "$STATICCHECK" >&2; then
       echo "ERROR: could not install $STATICCHECK" >&2
@@ -130,8 +169,16 @@ scan() {
   local m prefix mod_out noise
   while IFS= read -r m; do
     [ -n "$m" ] || continue
-    mod_out="$(cd "$m" && LC_ALL=C GOOS=linux CGO_ENABLED=0 GOWORK=off \
-      "$TOOLDIR/staticcheck" -checks=U1000 -tests=false ./... 2>&1)"
+    if [ "$cgo" = "on" ]; then
+      # NATIVE: cgo cannot cross-compile without a cross toolchain. Safe here
+      # because the repo has no OS-specific tags or filenames -- see the note
+      # above, which carries the commands that re-derive that.
+      mod_out="$(cd "$m" && LC_ALL=C CGO_ENABLED=1 GOWORK=off \
+        "$TOOLDIR/staticcheck" -checks=U1000 -tests=false ./... 2>&1)"
+    else
+      mod_out="$(cd "$m" && LC_ALL=C GOOS=linux CGO_ENABLED=0 GOWORK=off \
+        "$TOOLDIR/staticcheck" -checks=U1000 -tests=false ./... 2>&1)"
+    fi
 
     # Anything that is not a U1000 finding is staticcheck failing to analyse,
     # not a clean module. The 2025.1.1 pin died this way on every package
@@ -171,10 +218,7 @@ EOF
   fi
 
   local findings
-  findings="$(printf '%s\n' "$all" |
-    grep '(U1000)$' |
-    sed -E 's|^([^:]*)/[^/:]*\.go:[0-9]+:[0-9]+: (.*) is unused \(U1000\)$|\1\t\2|' |
-    LC_ALL=C sort -u)"
+  findings="$(printf '%s\n' "$all" | grep '(U1000)$' | LC_ALL=C sort -u)"
 
   # A scan that finds nothing is far more likely to be a broken scan than a
   # clean tree -- a cross-compile failure, a build error, a changed message
@@ -236,6 +280,64 @@ stale_entries() {
     return 1
   fi
   grep -Fxv -f <(printf '%s\n' "$current") "$baseline" | grep -v '^[[:space:]]*$' || true
+}
+
+# buildTagOf classifies a repo-relative .go file by the constraint that decides
+# which pass can see it. Only the leading build-tag block matters, so the first
+# few lines are enough.
+buildTagOf() {
+  local f="$1"
+  if [ ! -f "$f" ]; then
+    echo "missing"
+    return
+  fi
+  local tag
+  tag="$(head -8 "$f" | grep -m1 '^//go:build ' || true)"
+  case "$tag" in
+    '//go:build cgo') echo "cgo" ;;
+    '//go:build !cgo') echo "nocgo" ;;
+    *) echo "none" ;;
+  esac
+}
+
+# combine applies the per-file rule described at the top of this file to the two
+# raw scans, then reduces what survives to the baseline key.
+#
+# The key is "<package dir><TAB><symbol>", deliberately dropping the filename
+# and line so that moving a function does not churn the baseline.
+combine() {
+  local off="$1" on="$2"
+  local line file tag keep
+
+  {
+    # Everything either pass reported, considered once.
+    printf '%s\n%s\n' "$off" "$on" | LC_ALL=C sort -u | while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      file="${line%%:*}"
+      tag="$(buildTagOf "$file")"
+      keep=no
+      case "$tag" in
+        cgo)
+          # Invisible to the CGO-off pass; the CGO-on pass is the only witness.
+          printf '%s\n' "$on" | grep -qxF "$line" && keep=yes
+          ;;
+        nocgo)
+          printf '%s\n' "$off" | grep -qxF "$line" && keep=yes
+          ;;
+        *)
+          # Both passes can see this file, so both must agree. One pass alone
+          # means the other found a caller behind the opposite constraint --
+          # the cgo-caller false positive this rule exists to drop.
+          if printf '%s\n' "$off" | grep -qxF "$line" &&
+             printf '%s\n' "$on" | grep -qxF "$line"; then
+            keep=yes
+          fi
+          ;;
+      esac
+      [ "$keep" = yes ] && printf '%s\n' "$line"
+    done
+  } | sed -E 's|^([^:]*)/[^/:]*\.go:[0-9]+:[0-9]+: (.*) is unused \(U1000\)$|\1\t\2|' |
+    LC_ALL=C sort -u
 }
 
 die_if_scan_failed() {
@@ -333,8 +435,11 @@ if [ "${1:-}" = "--self-test" ]; then
 fi
 
 if [ "${1:-}" = "--update" ]; then
-  fresh="$(scan)"
-  die_if_scan_failed "$fresh"
+  fresh_off="$(scan off)"
+  die_if_scan_failed "$fresh_off"
+  fresh_on="$(scan on)"
+  die_if_scan_failed "$fresh_on"
+  fresh="$(combine "$fresh_off" "$fresh_on")"
   printf '%s\n' "$fresh" > "$BASELINE"
   echo "Wrote $(wc -l < "$BASELINE" | tr -d ' ') entries to $BASELINE"
   exit 0
@@ -346,8 +451,11 @@ if [ ! -f "$BASELINE" ]; then
   exit 1
 fi
 
-current="$(scan)"
-die_if_scan_failed "$current"
+current_off="$(scan off)"
+die_if_scan_failed "$current_off"
+current_on="$(scan on)"
+die_if_scan_failed "$current_on"
+current="$(combine "$current_off" "$current_on")"
 
 # Anything present now but absent from the baseline is new.
 #
