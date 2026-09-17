@@ -117,6 +117,64 @@ the half that goes stale between the writing and the reading.
 second. WS-1's own #680 and #682 collided on the three SDK parity lists because both were open at
 once; the merge order decided which one had to be resolved by hand.
 
+**R6a — A DERIVED file is a shared declaration file too, and it is the more dangerous kind,
+because its collision is SILENT.** Added 2026-09-17 after WS-3 obeyed R6 on the hand-edited file
+they had been warned about and then held two PRs both regenerating `scripts/skip-baseline.txt`.
+
+    two appends to a shared file        -> CONFLICT, loud, someone resolves it
+    two regenerations of a DERIVED file -> CLEAN MERGE, and the older scanner wins
+
+It did not conflict. It **reverted**: the older branch's baseline had been generated from a tree
+whose `check-skips.sh` could not yet see methods, so merging restored the exact misattribution the
+other PR existed to remove, and dropped a third PR's entries. `git merge-tree` reported clean,
+because textually it is. A derived file has no conflict surface, so every instinct built around
+*git will stop me* is inverted — and the hunk-move that resolves two guards inserting at one
+`ci.yml` anchor does not help, because the collision is the whole file's content rather than a
+region of it.
+
+**And it had already happened on `develop`, unnoticed**: the baseline carried
+`engine mssqlRowDisappearanceReporter 2`, which the current scanner produces **zero** times, and
+the guard exited 0 — because it fails only on skips *above* the baseline. A grant covering
+something that is not there is invisible to a ceiling-only check. (cleat#1746.)
+
+**The rule, and the second clause is the one that is easy to miss:**
+
+> **Rebase first, regenerate second, assert the diff.** Never conflict-resolve a derived file —
+> regenerate it. *And regenerate it after a CLEAN merge too, if the other side changed the
+> generator.*
+
+**The trigger is not "the other side touched the derived file" — it is "the other side touched the
+GENERATOR"**, a change nowhere near the file you are about to regenerate. #1742 changed
+`check-skips.sh`; #1744 regenerated `skip-baseline.txt`. Nothing in #1744's diff pointed at #1742
+and no conflict marker ever appeared, so the habit has to be keyed on the **rebase**, not on
+inspecting your own diff for overlap.
+
+**The obvious structural fix does NOT work here, and the reason is the sharper half of this rule.**
+`scripts/skip-ledger.d/` removed this class for the budget ledger (cleat#1333, #1395) by giving
+each declaration its own file, and reaching for the same shape here is the first thing anyone
+tries — WS-3 filed exactly that remedy in cleat#1746 and then withdrew it on measurement.
+
+    hand-authored declarations  ->  one file per entry WORKS.  Two streams
+                                    writing different files have nothing to
+                                    collide over.
+    GENERATED wholesale         ->  one file per entry buys NOTHING. A
+                                    regeneration from a stale base rewrites all
+                                    N files with the older generator's output,
+                                    and they merge exactly as cleanly as one
+                                    file did.
+
+So the distinction that matters is **hand-authored versus generated**, not one-file versus many —
+and it is the same distinction underneath this whole rule. R1 ("never edit a shared counter,
+derive it") applies to the first kind. For the second kind there is no layout that helps: the
+remedy is a **guard that fails on a stale entry**, which is what cleat#1751 adds for
+`skip-baseline.txt`.
+
+**Both halves survive, and not redundantly.** A guard makes staleness fail for the one file it
+covers, so there the discipline is enforced rather than remembered. This rule covers every *other*
+derived file in the tree, none of which has a guard — and the next derived file to acquire this
+hazard will not have one on the day it acquires it. (WS-3's framing, after correcting their own
+filed remedy.)
+
 **R7 — Freeze the surface while converging.** No new SDK capability, no new host call, no new
 dialect until the existing matrix is guarded. Every addition multiplies 5 languages × 3 dialects,
 and §3.111 measured what that costs: seven remaining calls ≈ 40 guest-side edits.
