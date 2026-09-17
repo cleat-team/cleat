@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Stream Trailer Check — every commit names the workstream that wrote it
 #
-# Commits carry `Claude-Stream: <WS-1|WS-2|WS-3|coordinator>`. The convention
+# Commits carry `Claude-Stream: <WS-1|WS-2|WS-3|coordinator|cleat-review>`. The convention
 # replaced a session id on 2026-09-17 for one reason: a session id does not
 # survive a host restart and a stream does. After the 2026-09-16 reboot every
 # recorded `session_…` mapping named a session that no longer existed, three
@@ -112,7 +112,19 @@ jobs:
               ;;
           esac
 
-          VALID='^(WS-1|WS-2|WS-3|coordinator)$'
+          # cleat-review is a REVIEW session rather than a delivery stream: it
+          # reads the tree and opens a pull request only for what that reading
+          # turns up. Added 2026-09-17 because the set had no value for one and
+          # the nearest was actively wrong -- two of its PRs went out as
+          # `coordinator`, which is not "unattributed", it is attributed to
+          # someone else. The coordinator session found a red PR carrying its
+          # own name that it had not opened, and correctly declined to touch 80
+          # files of WASM host ABI on that basis.
+          #
+          # An enumerated set is still right: this check exists to catch a typo,
+          # and an open set catches none. What it costs is exactly this -- a new
+          # participant is a CI change, and cannot land it under its own name.
+          VALID='^(WS-1|WS-2|WS-3|coordinator|cleat-review)$'
 
           # Commits that PREDATE the convention cannot carry the trailer, and a
           # check that demands one of them is asking for something impossible.
@@ -181,7 +193,7 @@ jobs:
                 echo "  $(git log -1 --format='%h %s' "$commit")  -- no Claude-Stream trailer"
               fi
             elif ! printf '%s' "$value" | grep -qE "$VALID"; then
-              echo "  $(git log -1 --format='%h %s' "$commit")  -- Claude-Stream: '$value' is not one of WS-1, WS-2, WS-3, coordinator"
+              echo "  $(git log -1 --format='%h %s' "$commit")  -- Claude-Stream: '$value' is not one of WS-1, WS-2, WS-3, coordinator, cleat-review"
             fi
           done)
 
@@ -238,7 +250,7 @@ jobs:
             echo "  git rebase --exec \"git commit --amend --no-edit --trailer 'Claude-Stream: WS-1'\" ${BASE}"
             echo "  git push --force-with-lease"
             echo ""
-            echo "Valid values: WS-1, WS-2, WS-3, coordinator."
+            echo "Valid values: WS-1, WS-2, WS-3, coordinator, cleat-review."
             echo ""
             echo "If a commit is reported as carrying a line git will not parse:"
             echo "  the trailer must be in the message's FINAL paragraph, with no"

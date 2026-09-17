@@ -1615,8 +1615,21 @@ stream does.** After the 2026-09-16 reboot every `session_…` mapping recorded 
 that no longer existed, three PRs could not be attributed at all, and one session merged two PRs it
 had not authored on the strength of a dead id. The new form:
 
-    Claude-Stream: WS-1        # closed set: WS-1, WS-2, WS-3, coordinator
+    Claude-Stream: WS-1        # closed set: WS-1, WS-2, WS-3, coordinator,
+                               #             cleat-review
                                # anchor greps at ^Claude-Stream: , as before
+
+`cleat-review` is a review session rather than a delivery stream, added 2026-09-17. The set had no
+value for one, and the nearest was actively wrong: two of its PRs went out trailered `coordinator`,
+which is not "unattributed" — it is attributed to someone else. The coordinator session then found
+a red PR carrying its own name that it had not opened, and declined to touch 80 files of WASM host
+ABI on that basis, which was the correct call and cost a round trip to establish. Same failure
+class as the dead-id incident above, reached from the other direction: there, a session merged what
+it had not authored; here, a session nearly debugged what it had not written.
+
+**Adding a value is a CI change, and the new participant cannot land it under its own name.** That
+is the price of an enumerated set and it is worth paying — the check exists to catch a typo, and an
+open set catches nothing.
 
 It is still a **claim, not a record** — any session can type any stream name, exactly as any session
 could type any id. The gain is stability under restart, and the fact that each session can assert
