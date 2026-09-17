@@ -1,7 +1,36 @@
 # Cleat Engine Throughput Benchmarks
 
-> Generated: 2026-05-15
-> Agent: Session C (items 1-4)
+> Measured 2026-05-15. Scope narrowed 2026-09-17 to what was actually run.
+
+## What this document is, and what it is not
+
+**Read this before quoting any number below.**
+
+Everything here was measured on **one laptop** — a Ryzen 5 5500U with
+default-configured Docker PostgreSQL. That is a development machine, not a
+representative deployment, and no figure here should be compared against a
+number another project published from provisioned cloud hardware.
+
+The two classes of result mean very different things:
+
+| section | what it measures | what it does **not** measure |
+|---|---|---|
+| In-Process Benchmark Results | Go framework overhead — closure dispatch, mutexes, allocation | WASM instantiation, any database, any network |
+| Database Benchmark Results | PostgreSQL operations against a local Docker instance | WASM, network, contention from real worker fleets, any other dialect |
+
+In particular, the in-process figures in the millions of workflows per second
+are **the cost of calling a Go function**. A workflow that does no durable call
+and touches no database is not a workflow cleat would ever run. Those numbers
+are a useful ceiling for framework overhead and are meaningless as a throughput
+claim.
+
+**Removed 2026-09-17, deliberately:** a "Throughput at Scale (Projected)"
+section, an "Estimated throughput tiers" table, a cost-per-dollar calculator
+built on top of those estimates, and a "Retention Verification" section whose
+every file path (`internal/host/*`) no longer exists. None of it was measured;
+the calculator converted the no-database microbenchmark into a dollars figure.
+Publishing fewer honest numbers beats publishing many unreliable ones. What a
+replacement needs is stated at the end.
 
 ## Methodology
 
@@ -125,12 +154,16 @@ Batch INSERT into `event_history` table within a transaction.
 
 ### Event History SELECT Throughput
 
-Loading 10,000 events. **Note**: These benchmarks failed due to a pre-existing schema resolution issue in the benchmark setup (`event_history` table in `cleat_bench` schema not found via default `search_path`). The `LoadEventHistory` and `LoadEventHistoryPaginated` methods work correctly in production; this is a test fixture issue.
+**Not measured.** The benchmark did not run: `event_history` lives in the
+`cleat_bench` schema and was not on the default `search_path`, so both cases
+errored out.
 
-| Mode | Result |
-|------|--------|
-| load_all | FAIL (schema resolution) |
-| paginated (page 1000) | FAIL (schema resolution) |
+A previous revision of this document published that as a results table with
+`FAIL (schema resolution)` in the cells, alongside a note that the production
+code paths work correctly. A failed run is not a result, and a table is where a
+reader looks for one. `LoadEventHistory` and `LoadEventHistoryPaginated` are
+covered by the test suite; their **throughput is simply unknown** and is stated
+that way here rather than rendered as a row.
 
 ### Heartbeat UPDATE Throughput
 
@@ -146,54 +179,6 @@ Loading event history for compaction operations at different history sizes. Meas
 |--------|-----------|-------|---------|------|-----------|
 | 10,000 | 1,689 | 6,988,304 | 847.2 | 106,264 | 10,793 |
 | 100,000 | 250 | 48,455,905 | 8,255 | 106,264 | 10,793 |
-
----
-
-## Throughput at Scale (Projected)
-
-Based on in-process benchmark results, projected throughput for real deployments depends on the database layer. The in-process ceiling is extremely high (millions of workflows/s), but real throughput will be limited by:
-
-1. **PostgreSQL write throughput**: Event history INSERTs are the primary bottleneck. Each step in a workflow generates one `event_history` row.
-2. **Claim contention**: At high concurrency (>100 workers), `SELECT ... FOR UPDATE SKIP LOCKED` contention increases latency.
-
-### Estimated throughput tiers
-
-| Tier | Workflows/s | Steps/s | DB IO pattern | Bottleneck |
-|------|------------|---------|---------------|------------|
-| Small (10-step simple) | ~1,000 | ~10,000 | Light writes | Claim latency |
-| Medium (100-step saga) | ~500 | ~50,000 | Moderate writes | Event history INSERT |
-| Large (1000-step saga) | ~100 | ~100,000 | Heavy writes | Compaction, I/O |
-
----
-
-## Cost Calculator: Events per Dollar
-
-This calculator estimates throughput per dollar on reference hardware (Ryzen 5 5500U-class, NVMe SSD).
-
-### Assumptions
-
-- Reference instance cost: ~$50/month (cloud VM, similar to AWS c6a.xlarge)
-- Event = one `event_history` row
-- In-process framework cost per event: ~11.5ns (from 1000-step simple benchmark)
-- DB write cost per event: ~5-20us (estimated from insert benchmarks)
-
-### Formula
-
-```
-events_per_dollar = (monthly_events) / monthly_cost
-monthly_events = 30 * 24 * 3600 * events_per_second
-```
-
-### Tiers
-
-| Tier | events/s | events/month | events/$ |
-|------|----------|-------------|----------|
-| Framework only (in-process ceiling) | 86,000,000 | 2.23e14 | 4.46e12 |
-| Realistic (simple, single PG) | ~10,000 | 2.59e10 | 5.18e8 |
-| Realistic (saga, single PG) | ~5,000 | 1.30e10 | 2.59e8 |
-| Heavy (1000-step, single PG) | ~1,000 | 2.59e9 | 5.18e7 |
-
-**Note**: At $0.50/GB-month for managed PostgreSQL storage, event history retention at 30 days adds storage cost. At 1KB per event row, 10M events/day = 10GB/day = 300GB/month retention = $150/month storage cost. Plan retention carefully.
 
 ---
 
@@ -213,56 +198,21 @@ monthly_events = 30 * 24 * 3600 * events_per_second
 
 ---
 
-## Retention Verification
+## What a replacement benchmark has to do
 
-The retention loop was verified for all paths:
+This document cannot currently support a public performance claim. To become one
+that can:
 
-### 1. Retention loop started in `Worker.Run()` (sharded and non-sharded)
+1. **Provisioned hardware**, not a laptop, with the instance type stated.
+2. **A tuned PostgreSQL**, or the configuration stated as deliberately default —
+   `shared_buffers=128MB` is a Docker default, not a deployment.
+3. **The SELECT benchmark fixed** so the `cleat_bench` schema resolves, and its
+   numbers measured rather than omitted.
+4. **WASM in the path** for at least one end-to-end case, so there is a figure
+   that describes a workflow rather than a function call.
+5. **Methodology stated in the terms Temporal and DBOS use**, so the numbers are
+   comparable rather than merely present.
 
-File: `cmd/cleat-worker/main.go`
-- Line 968: `initLoopCtx("retention")` -- per-loop context initialized
-- Line 1012: `w.loopFuncs["retention"] = func() { w.retentionLoop(w.retentionDays) }` -- registered
-- Line 1014: `go w.withPanicRecovery("retention", func() { w.retentionLoop(w.retentionDays) })()` -- started
-
-The `store` field on Worker is of type `host.WorkflowStore` (interface), which works for both plain `PostgresStore` and `ShardedStore`.
-
-### 2. Default retention: 30 days
-
-File: `cmd/cleat-worker/main.go`, line 102:
-```go
-retentionDays := flag.Int("retention-days", 30, "Days to retain completed/failed workflow event history (0 disables)")
-```
-Default value is 30. The flag description states "0 disables".
-
-### 3. Retention loop behavior
-
-File: `cmd/cleat-worker/main.go`, lines 1797-1824:
-- Returns immediately if `retentionDays <= 0` (zero disables retention)
-- Runs every 24 hours
-- Calls `w.store.DeleteExpiredEvents(ctx, cutoff)`
-- Emits metrics via Prometheus (`events_deleted_total`, `retention_last_run_timestamp`)
-
-### 4. `DeleteExpiredEvents` implemented on all backends
-
-| Backend | File | Lines |
-|---------|------|-------|
-| PostgresStore | `internal/host/db.go` | 3948-3989 |
-| MySQLStore | `internal/host/mysql_ops.go` | 1018-1059 |
-| MSSQLStore | `internal/host/mssql_store.go` | 2686-2733 |
-| ShardedStore | `internal/host/sharded_store.go` | 1132-1150 |
-
-All implementations:
-- Batch-delete in chunks of 10,000 rows to avoid table locks
-- Clean up compaction state for expired workflows
-- Return total deleted row count
-
-### 5. ShardedStore path
-
-File: `internal/host/sharded_store.go`, lines 1132-1150:
-- Fans out `DeleteExpiredEvents` to all shards
-- Collects errors from each shard
-- Returns summed deletion count
-
-### Conclusion
-
-Retention is enabled by default (30 days), started on all worker paths, and implemented on all three database backends plus the sharded store. No gaps found.
+Until then, the honest summary is the one at the top: framework overhead is very
+low, single-node PostgreSQL write throughput is the bottleneck, and no number
+here describes a deployment.
