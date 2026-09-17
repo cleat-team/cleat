@@ -83,6 +83,28 @@ func runVetJava(projectDir string) int {
 				strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
+			// Skip test source sets. cleat#1789.
+			//
+			// These are not workflow code and are not compiled into the
+			// artifact, so their determinism is not a property of anything
+			// that replays. While `cleat vet` was opt-in that was noise; #1791
+			// wired this checker into `cleat build --target java`, so a test
+			// that reads a fixture file now REFUSES THE BUILD -- and reading a
+			// fixture file is what tests are for.
+			//
+			// Matched as the PAIR src/test rather than any directory called
+			// "test", which would also skip a `test` package inside main
+			// sources. Checking the parent's name keeps it to Gradle and Maven
+			// source-set layout, and still works for a multi-module project
+			// where the path is <module>/src/test.
+			//
+			// testFixtures is Gradle's other non-production source set and is
+			// excluded for the same reason.
+			if d.Name() == "test" || d.Name() == "testFixtures" {
+				if filepath.Base(filepath.Dir(path)) == "src" {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		if strings.HasSuffix(path, ".java") {
