@@ -25,7 +25,7 @@ type fakeAPIKeyRow struct {
 	tenantID    string
 	keyHashHex  string
 	description string
-	revokedAt   *time.Time
+	disabledAt   *time.Time
 }
 
 // fakeDBStore holds the in-memory data used by the fake SQL driver.
@@ -115,8 +115,8 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	case strings.Contains(query, "INSERT INTO admin.tenant_api_keys") ||
 		strings.Contains(query, "INSERT INTO tenant_api_keys"):
 		return c.execInsertAPIKey(args)
-	case strings.Contains(query, "UPDATE admin.tenant_api_keys SET revoked_at") ||
-		strings.Contains(query, "UPDATE tenant_api_keys SET revoked_at"):
+	case strings.Contains(query, "UPDATE admin.tenant_api_keys SET disabled_at") ||
+		strings.Contains(query, "UPDATE tenant_api_keys SET disabled_at"):
 		return c.execRevokeAPIKey(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Exec: %s", query)
@@ -129,7 +129,7 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 
 // queryTenantLookup handles:
 //
-//	SELECT tenant_id FROM tenant_api_keys WHERE key_hash = $1 AND revoked_at IS NULL
+//	SELECT tenant_id FROM tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL
 func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, error) {
 	keyHash, err := argBytes(args, 1)
 	if err != nil {
@@ -137,7 +137,7 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 	}
 	hashHex := fmt.Sprintf("%x", keyHash)
 	key, ok := c.store.apiKeys[hashHex]
-	if !ok || key.revokedAt != nil {
+	if !ok || key.disabledAt != nil {
 		// Return empty rows → Next() returns io.EOF → sql.ErrNoRows
 		return &fakeRows{columns: []string{"tenant_id"}}, nil
 	}
@@ -210,7 +210,7 @@ func (c *fakeConn) execInsertAPIKey(args []driver.NamedValue) (driver.Result, er
 
 // execRevokeAPIKey handles:
 //
-//	UPDATE tenant_api_keys SET revoked_at = now() WHERE key_id = $1 AND revoked_at IS NULL
+//	UPDATE tenant_api_keys SET disabled_at = now() WHERE key_id = $1 AND disabled_at IS NULL
 func (c *fakeConn) execRevokeAPIKey(args []driver.NamedValue) (driver.Result, error) {
 	keyID, err := argString(args, 1)
 	if err != nil {
@@ -218,9 +218,9 @@ func (c *fakeConn) execRevokeAPIKey(args []driver.NamedValue) (driver.Result, er
 	}
 
 	for hashHex, key := range c.store.apiKeys {
-		if key.keyID == keyID && key.revokedAt == nil {
+		if key.keyID == keyID && key.disabledAt == nil {
 			now := time.Now()
-			key.revokedAt = &now
+			key.disabledAt = &now
 			c.store.apiKeys[hashHex] = key
 			return &fakeResult{rowsAffected: 1}, nil
 		}

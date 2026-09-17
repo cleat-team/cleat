@@ -477,7 +477,7 @@ func (c *fakeConn) execResetStuckJobs() (driver.Result, error) {
 
 // queryTenantLookup handles:
 //
-//	SELECT tenant_id FROM tenant_api_keys WHERE key_hash = $1 AND revoked_at IS NULL
+//	SELECT tenant_id FROM tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL
 func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, error) {
 	keyHash, err := argBytes(args, 1)
 	if err != nil {

@@ -756,8 +756,9 @@ tier2:
 
           * issuance -- `cleat-worker --generate-api-key-for <tenant-uuid>` prints a key
             and the header to use it in (cmd/cleat-worker/main.go).
-          * storage -- admin.tenant_api_keys, hashed, with revoked_at
-            (migrations/postgres/001_schema.sql).
+          * storage -- admin.tenant_api_keys, hashed, with disabled_at
+            (migrations/postgres/001_schema.sql; the column was revoked_at until
+            087 made it the contract spelling, cleat#1702).
           * validation -- auth/middleware.go accepts `Authorization: Bearer cleat_sk_...`
             or `X-Cleat-API-Key`, and with requireAuth=true refuses anything else with
             401 before the handler runs.

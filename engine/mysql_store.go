@@ -711,7 +711,7 @@ func (s *MySQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte
 	var tenantID uuid.UUID
 	err := s.db.QueryRowContext(ctx,
 		`SELECT tenant_id FROM tenant_api_keys
-		 WHERE key_hash = ? AND revoked_at IS NULL`, keyHash).Scan(&tenantID)
+		 WHERE key_hash = ? AND disabled_at IS NULL`, keyHash).Scan(&tenantID)
 	if err != nil {
 		return uuid.Nil, err
 	}

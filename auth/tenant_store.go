@@ -196,11 +196,11 @@ func resolveAPIKeyStmt(dialect string) string {
 	case DialectMySQL:
 		// No admin schema: schema and database are one namespace in MySQL, and
 		// the keys live in the base database the DSN names.
-		return `SELECT tenant_id FROM tenant_api_keys WHERE key_hash = ? AND revoked_at IS NULL`
+		return `SELECT tenant_id FROM tenant_api_keys WHERE key_hash = ? AND disabled_at IS NULL`
 	case DialectMSSQL:
-		return `SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND revoked_at IS NULL`
+		return `SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL`
 	default:
-		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND revoked_at IS NULL`
+		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL`
 	}
 }
 
@@ -213,7 +213,7 @@ func (s *TenantStore) RevokeAPIKey(ctx context.Context, keyID uuid.UUID) error {
 		return fmt.Errorf("auth: RevokeAPIKey is not implemented for %s", s.dialect)
 	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE admin.tenant_api_keys SET revoked_at = now() WHERE key_id = $1 AND revoked_at IS NULL`, keyID)
+		`UPDATE admin.tenant_api_keys SET disabled_at = now() WHERE key_id = $1 AND disabled_at IS NULL`, keyID)
 	return err
 }
 

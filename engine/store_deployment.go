@@ -88,7 +88,7 @@ func (s *PostgresStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []b
 	var tenantID uuid.UUID
 	err := s.db.QueryRowContext(ctx,
 		`SELECT tenant_id FROM admin.tenant_api_keys
-		 WHERE key_hash = $1 AND revoked_at IS NULL`, keyHash).Scan(&tenantID)
+		 WHERE key_hash = $1 AND disabled_at IS NULL`, keyHash).Scan(&tenantID)
 	if err != nil {
 		return uuid.Nil, err
 	}

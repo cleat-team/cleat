@@ -186,7 +186,7 @@ func TestMiddleware_RevokedToken_ReturnsUnauthorized(t *testing.T) {
 	store.mu.Lock()
 	k := store.apiKeys[hashHex]
 	now := time.Now()
-	k.revokedAt = &now
+	k.disabledAt = &now
 	store.apiKeys[hashHex] = k
 	store.mu.Unlock()
 
