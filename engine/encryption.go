@@ -7,10 +7,13 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+
+	"golang.org/x/crypto/hkdf"
 )
 
 // PayloadEncryption provides AES-256-GCM encryption and decryption for
@@ -69,6 +72,115 @@ func tenantForAAD(tenantID string) string {
 	return tenantID
 }
 
+// payloadKeyInfo separates this subsystem's derived keys from every other one
+// that shares the master secret.
+//
+// A DIFFERENT string from tenant_secrets.go's "cleat-tenant-secret-v1", which is
+// the point: with the same master key and the same tenant id, a different info
+// string yields a different derived key, so a payload key cannot open a tenant
+// secret or the reverse even if the two subsystems are ever pointed at one
+// master.
+const payloadKeyInfo = "cleat-payload-v1"
+
+// tenantCipher holds one tenant's keys for the duration of one operation.
+//
+// WHY THIS EXISTS AT ALL, AND IT IS A MEASUREMENT RATHER THAN A PREFERENCE.
+// Deriving a key costs about what a GCM seal costs -- 530ns against 540ns,
+// measured at -benchtime 2s -count=5 -- a shorter benchtime is noise, see
+// engine/payload_key_derivation_bench_test.go. encodeEventForStorage seals up to
+// eleven fields for one event, so deriving per FIELD adds a seal's worth of work
+// per field and doubles the crypto on the write path:
+//
+//	11 seals, no derivation (before this)   5997 ns/op   1.00x
+//	11 seals, derive once per event         6537 ns/op   1.09x
+//	11 seals, derive once per field        12261 ns/op   2.04x
+//
+// So the derived key is computed once per event and carried, rather than
+// recomputed per field or cached across events.
+//
+// NOT A CACHE, deliberately. A per-tenant key cache would hold derived keys in
+// memory indefinitely, which is the property tenant_secrets.go avoids by
+// deriving per call, and it would need eviction and a mutex on a hot path. This
+// holds a key for exactly one event's encoding or one row's decoding.
+//
+// tenant_secrets.go:112 says HKDF is "cheap enough to do per call rather than
+// cache". That is true at ITS call rate -- one secret at a time -- and would
+// have been false here, where "per call" means eleven times per event. The
+// sentence did not transfer; the measurement is why.
+type tenantCipher struct {
+	tenantID string
+	derived  []byte // HKDF(master, tenantID, payloadKeyInfo)
+	master   []byte // kept for the two legacy forms below
+}
+
+// forTenant derives this tenant's payload key.
+//
+// PER TENANT, so that a key recovered from one tenant's ciphertext -- by
+// cryptanalysis, by a bug, by a disclosed plaintext -- does not decrypt
+// another's. The AAD binding from cleat#1776 stops a ciphertext being MOVED
+// between tenants; this stops one recovered key reading all of them. They are
+// different properties and this subsystem now has both, which is what
+// tenant_secrets.go has had since it was written.
+func (pe *PayloadEncryption) forTenant(tenantID string) (*tenantCipher, error) {
+	if tenantID == "" {
+		return nil, ErrNoTenantForEncryption
+	}
+	// A 32-byte master is an invariant NewPayloadEncryption enforces, and it has
+	// to be re-checked HERE because the derivation silently tolerates a bad one.
+	//
+	// MEASURED, AND IT WAS A REGRESSION THIS CHANGE INTRODUCED. Before
+	// cleat#1793 a zero-value PayloadEncryption failed at aes.NewCipher(nil) on
+	// the first field, which is how TestAdaptiveFlusher_PrepareEntry_EncryptionError
+	// and TestFlushEvent_EncryptGeneralFailure force the encrypt-error branch.
+	// HKDF has no such objection -- a nil secret is just HMAC with an empty key
+	// -- so derivation produced a perfectly valid 32-byte key from nothing and
+	// the seal succeeded. A misconfigured encryptor would have written
+	// ciphertext keyed off an empty master and reported success. Those two tests
+	// caught it; without them the loud failure would have become a silent one.
+	if len(pe.key) != 32 {
+		return nil, fmt.Errorf("payload encryption: master key is %d bytes, want 32", len(pe.key))
+	}
+	derived := make([]byte, 32)
+	r := hkdf.New(sha256.New, pe.key, []byte(tenantID), []byte(payloadKeyInfo))
+	if _, err := io.ReadFull(r, derived); err != nil {
+		return nil, fmt.Errorf("payload encryption: derive tenant key: %w", err)
+	}
+	return &tenantCipher{tenantID: tenantID, derived: derived, master: pe.key}, nil
+}
+
+// seal always writes the newest form.
+func (tc *tenantCipher) seal(plaintext []byte) ([]byte, error) {
+	return sealGCM(tc.derived, plaintext, []byte(tc.tenantID))
+}
+
+// sealString and sealJSON mirror EncryptString and EncryptJSON, minus the
+// derivation -- the caller has already paid for it once.
+//
+// These exist so the multi-field write path can derive once per EVENT. Without
+// them encodeEventForStorage would call EncryptString eleven times and derive
+// eleven keys, which roughly doubles the crypto cost -- see the table above.
+// See tenantCipher's doc for the numbers.
+func (tc *tenantCipher) sealString(plaintext string) (string, error) {
+	ct, err := tc.seal([]byte(plaintext))
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(ct), nil
+}
+
+func (tc *tenantCipher) sealJSON(jsonBytes []byte) ([]byte, error) {
+	ct, err := tc.seal(jsonBytes)
+	if err != nil {
+		return nil, err
+	}
+	encoded := base64.StdEncoding.EncodeToString(ct)
+	out := make([]byte, 0, len(encoded)+2)
+	out = append(out, '"')
+	out = append(out, encoded...)
+	out = append(out, '"')
+	return out, nil
+}
+
 // ErrNoTenantForEncryption is returned when a caller seals with an empty tenant.
 //
 // REFUSING IS NOT PEDANTRY, IT IS THE ONLY WAY THIS FIX CANNOT SILENTLY NOT
@@ -107,11 +219,130 @@ func NewPayloadEncryption(keyBase64 string) (*PayloadEncryption, error) {
 // parameter is required rather than added as a sibling method on purpose -- a
 // surviving Encrypt(plaintext) is an unbound write path that outlives the fix,
 // and the compiler finding every caller is the point.
+// One derivation per call, which is correct for a caller sealing ONE value and
+// is the slow path if used per field. The multi-field write path does not come
+// through here -- encodeEventForStorage takes a tenantCipher once per event and
+// seals through it. See tenantCipher's doc for the measurement.
 func (pe *PayloadEncryption) Encrypt(tenantID string, plaintext []byte) ([]byte, error) {
-	if tenantID == "" {
-		return nil, ErrNoTenantForEncryption
+	tc, err := pe.forTenant(tenantID)
+	if err != nil {
+		return nil, err
 	}
-	block, err := aes.NewCipher(pe.key)
+	return tc.seal(plaintext)
+}
+
+// PayloadForm is which of the three stored forms a ciphertext is in.
+//
+// Replaces the DecryptTenantBound / DecryptLegacyUnbound pair added in
+// cleat#1794. Those answered a yes/no question -- "is this bound to its tenant"
+// -- which stopped being the question the moment there were two bound forms:
+// `cleatctl reseal-payloads` must now rewrite BOTH the nil-AAD form and the
+// master-key form, and a boolean cannot tell it which it is holding. One call
+// that returns the plaintext AND the form is what the sweep actually needs, and
+// it cannot be answered wrongly by omission the way a pair of predicates can.
+type PayloadForm int
+
+const (
+	// PayloadFormDerived is the current form: per-tenant derived key, tenant
+	// id as AAD. Nothing needs doing to these.
+	PayloadFormDerived PayloadForm = iota
+
+	// PayloadFormBound is cleat#1792's form: master key, tenant id as AAD. It
+	// cannot be moved between tenants, but one recovered key reads every
+	// tenant's payloads, so it is still work for the sweep.
+	PayloadFormBound
+
+	// PayloadFormLegacy is pre-cleat#1792: master key, nil AAD. Bound to
+	// nothing -- it decrypts in any tenant's row.
+	PayloadFormLegacy
+
+	// PayloadFormUnreadable is none of the above under this key: plaintext
+	// that happens to be valid base64, a row sealed under a different key, or
+	// corruption. Reported, never rewritten.
+	PayloadFormUnreadable
+)
+
+func (f PayloadForm) String() string {
+	switch f {
+	case PayloadFormDerived:
+		return "derived"
+	case PayloadFormBound:
+		return "bound"
+	case PayloadFormLegacy:
+		return "legacy"
+	default:
+		return "unreadable"
+	}
+}
+
+// OpenAndClassify opens data and reports which form it was in.
+//
+// Newest form first, so a fully converted database costs one GCM open per value
+// and only unconverted rows pay for the extra attempts. Classification is by
+// AUTHENTICATION rather than inspection: each form is a distinct (key, AAD)
+// pair, and GCM's tag accepts exactly one of them, at forgery probability
+// 2^-128. There is no length rule, no version prefix and no guessing -- which is
+// what stops the sweep double-encrypting a plaintext column or rewriting a row
+// it has already done.
+func (pe *PayloadEncryption) OpenAndClassify(tenantID string, data []byte) ([]byte, PayloadForm, error) {
+	tc, err := pe.forTenant(tenantID)
+	if err != nil {
+		return nil, PayloadFormUnreadable, err
+	}
+	return tc.openClassify(data)
+}
+
+// openClassify is the three attempts, in one place.
+//
+// Both entry points come through here -- OpenAndClassify for the sweep, which
+// needs the form, and open for the read paths, which do not. One implementation
+// because the ORDER is the contract: newest first, so a converted row costs one
+// GCM open, and a form added later has exactly one place to be added.
+func (tc *tenantCipher) openClassify(data []byte) ([]byte, PayloadForm, error) {
+	if pt, err := openGCM(tc.derived, data, []byte(tc.tenantID)); err == nil {
+		return pt, PayloadFormDerived, nil
+	}
+	if pt, err := openGCM(tc.master, data, []byte(tc.tenantID)); err == nil {
+		return pt, PayloadFormBound, nil
+	}
+	pt, err := openGCM(tc.master, data, nil)
+	if err == nil {
+		return pt, PayloadFormLegacy, nil
+	}
+	return nil, PayloadFormUnreadable, err
+}
+
+// open is openClassify for callers that only want the plaintext.
+func (tc *tenantCipher) open(data []byte) ([]byte, error) {
+	pt, _, err := tc.openClassify(data)
+	return pt, err
+}
+
+// Decrypt opens data produced by Encrypt, in any of the three forms.
+//
+// The two older forms are the only thing keeping rows written before this
+// change readable, and they are also the residual: a PayloadFormLegacy value is
+// bound to no tenant, and a PayloadFormBound value is readable with a key
+// recovered from any other tenant's ciphertext. `cleatctl reseal-payloads`
+// converts both; until it has run, this fallback is what a reader depends on.
+//
+// Errors report the NEWEST attempt, not the last: every form fails with
+// "message authentication failed" for a wrong tenant, and the first is the one
+// describing what the caller asked for.
+func (pe *PayloadEncryption) Decrypt(tenantID string, data []byte) ([]byte, error) {
+	pt, _, err := pe.OpenAndClassify(tenantID, data)
+	return pt, err
+}
+
+// sealGCM and openGCM are the primitives, parameterised by KEY as well as AAD.
+//
+// Key-taking rather than methods on PayloadEncryption because there are now two
+// keys in play -- the master and the per-tenant derived one -- and every form in
+// the matrix above is one (key, aad) pair. A method closed over pe.key could
+// only express the master-key forms, which is how the derived form would have
+// ended up with its own near-duplicate of this code.
+func sealGCM(key, plaintext, aad []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt: new cipher: %w", err)
 	}
@@ -123,92 +354,11 @@ func (pe *PayloadEncryption) Encrypt(tenantID string, plaintext []byte) ([]byte,
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("encrypt: nonce: %w", err)
 	}
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, []byte(tenantID))
-	return ciphertext, nil
+	return gcm.Seal(nonce, nonce, plaintext, aad), nil
 }
 
-// ErrNotTenantBound reports a ciphertext that opens only with nil AAD -- a row
-// written before cleat#1776 and not yet re-sealed.
-//
-// Exported now that there is a caller: `cleatctl reseal-payloads` (cleat#1794)
-// has to tell a blob it must rewrite from one it must not. #1792 deliberately
-// did NOT export this, because at that point its only caller would have been a
-// test -- and an exported symbol whose only caller is a test is reported by
-// neither guard meant to catch dead code (cleat#1795). The sequence is the
-// point: the primitive lands with the thing that needs it.
-var ErrNotTenantBound = errors.New("payload encryption: ciphertext is not bound to a tenant (sealed before cleat#1776)")
-
-// DecryptTenantBound opens data only if it is bound to tenantID, with no
-// fallback to the legacy nil-AAD form.
-//
-// Decrypt cannot answer "is this bound?" -- it falls back and succeeds either
-// way, which is the residual hole rather than a defect in it. A re-seal needs
-// the distinction, and needs it to be exact: ErrNotTenantBound means "opens
-// with nil AAD and not with this tenant", which is a positive identification
-// of a legacy blob rather than an inference from a failure.
-func (pe *PayloadEncryption) DecryptTenantBound(tenantID string, data []byte) ([]byte, error) {
-	if tenantID == "" {
-		return nil, ErrNoTenantForEncryption
-	}
-	plaintext, err := pe.open(data, []byte(tenantID))
-	if err == nil {
-		return plaintext, nil
-	}
-	if _, lerr := pe.open(data, nil); lerr == nil {
-		return nil, ErrNotTenantBound
-	}
-	return nil, err
-}
-
-// DecryptLegacyUnbound opens data as a pre-cleat#1776 nil-AAD ciphertext, and
-// refuses anything else.
-//
-// The re-seal's read half. It is deliberately NOT Decrypt: Decrypt tries the
-// bound form first and falls back, so it happily returns a plaintext for an
-// already-converted row, and a re-seal built on it would re-encrypt rows it
-// had already done -- harmless per row, and fatal to the count that says the
-// sweep is finished.
-//
-// It is also what tells a legacy ciphertext from a column holding PLAINTEXT
-// (written before encryption was switched on) or "" (never encrypted). Only a
-// real ciphertext authenticates under the key; there is no length rule, no
-// base64 sniffing and no magic prefix involved.
-func (pe *PayloadEncryption) DecryptLegacyUnbound(data []byte) ([]byte, error) {
-	return pe.open(data, nil)
-}
-
-// Decrypt opens data produced by Encrypt (nonce || ciphertext) for one tenant.
-//
-// It tries AAD = tenantID first, then AAD = nil. The second attempt is the only
-// thing keeping rows written before cleat#1776 readable, and it is also the
-// residual hole: such a row is not bound to any tenant and never will be until
-// it is re-sealed. DecryptTenantBound above is the no-fallback form, for
-// callers that need to tell the two apart -- `cleatctl reseal-payloads` does.
-//
-// The order matters and is not arbitrary: a tenant-bound blob does NOT open with
-// nil AAD (measured), so trying the bound form first can never mistake a new
-// blob for a legacy one, and the fallback is reached only by blobs that really
-// are unbound.
-func (pe *PayloadEncryption) Decrypt(tenantID string, data []byte) ([]byte, error) {
-	plaintext, err := pe.open(data, []byte(tenantID))
-	if err == nil {
-		return plaintext, nil
-	}
-	// Legacy: sealed before cleat#1776, with nil AAD.
-	legacy, lerr := pe.open(data, nil)
-	if lerr == nil {
-		return legacy, nil
-	}
-	// Report the BOUND attempt's error, not the fallback's. Both say
-	// "message authentication failed" for a wrong tenant, and the first is the
-	// one describing what the caller asked for.
-	return nil, err
-}
-
-// open is the shared GCM open, parameterised by AAD so that the two callers
-// above differ in exactly one argument and nothing else.
-func (pe *PayloadEncryption) open(data, aad []byte) ([]byte, error) {
-	block, err := aes.NewCipher(pe.key)
+func openGCM(key, data, aad []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt: new cipher: %w", err)
 	}
@@ -228,15 +378,6 @@ func (pe *PayloadEncryption) open(data, aad []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-// EncryptString seals a plaintext string for one tenant, base64-encoded.
-func (pe *PayloadEncryption) EncryptString(tenantID, plaintext string) (string, error) {
-	ciphertext, err := pe.Encrypt(tenantID, []byte(plaintext))
-	if err != nil {
-		return "", err
-	}
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
-}
-
 // DecryptString opens a base64-encoded ciphertext string for one tenant.
 func (pe *PayloadEncryption) DecryptString(tenantID, encoded string) (string, error) {
 	plaintext, err := pe.DecryptBase64(tenantID, encoded)
@@ -253,23 +394,6 @@ func (pe *PayloadEncryption) DecryptBase64(tenantID, encoded string) ([]byte, er
 		return nil, fmt.Errorf("decrypt base64: decode: %w", err)
 	}
 	return pe.Decrypt(tenantID, data)
-}
-
-// EncryptJSON encrypts JSON bytes and returns them as a JSON string literal
-// (i.e., a quoted base64 string that is valid JSON). This allows encrypted
-// payloads to be stored in JSONB columns.
-func (pe *PayloadEncryption) EncryptJSON(tenantID string, jsonBytes []byte) ([]byte, error) {
-	ciphertext, err := pe.Encrypt(tenantID, jsonBytes)
-	if err != nil {
-		return nil, err
-	}
-	encoded := base64.StdEncoding.EncodeToString(ciphertext)
-	// Wrap in quotes to form a JSON string literal.
-	result := make([]byte, 0, len(encoded)+2)
-	result = append(result, '"')
-	result = append(result, []byte(encoded)...)
-	result = append(result, '"')
-	return result, nil
 }
 
 // DecryptJSON parses a JSON string literal containing base64-encoded

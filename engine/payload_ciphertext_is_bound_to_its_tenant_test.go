@@ -95,11 +95,22 @@ func openWithAAD(t *testing.T, keyBase64 string, data, aad []byte) ([]byte, erro
 	return gcm.Open(nil, nonce, ct, aad)
 }
 
-// boundTo reports whether data opens with tenantID as AAD and nothing else.
-func boundTo(t *testing.T, keyBase64, tenantID string, data []byte) bool {
+// boundTo reports whether data is bound to tenantID -- in EITHER of the two
+// bound forms.
+//
+// Rewritten for cleat#1793, which made the current form use a per-tenant DERIVED
+// key. The old version opened with the master key and tenant AAD, so after that
+// change it reported a freshly sealed blob as NOT bound, which is how this file
+// caught the change rather than silently testing the wrong thing.
+//
+// "Bound" deliberately admits both PayloadFormDerived and PayloadFormBound,
+// because the property these tests are about is cleat#1776's -- can another
+// tenant read it -- and both forms answer no. The tests about WHICH form live in
+// payload_keys_are_derived_per_tenant_test.go.
+func boundTo(t *testing.T, pe *PayloadEncryption, tenantID string, data []byte) bool {
 	t.Helper()
-	_, err := openWithAAD(t, keyBase64, data, []byte(tenantID))
-	return err == nil
+	_, form, err := pe.OpenAndClassify(tenantID, data)
+	return err == nil && (form == PayloadFormDerived || form == PayloadFormBound)
 }
 
 // TestACiphertextFromOneTenantDoesNotOpenInAnother is the defect, stated as a
@@ -163,7 +174,7 @@ func TestEveryWrappedFormIsBoundToo(t *testing.T) {
 	}
 
 	t.Run("EncryptString", func(t *testing.T) {
-		blob, err := pe.EncryptString(tenantA, "sensitive")
+		blob, err := mustSeal(t, pe, tenantA).sealString("sensitive")
 		if err != nil {
 			t.Fatalf("EncryptString: %v", err)
 		}
@@ -177,7 +188,7 @@ func TestEveryWrappedFormIsBoundToo(t *testing.T) {
 
 	t.Run("EncryptJSON", func(t *testing.T) {
 		payload := []byte(`{"k":"v"}`)
-		blob, err := pe.EncryptJSON(tenantA, payload)
+		blob, err := mustSeal(t, pe, tenantA).sealJSON(payload)
 		if err != nil {
 			t.Fatalf("EncryptJSON: %v", err)
 		}
@@ -222,7 +233,7 @@ func TestALegacyCiphertextStillOpensAndIsReportedAsUnbound(t *testing.T) {
 	}
 
 	// And it is reported as what it is, rather than passing for bound.
-	if boundTo(t, key, tenantA, legacy) {
+	if boundTo(t, pe, tenantA, legacy) {
 		t.Error("a pre-cleat#1776 ciphertext reports as bound to a tenant.\n\n" +
 			"It was sealed with nil AAD, so it cannot be: if this passes, the check " +
 			"is not distinguishing the two forms and nothing can count what is left " +
@@ -240,7 +251,7 @@ func TestALegacyCiphertextStillOpensAndIsReportedAsUnbound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	if !boundTo(t, key, tenantA, bound) {
+	if !boundTo(t, pe, tenantA, bound) {
 		t.Error("a freshly sealed blob does not report as bound to its own tenant")
 	}
 	if _, err := openWithAAD(t, key, bound, nil); err == nil {
@@ -271,8 +282,10 @@ func TestSealingWithNoTenantIsRefused(t *testing.T) {
 		call func() error
 	}{
 		{"Encrypt", func() error { _, err := pe.Encrypt("", []byte("x")); return err }},
-		{"EncryptString", func() error { _, err := pe.EncryptString("", "x"); return err }},
-		{"EncryptJSON", func() error { _, err := pe.EncryptJSON("", []byte(`{}`)); return err }},
+		// The seal helpers cannot be reached with an empty tenant at all --
+		// forTenant refuses before returning a cipher -- so the refusal is
+		// asserted where it happens rather than one layer further in.
+		{"forTenant", func() error { _, err := pe.forTenant(""); return err }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if err := c.call(); !errors.Is(err, ErrNoTenantForEncryption) {
@@ -281,13 +294,23 @@ func TestSealingWithNoTenantIsRefused(t *testing.T) {
 		})
 	}
 
-	// THE KNOWN-POSITIVE for the claim in the doc comment: prove the two AADs
-	// really are indistinguishable, so the refusal above is load-bearing rather
-	// than tidiness. If this ever stops holding, the guard can be relaxed.
+	// THE KNOWN-POSITIVE for the claim in the doc comment: prove a zero-length
+	// AAD really is indistinguishable from a nil one, so the refusal above is
+	// load-bearing rather than tidiness.
+	//
+	// Asserted on the PRIMITIVE rather than through Decrypt, because since
+	// cleat#1793 Decrypt refuses an empty tenant before it opens anything --
+	// forTenant will not derive from "". That refusal is the right behaviour and
+	// it also means Decrypt can no longer be used to demonstrate this, so the
+	// demonstration moved down a layer instead of being dropped.
 	legacy := sealWithNilAAD(t, key, []byte("x"))
-	if _, err := pe.Decrypt("", legacy); err != nil {
-		t.Errorf("a nil-AAD blob did not open under an empty tenant (%v), which would "+
-			"mean zero-length and nil AAD are distinguishable after all -- re-check "+
+	keyBytes, derr := base64.StdEncoding.DecodeString(key)
+	if derr != nil {
+		t.Fatalf("decode key: %v", derr)
+	}
+	if _, err := openGCM(keyBytes, legacy, []byte("")); err != nil {
+		t.Errorf("a nil-AAD blob did not open under a ZERO-LENGTH AAD (%v), which would "+
+			"mean the two are distinguishable after all -- re-check "+
 			"ErrNoTenantForEncryption's reasoning before changing it", err)
 	}
 }
@@ -321,10 +344,10 @@ func TestTheUntenantedWritePathBindsToTheTenantTheRowGets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	if !boundTo(t, key, tenantForAAD(""), blob) {
+	if !boundTo(t, pe, tenantForAAD(""), blob) {
 		t.Error("the default tenant cannot open what the untenanted path wrote")
 	}
-	if boundTo(t, key, tenantA, blob) {
+	if boundTo(t, pe, tenantA, blob) {
 		t.Error("tenant A opened a blob written under the default tenant")
 	}
 }
@@ -415,7 +438,7 @@ func TestWhatTheStoreWritesIsBoundToTheWritingTenant(t *testing.T) {
 	// all: the bytes on disk open BOUND to the store's own tenant. A write that
 	// passed "" would leave the blob unbound, which is precisely the
 	// silent-unbinding case ErrNoTenantForEncryption exists to prevent.
-	back, err := openWithAAD(t, key, raw, []byte(store.tenantID))
+	back, form, err := enc.OpenAndClassify(store.tenantID, raw)
 	if err != nil {
 		t.Fatalf("what the store wrote is not bound to the tenant that wrote it: %v\n\n"+
 			"The ciphertext is on disk and decryptable, but not with this tenant as AAD, "+
@@ -424,10 +447,16 @@ func TestWhatTheStoreWritesIsBoundToTheWritingTenant(t *testing.T) {
 	if string(back) != secret {
 		t.Fatalf("bound decrypt returned %q, want %q", back, secret)
 	}
+	// And in the CURRENT form: since cleat#1793 the store writes a per-tenant
+	// derived key, so a master-key form on disk would mean the write path is
+	// behind.
+	if form != PayloadFormDerived {
+		t.Errorf("the store wrote the %s form, want derived", form)
+	}
 
-	// THE ASSERTION: another tenant cannot open it. Same bytes, same key, same
+	// THE ASSERTION: another tenant cannot open it. Same bytes, same store, same
 	// call -- only the tenant differs.
-	if got, err := openWithAAD(t, key, raw, []byte(tenantB)); err == nil {
+	if got, _, err := enc.OpenAndClassify(tenantB, raw); err == nil {
 		t.Errorf("another tenant opened this row's ciphertext and got %q", got)
 	}
 	if got, err := enc.Decrypt(tenantB, raw); err == nil {
@@ -486,7 +515,7 @@ func TestTheEncoderBindsToTheTenantItIsGiven(t *testing.T) {
 		t.Fatalf("UNMEASURED: stored err is not base64: %v", err)
 	}
 
-	back, err := openWithAAD(t, key, raw, []byte(tenantA))
+	back, _, err := enc.OpenAndClassify(tenantA, raw)
 	if err != nil {
 		t.Fatalf("the encoder did not bind to the tenant it was given: %v\n\n"+
 			"tenantA was passed in and the output does not open bound to it, so the "+
@@ -506,4 +535,24 @@ func TestTheEncoderBindsToTheTenantItIsGiven(t *testing.T) {
 			"tenant would produce, and the on-disk test cannot see it because its "+
 			"store's tenant IS the default.", got)
 	}
+}
+
+// mustSeal is the tenantCipher the production write path uses.
+//
+// The tests here used PayloadEncryption.EncryptString/EncryptJSON until
+// cleat#1793 routed encodeEventForStorage through a tenantCipher instead, which
+// left those two exported wrappers with no production caller at all -- caught by
+// this repo's own check-dead-exports.sh the same day it shipped (cleat#1795).
+// They were deleted rather than baselined: they died BECAUSE of this change,
+// which is the case a baseline must not absorb.
+//
+// Pointing the tests at the real path is the better outcome anyway. They were
+// asserting a wrapper nothing called; now they assert what the write path does.
+func mustSeal(t *testing.T, pe *PayloadEncryption, tenantID string) *tenantCipher {
+	t.Helper()
+	tc, err := pe.forTenant(tenantID)
+	if err != nil {
+		t.Fatalf("forTenant(%q): %v", tenantID, err)
+	}
+	return tc
 }

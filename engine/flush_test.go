@@ -392,7 +392,18 @@ func TestFlushEvent_EncryptGeneralFailure(t *testing.T) {
 	defer db.Close()
 
 	engine := NewEngine(nil, nil, WithDB(db))
-	// A nil key causes EncryptString to fail on the first field (Request).
+	// A nil key is refused, so flushEvent returns an error rather than writing
+	// the plaintext. Until cleat#1793 it failed at aes.NewCipher(nil) on the
+	// first FIELD, which is why the assertion below used to look for "encrypt
+	// request"; now the per-tenant key derivation checks the master key's
+	// length up front and fails once for the whole event. The property under
+	// test is unchanged -- a broken encryptor must not silently store plaintext
+	// -- and the error is more actionable, but it no longer names a field.
+	//
+	// It matters that the check is up front: HKDF accepts a nil secret without
+	// complaint, so without it the derivation would produce a valid key from an
+	// empty master and the seal would SUCCEED. This test and
+	// TestAdaptiveFlusher_PrepareEntry_EncryptionError are what caught that.
 	engine.encryption = &PayloadEncryption{key: nil}
 	engine.encryptSensitivePayloads = true
 
@@ -408,7 +419,7 @@ func TestFlushEvent_EncryptGeneralFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected encryption error")
 	}
-	if !strings.Contains(err.Error(), "encrypt request") {
-		t.Errorf("expected 'encrypt request' in error, got: %v", err)
+	if !strings.Contains(err.Error(), "master key is 0 bytes") {
+		t.Errorf("expected the error to name the bad master key, got: %v", err)
 	}
 }

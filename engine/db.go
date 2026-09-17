@@ -145,7 +145,11 @@ func (s *PostgresStore) WithNotifyChannel(channel string) *PostgresStore {
 // When useBytesDecrypt is true, the value is treated as raw ciphertext
 // (Decrypt); otherwise it is treated as a base64-encoded ciphertext
 // (DecryptString).
-func (s *PostgresStore) decryptField(encrypted, fieldName, workflowID string, step int, useBytesDecrypt bool) string {
+// tc is the tenant's cipher, derived ONCE by the caller. Passed rather than
+// derived here because this is called ten times per row, and a derivation costs
+// about what a GCM open costs -- see tenantCipher in encryption.go for the
+// measurement. Deriving per field would double the crypto on every read.
+func (s *PostgresStore) decryptField(tc *tenantCipher, encrypted, fieldName, workflowID string, step int, useBytesDecrypt bool) string {
 	// An empty stored value was never produced by the encryptor, so there is
 	// nothing here to decrypt and nothing to report. EncryptString always
 	// returns at least a nonce and a GCM tag, so it cannot return "" --
@@ -165,10 +169,16 @@ func (s *PostgresStore) decryptField(encrypted, fieldName, workflowID string, st
 	var err error
 	if useBytesDecrypt {
 		var b []byte
-		b, err = s.encryption.Decrypt(tenantForAAD(s.tenantID), []byte(encrypted))
+		b, err = tc.open([]byte(encrypted))
 		decrypted = string(b)
 	} else {
-		decrypted, err = s.encryption.DecryptString(tenantForAAD(s.tenantID), encrypted)
+		var raw []byte
+		raw, err = base64.StdEncoding.DecodeString(encrypted)
+		if err == nil {
+			var b []byte
+			b, err = tc.open(raw)
+			decrypted = string(b)
+		}
 	}
 	if err != nil {
 		s.log().WarnContext(context.Background(), "decrypt failed", "field", fieldName, "workflow_id", workflowID, "step", step, "error", err)
@@ -182,21 +192,28 @@ func (s *PostgresStore) decryptField(encrypted, fieldName, workflowID string, st
 
 func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID string) {
 	if s.encryption != nil && s.encryptSensitivePayloads {
+		// ONE DERIVATION FOR THE WHOLE ROW; see decryptField's doc.
+		tc, err := s.encryption.forTenant(tenantForAAD(s.tenantID))
+		if err != nil {
+			s.log().WarnContext(context.Background(), "derive tenant key failed",
+				"workflow_id", workflowID, "step", rec.Step, "error", err)
+			return
+		}
 		// Request and Response are base64-decoded by tryDecodeBase64,
 		// so they hold raw ciphertext bytes and must be decrypted via Decrypt.
-		rec.Request = s.decryptField(rec.Request, "Request", workflowID, rec.Step, true)
-		rec.Response = s.decryptField(rec.Response, "Response", workflowID, rec.Step, true)
+		rec.Request = s.decryptField(tc, rec.Request, "Request", workflowID, rec.Step, true)
+		rec.Response = s.decryptField(tc, rec.Response, "Response", workflowID, rec.Step, true)
 		// Err, SignalPayload, ChildInput, NewInput, PluginInput, PluginOutput,
 		// PromiseResult, PromiseError are stored as base64-encoded ciphertexts
 		// (no extra base64 layer), so DecryptString is correct.
-		rec.Err = s.decryptField(rec.Err, "Err", workflowID, rec.Step, false)
-		rec.SignalPayload = s.decryptField(rec.SignalPayload, "SignalPayload", workflowID, rec.Step, false)
-		rec.ChildInput = s.decryptField(rec.ChildInput, "ChildInput", workflowID, rec.Step, false)
-		rec.NewInput = s.decryptField(rec.NewInput, "NewInput", workflowID, rec.Step, false)
-		rec.PluginInput = s.decryptField(rec.PluginInput, "PluginInput", workflowID, rec.Step, false)
-		rec.PluginOutput = s.decryptField(rec.PluginOutput, "PluginOutput", workflowID, rec.Step, false)
-		rec.PromiseResult = s.decryptField(rec.PromiseResult, "PromiseResult", workflowID, rec.Step, false)
-		rec.PromiseError = s.decryptField(rec.PromiseError, "PromiseError", workflowID, rec.Step, false)
+		rec.Err = s.decryptField(tc, rec.Err, "Err", workflowID, rec.Step, false)
+		rec.SignalPayload = s.decryptField(tc, rec.SignalPayload, "SignalPayload", workflowID, rec.Step, false)
+		rec.ChildInput = s.decryptField(tc, rec.ChildInput, "ChildInput", workflowID, rec.Step, false)
+		rec.NewInput = s.decryptField(tc, rec.NewInput, "NewInput", workflowID, rec.Step, false)
+		rec.PluginInput = s.decryptField(tc, rec.PluginInput, "PluginInput", workflowID, rec.Step, false)
+		rec.PluginOutput = s.decryptField(tc, rec.PluginOutput, "PluginOutput", workflowID, rec.Step, false)
+		rec.PromiseResult = s.decryptField(tc, rec.PromiseResult, "PromiseResult", workflowID, rec.Step, false)
+		rec.PromiseError = s.decryptField(tc, rec.PromiseError, "PromiseError", workflowID, rec.Step, false)
 	}
 
 	// Retroactive redaction on read path.

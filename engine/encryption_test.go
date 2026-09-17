@@ -192,7 +192,7 @@ func TestEncryptStringDecryptString_RoundTrip(t *testing.T) {
 	}
 
 	for _, plaintext := range tests {
-		enc, err := pe.EncryptString(DefaultTenantUUID, plaintext)
+		enc, err := mustSeal(t, pe, DefaultTenantUUID).sealString(plaintext)
 		if err != nil {
 			t.Fatalf("EncryptString(%q): %v", plaintext, err)
 		}
@@ -269,7 +269,7 @@ func TestEncryptJSONDecryptJSON_RoundTrip(t *testing.T) {
 	}
 
 	for _, original := range tests {
-		enc, err := pe.EncryptJSON(DefaultTenantUUID, original)
+		enc, err := mustSeal(t, pe, DefaultTenantUUID).sealJSON(original)
 		if err != nil {
 			t.Fatalf("EncryptJSON(%s): %v", original, err)
 		}
@@ -497,7 +497,7 @@ func TestEncryptJSON_EmptyInput(t *testing.T) {
 		t.Fatalf("NewPayloadEncryption: %v", err)
 	}
 
-	enc, err := pe.EncryptJSON(DefaultTenantUUID, []byte{})
+	enc, err := mustSeal(t, pe, DefaultTenantUUID).sealJSON([]byte{})
 	if err != nil {
 		t.Fatalf("EncryptJSON empty: %v", err)
 	}
