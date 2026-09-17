@@ -90,12 +90,19 @@ func TestBuildRefusesAFlagAfterThePath(t *testing.T) {
 
 	cwd := t.TempDir()
 	out := t.TempDir()
-	proj, err := filepath.Abs(filepath.Join("..", "..", "examples", "rust-workflow"))
+	// THE GO TARGET, and the choice is not incidental. `Test Go (commands)`
+	// installs Rust only for the `internal` matrix entry, so a rust-target
+	// build cannot SUCCEED in this job -- which is fine for a test asserting a
+	// refusal and fatal for the control below, where the documented order must
+	// produce an artifact. testdata/autothread is the package
+	// TestBuildAutoThreadedPackage builds successfully in this same package,
+	// so it is known to reach the end of a build rather than chosen hopefully.
+	proj, err := filepath.Abs(filepath.Join("..", "..", "testdata", "autothread"))
 	if err != nil {
-		t.Fatalf("resolve the example: %v", err)
+		t.Fatalf("resolve the fixture: %v", err)
 	}
 
-	cmd := exec.Command(cleatBinary, "build", "--target", "rust", proj, "-o", out)
+	cmd := exec.Command(cleatBinary, "build", "--target", "go", proj, "-o", out)
 	cmd.Dir = cwd
 	combined, err := cmd.CombinedOutput()
 	got := string(combined)
@@ -131,9 +138,9 @@ func TestBuildStillAcceptsTheDocumentedOrder(t *testing.T) {
 	}
 
 	out := t.TempDir()
-	proj := filepath.Join("..", "..", "examples", "rust-workflow")
+	proj := filepath.Join("..", "..", "testdata", "autothread")
 
-	combined, err := exec.Command(cleatBinary, "build", "--target", "rust", "-o", out, proj).CombinedOutput()
+	combined, err := exec.Command(cleatBinary, "build", "--target", "go", "-o", out, proj).CombinedOutput()
 	if err != nil {
 		t.Fatalf("the documented order was refused: %v\n\noutput:\n%s", err, combined)
 	}
