@@ -109,9 +109,45 @@ scan() {
           if (dir == "" || dir == ".") dir = "."
           fn = "<file scope>"
         }
-        /^func [A-Za-z_]/ {
-          fn = $2
-          sub(/\(.*$/, "", fn)
+        /^func[ \t]/ {
+          # A METHOD IS A DECLARATION TOO, and this used to miss them. The
+          # pattern was /^func [A-Za-z_]/, which cannot match
+          # `func (m *MySQLBackend) Setup(`, because the character after
+          # "func " is "(". A method therefore never updated fn, so every
+          # skip inside one was credited to whatever plain function happened
+          # to sit above it -- silently, and in a way that looks like a real
+          # attribution rather than a missing one. cleat#1740.
+          #
+          # Measured on develop before the fix: 4 of 247 skip sites, all in
+          # engine/store_backends_test.go, landing on TWO functions that
+          # contain no skip at all. Both were live in the baseline:
+          #
+          #     engine	RegisterBackend	2          (3 lines long, no skip)
+          #     engine	openMSSQLTenantStore	2   (no skip)
+          #
+          # RECEIVER-QUALIFIED, and that is not cosmetic. This file declares
+          # MySQLBackend.Setup and MSSQLBackend.Setup, and likewise two
+          # SetupForTenant. A bare method name collapses four distinct owners
+          # into two entries, so the baseline could not tell a skip moving
+          # between backends from one staying put -- which is the whole job of
+          # a per-name baseline.
+          if ($0 ~ /^func[ \t]+\(/) {
+            recv = $0
+            sub(/^func[ \t]+\(/, "", recv)
+            sub(/\).*$/, "", recv)          # "m *MySQLBackend" | "*Foo" | "Foo"
+            nparts = split(recv, rp, /[ \t]+/)
+            rtype = rp[nparts]
+            sub(/^\*/, "", rtype)
+
+            name = $0
+            sub(/^func[ \t]+\([^)]*\)[ \t]*/, "", name)
+            sub(/[\(\[].*$/, "", name)      # drop params, and any type params
+            fn = rtype "." name
+          } else {
+            fn = $0
+            sub(/^func[ \t]+/, "", fn)
+            sub(/[\(\[].*$/, "", fn)        # "[" so a generic func keeps its name
+          }
         }
         {
           # Drop whole-line comments. This repo documents its skips heavily --
@@ -163,7 +199,95 @@ total_skips() {
   awk -F'\t' '{ n += $3 } END { print n + 0 }' <<<"$1"
 }
 
+# self_test builds a fixture tree and asserts what scan() attributes a skip to.
+#
+# WHY THIS EXISTS AT ALL: until cleat#1740 this script had no self-test, and the
+# defect it now pins survived for exactly that reason. `/^func [A-Za-z_]/`
+# cannot match `func (m *MySQLBackend) Setup(`, so four skips were credited to
+# two functions containing none -- and both wrong names sat in the committed
+# baseline looking like ordinary entries. Nothing could notice, because nothing
+# ever asserted what the scanner attributes; the guard only ever compared its
+# own output to a baseline generated from that same output.
+#
+# THAT IS THE FAILURE MODE A REGENERATED BASELINE CANNOT CATCH. `--update`
+# agrees with whatever scan() does, correct or not, so "the diff looks right"
+# is a statement about the diff and not about the attribution. Hence a fixture
+# whose correct answer is known independently of this script.
+#
+# IT RUNS THE REAL scan(), not a copy of its awk. scan() walks `find .` from
+# the current directory, so cd-ing into the fixture is enough to point it at
+# known input -- and a second copy of the program would be a second thing to
+# keep correct, which is the defect this fix is about in another costume.
+self_test() {
+  local tmp ok=0 out
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+
+  mkdir -p "$tmp/pkg"
+  cat > "$tmp/pkg/fixture_test.go" <<'FIXTURE'
+package pkg
+
+// A plain function, and the control: its skip must stay attributed to it.
+func TestPlainFunction(t *testing.T) {
+	t.Skip("control")
+}
+
+// The bug: a skip inside a METHOD used to be credited to the function above.
+// This declaration sits directly above the methods for that reason.
+func helperAboveTheMethods() {}
+
+func (m *MySQLBackend) Setup(t *testing.T) {
+	t.Skip("belongs to MySQLBackend.Setup")
+}
+
+// The collision case: a bare method name would merge these two into one entry.
+func (m *MSSQLBackend) Setup(t *testing.T) {
+	t.Skip("belongs to MSSQLBackend.Setup")
+}
+
+// A value receiver and an unnamed receiver must resolve to the type too.
+func (v ValueBackend) Check(t *testing.T) {
+	t.Skip("belongs to ValueBackend.Check")
+}
+FIXTURE
+
+  out="$(cd "$tmp" && scan)"
+
+  _expect() {   # _expect <line> <why>
+    if printf '%s\n' "$out" | grep -qF "$1"; then
+      return 0
+    fi
+    echo "SELF-TEST FAILED: expected '$1' ($2)" >&2
+    ok=1
+  }
+  _refute() {
+    if printf '%s\n' "$out" | grep -qF "$1"; then
+      echo "SELF-TEST FAILED: did not expect '$1' ($2)" >&2
+      ok=1
+    fi
+  }
+
+  # The known-positive. Before cleat#1740 these four lines were absent and the
+  # skips appeared under helperAboveTheMethods instead.
+  _expect "pkg	MySQLBackend.Setup	1"      "a skip inside a method belongs to that method"
+  _expect "pkg	MSSQLBackend.Setup	1"      "two Setup methods must not collapse into one entry"
+  _expect "pkg	ValueBackend.Check	1"      "a value receiver resolves to its type"
+  # The negative control: a plain function still works.
+  _expect "pkg	TestPlainFunction	1"       "a plain function's skip is unchanged"
+  # The defect itself, stated as a refusal.
+  _refute "helperAboveTheMethods"            "no skip may be credited to the function above a method"
+
+  if [ "$ok" -eq 0 ]; then
+    echo "self-test passed"
+  fi
+  return "$ok"
+}
+
 case "${1:-}" in
+  --self-test)
+    self_test
+    exit $?
+    ;;
   --update)
     fresh="$(scan)"
     die_if_scan_failed "$fresh"

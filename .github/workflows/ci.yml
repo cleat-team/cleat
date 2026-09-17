@@ -243,7 +243,21 @@ jobs:
       # crash-looping while the job reported success. The baseline records
       # every skip that exists today; a new one, or a growing one, fails here.
       - name: Conditional-skip guard
-        run: scripts/check-skips.sh
+        # --self-test FIRST, and it is not ceremony here -- it is the thing
+        # whose absence let cleat#1740 live in the committed baseline. This
+        # guard compares its own scan against a baseline generated from that
+        # same scan, so until now nothing asserted what it ATTRIBUTES a skip
+        # to. Four skips were credited to two functions containing none, the
+        # totals balanced, and `--update` reproduced the error faithfully on
+        # every regeneration.
+        #
+        # The self-test scans a fixture whose correct answer is known
+        # independently of this script, and asserts the attribution by name in
+        # both directions: a skip inside a method belongs to that method, and
+        # no skip may be credited to the plain function above it.
+        run: |
+          scripts/check-skips.sh --self-test
+          scripts/check-skips.sh
 
       # A test double that never reads the parameter its test is named after
       # cannot fail for the reason the test exists. That is not hypothetical:
