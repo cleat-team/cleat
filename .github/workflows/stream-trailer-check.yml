@@ -117,7 +117,24 @@ jobs:
           FAILING=$(git log --no-merges "${BASE}..${HEAD}" --format='%H' | while read -r commit; do
             value=$(git show -s --format='%(trailers:key=Claude-Stream,valueonly)' "$commit" | head -1 | tr -d '\r')
             if [ -z "$value" ]; then
-              echo "  $(git log -1 --format='%h %s' "$commit")  -- no Claude-Stream trailer"
+              # TWO CAUSES, ONE SYMPTOM, DIFFERENT REPAIRS. An empty parse means
+              # either there is no such line, or there IS one and git will not
+              # read it as a trailer -- because it is not in the message's FINAL
+              # paragraph. A blank line between it and Signed-off-by is enough:
+              #
+              #     Claude-Stream: WS-2
+              #                             <- this blank line is the defect
+              #     Signed-off-by: ...
+              #
+              # The second looks exactly like the first from outside, and cost a
+              # session ten minutes on this check's first run. Distinguish them,
+              # because "add the trailer" is the wrong instruction for a commit
+              # that already has one.
+              if git log -1 --format='%B' "$commit" | grep -qE '^Claude-Stream:'; then
+                echo "  $(git log -1 --format='%h %s' "$commit")  -- has a Claude-Stream: line that git does NOT parse as a trailer (it is not in the final paragraph -- remove the blank line before the trailer block)"
+              else
+                echo "  $(git log -1 --format='%h %s' "$commit")  -- no Claude-Stream trailer"
+              fi
             elif ! printf '%s' "$value" | grep -qE "$VALID"; then
               echo "  $(git log -1 --format='%h %s' "$commit")  -- Claude-Stream: '$value' is not one of WS-1, WS-2, WS-3, coordinator"
             fi
@@ -148,6 +165,11 @@ jobs:
             echo "  git push --force-with-lease"
             echo ""
             echo "Valid values: WS-1, WS-2, WS-3, coordinator."
+            echo ""
+            echo "If a commit is reported as carrying a line git will not parse:"
+            echo "  the trailer must be in the message's FINAL paragraph, with no"
+            echo "  blank line between it and Signed-off-by. Check with:"
+            echo "    git show -s --format='%(trailers:key=Claude-Stream,valueonly)' <sha>"
             echo "It is a claim about which workstream wrote the commit, not a"
             echo "credential -- see WORKSTREAM.md, 'Shared files'."
             exit 1
