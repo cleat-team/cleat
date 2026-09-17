@@ -642,7 +642,25 @@ not survivors; ports are per session and there is no fixed assignment to recover
 Two operational notes from those runs, recorded because each cost someone time:
 
 - **`sqlcmd -I`** (QUOTED_IDENTIFIER ON) is required, or migration `001` fails on `CREATE INDEX`
-  with `Msg 1934`. Measured by WS-2.
+  with `Msg 1934`. Measured by WS-2 on 2026-09-17, and hit independently by WS-3 the same night on
+  a different migration.
+
+  **A probe that bypasses the real runner needs a control that uses it.** (WS-3's framing, kept
+  because it is the durable half.) That failure looked exactly like a migration defect, on the
+  dialect where one was most plausible. What distinguished them was that the Go test, going
+  through `migration.Runner`, had already applied the same file successfully. **The flag is the
+  fix; the control is what tells you the flag is the fix rather than the migration being broken.**
+  Generalise past `sqlcmd`: any probe that reaches the database by a path production does not use
+  — a bare client, a hand-run script, `docker exec` — can fail for reasons that belong to the path
+  and present as defects in the subject.
+
+  **And the honest account of what the note above was worth, which is weaker than it looks.** Two
+  sessions hitting this independently is not evidence that writing it down helped: WS-3 had not
+  read it and would not have, having gone to this section for DSNs hours earlier with no reason to
+  return. The value was not that two people knew — it was that the note existed to be found by
+  whoever looks next, and WS-3 was not that person. That is an argument for writing things down,
+  not for coordination, and it is the weaker and truer claim. Recorded at WS-3's insistence, over
+  the flattering version.
 - **`ssh-add -l` can come back empty after a host restart** and `gh` keeps working throughout on its
   own token, so only git-over-ssh is broken and nothing says so until a push fails. It is **per
   session** — one session had three identities loaded while two had none. Check with
