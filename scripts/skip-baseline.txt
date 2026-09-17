@@ -16,6 +16,7 @@ cmd/cleat	TestThePythonVetSaysWhetherItRan	3
 cmd/cleat	TestVetAS	2
 cmd/cleat	TestVetExitCode	1
 cmd/cleat	TestVetPython	3
+cmd/cleat	TestVetPythonAcceptsTheSingleFileForm	2
 cmd/cleat	compileASFixture	1
 cmd/cleat	newASVetProject	1
 cmd/cleat	runVetCmd	1
