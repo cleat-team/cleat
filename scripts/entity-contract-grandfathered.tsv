@@ -19,7 +19,5 @@
 #
 # table					clause
 admin.tenant_api_keys	no-legacy-retirement
-public.tenant_secrets	created_at
-public.tenant_settings	created_at
 public.workflow_defs	no-legacy-retirement
 public.workflow_schedules	no-legacy-retirement

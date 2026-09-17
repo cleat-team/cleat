@@ -58,7 +58,14 @@ CLASSES = ("member", "exempt", "not-an-entity")
 # is left is two created_at pairs and the three legacy retirement spellings --
 # `revoked_at`, `deprecated` and `enabled` -- of which `enabled` is the one
 # carrying the approved API break and converts last.
-GRANDFATHER_CEILING = 5
+# 3 of 40 after the third: `created_at` now exists on tenant_settings and
+# tenant_secrets, the two members that lacked it. Those two are the INVERSE of
+# the other eight -- they carried `updated_at` and no `created_at` -- so the
+# backfill runs the other way and is an upper bound rather than the exact value
+# the previous one could claim. See postgres/086. All three timestamp clauses
+# are now enforced on every member; what remains is only the legacy retirement
+# spellings.
+GRANDFATHER_CEILING = 3
 
 
 def strip_sql_comments(src):

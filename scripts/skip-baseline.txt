@@ -117,7 +117,6 @@ engine	buildJavaWasm	2
 engine	buildRustWasm	2
 engine	forEachBackend	1
 engine	mssqlDropTenantDB	2
-engine	mssqlRowDisappearanceReporter	2
 engine	mssqlTenantTestPool	2
 engine	mysqlIntegrationStore	2
 engine	pythonDeferSegment	1
@@ -129,6 +128,7 @@ engine/testutil	MySQLTestDB	1
 engine/testutil	SuiteTestDB	2
 engine/testutil	TestDB	4
 internal/transform	TestUpdateCallSitesSkipsWhenHAlreadyFirstArg	1
+migration	TestCreatedAtIsBackfilledFromUpdatedAtNotFromTheMigrationsClock	1
 migration	TestIdempotencyTenantMigrationPreservesExistingKeys	1
 migration	mssqlCredentials	2
 migration	mssqlDSNAs	1
