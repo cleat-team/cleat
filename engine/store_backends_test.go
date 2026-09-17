@@ -171,6 +171,72 @@ func openMSSQLTenantStore(t *testing.T, tenantID string) *MSSQLStore {
 	return store
 }
 
+// mssqlRowDisappearanceReporter returns cleat#982's instrument as a function
+// the teardown calls FIRST, so a SQL Server failure says whether the row it
+// could not find was DELETED or merely INVISIBLE to the pool that looked.
+//
+// IT IS NOT REGISTERED WITH t.Cleanup, AND THAT IS THE WHOLE POINT. Both
+// obvious placements were tried and both report UNMEASURED or a clean reading
+// on every real failure -- measured 2026-09-16 by forcing a failure through
+// Setup rather than by reasoning about the ordering:
+//
+//	placement                     what defeats it                 reading
+//	----------------------------  ------------------------------  ---------------
+//	t.Cleanup in Setup            the test's `defer teardown()`    UNMEASURED:
+//	                              closes db first                  "database is closed"
+//	t.Cleanup, pools kept open    teardown's CleanupMSSQLTestData  truth=0 visible=0
+//	                              wipes the table first            "consistent"
+//
+// A deferred call in the test body runs before any t.Cleanup callback, and
+// every backend test in this suite is written `defer teardown()`. So the
+// handle is closed, and -- worse, because it survives the obvious fix -- the
+// blanket DELETE that teardown issues has already removed the rows the
+// instrument exists to count.
+//
+// The second row is the dangerous one and was measured with the pools
+// deliberately left open, so "closed" could not be the explanation. The SAME
+// readers, over the SAME run, read `truth=5 visible=0 PRESENT BUT INVISIBLE`
+// at failure time and `truth=0 visible=0 consistent` from a t.Cleanup a moment
+// later. Nothing reports an error in between; the instrument simply arrives
+// after the evidence has gone, and prints the reassuring branch.
+//
+// THE READER HAS TO BE THE STORE. Arming this in testutil.TestDB beside
+// ReportForeignSessionsOnFailure is the other obvious placement; it cannot
+// work either, because the handle TestDB returns is a plain pool with no
+// session context and since migration 075 the shipped fn_tenant_filter grants
+// sa no exemption -- so it reads physical=1 visible=0 on a HEALTHY database, a
+// verdict that never changes. The four measurements are in
+// testutil.MSSQLRowDisappearanceReaders' doc comment.
+//
+// A passing test runs no query: the returned function checks t.Failed() first.
+func mssqlRowDisappearanceReporter(t *testing.T, db *sql.DB, store *MSSQLStore) func() {
+	t.Helper()
+	// Resolved at Setup time, while db is certainly open.
+	//
+	// Stats is a process-lived pool rather than db, because db is closed by
+	// the same teardown that calls this. Truth needs to read across tenants;
+	// MSSQLAdminDB returns db unchanged when the database has no policies, and
+	// in that case the stats pool is the right answer anyway -- with no policy
+	// there is nothing to be invisible behind, and sa can see everything.
+	stats := testutil.MSSQLStatsDB(t)
+	truth := testutil.MSSQLAdminDB(t, db)
+	if truth == db {
+		truth = stats
+	}
+	readers := testutil.MSSQLRowDisappearanceReaders{
+		Stats:    stats,
+		Truth:    truth,
+		TenantID: store.tenantID,
+		Reader:   store.db,
+	}
+	return func() {
+		if !t.Failed() {
+			return
+		}
+		t.Log(testutil.MSSQLRowDisappearanceReportFor(readers))
+	}
+}
+
 func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	t.Helper()
 	if !b.Enabled() {
@@ -181,7 +247,10 @@ func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	applyMSSQLProcedures(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 	store := openMSSQLTenantStore(t, DefaultTenantUUID)
+	report := mssqlRowDisappearanceReporter(t, db, store)
 	teardown := func() {
+		// Before the cleanup below, which would wipe what it counts.
+		report()
 		testutil.CleanupMSSQLTestData(t, db)
 		db.Close()
 	}
@@ -197,7 +266,10 @@ func (b *MSSQLBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowSt
 	testutil.SetupMSSQLFullSchema(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 	store := openMSSQLTenantStore(t, tenantID)
+	report := mssqlRowDisappearanceReporter(t, db, store)
 	teardown := func() {
+		// Before the cleanup below, which would wipe what it counts.
+		report()
 		testutil.CleanupMSSQLTestData(t, db)
 		db.Close()
 	}
