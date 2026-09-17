@@ -21,6 +21,9 @@
 # That real one is known and CLOSED. It has been public since `1dcf116` (2026-06-06);
 # measured 2026-08-30 it is absent from the production database, so every lookup's
 # `WHERE key_hash = ? AND revoked_at IS NULL` misses it and revocation would be a no-op.
+# (That predicate reads `disabled_at IS NULL` since migration 087, cleat#1702. The
+# measurement above is unchanged -- it was taken against the column as it was named
+# then, and renaming it in this sentence would misreport what was measured.)
 # There is a standing decision NOT to rewrite history for it: that would invalidate the
 # v0.2.0 tag, `main` and every clone, and GitHub serves unreferenced blobs by SHA until
 # support purges them, so the rewrite would not even un-expose it.

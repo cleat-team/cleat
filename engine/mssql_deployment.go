@@ -123,7 +123,7 @@ func (s *MSSQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte
 	var tenantIDStr string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys
-		 WHERE key_hash = @p1 AND revoked_at IS NULL`, keyHash).Scan(&tenantIDStr)
+		 WHERE key_hash = @p1 AND disabled_at IS NULL`, keyHash).Scan(&tenantIDStr)
 	if err != nil {
 		return uuid.Nil, err
 	}

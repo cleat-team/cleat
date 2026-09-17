@@ -153,7 +153,7 @@ func TestTenantStore_CreateAPIKey(t *testing.T) {
 	if k.description != "my test key" {
 		t.Errorf("expected description 'my test key', got %q", k.description)
 	}
-	if k.revokedAt != nil {
+	if k.disabledAt != nil {
 		t.Error("expected new key to not be revoked")
 	}
 }
@@ -223,7 +223,7 @@ func TestTenantStore_RevokeAPIKey(t *testing.T) {
 	if !ok {
 		t.Fatal("expected API key to exist before revoke")
 	}
-	if k.revokedAt != nil {
+	if k.disabledAt != nil {
 		t.Fatal("expected key to NOT be revoked before revoke")
 	}
 
@@ -242,7 +242,7 @@ func TestTenantStore_RevokeAPIKey(t *testing.T) {
 	if !ok {
 		t.Fatal("expected API key to still exist after revoke")
 	}
-	if k.revokedAt == nil {
+	if k.disabledAt == nil {
 		t.Fatal("expected key to be revoked after RevokeAPIKey")
 	}
 }

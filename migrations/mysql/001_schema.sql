@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS tenant_api_keys (
     key_hash           VARBINARY(32) NOT NULL,
     description        VARCHAR(1024) NOT NULL DEFAULT '',
     created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-    revoked_at         TIMESTAMP(6),
+    -- cleat#1702: contract retirement spelling; migration 075 removes
+    -- revoked_at. This file carries the final column set.
+    disabled_at        TIMESTAMP(6),
     FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id),
     PRIMARY KEY (key_id)
 ) ENGINE=InnoDB;

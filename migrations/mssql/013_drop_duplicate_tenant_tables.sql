@@ -25,7 +25,7 @@
 -- correct and unindexed.
 -- ---------------------------------------------------------------------------
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_api_keys_hash' AND object_id = OBJECT_ID(N'admin.tenant_api_keys'))
-    CREATE INDEX idx_api_keys_hash ON admin.tenant_api_keys(key_hash) WHERE revoked_at IS NULL;
+    CREATE INDEX idx_api_keys_hash ON admin.tenant_api_keys(key_hash) WHERE disabled_at IS NULL;
 GO
 
 -- ---------------------------------------------------------------------------
@@ -46,7 +46,13 @@ IF OBJECT_ID(N'dbo.tenants', N'U') IS NOT NULL
 GO
 
 IF OBJECT_ID(N'dbo.tenant_api_keys', N'U') IS NOT NULL
-    INSERT INTO admin.tenant_api_keys (key_id, tenant_id, key_hash, description, created_at, revoked_at)
+    -- cleat#1702: the TARGET column is disabled_at (migration 079 removed
+    -- revoked_at from admin.tenant_api_keys). The SOURCE stays d.revoked_at --
+    -- dbo.tenant_api_keys is the legacy duplicate this file drops, it was never
+    -- converted, and SQL Server's deferred name resolution covers a missing
+    -- TABLE, so naming its old column is safe where naming a missing column on
+    -- an existing table would not compile.
+    INSERT INTO admin.tenant_api_keys (key_id, tenant_id, key_hash, description, created_at, disabled_at)
     SELECT d.key_id, d.tenant_id, d.key_hash, d.description, d.created_at, d.revoked_at
     FROM dbo.tenant_api_keys d
     WHERE EXISTS (SELECT 1 FROM admin.tenants a WHERE a.tenant_id = d.tenant_id)

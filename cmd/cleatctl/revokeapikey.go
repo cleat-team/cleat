@@ -40,9 +40,9 @@ import (
 // is the point:
 //
 //   - drop-tenant destroys data irreversibly, so it demands the tenant ID
-//     typed back exactly. This command sets a revoked_at timestamp. It is
+//     typed back exactly. This command sets a disabled_at timestamp. It is
 //     reversible by an operator with the same access (UPDATE ... SET
-//     revoked_at = NULL), and it is what you reach for *during* an
+//     disabled_at = NULL), and it is what you reach for *during* an
 //     incident, when every extra prompt is a reason to reach for raw SQL
 //     instead -- which is precisely the behaviour this command exists to
 //     stop. Making a safety action slow makes people route around it.
@@ -143,8 +143,8 @@ func runRevokeAPIKey(ctx context.Context, db *sql.DB, args []string) {
 
 	printAPIKeyRows([]apiKeyRow{*row})
 
-	if row.revokedAt.Valid {
-		fmt.Printf("\nAlready revoked at %s. Nothing to do.\n", row.revokedAt.Time.Format("2006-01-02 15:04:05 MST"))
+	if row.disabledAt.Valid {
+		fmt.Printf("\nAlready revoked at %s. Nothing to do.\n", row.disabledAt.Time.Format("2006-01-02 15:04:05 MST"))
 		return
 	}
 	if *dryRun {
@@ -153,8 +153,8 @@ func runRevokeAPIKey(ctx context.Context, db *sql.DB, args []string) {
 	}
 
 	res, err := db.ExecContext(ctx,
-		`UPDATE admin.tenant_api_keys SET revoked_at = now()
-		 WHERE key_id = $1 AND revoked_at IS NULL`, row.keyID)
+		`UPDATE admin.tenant_api_keys SET disabled_at = now()
+		 WHERE key_id = $1 AND disabled_at IS NULL`, row.keyID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: revoke: %v\n", err)
 		osExit(1)
@@ -170,7 +170,7 @@ func runRevokeAPIKey(ctx context.Context, db *sql.DB, args []string) {
 	}
 
 	fmt.Printf("\nRevoked key_id %s (tenant %s).\n", row.keyID, row.tenantID)
-	fmt.Println("Effective immediately: every lookup path filters `revoked_at IS NULL`.")
+	fmt.Println("Effective immediately: every lookup path filters `disabled_at IS NULL`.")
 	fmt.Printf("Issue a replacement with:\n  cleat-worker --generate-api-key %s --db \"$DSN\"\n", row.tenantID)
 }
 
@@ -243,11 +243,11 @@ type apiKeyRow struct {
 	tenantID    uuid.UUID
 	description string
 	createdAt   sql.NullTime
-	revokedAt   sql.NullTime
+	disabledAt  sql.NullTime
 }
 
 // findAPIKey looks a key up by whichever selector was given. It deliberately
-// does NOT filter on revoked_at: reporting "already revoked at <time>" is more
+// does NOT filter on disabled_at: reporting "already revoked at <time>" is more
 // useful during an incident than reporting "not found", which an operator
 // would reasonably read as "wrong database".
 func findAPIKey(ctx context.Context, db *sql.DB, sel revokeKeySelector) (*apiKeyRow, error) {
@@ -263,16 +263,16 @@ func findAPIKey(ctx context.Context, db *sql.DB, sel revokeKeySelector) (*apiKey
 	// coverage hole is worth more than a repeated line. cleat#1208.
 	if sel.keyHash != nil {
 		err = db.QueryRowContext(ctx, `
-			SELECT key_id, tenant_id, description, created_at, revoked_at
+			SELECT key_id, tenant_id, description, created_at, disabled_at
 			FROM admin.tenant_api_keys WHERE key_hash = $1
 		`, sel.keyHash).
-			Scan(&row.keyID, &row.tenantID, &row.description, &row.createdAt, &row.revokedAt)
+			Scan(&row.keyID, &row.tenantID, &row.description, &row.createdAt, &row.disabledAt)
 	} else {
 		err = db.QueryRowContext(ctx, `
-			SELECT key_id, tenant_id, description, created_at, revoked_at
+			SELECT key_id, tenant_id, description, created_at, disabled_at
 			FROM admin.tenant_api_keys WHERE key_id = $1
 		`, sel.keyID).
-			Scan(&row.keyID, &row.tenantID, &row.description, &row.createdAt, &row.revokedAt)
+			Scan(&row.keyID, &row.tenantID, &row.description, &row.createdAt, &row.disabledAt)
 	}
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -289,7 +289,7 @@ func listAPIKeys(ctx context.Context, db *sql.DB, tenant string) error {
 		return fmt.Errorf("--list %q is not a tenant uuid: %w", tenant, err)
 	}
 	rows, err := db.QueryContext(ctx,
-		`SELECT key_id, tenant_id, description, created_at, revoked_at
+		`SELECT key_id, tenant_id, description, created_at, disabled_at
 		 FROM admin.tenant_api_keys WHERE tenant_id = $1
 		 ORDER BY created_at DESC`, tid)
 	if err != nil {
@@ -300,7 +300,7 @@ func listAPIKeys(ctx context.Context, db *sql.DB, tenant string) error {
 	var out []apiKeyRow
 	for rows.Next() {
 		var r apiKeyRow
-		if err := rows.Scan(&r.keyID, &r.tenantID, &r.description, &r.createdAt, &r.revokedAt); err != nil {
+		if err := rows.Scan(&r.keyID, &r.tenantID, &r.description, &r.createdAt, &r.disabledAt); err != nil {
 			return fmt.Errorf("scan api key row: %w", err)
 		}
 		out = append(out, r)
@@ -325,8 +325,8 @@ func printAPIKeyRows(rows []apiKeyRow) {
 	fmt.Fprintln(w, "KEY_ID\tTENANT\tSTATUS\tCREATED\tDESCRIPTION")
 	for _, r := range rows {
 		status := "active"
-		if r.revokedAt.Valid {
-			status = "revoked " + r.revokedAt.Time.Format("2006-01-02")
+		if r.disabledAt.Valid {
+			status = "revoked " + r.disabledAt.Time.Format("2006-01-02")
 		}
 		created := "-"
 		if r.createdAt.Valid {
