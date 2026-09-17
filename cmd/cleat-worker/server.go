@@ -2617,6 +2617,11 @@ func newIPRateLimiter(r rate.Limit, burst int) *ipRateLimiter {
 	// Background cleanup: every 10 minutes remove limiter entries that
 	// have not been used in the last hour.
 	go func() {
+		// cleat#1769. Map iteration and time arithmetic under a mutex, in a
+		// loop that runs for the worker's whole life: a panic here took the
+		// process down. slog.Default() because neither this constructor nor
+		// ipRateLimiter carries a logger, matching idempotencyCleanupLoop.
+		defer recoverBackgroundGoroutine(slog.Default(), "", "ip-rate-limiter-cleanup")
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -2686,6 +2691,8 @@ func newKeyedRateLimiter() *keyedRateLimiter {
 		stopCh: make(chan struct{}),
 	}
 	go func() {
+		// cleat#1769, same shape as newIPRateLimiter's cleanup above.
+		defer recoverBackgroundGoroutine(slog.Default(), "", "keyed-rate-limiter-cleanup")
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for {
