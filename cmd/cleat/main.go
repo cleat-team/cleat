@@ -818,8 +818,13 @@ func runVetPython(dir string, jsonOut bool) int {
 	} else {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: cannot read directory %s: %v\n", dir, err)
-			return 1
+			fmt.Fprintf(os.Stderr, "Error: cannot read %s: %v\n", dir, err)
+			// UNMEASURED, NOT A FINDING. Nothing was inspected, so this says
+			// nothing about any workflow. Returning 1 here reported a mistyped
+			// path as a determinism violation -- the same category error as a
+			// skip that hides a crash, and precisely what cleat#1801's third
+			// outcome exists to prevent.
+			return vetExitUnmeasured
 		}
 		for _, e := range entries {
 			if !e.IsDir() && strings.HasSuffix(e.Name(), ".py") {
@@ -829,7 +834,11 @@ func runVetPython(dir string, jsonOut bool) int {
 	}
 	if len(pyFiles) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: no .py files found in %s\n", dir)
-		return 1
+		// Also UNMEASURED, and since cleat#1825 reordered the checks above this
+		// is the LOUDER of the two: a mistyped path no longer dies at ReadDir,
+		// it lands here. An empty directory and a missing one are unmeasurable
+		// for the same reason -- there was nothing to inspect either way.
+		return vetExitUnmeasured
 	}
 
 	sdkDir := findPythonSDKDir()
