@@ -199,6 +199,37 @@ func pluginMigrationSession(ctx context.Context, db *sql.DB, dialect Dialect, sc
 		conn.Close()
 		return nil, nil, fmt.Errorf("plugin: pin search_path to %s: %w", schema, err)
 	}
+	// Bound the wait for every lock the plugin migrations take, exactly as
+	// migration.Runner.session does for the core ones. cleat#1775.
+	//
+	// THIS FILE IS THE SECOND MIGRATION RUNNER, and it is the reason the bound
+	// is here as well as there. Plugin migrations run DDL against tables the
+	// worker also serves, on the same boot path, with the same consequence if
+	// they block: the worker stops heartbeating and the reaper starts
+	// collecting its runs. Bounding one runner and not the other would leave
+	// the property true of the instance and false of the class, which is the
+	// shape cleat#1769 was filed about.
+	//
+	// A LITERAL, not migration.DefaultLockTimeout, and the reason is narrower
+	// than "import cycle" -- it took two tries to state correctly.
+	// `go list -deps` shows neither package importing the other, and
+	// `go build ./...` with the import succeeds. `go vet` does not:
+	//
+	//   package cleat/migration
+	//     imports cleat/engine from internal_test.go
+	//     imports cleat/plugin from app.go
+	//
+	// The cycle exists only in migration's TEST build, which is invisible to
+	// `go build` and is why the first check said the import was fine.
+	//
+	// Two runners bounded by two literals is how they drift, so
+	// TestBothMigrationRunnersBoundTheirLockWait reads both files and fails if
+	// the numbers stop agreeing.
+	if _, err := conn.ExecContext(ctx, "SET lock_timeout = 30000"); err != nil {
+		_, _ = conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", pluginMigrationsLockKey)
+		conn.Close()
+		return nil, nil, fmt.Errorf("plugin: set lock_timeout: %w", err)
+	}
 	return conn, func() {
 		// Reset before releasing so the connection returns to the pool
 		// configured like every other one.
@@ -208,6 +239,8 @@ func pluginMigrationSession(ctx context.Context, db *sql.DB, dialect Dialect, sc
 		// and leave one connection resolving unqualified names differently
 		// from every other one in it.
 		_, _ = conn.ExecContext(free, "RESET search_path")
+		// And the lock bound, for the same reason as the pin above it.
+		_, _ = conn.ExecContext(free, "RESET lock_timeout")
 		_, _ = conn.ExecContext(free, "SELECT pg_advisory_unlock($1)", pluginMigrationsLockKey)
 		conn.Close()
 	}, nil

@@ -49,6 +49,7 @@ type Runner struct {
 	dialect       Dialect
 	migrationsDir string
 	schema        string
+	lockTimeout   time.Duration
 }
 
 // migration represents a single versioned SQL migration file.
@@ -157,6 +158,33 @@ func (r *Runner) searchPath() string {
 	return r.schemaIdent() + ", pg_temp"
 }
 
+// DefaultLockTimeout bounds how long a migration statement waits for a lock
+// before failing. cleat#1775.
+//
+// # Why a bound at all
+//
+// Without one, a migration that needs an ACCESS EXCLUSIVE lock -- ALTER TABLE,
+// CREATE INDEX without CONCURRENTLY, DROP -- waits forever behind whatever
+// holds a conflicting lock, and an idle-in-transaction session is enough. It
+// also queues every later reader behind itself, so one blocked migration takes
+// the table down rather than merely being slow.
+//
+// It is worse than that here, and the reason is why this is not cosmetic: every
+// worker migrates at boot, and a worker stuck in migrations is not
+// heartbeating. Its runs go stale and the reaper picks them up while the
+// database is mid-DDL. cleat#1775 records `--max-reclaim-per-tick` (598712a1)
+// as the bound on the CONSEQUENCE; this is the bound on the cause.
+//
+// # Why thirty seconds
+//
+// Long enough that a migration briefly queued behind an ordinary transaction
+// still completes -- the alternative failure, a migration that gives up under
+// normal load, is worse than the one being fixed. Short enough that a worker
+// blocked on a lock fails and says so inside the reclaim window rather than
+// after it. Not derived from a measurement; it is a starting point, and the
+// flag exists so an operator who measures something different can say so.
+const DefaultLockTimeout = 30 * time.Second
+
 // NewRunner creates a migration runner that reads .sql files from the
 // dialect-specific subdirectory under dir and applies pending ones against db.
 func NewRunner(db *sql.DB, dialect Dialect, dir string) *Runner {
@@ -164,7 +192,19 @@ func NewRunner(db *sql.DB, dialect Dialect, dir string) *Runner {
 		db:            db,
 		dialect:       dialect,
 		migrationsDir: dir,
+		lockTimeout:   DefaultLockTimeout,
 	}
+}
+
+// WithLockTimeout overrides DefaultLockTimeout. Zero or negative disables the
+// bound, restoring the historical behaviour of waiting indefinitely.
+//
+// Disabling is a real choice rather than an oversight guard: a first migration
+// onto a large, busy table can legitimately need longer than any default, and
+// an operator who has decided that should not have to fight the runner.
+func (r *Runner) WithLockTimeout(d time.Duration) *Runner {
+	r.lockTimeout = d
+	return r
 }
 
 // WithSchema directs the runner at a PostgreSQL schema other than public,
@@ -294,6 +334,18 @@ type sqlSession interface {
 // PostgreSQL, and untested locking code for the other two would be worse than
 // none: there, this returns the pool unchanged and the behaviour is exactly
 // what it was before.
+//
+// The lock TIMEOUT set below has the same boundary, and for a reason that
+// follows from the line above rather than a second judgement: the other two
+// dialects have no pinned session here, only the pool. MySQL's
+// innodb_lock_wait_timeout / lock_wait_timeout and SQL Server's SET LOCK_TIMEOUT
+// are connection-scoped, so setting either on a pooled handle applies it to one
+// arbitrary connection and then leaks it back into the pool for application
+// traffic. Covering them means pinning a connection for those dialects too,
+// which is the same change as extending the advisory lock and should be made
+// with it, not before it. So: PostgreSQL is bounded, MySQL and SQL Server are
+// NOT, and that is stated here rather than implied by a flag that sounds
+// dialect-neutral.
 func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
 	if r.dialect != DialectPostgres {
 		return r.db, func() {}, nil
@@ -336,6 +388,26 @@ func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
 		conn.Close()
 		return nil, nil, fmt.Errorf("pin search_path to %s: %w", r.schemaIdent(), err)
 	}
+	// Bound the wait for every lock the migrations themselves take. cleat#1775.
+	//
+	// AFTER the advisory lock above, deliberately. Whether lock_timeout applies
+	// to pg_advisory_lock is a question this code should not have to be right
+	// about -- setting it here means the advisory wait keeps the bound the
+	// comment above already claims for it, which is ctx, and nothing changes
+	// about how workers serialise at boot.
+	//
+	// Session-scoped, not SET LOCAL. MySQL commits DDL implicitly, and the
+	// Postgres path is the one place a transaction-scoped setting would work --
+	// using the same scope on the one dialect that is pinned keeps "what bounds
+	// this statement" a property of the run rather than of the statement.
+	if r.lockTimeout > 0 {
+		ms := r.lockTimeout.Milliseconds()
+		if _, err := conn.ExecContext(ctx,
+			fmt.Sprintf("SET lock_timeout = %d", ms)); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("set lock_timeout to %dms: %w", ms, err)
+		}
+	}
 	return conn, func() {
 		free := context.WithoutCancel(ctx)
 		// Undo the pin before letting go. *sql.Conn.Close() RETURNS the
@@ -347,6 +419,13 @@ func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
 		// TestRunner_LeavesSearchPathUnchanged is the regression test, and it
 		// caught exactly this when the pin moved here from the files.
 		_, _ = conn.ExecContext(free, "RESET search_path")
+		// And the timeout, for the same reason spelled out above: Close()
+		// RETURNS this connection to the pool, so a session-level setting left
+		// on it would ride back in and bound locks for ordinary application
+		// traffic on whichever caller happened to be handed this connection.
+		// RESET rather than SET DEFAULT: the historical value is whatever the
+		// server or the DSN configured, which the runner does not know.
+		_, _ = conn.ExecContext(free, "RESET lock_timeout")
 		// Closing the connection releases the lock on its own, but unlocking
 		// explicitly returns it promptly even if the driver keeps the
 		// connection around. WithoutCancel so release still works when the
