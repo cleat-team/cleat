@@ -148,3 +148,49 @@ func RecoverPluginStreamFunc(pluginName string, tracker *PluginHealthTracker, fn
 		return fn(ctx, inputJSON)
 	}
 }
+
+// RecoverGoroutine runs fn and converts a panic into a logged PanicError
+// instead of a process exit. It is for goroutines a plugin STARTS, which the
+// wrappers above cannot reach.
+//
+// # Why this exists separately from RecoverPluginStreamFunc
+//
+// RecoverPluginStreamFunc says so in its own doc comment: it catches a panic
+// during stream SETUP, "panics during channel consumption are not caught here".
+// A streaming provider returns its channel and then produces into it from a
+// goroutine, so every SSE-scan and JSON-decode panic lands after the wrapper has
+// already returned. Four such goroutines existed when this was written
+// (plugins/llm/host_functions.go and the openai, anthropic and ollama
+// providers), and a panic in any of them killed the worker process rather than
+// the request.
+//
+// # What a caller can and cannot observe, stated because it is a real limit
+//
+// The caller's channel is closed by the producer's own `defer close(ch)`, which
+// still runs: this recovery is deferred LAST, so it runs FIRST and the close
+// follows it. So the consumer is never left hanging.
+//
+// But it cannot tell a panic from a stream that simply ended. Neither
+// StreamChunk (plugins/llm/providers/types.go) nor plugin.StreamEvent carries
+// an error field, so a truncated stream and a completed one are the same three
+// values on the wire. Giving the consumer that signal means adding a field to a
+// public type, which is a larger change than this one and is deliberately not
+// made here. What the OPERATOR gets is complete: the panic, its stack, and the
+// plugin marked unhealthy so the next call is refused rather than attempted.
+//
+// tracker may be nil, for a goroutine that belongs to no plugin health record.
+func RecoverGoroutine(pluginName string, tracker *PluginHealthTracker, fn func()) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		stack := string(debug.Stack())
+		panicErr := &PanicError{Plugin: pluginName, Value: r, Stack: stack}
+		if tracker != nil {
+			tracker.MarkUnhealthy(pluginName, panicErr)
+		}
+		log.Printf("[plugin] %s panicked in a background goroutine: %v\n%s", pluginName, r, stack)
+	}()
+	fn()
+}

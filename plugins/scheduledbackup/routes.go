@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/cleat-team/cleat/auth"
@@ -549,6 +550,18 @@ func (p *Plugin) handleRunBackup(w http.ResponseWriter, r *http.Request) {
 
 // runBackupAsync executes pg_dump and records the result in backup_history.
 func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filename string) {
+	// Started with `go` from routes.go. cleat#1769: a panic anywhere in the
+	// dump path -- and this shells out, writes files and touches the database
+	// -- took the worker process down with it.
+	defer func() {
+		if r := recover(); r != nil {
+			p.logger.Error("scheduledbackup: PANIC in background backup — this backup failed; the worker continues",
+				"config_id", configID, "history_id", historyID,
+				"error", r, "stack", string(debug.Stack()))
+			p.markBackupFailed(tenantID, historyID, fmt.Sprintf("panic: %v", r))
+		}
+	}()
+
 	dumpPath, err := SafeDumpPath(p.config.DumpDir, filename)
 	if err != nil {
 		p.logger.Error("scheduledbackup: refusing backup", "config_id", configID,

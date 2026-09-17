@@ -227,6 +227,7 @@ func (c *MemoryController) RecordWorkflowMemory(ctx context.Context, persistStor
 
 	// Async persist to DB; don't fail the workflow if stats recording fails.
 	go func() {
+		defer recoverBackgroundGoroutine(c.log(), c.workerID, "memory-sample-persist")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := target.RecordWorkflowMemorySample(ctx, defName, int64(deltaBytes)); err != nil {

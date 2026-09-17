@@ -325,13 +325,15 @@ func (p *Plugin) chatStream(ctx context.Context, inputJSON string) (<-chan plugi
 	out := make(chan plugin.StreamEvent)
 	go func() {
 		defer close(out)
-		for chunk := range chunkCh {
-			out <- plugin.StreamEvent{
-				Index:   chunk.Index,
-				Content: chunk.Content,
-				Finish:  chunk.Done,
+		plugin.RecoverGoroutine("llm", nil, func() {
+			for chunk := range chunkCh {
+				out <- plugin.StreamEvent{
+					Index:   chunk.Index,
+					Content: chunk.Content,
+					Finish:  chunk.Done,
+				}
 			}
-		}
+		})
 	}()
 
 	return out, nil
