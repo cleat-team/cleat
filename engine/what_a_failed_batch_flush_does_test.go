@@ -208,19 +208,25 @@ func (f *failingStore) flushEventForStep(_ context.Context, _ string, _ EventRec
 }
 
 // TestHowManyTimesAFlushIsTriedBeforeItIsReportedFailed answers the question the
-// owner's steer on cleat#1717 turns on: fail-fast is only safe if everything
+// owner's steer on cleat#1717 turned on: fail-fast is only safe if everything
 // reaching eventFlushFailed has already been retried and judged hopeless.
 //
-// It has not. `retryBatchFlush` is the ONLY retry in the picture, it covers one
-// of the routes to eventFlushFailed, and it returns immediately on a
-// non-retryable error:
+// WHEN THIS TEST WAS WRITTEN IT HAD NOT BEEN, and the count it asserted was 1.
+// `retryBatchFlush` was the only retry in the picture, it covered one of the six
+// routes to eventFlushFailed, and the DIRECT path -- what a low-rate workflow
+// uses, since that is what "adaptive" adapts to -- had no retry loop at all.
+// That asymmetry is what this test was built to measure, and it is the finding
+// the fix was written from.
 //
-//	if !errIsRetryable(err) { return err }
+// Both paths now share --flush-retry-window, so the count is the window's, not
+// a constant: five attempts at the 750ms default, which is the sleep budget the
+// batch path already had. The assertion is therefore ">1 and consistent with
+// the window" rather than an exact number owned in two places --
+// TestTheDefaultWindowReproducesTheHistoricalFiveAttempts owns the five.
 //
-// The DIRECT path -- which is what a low-rate workflow uses, since that is what
-// "adaptive" adapts to -- has no retry loop at all. This measures that rather
-// than asserting it from a reading, because reasoning about this file has been
-// wrong twice today.
+// IT STILL MEASURES RATHER THAN READS, which is why it survived the change that
+// invalidated it: this file's reasoning has been wrong twice, and a count nobody
+// runs would have gone on describing a direct path that no longer exists.
 func TestHowManyTimesAFlushIsTriedBeforeItIsReportedFailed(t *testing.T) {
 	store := &failingStore{err: errors.New("injected: the database refused this write")}
 	livePool := sql.OpenDB(deadConnector{})
@@ -243,12 +249,22 @@ func TestHowManyTimesAFlushIsTriedBeforeItIsReportedFailed(t *testing.T) {
 		t.Fatalf("UNMEASURED: outcome = %v, want eventFlushFailed -- the injected error "+
 			"did not reach the outcome, so the attempt count below means nothing", outcome)
 	}
-	if got := store.calls.Load(); got != 1 {
-		t.Errorf("the direct path made %d flush attempts, want 1.\n\n"+
-			"If this is now >1 somebody added a retry to the direct path, which changes "+
-			"the fail-fast-vs-retry trade on cleat#1717: the argument for fail-fast is "+
-			"that the failure was already retried, and today that is true for exactly one "+
-			"of the routes to eventFlushFailed (the batch INSERT) and false for this one.", got)
+	if got := store.calls.Load(); got <= 1 {
+		t.Errorf("the direct path made %d flush attempt(s), want more than 1.\n\n"+
+			"1 means the direct path has lost its retry and is back to reporting a "+
+			"transient database failure as an unpersisted step, while the same event at "+
+			"a higher step rate would be retried by the batch path. That asymmetry is "+
+			"the defect cleat#1717 fixed.", got)
+	}
+	// The count is the WINDOW's, so pin it to the window rather than to a
+	// literal. A retry that ignored its deadline would satisfy the check above
+	// and run until the test timed out, so an upper bound is load-bearing here
+	// and is not tidiness.
+	if got, want := store.calls.Load(), int64(5); got != want {
+		t.Errorf("the direct path made %d attempts at the %v default window, want %d. "+
+			"Either the window changed or the backoff did; "+
+			"TestTheDefaultWindowReproducesTheHistoricalFiveAttempts is the one to read.",
+			got, DefaultFlushRetryWindow, want)
 	}
 }
 
