@@ -140,8 +140,24 @@ Network calls are non-deterministic -- network failures, DNS resolution,
 and response timing differ across replays.
 
 **Fix:** Use `h.DurableCall()` with a registered service name, or
-`h.CleatFetch()` for durable HTTP requests. These are recorded in the
+`h.DurableFetch()` for durable HTTP requests. These are recorded in the
 event history and return cached results during replay.
+
+**What "a registered service name" means, because it is not a database row.**
+`h.DurableFetch()` and the built-in `http.fetch` service need no registration at
+all — use them for ordinary outbound HTTP and nothing else is required. A
+*named* service is different: the worker resolves `service.operation` in
+`dbServiceCaller.call`, which handles `http.fetch`, then an optional
+`--bench-svc-url`, and otherwise fails permanently with
+
+```
+service orders.GetOrder not configured: no endpoint registered
+```
+
+There is **no endpoint table and no service registry**. If you see that error,
+adding a row somewhere will not fix it: the service has to be provided by a Go
+plugin compiled into the worker, which means a worker rebuild and redeploy.
+Prefer `h.DurableFetch()` unless you specifically need a plugin's capabilities.
 
 **Example:**
 ```go
@@ -152,7 +168,10 @@ resp, err := http.Get("https://api.example.com/orders/123")
 result, err := h.DurableCall("orders", "GetOrder", `{"id":"123"}`)
 
 // ALSO GOOD -- durable HTTP fetch:
-result, err := h.CleatFetch("https://api.example.com/orders/123", "GET", nil, nil)
+body, status, err := h.DurableFetch("https://api.example.com/orders/123", "GET", nil, "")
+
+// Or, for a plain GET:
+body, status, err := h.FetchGet("https://api.example.com/orders/123")
 ```
 
 ---

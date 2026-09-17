@@ -23,6 +23,22 @@ The system has three goals:
 
 2. **Operational simplicity.** The entire infrastructure is a PostgreSQL database plus a pool of stateless worker processes. No separate queue service, no history service, no matching service. Deploying a new workflow version is an `INSERT`. Rolling back is an `UPDATE`.
 
+   **Scope of that claim, stated because it does not cover everything a reader
+   will assume.** "Deploying a new workflow version is an `INSERT`" is true of
+   *workflow definitions* — the business logic — and it is true of generic
+   outbound HTTP, which `DurableFetch` and the built-in `http.fetch` service
+   handle without any worker change. It is **not** true of a new *named*
+   service. `dbServiceCaller.call` (`cmd/cleat-worker/setup.go:200`) handles
+   `http.fetch`, then one optional `--bench-svc-url`, and otherwise returns a
+   permanent `service X.Y not configured: no endpoint registered`. There is no
+   endpoint table, no service registry, and no `RegisterService`. Integrating a
+   new CRM, payment processor or internal RPC service therefore means writing a
+   Go plugin and rebuilding the worker — the CI/CD pipeline this section says
+   you do not need.
+
+   The honest split is still a good story, and it survives contact: **fully true
+   for business logic and generic HTTP, fully false for new named services.**
+
 3. **Built-in observability.** Because every external interaction must be recorded for durability (replay-after-crash), that same record serves as structured logging, distributed tracing, metrics, and business-level querying. The developer writes zero observability code.
 
 **Cleat is NOT a database. It is a worker pool.** All state -- workflow instances, event history, schedules, deployment metadata -- lives in PostgreSQL. Workers are stateless compute: they claim work from Postgres, execute it in a sandboxed WASM runtime, and write results back. The database is YOURS -- managed Postgres (RDS, Cloud SQL, Crunchy), self-hosted Patroni, or anything that speaks the PostgreSQL wire protocol. Cleat just needs a connection string. Workers and database scale independently: add workers for throughput, scale Postgres the way you always do.
