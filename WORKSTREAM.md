@@ -149,9 +149,31 @@ GENERATOR"**, a change nowhere near the file you are about to regenerate. #1742 
 and no conflict marker ever appeared, so the habit has to be keyed on the **rebase**, not on
 inspecting your own diff for overlap.
 
-The structural fix, where it is affordable, is the one that removed this class for the budget
-ledger: **one file per declaration** (`scripts/skip-ledger.d/`, cleat#1333 and #1395), so there is
-no shared surface to regenerate. R1 is the same rule for counters; this is R1 for scans.
+**The obvious structural fix does NOT work here, and the reason is the sharper half of this rule.**
+`scripts/skip-ledger.d/` removed this class for the budget ledger (cleat#1333, #1395) by giving
+each declaration its own file, and reaching for the same shape here is the first thing anyone
+tries — WS-3 filed exactly that remedy in cleat#1746 and then withdrew it on measurement.
+
+    hand-authored declarations  ->  one file per entry WORKS.  Two streams
+                                    writing different files have nothing to
+                                    collide over.
+    GENERATED wholesale         ->  one file per entry buys NOTHING. A
+                                    regeneration from a stale base rewrites all
+                                    N files with the older generator's output,
+                                    and they merge exactly as cleanly as one
+                                    file did.
+
+So the distinction that matters is **hand-authored versus generated**, not one-file versus many —
+and it is the same distinction underneath this whole rule. R1 ("never edit a shared counter,
+derive it") applies to the first kind. For the second kind there is no layout that helps: the
+remedy is a **guard that fails on a stale entry**, which is what cleat#1751 adds for
+`skip-baseline.txt`.
+
+**Both halves survive, and not redundantly.** A guard makes staleness fail for the one file it
+covers, so there the discipline is enforced rather than remembered. This rule covers every *other*
+derived file in the tree, none of which has a guard — and the next derived file to acquire this
+hazard will not have one on the day it acquires it. (WS-3's framing, after correcting their own
+filed remedy.)
 
 **R7 — Freeze the surface while converging.** No new SDK capability, no new host call, no new
 dialect until the existing matrix is guarded. Every addition multiplies 5 languages × 3 dialects,
