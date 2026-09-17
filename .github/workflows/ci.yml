@@ -272,7 +272,16 @@ jobs:
       # rather than the parameter, so it does not replace sabotaging the read
       # and running the suite. CONTRIBUTING.md carries that procedure.
       - name: Blind test-double guard
-        run: scripts/check-blind-doubles.sh
+        # --self-test FIRST, same as the guards below. Nothing asserted what
+        # findblinddoubles.go attributes until cleat#1764: the baseline is
+        # regenerated from its own scan, so a rule that silently stopped
+        # matching would shrink the baseline and report OK. The self-test drives
+        # the real scanner over a fixture holding both directions -- a double
+        # blind to the parameter its test is named for, and one that reads it --
+        # and neither "reports everything" nor "reports nothing" survives it.
+        run: |
+          scripts/check-blind-doubles.sh --self-test
+          scripts/check-blind-doubles.sh
 
       # Added by WS-1 rather than WS-3, who own this file, because an unwired
       # guard is worse than none -- it reads as coverage nobody has. Said here
