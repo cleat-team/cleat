@@ -830,6 +830,51 @@ applied returned a red that agreed with a wrong one, and a guard's own count rea
 that embarrass get fixed the first time anyone looks. **The ones that survive are the ones nobody
 had a reason to check.**
 
+**A THIRD REMEDY, AND IT IS THE ONE THAT SCALES: GIVE "I COULD NOT LOOK" ITS OWN EXIT STATUS.** The
+two above are things to remember while writing a check. This one is a property the check carries
+afterwards, so it protects the person who did not write it.
+
+    0   passed
+    1   a finding
+    2   could not establish what was being measured
+
+`0` and `2` must not be the same status, because a check that measured nothing agrees with every
+tree, correct or not. `1` and `2` must not be the same status either, because they send the next
+person to different places: `1` says *go and look at the thing I named*, `2` says *the check is
+broken, the subject may be fine*.
+
+Two guards arrived at this on 2026-09-16, hours apart, in different repos and on different
+subjects:
+
+| guard | what `2` distinguishes |
+|---|---|
+| `cleat-ports/scripts/check-go-toolchain-pin.py` | "no pins found" and "could not read cleat's `go.work` floor" agree with every workflow file |
+| `scripts/check-doc-comment-reattachment.py` | under a shallow clone an unresolvable ref compared nothing |
+
+**The honest form of that convergence is narrower than it first looked, and the narrowing is the
+finding.** Neither author had seen the other's guard. But one of them already held a rule from
+2026-09-13 (cleat#1445) that *a guard needs a third outcome*, written after a dashboard guard's
+SKIP branch caught three of its own defects in a sitting. So "a check needs a third thing to say"
+was a prior, not a discovery. What both arrived at independently is that the third outcome needs
+its own **exit status** — because a message is read by a person and a status is read by a harness.
+That distinction is the part worth writing down, and it would have been lost inside the stronger
+claim.
+
+**The second guard's author measured this by walking into it.** Its `UNMEASURED` originally exited
+`1`. The sequence matters more than the pair: a full SHA was **fabricated** rather than read from
+`git rev-parse`, so it did not resolve, so the guard reported `UNMEASURED` and exited `1` — and the
+harness line `rc=1 (want 1)` printed it as a pass. **The second defect made the first one
+invisible.** A conflated exit status does not merely lose information; it launders another error
+into a green.
+
+**How to apply.** Any check that reads something it does not control — a remote ref, another repo's
+file, a tool that may be absent, a clone that may be shallow — needs the third status. Say which it
+is in the message (`UNMEASURED:` is enough, with a second line saying *this is a failure of the
+check, not a finding about the tree*). Both `1` and `2` should fail CI; the distinction is not
+whether to stop, it is where to send the person who has to fix it. A self-test that builds its own
+fixtures cannot be unmeasured and should exit `0`/`1` only — the third status belongs to the checks
+that reach outside themselves, not to every script.
+
 **A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
 head*, which contains your commit — not your own SHA.
@@ -1523,6 +1568,30 @@ fourth entry under *"could this check have disagreed?"*, written by an author wh
 afternoon measuring exactly this absence — merged without a trailer. Five of my six merges that day
 lacked one. That is the argument for recording the *resolver* rule rather than chasing the markers:
 **plan for the marker to be missing, because the person most aware of it is still missing it.**
+
+**SUPERSEDED 2026-09-17: commits now carry `Claude-Stream:`, not `Claude-Session:`.** Everything
+measured above stands and is why the replacement exists — the id form did not fail because people
+were careless with it, it failed because **a session id does not survive a host restart and a
+stream does.** After the 2026-09-16 reboot every `session_…` mapping recorded here named a session
+that no longer existed, three PRs could not be attributed at all, and one session merged two PRs it
+had not authored on the strength of a dead id. The new form:
+
+    Claude-Stream: WS-1        # closed set: WS-1, WS-2, WS-3, coordinator
+                               # anchor greps at ^Claude-Stream: , as before
+
+It is still a **claim, not a record** — any session can type any stream name, exactly as any session
+could type any id. The gain is stability under restart, and the fact that each session can assert
+its value from its own evidence rather than resolve an id the harness may not expose to it. The
+`CLAUDE_CODE_SESSION_ID`-is-a-UUID trap above is unchanged and is the reason the hook still cannot
+stamp it.
+
+**And it answers a different question from the reflog, which is the thing to keep straight.** The
+trailer says *who worked*; the reflog says *where*. The failure mode to design against is not a
+session stamping the wrong stream on purpose — it is a session stamping the **right** one for a
+commit produced in another stream's working tree, which is exactly what happened on 2026-09-16.
+The trailer would have been true and still would not have answered the question anyone was asking.
+Only the reflog is unforgeable by typing; only the trailer names a person. See `WORKSTREAM.md`,
+*Shared files, and the protocol for each*.
 
 **One PR, one thing.** Every PR that bundled a second concern was harder to review than the two
 would have been apart.
