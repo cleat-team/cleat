@@ -61,6 +61,7 @@ type egressFinding struct {
 //     either today -- all eight guarded clients name env.HTTPTransport inline --
 //     so the strictness costs nothing now and would have to be revisited
 //     deliberately rather than by loosening this back to a substring.
+//
 // dialsThroughEgressGuard reports whether an `&http.Transport{...}` literal sets
 // DialContext to a selector on a call to something named egressGuard -- the
 // worker's spelling of "guarded", as opposed to a plugin's env.HTTPTransport.
@@ -96,7 +97,14 @@ func dialsThroughEgressGuard(t *ast.UnaryExpr) bool {
 			return false
 		}
 		fn, ok := call.Fun.(*ast.SelectorExpr)
-		return ok && fn.Sel.Name == "egressGuard"
+		// TWO NAMES, because the worker has two policies and they are not
+		// interchangeable: egressGuard is for a destination a GUEST named and
+		// consults the per-tenant allowlist; serviceEgressGuard is for one the
+		// OPERATOR named and does not. Both end at EgressGuard.DialContext.
+		//
+		// An allowlist of exact names rather than a suffix match, so a helper
+		// called anythingEgressGuard does not qualify by being spelled well.
+		return ok && (fn.Sel.Name == "egressGuard" || fn.Sel.Name == "serviceEgressGuard")
 	}
 	return false
 }

@@ -101,6 +101,25 @@ func TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt(t *testing.T) {
 	logs := &syncBuffer{}
 	w := newRealDeferPhaseWorker(t, db, store, logs)
 
+	// httptest binds loopback, and the egress floor refuses loopback -- which
+	// since cleat#1841 applies to the service forwarder too. That is the point
+	// of that change: the one path reaching an operator-named service used to
+	// be the one path outside the floor.
+	//
+	// AllowLoopback is the sanctioned way for a test to drive the real fetch
+	// path against an httptest server, and its own comment says so. It is
+	// TEST ONLY and enforced as such: TestNoProductionCodeAllowsLoopbackEgress
+	// fails if any non-test file sets it.
+	//
+	// Set on the WORKER, because this test builds one directly rather than
+	// calling main(), so neither the caller's own field nor any flag is reached
+	// from here. An earlier attempt set *pluginEgressAllowPrivate, which looked
+	// right and did nothing for exactly that reason.
+	w.egress = &engine.EgressGuard{
+		AllowLoopback:  true,
+		TenantOptional: func(context.Context) bool { return true },
+	}
+
 	// ---- Segment 1: ordinary work. Registers the defer, sleeps, suspends.
 	runExecuteWorkflow(w, claimOne(t, ctx, store, w.id, wfID))
 
