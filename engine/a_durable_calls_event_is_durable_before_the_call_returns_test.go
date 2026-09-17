@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,17 +60,27 @@ import (
 type orderingStore struct {
 	WorkflowStore
 
-	seq      *atomic.Int64
-	flushSeq atomic.Int64
-	flushErr error
-	flushed  chan struct{}
-	calls    atomic.Int64
+	seq       *atomic.Int64
+	flushSeq  atomic.Int64
+	flushErr  error
+	flushed   chan struct{}
+	closeOnce sync.Once
+	calls     atomic.Int64
 }
 
+// flushEventForStep records WHEN the first flush completed, and how many
+// flushes there were.
+//
+// The close is once-only because the direct flush path RETRIES a transient
+// failure (cleat#1717) and a second close would panic -- which is exactly what
+// it did when the retry landed, since this double was written when one attempt
+// was the only possibility. The signal this double exists to give is "a flush
+// has completed", and the FIRST one is what makes the ordering assertion
+// meaningful; the count is asserted separately below.
 func (o *orderingStore) flushEventForStep(_ context.Context, _ string, _ EventRecord) error {
 	o.calls.Add(1)
 	o.flushSeq.Store(o.seq.Add(1))
-	close(o.flushed)
+	o.closeOnce.Do(func() { close(o.flushed) })
 	return o.flushErr
 }
 
@@ -153,9 +164,23 @@ func TestRecordEventReturnsAfterAFailedFlushAndDoesNotAdvanceTheChain(t *testing
 	for _, tc := range []struct {
 		name string
 		err  error
+		// wantCalls is the ASYMMETRY cleat#1717 introduced, asserted rather
+		// than tolerated. Both arms used to be 1 because the direct path made
+		// one attempt and no retry.
+		//
+		// A fence loss must still be 1: another worker holds the claim, and
+		// retrying can only be refused again -- errIsRetryable would return
+		// true for it (its closing clause retries what it does not recognise)
+		// if errFlushRetryPointless did not exempt it, and every step of a
+		// reaped worker's remaining segment would sleep out the whole window.
+		//
+		// A transient failure must be MORE than 1, or the retry is not
+		// reaching this path at all.
+		wantCalls func(int64) bool
+		wantDesc  string
 	}{
-		{"fence lost", ErrFenceLost},
-		{"any other failure", errors.New("connection reset")},
+		{"fence lost", ErrFenceLost, func(n int64) bool { return n == 1 }, "exactly 1 (a lost fence is not retried)"},
+		{"any other failure", errors.New("connection reset"), func(n int64) bool { return n > 1 }, "more than 1 (a transient failure is retried)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, store := newOrderingHarness(t, tc.err)
@@ -164,8 +189,8 @@ func TestRecordEventReturnsAfterAFailedFlushAndDoesNotAdvanceTheChain(t *testing
 			s.recordEvent(stampedRecord(0))
 
 			<-store.flushed
-			if store.calls.Load() != 1 {
-				t.Fatalf("the flush ran %d times, want 1", store.calls.Load())
+			if n := store.calls.Load(); !tc.wantCalls(n) {
+				t.Fatalf("the flush ran %d times, want %s", n, tc.wantDesc)
 			}
 			// Returning at all is the assertion: recordEvent has no error
 			// result and does not abort the session.

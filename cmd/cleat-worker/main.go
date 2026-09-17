@@ -1256,11 +1256,22 @@ func main() {
 			MaxBatch:       *batchFlushMaxSize,
 			EnterThreshold: float64(*batchFlushEnterRate),
 			ExitThreshold:  float64(*batchFlushExitRate),
+			RetryWindow:    *flushRetryWindow,
 		})
 		registry.SetEncryption(*encryptSensitivePayloads, payloadEncryption)
 		flusherRegistry = registry
 		logger.InfoContext(ctx, "adaptive flusher registry enabled", "worker_id", workerID, "max_wait_ms", *batchFlushMaxWaitMs, "max_batch", *batchFlushMaxSize, "enter_rate", *batchFlushEnterRate, "exit_rate", *batchFlushExitRate)
 	}
+	// Emitted OUTSIDE the registry branch above, because the advice is about
+	// the retry window and both flush paths have one -- a deployment running
+	// with --batch-flush-disabled is exactly the one whose every step takes the
+	// direct path, and it would be the wrong deployment to stay quiet for.
+	if advice := flushRetryWindowAdvice(*flushRetryWindow, *reclaimTimeout, *heartbeatInterval); advice != "" {
+		logger.WarnContext(ctx, advice, "worker_id", workerID,
+			"flush_retry_window", (*flushRetryWindow).String(),
+			"reclaim_window", reclaimWindow(*reclaimTimeout, *heartbeatInterval).String())
+	}
+
 	// The connection census. cleat#1486.
 	//
 	// Computed HERE because this is the first point at which every term is
@@ -1406,6 +1417,7 @@ func main() {
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,
 		reclaimTimeout:                   *reclaimTimeout,
+		flushRetryWindow:                 *flushRetryWindow,
 		egressAllow:                      egressAllow,
 		operatorEgress:                   operatorEgress,
 		workerRegistry:                   workerRegistry,
@@ -1815,4 +1827,34 @@ func validateReclaimTimeout(reclaim, heartbeat time.Duration) error {
 			reclaim, heartbeat, floor, floor)
 	}
 	return nil
+}
+
+// flushRetryWindowAdvice returns what an operator should be told about a
+// --flush-retry-window that outlasts the window in which this worker's runs stay
+// its own, or "" when there is nothing to say.
+//
+// ADVICE RATHER THAN A REFUSAL, unlike validateReclaimTimeout, and the
+// difference is that this configuration is merely usually pointless rather than
+// always wrong. The reasoning: an outage long enough to need a long retry also
+// stops BatchHeartbeat, which writes to the same database, so every run in the
+// fleet is past its stale window the moment the database returns. The reaper
+// then reclaims them and the retry that finally succeeds loses its fence. A
+// deployment running one worker has no other reaper and can legitimately want
+// this, so it is not refused -- but nothing in the flag's own units says so, and
+// an operator who sets 5m against a 10s reclaim window has almost certainly not
+// realised the two are related.
+func flushRetryWindowAdvice(flushWindow, reclaim, heartbeat time.Duration) string {
+	if flushWindow <= 0 {
+		return ""
+	}
+	window := reclaimWindow(reclaim, heartbeat)
+	if flushWindow <= window {
+		return ""
+	}
+	return fmt.Sprintf(
+		"--flush-retry-window %v outlasts the reclaim window (%v): an outage that long also stops "+
+			"this worker's heartbeat, so its runs become reclaimable as soon as the database returns "+
+			"and a retry that succeeds after that loses its fence. Raise --reclaim-timeout to at least "+
+			"%v to make the extra retrying reachable, or ignore this if nothing else reaps for this deployment.",
+		flushWindow, window, flushWindow)
 }

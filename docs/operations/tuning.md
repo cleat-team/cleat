@@ -92,6 +92,70 @@ max(2 x --heartbeat, 10s)     # cmd/cleat-worker/setup.go, Worker.reclaimAfter
 | Managed DB with failover | 5 s | `2–5 m` | Survive the failover without making crash recovery slower |
 | Development | 30 s+ | leave at 0 | Minimizes DB writes while debugging |
 
+## Event flush retry (`--flush-retry-window`)
+
+An event flush that fails does not give up immediately — it retries with
+exponential backoff until this window elapses, and only then is the step
+reported as unpersisted.
+
+`--flush-retry-window` defaults to `0`, meaning **750 ms**. That is not a new
+number: the batch flush path has always retried five times at 50 ms doubling,
+which is 50+100+200+400 = 750 ms of sleeping. Setting nothing leaves the batch
+path exactly as it was.
+
+### What changed at the default
+
+The **direct** flush path — the one every step of a low-rate workflow takes —
+made one attempt and no retry. The same event at a higher step rate went through
+the batch path and got five. That asymmetry was not a decision; it was where the
+retry happened to be written. Both paths now share the window.
+
+### Sizing it for a failover
+
+```bash
+# ride out a managed-database failover, and keep the runs while doing so
+cleat-worker --flush-retry-window 5m --reclaim-timeout 5m
+```
+
+**Raise `--reclaim-timeout` with it.** An outage long enough to need a long
+retry also stops this worker's heartbeat, which is written to the same database
+— so the moment the database returns, every run in the fleet is past its stale
+window, the reaper takes them, and the retry that finally succeeds loses its
+fence. A `--flush-retry-window` above the reclaim window buys nothing on its
+own, and the worker says so at startup:
+
+```
+WARN --flush-retry-window 5m0s outlasts the reclaim window (10s): ...
+```
+
+The exception is a deployment where nothing else reaps — a single worker — in
+which case the advice is safe to ignore. It is advice rather than a refusal for
+exactly that case.
+
+### What it costs
+
+| | |
+|---|---|
+| A step whose flush fails permanently | stalls for the whole window |
+| Errors the engine does not recognise | **are retried** — `errIsRetryable` defaults to true, so a permanent unknown error costs the full window |
+| Shutdown | an in-flight retry can delay it by up to the window |
+| A lost fence | **not** retried — it is another worker holding the claim, which no later attempt changes |
+| A cancelled context | not retried |
+
+Those exemptions are why the default is 750 ms rather than something failover-sized:
+the retry sits on the engine's hottest write path, and only an operator who knows
+their failover budget should be paying for one.
+
+### Recommendations
+
+| Deployment | `--flush-retry-window` | `--reclaim-timeout` |
+|---|---|---|
+| Local / development | leave at 0 | leave at 0 |
+| Multi-worker, self-managed DB | leave at 0 | leave at 0 |
+| Streaming replication failover | `30–60 s` | match it |
+| Managed DB with Multi-AZ failover | `2–5 m` | match it |
+| Single worker, long outages expected | `2–5 m` | leave at 0 (nothing else reaps) |
+
 ## Poll interval (`--poll`)
 
 Controls how long the worker waits between dispatch-loop iterations when no

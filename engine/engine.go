@@ -112,7 +112,8 @@ type Engine struct {
 	// is AtLeastOnce, which is what shipped before and costs nothing.
 	intentOps map[string]bool
 
-	flusherRegistry *TenantFlusherRegistry // per-tenant adaptive batch flushers based on step rate
+	flusherRegistry  *TenantFlusherRegistry // per-tenant adaptive batch flushers based on step rate
+	flushRetryWindow time.Duration          // how long a failed event flush is retried; 0 = DefaultFlushRetryWindow
 
 	cancellationCheckInterval time.Duration // throttle PollCancellation; 0 = every step
 
@@ -878,6 +879,17 @@ func WithNoPerStepFlush(v bool) EngineOption { return func(e *Engine) { e.noPerS
 // direct per-step flushing and batched event persistence.
 func WithFlusherRegistry(r *TenantFlusherRegistry) EngineOption {
 	return func(e *Engine) { e.flusherRegistry = r }
+}
+
+// WithFlushRetryWindow bounds how long a failed event flush is retried before
+// recordEvent reports eventFlushFailed. Zero means DefaultFlushRetryWindow.
+//
+// It governs the DIRECT flush path. The batch path reads the same value from
+// its flusher (FlusherConfig.RetryWindow) because one flusher serves every
+// workflow of a tenant on this worker and so cannot take it from a per-execution
+// engine; the worker sets both from one flag.
+func WithFlushRetryWindow(d time.Duration) EngineOption {
+	return func(e *Engine) { e.flushRetryWindow = d }
 }
 
 // WithCancellationCheckInterval sets the minimum wall-clock interval between
