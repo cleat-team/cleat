@@ -20,7 +20,10 @@ cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
 cmd/cleat-worker	TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt	1
 cmd/cleat-worker	newSignalAuthStore	1
-engine	RegisterBackend	2
+engine	MSSQLBackend.Setup	1
+engine	MSSQLBackend.SetupForTenant	1
+engine	MySQLBackend.Setup	1
+engine	MySQLBackend.SetupForTenant	1
 engine	TestADeferBodyCannotContinueAsNew	1
 engine	TestADeferBodyCannotRegisterAnotherDefer	1
 engine	TestAMissingDeferExportIsNotReportedAsAFailure	1
@@ -115,7 +118,6 @@ engine	forEachBackend	1
 engine	mssqlDropTenantDB	2
 engine	mssqlTenantTestPool	2
 engine	mysqlIntegrationStore	2
-engine	openMSSQLTenantStore	2
 engine	pythonDeferSegment	1
 engine	pythonDeterminismWasm	1
 engine	setupMSSQLIntegrationTest	2
