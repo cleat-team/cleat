@@ -12,6 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **`--max-quota-events` now defaults to 50,000 instead of unlimited.** (cleat#1829)
+
+  A workflow run that writes more than 50,000 events is now **continued as
+  new** at that point rather than growing without bound. This is a rollover,
+  not a failure: the durable call is refused before dispatch, so no side effect
+  happens, the guest's defers drain as they do for an explicit
+  `ContinueAsNew`, and the executor records a `continue_as_new` suspension.
+
+  Previously the default was `0` = unlimited, and `--retention-days` did not
+  help — it sweeps *terminal* runs, and a runaway is not terminal, so one
+  looping workflow could fill `event_history`.
+
+  **If you have a legitimate run that exceeds 50,000 events**, set
+  `--max-quota-events` higher, or `0` to restore the old unbounded behaviour.
+  The number is a starting point rather than a measurement.
+
+  `--max-quota-children`, `--max-quota-concurrency-keys` and
+  `--max-quota-schedules` are **unchanged and still unlimited**, deliberately:
+  exceeding those fails the workflow rather than rolling it over, so a default
+  would break working deployments.
+
 - **A start payload that omits a declared entry-point parameter is now refused,
   instead of binding the zero value.** (cleat#1065)
 

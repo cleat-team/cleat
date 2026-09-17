@@ -402,10 +402,39 @@ var (
 			"onto a large busy table. PostgreSQL only: the other dialects have no pinned migration session to set it "+
 			"on, and setting it on a pooled handle would leak the bound into application traffic. See cleat#1775.")
 
-	maxQuotaEvents          = flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
-	maxQuotaChildren        = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
-	maxQuotaConcurrencyKeys = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
-	maxQuotaSchedules       = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
+	// DefaultMaxQuotaEvents bounds how much history one run may write.
+	// cleat#1829.
+	//
+	// WHY THIS QUOTA HAS A DEFAULT AND THE THREE BELOW DO NOT. Exceeding this
+	// one is a REFUSAL, not a failure: engine/callerrors.go's
+	// eventCapCallError is reported before the call is dispatched, so no side
+	// effect happens, the guest unwinds through its entry-point wrapper
+	// draining its defers, and the executor records a continue_as_new
+	// suspension. The run rolls over. The other three write an error back into
+	// the workflow and fail it, so a default there would turn working
+	// deployments into failing ones at whatever number was picked.
+	//
+	// It also costs nothing to enable: setup.go already loads the persisted
+	// event count unconditionally -- it was ungated for the replay-tail check
+	// in cleat#1507 -- so a cap adds no query.
+	//
+	// 50,000 is a STARTING POINT, not a measurement, in the same sense as
+	// migration.DefaultLockTimeout. Far above any legitimate workflow, far
+	// below a runaway, and wrong in the mild direction (one extra
+	// continue-as-new) rather than the unbounded one. A distribution of real
+	// per-run event counts would beat it.
+	DefaultMaxQuotaEvents = 50000
+
+	maxQuotaEvents = flag.Int("max-quota-events", DefaultMaxQuotaEvents,
+		"Max events one workflow run may write before the engine continues it as new. This is a "+
+			"ROLLOVER, not a failure: the call is refused before dispatch, so no side effect happens, "+
+			"defers drain, and the run continues as a fresh one. 0 disables the bound, which leaves a "+
+			"looping workflow free to fill event_history -- --retention-days only sweeps TERMINAL runs, "+
+			"and a runaway is not terminal. The default is a starting point rather than a measurement; "+
+			"see cleat#1829.")
+	maxQuotaChildren        = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited). Deliberately unbounded: unlike --max-quota-events, exceeding this FAILS the workflow rather than rolling it over, so a default would break working deployments at whatever number was chosen, and nobody has usage data to choose from. cleat#1829.")
+	maxQuotaConcurrencyKeys = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited). Deliberately unbounded: unlike --max-quota-events, exceeding this FAILS the workflow rather than rolling it over, so a default would break working deployments at whatever number was chosen, and nobody has usage data to choose from. cleat#1829.")
+	maxQuotaSchedules       = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited). Deliberately unbounded: unlike --max-quota-events, exceeding this FAILS the workflow rather than rolling it over, so a default would break working deployments at whatever number was chosen, and nobody has usage data to choose from. cleat#1829.")
 	claimAcrossTenants      = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. "+
 		"Requires a database-side grant, and on SQL Server it now requires TWO steps rather than one.\n"+
 		"PostgreSQL: migrations/postgres/023_cross_tenant_claim.sql.\n"+
