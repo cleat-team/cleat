@@ -28,6 +28,28 @@ func runBuildJava(pattern, outDir, channel string, workflowVersion int) {
 		}
 	}
 
+	// Determinism gate. See the equivalent in build_rust.go and cleat#1770:
+	// runBuild early-returns here before ever reaching analyze(), so a Java
+	// workflow used to compile to a deployable artifact with no determinism
+	// checking at all.
+	//
+	// Placed AFTER the build-file validation and BEFORE the gradle lookup.
+	// After, because "no build.gradle" is the more fundamental complaint and
+	// an empty directory should hear that rather than "no .java files"
+	// (TestRunBuild_JavaTarget_NoBuildFile asserts exactly this). Before,
+	// because runVetJava is pure Go and needs no toolchain, so a project with
+	// determinism errors is refused on a machine that could not have built it.
+	//
+	// forbiddenJavaPatterns is substring matching, so passing it is not
+	// evidence of determinism. It is a much longer list than Rust's and still
+	// has whole APIs missing -- see the known-limit fixture referenced in
+	// java_build_refuses_nondeterminism_test.go.
+	if code := runVetJava(javaDir); code != 0 {
+		fmt.Fprintf(os.Stderr, "\nError: determinism check failed for %s -- no artifact was emitted.\n", javaDir)
+		fmt.Fprintf(os.Stderr, "Fix the errors above, or run 'cleat vet --lang java %s' to see them again.\n", javaDir)
+		os.Exit(1)
+	}
+
 	// Prefer the Gradle wrapper (gradlew) if present, otherwise fall back to
 	// the system gradle.  The wrapper ensures a compatible Gradle version.
 	gradleBin := "gradle"
