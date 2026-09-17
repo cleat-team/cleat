@@ -166,23 +166,49 @@ func callersOutsideOwnBody(t *testing.T, methods map[string][2]int) map[string]b
 		t.Fatalf("read %s: %v", self, err)
 	}
 
+	// Read and blank each file ONCE, before the per-method loop. It used to
+	// re-read every source for every method -- 46 methods x 520 files -- which
+	// was tolerable only because the read was the whole cost. Parsing is not.
+	sources := make(map[string][]byte, len(files))
+	for _, f := range files {
+		if strings.HasSuffix(f, "/monitoring/prometheus/metrics.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Errorf("%s: listed by git ls-files and unreadable: %v", f, err)
+			continue
+		}
+		blanked, err := codeWithoutComments(f, b)
+		if err != nil {
+			// NOT a skip, which is what this was. A file that does not parse
+			// is UNMEASURED, and an unmeasured file reads exactly like one
+			// with no call in it -- which for this guard means "this metric
+			// has no feeder", the finding it exists to report. All 520 tracked
+			// non-test sources parse today.
+			t.Errorf("%s: does not parse, so its calls were not counted: %v", f, err)
+			continue
+		}
+		sources[f] = blanked
+	}
+
+	selfBlanked, err := codeWithoutComments(self, selfSrc)
+	if err != nil {
+		t.Fatalf("parse %s: %v", self, err)
+	}
+
 	called := map[string]bool{}
 	for name, span := range methods {
 		pat := regexp.MustCompile(`\.` + regexp.QuoteMeta(name) + `\s*\(`)
-		// metrics.go with only THIS method's body removed.
-		trimmed := string(selfSrc[:span[0]]) + string(selfSrc[span[1]:])
-		if pat.MatchString(trimmed) {
+		// metrics.go with only THIS method's body removed. Offsets come from
+		// the ORIGINAL source, which is why codeWithoutComments preserves them
+		// byte for byte rather than deleting anything.
+		trimmed := append(append([]byte{}, selfBlanked[:span[0]]...), selfBlanked[span[1]:]...)
+		if pat.Match(trimmed) {
 			called[name] = true
 			continue
 		}
-		for _, f := range files {
-			if strings.HasSuffix(f, "/monitoring/prometheus/metrics.go") {
-				continue
-			}
-			b, err := os.ReadFile(f)
-			if err != nil {
-				continue
-			}
+		for _, b := range sources {
 			if pat.Match(b) {
 				called[name] = true
 				break
@@ -190,4 +216,138 @@ func callersOutsideOwnBody(t *testing.T, methods map[string][2]int) map[string]b
 		}
 	}
 	return called
+}
+
+// codeWithoutComments returns src with every comment's text replaced by spaces,
+// byte offsets and line numbers untouched.
+//
+// WHY. The scan above is `\.<Name>\s*\(` over raw source, and a COMMENTED-OUT
+// call matches it. Measured on develop by commenting out the only production
+// call site of AddCompactionEventsDeleted:
+//
+//	// engine/compaction.go:431
+//	-		metrics.AddCompactionEventsDeleted(ctx, int64(compactedStep))
+//	+		// sabotage: metrics.AddCompactionEventsDeleted(ctx, int64(compactedStep))
+//
+//	ok  github.com/cleat-team/cleat/monitoring/prometheus  0.283s
+//
+// A gauge with no feeder, reported as fed, by the guard whose own failure text
+// says an unfed OTel gauge emits no series so an alert can never fire. The
+// negative control is what makes that a blind spot rather than a broken guard:
+// DELETING the same line fails it correctly. It is blind to exactly the form a
+// developer produces -- a call disabled in place, or a name left in a doc
+// comment after a refactor. (cleat#1768; the same shape as #1771 and #1772.)
+//
+// BLANKING, NOT DELETING, because exportedMetricsMethods hands back byte
+// offsets into the original metrics.go and the sibling-delegation check slices
+// with them. A stripper that shortens anything silently re-points every span.
+//
+// cmd/cleat-worker/route_table_test.go's stripGoComments does the same job with
+// a hand-written state machine, and was already immune to this. Using the
+// parser here rather than copying it: it is in another package, and a parser
+// cannot disagree with the compiler about where a comment ends.
+func codeWithoutComments(path string, src []byte) ([]byte, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, src, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(src))
+	copy(out, src)
+	base := fset.File(f.Pos()).Base()
+	for _, group := range f.Comments {
+		lo, hi := int(group.Pos())-base, int(group.End())-base
+		if lo < 0 || hi > len(out) || lo > hi {
+			continue
+		}
+		for i := lo; i < hi; i++ {
+			if out[i] != '\n' {
+				out[i] = ' '
+			}
+		}
+	}
+	return out, nil
+}
+
+// TestTheFeederScanIsNotSatisfiedByAComment is the known-positive this guard
+// did not have.
+//
+// Every metric in the tree is either fed or declared unfed, so a run over the
+// repo is green whether the call scan is right, wrong, or deleted. That is how
+// a raw-source regex survived here. These fixtures fail without it.
+func TestTheFeederScanIsNotSatisfiedByAComment(t *testing.T) {
+	pat := regexp.MustCompile(`\.` + regexp.QuoteMeta("AddThing") + `\s*\(`)
+
+	cases := []struct {
+		name string
+		src  string
+		want bool // does the file contain a real call?
+	}{{
+		name: "a real call",
+		src:  "package p\n\nfunc f() {\n\tm.AddThing(ctx, 1)\n}\n",
+		want: true,
+	}, {
+		name: "the call commented out, its name left behind -- the defect",
+		src:  "package p\n\nfunc f() {\n\t// m.AddThing(ctx, 1)\n}\n",
+		want: false,
+	}, {
+		name: "a doc comment naming it",
+		src:  "package p\n\n// f used to call m.AddThing(ctx, 1) before the sweep moved.\nfunc f() {}\n",
+		want: false,
+	}, {
+		name: "a block comment",
+		src:  "package p\n\nfunc f() {\n\t/* m.AddThing(ctx, 1) */\n}\n",
+		want: false,
+	}, {
+		name: "a trailing comment beside an unrelated statement",
+		src:  "package p\n\nfunc f() {\n\tg() // TODO: m.AddThing(ctx, 1)\n}\n",
+		want: false,
+	}, {
+		name: "the name inside a STRING is still a match, and that is correct",
+		src:  "package p\n\nfunc f() {\n\ts := \"m.AddThing(\"\n\t_ = s\n}\n",
+		want: true,
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			blanked, err := codeWithoutComments("fixture.go", []byte(tc.src))
+			if err != nil {
+				t.Fatalf("the fixture does not parse, so this case asserts nothing: %v", err)
+			}
+			// Offsets must survive, or the sibling-delegation slice above cuts
+			// metrics.go in the wrong place.
+			if len(blanked) != len(tc.src) {
+				t.Fatalf("blanking changed the length: %d, want %d", len(blanked), len(tc.src))
+			}
+			if got := pat.Match(blanked); got != tc.want {
+				t.Errorf("call found = %v, want %v, in:\n%s", got, tc.want, tc.src)
+			}
+		})
+	}
+}
+
+// TestTheFeederScanSeesADeletedCall is the other half, and it is what makes the
+// case above a BLIND SPOT rather than a broken guard.
+//
+// Without it, "commenting the call out leaves it green" is equally consistent
+// with "this scan never worked". The pair says: the scan does detect a call
+// going away, and the comment is what hid it.
+func TestTheFeederScanSeesADeletedCall(t *testing.T) {
+	pat := regexp.MustCompile(`\.` + regexp.QuoteMeta("AddThing") + `\s*\(`)
+	const with = "package p\n\nfunc f() {\n\tm.AddThing(ctx, 1)\n}\n"
+	const without = "package p\n\nfunc f() {\n}\n"
+
+	for _, tc := range []struct {
+		name string
+		src  string
+		want bool
+	}{{"the call present", with, true}, {"the call deleted outright", without, false}} {
+		blanked, err := codeWithoutComments("fixture.go", []byte(tc.src))
+		if err != nil {
+			t.Fatalf("%s: fixture does not parse: %v", tc.name, err)
+		}
+		if got := pat.Match(blanked); got != tc.want {
+			t.Errorf("%s: call found = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }
