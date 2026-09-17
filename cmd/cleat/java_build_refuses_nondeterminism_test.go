@@ -83,8 +83,7 @@ func TestJavaBuildRefusesNondeterminism(t *testing.T) {
 			t.Fatalf("copied 0 files from %s -- the fixture is missing or empty, "+
 				"so neither arm below would be measuring the checker", src)
 		}
-		out, _ := exec.Command(cleatBinary, "build", "--target", "java", dst,
-			"-o", t.TempDir()).CombinedOutput()
+		out, _ := exec.Command(cleatBinary, "build", "--target", "java", "-o", t.TempDir(), dst).CombinedOutput()
 		return string(out)
 	}
 
