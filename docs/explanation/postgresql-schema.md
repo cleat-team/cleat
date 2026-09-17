@@ -91,6 +91,7 @@ CREATE TABLE workflow_defs (
     plugin_deps JSONB NOT NULL DEFAULT '{}',
     deprecated BOOLEAN NOT NULL DEFAULT false,
     disabled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, name, version)
 );
 ```
@@ -347,6 +348,7 @@ CREATE TABLE workflow_schedules (
     idempotency_key TEXT,
     request_digest TEXT,
     disabled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, name)
 );
 
