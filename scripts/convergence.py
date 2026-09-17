@@ -78,7 +78,15 @@ import re
 import subprocess
 import sys
 
-PLAN_FILES = ["IMPROVEMENT-PLAN.md", "IMPROVEMENT-PLAN-CLOSED.md"]
+# cleat#1727 moved the OPEN sections into IMPROVEMENT-PLAN.d/, one file each.
+# A section recorded there is a finding recorded, exactly as it was when the
+# same text lived in IMPROVEMENT-PLAN.md -- so leaving the directory out would
+# make this report undercount from the migration onward, silently and with no
+# sign that the population had changed underneath it. Listed explicitly rather
+# than globbed so `git log -- <paths>` keeps working on revisions from before
+# the directory existed.
+PLAN_FILES = ["IMPROVEMENT-PLAN.md", "IMPROVEMENT-PLAN-CLOSED.md",
+              "IMPROVEMENT-PLAN.d"]
 SECTION = re.compile(r"^### (\d+\.\d+) ", re.M)
 
 

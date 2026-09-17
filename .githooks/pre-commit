@@ -49,8 +49,15 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 BLOCKS="$REPO_ROOT/scripts/section-blocks.sh"
 PLAN="IMPROVEMENT-PLAN.md"
 
-# Nothing to say unless the plan is being changed.
-git diff --cached --name-only --diff-filter=ACM -- "$PLAN" | grep -q . || exit 0
+# THE PLAN IS TWO PATHS SINCE cleat#1727: IMPROVEMENT-PLAN.md holds the closed
+# sections, IMPROVEMENT-PLAN.d/ holds one file per OPEN section. A NEW section is
+# now almost always a new file in the directory -- which is the whole point of
+# the split -- so a hook watching only IMPROVEMENT-PLAN.md would exit 0 on
+# exactly the commits it exists to check, and go on passing forever.
+PLAN_D="IMPROVEMENT-PLAN.d"
+
+# Nothing to say unless one of them is being changed.
+git diff --cached --name-only --diff-filter=ACM -- "$PLAN" "$PLAN_D" | grep -q . || exit 0
 [ -f "$BLOCKS" ] || exit 0
 
 # shellcheck source=scripts/section-blocks.sh
@@ -68,8 +75,26 @@ git diff --cached --name-only --diff-filter=ACM -- "$PLAN" | grep -q . || exit 0
 # however the diff chose to render it.
 heads_of() { grep -oE '^### [0-9]+\.[0-9]+ ' | sed 's/^### //; s/ $//' | sort -u; }
 
-staged="$(git show ":$PLAN" 2>/dev/null | heads_of)"
-current="$(git show "HEAD:$PLAN" 2>/dev/null | heads_of)"
+# Headings from BOTH namespaces, on both sides of the comparison. The set
+# difference is still what decides; it just now covers the directory too.
+heads_at() {
+  # $1: "" for the index (":<path>"), or a rev ("HEAD").
+  local rev="$1" f
+  if [ -z "$rev" ]; then
+    git show ":$PLAN" 2>/dev/null
+    git diff --cached --name-only --diff-filter=ACMR -- "$PLAN_D" | while read -r f; do
+      [ -n "$f" ] && git show ":$f" 2>/dev/null
+    done
+  else
+    git show "$rev:$PLAN" 2>/dev/null
+    git ls-tree --name-only "$rev:$PLAN_D" 2>/dev/null | while read -r f; do
+      [ -n "$f" ] && git show "$rev:$PLAN_D/$f" 2>/dev/null
+    done
+  fi
+}
+
+staged="$(heads_at "" | heads_of)"
+current="$(heads_at HEAD | heads_of)"
 
 # DURING A MERGE, HEAD IS ONLY THE FIRST PARENT, so every section the second
 # parent brings looks new and the hook refuses a merge that authored nothing.

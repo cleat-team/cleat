@@ -68,8 +68,28 @@ def marked(line):
     return symbol(line) or bool(WORD_RE.search(line))
 
 
-def headings(path=PLAN):
-    return [l.rstrip() for l in path.open(encoding="utf-8") if HEADING_RE.match(l)]
+def plan_sources():
+    """Every file holding plan sections: the plan, then IMPROVEMENT-PLAN.d/.
+
+    Since cleat#1727 the OPEN sections live one-per-file in IMPROVEMENT-PLAN.d/,
+    and the open ones are exactly the ones whose marker this guard exists to
+    check. Reading PLAN alone does not fail -- it reports "0 unmarked headings"
+    over a tree it can only see 253 of 298 of, which is the reassuring answer
+    from a check that stopped looking. Measured on the migration commit.
+    """
+    out = [PLAN] if PLAN.exists() else []
+    d = pathlib.Path("IMPROVEMENT-PLAN.d")
+    if d.is_dir():
+        out += sorted(d.glob("*.md"))
+    return out
+
+
+def headings(path=None):
+    paths = [path] if path is not None else plan_sources()
+    hs = []
+    for p in paths:
+        hs += [l.rstrip() for l in p.open(encoding="utf-8") if HEADING_RE.match(l)]
+    return hs
 
 
 # --- the clauses as CLAUDE.md published them before 2026-09-16, kept so --audit
@@ -156,7 +176,7 @@ def audit():
         ok = ok and good
         print(f"  {'OK  ' if good else 'FAIL'} {label:52} {got}")
 
-    print(f"headings in {PLAN}: {len(hs)}")
+    print(f"headings across {len(plan_sources())} plan source(s): {len(hs)}")
 
     print("\nthe clauses CLAUDE.md published before 2026-09-16:")
     both = sum(1 for l in hs if OLD_SYMBOL_RE.search(l) and OLD_WORD_RE.search(l))
