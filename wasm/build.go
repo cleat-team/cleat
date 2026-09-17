@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -52,6 +53,111 @@ type BuildConfig struct {
 	XfrmSource map[string][]byte
 }
 
+// stagedManifestName records which user sources the last build copied into an
+// output directory. A dotfile, so the Go toolchain ignores it when compiling
+// the directory.
+const stagedManifestName = ".cleat-staged"
+
+// clearStaleStagedSources removes the user sources a PREVIOUS build staged into
+// this directory and this one will not.
+//
+// THE DEFECT. -o is both the artifact destination and the staging directory:
+// the build copies the workflow's own .go files there beside the generated
+// ones. Nothing removed them, and every Go example's README documents the same
+// `-o /tmp/out`, so following two of them in a row fails. Measured on
+// cleat#1823:
+//
+//	cleat build -o /tmp/out ./examples/datapipeline/    exit 0
+//	cleat build -o /tmp/out ./examples/event-driven/    exit 1
+//	    subscription_workflow.go:190:6: toJSON redeclared in this block
+//	        pipeline.go:186:6: other declaration of toJSON
+//
+// pipeline.go belongs to datapipeline. The error names two files from two
+// different examples, reports a Go symbol clash rather than anything about
+// cleat, and points at line numbers in a directory the user thinks of as
+// output. The gen_*.go files are overwritten every time, which is why this
+// bites only when two projects' OWN sources differ in name -- and why building
+// one example twice is fine, so the failure looks intermittent.
+//
+// A MANIFEST, NOT A GLOB, AND THAT IS THE WHOLE DESIGN. Deleting *.go from
+// OutDir would be deleting the user's files: -o is a path they chose, and
+// `cleat build -o ~/src/myproject` is a typo away. This removes only names a
+// previous cleat build recorded writing, so a directory cleat has never
+// written to is never touched.
+//
+// AND A DIRECTORY WITH FOREIGN SOURCES IS REFUSED RATHER THAN MIXED. Without a
+// manifest there is no way to tell a leftover from a file that was always
+// there, so the honest answer is to stop and say which files are in the way.
+// That replaces a compile error about redeclared symbols with one about the
+// output directory, which is where the problem actually is.
+func clearStaleStagedSources(outDir string, keep map[string]bool) error {
+	previous, hadManifest := readStagedManifest(outDir)
+	if hadManifest {
+		for _, base := range previous {
+			if keep[base] || strings.HasPrefix(base, "gen_") {
+				continue
+			}
+			if err := os.Remove(filepath.Join(outDir, base)); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("removing %s staged by a previous build: %w", base, err)
+			}
+		}
+		return nil
+	}
+
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		return fmt.Errorf("reading the build directory: %w", err)
+	}
+	var foreign []string
+	for _, e := range entries {
+		base := e.Name()
+		if e.IsDir() || !strings.HasSuffix(base, ".go") {
+			continue
+		}
+		if keep[base] || strings.HasPrefix(base, "gen_") {
+			continue
+		}
+		foreign = append(foreign, base)
+	}
+	if len(foreign) == 0 {
+		return nil
+	}
+	sort.Strings(foreign)
+	return fmt.Errorf(
+		"the build directory %s already contains Go sources this build did not put there: %s\n"+
+			"  cleat stages the workflow's own sources into -o beside the generated files, so\n"+
+			"  building into a directory that already has .go files in it compiles them together\n"+
+			"  and fails with a redeclaration error naming files from both.\n"+
+			"  Use an empty directory, or one only cleat writes to.",
+		outDir, strings.Join(foreign, ", "))
+}
+
+func readStagedManifest(outDir string) ([]string, bool) {
+	data, err := os.ReadFile(filepath.Join(outDir, stagedManifestName))
+	if err != nil {
+		return nil, false
+	}
+	var names []string
+	for _, l := range strings.Split(string(data), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			names = append(names, l)
+		}
+	}
+	return names, true
+}
+
+func writeStagedManifest(outDir string, names []string) error {
+	sort.Strings(names)
+	body := strings.Join(names, "\n")
+	if body != "" {
+		body += "\n"
+	}
+	if err := os.WriteFile(filepath.Join(outDir, stagedManifestName), []byte(body), 0644); err != nil {
+		return fmt.Errorf("writing the staged-source manifest: %w", err)
+	}
+	return nil
+}
+
 // PrepareBuildDir assembles the build directory: copies user source files,
 // writes generated files, and creates a go.mod for wasip1 compilation.
 func PrepareBuildDir(cfg *BuildConfig) error {
@@ -60,7 +166,15 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return fmt.Errorf("creating build directory: %w", err)
 	}
 
-	// Copy or write user source files, rewriting package declarations to "main".
+	// Collect the user sources this build will stage, BEFORE writing any of
+	// them, so the stale ones from a previous build into the same directory
+	// can be removed first. cleat#1823.
+	type staged struct {
+		base    string
+		content []byte
+	}
+	var toStage []staged
+
 	if len(cfg.XfrmSource) > 0 {
 		for filename, content := range cfg.XfrmSource {
 			base := filepath.Base(filename)
@@ -82,12 +196,7 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 			if !ok {
 				continue
 			}
-
-			dst := filepath.Join(cfg.OutDir, base)
-			rewritten := rewritePackageToMain(content)
-			if err := os.WriteFile(dst, rewritten, 0644); err != nil {
-				return fmt.Errorf("writing transformed %s: %w", base, err)
-			}
+			toStage = append(toStage, staged{base, rewritePackageToMain(content)})
 		}
 	} else {
 		goFiles, err := filepath.Glob(filepath.Join(cfg.SrcDir, "*.go"))
@@ -118,13 +227,29 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 			if !ok {
 				continue
 			}
-
-			dst := filepath.Join(cfg.OutDir, base)
-			rewritten := rewritePackageToMain(content)
-			if err := os.WriteFile(dst, rewritten, 0644); err != nil {
-				return fmt.Errorf("writing %s: %w", base, err)
-			}
+			toStage = append(toStage, staged{base, rewritePackageToMain(content)})
 		}
+	}
+
+	keep := make(map[string]bool, len(toStage))
+	for _, f := range toStage {
+		keep[f.base] = true
+	}
+	if err := clearStaleStagedSources(cfg.OutDir, keep); err != nil {
+		return err
+	}
+
+	for _, f := range toStage {
+		if err := os.WriteFile(filepath.Join(cfg.OutDir, f.base), f.content, 0644); err != nil {
+			return fmt.Errorf("writing %s: %w", f.base, err)
+		}
+	}
+	names := make([]string, 0, len(toStage))
+	for _, f := range toStage {
+		names = append(names, f.base)
+	}
+	if err := writeStagedManifest(cfg.OutDir, names); err != nil {
+		return err
 	}
 
 	// Write generated files.
