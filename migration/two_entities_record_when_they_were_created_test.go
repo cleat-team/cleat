@@ -224,11 +224,33 @@ func pinnedConn(t *testing.T, ctx context.Context, db *sql.DB, d idempotencyDial
 
 // columnExists answers from the live database rather than from the files, which
 // is the whole reason this test exists.
+//
+// SCOPED TO THE CURRENT DATABASE, and on MySQL that is not optional. A MySQL
+// "schema" IS a database, so information_schema.COLUMNS spans every database on
+// the server -- including the fully-migrated one the rest of the suite uses.
+// Unscoped, this reports `tenant_settings.created_at` as already present in a
+// scratch database that has never seen the migration, and the precondition
+// below turns a working test into a false UNMEASURED.
+//
+// Postgres and SQL Server both scope information_schema to the connected
+// database already, so only the MySQL arm can fail this way -- which is exactly
+// why it passed locally and on two dialects in CI. Every dialect carries the
+// predicate regardless: a check that is correct only because two of three
+// engines are forgiving is one engine change away from being wrong everywhere.
 func columnExists(t *testing.T, ctx context.Context, db *sql.DB, d idempotencyDialect, table, column string) bool {
 	t.Helper()
+	var scope string
+	switch d.dialect {
+	case migration.DialectMySQL:
+		scope = "TABLE_SCHEMA = DATABASE()"
+	case migration.DialectMSSQL:
+		scope = "TABLE_CATALOG = DB_NAME()"
+	default:
+		scope = "TABLE_CATALOG = CURRENT_DATABASE()"
+	}
 	var n int
 	q := `SELECT COUNT(*) FROM information_schema.COLUMNS
-	      WHERE TABLE_NAME = ? AND COLUMN_NAME = ?`
+	      WHERE ` + scope + ` AND TABLE_NAME = ? AND COLUMN_NAME = ?`
 	if err := db.QueryRowContext(ctx, d.rebind(q), table, column).Scan(&n); err != nil {
 		t.Fatalf("query information_schema for %s.%s: %v", table, column, err)
 	}
