@@ -79,8 +79,44 @@ class CleatEntryTransformer {
 
       if (durableLeaves.size === 0) continue;
 
-      // Compute transitive closure of durable functions
-      const durableFunctions = this._computeDurableClosure(callGraph, durableLeaves);
+      // Scope for both checks: what the workflow can REACH. cleat#1799.
+      //
+      // durableLeaves is already {functions calling h.*} + {@cleatEntry
+      // functions}, which are exactly the right roots for a forward walk.
+      //
+      // The backward walk is kept for a source that declares no entry point,
+      // where the forward one would have only leaf callers to start from and
+      // would stop checking whatever calls them.
+      const hasEntry = source.statements.some(st => this._isDurableEntryFunc(st));
+      const durableFunctions = hasEntry
+        ? this._computeReachable(callGraph, durableLeaves)
+        : this._computeDurableClosure(callGraph, durableLeaves);
+
+      // The THREADING scope is the INTERSECTION, and neither closure alone
+      // works -- both obvious answers are wrong, in opposite directions.
+      //
+      //   the callers closure alone flags the boundary that SUPPLIES h: a
+      //     harness that constructs a HostCalls and calls the workflow;
+      //   durableFunctions alone flags helpers that NEED no h. Measured here:
+      //     substituting it made SIX pure helpers in examples/as-workflow --
+      //     extractStringField, extractI64Field, extractRawArray, indexOf,
+      //     isDigit, parseI64 -- fail E005 on an UNMODIFIED example, taking
+      //     the control build from green to seven diagnostics.
+      //
+      // E005 asks "can this function obtain the h it needs?", which is only a
+      // meaningful question for a function that BOTH participates in the
+      // workflow and reaches a host call.
+      //
+      //   isDigit   forward yes, backward no   -> excluded, needs no h
+      //   a harness forward no,  backward yes  -> excluded, supplies h
+      //   a durable helper missing h           -> in both, reported
+      //
+      // The Python checker had the identical pair; see cleat#1813/#1816, where
+      // the intersection is pinned from both sides by two tests.
+      const reachesHost = this._computeDurableClosure(callGraph, durableLeaves);
+      const threadingScope = hasEntry
+        ? new Set([...durableFunctions].filter(f => reachesHost.has(f)))
+        : reachesHost;
 
       // Validate all functions in the durable closure for forbidden APIs
       for (const stmt of source.statements) {
@@ -91,7 +127,7 @@ class CleatEntryTransformer {
       }
 
       // Verify that functions in the durable closure have access to 'h'
-      this._verifyThreading(source, durableFunctions, callGraph);
+      this._verifyThreading(source, threadingScope, callGraph);
     }
 
     // E001-E005 were `console.error` and nothing else, so `cleat build` on a
@@ -545,8 +581,53 @@ class CleatEntryTransformer {
   }
 
   // ---------------------------------------------------------------
+  // Functions reachable FORWARD from the durable roots: everything an
+  // entry point, or a function that calls the host, can itself call.
+  //
+  // This is the scope both checks need. Determinism is a property of what a
+  // workflow EXECUTES, so the question is "what does the entry reach?", not
+  // "who reaches into this?".
+  //
+  // Answering it backwards was cleat#1799, and it was wrong in BOTH directions
+  // at once, measured 2026-09-17 on a copy of examples/as-workflow:
+  //
+  //   a helper the workflow CALLS, doing Date.now()   0 diagnostics, .wasm written
+  //   a CALLER of the workflow, doing Date.now()      E002, build refused
+  //
+  // The first is the miss this issue was filed for. The second was not in the
+  // report and is the more damaging half: it is a test harness or a __main__
+  // driver being told its code is non-deterministic. Python's checker had the
+  // identical pair (cleat#1813 / #1816), where a mock-driven harness produced
+  // 22 false PY010s on a shipped example and refused its documented build.
+  //
+  // Note callGraph.callers maps a function to its CALLEES despite the name;
+  // walking it forward is what makes this the callee closure.
+  // ---------------------------------------------------------------
+  _computeReachable(callGraph, roots) {
+    const reachable = new Set();
+    const queue = Array.from(roots);
+
+    while (queue.length > 0) {
+      const func = queue.shift();
+      if (reachable.has(func)) continue;
+      reachable.add(func);
+      for (const callee of (callGraph.callers[func] || [])) {
+        if (!reachable.has(callee)) queue.push(callee);
+      }
+    }
+
+    return reachable;
+  }
+
+  // ---------------------------------------------------------------
   // Compute the transitive closure of durable functions: starting from
   // durable leaves, traverse callers until fixed point.
+  //
+  // RETAINED ONLY as the no-entry fallback -- see afterParse. A source with no
+  // @cleatEntry gives the forward walk nothing but its leaf callers to start
+  // from, which would stop checking any function that calls one. Keeping the
+  // backward walk there leaves such files behaving exactly as they did, rather
+  // than trading cleat#1799's false positives for a silent new false negative.
   // ---------------------------------------------------------------
   _computeDurableClosure(callGraph, durableLeaves) {
     const durableFuncs = new Set(durableLeaves);
