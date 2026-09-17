@@ -102,6 +102,7 @@ engine	TestTheBackendLogsToTheConfiguredLogger	1
 engine	TestTheDeletionAuditNamesWhoRemovedTheRow	1
 engine	TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow	1
 engine	TestTheHostRunsDefersOfAKilledJavaWorkflow	1
+engine	TestTheRowDisappearanceVerdictIsNotConstant	1
 engine	TestTheRustTargetCompilesWithPanicAbort	1
 engine	TestTheWazeroPathRunsDefersOfATrappedWorkflow	1
 engine	TestUnauthenticatedQueryRejection	2
@@ -113,9 +114,9 @@ engine	buildJavaWasm	2
 engine	buildRustWasm	2
 engine	forEachBackend	1
 engine	mssqlDropTenantDB	2
+engine	mssqlRowDisappearanceReporter	2
 engine	mssqlTenantTestPool	2
 engine	mysqlIntegrationStore	2
-engine	openMSSQLTenantStore	2
 engine	pythonDeferSegment	1
 engine	pythonDeterminismWasm	1
 engine	setupMSSQLIntegrationTest	2

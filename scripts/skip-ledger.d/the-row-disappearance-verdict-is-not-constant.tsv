@@ -1,0 +1,2 @@
+test-go/engine	1	^TestTheRowDisappearanceVerdictIsNotConstant$	dialect-gated: cleat#982's instrument only has a verdict to check on SQL Server -- it reads sys.dm_db_partition_stats against a filter predicate, and neither exists on PostgreSQL. Skips in this PostgreSQL-only job and RUNS in test-mssql. Measured with all three DSNs unset: 1 skip, no subtests.
+cluster	1	^TestTheRowDisappearanceVerdictIsNotConstant$	dialect-gated: the same test, and the cluster job sweeps ./engine/... too. See the test-go/engine line above.

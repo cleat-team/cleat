@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -378,6 +379,141 @@ func PhysicalAndVisibleMSSQLRowCount(statsDB, readerDB *sql.DB, table string) (p
 	return phys.Int64, visible, nil
 }
 
+var (
+	mssqlStatsMu    sync.Mutex
+	mssqlStatsPools = map[string]*sql.DB{}
+)
+
+// MSSQLStatsDB returns a pool for the Stats reading that OUTLIVES the test.
+//
+// THE POOL A TEST HOLDS IS CLOSED BEFORE THE REPORT RUNS, and that is not an
+// edge case -- it is the standard shape of every backend test in the suite:
+//
+//	store, teardown := backend.Setup(t)
+//	defer teardown()          // closes db
+//	                          // ... t.Cleanup callbacks run AFTER this
+//
+// A deferred call in the test body runs before any t.Cleanup, so a report
+// registered with t.Cleanup and holding the test's own handle reads
+// "sql: database is closed" on every real failure. Measured 2026-09-16 with a
+// forced failure through MSSQLBackend.Setup: the report fired and every line of
+// it said UNMEASURED. That is the reassuring answer from an instrument that
+// never looked -- the exact failure cleat#982 has accumulated a dozen of.
+//
+// Cached per DSN and never closed, like MSSQLAdminDB's pool, so a suite pays
+// one connection rather than one per test. sa rather than cleat_admin because
+// sys.dm_db_partition_stats needs VIEW DATABASE STATE, which the admin login
+// deliberately does not have.
+func MSSQLStatsDB(t *testing.T) *sql.DB {
+	t.Helper()
+	dsn := os.Getenv("CLEAT_TEST_MSSQL")
+	if dsn == "" {
+		// Fatal rather than Skip. Every caller reaches here having already
+		// established that a SQL Server was asked for -- MSSQLBackend.Setup
+		// checks Enabled() first -- so an empty DSN at this point is a
+		// programming error, not an absent optional resource. A skip would
+		// turn it into a silently missing instrument, which is the failure
+		// this whole file exists to stop.
+		t.Fatalf("MSSQLStatsDB: CLEAT_TEST_MSSQL is empty, but this is only " +
+			"reached once a caller has established a SQL Server was requested")
+	}
+
+	mssqlStatsMu.Lock()
+	defer mssqlStatsMu.Unlock()
+	if pool, ok := mssqlStatsPools[dsn]; ok {
+		return pool
+	}
+	pool, err := sql.Open("sqlserver", dsn)
+	if err != nil {
+		t.Fatalf("open a cleat#982 stats pool: %v", err)
+	}
+	// One connection is enough and the pool is process-lived, so bound it
+	// rather than letting an idle diagnostic hold several.
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
+	mssqlStatsPools[dsn] = pool
+	return pool
+}
+
+// MSSQLRowDisappearanceReaders names the handles the report reads through.
+//
+// THERE ARE THREE, AND THE THIRD IS WHY. The two-handle form below answers
+// "physical versus what this connection can see", and that comparison decides
+// nothing at either end of the range the suite actually uses. Measured
+// 2026-09-16 on a database built from the shipped migrations, every case
+// seeded first and refused if the seed was not visible to a reader that should
+// see it:
+//
+//	Reader                              reading                 verdict
+//	----------------------------------  ----------------------  ---------------------
+//	the raw TestDB handle (sa)          physical=1 visible=0    PRESENT BUT INVISIBLE
+//	the MSSQLAdminDB pool               physical=1 visible=1    consistent
+//	a tenant store, one tenant          physical=3 visible=3    consistent
+//	a tenant store, TWO tenants         physical=5 visible=3    PRESENT BUT INVISIBLE
+//
+// Row 1 is constant because sa has no exemption: since migration 075 the
+// shipped fn_tenant_filter is the plain form and names no role, so a plain pool
+// with no session context sees nothing in a policy-bearing table whether the
+// database is healthy or not. Arming that pairing beside
+// ReportForeignSessionsOnFailure -- the obvious place, and the first thing
+// tried -- would print PRESENT BUT INVISIBLE under every SQL Server failure in
+// the suite. Row 2 is constant in the opposite direction, which is the more
+// dangerous one: it prints the reassuring branch every time.
+//
+// Rows 3 and 4 differ, so a tenant store CAN decide, and it is also the handle
+// the failing reads in cleat#982 went through. Row 4 is its false positive:
+// physical counts EVERY tenant's rows and a tenant pool counts one tenant's, so
+// two rows belonging to somebody else are enough to read as a disappearance.
+// That is inherent -- being table-level index metadata is exactly why no
+// predicate is evaluated against dm_db_partition_stats, and it is why the
+// reading cannot be scoped to a tenant.
+//
+// Hence Truth: a COUNT over the same population the Reader is scoped to, read
+// through a cross-tenant principal. physical stays in the report as context
+// rather than as a verdict.
+type MSSQLRowDisappearanceReaders struct {
+	// Stats reads sys.dm_db_partition_stats and needs VIEW DATABASE STATE. No
+	// predicate is evaluated against it, so it is the one reading that cannot be
+	// wrong about how many rows exist -- and cannot say whose they are.
+	Stats *sql.DB
+
+	// Truth is a reader that can see across tenants -- MSSQLAdminDB's pool. With
+	// TenantID it gives a count over exactly the population Reader is scoped to,
+	// which is the comparison that carries the signal. Nil, or an empty TenantID,
+	// makes that line UNMEASURED rather than absent.
+	Truth    *sql.DB
+	TenantID string
+
+	// Reader is the pool whose visibility is in question: the handle the failing
+	// read went through, filtered exactly as it was.
+	Reader *sql.DB
+}
+
+// THERE IS DELIBERATELY NO t.Cleanup-REGISTERING WRAPPER FOR THE READERS FORM,
+// and one was written and then deleted rather than never considered. A
+// t.Cleanup callback runs AFTER the test body's deferred calls, and every
+// engine backend test is written `defer teardown()`, where teardown closes the
+// pool and issues a blanket DELETE. So a convenience wrapper here would hand
+// callers the exact ordering bug this instrument exists to survive -- reading
+// a closed handle, or an emptied table, and printing the reassuring verdict
+// either way. Call MSSQLRowDisappearanceReportFor from inside the teardown
+// instead; engine's mssqlRowDisappearanceReporter shows the shape and carries
+// the measurements.
+//
+// ReportMSSQLRowDisappearanceOnFailure (the two-handle form above) keeps its
+// t.Cleanup registration because its own self-test calls it directly, with
+// handles it controls and does not close.
+
+// TenantScopedMSSQLRowCount counts one tenant's rows through a cross-tenant
+// reader, so the result can be compared with what a pool scoped to that tenant
+// can see. A difference means the rows are there and their own tenant's
+// connection cannot read them.
+func TenantScopedMSSQLRowCount(truthDB *sql.DB, table, tenantID string) (int64, error) {
+	var n int64
+	err := truthDB.QueryRow(`SELECT COUNT(*) FROM dbo.`+table+` WHERE tenant_id = @p1`, tenantID).Scan(&n)
+	return n, err
+}
+
 // ReportMSSQLRowDisappearanceOnFailure prints both instruments' readings, and
 // only if the test has already failed.
 //
@@ -403,26 +539,100 @@ func ReportMSSQLRowDisappearanceOnFailure(t *testing.T, statsDB, readerDB *sql.D
 func MSSQLRowDisappearanceReport(statsDB, readerDB *sql.DB) string {
 	var b strings.Builder
 	b.WriteString("cleat#982 row-disappearance report\n")
+	for _, table := range mssqlAuditedTables {
+		physicalVsVisible(&b, statsDB, readerDB, table)
+	}
+	return mssqlDeletionSection(&b, statsDB)
+}
+
+// physicalVsVisible writes the two-handle reading: is the row still physically
+// in the table while this connection cannot see it?
+//
+// IT ANSWERS A QUESTION ABOUT ONE HANDLE, which is why it survives alongside
+// the tenant-exact reading rather than being replaced by it. What it cannot do
+// is serve as a blanket verdict: physical counts every tenant's rows, so a
+// reader scoped to one tenant trips it whenever another tenant has any. See
+// MSSQLRowDisappearanceReaders for the four measurements.
+func physicalVsVisible(b *strings.Builder, statsDB, readerDB *sql.DB, table string) {
+	physical, visible, err := PhysicalAndVisibleMSSQLRowCount(statsDB, readerDB, table)
+	switch {
+	case err != nil:
+		fmt.Fprintf(b, "  %s: UNMEASURED (physical/visible: %v)\n", table, err)
+	case physical > visible:
+		fmt.Fprintf(b, "  %s: physical=%d visible=%d -- PRESENT BUT INVISIBLE to this\n"+
+			"    connection. %d row(s) are in the table and its session context cannot\n"+
+			"    see them. Nothing deleted them; look at how this pool sets\n"+
+			"    sp_set_session_context, not at who else was attached.\n",
+			table, physical, visible, physical-visible)
+	default:
+		fmt.Fprintf(b, "  %s: physical=%d visible=%d -- consistent, so a missing row was\n"+
+			"    really removed rather than hidden.\n", table, physical, visible)
+	}
+}
+
+// MSSQLRowDisappearanceReportFor renders the readings for r.
+//
+// The tenant-exact line is the verdict. The physical line is context, and says
+// so: physical > visible is EXPECTED whenever another tenant has rows, so
+// printing it as a disappearance is a false positive the two-handle form could
+// not avoid.
+func MSSQLRowDisappearanceReportFor(r MSSQLRowDisappearanceReaders) string {
+	var b strings.Builder
+	b.WriteString("cleat#982 row-disappearance report\n")
 
 	for _, table := range mssqlAuditedTables {
-		physical, visible, err := PhysicalAndVisibleMSSQLRowCount(statsDB, readerDB, table)
-		switch {
-		case err != nil:
+		physical, visible, err := PhysicalAndVisibleMSSQLRowCount(r.Stats, r.Reader, table)
+		if err != nil {
 			fmt.Fprintf(&b, "  %s: UNMEASURED (physical/visible: %v)\n", table, err)
-		case physical > visible:
-			fmt.Fprintf(&b, "  %s: physical=%d visible=%d -- PRESENT BUT INVISIBLE to this\n"+
-				"    connection. %d row(s) are in the table and its session context cannot\n"+
-				"    see them. Nothing deleted them; look at how this pool sets\n"+
-				"    sp_set_session_context, not at who else was attached.\n",
-				table, physical, visible, physical-visible)
-		default:
-			fmt.Fprintf(&b, "  %s: physical=%d visible=%d -- consistent, so a missing row was\n"+
-				"    really removed rather than hidden.\n", table, physical, visible)
+			continue
 		}
+
+		// The verdict line, over one population.
+		switch {
+		case r.Truth == nil || r.TenantID == "":
+			// No tenant-exact reading available, so say so AND give the
+			// two-handle one rather than leaving the report with no verdict.
+			// A reader who asked for the better question deserves to know it
+			// was not answered; a reader who gets nothing at all concludes the
+			// instrument found nothing.
+			fmt.Fprintf(&b, "  (tenant-exact reading UNMEASURED: no cross-tenant reader, or no\n"+
+				"    tenant given. Falling back to the one-handle reading, which is about\n"+
+				"    this connection rather than about this tenant.)\n")
+			physicalVsVisible(&b, r.Stats, r.Reader, table)
+			continue
+		default:
+			truth, terr := TenantScopedMSSQLRowCount(r.Truth, table, r.TenantID)
+			switch {
+			case terr != nil:
+				fmt.Fprintf(&b, "  %s: tenant-exact reading UNMEASURED (%v)\n", table, terr)
+			case truth > visible:
+				fmt.Fprintf(&b, "  %s: tenant=%s truth=%d visible=%d -- PRESENT BUT INVISIBLE\n"+
+					"    TO ITS OWN TENANT. %d row(s) carrying this tenant_id are in the table\n"+
+					"    and this pool cannot read them. Nothing deleted them; look at how this\n"+
+					"    pool sets sp_set_session_context, not at who else was attached.\n",
+					table, r.TenantID, truth, visible, truth-visible)
+			default:
+				fmt.Fprintf(&b, "  %s: tenant=%s truth=%d visible=%d -- consistent over this\n"+
+					"    tenant, so a missing row was really removed rather than hidden.\n",
+					table, r.TenantID, truth, visible)
+			}
+		}
+
+		// Context, deliberately not a verdict. See MSSQLRowDisappearanceReaders.
+		note := ""
+		if physical > visible {
+			note = " (EXPECTED if another tenant has rows; not a disappearance on its own)"
+		}
+		fmt.Fprintf(&b, "    context: physical=%d across ALL tenants, visible=%d%s\n",
+			physical, visible, note)
 	}
 
+	return mssqlDeletionSection(&b, r.Stats)
+}
+
+func mssqlDeletionSection(b *strings.Builder, statsDB *sql.DB) string {
 	if !mssqlRowAuditEnabled() {
-		fmt.Fprintf(&b, "  deletions: UNMEASURED (%s is not set, so no trigger was installed;\n"+
+		fmt.Fprintf(b, "  deletions: UNMEASURED (%s is not set, so no trigger was installed;\n"+
 			"    an empty audit here would mean nothing). Re-run with %s=1.\n",
 			MSSQLRowAuditEnv, MSSQLRowAuditEnv)
 		return b.String()
@@ -430,15 +640,15 @@ func MSSQLRowDisappearanceReport(statsDB, readerDB *sql.DB) string {
 
 	dels, err := MSSQLDeletions(statsDB)
 	if err != nil {
-		fmt.Fprintf(&b, "  deletions: UNMEASURED (reading the audit failed: %v)\n", err)
+		fmt.Fprintf(b, "  deletions: UNMEASURED (reading the audit failed: %v)\n", err)
 		return b.String()
 	}
 	if len(dels) == 0 {
-		fmt.Fprintf(&b, "  deletions: none recorded, and the audit WAS installed, so this is a\n"+
+		fmt.Fprintf(b, "  deletions: none recorded, and the audit WAS installed, so this is a\n"+
 			"    real negative rather than an absent instrument.\n")
 		return b.String()
 	}
-	fmt.Fprintf(&b, "  deletions: %d recorded (this process is pid %d)\n", len(dels), selfPID())
+	fmt.Fprintf(b, "  deletions: %d recorded (this process is pid %d)\n", len(dels), selfPID())
 	for _, d := range dels {
 		who := "this process"
 		if d.Foreign() {
@@ -459,7 +669,7 @@ func MSSQLRowDisappearanceReport(statsDB, readerDB *sql.DB) string {
 			shape = fmt.Sprintf("targeted, %d row(s) in one statement", d.BatchRows)
 			stmt = trimmedStmt(d.Stmt)
 		}
-		fmt.Fprintf(&b, "    %s/%s tenant=%s by %s pid=%d (%s), %s\n      %s\n",
+		fmt.Fprintf(b, "    %s/%s tenant=%s by %s pid=%d (%s), %s\n      %s\n",
 			d.Table, d.RowID, d.TenantID, who, d.HostPID, d.Program, shape, stmt)
 	}
 	return b.String()
