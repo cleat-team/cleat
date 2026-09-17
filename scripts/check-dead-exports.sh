@@ -206,21 +206,55 @@ scan() {
     return 2
   fi
 
+  # One `git ls-files` for the whole scan rather than one per symbol: the list
+  # does not change while scan() runs, and there are ~1500 declarations.
+  local tracked
+  tracked="$(mktemp)"
+  git ls-files -z '*.go' > "$tracked"
+  if [ ! -s "$tracked" ]; then
+    echo "ERROR: git ls-files '*.go' produced nothing in $(pwd)." >&2
+    echo "The scan reads the INDEX (cleat#1783), so an empty list means every" >&2
+    echo "declaration would look unused and the whole baseline would be" >&2
+    echo "rewritten as dead. Refusing rather than reporting that." >&2
+    rm -f "$decls" "$stderr_f" "$tracked"
+    return 2
+  fi
+
   local out="" file line recv name matches label
   while IFS=$'\t' read -r file line recv name; do
     if [[ "$name" =~ $COMMON_INTERFACE_METHODS ]]; then
       continue
     fi
 
-    # -n rather than -l: every branch now reasons about LINES, so that a
-    # comment or string is treated identically wherever in the tree it lives.
-    # -w so Deploy does not match Deployment. The leading "./" that grep
-    # prints when searching "." is normalised away before comparing against
-    # $file, which finddeadexports.go reports without one -- without this the
-    # declaration line never matches itself, every declaration looks used by
-    # its own declaration, and the whole check passes vacuously. Caught by the
-    # red/green probe: see the commit that added this script.
-    matches="$(grep -rnw --include='*.go' -- "$name" . 2>/dev/null | sed 's#^\./##')"
+    # THE INDEX, NOT THE WORKING DIRECTORY (cleat#1783). This used to be
+    # `grep -rnw --include='*.go' . `, which walks whatever is on disk -- and
+    # this repo routinely holds whole additional copies of itself under
+    # .claude/worktrees/. A copy of a declaration in another session's scratch
+    # checkout has a different path, so code_use_filter's one exclusion (the
+    # declaration's own file:line) does not cover it; the copy's `func Name(`
+    # is neither comment nor string, so it survives both gsubs and matches the
+    # identifier regex. The symbol reads as used.
+    #
+    # Both directions exist and only one is loud. A BASELINED symbol that looks
+    # used stops being reported and the staleness half fails, which is how
+    # cleat#1783 was found. A symbol that is genuinely dead and NOT yet
+    # baselined also looks used -- and is silently never reported. That is the
+    # direction worth fixing: the guard goes quiet in proportion to how messy
+    # the checkout is.
+    #
+    # Measured twice on the same commit: in a pristine worktree the two file
+    # sets agreed exactly (1481 = 1481, difference 0) and the guard was
+    # correct; in a checkout carrying .claude/worktrees/ it was not. An answer
+    # that depends on what happens to be beside the repo cannot be reproduced
+    # from the commit, which is worse than being consistently wrong.
+    #
+    # -n rather than -l: every branch reasons about LINES, so a comment or
+    # string is treated identically wherever it lives. -w so Deploy does not
+    # match Deployment. -H because the file list arrives through xargs, and a
+    # final chunk of ONE file makes grep omit the filename prefix that every
+    # branch of code_use_filter parses. -z/-0 so a path containing whitespace
+    # is one argument rather than two.
+    matches="$(xargs -0 grep -Hnw -- "$name" < "$tracked" 2>/dev/null)"
 
     label="$name"
     if [ "$recv" != "-" ]; then
@@ -248,7 +282,7 @@ scan() {
     out="${out}${file}	func ${label}	dead"$'\n'
   done < "$decls"
 
-  rm -f "$decls" "$stderr_f"
+  rm -f "$decls" "$stderr_f" "$tracked"
   printf '%s' "$out" | grep -v '^$' | LC_ALL=C sort -u || true
 }
 
@@ -350,6 +384,30 @@ func TestBoth(t *testing.T) {
 	LiveFromTestAndCode()
 }
 FIXTURE_TEST
+
+  # cleat#1783's case: a whole copy of the package in a scratch directory, of
+  # the kind .claude/worktrees/ holds. It is deliberately NOT added to the
+  # fixture's index -- that is what makes it a copy rather than a second real
+  # file, and it mirrors reality, where .gitignore line 127 excludes
+  # .claude/worktrees/ so git never tracks it.
+  #
+  # Every DeadNoRefs-style symbol below is declared again in here. If the scan
+  # reads the working directory instead of the index, each of those copies is a
+  # `func Name(` line in a file with a different path -- not the declaration's
+  # own file:line, not a comment, not a string -- so it is counted as a caller
+  # and the four dead symbols vanish from the report. The expectation is
+  # therefore unchanged BY the copy, which is the whole assertion.
+  mkdir -p "$tmp/.claude/worktrees/scratch/pkg"
+  cp "$tmp/pkg/a.go" "$tmp/.claude/worktrees/scratch/pkg/a.go"
+  cp "$tmp/pkg/b.go" "$tmp/.claude/worktrees/scratch/pkg/b.go"
+
+  # The scan reads the index, so the fixture has to have one. git init rather
+  # than a repo/non-repo branch in scan(): one code path, and the self-test
+  # then exercises the real file selection instead of a special case of it.
+  # `git add pkg` and not `git add .` -- adding everything would track the copy
+  # above and make it a legitimate second declaration.
+  git -C "$tmp" init -q 2>/dev/null || { echo "self-test: git init failed" >&2; rm -rf "$tmp"; return 1; }
+  git -C "$tmp" add pkg || { echo "self-test: git add failed" >&2; rm -rf "$tmp"; return 1; }
 
   expected="$(printf '%s\n' \
     'pkg/a.go	func DeadNoRefs	dead' \
