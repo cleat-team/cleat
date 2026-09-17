@@ -1779,14 +1779,15 @@ Key conventions:
   at all, which is short and is the thing to fix:
 
       python3 - <<'EOF'
-      import re, unicodedata
+      import re
       hs = [l.rstrip() for l in open('IMPROVEMENT-PLAN.md')
             if re.match(r'^### [0-9]+\.[0-9]+ ', l)]
+      MARKERS = set('✅🟢🟡🔴🔶🔵🔷⬛⬜⚪❌')
       WORDS = (r'fixed|done|open|wontfix|declined|superseded|parked|deferred|'
                r'partly|partially|core fixed|shipped')
       word = re.compile(r'—[^A-Za-z]*(?:' + WORDS + r')', re.I)
       def marked(l):
-          return any(unicodedata.category(c) == 'So' for c in l) or word.search(l)
+          return any(c in MARKERS for c in l) or word.search(l)
       for l in hs:
           if not marked(l):
               print(l[:110])
@@ -1813,19 +1814,38 @@ Key conventions:
   **A hand-picked RANGE fails the same way a hand-picked list does**, which is what this note
   used to say and it was wrong. `\U0001F300-\U0001FAFF` plus four literals misses `⬛` U+2B1B
   — whose neighbour `⬜` U+2B1C *is* in the literals — and §2.23 carries one today, classified
-  correctly only because the same heading also carries a `✅`. The Unicode **category** needs no
-  vocabulary and is the test that cannot go stale: every marker in use (`✅ 🟢 🟡 🔴 🔶 🔵
-  🔷 ⬛ ⬜ ⚪ ❌`) is category `So`. Widening by *block* instead would have swept in `→`
-  U+2192, which appears in two headings as prose and would have falsely marked §2.12; `→` is
-  category `Sm`, so the category test excludes it for a reason rather than by luck.
+  correctly only because the same heading also carries a `✅`.
+
+  **The symbol set is still a LIST, and widening it to a Unicode CATEGORY was the wrong
+  repair — it trades a loud failure for a silent one.** This scan *prints* the unmarked
+  headings, so the two directions are not symmetric:
+
+  | the matcher is | a real marker | prose |
+  |---|---|---|
+  | too **narrow** | missed → a spurious LINE APPEARS | correct |
+  | too **wide** | correct | read as a marker → a true line **VANISHES** |
+
+  Category `So` is far wider than the markers: `✓` U+2713, `✔`, `✗`, `™`, `©`, `°`, `★` and
+  `⚠` are all `So`. A heading reading *"a 30° window"* or *"✓ checked"* would count as
+  carrying a status and drop silently out of the report — in the one scan whose subject is
+  checks that read cleanest where they measured least. (Found by WS-2 in review, after I had
+  shipped the category test and argued in this very file that the scan fails loud.)
+
+  So the category is used to **detect**, not to match: `--self-test` reports any `So`
+  character in a heading that is not a known marker, and fails naming it. A new status symbol
+  is then added on purpose, and a `✓` written in prose is caught the first time. The list is
+  only safe because the *other* clause is now a real fallback — `— ⬛ **SUPERSEDED**` is
+  carried by the word clause whatever the set contains, which is exactly what was untrue
+  before `[^A-Za-z]*`.
 
   Re-derive all of it — the four counts, the codepoints, and the claim that the replacement
   changes no verdict on any real heading — with `scripts/check-plan-markers.py --self-test`,
   which CI runs.
 
-  **This scan fails LOUD, and the sentence here used to claim the opposite.** It PRINTS the
-  unmarked headings, so a marker it cannot parse adds a spurious line rather than deleting a
-  true one. "A scan that silently stops matching reports zero unmarked headings — which reads
+  **This scan fails LOUD in both clauses, and that is a property to preserve rather than a
+  fact to rely on.** It PRINTS the unmarked headings, so a marker it cannot parse adds a
+  spurious line rather than deleting a true one — which holds only while the symbol set stays
+  narrow, per the table above. "A scan that silently stops matching reports zero unmarked headings — which reads
   exactly like success" is true of a scan that COUNTS closed sections, and
   `scripts/archive-closed-sections.py` has exactly that shape with a third marker vocabulary of
   its own (`✅|🟢|FIXED|DONE|CLOSED|GUARDED|fixed in`, and no SUPERSEDED, DECLINED, WONTFIX,

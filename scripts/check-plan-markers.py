@@ -33,16 +33,35 @@ WORDS = (r"fixed|done|open|wontfix|declined|superseded|parked|deferred|"
 WORD_RE = re.compile(r"—[^A-Za-z]*(?:" + WORDS + r")", re.IGNORECASE)
 
 
+# The status symbols actually in use. Deliberately a LIST, and the audit below
+# is what keeps it honest: it reports any category-'So' character appearing in a
+# heading that is not in here, so a genuinely new marker is added on purpose
+# rather than absorbed silently.
+KNOWN_MARKERS = frozenset("✅🟢🟡🔴🔶🔵🔷⬛⬜⚪❌")
+
+
 def symbol(line):
     """True if the heading carries a status SYMBOL.
 
-    Category 'So' rather than a codepoint range. A range picked by hand misses
-    the next marker exactly as a list does -- the previous version of this scan
-    carried `⬜` U+2B1C and missed `⬛` U+2B1B, its neighbour. Widening by block
-    is not the fix either: it sweeps in `→` U+2192, which appears in headings as
-    prose. `→` is category 'Sm', every marker in use is 'So'.
+    WHY THIS IS NOT `unicodedata.category(c) == "So"`, which was the first
+    attempt and is worse in the direction that matters. This scan PRINTS the
+    unmarked headings, so the two failure modes are not symmetric:
+
+        matcher too NARROW -> a real marker is missed -> a spurious LINE appears
+        matcher too WIDE   -> prose is read as a marker -> a true line VANISHES
+
+    Category 'So' is far wider than the markers: `✓` U+2713, `✔`, `✗`, `™`, `©`,
+    `°`, `★` and `⚠` are all 'So'. A heading reading "a 30° window" or "✓ checked"
+    would be counted as carrying a status, and the heading would silently drop
+    out of the report -- in the one scan whose whole subject is checks that read
+    cleanest where they measured least. A narrow matcher fails loud instead.
+
+    A hand-picked list is only safe because the OTHER clause is now a real
+    fallback: `— ⬛ **SUPERSEDED**` is carried by the word clause whatever this
+    set contains. Before `[^A-Za-z]*` it was not, which is what made the old
+    hand-picked set a single point of failure rather than half of a pair.
     """
-    return any(unicodedata.category(c) == "So" for c in line)
+    return any(c in KNOWN_MARKERS for c in line)
 
 
 def marked(line):
@@ -58,23 +77,31 @@ def headings(path=PLAN):
 OLD_SYMBOL_RE = re.compile(r"[\U0001F300-\U0001FAFF✅❌⬜⚪]")
 OLD_WORD_RE = re.compile(r"—\s*(?:\*\*)?\s*(?:" + WORDS + r")", re.IGNORECASE)
 
-# Cases chosen so that each BREAKS IF ONE CLAUSE IS REVERTED, rather than being
-# caught by the other. A control that the OR rescues proves nothing about either
-# half -- which is how the first version of this audit stayed green while the
-# symbol clause was reverted to the codepoint range it replaced.
+# Each fixture declares WHICH CLAUSE IT DISCRIMINATES, and the audit checks that
+# claim by reverting one clause at a time -- a label here is a testable assertion,
+# not a comment. "SYM" and "WORD" mean the verdict changes when that clause alone
+# is reverted; "none" means the OR rescues it in both directions.
+#
+# A control the OR rescues proves nothing about either half. That is how the
+# first version of this audit stayed GREEN while the symbol clause was reverted,
+# and WS-2's review found I had then overclaimed the repair: four of these six
+# discriminate nothing. The two that do -- 9.1 for the symbol clause and 9.4 for
+# the word clause -- are the entire guard, and `--self-test` fails if either
+# clause is left without one, so deleting 9.1 as a "terser duplicate of 9.3"
+# cannot silently disarm the symbol arm.
 FIXTURES = [
-    ("### 9.1 synthetic — ⬛", True,
-     "symbol clause alone: a marker with no word after it"),
-    ("### 9.2 synthetic — **FIXED**", True,
-     "word clause alone: a word with no symbol at all"),
-    ("### 9.3 synthetic — ⬛ **SUPERSEDED 2026-09-02**", True,
-     "the headline: a symbol the old class missed, ahead of a word"),
-    ("### 9.4 synthetic — → **DEFERRED 2026-09-16**", True,
-     "word clause past a non-marker symbol (the anti-correlation)"),
-    ("### 9.5 synthetic — 231 → 184, and three defects behind the skips", False,
+    ("### 9.1 synthetic — ⬛", True, "SYM",
+     "a marker the old set missed, with NO word to rescue it"),
+    ("### 9.2 synthetic — **FIXED**", True, "none",
+     "a word with no symbol (the old word clause matches this too)"),
+    ("### 9.3 synthetic — ⬛ **SUPERSEDED 2026-09-02**", True, "none",
+     "documents the original bug; rescued either way, so it guards nothing"),
+    ("### 9.4 synthetic — → **DEFERRED 2026-09-16**", True, "WORD",
+     "a word past a non-marker symbol -- the anti-correlation itself"),
+    ("### 9.5 synthetic — 231 → 184, and three defects behind the skips", False, "none",
      "`→` in prose is not a marker"),
-    ("### 9.6 synthetic — 89 findings, and one that changes a support claim", False,
-     "no marker at all is still no marker"),
+    ("### 9.6 synthetic — a 30° window, ✓ checked, 89 findings", False, "none",
+     "prose symbols (`°`, `✓`) are category So and must NOT count"),
 ]
 
 # scripts/archive-closed-sections.py's own, third vocabulary.
@@ -152,11 +179,36 @@ def audit():
         print(f"      {l[:100]}")
     check("headings where old and new disagree", len(disagree), 0)
 
-    print("\ncontrols (each isolates ONE clause -- see FIXTURES):")
-    for line, want, why in FIXTURES:
-        check(f"{why}", marked(line), want)
-    headline = FIXTURES[2][0]
-    check("...and the headline case was missed by BOTH old clauses", old(headline), False)
+    print("\ncontrols, with each fixture's discrimination claim checked:")
+    # Rebuild `marked` with exactly one clause reverted, to test the labels.
+    sym_reverted = lambda l: bool(OLD_SYMBOL_RE.search(l)) or bool(WORD_RE.search(l))
+    word_reverted = lambda l: symbol(l) or bool(OLD_WORD_RE.search(l))
+    covered = set()
+    for line, want, arm, why in FIXTURES:
+        check(why, marked(line), want)
+        actual = []
+        if sym_reverted(line) != want:
+            actual.append("SYM")
+        if word_reverted(line) != want:
+            actual.append("WORD")
+        claim = [] if arm == "none" else [arm]
+        check(f"    discriminates {arm!r}", sorted(actual), sorted(claim))
+        covered.update(actual)
+    check("a fixture guards the SYMBOL clause", "SYM" in covered, True)
+    check("a fixture guards the WORD clause", "WORD" in covered, True)
+    check("the headline case was missed by BOTH old clauses", old(FIXTURES[2][0]), False)
+
+    print("\nevery status symbol in the plan is a KNOWN marker:")
+    # The matcher is a list on purpose (see symbol()); THIS is what keeps the
+    # list honest. Category 'So' is the wide net, used to DETECT rather than to
+    # match, so a genuinely new marker is reported and added deliberately, and a
+    # `✓` written in prose is caught the first time instead of silently deleting
+    # a line from the report.
+    found = {c for l in hs for c in l if unicodedata.category(c) == "So"}
+    unknown = sorted(found - KNOWN_MARKERS)
+    for c in unknown:
+        print(f"      {c} U+{ord(c):04X} {unicodedata.name(c, '?')}")
+    check("category-So characters not in KNOWN_MARKERS", len(unknown), 0)
 
     print("\nsymbols appearing in headings, and whether each clause knows them:")
     seen = {}
