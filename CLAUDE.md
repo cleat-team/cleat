@@ -875,6 +875,45 @@ whether to stop, it is where to send the person who has to fix it. A self-test t
 fixtures cannot be unmeasured and should exit `0`/`1` only — the third status belongs to the checks
 that reach outside themselves, not to every script.
 
+**5. A MECHANISM THAT EXISTS AND IS WIRED TO NOTHING READS AS DONE.** Four instances on
+2026-09-16/17, by three different authors, and the reason it belongs beside §4 is that §4 is about a
+condition whose verdict is supplied by something else — this is about a mechanism with no verdict at
+all. Both present as finished work.
+
+| the mechanism | what it was wired to |
+|---|---|
+| `isDeadlockError`, `isLockWaitTimeout` in `mysql_store.go` | **zero production callers** — with their own unit tests |
+| `isMSSQLDuplicateKey` | used elsewhere in its package, **not on the start path that needed it** |
+| `check-skips.sh --self-test` | did not exist; the flag exits 2 on a usage error (cleat#1742) |
+| `stale_entries` in the baseline ratchet | never computed, so a grant covering nothing was invisible (cleat#1746) |
+
+The engine could recognise MySQL 1213, 1205 and SQL Server 2627 and **acted on none of them**, which
+is how one racer under an idempotency key got a raw `500` on two dialects (cleat#1753, fixed in
+cleat#1755). The classifiers were not missing. They were unreferenced.
+
+**Why this is worse than an absent mechanism.** A missing one is a gap someone will eventually
+notice and fill. A present one answers the question *"does this codebase handle X?"* with **yes** —
+to a grep, to a reviewer, and to its own author six weeks later. It also carries unit tests, which
+is the strongest possible signal of doneness and says nothing whatever about reachability.
+
+**How to apply.** When a defect's fix looks like *"add a classifier for this error"*, first check
+whether the classifier is already there and simply unreferenced — it was, in three of the four above.
+And when adding one, the reachability question is separate from the correctness question: a unit
+test proves it classifies, a caller proves it runs. See §1673 for the same shape recorded about a
+backend method with no callers, and *"uncalled in testing is not unreachable"* — this is its inverse
+and the commoner one.
+
+**One measurement worth carrying with it, because it decides how a regression test for this class is
+written.** cleat#1755's race is milliseconds wide, and the first version used a single round of
+eight racers:
+
+    one round of 8 racers    4 failures in 10 runs   (~40% detection)
+    six rounds, same test   10 failures in 10 runs
+
+**A regression test that catches its own defect 40% of the time is a green that reads as coverage.**
+The rounds are not belt-and-braces; the detection rate is the argument for them, and it was measured
+rather than assumed.
+
 **A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
 head*, which contains your commit — not your own SHA.
