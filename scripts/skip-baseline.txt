@@ -26,6 +26,7 @@ engine	TestADeferBodyCannotRegisterAnotherDefer	1
 engine	TestAMissingDeferExportIsNotReportedAsAFailure	1
 engine	TestAPythonGuestGetsTheDurableClock	1
 engine	TestAPythonGuestsRandomnessIsReproducible	1
+engine	TestAnInvisibleRowIsNotAMissingRow	1
 engine	TestAssemblyScriptDeferSegmentRunsOnlyTheDefers	1
 engine	TestAssemblyScriptDefersDoNotRunOnSuspension	1
 engine	TestAssemblyScriptExportsTheDeferRunner	1
@@ -98,6 +99,7 @@ engine	TestTenantIsolation_Reaper	1
 engine	TestTenantIsolation_Schedules	1
 engine	TestTenantIsolation_Signals	1
 engine	TestTheBackendLogsToTheConfiguredLogger	1
+engine	TestTheDeletionAuditNamesWhoRemovedTheRow	1
 engine	TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow	1
 engine	TestTheHostRunsDefersOfAKilledJavaWorkflow	1
 engine	TestTheRustTargetCompilesWithPanicAbort	1
