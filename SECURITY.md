@@ -217,6 +217,18 @@ The PostgreSQL database is a critical trust component:
 delete workflow data, or inject malicious event history that alters workflow
 replay behavior.
 
+- **Tenant isolation is enforced in the SQL, not by the database.** On every
+  dialect the load-bearing layer is statement-level tenant predicates in cleat's
+  own queries, gated at authoring time per dialect. Row-level security is a
+  backstop underneath it, and its coverage differs sharply: PostgreSQL forces RLS
+  on 16 of 20 tenant-bearing tables, SQL Server binds read-only FILTER predicates
+  to 13 and has **no BLOCK predicates at all**, and MySQL has none and is
+  single-tenant only by decision (`tiers.yaml` D1). On SQL Server the filter is
+  additionally inert for a `cleat_admin` connection. So a write that escaped the
+  statement-level gate would not be caught by the database on any dialect.
+  `docs/reference/multi-tenancy.md` carries the measured table, checked on every
+  run by `engine/the_documented_tenant_coverage_is_measured_test.go`.
+
 ### Worker Compromise Impact
 
 If a `cleat-worker` process is compromised:
