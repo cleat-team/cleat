@@ -594,9 +594,33 @@ them.
 | Mechanism | `CREATE POLICY ... FOR ALL USING (tenant_id = current_setting('cleat.tenant_id')::uuid)` | Not available — application-layer `WHERE tenant_id = ?` on every query | `CREATE SECURITY POLICY ... ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.<table>` |
 | Session context | `current_setting('cleat.tenant_id', true)` | N/A | `SESSION_CONTEXT(N'tenant_id')` |
 | Predicate function | Inline policy expression | N/A | Inline TVF returning `1` when `SESSION_CONTEXT` matches |
-| Bypass | Superuser | N/A | `IS_MEMBER('db_owner') = 1` |
-| Fail-closed | Yes (NULL context returns no rows) | Yes (queries without tenant filter return no rows for other tenants) | Yes (unset context returns no rows) |
-| Block predicates | Not implemented (filter only) | N/A | Yes — `ADD BLOCK PRECATE` prevents INSERT/UPDATE of wrong-tenant rows |
+| Bypass | Superuser — unconditionally, and `FORCE ROW LEVEL SECURITY` does not close it (that closes the separate *table owner* exemption; see `migrations/postgres/005_app_role.sql`) | N/A | **None by default.** Since migration 075 the shipped `fn_tenant_filter` is `@tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)` and names no role at all; sysadmin gets no exemption either. An `IS_ROLEMEMBER(N'cleat_admin')` form exists and must be opted into. |
+| Fail-closed | **On reads.** NULL context returns no rows | Yes (queries without tenant filter return no rows for other tenants) | **On reads.** Unset context returns no rows — and accepts a write, see below |
+| Block predicates | Not implemented (filter only) | N/A | **Not implemented (filter only).** `grep -c 'BLOCK PREDICATE' migrations/mssql/*.sql` → 0, against `ADD FILTER PREDICATE` in 8 files. |
+
+**Both dialects are filter-only, and the consequence is on the WRITE side.** A
+filter predicate makes a row invisible; it does not refuse one. So on SQL Server a
+connection whose `SESSION_CONTEXT` is unset can `INSERT` a row carrying any
+`tenant_id`, the write succeeds, and the row is then invisible to every
+subsequent read — *including the connection that wrote it*, and including the
+blanket `DELETE` that would otherwise remove it. Measured 2026-09-16 on a
+database built from the shipped migrations:
+
+```
+physical=1 visible=0   -- sys.dm_db_partition_stats vs SELECT COUNT(*)
+```
+
+That matters twice over. It is a write-side isolation gap wherever a connection
+reaches the database without tenant context — the engine's own pools re-apply it
+on every recycle (`tenantSessionConn.ResetSession`), and a plain `sql.Open` pool
+does not. And it is a *diagnostic* trap: an invisible row is indistinguishable
+from a deleted one, so "the row was not there" has a second cause with nobody to
+blame for it. See cleat#982.
+
+The row this table used to carry here said SQL Server had block predicates and
+"prevents INSERT/UPDATE of wrong-tenant rows". It never shipped one; the cell
+also misspelled the statement (`ADD BLOCK PRECATE`), which is the tell that the
+line was written rather than run.
 
 ### Checking Type Equivalents in Migrations
 
