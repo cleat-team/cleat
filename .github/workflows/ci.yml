@@ -381,6 +381,31 @@ jobs:
         run: scripts/check-plan-markers.py --self-test
 
 
+      # Plan cross-references, after cleat#1727 split the open sections into
+      # IMPROVEMENT-PLAN.d/. R3 exists because breaking a §N.M is the failure
+      # that made "delete the closed sections" unimplementable, so the split is
+      # only safe while every reference still lands somewhere.
+      #
+      # THE SELF-TEST IS THE GATED HALF, for the same reason as the marker guard
+      # above rather than by analogy with it: the full check reports five
+      # references that resolve to nothing on develop TODAY -- §2.59, §3.93,
+      # §3.170, §3.889, §7.4 -- and all five predate the split. Measured by
+      # running the identical checker against the pre-split tree in a worktree:
+      # 18 dangling before, 17 after, and ZERO introduced. Two of them (§3.170,
+      # §3.889) look like a duplicated digit for sections that do exist (3.17,
+      # 3.89), but fixing a reference means knowing where its author meant it to
+      # point, and guessing would invent a link rather than repair one.
+      #
+      # The self-test is not a weaker check, it is a different one: it asserts
+      # the checker can still tell the plan's TWO namespaces apart. A §N.M does
+      # not always name a `### N.M` heading -- the Phase 2 table carries rows in
+      # the same shape, and §2.4/§2.5/§2.7 are cited from code and resolve to
+      # rows. It drives a deliberately headings-only reading and FAILS if that
+      # reading stops disagreeing, so a regression to one namespace cannot pass.
+      - name: Plan cross-reference guard
+        run: scripts/check-plan-references.py --self-test
+
+
       # Two migration files in one dialect must not share a version number.
       # The runner keys schema_migrations on the filename's numeric prefix, so
       # they collapse to one row: a fresh database applies both (which is why

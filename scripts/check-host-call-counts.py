@@ -62,6 +62,21 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASELINE = os.path.join(REPO, 'scripts', 'host-call-count-baseline.txt')
 
 SKIP_FILE = re.compile(r'^(IMPROVEMENT-PLAN|REVIEW-2026|REMEDIATION-PLAN|CHANGELOG)')
+
+# The archive exemption is keyed on a FILENAME, and cleat#1727 moved plan prose
+# into files that do not carry the plan's name. IMPROVEMENT-PLAN.d/ holds one
+# file per open section; its basenames are slugs like
+# `3.400-the-boundary-inventory-....md`, which SKIP_FILE cannot match.
+#
+# So a historical count that was exempt yesterday, because it sat in
+# IMPROVEMENT-PLAN.md, failed this guard today having not changed a character.
+# Caught by CI on the migration PR: §3.400's "58 host functions", written when
+# the number was 58 and correct as history.
+#
+# Matching on the PATH as well as the basename keeps the exemption attached to
+# the content rather than to where it happens to live. A directory is the plan
+# as much as the file is.
+SKIP_PATH = re.compile(r'^(IMPROVEMENT-PLAN\.d)/')
 SKIP_DIR = ('python-sdk/', 'packages/', 'crates/', 'examples/', 'web/')
 
 # Adjacency, in the constructions people actually write. Each must capture the
@@ -93,6 +108,7 @@ def tracked_markdown():
                          capture_output=True, text=True, check=True).stdout
     return [p for p in out.split('\n')
             if p and not SKIP_FILE.match(os.path.basename(p))
+            and not SKIP_PATH.match(p)
             and not p.startswith(SKIP_DIR)]
 
 

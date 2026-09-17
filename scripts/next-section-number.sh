@@ -41,7 +41,23 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# BOTH NAMESPACES, READ FROM origin/develop. Since cleat#1727 the open sections
+# live one-per-file in IMPROVEMENT-PLAN.d/, so a handed-out number must be free
+# in BOTH or two streams get the same one -- which is precisely what this script
+# exists to prevent, arriving through the fix for a different collision.
+#
+# `git show <rev>:<dir>` lists a tree, so the directory is enumerated from the
+# same revision rather than from the working copy; falling back to the working
+# copy here would reintroduce the defect named below.
 plan="$(git show "origin/develop:$DOC" 2>/dev/null)"
+plan_d="$(git ls-tree --name-only "origin/develop:IMPROVEMENT-PLAN.d" 2>/dev/null || true)"
+if [ -n "$plan_d" ]; then
+  while read -r f; do
+    [ -n "$f" ] || continue
+    plan="$plan
+$(git show "origin/develop:IMPROVEMENT-PLAN.d/$f" 2>/dev/null || true)"
+  done <<< "$plan_d"
+fi
 if [ -z "$plan" ]; then
   echo "ERROR: cannot read $DOC from origin/develop." >&2
   echo "Run 'git fetch origin' first. This script will not fall back to the" >&2

@@ -77,6 +77,15 @@ cd "$REPO_ROOT" || exit 1
 
 DOC="IMPROVEMENT-PLAN.md"
 
+# Since cleat#1727 the open sections live in IMPROVEMENT-PLAN.d/, one file each,
+# so scanning $DOC alone silently stops checking them. Measured on the migration
+# commit: this guard reported "all 253 section numbers are unique" over a tree
+# holding 298, having quietly dropped the 45 that are still open -- a pass, not a
+# failure, and the half that matters. $DOC stays the name in error messages
+# because it is where a duplicate is most likely to be typed; DOCS is what gets
+# read.
+DOCS_LIST="$(bash "$REPO_ROOT/scripts/plan-sources.sh")"
+
 # The negative control. Each case is a boundary that the real check depends on
 # being right, including the two that are easy to get wrong: 115 (the first
 # number a "next free integer" habit would reach for) and 199 (the end of the
@@ -125,7 +134,9 @@ if [ ! -f "$DOC" ]; then
   exit 1
 fi
 
-headings="$(grep -oE '^### [0-9]+\.[0-9]+ ' "$DOC" | sed 's/^### //; s/ $//')"
+headings="$(printf '%s\n' "$DOCS_LIST" | while read -r f; do
+  [ -n "$f" ] && grep -oE '^### [0-9]+\.[0-9]+ ' "$f"
+done | sed 's/^### //; s/ $//')"
 count="$(printf '%s\n' "$headings" | grep -c . || true)"
 
 # Vacuity guard. A grep that matches nothing reports success, so a heading
@@ -148,7 +159,9 @@ if [ -n "$dupes" ]; then
   echo >&2
   while IFS= read -r num; do
     [ -n "$num" ] || continue
-    grep -nE "^### ${num//./\\.} " "$DOC" | sed 's/^/    /' >&2
+    printf '%s\n' "$DOCS_LIST" | while read -r f; do
+      [ -n "$f" ] && grep -HnE "^### ${num//./\\.} " "$f"
+    done | sed 's/^/    /' >&2
   done <<<"$dupes"
   echo >&2
   echo "Two sections cannot share a number: every '§$dupes' reference elsewhere in" >&2
@@ -202,7 +215,9 @@ if [ -n "$outside" ]; then
   echo >&2
   while IFS= read -r num; do
     [ -n "$num" ] || continue
-    grep -nE "^### ${num//./\\.} " "$DOC" | sed 's/^/    /' >&2
+    printf '%s\n' "$DOCS_LIST" | while read -r f; do
+      [ -n "$f" ] && grep -HnE "^### ${num//./\\.} " "$f"
+    done | sed 's/^/    /' >&2
   done <<<"$(printf '%b' "$outside")"
   echo >&2
   echo "Sections are allocated in per-stream blocks, so that two streams" >&2
