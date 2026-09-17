@@ -61,6 +61,46 @@ type egressFinding struct {
 //     either today -- all eight guarded clients name env.HTTPTransport inline --
 //     so the strictness costs nothing now and would have to be revisited
 //     deliberately rather than by loosening this back to a substring.
+// dialsThroughEgressGuard reports whether an `&http.Transport{...}` literal sets
+// DialContext to a selector on a call to something named egressGuard -- the
+// worker's spelling of "guarded", as opposed to a plugin's env.HTTPTransport.
+//
+// Deliberately shallow. It matches the shape `X.egressGuard(...).DialContext`
+// and nothing else: a transport with no DialContext, or one dialing anything
+// else, is a finding. A helper that wrapped the guard under another name would
+// be reported, and should be -- the alternative is a matcher that accepts any
+// DialContext at all, which is the substring check this file replaced.
+func dialsThroughEgressGuard(t *ast.UnaryExpr) bool {
+	lit, ok := t.X.(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	if sel, ok := lit.Type.(*ast.SelectorExpr); !ok || sel.Sel.Name != "Transport" {
+		return false
+	}
+	for _, el := range lit.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "DialContext" {
+			continue
+		}
+		outer, ok := kv.Value.(*ast.SelectorExpr)
+		if !ok || outer.Sel.Name != "DialContext" {
+			return false
+		}
+		call, ok := outer.X.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		fn, ok := call.Fun.(*ast.SelectorExpr)
+		return ok && fn.Sel.Name == "egressGuard"
+	}
+	return false
+}
+
 func surveyEgress(fset *token.FileSet, path string, src []byte) (findings []egressFinding, clients int, err error) {
 	file, err := parser.ParseFile(fset, path, src, 0)
 	if err != nil {
@@ -100,6 +140,23 @@ func surveyEgress(fset *token.FileSet, path string, src []byte) (findings []egre
 			findings = append(findings, egressFinding{pos, "builds an http.Client with no Transport at all"})
 		case *ast.SelectorExpr:
 			if t.Sel.Name != guardedTransport {
+				findings = append(findings, egressFinding{pos,
+					fmt.Sprintf("sets Transport to %s", render(fset, transport))})
+			}
+		case *ast.UnaryExpr:
+			// THE SECOND SPELLING OF GUARDED, and it is not a loosening.
+			//
+			// A plugin receives a ready-made env.HTTPTransport. The worker
+			// builds its own, because its guard is per tenant and constructed
+			// per call: `&http.Transport{DialContext: c.egressGuard(ctx).DialContext}`.
+			// Both end at engine.EgressGuard.DialContext; only one names a field.
+			//
+			// So this accepts a composite &http.Transport{...} ONLY when its
+			// DialContext is a call to something named egressGuard. An
+			// &http.Transport{} with no DialContext, or with any other dialer,
+			// still falls through to a finding -- which is the case that
+			// mattered here, since the bench-svc forwarder held exactly that.
+			if !dialsThroughEgressGuard(t) {
 				findings = append(findings, egressFinding{pos,
 					fmt.Sprintf("sets Transport to %s", render(fset, transport))})
 			}
@@ -211,13 +268,34 @@ func pluginFiles(t *testing.T) (string, []string) {
 		t.Fatalf("git rev-parse: %v", err)
 	}
 	repo := strings.TrimSpace(string(root))
-	out, err := exec.Command("git", "-C", repo, "ls-files", "plugins/*.go", "plugins/**/*.go").Output()
+	// cmd/cleat-worker IS IN SCOPE, and leaving it out is what this scan missed.
+	//
+	// The survey was named for plugins and scanned only plugins/, so the worker's
+	// own outbound clients were never examined -- and one of them,
+	// forwardToBenchSvc's package-level http.Client, held a bare
+	// &http.Transport{} and dialed wherever it was pointed. The single outbound
+	// path that reaches an operator-named service was the single path outside the
+	// egress floor, and the guard written to catch exactly that was looking one
+	// directory away.
+	//
+	// The boundary that matters is "code in this repo that dials out on a
+	// workflow's behalf", not "code under plugins/".
+	out, err := exec.Command("git", "-C", repo, "ls-files",
+		"plugins/*.go", "plugins/**/*.go",
+		"cmd/cleat-worker/*.go").Output()
 	if err != nil {
 		t.Fatalf("git ls-files: %v", err)
 	}
-	files := strings.Fields(string(out))
+	var files []string
+	for _, f := range strings.Fields(string(out)) {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		files = append(files, f)
+	}
 	if len(files) < 50 {
-		t.Fatalf("git ls-files matched %d files under plugins/; the scan did not see the tree", len(files))
+		t.Fatalf("git ls-files matched %d non-test files under plugins/ and cmd/cleat-worker/; "+
+			"the scan did not see the tree", len(files))
 	}
 	return repo, files
 }
