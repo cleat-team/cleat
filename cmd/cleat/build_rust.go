@@ -36,10 +36,15 @@ func runBuildRust(pattern, outDir, channel string, workflowVersion int) {
 	// the known-limit fixture in rust_build_refuses_nondeterminism_test.go for
 	// what that distinction costs when it is missing.
 	//
-	// Note what this check is and is not. forbiddenRustPatterns is literal
-	// substring matching, so passing it is not evidence of determinism; it is
-	// evidence that none of a short list of spellings appeared. The fixture
-	// pair in that test states the limit rather than leaving it implied.
+	// Note what this check is and is not. Since cleat#1811 it resolves `use`
+	// declarations and matches the RESOLVED path, so grouped imports, nested
+	// groups and `as` aliases are all seen -- but there is no type resolution,
+	// so a METHOD call names no module and escapes. Passing it is therefore not
+	// evidence of determinism; it is evidence that no path resolving to a
+	// listed module is named in code. The fixture pair in that test states the
+	// limit rather than leaving it implied, and
+	// docs/contributor/design/rust-determinism-checker.md says why the limit is
+	// where it is.
 	if code := runVetRust(cargoDir); code != 0 {
 		fmt.Fprintf(os.Stderr, "\nError: determinism check failed for %s -- no artifact was emitted.\n", cargoDir)
 		fmt.Fprintf(os.Stderr, "Fix the errors above, or run 'cleat vet --lang rust %s' to see them again.\n", cargoDir)

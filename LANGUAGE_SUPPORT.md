@@ -310,7 +310,7 @@ that completely — which is why this section states the mechanism rather than a
 | **Python** | AST call-graph and closure analysis (`python-sdk/cleat_sdk/vet.py`) | what the entry point reaches, across functions | a forbidden call spelled so the `(module, function)` table does not match it |
 | **AssemblyScript** | AST analysis **inside the compiler** (`packages/cleat-as/transform`) | what the entry point reaches, across functions | a call site with no dotted member access |
 | **Java** | literal substring matching, over source with comments, strings, text blocks and character literals blanked first (`cmd/cleat/vet_java.go`) | a listed spelling in executable code | any other spelling; any module not listed |
-| **Rust** | literal substring matching, over source with comments and strings blanked first (`cmd/cleat/vet_rust.go`) | a listed spelling in executable code | any other spelling; any module not listed |
+| **Rust** | `use`-declaration resolution over source with comments, strings and `#[cfg(test)]` items blanked first (`cmd/cleat/vet_rust.go`) | a path expression **resolving** to a listed module — so grouped imports, nested groups and `as` aliases are all seen | a **method** call, which names no module (`t.elapsed()`); any module not listed; a glob import, which names nothing locally |
 
 Re-derive the shape of each, rather than trusting the row:
 

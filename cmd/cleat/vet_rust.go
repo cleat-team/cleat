@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -264,6 +265,234 @@ func withoutCfgTest(src []byte) []byte {
 	return out
 }
 
+// forbiddenRustPaths lists MODULE PATHS a workflow may not reach, replacing the
+// literal-spelling table this checker shipped with. cleat#1811.
+//
+// The difference is not cosmetic. A spelling table asks "does this text appear";
+// a path table asks "where does this name resolve to", and idiomatic Rust
+// writes the same reach in spellings the first question cannot see:
+//
+//	use std::{fs, net};               // grouped -- no literal matched
+//	use std::time::SystemTime as ST;  // aliased -- the spelling never appears
+//	ST::now()
+//
+// Neither is evasion; both are what rustfmt produces. See
+// docs/contributor/design/rust-determinism-checker.md for why this is a
+// hand-written resolver rather than tree-sitter -- briefly, the Go bindings are
+// cgo and cmd/cleat is deliberately pure-Go cross-compilable.
+//
+// A prefix matches a resolved path P when P == prefix or P starts with
+// prefix + "::". std::time::Duration is therefore allowed without needing a row
+// to say so: it is not under either SystemTime::now or Instant::now. The old
+// table carried an explicit empty-code row for it, which is gone.
+var forbiddenRustPaths = []struct {
+	prefix     string
+	code       string
+	message    string
+	suggestion string
+}{
+	{"std::fs", "R001", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
+	{"std::net", "R002", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
+	{"std::process", "R003", "process spawning is non-deterministic across replays (OS process state differs between runs)", "Use h.DurableCall() for side effects"},
+	{"rand", "R004", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness"},
+	{"std::time::SystemTime::now", "R005", "wall-clock time is non-deterministic across replays", "Use h.Now() for deterministic time"},
+	{"std::time::Instant::now", "R005", "wall-clock time is non-deterministic across replays", "Use h.Now() for deterministic time"},
+	{"std::thread", "R006", "threading is non-deterministic across replays (thread scheduling differs between runs)", "Workflow code is single-threaded by design"},
+	{"std::sync", "R007", "synchronization primitives are non-deterministic across replays", "Workflow code is single-threaded by design"},
+}
+
+type rustFinding struct {
+	line, col                      int
+	code, message, suggestion, why string
+}
+
+var (
+	rustUseRe  = regexp.MustCompile(`(?s)\buse\s+([^;]+);`)
+	rustPathRe = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)((?:::[A-Za-z_][A-Za-z0-9_]*)+)`)
+)
+
+// expandRustUse turns one `use` declaration's body into local name -> full path,
+// flattening nested groups and honouring `as` aliases and `self`.
+//
+// Recursive on the GROUP, not on the path, because `use a::{b::{c, d}, e}` nests
+// arbitrarily and the prefix accumulates down each arm. Splitting on "," at
+// depth 0 is what keeps the arms apart; a naive strings.Split eats the inner
+// commas and produces `a::b::{c` as a path.
+func expandRustUse(body string, out map[string]string) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return
+	}
+	if i := strings.Index(body, "{"); i >= 0 {
+		prefix := strings.TrimSuffix(strings.TrimSpace(body[:i]), "::")
+		depth, start := 0, i+1
+		for j := i + 1; j < len(body); j++ {
+			switch body[j] {
+			case '{':
+				depth++
+			case '}':
+				if depth == 0 {
+					expandRustUse(joinRustPath(prefix, body[start:j]), out)
+					return
+				}
+				depth--
+			case ',':
+				if depth == 0 {
+					expandRustUse(joinRustPath(prefix, body[start:j]), out)
+					start = j + 1
+				}
+			}
+		}
+		return
+	}
+	full := strings.TrimSpace(body)
+	local := ""
+	if k := strings.Index(full, " as "); k >= 0 {
+		local = strings.TrimSpace(full[k+4:])
+		full = strings.TrimSpace(full[:k])
+	}
+	// `use std::io::{self, Write}` brings the MODULE in as `io`.
+	full = strings.TrimSuffix(full, "::self")
+	if full == "" {
+		return
+	}
+	if local == "" {
+		parts := strings.Split(full, "::")
+		local = parts[len(parts)-1]
+	}
+	if local == "*" || local == "" {
+		// A glob import names nothing locally, so nothing can be resolved
+		// through it. Recorded as a known limit rather than guessed at.
+		return
+	}
+	out[local] = full
+}
+
+func joinRustPath(prefix, seg string) string {
+	seg = strings.TrimSpace(seg)
+	if seg == "" {
+		return ""
+	}
+	if prefix == "" {
+		return seg
+	}
+	return prefix + "::" + seg
+}
+
+// matchForbiddenRustPath reports the row a resolved path falls under.
+func matchForbiddenRustPath(path string) (int, bool) {
+	for i, f := range forbiddenRustPaths {
+		if path == f.prefix || strings.HasPrefix(path, f.prefix+"::") {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// findForbiddenRustPaths resolves every path expression in already-blanked
+// source and reports the ones that reach a forbidden module.
+//
+// TWO SITES PER REACH, DELIBERATELY. An import is reported where it is written
+// and a call where it is called, because they are different things to fix: one
+// is a dependency the crate declares, the other a line that runs. Reporting
+// only the call would leave `use std::fs;` -- which the old table flagged --
+// silent, and reporting only the import would miss a fully-qualified
+// `std::fs::read()` written with no import at all.
+//
+// DEDUPLICATED BY (code, resolved path, line) so that a line naming the same
+// reach twice does not print twice, which the old table did whenever two of its
+// spellings overlapped -- `use std::fs` and `std::fs::` both matched
+// `use std::fs::File;`.
+func findForbiddenRustPaths(code []byte) []rustFinding {
+	src := string(code)
+
+	aliases := map[string]string{}
+	for _, m := range rustUseRe.FindAllStringSubmatch(src, -1) {
+		expandRustUse(m[1], aliases)
+	}
+
+	var out []rustFinding
+	seen := map[string]bool{}
+	add := func(line, col, idx int, resolved, why string) {
+		f := forbiddenRustPaths[idx]
+		key := fmt.Sprintf("%s|%s|%d", f.code, resolved, line)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		msg := f.message
+		if why != "" {
+			msg = f.message + " " + why
+		}
+		out = append(out, rustFinding{
+			line: line, col: col,
+			code: f.code, message: msg, suggestion: f.suggestion,
+		})
+	}
+
+	lines := strings.Split(src, "\n")
+
+	// Imports, at the line the `use` is written on.
+	for _, loc := range rustUseRe.FindAllStringSubmatchIndex(src, -1) {
+		one := map[string]string{}
+		expandRustUse(src[loc[2]:loc[3]], one)
+		line := 1 + strings.Count(src[:loc[0]], "\n")
+		col := loc[0] - strings.LastIndex(src[:loc[0]], "\n")
+		for local, full := range one {
+			if idx, ok := matchForbiddenRustPath(full); ok {
+				// ALWAYS NAME THE RESOLVED PATH. A finding that says only
+				// "R001 here" is actionable because the line is in front of
+				// you; one that says which module it reached is actionable
+				// from a CI log. The three forms differ in what else the
+				// reader needs: an alias and a grouped arm do not appear in
+				// the source as the path that matched.
+				why := fmt.Sprintf("(reaches %s)", full)
+				if local != lastRustSegment(full) {
+					why = fmt.Sprintf("(imported as %q, which resolves to %s)", local, full)
+				} else if !strings.Contains(src[loc[0]:loc[1]], full) {
+					why = fmt.Sprintf("(a grouped import; this arm resolves to %s)", full)
+				}
+				add(line, col, idx, full, why)
+			}
+		}
+	}
+
+	// Call sites, resolved through the alias map.
+	for lineIdx, line := range lines {
+		for _, m := range rustPathRe.FindAllStringSubmatchIndex(line, -1) {
+			head := line[m[2]:m[3]]
+			rest := line[m[4]:m[5]]
+			written := head + rest
+			resolved := written
+			if base, ok := aliases[head]; ok {
+				resolved = base + rest
+			}
+			idx, ok := matchForbiddenRustPath(resolved)
+			if !ok {
+				continue
+			}
+			why := fmt.Sprintf("(reaches %s)", resolved)
+			if resolved != written {
+				why = fmt.Sprintf("(written %q, which resolves to %s)", written, resolved)
+			}
+			add(lineIdx+1, m[0]+1, idx, resolved, why)
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].line != out[j].line {
+			return out[i].line < out[j].line
+		}
+		return out[i].col < out[j].col
+	})
+	return out
+}
+
+func lastRustSegment(p string) string {
+	parts := strings.Split(p, "::")
+	return parts[len(parts)-1]
+}
+
 // runVetRust performs static analysis on a Rust crate.
 // Returns 0 on success (no errors), 1 if errors were found.
 func runVetRust(crateDir string) int {
@@ -360,36 +589,16 @@ func runVetRust(crateDir string) int {
 		// still says "read the list there rather than here" for that reason.
 		// Since #1784 this decides whether an artifact is emitted, so the same
 		// comment now fails a BUILD.
-		lines := strings.Split(string(withoutCfgTest(rustCodeOnly(data))), "\n")
-		for lineIdx, line := range lines {
-			lineNum := lineIdx + 1 // 1-based
-			trimmed := strings.TrimSpace(line)
-
-			for _, fb := range forbiddenRustPatterns {
-				if fb.pattern == "" {
-					continue
-				}
-				if strings.Contains(trimmed, fb.pattern) {
-					col := strings.Index(trimmed, fb.pattern) + 1 // 1-based
-
-					vr := VetResult{
-						Code:       fb.code,
-						File:       relPath,
-						Line:       lineNum,
-						Column:     col,
-						Message:    fb.message,
-						Suggestion: fb.suggestion,
-					}
-
-					if fb.code != "" && fb.code[0] == 'R' && fb.suggestion != "" {
-						// error implied by putting in Errors slice
-						output.Errors = append(output.Errors, vr)
-					} else {
-						// warning implied by putting in Warnings slice
-						output.Warnings = append(output.Warnings, vr)
-					}
-				}
-			}
+		code := withoutCfgTest(rustCodeOnly(data))
+		for _, f := range findForbiddenRustPaths(code) {
+			output.Errors = append(output.Errors, VetResult{
+				Code:       f.code,
+				File:       relPath,
+				Line:       f.line,
+				Column:     f.col,
+				Message:    f.message,
+				Suggestion: f.suggestion,
+			})
 		}
 	}
 
