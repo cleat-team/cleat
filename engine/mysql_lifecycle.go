@@ -722,130 +722,31 @@ func (s *MySQLStore) startNewRun(ctx context.Context, runID, defName string, def
 		runID = uuid.New().String()
 	}
 	if idempotencyKey != "" {
-		keyHash := sha256.Sum256([]byte(idempotencyKey))
-		inputDigest := IdempotencyInputDigest(input)
-
-		// Check for existing idempotency key, within this tenant.
+		// RETRIED ON A LOCK CONFLICT. cleat#1753.
 		//
-		// The tenant filter is not defence in depth: idempotency_keys was
-		// keyed by key_hash alone, so an Idempotency-Key was global across
-		// every tenant in the deployment. Two customers both choosing
-		// "order-123" collided, and the second was handed the first's
-		// workflow ID with alreadyExisted = true while its own workflow was
-		// never started. The key is a client-supplied request header, so that
-		// is the expected outcome of ordinary naming rather than an attack.
-		// migrations/mysql/010_idempotency_keys_tenant_id.sql,
-		// IMPROVEMENT-PLAN 3.10.
-		var existingWfID string
-		var existingDef sql.NullString
-		var existingDigest sql.NullString
-		err := s.db.QueryRowContext(ctx,
-			`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
-			 WHERE key_hash = ? AND tenant_id = ? AND expires_at > NOW(6)`,
-			keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
-		if err == nil {
-			// A hit must be for the SAME definition. NULL means the row predates
-			// cleat#1047's backfill or its workflow has been purged -- unknown
-			// rather than mismatched, so it is allowed through, which is exactly
-			// today's behaviour for those rows.
-			if existingDef.Valid && existingDef.String != defName {
-				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
-					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
-			}
-			if err := checkIdempotencyInput(existingDigest, inputDigest); err != nil {
-				return "", false, err
-			}
-			return existingWfID, true, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return "", false, err
-		}
-
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return "", false, err
-		}
-		defer tx.Rollback()
-
-		// Clear this key's row if its TTL has passed, so the insert below can
-		// take the key over.
+		// Concurrent starts sharing one key each run DELETE-then-INSERT against
+		// the same key_hash. InnoDB takes a next-key lock on the index record the
+		// DELETE scans -- under REPEATABLE READ, which is the default and what
+		// cleat runs on -- and the racers then need insert-intention locks in each
+		// other's locked range. InnoDB picks a victim and returns 1213.
 		//
-		// WITHOUT THIS, `n == 0` BELOW HAS TWO CAUSES AND THE CODE ASSUMES
-		// ONE: an expired row still blocks the insert and still reports no
-		// rows affected, identical to the concurrent-insert case it is read
-		// as. Only one of the two has a winner to re-read, and the re-read
-		// filters on expiry, so for the other it looks for a row it cannot see
-		// and the caller gets sql.ErrNoRows instead of a new run. cleat#1671.
+		// The victim's transaction is rolled back WHOLE, so nothing it wrote
+		// survives and replaying it is sound -- the same argument the SQL Server
+		// paths already make for their deadlock retries. On the retry the winner's
+		// row is committed, so the INSERT IGNORE reports 0 and the caller takes the
+		// replay path, which is the answer it should have had.
 		//
-		// Not a visibility fix: letting the re-read see the expired row would
-		// hand the caller a workflow id whose key the TTL already retired.
+		// POSTGRES DOES NOT NEED THIS and SQL Server already had it, which is why
+		// this surfaced on one dialect: Postgres does not gap-lock the range a
+		// non-matching DELETE scans, so its racers serialise on the unique index
+		// alone and never form a cycle. Measured -- 8 racers, one key:
 		//
-		// The expiry predicate is load bearing -- a row refreshed by a
-		// concurrent starter is LIVE, and deleting it would let two runs hold
-		// one key. Then this matches nothing, the insert reports the conflict,
-		// and that path is already correct.
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM idempotency_keys
-			 WHERE key_hash = ? AND tenant_id = ? AND expires_at <= NOW(6)`,
-			keyHash[:], tenantID); err != nil {
-			return "", false, fmt.Errorf("start new run: clear expired idempotency key: %w", err)
-		}
-
-		// Insert idempotency key record. INSERT IGNORE handles the race where
-		// two requests arrive with the same key simultaneously -- and, since
-		// the delete above, ONLY that: a row that blocks here is necessarily
-		// live.
-		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
-		res, err := tx.ExecContext(ctx,
-			`INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name, input_digest)
-			 VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?, ?, ?)`,
-			keyHash[:], runID, ttlSeconds, tenantID, defName, inputDigest)
-		if err != nil {
-			return "", false, err
-		}
-
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			// A LIVE row exists, so someone else won the race. INSERT IGNORE
-			// reports 0 only for a row it could not add, and after the delete
-			// above the only such row is one whose TTL has not passed -- so
-			// the re-read's own expiry filter will find it (cleat#1671).
-			//
-			// Rollback and return the existing one.
-			tx.Rollback()
-			err := s.db.QueryRowContext(ctx,
-				`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
-				 WHERE key_hash = ? AND tenant_id = ? AND expires_at > NOW(6)`,
-				keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
-			if err != nil {
-				return "", false, err
-			}
-			// The concurrent winner must also be for THIS definition. Without
-			// this the race path returns the other workflow's id even though
-			// the lookup above refuses it -- the same defect, reachable only
-			// under contention, which is where it would be hardest to see.
-			if existingDef.Valid && existingDef.String != defName {
-				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
-					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
-			}
-			if err := checkIdempotencyInput(existingDigest, inputDigest); err != nil {
-				return "", false, err
-			}
-			return existingWfID, true, nil
-		}
-
-		// Insert the workflow instance.
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
-			VALUES (?, ?, ?, 'ready', ?,
-			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
-			        ?, ?, ?, ?, ?, ?, ?, ?)
-		`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
-		if err != nil {
-			return "", false, fmt.Errorf("start new run: %w", err)
-		}
-
-		return runID, false, tx.Commit()
+		//	postgres  answered=8 replays=7 errors=0
+		//	mysql     answered=1 replays=0 errors=7   all 1213
+		//	mssql     answered=8 replays=7 errors=0
+		return s.startNewRunUnderIdempotencyKey(ctx, runID, defName, defVersion,
+			input, idempotencyKey, tenantID, priority, ckText, ckHash,
+			runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
 	}
 
 	// No idempotency key -- normal flow.
@@ -1331,4 +1232,191 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 		s.finalizeWorkflowSegmentInner(ctx, runID, workerID, generation, newEvents,
 			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
 		runID, result)
+}
+
+// startNewRunUnderIdempotencyKey runs the idempotent start, retrying the whole
+// transaction when InnoDB refuses it with a lock conflict.
+//
+// THE CLASSIFIERS ALREADY EXISTED AND NOTHING CALLED THEM. isDeadlockError and
+// isLockWaitTimeout are in mysql_store.go, have unit tests of their own, and had
+// ZERO production callers before this -- so the engine could recognise 1213 and
+// 1205 and never acted on either. cleat#1753 is what that cost.
+//
+// BOUNDED, AND THE BOUND IS A MARGIN RATHER THAN A MEASURED REQUIREMENT -- said
+// that way round because the measurement does not support a tighter claim.
+// Across 15 runs of 8 racers on one key, the DEEPEST retry index reached was 0:
+// every racer that lost a lock conflict succeeded on its next attempt. So one
+// retry sufficed every time it was observed, and 8 is headroom for a machine
+// more contended than the one that measured it.
+//
+// The reason headroom is cheap here is structural: each attempt either commits
+// or finds the winner already committed, so the population of contenders only
+// shrinks. The retries exist to outlast a lock cycle, not to wait out a queue,
+// and a run that genuinely needed all 8 would mean something other than this.
+//
+// NO SLEEP BETWEEN ATTEMPTS. The victim is chosen and rolled back immediately,
+// so there is nothing to wait for -- the lock it needed is already released.
+// A backoff here would add latency to the exact path a caller is blocking on.
+func (s *MySQLStore) startNewRunUnderIdempotencyKey(
+	ctx context.Context, runID, defName string, defVersion int, input json.RawMessage,
+	idempotencyKey string, tenantID string, priority int,
+	ckText *string, ckHash []byte,
+	runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs any,
+) (string, bool, error) {
+	const maxAttempts = 8
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		id, replayed, err := s.tryStartNewRunUnderIdempotencyKey(ctx, runID, defName,
+			defVersion, input, idempotencyKey, tenantID, priority, ckText, ckHash,
+			runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
+		if err == nil {
+			return id, replayed, nil
+		}
+		if !isDeadlockError(err) && !isLockWaitTimeout(err) {
+			return "", false, err
+		}
+		lastErr = err
+	}
+	// Reported as itself rather than as a bare 1213, because a caller that sees
+	// this has hit genuine sustained contention on one key and the attempt count
+	// is the thing they can act on.
+	return "", false, fmt.Errorf(
+		"start new run under idempotency key: %d attempts all lost a lock conflict: %w",
+		maxAttempts, lastErr)
+}
+
+// tryStartNewRunUnderIdempotencyKey is one attempt. Every path through it either
+// commits or leaves the transaction rolled back, which is what makes the caller
+// above free to run it again.
+func (s *MySQLStore) tryStartNewRunUnderIdempotencyKey(
+	ctx context.Context, runID, defName string, defVersion int, input json.RawMessage,
+	idempotencyKey string, tenantID string, priority int,
+	ckText *string, ckHash []byte,
+	runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs any,
+) (string, bool, error) {
+	keyHash := sha256.Sum256([]byte(idempotencyKey))
+	inputDigest := IdempotencyInputDigest(input)
+
+	// Check for existing idempotency key, within this tenant.
+	//
+	// The tenant filter is not defence in depth: idempotency_keys was
+	// keyed by key_hash alone, so an Idempotency-Key was global across
+	// every tenant in the deployment. Two customers both choosing
+	// "order-123" collided, and the second was handed the first's
+	// workflow ID with alreadyExisted = true while its own workflow was
+	// never started. The key is a client-supplied request header, so that
+	// is the expected outcome of ordinary naming rather than an attack.
+	// migrations/mysql/010_idempotency_keys_tenant_id.sql,
+	// IMPROVEMENT-PLAN 3.10.
+	var existingWfID string
+	var existingDef sql.NullString
+	var existingDigest sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
+		 WHERE key_hash = ? AND tenant_id = ? AND expires_at > NOW(6)`,
+		keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
+	if err == nil {
+		// A hit must be for the SAME definition. NULL means the row predates
+		// cleat#1047's backfill or its workflow has been purged -- unknown
+		// rather than mismatched, so it is allowed through, which is exactly
+		// today's behaviour for those rows.
+		if existingDef.Valid && existingDef.String != defName {
+			return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
+				ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+		}
+		if err := checkIdempotencyInput(existingDigest, inputDigest); err != nil {
+			return "", false, err
+		}
+		return existingWfID, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback()
+
+	// Clear this key's row if its TTL has passed, so the insert below can
+	// take the key over.
+	//
+	// WITHOUT THIS, `n == 0` BELOW HAS TWO CAUSES AND THE CODE ASSUMES
+	// ONE: an expired row still blocks the insert and still reports no
+	// rows affected, identical to the concurrent-insert case it is read
+	// as. Only one of the two has a winner to re-read, and the re-read
+	// filters on expiry, so for the other it looks for a row it cannot see
+	// and the caller gets sql.ErrNoRows instead of a new run. cleat#1671.
+	//
+	// Not a visibility fix: letting the re-read see the expired row would
+	// hand the caller a workflow id whose key the TTL already retired.
+	//
+	// The expiry predicate is load bearing -- a row refreshed by a
+	// concurrent starter is LIVE, and deleting it would let two runs hold
+	// one key. Then this matches nothing, the insert reports the conflict,
+	// and that path is already correct.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM idempotency_keys
+		 WHERE key_hash = ? AND tenant_id = ? AND expires_at <= NOW(6)`,
+		keyHash[:], tenantID); err != nil {
+		return "", false, fmt.Errorf("start new run: clear expired idempotency key: %w", err)
+	}
+
+	// Insert idempotency key record. INSERT IGNORE handles the race where
+	// two requests arrive with the same key simultaneously -- and, since
+	// the delete above, ONLY that: a row that blocks here is necessarily
+	// live.
+	ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
+	res, err := tx.ExecContext(ctx,
+		`INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name, input_digest)
+		 VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?, ?, ?)`,
+		keyHash[:], runID, ttlSeconds, tenantID, defName, inputDigest)
+	if err != nil {
+		return "", false, err
+	}
+
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// A LIVE row exists, so someone else won the race. INSERT IGNORE
+		// reports 0 only for a row it could not add, and after the delete
+		// above the only such row is one whose TTL has not passed -- so
+		// the re-read's own expiry filter will find it (cleat#1671).
+		//
+		// Rollback and return the existing one.
+		tx.Rollback()
+		err := s.db.QueryRowContext(ctx,
+			`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
+			 WHERE key_hash = ? AND tenant_id = ? AND expires_at > NOW(6)`,
+			keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
+		if err != nil {
+			return "", false, err
+		}
+		// The concurrent winner must also be for THIS definition. Without
+		// this the race path returns the other workflow's id even though
+		// the lookup above refuses it -- the same defect, reachable only
+		// under contention, which is where it would be hardest to see.
+		if existingDef.Valid && existingDef.String != defName {
+			return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
+				ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+		}
+		if err := checkIdempotencyInput(existingDigest, inputDigest); err != nil {
+			return "", false, err
+		}
+		return existingWfID, true, nil
+	}
+
+	// Insert the workflow instance.
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
+		VALUES (?, ?, ?, 'ready', ?,
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
+		        ?, ?, ?, ?, ?, ?, ?, ?)
+	`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority, ckText, ckHash, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
+	if err != nil {
+		return "", false, fmt.Errorf("start new run: %w", err)
+	}
+
+	return runID, false, tx.Commit()
 }
