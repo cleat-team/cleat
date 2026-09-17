@@ -32,6 +32,161 @@ var forbiddenRustPatterns = []struct {
 	{`use std::time::Duration`, "", "", ""}, // Allowed — used for h.DurableSleep()
 }
 
+// rustCodeOnly returns src with every comment and every string or character
+// literal replaced by spaces, byte offsets and line endings untouched.
+//
+// BLANKING, NOT DELETING, because the caller reports 1-based line and column
+// numbers straight out of this result. A filter that shortened anything would
+// move every position it reports, and the position is most of what a vet
+// finding is worth.
+//
+// WHY NOT vet_java.go's PREFIX TEST. The sibling checker skips a line whose
+// first non-space is "//", "*" or "/*" (vet_java.go:118-123). That is the right
+// shape for the common case and misses two others in the same file: a comment
+// AFTER code on the same line, and a string literal. Both are lines that name a
+// forbidden spelling without using it. Doing it with a scanner costs one
+// function and covers all three.
+//
+// WHAT IT MODELS, since a lexer for a language this size is a claim worth
+// bounding:
+//
+//   - line comments, including the doc forms /// and //!
+//   - block comments, WHICH NEST IN RUST -- /* /* */ */ is one comment, and a
+//     depth counter is the difference between blanking it and blanking half of
+//     it and then treating live code as a comment
+//   - "..." with backslash escapes, and b"..."
+//   - raw strings r"...", r#"..."#, r##"..."## -- no escapes, and the closing
+//     delimiter must match the opening hash count
+//   - character literals, 'a' and '\n'
+//
+// THE ONE AMBIGUITY IS THE APOSTROPHE, and it is resolved in the safe
+// direction. `'a` opens a lifetime in `&'a str` and a character literal in
+// `'a'`; they differ only in what follows. A quote is treated as a character
+// literal when the next byte is a backslash (an escape) or the byte after next
+// closes it, and as a lifetime otherwise. A multi-byte character literal such
+// as 'e-acute' therefore reads as a lifetime and is NOT blanked -- which leaves
+// it visible to the scan, the over-reporting direction. A missed blank can
+// produce a spurious finding someone will investigate; a wrong blank hides a
+// real one.
+func rustCodeOnly(src []byte) []byte {
+	out := make([]byte, len(src))
+	copy(out, src)
+	blank := func(i int) {
+		if out[i] != '\n' {
+			out[i] = ' '
+		}
+	}
+	n := len(src)
+	for i := 0; i < n; {
+		c := src[i]
+		switch {
+		case c == '/' && i+1 < n && src[i+1] == '/':
+			for ; i < n && src[i] != '\n'; i++ {
+				blank(i)
+			}
+		case c == '/' && i+1 < n && src[i+1] == '*':
+			depth := 0
+			for i < n {
+				if src[i] == '/' && i+1 < n && src[i+1] == '*' {
+					depth++
+					blank(i)
+					blank(i + 1)
+					i += 2
+					continue
+				}
+				if src[i] == '*' && i+1 < n && src[i+1] == '/' {
+					depth--
+					blank(i)
+					blank(i + 1)
+					i += 2
+					if depth == 0 {
+						break
+					}
+					continue
+				}
+				blank(i)
+				i++
+			}
+		case c == 'r' && i+1 < n && (src[i+1] == '"' || src[i+1] == '#'):
+			j := i + 1
+			hashes := 0
+			for j < n && src[j] == '#' {
+				hashes++
+				j++
+			}
+			if j >= n || src[j] != '"' {
+				i++ // an identifier beginning with r, not a raw string
+				continue
+			}
+			for k := i; k <= j; k++ {
+				blank(k)
+			}
+			j++
+			for j < n {
+				if src[j] == '"' {
+					closing := 0
+					for j+1+closing < n && closing < hashes && src[j+1+closing] == '#' {
+						closing++
+					}
+					if closing == hashes {
+						for k := j; k <= j+hashes; k++ {
+							blank(k)
+						}
+						j += hashes + 1
+						break
+					}
+				}
+				blank(j)
+				j++
+			}
+			i = j
+		case c == '"':
+			blank(i)
+			i++
+			for i < n {
+				if src[i] == '\\' && i+1 < n {
+					blank(i)
+					blank(i + 1)
+					i += 2
+					continue
+				}
+				closes := src[i] == '"'
+				blank(i)
+				i++
+				if closes {
+					break
+				}
+			}
+		case c == '\'':
+			// A lifetime or a character literal; see the note above.
+			isChar := (i+1 < n && src[i+1] == '\\') || (i+2 < n && src[i+2] == '\'')
+			if !isChar {
+				i++
+				continue
+			}
+			blank(i)
+			i++
+			for i < n {
+				if src[i] == '\\' && i+1 < n {
+					blank(i)
+					blank(i + 1)
+					i += 2
+					continue
+				}
+				closes := src[i] == '\''
+				blank(i)
+				i++
+				if closes {
+					break
+				}
+			}
+		default:
+			i++
+		}
+	}
+	return out
+}
+
 // runVetRust performs static analysis on a Rust crate.
 // Returns 0 on success (no errors), 1 if errors were found.
 func runVetRust(crateDir string) int {
@@ -87,7 +242,18 @@ func runVetRust(crateDir string) int {
 			continue
 		}
 
-		lines := strings.Split(string(data), "\n")
+		// CODE ONLY. The scan below is `strings.Contains` over a line, and a
+		// comment or a string literal is a line like any other, so prose
+		// NAMING a forbidden spelling was reported as a use of it (cleat#1782).
+		//
+		// Not a hypothetical: the known-limit fixture in
+		// testdata/vet-checks/rust/known_limit_grouped_use had to be rewritten
+		// so that its explanation does not quote the pattern list, because the
+		// first draft produced seven errors out of its own comment. Its header
+		// still says "read the list there rather than here" for that reason.
+		// Since #1784 this decides whether an artifact is emitted, so the same
+		// comment now fails a BUILD.
+		lines := strings.Split(string(rustCodeOnly(data)), "\n")
 		for lineIdx, line := range lines {
 			lineNum := lineIdx + 1 // 1-based
 			trimmed := strings.TrimSpace(line)
