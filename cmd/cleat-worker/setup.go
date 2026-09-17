@@ -1238,6 +1238,7 @@ type Worker struct {
 	maxQueued            int
 	heartbeatInterval    time.Duration
 	reclaimTimeout       time.Duration // 0 = derive from heartbeatInterval; see reclaimAfter
+	flushRetryWindow     time.Duration // 0 = engine.DefaultFlushRetryWindow; see --flush-retry-window
 	pollInterval         time.Duration
 	pluginRegistry       *engine.PluginRegistry
 	pluginStreamRegistry *engine.PluginStreamRegistry
@@ -2417,6 +2418,13 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if ops := parseWriteAheadIntentOps(writeAheadIntentOps); len(ops) > 0 {
 		engineOpts = append(engineOpts, engine.WithWriteAheadIntentOps(ops...))
 	}
+	// Set unconditionally, and note it is NOT enough on its own: this governs
+	// the direct flush path only. The batch path takes the same value from the
+	// flusher registry, which is built in main.go from the same flag, because
+	// one flusher serves every workflow of a tenant and cannot read a
+	// per-execution engine. Both or neither -- a value set here alone would
+	// leave the high-rate path on the default and look configured.
+	engineOpts = append(engineOpts, engine.WithFlushRetryWindow(w.flushRetryWindow))
 	if w.flusherRegistry != nil {
 		engineOpts = append(engineOpts, engine.WithFlusherRegistry(w.flusherRegistry))
 	} else {
@@ -2696,10 +2704,20 @@ func (w *Worker) heartbeatLoop() {
 // worker_membership.go, which answers a different question -- which workers
 // exist, for shard distribution -- and still follows --heartbeat.
 func (w *Worker) reclaimAfter() time.Duration {
-	if w.reclaimTimeout > 0 {
-		return w.reclaimTimeout
+	return reclaimWindow(w.reclaimTimeout, w.heartbeatInterval)
+}
+
+// reclaimWindow is reclaimAfter's arithmetic, as a function of its two inputs.
+//
+// Split out so that startup advice which has to reason about the window --
+// flushRetryWindowAdvice, before any Worker exists -- computes it rather than
+// restating it. A second copy of `max(hb*2, 10s)` somewhere else is a second
+// source of truth that nothing would notice diverging.
+func reclaimWindow(reclaimTimeout, heartbeat time.Duration) time.Duration {
+	if reclaimTimeout > 0 {
+		return reclaimTimeout
 	}
-	return max(w.heartbeatInterval*2, 10*time.Second)
+	return max(heartbeat*2, 10*time.Second)
 }
 
 func (w *Worker) reaperLoop() {

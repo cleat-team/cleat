@@ -34,6 +34,7 @@ spec:
             - "--api-addr=:{{ .Values.api.port }}"
             - "--heartbeat={{ .Values.worker.heartbeatInterval }}"
             - "--reclaim-timeout={{ .Values.worker.reclaimTimeout }}"
+            - "--flush-retry-window={{ .Values.worker.flushRetryWindow }}"
             - "--poll={{ .Values.worker.pollInterval }}"
           env:
             - name: DATABASE_URL

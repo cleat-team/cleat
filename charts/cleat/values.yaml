@@ -31,6 +31,15 @@ worker:
   # every run reclaimable ten seconds in. Setting this instead of raising
   # heartbeatInterval keeps crash recovery fast. Refused below 2 x the heartbeat.
   reclaimTimeout: "0"
+  # -- How long a failed event flush keeps retrying before the step is reported
+  # as unpersisted (--flush-retry-window). "0" means 750ms, which is the sleep
+  # budget the batch flush path has always had.
+  #
+  # Raise it to ride out a database failover, and raise reclaimTimeout with it:
+  # an outage that long also stops the heartbeat, so a retry that succeeds after
+  # the database returns finds its run already reclaimed. The worker logs a
+  # warning at startup when this exceeds the reclaim window.
+  flushRetryWindow: "0"
   # -- Poll interval when no work is available (--poll).
   pollInterval: "500ms"
 

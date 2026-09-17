@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,6 +69,11 @@ type AdaptiveFlusher struct {
 	encryptSensitivePayloads bool
 	encryption               *PayloadEncryption
 
+	// retryWindow bounds how long a failed batch INSERT is retried. Zero means
+	// DefaultFlushRetryWindow. Set through setRetryWindow rather than the
+	// constructor, which already carries seven parameters and has callers.
+	retryWindow time.Duration
+
 	// Stats
 	directFlushes  atomic.Int64
 	batchFlushes   atomic.Int64
@@ -116,6 +120,29 @@ func (af *AdaptiveFlusher) SetEncryption(encrypt bool, enc *PayloadEncryption) {
 	defer af.mu.Unlock()
 	af.encryptSensitivePayloads = encrypt
 	af.encryption = enc
+}
+
+// setRetryWindow bounds how long a failed batch INSERT is retried. Zero
+// restores DefaultFlushRetryWindow.
+func (af *AdaptiveFlusher) setRetryWindow(d time.Duration) {
+	af.mu.Lock()
+	defer af.mu.Unlock()
+	af.retryWindow = d
+}
+
+// retryWindowOf is how long a failed batch INSERT is retried. Zero means
+// DefaultFlushRetryWindow.
+//
+// Read under the lock rather than touching the field directly, because
+// setRetryWindow writes it under the lock and retryBatchFlush runs on the
+// flushing goroutine. In practice it is set once at construction, which is
+// exactly the argument that would leave a race here until somebody made it a
+// per-tenant setting. flushAndNotify does not hold af.mu, so this cannot
+// deadlock -- see its body, which reads af.db and af.tenantID the same way.
+func (af *AdaptiveFlusher) retryWindowOf() time.Duration {
+	af.mu.Lock()
+	defer af.mu.Unlock()
+	return af.retryWindow
 }
 
 // Flush is called from recordEvent. In direct mode it returns (nil, false)
@@ -602,6 +629,13 @@ func errIsRetryable(err error) bool {
 	if errPoolClosed(err) {
 		return false
 	}
+	// A refusal a later attempt would receive identically -- most often
+	// ErrFenceLost, which is not a database failure at all. See
+	// errFlushRetryPointless for why the closing "retry unknown errors" clause
+	// below makes this check load-bearing rather than tidy.
+	if errFlushRetryPointless(err) {
+		return false
+	}
 	// driver.ErrBadConn — the pool dropped a bad connection; retry gets a fresh one.
 	if errors.Is(err, sql.ErrConnDone) {
 		return true
@@ -620,31 +654,22 @@ func errIsRetryable(err error) bool {
 	return true
 }
 
-// retryBatchFlush executes the batch INSERT with exponential backoff on
-// transient errors. It returns nil on success or the last error after
-// exhausting retries.
+// retryBatchFlush executes the batch INSERT, retrying transient errors until
+// af.retryWindow has elapsed. It returns nil on success or the last error.
+//
+// The window replaces a fixed `maxRetries = 5`. The count was not wrong so much
+// as unstatable: what an operator needs to size is how long a flush keeps
+// trying, and five attempts at 50ms doubling is 750ms only until someone edits
+// the base. At the default window this performs the same five attempts it
+// always did -- see DefaultFlushRetryWindow.
+//
+// THE BATCH IS RETRIED WHOLE, which is correct here and is not a general
+// property of retry. One AdaptiveFlusher batches events from every workflow of
+// a tenant on this worker, so a failure is shared-fate by construction: the
+// INSERT is one statement, and there is no partial success to isolate. Per-entry
+// fate is decided before this, in partitionFencedBatch. cleat#1717.
 func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte, batchSize int) error {
-	const (
-		maxRetries  = 5
-		baseBackoff = 50 * time.Millisecond
-		maxBackoff  = 2 * time.Second
-	)
-	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := time.Duration(math.Min(float64(baseBackoff)*math.Pow(2, float64(attempt-1)), float64(maxBackoff)))
-			slog.Warn("adaptive flusher retrying batch flush",
-				"attempt", attempt,
-				"batchSize", batchSize,
-				"backoff", backoff,
-				"prevErr", lastErr,
-			)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff):
-			}
-		}
+	return retryFlushUntilDeadline(ctx, af.retryWindowOf(), fmt.Sprintf("batch flush (%d events)", batchSize), func() error {
 		_, err := af.db.ExecContext(ctx, `
 			WITH cfg AS (SELECT set_config('cleat.tenant_id', ($1::jsonb->0->>'tenant_id'), true))
 			INSERT INTO event_history (
@@ -669,15 +694,8 @@ func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte
 				SET response = EXCLUDED.response, error = EXCLUDED.error
 				WHERE event_history.response = '' AND event_history.error IS NULL
 		`, string(eventsJSON))
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !errIsRetryable(err) {
-			return err
-		}
-	}
-	return fmt.Errorf("batch flush failed after %d attempts: %w", maxRetries, lastErr)
+		return err
+	})
 }
 
 // jsonNull converts sql.Null* types to JSON-safe values (string, int64, or nil)
@@ -770,6 +788,10 @@ type FlusherConfig struct {
 	MaxBatch       int
 	EnterThreshold float64
 	ExitThreshold  float64
+
+	// RetryWindow bounds how long a failed batch INSERT is retried. Zero means
+	// DefaultFlushRetryWindow.
+	RetryWindow time.Duration
 }
 
 // TenantFlusherRegistry creates and caches per-tenant AdaptiveFlusher instances.
@@ -831,6 +853,7 @@ func (r *TenantFlusherRegistry) For(tenantID string) *AdaptiveFlusher {
 	af := NewAdaptiveFlusher(r.db, tenantID, r.config.MaxWait, r.config.MaxBatch,
 		r.config.EnterThreshold, r.config.ExitThreshold, 0)
 	af.SetEncryption(r.encrypt, r.enc)
+	af.setRetryWindow(r.config.RetryWindow)
 	r.flushers[tenantID] = af
 	return af
 }

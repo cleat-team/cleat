@@ -265,7 +265,28 @@ func (s *execSession) recordEvent(rec EventRecord) eventPersistence {
 		}
 		if !flushed {
 			// Direct flush (low-rate mode or batch/adaptive flushers disabled)
-			if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum); flushErr != nil {
+			//
+			// RETRIED, which it was not. Of the six routes to
+			// eventFlushFailed this is the one a low-rate workflow takes on
+			// every step, and it made exactly one attempt: a database that
+			// dropped a connection lost the event outright, while the same
+			// event at a higher step rate would have been retried by the batch
+			// path. The asymmetry was not a decision, it was where the retry
+			// happened to be written. cleat#1717.
+			//
+			// RETRYING IS SAFE HERE BECAUSE A RE-INSERT IS NOT A DOUBLE WRITE.
+			// insertEventSQL is ON CONFLICT (workflow_id, step) DO UPDATE with
+			// a WHERE that cannot fire (see its doc), so an attempt that
+			// committed and lost its acknowledgement replays as zero rows
+			// affected -- and afterFencedInsert answers zero rows by asking
+			// Heartbeat whether the fence still holds, which it does, so the
+			// retry returns nil rather than mistaking its own earlier success
+			// for a lost fence. TestARetryOfAnAlreadyCommittedFlushIsNotAFenceLoss
+			// measures that rather than trusting this paragraph.
+			flushErr := retryFlushUntilDeadline(context.Background(), s.engine.flushRetryWindow, "direct flush", func() error {
+				return s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum)
+			})
+			if flushErr != nil {
 				if errors.Is(flushErr, ErrFenceLost) {
 					s.engine.log().DebugContext(context.Background(), "flushEvent: fence lost, workflow reassigned to another worker", "workflow_id", s.workflowID, "step", rec.Step)
 				} else {
