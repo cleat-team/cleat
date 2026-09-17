@@ -10,6 +10,7 @@ cmd/cleat	TestRustBuildRefusesNondeterminism	1
 cmd/cleat	TestRustVetAnchorsTheTargetSkipAtTheCrateRoot	1
 cmd/cleat	TestRustVetSkipsSourcesThatAreNotTheArtifact	1
 cmd/cleat	TestTheASRowsOfTheBindingTableAreAsserted	1
+cmd/cleat	TestTheJavaScanActuallyUsesJavaCodeOnly	1
 cmd/cleat	TestTheJavaScanSkipsTestSources	1
 cmd/cleat	TestThePythonVetSaysWhetherItRan	3
 cmd/cleat	TestVetAS	2

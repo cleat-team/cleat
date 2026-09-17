@@ -9,6 +9,151 @@ import (
 )
 
 // forbiddenJavaPatterns lists Java APIs that are not allowed in workflow code.
+// javaCodeOnly returns src with every comment and every string, text block or
+// character literal replaced by spaces, byte offsets and line endings
+// untouched.
+//
+// BLANKING, NOT DELETING, because the caller reports 1-based line and column
+// numbers straight out of this result. Shortening anything would move every
+// position it reports, and the position is most of what a vet finding is worth.
+// This is the same contract as rustCodeOnly in vet_rust.go, and the shape is
+// deliberately borrowed rather than reinvented.
+//
+// WHAT IT REPLACES. This checker used to skip a line whose first non-space was
+// "//", "*" or "/*". That is the easy case and misses three others, all
+// measured (cleat#1820):
+//
+//	int x = 1; // System.currentTimeMillis()      a comment AFTER code
+//	String s = "System.currentTimeMillis()";      a string literal
+//	/*
+//	  System.currentTimeMillis() described here   a block interior not
+//	*/                                            starting with *
+//
+// None of the three can execute. A string naming an API is not a call to it,
+// and neither is a sentence telling a colleague not to use it. Since #1791
+// wired this checker into `cleat build --target java`, each was a build
+// refusal.
+//
+// WHAT IT MODELS, since a lexer for a language this size is a claim worth
+// bounding:
+//
+//   - line comments, including the doc form ///
+//   - block comments, WHICH DO NOT NEST IN JAVA -- unlike Rust, the first */
+//     closes the comment however many /* preceded it, so no depth counter
+//   - "..." with backslash escapes
+//   - text blocks """...""" (Java 15+), which end at the next unescaped """
+//   - character literals, 'a' and '\n'
+//
+// Java's apostrophe carries none of Rust's ambiguity: there are no lifetimes,
+// so ' always opens a character literal. That is the one place this is simpler
+// than its sibling rather than merely smaller.
+func javaCodeOnly(src []byte) []byte {
+	out := make([]byte, len(src))
+	copy(out, src)
+	blank := func(i int) {
+		if out[i] != '\n' {
+			out[i] = ' '
+		}
+	}
+
+	n := len(src)
+	for i := 0; i < n; {
+		switch {
+		// Line comment: // ... end of line.
+		case src[i] == '/' && i+1 < n && src[i+1] == '/':
+			for ; i < n && src[i] != '\n'; i++ {
+				blank(i)
+			}
+
+		// Block comment: /* ... */, not nesting.
+		case src[i] == '/' && i+1 < n && src[i+1] == '*':
+			blank(i)
+			blank(i + 1)
+			i += 2
+			for i < n {
+				if src[i] == '*' && i+1 < n && src[i+1] == '/' {
+					blank(i)
+					blank(i + 1)
+					i += 2
+					break
+				}
+				blank(i)
+				i++
+			}
+
+		// Text block: """ ... """ (Java 15+). Checked before the plain string
+		// case, or the opening """ would read as an empty string followed by a
+		// stray quote and the block's contents would stay visible.
+		case src[i] == '"' && i+2 < n && src[i+1] == '"' && src[i+2] == '"':
+			blank(i)
+			blank(i + 1)
+			blank(i + 2)
+			i += 3
+			for i < n {
+				if src[i] == '\\' && i+1 < n {
+					blank(i)
+					blank(i + 1)
+					i += 2
+					continue
+				}
+				if src[i] == '"' && i+2 < n && src[i+1] == '"' && src[i+2] == '"' {
+					blank(i)
+					blank(i + 1)
+					blank(i + 2)
+					i += 3
+					break
+				}
+				blank(i)
+				i++
+			}
+
+		// String literal.
+		case src[i] == '"':
+			blank(i)
+			i++
+			for i < n && src[i] != '\n' {
+				if src[i] == '\\' && i+1 < n {
+					blank(i)
+					blank(i + 1)
+					i += 2
+					continue
+				}
+				if src[i] == '"' {
+					blank(i)
+					i++
+					break
+				}
+				blank(i)
+				i++
+			}
+
+		// Character literal.
+		case src[i] == '\'':
+			blank(i)
+			i++
+			for i < n && src[i] != '\n' {
+				if src[i] == '\\' && i+1 < n {
+					blank(i)
+					blank(i + 1)
+					i += 2
+					continue
+				}
+				if src[i] == '\'' {
+					blank(i)
+					i++
+					break
+				}
+				blank(i)
+				i++
+			}
+
+		default:
+			i++
+		}
+	}
+	return out
+}
+
 var forbiddenJavaPatterns = []struct {
 	pattern    string
 	code       string
@@ -134,16 +279,19 @@ func runVetJava(projectDir string) int {
 			continue
 		}
 
-		lines := strings.Split(string(data), "\n")
+		// Scan code, not prose. javaCodeOnly blanks comments, strings, text
+		// blocks and character literals while preserving byte offsets, so the
+		// line and column reported below still point at the right place.
+		//
+		// This replaces a prefix test -- skip a line whose first non-space is
+		// "//", "*" or "/*" -- which covered the easy case and missed a comment
+		// AFTER code, a string literal, and a block-comment interior whose line
+		// does not begin with "*". All three named a forbidden spelling without
+		// using it, and since #1791 each refused a build. cleat#1820.
+		lines := strings.Split(string(javaCodeOnly(data)), "\n")
 		for lineIdx, line := range lines {
 			lineNum := lineIdx + 1 // 1-based
 			trimmed := strings.TrimSpace(line)
-
-			// Skip comments.
-			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") ||
-				strings.HasPrefix(trimmed, "/*") {
-				continue
-			}
 
 			for _, fb := range forbiddenJavaPatterns {
 				if fb.pattern == "" {
