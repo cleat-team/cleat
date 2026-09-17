@@ -1779,20 +1779,60 @@ Key conventions:
   at all, which is short and is the thing to fix:
 
       python3 - <<'EOF'
-      import re
+      import re, unicodedata
       hs = [l.rstrip() for l in open('IMPROVEMENT-PLAN.md')
             if re.match(r'^### [0-9]+\.[0-9]+ ', l)]
-      st = re.compile(r'[\U0001F300-\U0001FAFF✅❌⬜⚪]|—\s*(?:\*\*)?\s*'
-                      r'(?:fixed|done|open|wontfix|declined|superseded|parked|deferred|'
-                      r'partly|partially|core fixed|shipped)', re.I)
+      WORDS = (r'fixed|done|open|wontfix|declined|superseded|parked|deferred|'
+               r'partly|partially|core fixed|shipped')
+      word = re.compile(r'—[^A-Za-z]*(?:' + WORDS + r')', re.I)
+      def marked(l):
+          return any(unicodedata.category(c) == 'So' for c in l) or word.search(l)
       for l in hs:
-          if not st.search(l):
+          if not marked(l):
               print(l[:110])
       EOF
 
-  Two on 2026-09-08. Note the emoji class has to be a RANGE rather than a list: writing out
-  the markers you have seen misses the next one someone uses, and a scan that silently stops
-  matching reports zero unmarked headings — which reads exactly like success.
+  Two on 2026-09-08; the same two on 2026-09-16 (§2.8, §2.12), out of 295 headings.
+
+  **The OR in this scan was never a redundancy, and the fix is the `[^A-Za-z]*`.** Counted over
+  every heading on 2026-09-16, with the clauses that used to be here:
+
+      emoji clause AND word clause     0
+      emoji clause only              282
+      word clause only                11
+      neither                          2
+
+  Zero overlap is not bad luck, it is the construction. The word clause read
+  `—\s*(?:\*\*)?\s*(?:fixed|…)`, which allows *nothing* between the em-dash and the marker
+  word — so any symbol there defeated it, a recognised marker and an unrecognised one alike.
+  The fallback was therefore guaranteed to be absent in precisely the case it existed for: a
+  heading whose symbol the emoji class does not know. Allowing non-letters between the two
+  takes the overlap from 0 to 238, so from here either clause can fail alone without changing
+  an answer.
+
+  **A hand-picked RANGE fails the same way a hand-picked list does**, which is what this note
+  used to say and it was wrong. `\U0001F300-\U0001FAFF` plus four literals misses `⬛` U+2B1B
+  — whose neighbour `⬜` U+2B1C *is* in the literals — and §2.23 carries one today, classified
+  correctly only because the same heading also carries a `✅`. The Unicode **category** needs no
+  vocabulary and is the test that cannot go stale: every marker in use (`✅ 🟢 🟡 🔴 🔶 🔵
+  🔷 ⬛ ⬜ ⚪ ❌`) is category `So`. Widening by *block* instead would have swept in `→`
+  U+2192, which appears in two headings as prose and would have falsely marked §2.12; `→` is
+  category `Sm`, so the category test excludes it for a reason rather than by luck.
+
+  Re-derive all of it — the four counts, the codepoints, and the claim that the replacement
+  changes no verdict on any real heading — with `scripts/check-plan-markers.py --self-test`,
+  which CI runs.
+
+  **This scan fails LOUD, and the sentence here used to claim the opposite.** It PRINTS the
+  unmarked headings, so a marker it cannot parse adds a spurious line rather than deleting a
+  true one. "A scan that silently stops matching reports zero unmarked headings — which reads
+  exactly like success" is true of a scan that COUNTS closed sections, and
+  `scripts/archive-closed-sections.py` has exactly that shape with a third marker vocabulary of
+  its own (`✅|🟢|FIXED|DONE|CLOSED|GUARDED|fixed in`, and no SUPERSEDED, DECLINED, WONTFIX,
+  PARKED or DEFERRED). Checked on 2026-09-16: **zero** headings carry a close-word that
+  vocabulary cannot see, so the two disagree about nothing today. That is a measurement with a
+  date on it, not a property — the archiver is where a missed marker would fail silently, so it
+  is the one to re-check when the vocabulary moves.
 
   **When a section names the files it will change, those names go stale too, and in the
   direction that fools you.** §1.1's `Files:` bullet pointed at
