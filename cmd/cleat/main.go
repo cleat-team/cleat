@@ -777,6 +777,28 @@ func detectVetLang(dir string) (string, error) {
 	return "", fmt.Errorf("could not auto-detect language in %s. Use --lang to specify", dir)
 }
 
+// The three things a vet run can report, kept apart because they send the
+// reader to different places. cleat#1801.
+//
+//	0  the file was inspected and is clean
+//	1  the file was inspected and has violations -- go and look at them
+//	2  the vet could NOT be run (no interpreter, SDK not importable, too old an
+//	   interpreter) -- the check is broken, the file may be fine
+//
+// 0 and 2 must differ because a vet that could not look agrees with every file,
+// clean or not. 1 and 2 must differ because a build gate refusing on 2 needs to
+// say "I could not check this", not "this is non-deterministic" -- a message
+// that names the wrong problem is worse than no message.
+//
+// Both 1 and 2 are non-zero, so every existing `if err != nil` caller and every
+// `cleat vet && deploy` shell chain keeps behaving the same way; the added
+// information is only available to anything that looks at the value.
+const (
+	vetExitOK         = 0
+	vetExitViolations = 1
+	vetExitUnmeasured = 2
+)
+
 // runVetPython runs the Python AST-based vet via subprocess.
 func runVetPython(dir string, jsonOut bool) int {
 	// Find .py files in the directory.
@@ -851,8 +873,25 @@ func runVetPython(dir string, jsonOut bool) int {
 				if hint := pythonVetFailureHint(stderr.String()); hint != "" {
 					fmt.Fprint(os.Stderr, hint)
 				}
-				exitCode = 1
+				exitCode = vetExitUnmeasured
 				continue
+			}
+
+			// Not a tooling failure: the module ran, inspected the file, and
+			// exited 1 because it found violations. THAT IS A FAILING VET, and
+			// until cleat#1801 nothing said so -- the only path to a non-zero
+			// exit below is a non-empty stderr, and the violation report goes
+			// to stdout. So `cleat vet --lang python` exited 0 on a file it had
+			// just printed "2 errors" for, while go, rust and java all exit 1
+			// on their own violating fixtures.
+			//
+			// It is worth being precise about what was wrong, because the code
+			// above is right and was easy to mistake for the bug: separating
+			// "could not run" from "found violations" is exactly correct, and
+			// the stdout discriminator works. The defect is that only one of
+			// those two branches set an exit code.
+			if exitCode == vetExitOK {
+				exitCode = vetExitViolations
 			}
 		}
 
@@ -865,8 +904,8 @@ func runVetPython(dir string, jsonOut bool) int {
 				fmt.Fprint(os.Stderr, stderr.String())
 			}
 		}
-		if exitCode == 0 && stderr.Len() > 0 {
-			exitCode = 1
+		if exitCode == vetExitOK && stderr.Len() > 0 {
+			exitCode = vetExitUnmeasured
 		}
 	}
 

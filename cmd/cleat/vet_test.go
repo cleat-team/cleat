@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -550,8 +551,8 @@ func TestVetSummaryFields(t *testing.T) {
 	}
 }
 
-// TestVetPython verifies that `cleat vet --lang python` actually detects
-// py002_open's violation, rather than merely not erroring.
+// TestVetPython verifies that `cleat vet --lang python` detects py002_open's
+// violation AND reports it in its exit status.
 //
 // This used to be: run vet, and if it returned a non-nil error, call that
 // "Python vet not available" and skip; the non-skip branch asserted nothing
@@ -559,13 +560,20 @@ func TestVetSummaryFields(t *testing.T) {
 // is a fixture built specifically to contain a violation (file I/O in
 // workflow code, PY002), so the *correct* outcome -- vet finding it -- and
 // "the tooling is missing" need different, disjoint signals, and this test
-// had only one (err). Reproduced live: runVetPython (main.go) treats a
-// python3 exit status of 1 as "vet ran, found violations" and returns exit 0
-// -- finding PY002 does not make `cleat vet` exit non-zero -- but treats
-// anything that writes to stderr, e.g. `ModuleNotFoundError: No module named
-// 'cleat_sdk'`, as a real failure and returns 1. So a non-nil err here has
-// always meant "cleat_sdk was not importable," never "vet found the
-// violation and that's fine."
+// had only one (err).
+//
+// The description that used to sit here -- that runVetPython "returns exit 0"
+// on violations, so a non-nil err here means the SDK was not importable -- was
+// accurate, and is what this test was built around. It stopped being true with
+// cleat#1801, which made a violating file exit 1 and a vet that could not run
+// exit 2. This test now asserts the exit status rather than routing around it.
+//
+// That is the point worth keeping: the defect was written down HERE, in the
+// comment of the test that worked around it, and nowhere else. A test that
+// documents a bug and then parses JSON to avoid it cannot fail on the bug, so
+// nothing was ever going to report it. Prefer asserting the broken behaviour
+// and letting it be red, or file it, over describing it in the test that
+// tiptoes past it.
 //
 // It has also, in this harness, always been non-nil for a second, unrelated
 // reason: findPythonSDKDir (build_python.go) locates <repoRoot>/python-sdk
@@ -607,10 +615,28 @@ func TestVetPython(t *testing.T) {
 	cmd := exec.Command(cleatBinary, "vet", "--lang", "python", "--json", fixture)
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(repoRoot(t), "python-sdk"))
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("cleat vet --lang python failed (cleat_sdk not importable, or another real "+
-			"tooling failure -- not the fixture's violation, which does not set a non-zero exit): "+
-			"%v\n%s", err, out)
+
+	code := 0
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running cleat vet: %v\n%s", err, out)
+	}
+
+	switch code {
+	case vetExitUnmeasured:
+		// The vet could not run at all. Distinguished from a violation so this
+		// does not read as "the fixture is clean now" -- see cleat#1801.
+		t.Fatalf("the python vet could not run (exit %d): cleat_sdk not importable, "+
+			"no interpreter, or one older than %s. This says nothing about the "+
+			"fixture.\n%s", code, pythonSDKMinVersion, out)
+	case vetExitOK:
+		t.Fatalf("cleat vet --lang python exited 0 for %s, a fixture built specifically "+
+			"to contain a violation.\n\nThis is the cleat#1801 defect: the report and "+
+			"the exit status disagreed, so `cleat vet --lang python && deploy` was a "+
+			"false green, and wiring this as a build gate would have gated nothing.\n%s",
+			fixture, out)
 	}
 
 	var result VetOutput
