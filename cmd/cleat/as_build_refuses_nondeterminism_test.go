@@ -102,34 +102,14 @@ function myWorkflow(h: HostCalls, input: string): string {
 		}
 	})
 
-	// ARM 2 -- KNOWN LIMIT, and this one is a design boundary rather than a
-	// spelling trick.
-	//
-	// _computeDurableClosure traverses CALLERS, not callees: it starts from
-	// durable leaves (functions that call h.*, plus @cleatEntry functions) and
-	// adds anything that CALLS one. So the closure grows upward, toward the
-	// entry, and never downward into what a workflow calls.
-	//
-	// A helper that does not touch the host is therefore never validated, even
-	// when a durable function calls it directly. Measured, and the pair is the
-	// evidence for the mechanism rather than just the symptom:
-	//
-	//	helper calling Date.now() only          exit 0, no diagnostic, .wasm written
-	//	helper calling h.log() AND Date.now()   exit 1, E002 -- it became a leaf
-	//
-	// That is upside down for a determinism check: correctness needs the
-	// callee closure -- everything the workflow can reach -- and the callers
-	// closure is what the E005 threading check needs. One traversal is serving
-	// two checks that want opposite directions. Filed separately.
-	//
-	// So the limit is reached by extracting a helper, which is the most
-	// ordinary refactoring there is, and nothing reports anything.
-	t.Run("known limit escapes the checker, and says so out loud", func(t *testing.T) {
+	// ARM 2 -- KNOWN POSITIVE, added by cleat#1799. A helper the workflow
+	// CALLS. This used to build cleanly: _computeDurableClosure walked callers
+	// only, so a callee was never in scope. It is now reached by a forward walk
+	// from the entry.
+	t.Run("a helper the workflow calls is refused", func(t *testing.T) {
 		writeASEntry(t, dir, `
 import { HostCalls, cleatEntry } from "@cleat/sdk";
 
-// Not in the durable closure: it calls no host method, so nothing marks it
-// durable, so E001-E004 never run against it.
 function readClock(): i64 {
   return Date.now();
 }
@@ -143,18 +123,131 @@ function myWorkflow(h: HostCalls, input: string): string {
 `)
 		out := build(t)
 
+		if !strings.Contains(out, "E002") {
+			t.Errorf("a non-deterministic helper the workflow calls was not reported.\n\n"+
+				"Before cleat#1799 this built cleanly: the closure traversed callers,\n"+
+				"so a function the workflow CALLS was never in scope. If this has\n"+
+				"regressed, the forward walk in _computeReachable is not reaching\n"+
+				"callees of the entry.\n\noutput:\n%s", out)
+		}
+	})
+
+	// ARM 3 -- the other half of cleat#1799, and the direction the issue did
+	// not originally report. A CALLER of durable code is not workflow code: it
+	// is a harness or a driver, and it supplies `h` rather than executing under
+	// replay. Flagging it refused correct programs.
+	t.Run("a caller of durable code is not treated as workflow code", func(t *testing.T) {
+		writeASEntry(t, dir, `
+import { HostCalls, cleatEntry } from "@cleat/sdk";
+
+function myDurableHelper(h: HostCalls): void {
+  h.log("from a durable helper");
+}
+
+// Not reachable from any entry. Calls durable code and has its own
+// non-determinism, exactly as a test harness does.
+export function runTest(h: HostCalls): void {
+  const t: i64 = Date.now();
+  if (t > 0) { myDurableHelper(h); }
+}
+
+@cleatEntry()
+function myWorkflow(h: HostCalls, input: string): string {
+  myDurableHelper(h);
+  return "{\"status\":\"ok\"}";
+}
+`)
+		out := build(t)
+
+		if strings.Contains(out, "E002") {
+			t.Errorf("a CALLER of durable code was reported as non-deterministic.\n\n"+
+				"runTest is a harness: it supplies `h` and is reachable from no\n"+
+				"entry point. Reporting it refuses correct programs -- the Python\n"+
+				"twin of this defect produced 22 false findings on a shipped example\n"+
+				"and refused the build its own README documents (cleat#1813).\n\n"+
+				"output:\n%s", out)
+		}
+	})
+
+	// ARM 4 -- the pure-helper case, and it exists because the SUITE COULD NOT
+	// SEE IT.
+	//
+	// The obvious repair for cleat#1799 -- use the forward scope for the
+	// threading check as well -- passes every test in this package. It also
+	// takes an unmodified examples/as-workflow from a clean build to SEVEN E005
+	// diagnostics, on extractStringField, extractI64Field, extractRawArray,
+	// indexOf, isDigit and parseI64: pure string and arithmetic helpers that
+	// touch no host call and have no reason to take `h`.
+	//
+	// The reason the suite missed it is that its fixtures are small and have no
+	// pure helpers, while the example is real code and does. That is cleat#1814
+	// in miniature -- nothing in CI builds any example through `cleat build`,
+	// so the only thing that would have caught this is a command nobody runs.
+	// This arm puts the example's shape into the suite.
+	t.Run("a pure helper is not asked for a HostCalls parameter", func(t *testing.T) {
+		writeASEntry(t, dir, `
+import { HostCalls, cleatEntry } from "@cleat/sdk";
+
+// Pure: no host access, no reason to take h.
+function isDigit(c: string): bool {
+  return c >= "0" && c <= "9";
+}
+
+@cleatEntry()
+function myWorkflow(h: HostCalls, input: string): string {
+  if (isDigit(input)) { return "{}"; }
+  return "{\"status\":\"ok\"}";
+}
+`)
+		out := build(t)
+
+		if strings.Contains(out, "E005") {
+			t.Errorf("a pure helper was told it is missing a HostCalls parameter.\n\n"+
+				"E005 asks whether a function can obtain the `h` it NEEDS. A helper\n"+
+				"that touches no host call needs none, and demanding it is noise on\n"+
+				"every string and arithmetic helper a workflow uses.\n\n"+
+				"This is what happens if the threading scope becomes the forward\n"+
+				"closure instead of its intersection with the callers closure --\n"+
+				"seven of these on an unmodified examples/as-workflow.\n\n"+
+				"output:\n%s", out)
+		}
+	})
+
+	// ARM 5 -- KNOWN LIMIT, replacing the helper case that cleat#1799 closed.
+	//
+	// This one is sharper than the old one, because it is inside the ENTRY
+	// FUNCTION ITSELF -- the most unambiguously durable code there is. So it
+	// cannot be explained away as a scope question, which is exactly what the
+	// old known limit turned out to be.
+	//
+	// _calleeName requires a dotted member access: the check does
+	// `calleeName.indexOf(".")` and returns early when there is none. Bind the
+	// function to a local first and the call site has no dot in it.
+	t.Run("known limit escapes the checker, and says so out loud", func(t *testing.T) {
+		writeASEntry(t, dir, `
+import { HostCalls, cleatEntry } from "@cleat/sdk";
+
+@cleatEntry()
+function myWorkflow(h: HostCalls, input: string): string {
+  const clock = Date.now;
+  const t: i64 = clock();
+  if (t < 0) { return "{}"; }
+  return "{\"status\":\"ok\"}";
+}
+`)
+		out := build(t)
+
 		if strings.Contains(out, "E00") {
-			t.Errorf("the AS transform now CATCHES a non-deterministic helper "+
-				"outside the durable closure.\n\n"+
-				"This is an improvement, not a regression -- most likely the\n"+
-				"closure now traverses callees as well as callers. Three things\n"+
-				"to do:\n"+
-				"  1. move this case to the known-positive arm above;\n"+
-				"  2. write a new known-limit fixture for whatever still escapes\n"+
-				"     -- do not leave this arm empty, or the next reader cannot\n"+
-				"     tell a strong checker from one that never ran;\n"+
+			t.Errorf("the AS transform now CATCHES an aliased non-deterministic call.\n\n"+
+				"This is an improvement, not a regression -- most likely _calleeName\n"+
+				"now resolves a local binding rather than requiring a dotted member\n"+
+				"access. Three things to do:\n"+
+				"  1. move this case to a known-positive arm above;\n"+
+				"  2. write a new known-limit for whatever still escapes -- do not\n"+
+				"     leave this arm empty, or the next reader cannot tell a strong\n"+
+				"     checker from one that never ran;\n"+
 				"  3. update LANGUAGE_SUPPORT.md, which describes AssemblyScript\n"+
-				"     enforcement as entry-and-host-callers only.\n\noutput:\n%s", out)
+				"     enforcement.\n\noutput:\n%s", out)
 		}
 	})
 }
