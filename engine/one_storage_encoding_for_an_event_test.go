@@ -197,7 +197,7 @@ func TestBothWritePathsStoreAnEventTheSameWay(t *testing.T) {
 			wf.id).Scan(&storedReq); err != nil {
 			t.Fatalf("read %s request: %v", wf.label, err)
 		}
-		plain, err := enc.DecryptString(storedReq)
+		plain, err := enc.DecryptString(DefaultTenantUUID, storedReq)
 		if err != nil {
 			t.Errorf("the %s path's stored request does not decrypt (%v), so that path did not "+
 				"encrypt it: %.40q", wf.label, err, storedReq)

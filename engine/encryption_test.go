@@ -86,11 +86,11 @@ func TestEncryptDecrypt_RoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ciphertext, err := pe.Encrypt(tt.plaintext)
+			ciphertext, err := pe.Encrypt(DefaultTenantUUID, tt.plaintext)
 			if err != nil {
 				t.Fatalf("Encrypt: %v", err)
 			}
-			plaintext, err := pe.Decrypt(ciphertext)
+			plaintext, err := pe.Decrypt(DefaultTenantUUID, ciphertext)
 			if err != nil {
 				t.Fatalf("Decrypt: %v", err)
 			}
@@ -108,11 +108,11 @@ func TestEncrypt_ProducesDifferentCiphertexts(t *testing.T) {
 	}
 
 	plaintext := []byte("same plaintext")
-	ct1, err := pe.Encrypt(plaintext)
+	ct1, err := pe.Encrypt(DefaultTenantUUID, plaintext)
 	if err != nil {
 		t.Fatalf("first Encrypt: %v", err)
 	}
-	ct2, err := pe.Encrypt(plaintext)
+	ct2, err := pe.Encrypt(DefaultTenantUUID, plaintext)
 	if err != nil {
 		t.Fatalf("second Encrypt: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestDecrypt_CiphertextTooShort(t *testing.T) {
 		t.Fatalf("NewPayloadEncryption: %v", err)
 	}
 
-	_, err = pe.Decrypt([]byte{0x01, 0x02})
+	_, err = pe.Decrypt(DefaultTenantUUID, []byte{0x01, 0x02})
 	if err == nil {
 		t.Fatal("expected error for ciphertext shorter than nonce")
 	}
@@ -140,7 +140,7 @@ func TestDecrypt_TamperedCiphertext(t *testing.T) {
 	}
 
 	plaintext := []byte("sensitive data")
-	ciphertext, err := pe.Encrypt(plaintext)
+	ciphertext, err := pe.Encrypt(DefaultTenantUUID, plaintext)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestDecrypt_TamperedCiphertext(t *testing.T) {
 		ciphertext[12] ^= 0xFF
 	}
 
-	_, err = pe.Decrypt(ciphertext)
+	_, err = pe.Decrypt(DefaultTenantUUID, ciphertext)
 	if err == nil {
 		t.Fatal("expected authentication error for tampered ciphertext")
 	}
@@ -167,12 +167,12 @@ func TestDecrypt_WrongKey(t *testing.T) {
 	}
 
 	plaintext := []byte("secret")
-	ciphertext, err := pe1.Encrypt(plaintext)
+	ciphertext, err := pe1.Encrypt(DefaultTenantUUID, plaintext)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
 
-	_, err = pe2.Decrypt(ciphertext)
+	_, err = pe2.Decrypt(DefaultTenantUUID, ciphertext)
 	if err == nil {
 		t.Fatal("expected error when decrypting with wrong key")
 	}
@@ -192,11 +192,11 @@ func TestEncryptStringDecryptString_RoundTrip(t *testing.T) {
 	}
 
 	for _, plaintext := range tests {
-		enc, err := pe.EncryptString(plaintext)
+		enc, err := pe.EncryptString(DefaultTenantUUID, plaintext)
 		if err != nil {
 			t.Fatalf("EncryptString(%q): %v", plaintext, err)
 		}
-		dec, err := pe.DecryptString(enc)
+		dec, err := pe.DecryptString(DefaultTenantUUID, enc)
 		if err != nil {
 			t.Fatalf("DecryptString(%q): %v", plaintext, err)
 		}
@@ -213,13 +213,13 @@ func TestDecryptBase64_Valid(t *testing.T) {
 	}
 
 	plaintext := []byte("test data")
-	ciphertext, err := pe.Encrypt(plaintext)
+	ciphertext, err := pe.Encrypt(DefaultTenantUUID, plaintext)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
 	encoded := base64.StdEncoding.EncodeToString(ciphertext)
 
-	got, err := pe.DecryptBase64(encoded)
+	got, err := pe.DecryptBase64(DefaultTenantUUID, encoded)
 	if err != nil {
 		t.Fatalf("DecryptBase64: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestDecryptBase64_InvalidBase64(t *testing.T) {
 		t.Fatalf("NewPayloadEncryption: %v", err)
 	}
 
-	_, err = pe.DecryptBase64("!!!not-base64!!!")
+	_, err = pe.DecryptBase64(DefaultTenantUUID, "!!!not-base64!!!")
 	if err == nil {
 		t.Fatal("expected error for invalid base64")
 	}
@@ -248,7 +248,7 @@ func TestDecryptString_InvalidCiphertext(t *testing.T) {
 
 	// Valid base64 but not valid ciphertext (random 20 bytes).
 	garbage := base64.StdEncoding.EncodeToString(make([]byte, 20))
-	_, err = pe.DecryptString(garbage)
+	_, err = pe.DecryptString(DefaultTenantUUID, garbage)
 	if err == nil {
 		t.Fatal("expected error for garbage ciphertext")
 	}
@@ -269,7 +269,7 @@ func TestEncryptJSONDecryptJSON_RoundTrip(t *testing.T) {
 	}
 
 	for _, original := range tests {
-		enc, err := pe.EncryptJSON(original)
+		enc, err := pe.EncryptJSON(DefaultTenantUUID, original)
 		if err != nil {
 			t.Fatalf("EncryptJSON(%s): %v", original, err)
 		}
@@ -279,7 +279,7 @@ func TestEncryptJSONDecryptJSON_RoundTrip(t *testing.T) {
 			t.Errorf("EncryptJSON output should be quoted: got %s", enc)
 		}
 
-		got, err := pe.DecryptJSON(enc)
+		got, err := pe.DecryptJSON(DefaultTenantUUID, enc)
 		if err != nil {
 			t.Fatalf("DecryptJSON(%s): %v", enc, err)
 		}
@@ -296,12 +296,12 @@ func TestDecryptJSON_NotAString(t *testing.T) {
 	}
 
 	// Input is not a JSON string literal.
-	_, err = pe.DecryptJSON([]byte(`123`))
+	_, err = pe.DecryptJSON(DefaultTenantUUID, []byte(`123`))
 	if err == nil {
 		t.Fatal("expected error for non-string JSON value")
 	}
 
-	_, err = pe.DecryptJSON([]byte(`true`))
+	_, err = pe.DecryptJSON(DefaultTenantUUID, []byte(`true`))
 	if err == nil {
 		t.Fatal("expected error for non-string JSON value")
 	}
@@ -314,7 +314,7 @@ func TestDecryptJSON_InvalidBase64Content(t *testing.T) {
 	}
 
 	// Quoted but content is not valid base64.
-	_, err = pe.DecryptJSON([]byte(`"!!!not-base64!!!"`))
+	_, err = pe.DecryptJSON(DefaultTenantUUID, []byte(`"!!!not-base64!!!"`))
 	if err == nil {
 		t.Fatal("expected error for invalid base64 content")
 	}
@@ -327,11 +327,11 @@ func TestEncryptDecrypt_LargePayload(t *testing.T) {
 	}
 
 	large := bytes.Repeat([]byte("x"), 100000)
-	ciphertext, err := pe.Encrypt(large)
+	ciphertext, err := pe.Encrypt(DefaultTenantUUID, large)
 	if err != nil {
 		t.Fatalf("Encrypt large: %v", err)
 	}
-	plaintext, err := pe.Decrypt(ciphertext)
+	plaintext, err := pe.Decrypt(DefaultTenantUUID, ciphertext)
 	if err != nil {
 		t.Fatalf("Decrypt large: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestEncrypt_OutputContainsNonce(t *testing.T) {
 	}
 
 	plaintext := []byte("test")
-	ciphertext, err := pe.Encrypt(plaintext)
+	ciphertext, err := pe.Encrypt(DefaultTenantUUID, plaintext)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -365,11 +365,11 @@ func TestEncrypt_EmptyPlaintext(t *testing.T) {
 		t.Fatalf("NewPayloadEncryption: %v", err)
 	}
 
-	ct, err := pe.Encrypt(nil)
+	ct, err := pe.Encrypt(DefaultTenantUUID, nil)
 	if err != nil {
 		t.Fatalf("Encrypt nil: %v", err)
 	}
-	pt, err := pe.Decrypt(ct)
+	pt, err := pe.Decrypt(DefaultTenantUUID, ct)
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
 	}
@@ -377,11 +377,11 @@ func TestEncrypt_EmptyPlaintext(t *testing.T) {
 		t.Errorf("expected empty result, got %v", pt)
 	}
 
-	ct2, err := pe.Encrypt([]byte{})
+	ct2, err := pe.Encrypt(DefaultTenantUUID, []byte{})
 	if err != nil {
 		t.Fatalf("Encrypt empty: %v", err)
 	}
-	pt2, err := pe.Decrypt(ct2)
+	pt2, err := pe.Decrypt(DefaultTenantUUID, ct2)
 	if err != nil {
 		t.Fatalf("Decrypt empty: %v", err)
 	}
@@ -399,11 +399,11 @@ func TestEncryptDecrypt_MultipleEncryptionsIndependent(t *testing.T) {
 	// Run many encryptions and verify all decrypt correctly.
 	for i := 0; i < 50; i++ {
 		plaintext := []byte("iteration test")
-		ct, err := pe.Encrypt(plaintext)
+		ct, err := pe.Encrypt(DefaultTenantUUID, plaintext)
 		if err != nil {
 			t.Fatalf("Encrypt iteration %d: %v", i, err)
 		}
-		pt, err := pe.Decrypt(ct)
+		pt, err := pe.Decrypt(DefaultTenantUUID, ct)
 		if err != nil {
 			t.Fatalf("Decrypt iteration %d: %v", i, err)
 		}
@@ -427,12 +427,12 @@ func TestEncryptDecrypt_Concurrent(t *testing.T) {
 		go func(id int) {
 			for i := 0; i < iterations; i++ {
 				plaintext := []byte("concurrent test data")
-				ct, err := pe.Encrypt(plaintext)
+				ct, err := pe.Encrypt(DefaultTenantUUID, plaintext)
 				if err != nil {
 					errs <- err
 					return
 				}
-				pt, err := pe.Decrypt(ct)
+				pt, err := pe.Decrypt(DefaultTenantUUID, ct)
 				if err != nil {
 					errs <- err
 					return
@@ -459,11 +459,11 @@ func TestDecrypt_EmptyInput(t *testing.T) {
 		t.Fatalf("NewPayloadEncryption: %v", err)
 	}
 
-	_, err = pe.Decrypt(nil)
+	_, err = pe.Decrypt(DefaultTenantUUID, nil)
 	if err == nil {
 		t.Fatal("expected error for nil input")
 	}
-	_, err = pe.Decrypt([]byte{})
+	_, err = pe.Decrypt(DefaultTenantUUID, []byte{})
 	if err == nil {
 		t.Fatal("expected error for empty input")
 	}
@@ -475,17 +475,17 @@ func TestDecryptJSON_EmptyInput(t *testing.T) {
 		t.Fatalf("NewPayloadEncryption: %v", err)
 	}
 
-	_, err = pe.DecryptJSON(nil)
+	_, err = pe.DecryptJSON(DefaultTenantUUID, nil)
 	if err == nil {
 		t.Fatal("expected error for nil input")
 	}
-	_, err = pe.DecryptJSON([]byte{})
+	_, err = pe.DecryptJSON(DefaultTenantUUID, []byte{})
 	if err == nil {
 		t.Fatal("expected error for empty input")
 	}
 
 	// Empty JSON string (just quotes).
-	_, err = pe.DecryptJSON([]byte(`""`))
+	_, err = pe.DecryptJSON(DefaultTenantUUID, []byte(`""`))
 	if err == nil {
 		t.Fatal("expected error for empty quoted string (empty base64)")
 	}
@@ -497,14 +497,14 @@ func TestEncryptJSON_EmptyInput(t *testing.T) {
 		t.Fatalf("NewPayloadEncryption: %v", err)
 	}
 
-	enc, err := pe.EncryptJSON([]byte{})
+	enc, err := pe.EncryptJSON(DefaultTenantUUID, []byte{})
 	if err != nil {
 		t.Fatalf("EncryptJSON empty: %v", err)
 	}
 	if len(enc) < 2 || enc[0] != '"' || enc[len(enc)-1] != '"' {
 		t.Errorf("expected quoted output, got %s", enc)
 	}
-	got, err := pe.DecryptJSON(enc)
+	got, err := pe.DecryptJSON(DefaultTenantUUID, enc)
 	if err != nil {
 		t.Fatalf("DecryptJSON: %v", err)
 	}

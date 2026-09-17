@@ -165,10 +165,10 @@ func (s *PostgresStore) decryptField(encrypted, fieldName, workflowID string, st
 	var err error
 	if useBytesDecrypt {
 		var b []byte
-		b, err = s.encryption.Decrypt([]byte(encrypted))
+		b, err = s.encryption.Decrypt(tenantForAAD(s.tenantID), []byte(encrypted))
 		decrypted = string(b)
 	} else {
-		decrypted, err = s.encryption.DecryptString(encrypted)
+		decrypted, err = s.encryption.DecryptString(tenantForAAD(s.tenantID), encrypted)
 	}
 	if err != nil {
 		s.log().WarnContext(context.Background(), "decrypt failed", "field", fieldName, "workflow_id", workflowID, "step", step, "error", err)
@@ -218,7 +218,7 @@ func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID
 // enabled and returns the decrypted (or original) payload string.
 func (s *PostgresStore) decryptPayloadJSON(payloadStr string) string {
 	if s.encryption != nil && s.encryptSensitivePayloads && payloadStr != "" {
-		if decrypted, err := s.encryption.DecryptJSON([]byte(payloadStr)); err == nil {
+		if decrypted, err := s.encryption.DecryptJSON(tenantForAAD(s.tenantID), []byte(payloadStr)); err == nil {
 			return string(decrypted)
 		} else {
 			s.log().WarnContext(context.Background(), "decrypt payload JSON failed", "error", err)

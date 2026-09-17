@@ -206,7 +206,7 @@ func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, 
 	// base64 decoded to the wrong bytes (cleat#1319, six of nine ordinary
 	// short values). And it did not encrypt, so --encrypt-sensitive-payloads
 	// left every write-ahead intent's request in the clear.
-	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
 	if err != nil {
 		// cleat#1317: encryption failures were counted nowhere, while their
 		// decryption twin has been counted since db.go:176. The asymmetry was
@@ -287,11 +287,11 @@ func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID strin
 	// that way -- encodePayloadForStorage encrypts what it is given rather
 	// than rebuilding it, so the checksum the caller computed still matches
 	// what VerifyWorkflowEvents recomputes from the decrypted row.
-	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
 	}
-	storedPayload, err := encodePayloadForStorage(string(payload), s.encryption, s.encryptSensitivePayloads)
+	storedPayload, err := encodePayloadForStorage(string(payload), s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
 	}
@@ -632,11 +632,11 @@ func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string
 	// that way -- encodePayloadForStorage encrypts what it is given rather
 	// than rebuilding it, so the checksum the caller computed still matches
 	// what VerifyWorkflowEvents recomputes from the decrypted row.
-	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads)
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
 	if err != nil {
 		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
 	}
-	storedPayload, err := encodePayloadForStorage(string(payload), s.encryption, s.encryptSensitivePayloads)
+	storedPayload, err := encodePayloadForStorage(string(payload), s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
 	if err != nil {
 		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
 	}

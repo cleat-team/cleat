@@ -106,7 +106,7 @@ func TestTheCallIntentPathEncrypts(t *testing.T) {
 		t.Errorf("the write-ahead intent's request is stored exactly as the unencrypted path would "+
 			"store it (%.40q), so WriteCallIntent did not encrypt it", storedReq)
 	}
-	if plain, err := enc.DecryptString(storedReq); err != nil {
+	if plain, err := enc.DecryptString(DefaultTenantUUID, storedReq); err != nil {
 		t.Errorf("the stored request does not decrypt: %v", err)
 	} else if plain != card {
 		t.Errorf("the stored request decrypts to %q, want %q -- encrypted, but not exactly once", plain, card)
@@ -147,7 +147,7 @@ func TestTheCallIntentPathEncrypts(t *testing.T) {
 		t.Errorf("the payload column holds a JSON object, which is the unencrypted form -- an "+
 			"encrypted payload is a JSON string literal: %.60q", storedPayload)
 	}
-	if decrypted, err := enc.DecryptJSON([]byte(storedPayload)); err != nil {
+	if decrypted, err := enc.DecryptJSON(DefaultTenantUUID, []byte(storedPayload)); err != nil {
 		t.Errorf("the stored payload does not decrypt: %v", err)
 	} else if string(decrypted) != string(payload) {
 		t.Errorf("the stored payload decrypts to %.60q, want %.60q", decrypted, payload)

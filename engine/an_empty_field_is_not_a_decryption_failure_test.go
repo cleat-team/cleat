@@ -76,7 +76,7 @@ func TestAnEmptyFieldIsNotADecryptionFailure(t *testing.T) {
 	// an empty string, so an empty stored value was never encrypted. If
 	// EncryptString ever returns "", "empty means never encrypted" stops being
 	// true and the guard starts hiding real failures.
-	if ct, err := enc.EncryptString(""); err != nil || ct == "" {
+	if ct, err := enc.EncryptString(DefaultTenantUUID, ""); err != nil || ct == "" {
 		t.Fatalf("EncryptString(\"\") = %q, %v -- decryptField treats an empty stored value as "+
 			"never-encrypted, which is only sound while the encryptor cannot produce one", ct, err)
 	}

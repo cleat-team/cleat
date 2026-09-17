@@ -213,28 +213,28 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				// NOTE: On MSSQL this block is a forward-compatibility guard only --
 				// encryption is not yet supported and will never be true.
 				if s.encryption != nil && s.encryptSensitivePayloads {
-					if decrypted, err := s.encryption.Decrypt([]byte(rec.Request)); err == nil {
+					if decrypted, err := s.encryption.Decrypt(tenantForAAD(s.tenantID), []byte(rec.Request)); err == nil {
 						rec.Request = string(decrypted)
 					}
-					if decrypted, err := s.encryption.Decrypt([]byte(rec.Response)); err == nil {
+					if decrypted, err := s.encryption.Decrypt(tenantForAAD(s.tenantID), []byte(rec.Response)); err == nil {
 						rec.Response = string(decrypted)
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.Err); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.Err); err == nil {
 						rec.Err = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.SignalPayload); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.SignalPayload); err == nil {
 						rec.SignalPayload = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.ChildInput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.ChildInput); err == nil {
 						rec.ChildInput = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.NewInput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.NewInput); err == nil {
 						rec.NewInput = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.PluginInput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.PluginInput); err == nil {
 						rec.PluginInput = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.PluginOutput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.PluginOutput); err == nil {
 						rec.PluginOutput = decrypted
 					}
 				}
@@ -261,7 +261,7 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					// Decrypt payload before populateFromPayload if encryption is enabled.
 					// NOTE: Forward-compatibility guard only on MSSQL.
 					if s.encryption != nil && s.encryptSensitivePayloads {
-						if decrypted, err := s.encryption.DecryptJSON([]byte(payloadStr)); err == nil {
+						if decrypted, err := s.encryption.DecryptJSON(tenantForAAD(s.tenantID), []byte(payloadStr)); err == nil {
 							payloadStr = string(decrypted)
 						}
 					}
