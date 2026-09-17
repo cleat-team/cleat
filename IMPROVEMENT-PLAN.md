@@ -14204,3 +14204,55 @@ presence depends on how the session was launched. A hook keyed on the obvious na
 well-formed marker that resolves to nothing and passes every scan above.
 
 Files: `CLAUDE.md`.
+
+### 3.263 A worker that cannot serve a run releases it instead of destroying it — ✅ fixed in cleat#1710
+
+Both pre-flight checks in `executeWorkflow` ran **after** the claim and answered
+`recordTerminalFailure(..., engine.ErrPermanent, ...)`. So a worker that could not serve a run
+claimed it and killed it. A pool where 3 of 10 workers satisfy a workflow's `plugin_deps` did not
+run it at 30% throughput — it permanently failed roughly 70% of its runs, decided by claim races.
+
+**The predicate, which is the part worth keeping: a pre-flight check that fails on a WORKER-LOCAL
+fact must release, not terminate.** The discriminator is where the fact lives, not how serious it
+is:
+
+| | example | verdict |
+|---|---|---|
+| run-intrinsic | a malformed def, an undecodable input | terminate — wrong on every worker |
+| worker-local | `w.plugList`, `wfMeta` from the loaded binary | **release** — a sibling may serve it |
+
+The issue was filed against the plugin check alone. The version check one line above has the same
+shape and the same consequence — `wfMeta` is read from the binary *this worker* loaded, which
+during a rolling deploy is exactly as worker-local as its plugin list — so fixing one and leaving
+the other would have produced a guard that looks complete and is not. Both converted.
+
+**What happens when the satisfying worker never arrives, stated because the failure this replaces
+was at least visible.** The run does not circulate hot: `ReleaseWorkflow` writes `next_wake_at` on
+the **row**, so the backoff throttles the whole pool rather than one worker — a run nothing can
+serve costs one claim-and-release per interval *cluster-wide*, stays `ready`, keeps its history,
+and is visible to `ListWorkflows` and to a log line naming the unmet requirement.
+
+That quiescent stuck state is deliberate, and the argument against bounding it is already written
+down in this repo for `ReclaimCount` (`engine/store_types.go`): the count exists so an operator can
+*see* a loop and is deliberately not a bound, because "dead-lettering past a threshold would turn a
+node being redeployed into permanent failure of a workflow that did nothing wrong". A rollout
+window is precisely when a threshold would destroy the work it is meant to preserve. No counter and
+no threshold were added; a bound needs persisted per-run state, and §1702 is sequencing that shape.
+
+**The finding worth more than the fix: five behavioural tests of the new helper cannot see the
+bug.** They exercise `releaseForAnotherWorker`, and the defect lives at the *call site* —
+`executeWorkflow` needs a real WASM binary to reach either check, so no unit test reaches them.
+Measured by reintroducing the exact bug with the AST guard excluded:
+
+    F1b  the #1710 bug, AST guard excluded  ->  ok  (all five green)
+    F1   the #1710 bug, AST guard included  ->  FAIL "plugin_check" is passed to recordTerminalFailure
+
+So `TestNeitherPreflightCheckTerminatesTheRun` is the only thing standing between the repo and a
+silent regression, and it keys on the op strings because that is what such a regression has to
+carry. A test that cannot fail on the bug it was written for is the thing this plan keeps
+rediscovering; here it was five of them, and only the deliberately different reading caught it.
+
+Falsified: both checks reverted to terminating (red on the guard, green without it), the backoff
+removed, and the zero-backoff fallback removed.
+
+    go test ./cmd/cleat-worker/ -run TestNeitherPreflightCheckTerminatesTheRun -count=1

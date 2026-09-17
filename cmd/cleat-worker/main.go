@@ -1400,6 +1400,7 @@ func main() {
 		claimAcrossTenants:               *claimAcrossTenants,
 		concurrency:                      *concurrency,
 		maxReclaimPerTick:                *maxReclaimPerTick,
+		unservableBackoff:                *unservableBackoffFlag,
 		bgPlugins:                        bgPlugins,
 		bgWg:                             &bgWg,
 		maxQueued:                        *maxQueued,

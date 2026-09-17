@@ -1220,6 +1220,11 @@ type Worker struct {
 	concurrency       int
 	maxReclaimPerTick int
 
+	// unservableBackoff is how long a run waits before it can be claimed again
+	// after a worker released it for a sibling. Zero means
+	// defaultUnservableBackoff. cleat#1710.
+	unservableBackoff time.Duration
+
 	// bgPlugins are the plugins implementing plugin.HasBackground, started by
 	// Run once the health tracker and metrics exist. cleat#1347.
 	bgPlugins []plugin.HasBackground
@@ -2174,12 +2179,15 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// (a) Verify the WASM binary version matches the workflow
 	// definition version stored in workflow_defs.  A mismatch means
 	// the wrong binary was deployed or the DB row is stale.
+	// wfMeta comes from the binary THIS worker loaded, so a mismatch says this
+	// worker's binary disagrees with the def row -- not that the run is bad.
+	// During a rolling deploy that is the expected transient state, and a
+	// freshly-deployed sibling resolves it. cleat#1710.
 	if wfMeta != nil && wfMeta.WorkflowVersion != wf.DefVersion {
 		err := fmt.Errorf(
-			"version mismatch: workflow instance %s expects def_version %d but WASM binary metadata reports version %d (def=%s). The workflow_defs row and the deployed WASM binary are out of sync.",
+			"version mismatch: workflow instance %s expects def_version %d but the WASM binary THIS worker loaded reports version %d (def=%s). This worker's binary and the workflow_defs row are out of sync; another worker may have the right one.",
 			wf.ID, wf.DefVersion, wfMeta.WorkflowVersion, wf.DefName)
-		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		w.recordTerminalFailure(wf, workflowStartTime, err.Error(), engine.ErrPermanent.String(), "version_check")
+		w.releaseForAnotherWorker(wf, err.Error(), "version_check")
 		return
 	}
 
@@ -2193,9 +2201,11 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			info := lp.Plugin.Info()
 			workerPlugins[info.Name] = info.Version
 		}
+		// workerPlugins is what THIS process linked in. A pool mid-rollout is
+		// heterogeneous by definition, so an unsatisfied dep means this worker
+		// is the wrong one, not that the run is unrunnable. cleat#1710.
 		if err := checkPluginDeps(workerPlugins, wfMeta.PluginDeps); err != nil {
-			w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-			w.recordTerminalFailure(wf, workflowStartTime, err.Error(), engine.ErrPermanent.String(), "plugin_check")
+			w.releaseForAnotherWorker(wf, err.Error(), "plugin_check")
 			return
 		}
 	}
@@ -4096,11 +4106,110 @@ func endedOnAnExhaustedCall(history []engine.EventRecord) bool {
 	return history[i].RetriesExhausted
 }
 
+// defaultUnservableBackoff is how long a run waits before another worker may
+// claim it, after one released it as unservable here. cleat#1710.
+//
+// Short, because the common case is a rolling deploy where a capable sibling is
+// already running and the delay is pure latency on work that could proceed. It
+// is not zero, because that would let the releasing worker win the same run
+// back immediately and spin.
+const defaultUnservableBackoff = 5 * time.Second
+
+// releaseForAnotherWorker returns a claimed run to the queue because THIS
+// worker cannot serve it. It is the counterpart to recordTerminalFailure for a
+// pre-flight check that fails on a WORKER-LOCAL fact. cleat#1710.
+//
+// # The discriminator is where the fact lives, not how serious it is
+//
+// A pre-flight check fails for one of two reasons, and they want opposite
+// verdicts:
+//
+//   - RUN-INTRINSIC -- a malformed definition, an input that cannot be decoded,
+//     a def row that is wrong on its own terms. Every worker in the pool would
+//     reach the same conclusion, so terminating is correct and releasing would
+//     circulate a run that can never run. recordTerminalFailure stays right for
+//     these.
+//   - WORKER-LOCAL -- this worker's loaded plugins, this worker's WASM binary.
+//     Another worker may well satisfy it, so the run is not doomed; this worker
+//     is merely the wrong one. Terminating destroys work a sibling could have
+//     done.
+//
+// Both pre-flight checks below are the second kind, and both used to do the
+// first. `w.plugList` is what this process linked in; `wfMeta` is read from the
+// binary this process loaded. During a rolling deploy those are exactly the
+// facts that differ between workers, which is why a version change was a
+// drain-and-replace operation rather than a rolling one -- not by anyone's
+// decision, but as a consequence of claiming being blind to a condition that
+// execution then treats as fatal.
+//
+// # What happens when the satisfying worker never arrives
+//
+// Stated because the failure this replaces was at least visible, and an
+// unbounded release would trade it for a livelock.
+//
+// The run does not circulate hot. ReleaseWorkflow writes next_wake_at on the
+// ROW, so the backoff applied here throttles the whole pool rather than just
+// this worker: a run that nobody can serve costs one claim-and-release per
+// backoff interval across the entire cluster, not one per worker. It stays
+// 'ready', it keeps its history, and it is visible to ListWorkflows and to this
+// log line, which names the unmet requirement.
+//
+// That is deliberately a QUIESCENT STUCK STATE rather than a terminal one. A
+// run nothing can serve today is served the moment a capable worker is
+// deployed, which is the ordinary end of a rolling deploy; killing it at some
+// attempt threshold would make the rollout window destroy exactly the work it
+// is trying to preserve. The same argument, in the same direction, is already
+// written down for ReclaimCount in engine/store_types.go: the count exists so
+// an operator can SEE a loop, and is deliberately not a bound, because
+// "dead-lettering past a threshold would turn a node being redeployed into
+// permanent failure of a workflow that did nothing wrong".
+//
+// So this deliberately adds no counter and no threshold. If a bound is wanted
+// later it needs persisted per-run state, and cleat#1702 is sequencing the
+// shape of that for the non-workflow entities; inventing a column here would be
+// the second place it gets designed.
+func (w *Worker) releaseForAnotherWorker(wf *engine.WorkflowInstance, reason, op string) {
+	ctx := context.Background()
+	w.logger.WarnContext(ctx,
+		"this worker cannot serve this workflow; returning it to the queue for one that can",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
+		"def_name", wf.DefName, "def_version", wf.DefVersion,
+		"check", op, "reason", reason)
+
+	st := w.storeFor(wf)
+	backoff := w.unservableBackoff
+	if backoff <= 0 {
+		backoff = defaultUnservableBackoff
+	}
+	err := st.ReleaseWorkflow(ctx, wf.ID, w.id, wf.Generation, time.Now().Add(backoff))
+	if errors.Is(err, engine.ErrFenceLost) {
+		// Another worker already has it, which is the outcome this function
+		// exists to produce. Not a failure.
+		w.logger.DebugContext(ctx, "release for another worker: fence already lost",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return
+	}
+	if err != nil {
+		// The run stays claimed until its lease expires, and then the reaper
+		// returns it -- slower than this release, but the same destination. It
+		// is NOT terminated, which is the property that matters.
+		w.logger.WarnContext(ctx,
+			"could not return this workflow to the queue; it stays claimed until its lease expires",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+	}
+}
+
 // recordTerminalFailure is the no-history form, for the failure paths that run
 // BEFORE any segment does -- no store for the tenant, history that would not
-// load, WASM that would not load, a version check. None of them can be a retry
-// exhaustion, because none of them ran a durable call, so passing no history
-// says exactly that rather than losing information.
+// load, WASM that would not load. None of them can be a retry exhaustion,
+// because none of them ran a durable call, so passing no history says exactly
+// that rather than losing information.
+//
+// This list used to include "a version check". It does not any more, and the
+// distinction is cleat#1710: the version and plugin pre-flight checks fail on
+// facts local to THIS worker, so they release the run for a worker that can
+// serve it rather than destroying it. See releaseForAnotherWorker above for
+// which side of that line a new pre-flight check belongs on.
 func (w *Worker) recordTerminalFailure(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string) {
 	w.recordTerminalFailureWithHistory(wf, startedAt, errMsg, errorCode, errorOp, nil)
 }

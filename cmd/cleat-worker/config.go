@@ -331,6 +331,16 @@ var (
 			"reader does poll the run's status once per 15s heartbeat. Over the ceiling "+
 			"the route answers 503 with Retry-After. "+
 			"cleat#1572")
+	unservableBackoffFlag = flag.Duration("unservable-release-backoff", defaultUnservableBackoff,
+		"How long a run waits before it can be claimed again after a worker released it "+
+			"because that worker could not serve it -- its loaded plugins do not satisfy the "+
+			"workflow's plugin_deps, or its WASM binary disagrees with the def row. Both are "+
+			"WORKER-LOCAL facts, so another worker may serve the run; before cleat#1710 either "+
+			"one destroyed it. ReleaseWorkflow writes next_wake_at on the ROW, so this throttles "+
+			"the whole pool rather than one worker: a run nothing can serve costs one "+
+			"claim-and-release per interval cluster-wide and stays visible as 'ready' rather "+
+			"than failing. Lower it to shorten the window in which a rolling deploy delays a run "+
+			"a sibling could already take. cleat#1710")
 	maxStreamPollReadersFlag = flag.Int("max-stream-poll-readers", 1024,
 		"How many readers of GET /api/workflows/{id}/stream this worker may hold at once "+
 			"that are following a run from event_history rather than from the in-memory "+
