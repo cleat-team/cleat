@@ -81,26 +81,176 @@ func isBase64URLChar(c rune) bool {
 //
 // If the input is not valid JSON, it is returned as-is.
 func Redact(raw string) string {
-	var data any
-	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+	if !json.Valid([]byte(raw)) {
 		// If it's not valid JSON, still check if the whole string looks like a JWT.
 		if looksLikeJWT(raw) {
-			return "[REDACTED]"
+			// BARE, not quoted: this branch is not JSON, so the placeholder is
+			// the whole value rather than a literal spliced into a document.
+			// TestRedact_NonJSON_JWT caught exactly this distinction.
+			return redactedPlain
 		}
 		return raw
 	}
 
-	result := redactValue(data)
-	out, err := json.Marshal(result)
-	if err != nil {
+	spans, err := collectRedactSpans(raw)
+	if err != nil || len(spans) == 0 {
+		// Nothing to redact means the input is returned BYTE FOR BYTE. See
+		// the note on collectRedactSpans for why that is the whole point.
 		return raw
 	}
-	return string(out)
+
+	var b strings.Builder
+	b.Grow(len(raw))
+	prev := 0
+	for _, sp := range spans {
+		b.WriteString(raw[prev:sp.start])
+		b.WriteString(redactedJSON)
+		prev = sp.end
+	}
+	b.WriteString(raw[prev:])
+	return b.String()
 }
 
-// redactValue recursively redacts sensitive values in an arbitrary JSON value.
-func redactValue(v any) any {
-	return redactValueDepth(v, 0)
+// redactedJSON is the placeholder as it appears in a JSON document: a string
+// literal, quotes included, because it is spliced into text rather than
+// marshalled from a Go value.
+const redactedJSON = `"[REDACTED]"`
+
+// redactedPlain is the same placeholder for a value that is not part of a JSON
+// document.
+const redactedPlain = "[REDACTED]"
+
+// redactSpan is a half-open byte range of the input that must be replaced.
+type redactSpan struct{ start, end int }
+
+// collectRedactSpans finds the byte ranges to replace, WITHOUT reserialising
+// the document.
+//
+// THIS FUNCTION EXISTS BECAUSE THE OBVIOUS IMPLEMENTATION CORRUPTS DATA.
+// Redact used to json.Unmarshal into map[string]any, walk it, and json.Marshal
+// the result. That round trip rewrites every payload it touches, whether or
+// not anything was redacted, because a Go map has no key order and every JSON
+// number becomes a float64:
+//
+//	{"zebra":1,"apple":2}        -> {"apple":2,"zebra":1}
+//	{"id":12345678901234567890}  -> {"id":12345678901234567000}
+//	{"id":9007199254740993}      -> {"id":9007199254740992}
+//	{"amount":1.0}               -> {"amount":1}
+//	{"big":1e300}                -> {"big":1e+300}
+//
+// The last four are not cosmetic. Any integer above 2^53 -- a snowflake id, a
+// bigint primary key, a cents amount on a large ledger -- comes back a
+// DIFFERENT NUMBER. Redact is applied on the read path to ten fields of every
+// event record (store_events.go and its MySQL and SQL Server twins), and the
+// replay path loads history through exactly that read, so a resumed workflow
+// was handed values its first run never saw. That is the one thing a durable
+// engine must not do, and it was being done by the engine itself.
+//
+// Collecting spans and splicing makes the no-redaction case the identity
+// function and confines every change to the values actually being hidden.
+func collectRedactSpans(raw string) ([]redactSpan, error) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var spans []redactSpan
+	if err := scanRedactValue(dec, raw, 0, false, &spans); err != nil {
+		return nil, err
+	}
+	return spans, nil
+}
+
+// scanRedactValue consumes one JSON value, appending spans for what must be
+// hidden. redact is true when an enclosing key was sensitive, in which case
+// the whole value becomes one span and its interior is not walked -- nested
+// spans inside a span would splice twice.
+func scanRedactValue(dec *json.Decoder, raw string, depth int, redact bool, spans *[]redactSpan) error {
+	pre := int(dec.InputOffset())
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	start := redactValueStart(raw, pre)
+
+	if d, ok := tok.(json.Delim); ok {
+		if redact {
+			if err := skipRedactComposite(dec); err != nil {
+				return err
+			}
+			*spans = append(*spans, redactSpan{start, int(dec.InputOffset())})
+			return nil
+		}
+		// Beyond the depth cap the subtree is left alone, which is what the
+		// recursive implementation did on the same bound.
+		if depth > maxRedactDepth {
+			return skipRedactComposite(dec)
+		}
+		if d == '{' {
+			for dec.More() {
+				ktok, kerr := dec.Token()
+				if kerr != nil {
+					return kerr
+				}
+				key, _ := ktok.(string)
+				if err := scanRedactValue(dec, raw, depth+1, isSensitiveField(key), spans); err != nil {
+					return err
+				}
+			}
+		} else {
+			for dec.More() {
+				if err := scanRedactValue(dec, raw, depth+1, false, spans); err != nil {
+					return err
+				}
+			}
+		}
+		_, err := dec.Token() // the closing delimiter
+		return err
+	}
+
+	end := int(dec.InputOffset())
+	if redact {
+		*spans = append(*spans, redactSpan{start, end})
+		return nil
+	}
+	if str, ok := tok.(string); ok && looksLikeJWT(str) {
+		*spans = append(*spans, redactSpan{start, end})
+	}
+	return nil
+}
+
+// skipRedactComposite consumes the remainder of an object or array whose
+// opening delimiter has already been read.
+func skipRedactComposite(dec *json.Decoder) error {
+	for depth := 1; depth > 0; {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+	}
+	return nil
+}
+
+// redactValueStart walks forward from the end of the previous token to the
+// first byte of the next value, stepping over the structural characters the
+// decoder does not report as tokens.
+//
+// Only characters BEFORE the value are skipped, so a string value containing
+// a colon or a comma is unaffected: the scan stops at its opening quote.
+func redactValueStart(raw string, from int) int {
+	for i := from; i < len(raw); i++ {
+		switch raw[i] {
+		case ' ', '\t', '\n', '\r', ':', ',':
+			continue
+		}
+		return i
+	}
+	return len(raw)
 }
 
 // redactValueDepth recursively redacts sensitive values with a recursion depth
