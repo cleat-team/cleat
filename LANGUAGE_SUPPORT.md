@@ -297,6 +297,75 @@ crates/cleat-macro/src/*.rs`) — grown substantially from the original
 
 ---
 
+## Determinism enforcement is not the same in every language
+
+"Enforced determinism, not promised determinism" is true of every shipped language in the sense
+that a check exists and runs. It is **not** true that the checks are comparable. They differ by
+about as much as a compiler differs from `grep`, and a table of five green fixtures would hide
+that completely — which is why this section states the mechanism rather than a pass/fail.
+
+| Language | Mechanism | What it can see | What it cannot |
+|---|---|---|---|
+| **Go** | whole-program analysis (`analyze()` in `cmd/cleat`) | the durable closure, computed from the type-checked call graph | — |
+| **Python** | AST call-graph and closure analysis (`python-sdk/cleat_sdk/vet.py`) | what the entry point reaches, across functions | a forbidden call spelled so the `(module, function)` table does not match it |
+| **AssemblyScript** | AST analysis **inside the compiler** (`packages/cleat-as/transform`) | what the entry point reaches, across functions | a call site with no dotted member access |
+| **Java** | literal substring matching over source lines (`cmd/cleat/vet_java.go`) | a listed spelling on a line that does not *begin* with a comment marker | any other spelling; any module not listed; a comment **after** code, and a string literal, are both scanned as code |
+| **Rust** | literal substring matching, over source with comments and strings blanked first (`cmd/cleat/vet_rust.go`) | a listed spelling in executable code | any other spelling; any module not listed |
+
+Re-derive the shape of each, rather than trusting the row:
+
+    grep -c '^\s*{`' cmd/cleat/vet_rust.go cmd/cleat/vet_java.go   # pattern-table entries
+    grep -oE '"PY[0-9]{3}"' python-sdk/cleat_sdk/vet.py | sort -u | wc -l
+    grep -ln 'runVet' cmd/cleat/build_*.go                          # which builds gate
+
+### AssemblyScript's arrangement is the strongest and is worth copying
+
+Its checks run as part of `asc`, not beside it: `runBuildAssemblyScript` passes
+`--transform @cleat/transform`, and the transform throws from `afterParse`. A separate gate can be
+removed, reordered, or skipped while the build still succeeds; a check inside the compiler cannot
+drift out of sync with it, because there is only one invocation.
+
+### A longer pattern list is not a stronger check
+
+Java's table is roughly twice Rust's and misses `java.nio` entirely — the API Java has recommended
+over `java.io` since 1.7. So it covers the legacy spelling and not its replacement:
+
+    import java.io.File;                 // reported
+    Files.readString(Path.of("x"));      // not reported
+
+Rust's misses grouped imports, which is what rustfmt produces from repeated single-module lines:
+
+    use std::fs;                         // reported
+    use std::{fs, io};                   // not reported
+
+Both are measured, and each has a fixture pinning it: see the `known_limit_*` directories under
+`testdata/vet-checks/`, and the `*_build_refuses_nondeterminism_test.go` files, which assert **both**
+that a violation is refused and that the known limit is not. The second arm is the one that keeps
+this table honest — without it, "every language refuses a bad fixture" reads as parity that does not
+exist.
+
+### The scope question, which all four got wrong
+
+A determinism check has to decide what counts as workflow code, and three of the four answered by
+walking the call graph the wrong way (cleat#1789, #1799, #1813):
+
+- **determinism** is a property of what a workflow *executes*, so the scope is forward reachability
+  from the entry points. Walking backwards instead means a helper the workflow **calls** is never
+  checked;
+- **"must carry a HostCalls"** is a property of what *reaches the host*, so it is the intersection
+  of that forward scope with the callers closure. Either closure alone is wrong: the callers closure
+  flags the test harness that *supplies* `h`, and the forward closure flags pure helpers that need
+  none.
+
+Fixed for Python in #1816. The AssemblyScript equivalent is #1818. Rust and Java have no closure
+analysis at all, so they do not have this specific problem — their scope is "every source file in
+the tree, including tests" (cleat#1789).
+
+Rust reads only executable code since #1815; Java still matches inside a trailing comment and inside
+a string literal, which is the weaker form of the same defect.
+
+---
+
 ## The Binary Size Constraint
 
 Cleat stores WASM blobs in `workflow_defs.wasm_bytes`. Each deploy creates a
