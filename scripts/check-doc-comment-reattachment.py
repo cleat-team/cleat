@@ -230,6 +230,23 @@ def main():
             print('Fetch the base commit (git fetch --depth=1 origin <sha>), or pass BASE HEAD.')
             return 2
 
+    # Prefer a real merge-base when one is computable.
+    #
+    # `github.event.pull_request.base.sha` is the base branch TIP, not the merge
+    # base. Paired with the merge ref from the same event those are consistent
+    # and `base..head` is exactly the PR's changes -- but they are two values
+    # from two sources, and if they ever drift the guard reports somebody else's
+    # commit against this author's PR. A guard that blames the wrong person is
+    # worse than no guard, because the next occurrence is read as noise.
+    #
+    # In the shallow clone CI uses there is no common history to compute one, so
+    # this falls back rather than failing: `git merge-base` errors, and `base` as
+    # given is what the caller meant. Degrading is right here -- the fallback is
+    # the value that is correct in the normal case, not a guess.
+    mb = subprocess.run(['git', 'merge-base', base, head], capture_output=True, text=True)
+    if mb.returncode == 0 and mb.stdout.strip():
+        base = mb.stdout.strip()
+
     hits = findings(base, head)
     if not hits:
         print(f'ok: no declaration lost its doc comment between {base} and {head}')
