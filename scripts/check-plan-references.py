@@ -85,12 +85,28 @@ SELF_HEADING_RE = re.compile(r"^#{1,4}\s+(\d+\.\d+)[ .]", re.M)
 def self_defined(path):
     """Section numbers a file defines FOR ITSELF.
 
-    `docs/contributor/design/event-routing-design.md` cites §4.3 and §6.2, and
-    those are ITS OWN headings -- not IMPROVEMENT-PLAN sections. Resolving every
-    §N.M against the plan reports six such references as dangling and sends the
-    reader to fix links that were never broken. This is the same trap as a text
-    search that cannot tell a thing from a sentence about the thing: the sigil
-    is identical, the namespace is not.
+    event-routing-design.md numbers its own sections 4.3 and 6.2, and those are
+    ITS OWN headings -- not IMPROVEMENT-PLAN sections. Resolving every reference
+    against the plan reports six such links as dangling and sends the reader to
+    fix links that were never broken. Same trap as a text search that cannot
+    tell a thing from a sentence about the thing: the sigil is identical, the
+    namespace is not.
+
+    AND THE PROSE IN THIS FILE KEEPS WALKING INTO IT. This docstring named those
+    two numbers WITH the sigil, as the example of references that are not plan
+    sections, and both were then reported dangling -- CODE_GLOBS scans .py, this
+    file defines no headings, and QUALIFIED_RE did not fire because words sat
+    between the filename and the sigil. The explanation of why those references
+    are not dangling was counted as two dangling references. Rephrasing it
+    carefully did not help either: the replacement prose quoted the broken form
+    and reintroduced them, and a third instance was already sitting in a comment
+    in references() whose example filenames were in DOUBLE QUOTES, which the
+    boundary class does not admit.
+
+    So the rule for this file is not "phrase it carefully". It is: WRITE THE
+    NUMBER WITHOUT THE SIGIL in any prose that is talking ABOUT a reference
+    rather than making one. self_test() asserts it, because three attempts at
+    remembering it produced three misses.
     """
     try:
         return set(SELF_HEADING_RE.findall(
@@ -121,10 +137,25 @@ def references():
             if n in own[loc]:
                 continue
             if QUALIFIED_RE.search(body[:m.start()]):
-                # "`ABI.md` §2.53", "database-backends.md §7.4" -- the reference
-                # names ANOTHER document's numbering explicitly. Resolving those
-                # against the plan reported four dangling links that are not
-                # links to the plan at all.
+                # `ABI.md` §2.53 and database-backends.md §7.4 -- the
+                # reference names ANOTHER document's numbering explicitly.
+                # Resolving those against the plan reported four dangling links
+                # that are not links to the plan at all.
+                #
+                # WRITTEN WITH THE FILENAMES IN DOUBLE QUOTES FIRST, and the
+                # 7.4 in this very comment was then reported dangling: the
+                # boundary class below admits whitespace, parens, brackets,
+                # backticks and asterisks, and NOT a double quote. The quotes
+                # are gone rather than the class widened -- a qualifier that
+                # exempts MORE is the direction in which a real dangling
+                # reference disappears silently, and this comment is only ever
+                # read by a person.
+                #
+                # It must also be the BARE filename: a path does not qualify,
+                # because the class before it does not admit "/". Nothing in the
+                # tree is affected by that today -- widening the pattern to
+                # [A-Za-z0-9_/.-]* before the name reports 0 additional
+                # exemptions -- so it is recorded rather than changed.
                 continue
             refs.setdefault(n, set()).add(loc)
     return refs
@@ -182,6 +213,28 @@ def self_test():
         print(f"SELF-TEST FAIL: found only {len(refs)} distinct §N.M references; "
               f"the scan is reading almost nothing and everything would look "
               f"resolvable.", file=sys.stderr)
+        ok = False
+
+    # 5. THIS FILE MUST NOT CITE A SECTION IT CANNOT RESOLVE. A guard that
+    #    explains a rule in prose is scanned by its own rule, and the sigil in an
+    #    explanation is indistinguishable from the sigil in a citation. That is
+    #    not hypothetical here: self_defined()'s docstring named 4.3 and 6.2
+    #    WITH the sigil, as the example of references that are NOT plan
+    #    sections, and both were reported dangling -- taking the set from the
+    #    five ci.yml documents to seven, unnoticed, because only --self-test is
+    #    gated. Two more attempts at the same paragraph reintroduced them.
+    #
+    #    Cheap, permanent, and it fails for the right reason: the message names
+    #    the file rather than the reference, because the repair is to rephrase
+    #    the prose, not to chase a link.
+    _, refs, dangling = run()
+    mine = sorted(n for n, locs in dangling.items() if __file__.split("/")[-1]
+                  in " ".join(locs))
+    if mine:
+        print(f"SELF-TEST FAIL: this checker's own source cites {mine}, which "
+              f"resolve to nothing. A sigil written in an explanation is counted "
+              f"as a citation. Qualify it with the bare filename immediately "
+              f"before, or drop the sigil.", file=sys.stderr)
         ok = False
 
     print("self-test: PASS" if ok else "self-test: FAIL", file=sys.stderr)
