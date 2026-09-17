@@ -57,7 +57,11 @@ export interface Schedule {
   def_name: string;
   entry_point: string;
   input: string;
-  enabled: boolean;
+  // When this schedule was retired; absent/null means live. cleat#1702
+  // replaced an `enabled` boolean with this field, INVERTING the polarity --
+  // `enabled: true` meant live. The key is omitted entirely for a live
+  // schedule (Go's `omitempty`), so test for presence, not for a value.
+  disabled_at?: string | null;
   next_run_at: string;
   created_at: string;
   updated_at: string;

@@ -40,7 +40,7 @@ const mockSchedule: Schedule = {
   def_name: 'process-orders',
   entry_point: '',
   input: '',
-  enabled: true,
+  // A live schedule omits disabled_at; cleat#1702 replaced `enabled: true`.
   next_run_at: '2024-01-01T02:00:00Z',
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',

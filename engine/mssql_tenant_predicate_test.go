@@ -230,8 +230,16 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "update workflow_instances set compaction_state = @p2, compaction_step = @p3, c",
 		Reason: scopedByCompactionSweep,
 	},
-	"mssql_schedules.go:GetDueSchedulesAcrossTenants#c2202324fa79": {
-		SQL:    "select name, def_name, entry_point, cron_expression, input, enabled, next_run_",
+	// DIGEST MOVED IN cleat#1702, AND THE REASON IS RESTATED RATHER THAN
+	// CARRIED. The column list changed `enabled` to `disabled_at` when
+	// workflow_schedules' retirement spelling converted (migration 081). The
+	// statement is the CROSS-TENANT due read and must not be scoped -- that is
+	// what it exists for, and it is why the worker can fire cron for every
+	// tenant from one process. Re-checked against the new text: the SELECT
+	// carries no tenant predicate and takes no tenant parameter, exactly as
+	// before, and the conversion touched only which column says "retired".
+	"mssql_schedules.go:GetDueSchedulesAcrossTenants#1cce8b9e4e94": {
+		SQL:    "select name, def_name, entry_point, cron_expression, input, disabled_at, next_",
 		Reason: deliberatelyCrossTenant,
 	},
 	"mssql_signals_promises.go:GetChildResult#18eaf4c5f15d": {

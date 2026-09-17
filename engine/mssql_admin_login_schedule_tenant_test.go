@@ -111,7 +111,6 @@ func mustCreateSchedule(t *testing.T, s *MSSQLStore, name string) {
 		DefName:        "some-workflow",
 		CronExpression: "0 3 * * *",
 		Input:          json.RawMessage(`{}`),
-		Enabled:        true,
 		NextRunAt:      time.Now().Add(time.Hour).UTC(),
 		Timezone:       "UTC",
 	}); err != nil {
@@ -183,7 +182,7 @@ func TestAdminLoginSetScheduleEnabledCannotCrossTenants(t *testing.T) {
 	if got == nil {
 		t.Fatalf("tenant A's schedule %q disappeared entirely", name)
 	}
-	if !got.Enabled {
+	if got.Disabled() {
 		t.Errorf("tenant B disabled tenant A's schedule %q", name)
 	}
 }
@@ -212,7 +211,7 @@ func TestAdminLoginGetDueSchedulesStaysWithinItsTenant(t *testing.T) {
 
 	due := Schedule{
 		Name: "tenant-a-due-now", DefName: "some-workflow",
-		CronExpression: "* * * * *", Input: json.RawMessage(`{}`), Enabled: true,
+		CronExpression: "* * * * *", Input: json.RawMessage(`{}`),
 		NextRunAt: time.Now().Add(-time.Minute).UTC(), Timezone: "UTC",
 	}
 	if err := storeA.CreateSchedule(ctx, due); err != nil {

@@ -222,7 +222,6 @@ func TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore(t *testing.T) {
 			DefName:        "sched-wf",
 			CronExpression: "* * * * *",
 			Input:          json.RawMessage(`{}`),
-			Enabled:        true,
 			NextRunAt:      time.Now().Add(-time.Minute),
 			Timezone:       "UTC",
 			TenantID:       otherTenant,

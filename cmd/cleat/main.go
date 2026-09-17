@@ -1517,12 +1517,12 @@ func runSchedule(args []string) {
 			EntryPoint:     *entryPoint,
 			CronExpression: *cronExpr,
 			Input:          json.RawMessage(*inputJSON),
-			Enabled:        true,
-			NextRunAt:      nextRun,
-			Timezone:       *timezone,
-			MisfirePolicy:  *misfire,
-			CatchUpLimit:   *catchUp,
-			OverlapPolicy:  *overlap,
+			// A new schedule is live, which after cleat#1702 is the zero value.
+			NextRunAt:     nextRun,
+			Timezone:      *timezone,
+			MisfirePolicy: *misfire,
+			CatchUpLimit:  *catchUp,
+			OverlapPolicy: *overlap,
 		}
 
 		if err := store.CreateSchedule(ctx, sch); err != nil {
@@ -1549,8 +1549,12 @@ func runSchedule(args []string) {
 		// they do not look like they agree.
 		fmt.Printf("%-20s %-20s %-20s %-7s %-20s %s\n", "NAME", "DEFINITION", "CRON", "ENABLED", "TIMEZONE", "NEXT RUN")
 		for _, sch := range schedules {
+			// The ENABLED column stays yes/no: this is operator-facing text,
+			// not the API surface cleat#1702 changed. The instant a schedule
+			// was retired is in disabled_at, which `GET /api/schedules`
+			// returns; a fixed-width table column is not the place for it.
 			enabled := "no"
-			if sch.Enabled {
+			if !sch.Disabled() {
 				enabled = "yes"
 			}
 			loc, _ := engine.LoadScheduleLocation(sch.Timezone)

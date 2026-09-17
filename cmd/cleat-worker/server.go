@@ -2317,12 +2317,12 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		EntryPoint:     req.EntryPoint,
 		CronExpression: req.Cron,
 		Input:          req.Input,
-		Enabled:        true,
-		NextRunAt:      engine.NextCronTimeIn(req.Cron, time.Now(), loc),
-		Timezone:       req.Timezone,
-		MisfirePolicy:  req.Misfire,
-		CatchUpLimit:   req.CatchUp,
-		OverlapPolicy:  req.Overlap,
+		// A new schedule is live, which after cleat#1702 is the zero value.
+		NextRunAt:     engine.NextCronTimeIn(req.Cron, time.Now(), loc),
+		Timezone:      req.Timezone,
+		MisfirePolicy: req.Misfire,
+		CatchUpLimit:  req.CatchUp,
+		OverlapPolicy: req.Overlap,
 	}
 	// The key is what lets this endpoint tell a retry from a name collision.
 	// Without one it cannot be asked the question: both arrive as a second

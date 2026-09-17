@@ -22,7 +22,6 @@ func TestSchedulePolicies_RoundTripAndDefaults(t *testing.T) {
 				DefName:        "test-workflow",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 				MisfirePolicy:  MisfireSkip,
 				CatchUpLimit:   7,
@@ -48,7 +47,6 @@ func TestSchedulePolicies_RoundTripAndDefaults(t *testing.T) {
 				DefName:        "test-workflow",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 			}); err != nil {
 				t.Fatalf("CreateSchedule: %v", err)
@@ -149,7 +147,6 @@ func TestSchedulePolicies_DatabaseRejectsUnknownValues(t *testing.T) {
 				DefName:        "test-workflow",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 				MisfirePolicy:  "definitely-not-a-policy",
 			})

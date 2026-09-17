@@ -52,7 +52,6 @@ func TestMSSQLSchedules_TenantIDSurvivesTheRoundTripToStartNewRun(t *testing.T) 
 		EntryPoint:     "run",
 		CronExpression: "* * * * *",
 		Input:          json.RawMessage(`{}`),
-		Enabled:        true,
 		NextRunAt:      time.Now().Add(-time.Minute).UTC(),
 	}); err != nil {
 		t.Fatalf("CreateSchedule: %v", err)

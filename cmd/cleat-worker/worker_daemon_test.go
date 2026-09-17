@@ -1690,7 +1690,7 @@ func TestAPISchedulesList(t *testing.T) {
 	ms := &mockStore{}
 	ms.listSchedulesFn = func(ctx context.Context) ([]engine.Schedule, error) {
 		return []engine.Schedule{
-			{Name: "hourly-job", DefName: "test", CronExpression: "0 * * * *", Enabled: true},
+			{Name: "hourly-job", DefName: "test", CronExpression: "0 * * * *"},
 		}, nil
 	}
 

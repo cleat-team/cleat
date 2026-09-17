@@ -18,7 +18,11 @@ import (
 // admin.get_due_schedules (migrations/postgres/024_cross_tenant_schedules.sql)
 // exists on no other dialect.
 
-// seedSchedule inserts one due, enabled schedule directly through adminDB.
+// seedSchedule inserts one due, LIVE schedule directly through adminDB.
+//
+// Live means `disabled_at` unset: cleat#1702 replaced `enabled` here and
+// inverted the polarity, so the column is simply omitted from the INSERT
+// rather than being given a value.
 //
 // Raw SQL rather than CreateSchedule, because CreateSchedule only ever writes
 // the calling store's own tenant_id and these fixtures need to belong to
@@ -28,9 +32,9 @@ func seedSchedule(t *testing.T, adminDB *sql.DB, name, tenantID string) {
 	t.Helper()
 	if _, err := adminDB.Exec(`
 		INSERT INTO workflow_schedules
-			(name, def_name, entry_point, cron_expression, input, enabled,
+			(name, def_name, entry_point, cron_expression, input,
 			 next_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy)
-		VALUES ($1, $2, 'run', '* * * * *', '{}', true, $3, 'UTC', $4, 'catch_up', 0, 'allow')
+		VALUES ($1, $2, 'run', '* * * * *', '{}', $3, 'UTC', $4, 'catch_up', 0, 'allow')
 	`, name, xtcDefName, time.Now().Add(-time.Minute).UTC(), tenantID); err != nil {
 		t.Fatalf("seed schedule %s: %v", name, err)
 	}
@@ -196,10 +200,10 @@ func TestGetDueSchedulesAcrossTenants_ColumnsMatchTheGoScan(t *testing.T) {
 
 	if _, err := adminDB.Exec(`
 		INSERT INTO workflow_schedules
-			(name, def_name, entry_point, cron_expression, input, enabled,
+			(name, def_name, entry_point, cron_expression, input,
 			 next_run_at, last_run_at, timezone, tenant_id, misfire_policy,
 			 catch_up_limit, overlap_policy, last_run_id)
-		VALUES ('xts-cols', $1, 'my-entry', '5 4 * * *', '{"depth":2}', true,
+		VALUES ('xts-cols', $1, 'my-entry', '5 4 * * *', '{"depth":2}',
 		        $2, $3, 'Europe/Berlin', $4, 'skip', 7, 'skip', 'run-xyz')
 	`, xtcDefName, time.Now().Add(-time.Minute).UTC(), time.Now().Add(-time.Hour).UTC(),
 		xtcTenantB); err != nil {
@@ -229,7 +233,7 @@ func TestGetDueSchedulesAcrossTenants_ColumnsMatchTheGoScan(t *testing.T) {
 		{"DefName", got.DefName, xtcDefName},
 		{"EntryPoint", got.EntryPoint, "my-entry"},
 		{"CronExpression", got.CronExpression, "5 4 * * *"},
-		{"Enabled", got.Enabled, true},
+		{"Disabled", got.Disabled(), false},
 		{"Timezone", got.Timezone, "Europe/Berlin"},
 		{"TenantID", got.TenantID, xtcTenantB},
 		{"MisfirePolicy", got.MisfirePolicy, "skip"},

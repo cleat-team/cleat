@@ -101,12 +101,25 @@ func scheduleRequestDigest(sch Schedule) string {
 
 	// json.Marshal sorts map keys, so this is canonical without a sort here.
 	canon, err := json.Marshal(map[string]any{
-		"name":           sch.Name,
-		"def_name":       sch.DefName,
-		"entry_point":    sch.EntryPoint,
-		"cron":           sch.CronExpression,
-		"input":          input,
-		"enabled":        sch.Enabled,
+		"name":        sch.Name,
+		"def_name":    sch.DefName,
+		"entry_point": sch.EntryPoint,
+		"cron":        sch.CronExpression,
+		"input":       input,
+		// DELIBERATELY STILL "enabled", AND DELIBERATELY STILL A BOOLEAN,
+		// after cleat#1702 replaced the column with `disabled_at`.
+		//
+		// This digest is PERSISTED, in workflow_schedules.request_digest, and
+		// compared against the digest of a later request carrying the same
+		// idempotency key. Renaming the key or changing the value's shape
+		// changes every digest, so after an upgrade a replayed create would be
+		// refused as a payload mismatch against a row it agrees with entirely.
+		//
+		// Digesting the timestamp instead would be wrong even on a fresh
+		// database: two requests that disable the same schedule differ only in
+		// WHEN, which is exactly the difference idempotency exists to ignore.
+		// Liveness is the property the request expresses; the instant is not.
+		"enabled":        !sch.Disabled(),
 		"timezone":       scheduleTimezoneOrDefault(sch.Timezone),
 		"misfire_policy": MisfirePolicyOrDefault(sch.MisfirePolicy),
 		"catch_up_limit": CatchUpLimitOrDefault(sch.CatchUpLimit),

@@ -424,7 +424,6 @@ func TestMySQLStore_CreateSchedule(t *testing.T) {
 		EntryPoint:     "main",
 		CronExpression: "0 2 * * *",
 		Input:          json.RawMessage(`{}`),
-		Enabled:        true,
 		NextRunAt:      time.Date(2025, 1, 1, 2, 0, 0, 0, time.UTC),
 	}
 	err := store.CreateSchedule(testCtx, sch)
@@ -447,12 +446,14 @@ func TestMySQLStore_ListSchedules_Empty(t *testing.T) {
 func TestMySQLStore_ListSchedules_WithRows(t *testing.T) {
 	nextRunAt := time.Date(2025, 1, 1, 2, 0, 0, 0, time.UTC)
 	lastRunAt := time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC)
+	// nil is LIVE; see db_methods_test.go's note on the polarity inversion.
+	disabledAt := time.Date(2024, 12, 25, 0, 0, 0, 0, time.UTC)
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, lastRunAt, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
-				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
+				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), nil, nextRunAt, lastRunAt, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
+				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), disabledAt, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
 			},
 		},
 	}, nil)
@@ -463,7 +464,7 @@ func TestMySQLStore_ListSchedules_WithRows(t *testing.T) {
 	if len(scheds) != 2 {
 		t.Fatalf("expected 2, got %d", len(scheds))
 	}
-	if scheds[0].Name != "sched-1" || !scheds[0].Enabled {
+	if scheds[0].Name != "sched-1" || scheds[0].Disabled() {
 		t.Errorf("unexpected first: %+v", scheds[0])
 	}
 	if scheds[1].LastRunAt != nil {
@@ -526,7 +527,7 @@ func TestMySQLStore_GetDueSchedules_WithRows(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
+				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), nil, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
 			},
 		},
 	}, nil)

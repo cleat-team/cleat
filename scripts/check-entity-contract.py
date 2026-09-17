@@ -65,7 +65,26 @@ CLASSES = ("member", "exempt", "not-an-entity")
 # the previous one could claim. See postgres/086. All three timestamp clauses
 # are now enforced on every member; what remains is only the legacy retirement
 # spellings.
-GRANDFATHER_CEILING = 3
+#
+# 0 of 40 after the fourth, which is the last: `workflow_schedules.enabled` is
+# gone (migration 089/077/081) and the list is EMPTY. All 40 clauses are
+# enforced on all 10 members.
+#
+# THE CEILING SAT AT 3 WHILE THE LIST HELD 1, FOR TWO MERGES, AND THIS GUARD
+# COULD NOT SEE IT. The test below is `len(gf) > GRANDFATHER_CEILING`, which
+# checks the DIRECTION and says nothing about the GAP -- so a ratchet carrying
+# slack is indistinguishable from one that does not, and the slack was enough
+# for a regression to re-add two rows and still pass. Measured:
+#
+#     0d02d392  ceiling=23  rows=23   the guard lands
+#     27857068  ceiling=3   rows=2    #1752, api keys      -- ceiling not lowered
+#     cdeb6228  ceiling=3   rows=1    #1759, workflow_defs -- ceiling not lowered
+#
+# At 0 the gap cannot reopen: a list cannot hold fewer than no rows, so any
+# regression is now a non-empty list against a ceiling of zero and fails on the
+# first row. That is why this is the value to leave it at, and why nothing here
+# needs to start comparing for equality instead.
+GRANDFATHER_CEILING = 0
 
 
 def strip_sql_comments(src):

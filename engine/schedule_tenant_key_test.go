@@ -47,7 +47,6 @@ func createNamedSchedule(t *testing.T, store WorkflowStore, name, defName string
 		DefName:        defName,
 		CronExpression: "0 3 * * *",
 		Input:          json.RawMessage(`{}`),
-		Enabled:        true,
 		NextRunAt:      nextRun,
 		Timezone:       "UTC",
 	}); err != nil {
@@ -181,7 +180,7 @@ func TestDisablingOneTenantsScheduleLeavesTheOtherNamesake(t *testing.T) {
 			if gotA == nil {
 				t.Fatalf("tenant A's schedule %q disappeared", sharedScheduleName)
 			}
-			if !gotA.Enabled {
+			if gotA.Disabled() {
 				t.Errorf("tenant B disabling its own %q disabled tenant A's schedule of the same name",
 					sharedScheduleName)
 			}
@@ -190,7 +189,7 @@ func TestDisablingOneTenantsScheduleLeavesTheOtherNamesake(t *testing.T) {
 			if gotB == nil {
 				t.Fatalf("tenant B's schedule %q disappeared", sharedScheduleName)
 			}
-			if gotB.Enabled {
+			if !gotB.Disabled() {
 				t.Errorf("tenant B's own %q is still enabled after it disabled it", sharedScheduleName)
 			}
 		})

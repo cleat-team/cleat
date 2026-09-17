@@ -84,10 +84,10 @@
 
   async function doToggle(s: Schedule) {
     try {
-      if (s.enabled) {
-        await disableSchedule(s.name);
-      } else {
+      if (s.disabled_at) {
         await enableSchedule(s.name);
+      } else {
+        await disableSchedule(s.name);
       }
       await load();
     } catch (e: any) {
@@ -124,14 +124,14 @@
             <td>{s.entry_point || 'default'}</td>
             <td style="font-family:monospace; font-size:0.8rem;">{s.timezone || 'UTC'}</td>
             <td>
-              <span class="badge" class:badge-completed={s.enabled} class:badge-failed={!s.enabled}>
-                {s.enabled ? 'Yes' : 'No'}
+              <span class="badge" class:badge-completed={!s.disabled_at} class:badge-failed={!!s.disabled_at}>
+                {s.disabled_at ? 'No' : 'Yes'}
               </span>
             </td>
             <td style="font-size:0.8rem;">{formatNextRun(s)}</td>
             <td>
               <button class="btn btn-sm" style="background:#eee; margin-right:0.25rem;" onclick={() => doToggle(s)}>
-                {s.enabled ? 'Disable' : 'Enable'}
+                {s.disabled_at ? 'Enable' : 'Disable'}
               </button>
               <button class="btn btn-danger btn-sm" onclick={() => doDelete(s.name)}>Delete</button>
             </td>

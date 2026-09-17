@@ -335,7 +335,6 @@ CREATE TABLE workflow_schedules (
     entry_point TEXT NOT NULL DEFAULT '',
     cron_expression TEXT NOT NULL,
     input JSONB NOT NULL DEFAULT '{}',
-    enabled BOOLEAN NOT NULL DEFAULT true,
     next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_run_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -356,6 +355,22 @@ CREATE UNIQUE INDEX uq_workflow_schedules_idempotency_key
     ON workflow_schedules (tenant_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 ```
+
+**`enabled` is gone, and `disabled_at` is not a rename of it.** Migration 089 replaced the boolean
+with the entity contract's timestamp (cleat#1702), and the polarity inverted on the way:
+`enabled = true` meant live, `disabled_at IS NULL` means live. A read written against the old
+column does not fail to compile against the new one if it goes through a generic "is this live?"
+helper — it silently answers backwards, which is the hazard the contract exists to remove. The
+scheduler's due-schedule scan and `admin.get_due_schedules()` both filter on `disabled_at IS NULL`,
+and `idx_schedules_tenant_due` is partial on the same predicate (three columns on MySQL, which has
+no partial indexes). Values backfilled by the conversion are an **upper bound**: the boolean
+recorded that a schedule was disabled and never when.
+
+**This is also the accepted API break.** `GET /api/schedules` no longer returns `"enabled": bool`;
+it returns `"disabled_at"`, omitted entirely for a live schedule. `POST /api/schedules/{name}/enable`
+and `/disable` are unchanged — they are the uniform surface the contract asks for, and they now
+clear and stamp the timestamp respectively. Re-disabling keeps the original instant rather than
+moving it.
 
 `idempotency_key` and `request_digest` are what let `POST /api/schedules` tell a retry from a
 genuine name collision (cleat#1495). They live on the schedule row rather than in

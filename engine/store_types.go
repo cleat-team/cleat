@@ -266,6 +266,16 @@ type WorkflowInstance struct {
 	ReclaimCount int64 `json:"reclaim_count"`
 }
 
+// Disabled reports whether this schedule has been retired.
+//
+// Exists for the same reason WorkflowDef.Disabled() does: the question callers
+// ask is "should this schedule fire", and DisabledAt != nil is easy to write as
+// DisabledAt == nil by accident in a negated condition. That risk is higher
+// here than anywhere else in the entity class, because this is the one member
+// whose previous spelling ran the other way -- code and habits written against
+// `enabled` read true for the live case.
+func (s Schedule) Disabled() bool { return s.DisabledAt != nil }
+
 // Schedule is a row from workflow_schedules.
 type Schedule struct {
 	Name           string          `json:"name"`
@@ -273,9 +283,25 @@ type Schedule struct {
 	EntryPoint     string          `json:"entry_point"`
 	CronExpression string          `json:"cron_expression"`
 	Input          json.RawMessage `json:"input"`
-	Enabled        bool            `json:"enabled"`
-	NextRunAt      time.Time       `json:"next_run_at"`
-	LastRunAt      *time.Time      `json:"last_run_at,omitempty"`
+
+	// DisabledAt is when this schedule was retired. nil means live, and a live
+	// schedule is the only kind GetDueSchedules and admin.get_due_schedules()
+	// return.
+	//
+	// cleat#1702 replaced an `enabled BOOLEAN` column with this one (migration
+	// 089/077/081), and that conversion INVERTED POLARITY: enabled=true meant
+	// live. It is the reason the contract picked a timestamp -- `enabled` and
+	// `deprecated` were the same idea at opposite polarity, so a generic
+	// "is this live?" helper over the entity class was silently backwards for
+	// exactly one member. Prefer Disabled() to reading this field in a negated
+	// condition, for the same reason WorkflowDef.Disabled() exists.
+	//
+	// Values backfilled by the conversion are an UPPER BOUND: the boolean
+	// recorded that a schedule was disabled and never when.
+	DisabledAt *time.Time `json:"disabled_at,omitempty"`
+
+	NextRunAt time.Time  `json:"next_run_at"`
+	LastRunAt *time.Time `json:"last_run_at,omitempty"`
 
 	// Timezone is the IANA zone the cron expression's wall-clock fields are
 	// evaluated in (see engine.NextCronTimeIn). Empty means

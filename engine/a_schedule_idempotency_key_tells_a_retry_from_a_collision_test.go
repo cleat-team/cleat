@@ -24,7 +24,6 @@ func TestAScheduleIdempotencyKeyTellsARetryFromACollision(t *testing.T) {
 			EntryPoint:     "Handle",
 			CronExpression: "0 3 * * *",
 			Input:          json.RawMessage(`{"region":"eu"}`),
-			Enabled:        true,
 			NextRunAt:      time.Now().Add(time.Hour),
 		}
 	}

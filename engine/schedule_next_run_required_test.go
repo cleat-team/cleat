@@ -37,7 +37,6 @@ func TestEveryDialectRejectsAScheduleWithNoNextRunAt(t *testing.T) {
 				EntryPoint:     "Handle",
 				CronExpression: "0 3 * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 			}
 
 			// Zero NextRunAt: refused, identically, on every backend.
@@ -94,7 +93,6 @@ func TestAPastNextRunAtIsAccepted(t *testing.T) {
 				EntryPoint:     "Handle",
 				CronExpression: "0 3 * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(-48 * time.Hour),
 			}
 			if err := store.CreateSchedule(context.Background(), sch); err != nil {

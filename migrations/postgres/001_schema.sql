@@ -379,7 +379,36 @@ CREATE TABLE IF NOT EXISTS workflow_schedules (
     entry_point TEXT NOT NULL DEFAULT '',
     cron_expression TEXT NOT NULL,
     input JSONB NOT NULL DEFAULT '{}',
+    -- cleat#1702: BOTH SPELLINGS ARE HERE, AND THAT IS DELIBERATE -- read this
+    -- before "tidying" the boolean away.
+    --
+    -- `enabled BOOLEAN` is the legacy retirement spelling, dropped by migration
+    -- 089. `disabled_at` is the contract spelling, added by 084. Between those
+    -- two migrations an EXISTING database legitimately carries both, and
+    -- declaring both here makes a FRESH database traverse the same window
+    -- instead of a shortcut -- so 089's guards, and its backfill, are the same
+    -- code path everywhere.
+    --
+    -- The other two conversions (087 api keys, 088 workflow_defs) removed their
+    -- legacy column from this file, per the header's "final column set". This
+    -- one cannot, and a test caught the attempt: migration 024 creates
+    -- admin.get_due_schedules() with a LANGUAGE sql body naming `enabled`, and
+    -- PostgreSQL validates those bodies AT CREATE TIME, so dropping the column
+    -- here kills a fresh bootstrap at 024 -- four migrations before 089, with
+    -- an error naming a column nobody asked about. Editing 024's body instead
+    -- made it byte-identical to 089's, and
+    -- routine_definition_drift_test.go rejected THAT: with two identical
+    -- definitions in the tree it has no way to tell a current database from one
+    -- stuck at 024, which it reports as "a hole in this test, not a property of
+    -- the schema".
+    --
+    -- What the header's invariant is actually FOR is re-applying this file to an
+    -- already-migrated database (TestShippedSchema_IsIdempotent). That still
+    -- holds: CREATE TABLE IF NOT EXISTS is a no-op on the second pass, and the
+    -- part that genuinely breaks -- an INDEX naming a dropped column -- is
+    -- final below, on disabled_at. See migration 089's header.
     enabled BOOLEAN NOT NULL DEFAULT true,
+    disabled_at TIMESTAMPTZ,
     next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_run_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -506,7 +535,7 @@ CREATE INDEX IF NOT EXISTS idx_instances_ready_claim
 -- Tenant-scoped lookups
 CREATE INDEX IF NOT EXISTS idx_event_history_tenant_wf ON event_history(tenant_id, workflow_id, step);
 CREATE INDEX IF NOT EXISTS idx_signals_tenant_wf ON workflow_signals(tenant_id, workflow_id, signal_name);
-CREATE INDEX IF NOT EXISTS idx_schedules_tenant_enabled ON workflow_schedules(tenant_id, enabled, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_schedules_tenant_due ON workflow_schedules(tenant_id, next_run_at) WHERE disabled_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_instances_created_at ON workflow_instances(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_instances_terminal_completed
     ON workflow_instances(tenant_id, status, completed_at)
