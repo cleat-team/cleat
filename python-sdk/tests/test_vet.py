@@ -740,3 +740,131 @@ def test_no_false_positive_innocent_imports(tmp_path) -> None:
     )
     result = analyze_file(fp)
     assert len(result.errors) == 0
+
+
+# ---------------------------------------------------------------------------
+# cleat#1813 — the determinism scope is what the workflow REACHES, not who
+# reaches it.
+#
+# compute_closure walks the call graph BACKWARDS, from functions that call
+# ``h.*`` to whoever calls them. That set was used for both the determinism
+# checks and the threading check, so a function that merely CALLED a workflow
+# became "workflow code" and everything in it was checked.
+#
+# The cost was not theoretical. examples/python-langchain reported 24 findings
+# -- 22x PY010 and 2x PY011 -- all of them inside run_test() and main(), the
+# file's mock-driven test harness, which the README tells users to run with
+# ``python research_agent.py --test``. The single call
+# ``_research_agent_impl(mock, topic)`` was enough to pull the harness in. The
+# determinism gate built on top of this then refused the build command that
+# same README documents.
+#
+# These tests pin both directions, because the repair has an obvious way to go
+# wrong: narrowing the scope until the false positives vanish also removes the
+# checks from code that genuinely is the workflow.
+# ---------------------------------------------------------------------------
+
+
+_HARNESS = """
+    from cleat_sdk import cleat_entry, HostCalls
+
+    class _MockHostCalls:
+        def now(self) -> int:
+            return 0
+
+    def _impl(h: HostCalls, topic: str) -> str:
+        return str(h.now())
+
+    @cleat_entry
+    def workflow(h: HostCalls, topic: str) -> str:
+        return _impl(h, topic)
+
+    def run_test() -> None:
+        # A test harness: it CONSTRUCTS a HostCalls and calls into the
+        # workflow. It is the boundary where `h` comes from, not a participant.
+        mock = _MockHostCalls()
+        print("running")
+        print(_impl(mock, "topic"))
+"""
+
+
+def test_a_harness_that_calls_the_workflow_is_not_workflow_code(tmp_path):
+    """cleat#1813: callers of a workflow must not be checked for determinism."""
+    _assert_no_error(tmp_path, _HARNESS, "PY010")
+
+
+def test_a_harness_that_constructs_hostcalls_is_not_missing_one(tmp_path):
+    """The other half of the same defect.
+
+    run_test has no ``h`` parameter and does not need one -- it makes the
+    HostCalls it passes down. Reporting PY011 here says "add a parameter" to a
+    function that is the source of the value.
+    """
+    _assert_no_error(tmp_path, _HARNESS, "PY011")
+
+
+def test_a_helper_the_workflow_calls_is_still_checked(tmp_path):
+    """The inverse, and the reason the scope is not simply made smaller.
+
+    Narrowing until the false positives disappear would also stop checking the
+    workflow's own helpers. A function the entry point reaches is workflow code
+    however it is written, so its file I/O is still PY002.
+    """
+    _assert_analyze(
+        tmp_path,
+        """
+        from cleat_sdk import cleat_entry, HostCalls
+
+        def helper():
+            return open("data.txt").read()
+
+        @cleat_entry
+        def workflow(h: HostCalls, input: str) -> str:
+            return helper()
+        """,
+        "PY002",
+    )
+
+
+def test_a_helper_that_uses_h_without_receiving_it_is_still_reported(tmp_path):
+    """PY011 must survive the narrowing, on the case it exists for.
+
+    ``helper`` is reached from the entry and uses ``h`` without taking it as a
+    parameter -- a NameError waiting to happen, and exactly what the threading
+    check is for.
+    """
+    _assert_analyze(
+        tmp_path,
+        """
+        from cleat_sdk import cleat_entry, HostCalls
+
+        def helper():
+            return h.now()
+
+        @cleat_entry
+        def workflow(h: HostCalls, input: str) -> str:
+            return str(helper())
+        """,
+        "PY011",
+    )
+
+
+def test_a_file_with_no_entry_point_still_checks_its_durable_functions(tmp_path):
+    """The forward walk needs roots; a file with no @cleat_entry has none.
+
+    Falling back to the callers closure keeps such files behaving as they did.
+    Without this the narrowing would trade a false positive for a silent false
+    negative -- a helper module would be checked for nothing at all.
+    """
+    _assert_analyze(
+        tmp_path,
+        """
+        import time
+
+        from cleat_sdk import HostCalls
+
+        def durable_helper(h: HostCalls) -> str:
+            return str(h.now()) + str(time.time())
+        """,
+        "PY005",
+    )
