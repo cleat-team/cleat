@@ -868,3 +868,40 @@ def test_a_file_with_no_entry_point_still_checks_its_durable_functions(tmp_path)
         """,
         "PY005",
     )
+
+
+def test_a_pure_helper_is_not_asked_for_a_hostcalls_parameter(tmp_path):
+    """The threading scope is an INTERSECTION, and this is why.
+
+    A first version of the #1813 fix used the determinism scope for the
+    threading check too. That scope is everything an entry can reach, which
+    includes string and arithmetic helpers that touch no host call and have no
+    reason to take ``h``.
+
+    Caught on the AssemblyScript twin (cleat#1799), where the same substitution
+    made six pure helpers in examples/as-workflow -- extractStringField,
+    isDigit, parseI64 and friends -- fail E005 on an unmodified example. The
+    Python version had it too and no test or example happened to show it:
+    examples/python-langchain went to 0 findings because all of its helpers
+    take ``h``.
+
+    So neither closure alone works. The callers closure flags the boundary that
+    SUPPLIES h; the callee closure flags helpers that NEED no h. Only functions
+    in both -- reachable from an entry AND able to reach a host call -- are
+    being asked a question that means anything.
+    """
+    _assert_no_error(
+        tmp_path,
+        """
+        from cleat_sdk import cleat_entry, HostCalls
+
+        def is_digit(c: str) -> bool:
+            return c in "0123456789"
+
+        @cleat_entry
+        def workflow(h: HostCalls, input: str) -> str:
+            x = is_digit(input)
+            return str(x)
+        """,
+        "PY011",
+    )

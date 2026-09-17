@@ -945,25 +945,35 @@ def analyze_file(filepath: str) -> AnalysisResult:
 
     # --- HostCalls threading verification ---
     #
-    # Same scope as the determinism checks, and the reasoning took a correction.
+    # NEITHER closure alone is the right scope here, and both of the obvious
+    # answers are wrong in a way that only shows up on real code.
     #
-    # The first version of this fix kept the CALLERS closure here, on the
-    # argument that "a function that can reach a host call must supply h" is a
-    # statement about callers. That left 2 of the original 24 findings on
-    # examples/python-langchain standing -- PY011 against run_test and main --
-    # so the example still would not build, and both were still false.
+    # The CALLERS closure alone flags a test harness: run_test in
+    # examples/python-langchain CONSTRUCTS a HostCalls and passes it down, so
+    # it is the boundary where `h` comes from -- every workflow has one, the
+    # runtime in production and a mock in a test -- and a boundary does not
+    # need to receive `h`.
     #
-    # They are false for a reason worth naming: run_test CONSTRUCTS a
-    # HostCalls (`mock = _MockHostCalls()`) and passes it down. It is the
-    # boundary where `h` comes from, which every workflow has -- the runtime in
-    # production, a mock in a test. A boundary does not need to receive `h`; it
-    # is where `h` starts.
+    # The DETERMINISM scope alone flags pure helpers. `def is_digit(c: str)`,
+    # reached from an entry and touching no host call, has no reason to take
+    # `h`, and demanding it would be noise on every string or arithmetic helper
+    # a workflow uses. Measured while fixing the AssemblyScript twin
+    # (cleat#1799), where the same substitution made SIX pure helpers in
+    # examples/as-workflow -- extractStringField, isDigit, parseI64 and
+    # friends -- fail E005 on an unmodified example.
     #
-    # A function that genuinely participates in durable execution is reachable
-    # FROM an entry, or calls h.* itself. Both are in the scope below, so the
-    # check still fires on the case it exists for: a helper the workflow calls
-    # that uses `h` without receiving it.
-    threading_scope = set(determinism_scope) | entry_names
+    # The question the check actually asks is "can this function obtain the `h`
+    # it needs?", and that is only meaningful for a function that BOTH
+    # participates in the workflow and reaches a host call. So: the
+    # intersection.
+    #
+    #   reachable from an entry   and   able to reach a host call
+    #
+    #   is_digit   forward yes, backward no   -> excluded, it needs no h
+    #   run_test   forward no,  backward yes  -> excluded, it supplies h
+    #   a durable helper missing h            -> in both, reported
+    threading_scope = (set(closure) | leaf_callers) & set(determinism_scope)
+    threading_scope |= entry_names
     threading_checker = ThreadingChecker(filepath, func_defs, threading_scope)
     threading_errors = threading_checker.check()
     result.errors.extend(threading_errors)
