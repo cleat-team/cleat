@@ -197,6 +197,46 @@ EOF
   printf '%s\n' "$findings"
 }
 
+# stale_entries prints the baseline lines the current scan does not produce.
+# cleat#1746's shape, on this guard's baseline.
+#
+# WHY THE OTHER DIRECTION IS NOT ENOUGH. The comparison below asks only
+# "current - baseline": is anything reported that has not been granted. A
+# baseline entry the scan stopped producing is invisible to it, and that is the
+# entry that matters most here -- it is a STANDING GRANT to be test-only,
+# sitting on a symbol that someone has since wired into production. Unwire it
+# again tomorrow and this guard stays green, which is precisely the regression
+# the grant was written to record.
+#
+# WHOLE-LINE, so no key-prefix hazard. check-skips.sh's equivalent keys on two
+# of three tab-separated fields and has to terminate the key with a literal tab
+# to stop `engine Setup` matching `engine SetupForTenant`. A baseline line here
+# is the whole key -- "<dir><TAB><symbol>" -- so -Fx compares the entire line
+# and a longer symbol cannot satisfy a shorter one.
+#
+# grep -Fxv rather than comm, for the reason stated at the "new" comparison
+# below: comm requires both inputs sorted in its own collation and emits
+# garbage when they disagree, which is what a darwin-generated baseline did
+# against the CI runner. Set membership has no ordering requirement.
+#
+# A SEPARATE FUNCTION so --self-test can drive it against fixtures. Exercising
+# it through the real scan costs two minutes and a staged repo, and a check
+# whose only assertion is that it says nothing on a healthy tree is the defect
+# this change is about.
+#
+# $1 is the current scan; the baseline path comes from $BASELINE, or $2 when
+# given, which is what the self-test passes.
+stale_entries() {
+  local current="$1" baseline="${2:-$BASELINE}"
+  # An empty $current would make every baseline line stale. That cannot reach
+  # here -- scan() returns the sentinel instead, and die_if_scan_failed exits
+  # first -- but the guard is cheap and the failure would be maximally noisy.
+  if [ -z "$(printf '%s' "$current" | tr -d '[:space:]')" ]; then
+    echo "ERROR: stale_entries called with an empty scan result." >&2
+    return 1
+  fi
+  grep -Fxv -f <(printf '%s\n' "$current") "$baseline" | grep -v '^[[:space:]]*$' || true
+}
 
 die_if_scan_failed() {
   if [ "$1" = "$SCAN_FAILED" ]; then
@@ -239,10 +279,56 @@ if [ "${1:-}" = "--self-test" ]; then
     st_fails=$((st_fails + 1))
   fi
 
+  # The stale-entry check, driven against fixtures rather than the real scan.
+  #
+  # A KNOWN-POSITIVE FIRST. "It says nothing on a healthy tree" is satisfied by
+  # a stale_entries that returns nothing ever, which is the version this guard
+  # effectively shipped with for as long as it has had a baseline. So the case
+  # asserted is one constructed to be stale.
+  st_base="$(mktemp)"
+  printf 'engine\tfunc live\nengine\tfunc GoneAway\nwasm\tconst live2\n' > "$st_base"
+  st_scan="$(printf 'engine\tfunc live\nwasm\tconst live2\n')"
+  st_got="$(stale_entries "$st_scan" "$st_base")"
+
+  if ! printf '%s\n' "$st_got" | grep -qF 'GoneAway'; then
+    echo "SELF-TEST FAIL: a baseline entry the scan does not produce was not reported." >&2
+    st_fails=$((st_fails + 1))
+  fi
+  # The negative control, and it is the half that catches an over-eager check:
+  # report a live entry and every run fails, which gets the guard switched off.
+  if printf '%s\n' "$st_got" | grep -qE 'live'; then
+    echo "SELF-TEST FAIL: a baseline entry the scan DOES produce was reported stale." >&2
+    st_fails=$((st_fails + 1))
+  fi
+  # Substring safety, and the FIXTURE DIRECTION is the whole assertion. Drop the
+  # -x and grep matches a baseline line whenever any scan line appears ANYWHERE
+  # in it -- so a SHORT scan line silently vouches for a LONGER baseline entry.
+  # The baseline therefore holds the long name and the scan produces the short
+  # one.
+  #
+  # Written the other way round first, and it passed against a deliberately
+  # broken -F: a long scan line cannot be CONTAINED IN a short baseline entry,
+  # so that fixture is green under both the correct comparison and the broken
+  # one. An assertion that cannot distinguish them is not an assertion.
+  #
+  # The pair is constructed, and deliberately: no two entries in today's
+  # baseline contain one another, so waiting for a real one is waiting for the
+  # defect. Re-derive with
+  #   python3 -c "ls=[l.rstrip() for l in open('scripts/deadcode-baseline.txt') if l.strip()];
+  #               print(sum(1 for a in ls for b in ls if a!=b and a in b))"   # 0
+  printf 'engine\tfunc isDeadlockError\n' > "$st_base"
+  if ! stale_entries "$(printf 'engine\tfunc is\n')" "$st_base" |
+      grep -qF 'func isDeadlockError'; then
+    echo "SELF-TEST FAIL: a baseline entry was satisfied by a scan line it merely contains." >&2
+    st_fails=$((st_fails + 1))
+  fi
+  rm -f "$st_base"
+
   if [ "$st_fails" != 0 ]; then
     exit 1
   fi
-  echo "OK: self-test passed, an uninstallable tool fails the guard (exit $st_rc)."
+  echo "OK: self-test passed, an uninstallable tool fails the guard (exit $st_rc)"
+  echo "    and a baseline entry the scan no longer produces is reported."
   exit 0
 fi
 
@@ -284,4 +370,31 @@ if [ -n "$new" ]; then
   exit 1
 fi
 
-echo "OK: no new test-only code ($(printf '%s\n' "$current" | grep -c . ) known entries in the baseline)."
+# And the other direction: a grant that covers nothing. cleat#1746.
+stale="$(stale_entries "$current")"
+
+if [ -n "$stale" ]; then
+  echo "ERROR: $BASELINE lists entries the scan no longer reports:" >&2
+  echo >&2
+  printf '%s\n' "$stale" | sed 's/^/  /' >&2
+  echo >&2
+  echo "Each of these is a standing grant to be called only from tests, sitting" >&2
+  echo "on a symbol that is no longer test-only. Nothing is wrong with the tree;" >&2
+  echo "the baseline is describing a state that has been fixed. Left in place the" >&2
+  echo "grant outlives what it granted, and the same code going test-only again" >&2
+  echo "would not fail this guard." >&2
+  echo >&2
+  echo "Refresh the baseline with:" >&2
+  echo "  scripts/check-test-only-code.sh --update" >&2
+  echo "Rebase FIRST -- a regeneration from a stale base reinstates whatever the" >&2
+  echo "other side removed, and merges cleanly doing it (WORKSTREAM.md R6a)." >&2
+  exit 1
+fi
+
+# BOTH counts, because they are the two sets that were just compared and this
+# line used to print one of them under the other's name: it reported
+# `$current | grep -c .` as "known entries in the baseline". On a clean tree the
+# two agree, so the label was never wrong where anyone looked. On develop today
+# it printed 52 against a 60-line file -- the guard stating the size of its own
+# blind spot, in the reassuring direction, and exiting 0.
+echo "OK: no new test-only code ($(grep -c . "$BASELINE") baseline entries, $(printf '%s\n' "$current" | grep -c . ) reported by the scan, none stale)."
