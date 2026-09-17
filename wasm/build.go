@@ -304,6 +304,34 @@ func BuildPythonWasm(entry, output string, verbose bool) error {
 	return BuildPythonWasmWithRuntime(entry, output, "", verbose)
 }
 
+// AbsoluteEntryPath makes the file half of a "path:function" entry spec
+// absolute, leaving the function name untouched.
+//
+// Exported so it can be tested without a Python toolchain: the behaviour is
+// pure string and filesystem-path work, and the alternative is a test that
+// needs componentize-py to say anything at all.
+//
+// rsplit on the LAST colon, matching build_wasm.py's `entry.rsplit(":", 1)`,
+// so a directory containing a colon resolves the same way on both sides.
+//
+// An entry with no colon, or one whose colon is at position 0, is returned
+// untouched: there is no file half to resolve, and build_wasm.py's parse_entry
+// should reject it with its own message rather than have this silently
+// reinterpret it. Same for a path that is already absolute, and for the case
+// where filepath.Abs fails -- passing the original through leaves the error to
+// the layer that can describe it.
+func AbsoluteEntryPath(entry string) string {
+	i := strings.LastIndex(entry, ":")
+	if i <= 0 {
+		return entry
+	}
+	abs, err := filepath.Abs(entry[:i])
+	if err != nil {
+		return entry
+	}
+	return abs + entry[i:]
+}
+
 // BuildPythonWasmWithRuntime compiles a Python workflow to WASM, selecting
 // the output format based on targetRuntime:
 //   - "wasmtime" — Component Model binary (skip decomposition)
@@ -322,7 +350,23 @@ func BuildPythonWasmWithRuntime(entry, output, targetRuntime string, verbose boo
 		return fmt.Errorf("build script not found at %s: %w", buildScript, err)
 	}
 
-	args := []string{buildScript, "--entry", entry, "--output", output}
+	// THE ENTRY PATH IS MADE ABSOLUTE HERE, and the reason is cmd.Dir below.
+	//
+	// build_wasm.py runs with its working directory set to the SDK root, and
+	// validate_entry resolves the path with a bare Path(entry_file) -- so a
+	// RELATIVE entry was looked up under python-sdk/ rather than under the
+	// directory the user ran the command in. Both documented Python example
+	// commands are relative, so both failed:
+	//
+	//	$ cd examples/python-langchain
+	//	$ cleat build --target python --entry research_agent.py:langchain_research_agent
+	//	Error: Entry file not found: research_agent.py     <- it is right there
+	//
+	// cleat#1836. Resolving in Go rather than in build_wasm.py keeps the fix
+	// next to the cmd.Dir that causes it: the script is entitled to assume its
+	// own working directory, and the caller is the one changing it.
+	//
+	args := []string{buildScript, "--entry", AbsoluteEntryPath(entry), "--output", output}
 	if verbose {
 		args = append(args, "--verbose")
 	}
