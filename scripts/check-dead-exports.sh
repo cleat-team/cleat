@@ -98,6 +98,12 @@ FINDER="$REPO_ROOT/scripts/finddeadexports.go"
 # regenerate it without reading it, which is how a guard stops guarding.
 BASELINE="scripts/deadexports-baseline.txt"
 
+# The second question's list, same key and same relative style. Separate file
+# rather than a third column on the one above: the two conditions are mutually
+# exclusive, so no entry ever appears in both, and one file per question keeps
+# each diff about one claim.
+TESTONLY_BASELINE="scripts/exported-test-only-baseline.txt"
+
 # Package roots scanned for exported declarations. Deliberately excludes:
 #   cleat/        -- "Public Go API" (CLAUDE.md); has its own go.mod
 #   pluginapi/    -- "Public re-exports for external plugin authors"
@@ -152,14 +158,19 @@ fi
 # finding a human reads. Stripping too LITTLE counts prose as a call and marks a
 # dead function used -- which is silent, and is the bug being fixed. When this
 # heuristic is wrong it should be wrong in the loud direction.
+# A fourth argument, skip_tests, makes the filter ignore callers in _test.go
+# files. That is the only difference between this guard's two questions -- "does
+# anything call it" and "does anything OUTSIDE A TEST call it" -- so they share
+# one grep and one filter rather than being two scans that can drift.
 code_use_filter() {
-  awk -v name="$1" -v decl_file="$2" -v decl_line="$3" '
+  awk -v name="$1" -v decl_file="$2" -v decl_line="$3" -v skip_tests="${4:-0}" '
     {
       # split "file:line:content" on the FIRST two colons only; content keeps
       # any colons of its own.
       i = index($0, ":");            f = substr($0, 1, i-1); rest = substr($0, i+1)
       j = index(rest, ":");          ln = substr(rest, 1, j-1); c = substr(rest, j+1)
       if (f == decl_file && ln == decl_line) next    # the declaration itself
+      if (skip_tests == 1 && f ~ /_test\.go$/) next  # a test is not a caller
       gsub(/"[^"]*"/, "", c)                         # strings first...
       gsub(/`[^`]*`/, "", c)
       sub(/\/\/.*/, "", c)                           # ...then comments
@@ -211,15 +222,30 @@ scan() {
     # red/green probe: see the commit that added this script.
     matches="$(grep -rnw --include='*.go' -- "$name" . 2>/dev/null | sed 's#^\./##')"
 
-    if [ -n "$(printf '%s\n' "$matches" | code_use_filter "$name" "$file" "$line")" ]; then
-      continue
-    fi
-
     label="$name"
     if [ "$recv" != "-" ]; then
       label="${recv}.${name}"
     fi
-    out="${out}${file}	func ${label}"$'\n'
+
+    # TWO PREDICATES OVER ONE GREP, and the classification is mutually
+    # exclusive by construction:
+    #
+    #   dead      nothing calls it, tests included
+    #   testonly  something calls it, and everything that does is a test
+    #
+    # That exclusivity is what keeps the two baselines from overlapping. A
+    # zero-caller symbol is the STRONGER finding, so it is reported as dead and
+    # never appears in the test-only list -- otherwise every entry in
+    # deadexports-baseline.txt would also need an entry in the other file, and
+    # two files asserting the same thing drift apart.
+    if [ -n "$(printf '%s\n' "$matches" | code_use_filter "$name" "$file" "$line" 0)" ]; then
+      if [ -n "$(printf '%s\n' "$matches" | code_use_filter "$name" "$file" "$line" 1)" ]; then
+        continue                                  # a real, non-test caller
+      fi
+      out="${out}${file}	func ${label}	testonly"$'\n'
+      continue
+    fi
+    out="${out}${file}	func ${label}	dead"$'\n'
   done < "$decls"
 
   rm -f "$decls" "$stderr_f"
@@ -280,6 +306,18 @@ func DeadOnlyInCommentElsewhere() {}
 // DeadOnlyInStringElsewhere is named only inside a string literal in b.go.
 func DeadOnlyInStringElsewhere() {}
 
+// TestOnlyCaller is called from a_test.go and from nowhere else. It is the
+// known-positive for the second predicate: a scan that answers only the
+// "zero callers anywhere" question reports nothing for this, because the test
+// IS a caller.
+func TestOnlyCaller() {}
+
+// LiveFromTestAndCode is called from a_test.go AND from b.go. It is the
+// control that stops a scan which reports EVERYTHING as test-only from
+// passing: without it, classifying every symbol as testonly satisfies the
+// TestOnlyCaller case.
+func LiveFromTestAndCode() {}
+
 func sameFileCaller() { LiveFromSameFile() }
 FIXTURE_A
 
@@ -294,16 +332,31 @@ var notACall = map[string]string{
 	"DeadOnlyInStringElsewhere": "documented as unreachable; still not a call",
 }
 
-func otherFileCaller() { LiveFromOtherFile() }
+func otherFileCaller() { LiveFromOtherFile(); LiveFromTestAndCode() }
 
 var _ = notACall
 FIXTURE_B
 
+  # A _test.go file is not a source of DECLARATIONS (finddeadexports.go skips
+  # them) but it is a source of REFERENCES, which is the whole point of the
+  # second predicate.
+  cat > "$tmp/pkg/a_test.go" <<'FIXTURE_TEST'
+package pkg
+
+import "testing"
+
+func TestBoth(t *testing.T) {
+	TestOnlyCaller()
+	LiveFromTestAndCode()
+}
+FIXTURE_TEST
+
   expected="$(printf '%s\n' \
-    'pkg/a.go	func DeadNoRefs' \
-    'pkg/a.go	func DeadOnlyInCommentElsewhere' \
-    'pkg/a.go	func DeadOnlyInOwnDocComment' \
-    'pkg/a.go	func DeadOnlyInStringElsewhere' | LC_ALL=C sort)"
+    'pkg/a.go	func DeadNoRefs	dead' \
+    'pkg/a.go	func DeadOnlyInCommentElsewhere	dead' \
+    'pkg/a.go	func DeadOnlyInOwnDocComment	dead' \
+    'pkg/a.go	func DeadOnlyInStringElsewhere	dead' \
+    'pkg/a.go	func TestOnlyCaller	testonly' | LC_ALL=C sort)"
 
   # scan() greps "." from the CWD, so running it from the fixture points both
   # halves -- declarations and references -- at the fixture and nothing else.
@@ -338,46 +391,87 @@ self_test || exit 1
 
 findings="$(scan "${ROOTS[@]}")" || exit 2
 
+# The scan's third column is the condition. Split here and drop it, so each
+# baseline file keeps the two-column "<file>\tfunc <Label>" shape it already
+# has -- adding a column would have rewritten every line of
+# deadexports-baseline.txt for no gain and made the diff unreadable.
+dead_findings="$(printf '%s\n' "$findings" | awk -F'\t' '$3=="dead"     {print $1"\t"$2}')"
+testonly_findings="$(printf '%s\n' "$findings" | awk -F'\t' '$3=="testonly" {print $1"\t"$2}')"
 
 if [ "${1:-}" = "--update" ]; then
-  printf '%s\n' "$findings" > "$BASELINE"
+  printf '%s\n' "$dead_findings"     | grep -v '^$' > "$BASELINE" || true
+  printf '%s\n' "$testonly_findings" | grep -v '^$' > "$TESTONLY_BASELINE" || true
   echo "Wrote $(grep -c . "$BASELINE" || true) entries to $BASELINE"
+  echo "Wrote $(grep -c . "$TESTONLY_BASELINE" || true) entries to $TESTONLY_BASELINE"
   exit 0
 fi
 
-new="$(printf '%s\n' "$findings" | grep -Fxv -f "$BASELINE" || true)"
-new="$(printf '%s' "$new" | grep -v '^$' || true)"
+# gate compares one condition's findings against one baseline, both directions:
+# new findings fail, and baseline lines the scan no longer reports fail too.
+#
+# One function rather than two copies, because the second copy is where the
+# staleness half gets forgotten -- and a baseline that can only grow stale is
+# the defect cleat#1743 was filed for.
+gate() {
+  local found="$1" baseline="$2" headline="$3" advice="$4" new stale
+  new="$(printf '%s\n' "$found" | grep -Fxv -f "$baseline" || true)"
+  new="$(printf '%s' "$new" | grep -v '^$' || true)"
+  if [ -n "$new" ]; then
+    echo "ERROR: $headline" >&2
+    echo >&2
+    printf '%s\n' "$new" | sed 's/^/  /' >&2
+    echo >&2
+    printf '%s\n' "$advice" >&2
+    return 1
+  fi
 
-if [ -n "$new" ]; then
-  echo "ERROR: exported code with zero callers anywhere in the tree (not even tests):" >&2
-  echo >&2
-  printf '%s\n' "$new" | sed 's/^/  /' >&2
-  echo >&2
-  echo "Either wire it into production, delete it, or -- if it is genuinely" >&2
-  echo "meant as public API not yet adopted -- move it under cleat/ or" >&2
-  echo "pluginapi/ (the packages this script treats as public surface), or" >&2
-  echo "add it to $BASELINE with a reason in the commit message via" >&2
-  echo "  scripts/check-dead-exports.sh --update" >&2
-  exit 1
-fi
+  stale="$(LC_ALL=C comm -23 <(LC_ALL=C sort -u "$baseline") \
+                             <(printf '%s\n' "$found" | grep -v '^$' | LC_ALL=C sort -u))"
+  if [ -n "$(printf '%s' "$stale" | tr -d '[:space:]')" ]; then
+    echo "ERROR: $baseline lists entries the scan no longer reports:" >&2
+    echo >&2
+    printf '%s\n' "$stale" | sed 's/^/  /' >&2
+    echo >&2
+    echo "A baseline is a ratchet: it may shrink, never silently hold. Each line" >&2
+    echo "above is a standing claim the scan now disagrees with -- because the" >&2
+    echo "symbol was wired up, deleted, or the scan itself changed. Left alone" >&2
+    echo "the file accumulates false claims that read as authoritative: on" >&2
+    echo "develop before cleat#1743, 10 of 16 entries were stale, one named a" >&2
+    echo "function that no longer existed, and the guard reported all 16 as" >&2
+    echo "'known entries' on every green run." >&2
+    echo >&2
+    echo "Re-derive both baselines with:" >&2
+    echo "  scripts/check-dead-exports.sh --update" >&2
+    return 1
+  fi
+  return 0
+}
 
-stale="$(LC_ALL=C comm -23 <(LC_ALL=C sort -u "$BASELINE") <(printf '%s\n' "$findings" | grep -v '^$' | LC_ALL=C sort -u))"
-if [ -n "$(printf '%s' "$stale" | tr -d '[:space:]')" ]; then
-  echo "ERROR: $BASELINE lists entries the scan no longer reports:" >&2
-  echo >&2
-  printf '%s\n' "$stale" | sed 's/^/  /' >&2
-  echo >&2
-  echo "A baseline is a ratchet: it may shrink, never silently hold. Each line" >&2
-  echo "above is a standing claim that an exported function has no callers," >&2
-  echo "and the scan now disagrees -- because it was wired up, deleted, or the" >&2
-  echo "scan itself changed. Left alone the file accumulates false claims that" >&2
-  echo "read as authoritative: on develop before cleat#1743, 10 of 16 entries" >&2
-  echo "were stale, one named a function that no longer existed, and the guard" >&2
-  echo "reported all 16 as 'known entries' on every green run." >&2
-  echo >&2
-  echo "Re-derive it with:" >&2
-  echo "  scripts/check-dead-exports.sh --update" >&2
-  exit 1
-fi
+rc=0
+gate "$dead_findings" "$BASELINE" \
+  "exported code with zero callers anywhere in the tree (not even tests):" \
+  "Either wire it into production, delete it, or -- if it is genuinely
+meant as public API not yet adopted -- move it under cleat/ or
+pluginapi/ (the packages this script treats as public surface), or
+add it to $BASELINE with a reason in the commit message via
+  scripts/check-dead-exports.sh --update" || rc=1
 
-echo "OK: no new dead exports ($(grep -c . "$BASELINE" || true) known entries in the baseline, none stale)."
+gate "$testonly_findings" "$TESTONLY_BASELINE" \
+  "exported code whose ONLY callers are tests (cleat#1795):" \
+  "This is not reported by either guard that exists to catch dead code, which
+is why it has its own list. scripts/check-test-only-code.sh runs staticcheck
+U1000, and U1000 does not report exported identifiers in non-main packages at
+all; the zero-caller question above sees the test as a caller and moves on. So
+a symbol here is tested, passing, and wired to nothing -- the shape
+cmd/cleatctl/revokeapikey.go:22 describes for auth.TenantStore.RevokeAPIKey,
+which was noticed, written about, given a CLI command, and is STILL uncalled
+because the command issues its own SQL instead.
+
+Either give it a production caller, delete it, or add it to
+$TESTONLY_BASELINE via
+  scripts/check-dead-exports.sh --update" || rc=1
+
+[ "$rc" -eq 0 ] || exit 1
+
+echo "OK: no new dead exports ($(grep -c . "$BASELINE" || true) known) and no new"
+echo "    test-only exports ($(grep -c . "$TESTONLY_BASELINE" || true) known), none stale."
