@@ -955,6 +955,7 @@ func main() {
 	// looks in --schema. That was cleat#1287: the migration run did not even
 	// finish, because nineteen files pinned public and twenty-five did not.
 	migrator := migration.NewRunner(migrateDB, migration.Dialect(factory.Dialect()), "migrations").
+		WithLockTimeout(*migrationLockTimeout).
 		WithSchema(*schemaName)
 	if err := migrator.Run(ctx); err != nil {
 		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges (see --migrate-db)", "worker_id", workerID, "error", err)
@@ -1003,6 +1004,7 @@ func main() {
 				os.Exit(1)
 			}
 			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), "migrations").
+				WithLockTimeout(*migrationLockTimeout).
 				WithSchema(*schemaName)
 			if terr = tm.Run(ctx); terr != nil {
 				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
