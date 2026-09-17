@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"os"
 	"testing"
 	"time"
 
@@ -105,6 +106,13 @@ func gcSplitDialects() []gcSplitDialect {
 			name:    "mysql",
 			dialect: testutil.DialectMySQL,
 			setup: func(t *testing.T) (WorkflowStore, *sql.DB) {
+				// GATE BEFORE TOUCHING THE DSN. testutil.MySQLTestDB falls back
+				// to a default DSN when CLEAT_TEST_MYSQL is unset and then
+				// t.Fatalf's on the failed ping, so without this the test HARD
+				// FAILS in every job that does not provision MySQL rather than
+				// skipping. The backend harness gates with Enabled() first
+				// (store_backends_test.go); this is the same gate.
+				requireDialectDSN(t, "CLEAT_TEST_MYSQL")
 				db := testutil.MySQLTestDB(t)
 				testutil.SetupMySQLFullSchema(t, db)
 				return NewMySQLStore(db), db
@@ -118,6 +126,7 @@ func gcSplitDialects() []gcSplitDialect {
 			name:    "mssql",
 			dialect: testutil.DialectMSSQL,
 			setup: func(t *testing.T) (WorkflowStore, *sql.DB) {
+				requireDialectDSN(t, "CLEAT_TEST_MSSQL")
 				db := testutil.MSSQLTestDB(t)
 				testutil.SetupMSSQLFullSchema(t, db)
 				testutil.CleanupMSSQLTestData(t, db)
@@ -144,6 +153,25 @@ func gcSplitDialects() []gcSplitDialect {
 			read: readWith(`SELECT disabled_at, gc_eligible FROM workflow_defs
 			                 WHERE name = @p1 AND version = @p2`),
 		},
+	}
+}
+
+// requireDialectDSN skips when this dialect has no database in this job.
+//
+// A SKIP, NOT A FAILURE, and the coverage is relocated rather than lost: CI runs
+// every dialect in its own job (Test MySQL, Test SQL Server), so each arm runs
+// somewhere on every PR. The POSTGRES arm never skips, so the property these
+// tests pin is exercised in every job that runs ./engine/ at all -- a skip here
+// can never take the whole trio with it.
+//
+// Declared in scripts/skip-ledger.d/ so the skips are counted rather than
+// invisible, which is the only thing that stops a dialect-gated skip becoming
+// the way this guard quietly stops guarding.
+func requireDialectDSN(t *testing.T, env string) {
+	t.Helper()
+	if os.Getenv(env) == "" {
+		t.Skipf("%s not set, skipping this dialect: the split is still asserted on "+
+			"postgres in this job, and on this dialect in the job that provisions it", env)
 	}
 }
 
