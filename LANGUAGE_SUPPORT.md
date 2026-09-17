@@ -309,7 +309,7 @@ that completely — which is why this section states the mechanism rather than a
 | **Go** | whole-program analysis (`analyze()` in `cmd/cleat`) | the durable closure, computed from the type-checked call graph | — |
 | **Python** | AST call-graph and closure analysis (`python-sdk/cleat_sdk/vet.py`) | what the entry point reaches, across functions | a forbidden call spelled so the `(module, function)` table does not match it |
 | **AssemblyScript** | AST analysis **inside the compiler** (`packages/cleat-as/transform`) | what the entry point reaches, across functions | a call site with no dotted member access |
-| **Java** | literal substring matching over source lines (`cmd/cleat/vet_java.go`) | a listed spelling on a line that does not *begin* with a comment marker | any other spelling; any module not listed; a comment **after** code, and a string literal, are both scanned as code |
+| **Java** | literal substring matching, over source with comments, strings, text blocks and character literals blanked first (`cmd/cleat/vet_java.go`) | a listed spelling in executable code | any other spelling; any module not listed |
 | **Rust** | literal substring matching, over source with comments and strings blanked first (`cmd/cleat/vet_rust.go`) | a listed spelling in executable code | any other spelling; any module not listed |
 
 Re-derive the shape of each, rather than trusting the row:
@@ -361,8 +361,10 @@ Fixed for Python in #1816. The AssemblyScript equivalent is #1818. Rust and Java
 analysis at all, so they do not have this specific problem — their scope is "every source file in
 the tree, including tests" (cleat#1789).
 
-Rust reads only executable code since #1815; Java still matches inside a trailing comment and inside
-a string literal, which is the weaker form of the same defect.
+Rust reads only executable code since #1815 and Java since #1824, so the two rows are now the same
+shape. Java's scanner is the simpler of the pair: block comments do not nest, and `'` always opens a
+character literal rather than sometimes a lifetime. Java 15 text blocks are the one construct Rust
+has no equivalent of.
 
 ---
 
