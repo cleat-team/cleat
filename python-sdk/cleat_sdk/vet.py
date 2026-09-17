@@ -754,6 +754,36 @@ def build_call_graph_and_leaf_callers(
     return builder.graph, builder.leaf_calls, builder.function_defs
 
 
+def compute_reachable(
+    call_graph: dict[str, set[str]],
+    roots: set[str],
+) -> set[str]:
+    """Functions reachable FORWARD from roots: everything the roots can call.
+
+    This is the scope the determinism checks need. A workflow's non-determinism
+    is whatever it can reach, so the question is "what does the entry call?",
+    not "who calls into this?".
+
+    Answering it the other way round is cleat#1813: a mock-driven test harness
+    that calls a workflow once became "workflow code", and 22 print() calls in
+    examples/python-langchain's run_test() were reported as PY010. The harness
+    is a caller, never a callee, so a forward walk cannot reach it.
+    """
+    reachable: set[str] = set()
+    queue = list(roots)
+    visited: set[str] = set()
+
+    while queue:
+        func = queue.pop(0)
+        if func in visited:
+            continue
+        visited.add(func)
+        reachable.add(func)
+        queue.extend(c for c in call_graph.get(func, set()) if c not in visited)
+
+    return reachable
+
+
 def compute_closure(
     call_graph: dict[str, set[str]],
     leaf_callers: set[str],
@@ -761,6 +791,16 @@ def compute_closure(
     """Compute transitive closure of functions that reach durable leaves.
 
     Uses BFS from leaf callers following reverse edges in the call graph.
+
+    This is the scope the THREADING check needs, and it is the right shape for
+    it: a function that can reach a host call must be able to supply `h`, so
+    the question there really is "who calls into this?".
+
+    Two checks, two directions, one graph -- see compute_reachable. They were
+    sharing this one result, which is why cleat#1813 reported a test harness as
+    non-deterministic. The AssemblyScript transform has the same defect in the
+    mirror direction (cleat#1799), where a callers-only closure means a helper
+    the workflow calls is never checked at all.
     """
     # Build reverse call graph (callee -> set of callers)
     reverse_graph: dict[str, set[str]] = {}
@@ -861,15 +901,41 @@ def analyze_file(filepath: str) -> AnalysisResult:
             leaf_callers.add(func_name)
     result.durable_leaf_callers = leaf_callers
 
-    # --- Transitive closure ---
+    # --- Transitive closure (callers) : the threading scope ---
     closure = compute_closure(call_graph, leaf_callers)
     result.durable_closure = closure
 
-    # --- Forbidden API detection in durable closure + entry points ---
+    # --- Determinism scope: what the workflow can REACH ---
+    #
+    # cleat#1813. These two scopes were one set, and the determinism checks were
+    # reading the callers closure. A function that calls a workflow -- a
+    # mock-driven test harness, a __main__ driver -- is a caller, so it landed
+    # in the scope and everything in it was checked for determinism. 22 print()
+    # calls in examples/python-langchain's run_test() were reported as PY010,
+    # and the gate built on top of this refused the build that example's own
+    # README documents.
+    #
+    # Determinism is a property of what the workflow EXECUTES, so the scope is
+    # forward reachability from the entry points.
+    #
+    # Leaf callers are unioned in because a function that calls h.* is workflow
+    # code whether or not this file contains the entry that reaches it -- a
+    # helper module with no @cleat_entry of its own would otherwise be checked
+    # for nothing.
+    #
+    # If a file declares no entry points at all, the forward walk has no roots.
+    # Falling back to the callers closure keeps such files behaving as they did
+    # rather than silently checking nothing, which would trade this false
+    # positive for a false negative.
+    entry_names = {name for name, _ in entries}
+    if entry_names:
+        determinism_scope = compute_reachable(call_graph, entry_names | leaf_callers)
+    else:
+        determinism_scope = set(closure) | leaf_callers
+
+    # --- Forbidden API detection over the determinism scope ---
     # Entry points are always checked even if they don't call SDK methods directly.
-    to_check = set(closure)
-    for name, _ in entries:
-        to_check.add(name)
+    to_check = set(determinism_scope) | entry_names
     checker = ForbiddenAPIChecker(filepath, to_check)
     checker.visit(tree)
     result.errors.extend(checker.errors)
@@ -878,7 +944,37 @@ def analyze_file(filepath: str) -> AnalysisResult:
     # (module-level imports are already caught by the checker visiting the root)
 
     # --- HostCalls threading verification ---
-    threading_checker = ThreadingChecker(filepath, func_defs, to_check)
+    #
+    # NEITHER closure alone is the right scope here, and both of the obvious
+    # answers are wrong in a way that only shows up on real code.
+    #
+    # The CALLERS closure alone flags a test harness: run_test in
+    # examples/python-langchain CONSTRUCTS a HostCalls and passes it down, so
+    # it is the boundary where `h` comes from -- every workflow has one, the
+    # runtime in production and a mock in a test -- and a boundary does not
+    # need to receive `h`.
+    #
+    # The DETERMINISM scope alone flags pure helpers. `def is_digit(c: str)`,
+    # reached from an entry and touching no host call, has no reason to take
+    # `h`, and demanding it would be noise on every string or arithmetic helper
+    # a workflow uses. Measured while fixing the AssemblyScript twin
+    # (cleat#1799), where the same substitution made SIX pure helpers in
+    # examples/as-workflow -- extractStringField, isDigit, parseI64 and
+    # friends -- fail E005 on an unmodified example.
+    #
+    # The question the check actually asks is "can this function obtain the `h`
+    # it needs?", and that is only meaningful for a function that BOTH
+    # participates in the workflow and reaches a host call. So: the
+    # intersection.
+    #
+    #   reachable from an entry   and   able to reach a host call
+    #
+    #   is_digit   forward yes, backward no   -> excluded, it needs no h
+    #   run_test   forward no,  backward yes  -> excluded, it supplies h
+    #   a durable helper missing h            -> in both, reported
+    threading_scope = (set(closure) | leaf_callers) & set(determinism_scope)
+    threading_scope |= entry_names
+    threading_checker = ThreadingChecker(filepath, func_defs, threading_scope)
     threading_errors = threading_checker.check()
     result.errors.extend(threading_errors)
 
