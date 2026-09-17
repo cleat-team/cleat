@@ -71,14 +71,7 @@ var recoveryHelpers = map[string]bool{
 // file:line is brittle when code moves, deliberately. An exemption that stops
 // matching is reported below rather than ignored, so a moved goroutine gets
 // looked at again instead of inheriting a grant.
-var exemptGoroutines = map[string]string{
-	"server.go:2619": "R6: cmd/cleat-worker/server.go is held open by cleat#1773 (52 files, " +
-		"schedule lifecycle), so this change must not touch it. Genuinely unrecovered -- a " +
-		"rate-limiter cleanup ticker doing map iteration and time arithmetic under a mutex. " +
-		"Fix follows #1773; tracked on cleat#1769.",
-	"server.go:2688": "R6: same file, same PR. newKeyedRateLimiter's cleanup ticker -- the same " +
-		"shape as the site above, on the keyed limiter. Fix follows #1773; tracked on cleat#1769.",
-}
+var exemptGoroutines = map[string]string{}
 
 type goSite struct {
 	file   string
