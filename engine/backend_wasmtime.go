@@ -16,7 +16,7 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 
 	"github.com/cleat-team/cleat/wasm"
 )

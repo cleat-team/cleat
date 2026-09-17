@@ -1,6 +1,6 @@
 # Vendored wasmtime C headers
 
-These are the C headers from `github.com/bytecodealliance/wasmtime-go/v44`'s
+These are the C headers from `github.com/bytecodealliance/wasmtime-go/v48`'s
 `build/include` directory, copied verbatim. They are **not** maintained here:
 `wasmtime_headers_test.go` diffs this tree against the wasmtime-go module in the
 build's module cache and fails on any divergence, so a `go.mod` bump that is not
@@ -9,11 +9,22 @@ library skew.
 
 ## Why they are vendored
 
-`engine/component_cgo.go` calls wasmtime's Component Model C API directly,
-because wasmtime-go v44 exposes no Go binding for it — the module ships exactly
-one component-related Go file, `config_feat_component_model.go`, which is a
-config flag and nothing more. Types like `wasmtime_component_val_t` are reachable
-only from C.
+`engine/component_cgo.go` calls wasmtime's Component Model C API directly.
+
+This was originally because wasmtime-go v44 exposed no Go binding for it: the
+module shipped exactly one component-related Go file,
+`config_feat_component_model.go`, a config flag and nothing more, so types like
+`wasmtime_component_val_t` were reachable only from C.
+
+**That reason expired at v48, and the vendoring outlived it.** wasmtime-go v48
+ships real Component Model bindings — `component.go`, `component_linker.go`,
+`component_instance.go`, `component_type.go`, `component_valtype.go` and their
+tests (`ls $(go list -m -f '{{.Dir}}' github.com/bytecodealliance/wasmtime-go/v48)
+| grep component`). The headers are still vendored here because the v44→v48 bump
+was a security upgrade off an end-of-life branch and deliberately changed nothing
+else; porting `component_cgo.go` onto the native bindings would delete this
+directory and the drift test guarding it, and is tracked as follow-up rather than
+done here. Do not cite the "no Go binding" reason above as current.
 
 cgo therefore needs an `-I` to these headers, and there is no way to point one at
 another module: `${SRCDIR}` in a `#cgo` directive expands to the directory of the
@@ -47,7 +58,7 @@ https://github.com/bytecodealliance/wasmtime.
 
 ## Updating
 
-    WTDIR=$(go list -m -f '{{.Dir}}' github.com/bytecodealliance/wasmtime-go/v44)
+    WTDIR=$(go list -m -f '{{.Dir}}' github.com/bytecodealliance/wasmtime-go/v48)
     rm -rf engine/wasmtimeinc/*.h engine/wasmtimeinc/wasmtime
     (cd "$WTDIR/build/include" && find . -name '*.h' | while read -r f; do
         mkdir -p "$OLDPWD/engine/wasmtimeinc/$(dirname "$f")"

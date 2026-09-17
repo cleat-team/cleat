@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // cleat_poll_work was the only host function in the wasmtime layer that wrote

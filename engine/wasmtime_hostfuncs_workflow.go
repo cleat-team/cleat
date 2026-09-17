@@ -5,7 +5,7 @@ package engine
 import (
 	"context"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {

@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"time"
 
-	wasmtime "github.com/bytecodealliance/wasmtime-go/v44"
+	wasmtime "github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // The instance-timeout fence measures GUEST EXECUTION, not wall clock.

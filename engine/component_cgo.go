@@ -2,7 +2,7 @@
 
 // This file (plus component_callbacks.go and cgo_test_helpers.go) calls the
 // wasmtime Component Model C API directly via cgo, using types like
-// wasmtime_component_val_t that github.com/bytecodealliance/wasmtime-go/v44
+// wasmtime_component_val_t that github.com/bytecodealliance/wasmtime-go/v48
 // does not expose through its Go bindings -- the module ships exactly one
 // component-related Go file, config_feat_component_model.go, and it is a
 // config flag.
@@ -336,7 +336,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // -- engine ptr access -------------------------------------------------------
@@ -1055,6 +1055,26 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 
 	instance, err := componentInstantiate(linker, store, component)
 	if err != nil {
+		// THE FENCE CAN FIRE HERE, NOT ONLY IN THE CALL BELOW, and until
+		// wasmtime-go v48 it did not in practice -- which is why this path
+		// returned the raw error for as long as it did.
+		//
+		// A componentize-py build is ~19 MB and its instantiation runs real
+		// guest code: CPython's own module initialisation. That work is inside
+		// the epoch budget, correctly, so a budget small enough relative to
+		// that startup cost is exhausted before the export is ever called. The
+		// v44->v48 bump moved it across that line and TestPythonComponentExecutionFence
+		// caught it, reporting `wasm trap: component instantiate: wasm trap:
+		// interrupt` where it wanted the configured limit named.
+		//
+		// Unclassified, that reads as a guest crash during startup rather than
+		// the host enforcing a bound it was given -- the same confusion the
+		// call path's comment twenty lines below describes, arriving through
+		// the other door. Classify it the same way, so an operator sees which
+		// flag to change.
+		if limitErr := b.resourceLimitError(err, execTimeout); limitErr != nil {
+			return nil, limitErr
+		}
 		return nil, err
 	}
 

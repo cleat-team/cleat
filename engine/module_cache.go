@@ -6,7 +6,7 @@ import (
 	"container/list"
 	"sync"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // moduleLRU is a bounded, concurrent LRU over compiled wasmtime Modules.

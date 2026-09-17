@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // recordingSleepHandler answers ServeWasiSleep with a fixed duration and

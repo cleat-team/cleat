@@ -5,7 +5,7 @@ package engine
 import (
 	"strings"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
