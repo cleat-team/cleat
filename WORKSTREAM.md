@@ -831,10 +831,23 @@ So `git worktree list` showing you a worktree is **not** evidence you own it. WS
 checkout" as "mine", rebased and force-pushed — `--force-with-lease` protected the remote ref and
 protected nothing about the other session's working tree.
 
+**THE TRAILER SAYS WHO WORKED; THE REFLOG SAYS WHERE. They answer different questions and
+neither substitutes for the other.** The failure mode to design against is not a session stamping
+the wrong stream on purpose — it is a session stamping the **right** one for a commit produced in
+another stream's working tree. That is exactly tonight's case: whichever session made `54b94a19`
+would have marked it with its own stream, correctly, while the tree belonged to someone else. The
+trailer would have been true and still would not have answered the question anyone was asking.
+Only the reflog is unforgeable by typing, and only the trailer names a person. (WS-1's framing.)
+
 **What follows for attribution.** Two signals exist and both resolve to the *working tree*, not the
 session: the reflog says which checkout created an object, and the checkout has no single occupant.
-The `Claude-Session:` trailer is the only session-scoped signal, and it is **absent** for at least
-two streams right now — one omits it deliberately because `CLAUDE_CODE_SESSION_ID` is a UUID, the
+The `Claude-Stream:` trailer — `WS-1`, `WS-2`, `WS-3`, `coordinator`, adopted 2026-09-17 — is the
+only stream-scoped signal, and it replaced a session id for one reason: **a stream survives a host
+restart and a session id does not.** Every `session_…` mapping recorded before 2026-09-16 now names
+a session that no longer exists. A stream name is also a value each session can assert from its own
+evidence rather than resolve from an id it cannot read.
+
+The older `Claude-Session:` trailer was **absent** for at least two streams — one omits it deliberately because `CLAUDE_CODE_SESSION_ID` is a UUID, the
 form that appears in 0 of 741 trailers, and emitting a well-formed marker that resolves to nothing
 is worse than emitting none. **So `UNKNOWN` is the correct answer for an unmarked commit, and
 looking for a fourth signal is how you get a confident wrong one.** Session ids also rotate on a
@@ -842,8 +855,27 @@ host restart, so an id-to-stream table is only as good as its date — every map
 notes predates 2026-09-16 and several are now stale in both directions.
 
 **The cheap check before touching a worktree you did not create is its own HEAD reflog**, not the
-branch's: `git reflog worktrees/<name>/HEAD`. Note `git reflog --all` does *not* cover another
-worktree's HEAD, which is why a negative from it means nothing.
+branch's: `git reflog worktrees/<name>/HEAD`. Prefer that targeted form because it is unambiguous
+and does not depend on the reader knowing what `--all` sweeps.
+
+**It is NOT true that `git reflog --all` misses other worktrees' HEADs**, and this file said so
+until it was measured. On **git 2.50.1 (Apple Git-155)** `--all` walks `worktrees/<name>/HEAD`
+along with the branch refs — a commit made in a worktree appears twice, once via its branch and
+once via that HEAD:
+
+    $ git reflog --all --format='%gD' | sed 's/@.*//' | sort -u
+    HEAD
+    refs/heads/main
+    refs/heads/probebranch
+    worktrees/wt/HEAD
+
+So a negative from `--all` **is** informative here, and the retracted clause was the dangerous
+half: a reader who believed it would discard a true negative and re-derive by hand. Measured
+independently by two sessions on this host, each with a known-positive on the grep so it was not a
+search that could only say no. **Pin the version rather than the fact** — per-worktree coverage in
+`--all` is exactly the sort of thing that changed at some release, and neither measurement tested
+an older git. Re-derive elsewhere: `git init`, commit, `git worktree add`, commit inside it,
+`git reflog --all`.
 
 | file | protocol |
 |---|---|
