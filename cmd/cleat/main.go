@@ -800,30 +800,55 @@ const (
 )
 
 // runVetPython runs the Python AST-based vet via subprocess.
-func runVetPython(dir string, jsonOut bool) int {
-	// Find .py files in the directory.
+func runVetPython(path string, jsonOut bool) int {
+	// Resolve the target to a list of .py files. `path` may be a directory or
+	// a single .py file; the build gate passes the entry file it is about to
+	// compile, and `cleat vet --lang python` is used with both.
+	//
+	// THE SINGLE-FILE BRANCH USED TO BE UNREACHABLE. os.ReadDir ran first and
+	// returned on any non-directory, so the `strings.HasSuffix(dir, ".py")`
+	// check below it could never be evaluated:
+	//
+	//	$ cleat vet --lang python testdata/vet-checks/python/py002_open/workflow.py
+	//	Error: cannot read directory ...: not a directory        exit 1
+	//
+	// A branch that never decides anything cannot be observed to be wrong,
+	// which is why this survived: passing a directory works, so nobody passed
+	// a file twice. Stat first, and only read a directory when it is one.
 	var pyFiles []string
-	if dir == "" {
-		dir = "."
+	if path == "" {
+		path = "."
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: cannot read directory %s: %v\n", dir, err)
-		return 1
-	}
-	// Also check if dir itself is a .py file.
-	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() && strings.HasSuffix(dir, ".py") {
-		pyFiles = append(pyFiles, dir)
-	} else {
+	fi, statErr := os.Stat(path)
+	switch {
+	case statErr != nil:
+		fmt.Fprintf(os.Stderr, "Error: cannot read %s: %v\n", path, statErr)
+		// UNMEASURED, not a finding. Nothing was inspected, so this says
+		// nothing about any workflow -- and under the three-outcome contract
+		// (cleat#1801) returning 1 here would report a mistyped path as a
+		// determinism violation.
+		return vetExitUnmeasured
+	case !fi.IsDir():
+		if !strings.HasSuffix(path, ".py") {
+			fmt.Fprintf(os.Stderr, "Error: %s is not a .py file or a directory\n", path)
+			return vetExitUnmeasured
+		}
+		pyFiles = append(pyFiles, path)
+	default:
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot read directory %s: %v\n", path, err)
+			return vetExitUnmeasured
+		}
 		for _, e := range entries {
 			if !e.IsDir() && strings.HasSuffix(e.Name(), ".py") {
-				pyFiles = append(pyFiles, filepath.Join(dir, e.Name()))
+				pyFiles = append(pyFiles, filepath.Join(path, e.Name()))
 			}
 		}
 	}
 	if len(pyFiles) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: no .py files found in %s\n", dir)
-		return 1
+		fmt.Fprintf(os.Stderr, "Error: no .py files found in %s\n", path)
+		return vetExitUnmeasured
 	}
 
 	sdkDir := findPythonSDKDir()

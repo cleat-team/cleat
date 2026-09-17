@@ -84,6 +84,44 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 		funcName = fn
 	}
 
+	// Determinism gate. runBuild early-returns here before reaching analyze(),
+	// so a Python workflow compiled to a deployable artifact with no
+	// determinism checking at all (cleat#1770). Rust landed in #1784, Java in
+	// #1791; AssemblyScript needed none, because its transform already runs
+	// inside the compile.
+	//
+	// It runs BEFORE the componentize-py lookup for the same reason as the Rust
+	// and Java gates run before their toolchain lookups: a workflow with
+	// determinism errors should be refused for that, not for a missing
+	// compiler it was never going to reach.
+	//
+	// THE THREE OUTCOMES ARE WHY THIS IS NOT `if code != 0`. Until cleat#1801
+	// runVetPython returned 0 for every violating file, so this gate would have
+	// been present, green and inert -- exactly the shape #1770 exists to
+	// remove. It now returns 2 when it could not look, and that is a different
+	// message rather than a different decision: the build is refused either
+	// way, because emitting an unchecked artifact is what this gate exists to
+	// prevent, but the reader is told which of the two happened.
+	//
+	// Refusing on UNMEASURED rather than warning is deliberate. detectEntryFunction
+	// above falls back to a line scan when the SDK is missing, with the comment
+	// "so the build still works without the SDK", and that is right for entry
+	// detection: guessing the entry point wrong fails loudly at deploy.
+	// Guessing "deterministic" wrong fails silently in production, on replay,
+	// possibly much later. Same absence, opposite consequence.
+	switch code := runVetPython(pyFile, false); code {
+	case vetExitViolations:
+		fmt.Fprintf(os.Stderr, "\nError: determinism check failed for %s -- no artifact was emitted.\n", pyFile)
+		fmt.Fprintf(os.Stderr, "Fix the errors above, or run 'cleat vet --lang python %s' to see them again.\n", pyFile)
+		os.Exit(1)
+	case vetExitUnmeasured:
+		fmt.Fprintf(os.Stderr, "\nError: the determinism check could not run for %s -- no artifact was emitted.\n", pyFile)
+		fmt.Fprintf(os.Stderr, "This is a failure of the CHECK, not a finding about your workflow: the file may be fine.\n")
+		fmt.Fprintf(os.Stderr, "See the cause above. Refusing rather than building unchecked, because a workflow that\n")
+		fmt.Fprintf(os.Stderr, "is not deterministic replays incorrectly and says nothing at the time.\n")
+		os.Exit(1)
+	}
+
 	// Check for componentize-py on PATH.
 	if _, err := exec.LookPath("componentize-py"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: componentize-py not found.\n")
