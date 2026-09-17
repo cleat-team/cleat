@@ -91,12 +91,35 @@ func (s *execSession) callService(ctx context.Context, service, operation, reque
 	return s.engine.caller.Call(ctx, service, operation, requestJSON)
 }
 
-// CallerHonoursIdempotencyKeys reports whether this engine's caller receives
-// idempotency keys.
+// CallerHonoursIdempotencyKeys reports whether this engine's caller CAN receive
+// a per-call idempotency key — that is, whether it implements IdempotentCaller.
 //
-// Exported for operators and tests: whether a deployment has exactly-once
-// behaviour against a key-honouring service is otherwise invisible until a crash
-// duplicates something in production.
+// # What this does NOT establish, stated because it was read as establishing it
+//
+// It is a type assertion. It cannot see whether any particular path forwards the
+// key it receives, and for most of this project's life exactly one did not:
+// dbServiceCaller implemented IdempotentCaller, took the key, forwarded it to
+// forwardToBenchSvc, and DROPPED it for http.fetch — the only route a workflow
+// has to an external service without a Go plugin and a worker rebuild. This
+// predicate returned true throughout (cleat#1837).
+//
+// So the comment above IdempotentCaller is half right. The distinction it calls
+// "testable" is testable at the level of the TYPE, which is not the level the
+// failure lives at. A caller that could honour keys and does not still returns
+// true here.
+//
+// # What establishes the property this is usually quoted for
+//
+// Whether the key reaches the wire is a question about a request, and only a
+// test that reads a header off a delivered request can answer it.
+// cmd/cleat-worker/the_idempotency_key_reaches_the_request_test.go does that
+// against an httptest listener, for the engine's key, for its stability across
+// replays, and for a guest-set key winning. Cite those, not this, for
+// "this deployment sends idempotency keys".
+//
+// Making this predicate answer the real question needs IdempotentCaller to
+// expose which service/operation pairs it forwards for, which is a change to a
+// published interface and a decision this comment deliberately does not take.
 func (e *Engine) CallerHonoursIdempotencyKeys() bool {
 	_, ok := e.caller.(IdempotentCaller)
 	return ok

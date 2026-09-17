@@ -222,7 +222,7 @@ func (c *dbServiceCaller) call(ctx context.Context, service, operation, requestJ
 		return "", err
 	}
 	if service == "http" && operation == "fetch" {
-		return c.handleHTTPFetch(ctx, requestJSON)
+		return c.handleHTTPFetch(ctx, requestJSON, idempotencyKey)
 	}
 	if c.benchSvcURL != "" {
 		return c.forwardToBenchSvc(ctx, service, operation, requestJSON, idempotencyKey)
@@ -361,7 +361,7 @@ func (c *dbServiceCaller) egressGuard(ctx context.Context) *engine.EgressGuard {
 	return g
 }
 
-func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON string) (string, error) {
+func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON, idempotencyKey string) (string, error) {
 	var req fetchRequest
 	if err := json.Unmarshal([]byte(requestJSON), &req); err != nil {
 		return "", engine.NewPermanentError("http.fetch", "", fmt.Errorf("invalid request JSON: %w", err))
@@ -387,6 +387,31 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 	}
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
+	}
+	// The engine's replay-stable key, AFTER the guest's headers so a guest that
+	// set its own keeps it. cleat#1837.
+	//
+	// http.fetch is the only way a workflow reaches an external service without
+	// a Go plugin and a worker rebuild, so it is the path a team takes when they
+	// do what this architecture pushes them toward: keep the workflow an
+	// orchestrator and put the rest behind an idempotent HTTP API. That depends
+	// on the service being able to deduplicate. The engine computed exactly the
+	// value it would deduplicate on -- DurableCallIdempotencyKey, stable across
+	// replays -- handed it down the whole chain, and this function dropped it.
+	//
+	// It compounds with a default: --write-ahead-intent-ops is "" unless set, so
+	// an unflagged DurableCall is at-least-once. At-least-once dispatch with no
+	// key means a duplicate side effect that the receiver cannot notice.
+	//
+	// THE EMPTY-STRING CASE IS DELIBERATE, and it is the one the traceparent
+	// comment below records getting wrong. Get() returns "" both for a header
+	// the guest never set and for one it set empty, and both take the engine's
+	// key here. A guest that wants no deduplication has to mean it some other
+	// way, because the alternative -- an empty header silently disabling
+	// deduplication -- is the failure this change exists to remove, and it would
+	// be reachable by accident.
+	if idempotencyKey != "" && httpReq.Header.Get("Idempotency-Key") == "" {
+		httpReq.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	// AFTER the guest's headers. SetTraceparent leaves a non-empty traceparent
 	// alone, so a guest that set one deliberately keeps it either way -- the
