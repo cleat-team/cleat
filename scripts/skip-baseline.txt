@@ -7,6 +7,7 @@ cmd/cleat	TestJavaBuildRefusesNondeterminism	1
 cmd/cleat	TestRunBuild_PythonTarget_WasmRoundtrip	2
 cmd/cleat	TestRustBuildRefusesNondeterminism	1
 cmd/cleat	TestTheASRowsOfTheBindingTableAreAsserted	1
+cmd/cleat	TestThePythonVetSaysWhetherItRan	3
 cmd/cleat	TestVetAS	2
 cmd/cleat	TestVetExitCode	1
 cmd/cleat	TestVetPython	3
