@@ -392,7 +392,7 @@ Set to `0` to let each plugin use the main worker connection pool directly.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | (host default) | Number of events before history compaction triggers |
+| int | `100` | Number of events before history compaction triggers |
 
 Compaction collapses event history for long-running workflows, retaining only
 the compacted state.
@@ -778,10 +778,30 @@ started again.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `0` | Max events per workflow (0 = unlimited) |
+| int | `50000` | Max events one run may write before the engine continues it as new (0 disables the bound) |
 
-Limits the total number of events a single workflow instance can generate.
-When exceeded, the workflow is terminated with a quota error.
+Bounds how much history a single **run** may write. Exceeding it is a
+**rollover, not a failure**: the durable call is refused before it is
+dispatched, so no side effect happens; the guest sees an error and unwinds
+through its entry-point wrapper, draining its defers as it would for an
+explicit `ContinueAsNew`; and the executor records a `continue_as_new`
+suspension. The next run starts with a reset event count and makes the refused
+call for real.
+
+`--retention-days` bounds history for *terminal* runs. A runaway is not
+terminal, so that sweep never reaches it — this is the only bound that does.
+
+Setting `0` disables the bound and restores the pre-cleat#1829 behaviour, in
+which one looping workflow can fill `event_history` with nothing to stop it.
+
+> This section said the default was `0` and that "the workflow is terminated
+> with a quota error". Both were wrong, and the second was wrong in the
+> direction that argues against ever setting the flag: an operator reading it
+> would conclude a runaway gets killed. `engine/callerrors.go`'s
+> `eventCapCallError` says the opposite — "a refusal, not a failure" — and
+> `engine/durablecalls.go` auto-triggers `ContinueAsNew`. The default changed in
+> cleat#1829 and this reference did not follow it, because nothing compares a
+> flag's default against this file.
 
 ---
 
@@ -794,6 +814,11 @@ When exceeded, the workflow is terminated with a quota error.
 Limits the number of child workflows a single parent workflow can spawn.
 When exceeded, further child start attempts fail with a quota error.
 
+**Deliberately unbounded by default**, unlike `--max-quota-events`. Exceeding
+this one *fails* the workflow rather than rolling it over, so any default would
+turn working deployments into failing ones at whatever number was chosen, and
+there is no usage data to choose from. cleat#1829.
+
 ---
 
 ### --max-quota-concurrency-keys
@@ -804,6 +829,9 @@ When exceeded, further child start attempts fail with a quota error.
 
 Limits the number of distinct concurrency keys a single workflow can register.
 When exceeded, further key registrations fail with a quota error.
+
+**Deliberately unbounded by default**, for the same reason as
+`--max-quota-children`: exceeding it fails the workflow. cleat#1829.
 
 ---
 
