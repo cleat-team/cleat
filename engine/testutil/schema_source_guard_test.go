@@ -47,13 +47,33 @@ var forbiddenSchemaDDL = []string{
 	"alter table",
 }
 
+// exemptSchemaDDLTables are the tables this package may create directly.
+//
+// THE EXEMPTION IS KEYED ON THE TABLE NAME, NOT ON A FILE, and that is the
+// whole of what keeps this guard sharp. A file-level exemption would let a
+// hand-written copy of workflow_instances land in the exempted file and say
+// nothing; a name-level one means that same file is still checked for every
+// other table.
+//
+// cleat_test_deletion_audit is cleat#982's deletion audit
+// (mssql_row_disappearance.go). It is the case the paragraph above anticipated:
+// a table that MUST NOT ship in a migration, because it exists only in a
+// database some test explicitly installed an instrument into, and putting it
+// under migrations/ would be putting a diagnostic into every production schema.
+// So it cannot drift from a shipped definition -- there is no shipped
+// definition to drift from, which is the property that makes the exemption
+// safe and is not true of anything this guard was written for.
+var exemptSchemaDDLTables = []string{
+	"cleat_test_deletion_audit",
+}
+
 // TestNoHandWrittenSchema fails if any .go file in this package contains a
-// string literal that defines or alters a table. There is no allowlist:
-// every legitimate thing this package still creates directly
-// (PostgresRLSTestRole, the SQL Server administrative login in
-// mssql_admin.go) is a ROLE or LOGIN, not a TABLE, so none of it should ever
-// need one. If a future exception is genuinely needed, add it deliberately
-// here rather than letting the check go silently softer.
+// string literal that defines or alters a table, other than the tables named
+// in exemptSchemaDDLTables. Every other legitimate thing this package creates
+// directly (PostgresRLSTestRole, the SQL Server administrative login in
+// mssql_admin.go) is a ROLE or LOGIN, not a TABLE. If a future exception is
+// genuinely needed, add it to exemptSchemaDDLTables deliberately rather than
+// letting the check go silently softer.
 func TestNoHandWrittenSchema(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -89,6 +109,11 @@ func TestNoHandWrittenSchema(t *testing.T) {
 				return true
 			}
 			hay := strings.ToLower(lit.Value)
+			for _, exempt := range exemptSchemaDDLTables {
+				if strings.Contains(hay, exempt) {
+					return true
+				}
+			}
 			for _, bad := range forbiddenSchemaDDL {
 				if strings.Contains(hay, bad) {
 					findings = append(findings, fset.Position(lit.Pos()).String()+
@@ -109,5 +134,43 @@ func TestNoHandWrittenSchema(t *testing.T) {
 			"table no migration creates, that is a finding about the migration or the test, not a "+
 			"reason to hand-write one here.",
 			len(findings), strings.Join(findings, "\n  "))
+	}
+}
+
+// TestTheSchemaGuardStillFailsForANonExemptTable is the known-positive for the
+// exemption above.
+//
+// "No hand-written schema" is also what a guard reports when its exemption has
+// swallowed everything -- an exemption is a way for a check to go quiet, and a
+// quiet check reads exactly like a clean tree. This asserts the scan still
+// rejects a table that is NOT on the list, using the same substring test the
+// guard uses, so the two cannot come apart.
+func TestTheSchemaGuardStillFailsForANonExemptTable(t *testing.T) {
+	exempted := func(lit string) bool {
+		hay := strings.ToLower(lit)
+		for _, e := range exemptSchemaDDLTables {
+			if strings.Contains(hay, e) {
+				return true
+			}
+		}
+		for _, bad := range forbiddenSchemaDDL {
+			if strings.Contains(hay, bad) {
+				return false
+			}
+		}
+		return true
+	}
+
+	if exempted("CREATE TABLE workflow_instances (id NVARCHAR(200) PRIMARY KEY)") {
+		t.Error("a hand-written CREATE TABLE workflow_instances is exempted; the " +
+			"exemption has disarmed the guard for the tables it exists to protect")
+	}
+	if exempted("ALTER TABLE event_history ADD COLUMN service NVARCHAR(200) NULL") {
+		t.Error("a hand-written ALTER TABLE event_history is exempted")
+	}
+	if !exempted("IF OBJECT_ID('dbo.cleat_test_deletion_audit','U') IS NULL " +
+		"CREATE TABLE dbo.cleat_test_deletion_audit (audit_id BIGINT)") {
+		t.Error("the cleat#982 audit table is not exempted, so the exemption does " +
+			"nothing and mssql_row_disappearance.go cannot compile its instrument")
 	}
 }

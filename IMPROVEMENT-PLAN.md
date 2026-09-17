@@ -14256,3 +14256,129 @@ Falsified: both checks reverted to terminating (red on the guard, green without 
 removed, and the zero-backoff fallback removed.
 
     go test ./cmd/cleat-worker/ -run TestNeitherPreflightCheckTerminatesTheRun -count=1
+
+### 3.264 A deleted row and an invisible row are told apart on SQL Server — ⬜ INSTRUMENT LANDED, cleat#982 still open
+
+cleat#982 is four engine-suite failures on SQL Server, all "an operation that needed a
+workflow row found none", none reproducible in isolation. Every hypothesis on it has been
+about **deletion** — which process wiped whose fixtures — and every probe written for it has
+been a **sampler**. `ForeignSessions` asks who is attached at two instants; the suspected
+offender is short-lived and falls between them. It fired eleven times, reported "none", and
+could not have said otherwise.
+
+Two instruments replace it, chosen so they fail in opposite directions. Neither fixes
+anything: this section lands the means to answer the question, not the answer.
+
+**1. An event, not a sample.** A row leaving `workflow_instances` is an event, so an
+`AFTER DELETE` trigger records who removed it at the moment it happens. Measured across two
+OS processes, the audit separates them by `host_process_id` and captures the statement text,
+which is what tells `CleanupMSSQLTestData`'s unqualified `DELETE FROM` from a test's own
+targeted delete.
+
+**`@@SPID` is not the field that carries the answer, and looks like it is.** Two short-lived
+client processes reported **the same spid=59**, because SQL Server reuses session ids. A probe
+keyed on spid reports one session for two processes — a false all-clear, in the direction this
+issue keeps being fooled in.
+
+**2. A different question entirely, and nobody on the issue has asked it.** "The row was not
+there" has a second production on SQL Server with no deleter in it at all: `workflow_instances`
+carries a **FILTER predicate and no BLOCK predicate**, so a write through a connection with no
+`SESSION_CONTEXT` is *accepted* and the row is then invisible to every subsequent read —
+including the one that wrote it, and including the blanket `DELETE` that would have removed it.
+
+    physical=1 visible=0 -- PRESENT BUT INVISIBLE
+
+`sys.dm_db_partition_stats` is index metadata rather than a `SELECT`, so no predicate is
+evaluated against it. `physical > visible` says the rows are there and this connection cannot
+see them, and no amount of looking for a deleter will find one. The engine's own pools re-apply
+the context on every recycle (`tenantSessionConn.ResetSession`, §2.71); a plain `sql.Open` pool
+cannot.
+
+#### What the instrument cost to make safe, which is most of what was learned
+
+Four constraints, each found by the instrument breaking something, each measured 2026-09-16:
+
+| | |
+|---|---|
+| **Only `AFTER DELETE`, only these tables** | A trigger and an `OUTPUT` clause without `INTO` cannot coexist — **per DML type**. No trigger: `UPDATE…OUTPUT` ok. `AFTER DELETE`: **ok**. `AFTER UPDATE`: **Msg 334**. The claim path is `UPDATE…OUTPUT INSERTED.*`, so an UPDATE-side audit on this table is *structurally unavailable*. `blob_content` is excluded for the mirror reason. |
+| **`SET NOCOUNT ON`** | Without it the trigger's own `INSERT` joins the statement's rowcount: a one-row `DELETE` reported **`RowsAffected=6`**. Every fence in the claim and release path reads that number. |
+| **`GRANT INSERT` to PUBLIC** | A DML trigger runs in the caller's context and ownership chaining did not cover it: a `DELETE` through the suite's `cleat_admin` pool failed with *"The user does not have permission to perform this action"* — naming no audit object, on a connection that had deleted from the same table seconds earlier. |
+| **`HAS_PERMS_BY_NAME`, not `TRY`/`CATCH`** | `sys.dm_exec_input_buffer` needs `VIEW SERVER PERFORMANCE STATE`, which `cleat_admin` lacks and which cannot be granted from this database. Catching the denial does **not** save the statement — an error inside a trigger leaves the transaction uncommittable, so the `DELETE` then failed with *"The current transaction cannot be committed…"*, a stranger failure than the one it replaced. |
+
+The through-line is one sentence: **an instrument for an intermittent failure that itself causes
+failures, wearing a permissions costume, in the path it was installed to watch.** Three of the
+four above did exactly that before being fixed.
+
+So attribution is permission-free and only the statement text is privileged. `batch_id` and
+`batch_rows` carry what the text was there to answer: a trigger fires **once per statement**, so
+every row one `DELETE` removed shares a batch, and "one statement took 37 rows" identifies a
+blanket wipe with no DMV involved. A deletion with no text is reported as
+`shape UNMEASURED`, never as a verdict.
+
+#### The blind spot, and the guard on it
+
+**`TRUNCATE` does not fire an `AFTER DELETE` trigger** — measured: two truncated rows, zero audit
+rows, no error and no empty result to notice. `CleanupMSSQLTestData` issues `DELETE FROM` today,
+so the repeatedly-circled suspect *is* visible, and is one edit from not being.
+`TestTheAuditedCleanupStillIssuesADelete` fails if that loop ever becomes a `TRUNCATE`.
+
+That guard reads **string literals from the AST, not source text**, and the difference is not
+theoretical: the function's comments say "DELETE" five times, so a text-anchored guard is
+satisfied by prose about deleting — and would *fail* on a comment saying "do not use TRUNCATE
+here", which is precisely the comment someone would add. Both directions were falsified: red on
+the code change, green on the agreeing comment.
+
+#### It is three failures, not four, and the fourth is explained
+
+Selecting the four failures to arm this on turned up one that **cannot be selected**. cleat#982
+records run 4 as `TestAZeroClaimIsAmbiguousWhenRowsAreMerelyLocked/mssql`. That subtest has never
+existed: `git log --all -S` over the name returns **two** commits, both adding it and neither
+removing it; the function body has **zero** `t.Run`; and it names `DialectPostgres` four times,
+uses `$1` placeholders, `FOR UPDATE`, and `set_config` — none of which is a SQL Server mechanism.
+
+The known-positive matters here, because "no subtest" is also what a broken check reports. The
+other three tests in the list *do* produce one, demonstrated live rather than inferred:
+
+    === RUN   TestClaimSkipLocked/mssql
+        --- PASS: TestClaimSkipLocked/mssql (8.42s)
+
+The quoted message is a unique string in the tree, so the test NAME is right and the `/mssql` is
+the error: **run 4 was PostgreSQL.** Which makes "all four were SQL Server" three, and leaves
+cleat#923's `READPAST` elimination resting on a control that fired against `FOR UPDATE` and
+`SKIP LOCKED`.
+
+**Then reproduced, exactly.** A loop issuing an unqualified `DELETE FROM` — what a second
+`go test` process does on every `Setup` and teardown via `CleanupPostgresTestData` — running
+alongside that test:
+
+| | failures | message |
+|---|---|---|
+| with a concurrent blanket `DELETE` | **2 of 6** | `claim returned 0 row(s); 0 row(s) were ready…` |
+| with nothing else attached | **0 of 10** | every run `4 row(s) were ready` |
+
+Character for character the line in the issue. The `4` is stable across all ten, so this is not a
+flaky fixture the deleter merely perturbed.
+
+Note what that does to a discarded result: hypothesis 2 was recorded as reproducing the symptom
+3-in-10 and ruled **invalid as evidence for contention** — correctly, because the second process
+was deleting the first's rows. The same truncation reproduces **run 4 specifically**, on the
+dialect run 4 ran on. A result thrown away as a bad answer to one question was a good answer to
+one nobody had asked.
+
+How the label got there is a pattern rather than a typo, and it is one this file already names:
+*a documented failure mode absorbs every instance of its symptom, including the ones it does not
+explain* — applied to a label. Three SQL Server failures established the reading and the fourth
+was written down to match it. The one observation that would have broken the pattern is the one
+that got relabelled to fit.
+
+#### Status
+
+Open. The instrument is opt-in (`CLEAT_TEST_MSSQL_ROW_AUDIT`) and test-only — no production
+migration, and nothing installed in a database a test did not ask. It is installed today only by
+its own tests; arming it across the suite is a separate change to the SQL Server setup path, and
+it covers **runs 1-3**, since run 4 is PostgreSQL and accounted for.
+
+Note which way round the two instruments point: a deletion audit alone would have answered
+"nothing deleted it", been right, and been useless. And note what the reproduction does NOT show —
+that this is what happened in the observed runs. That is unknowable after the fact, which is the
+whole reason the instrument has to be armed before a failure rather than read after one.
