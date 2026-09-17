@@ -8,6 +8,7 @@ cmd/cleat	TestRunBuild_PythonTarget_WasmRoundtrip	2
 cmd/cleat	TestRustBuildAcceptsProseNamingAForbiddenPattern	1
 cmd/cleat	TestRustBuildRefusesNondeterminism	1
 cmd/cleat	TestTheASRowsOfTheBindingTableAreAsserted	1
+cmd/cleat	TestTheJavaScanSkipsTestSources	1
 cmd/cleat	TestThePythonVetSaysWhetherItRan	3
 cmd/cleat	TestVetAS	2
 cmd/cleat	TestVetExitCode	1
