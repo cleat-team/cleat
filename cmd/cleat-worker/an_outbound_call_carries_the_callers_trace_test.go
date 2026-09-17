@@ -40,7 +40,7 @@ func TestAnOutboundCallCarriesTheCallersTrace(t *testing.T) {
 		traceID: testTraceID,
 	}
 	req, _ := json.Marshal(map[string]string{"url": srv.URL, "method": "GET"})
-	if _, err := c.handleHTTPFetch(context.Background(), string(req)); err != nil {
+	if _, err := c.handleHTTPFetch(context.Background(), string(req), ""); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 
@@ -82,7 +82,7 @@ func TestAGuestsOwnTraceparentIsNotOverwritten(t *testing.T) {
 		"url": srv.URL, "method": "GET",
 		"headers": map[string]string{"traceparent": guestTP},
 	})
-	if _, err := c.handleHTTPFetch(context.Background(), string(req)); err != nil {
+	if _, err := c.handleHTTPFetch(context.Background(), string(req), ""); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	if got != guestTP {
@@ -115,7 +115,7 @@ func TestARunWithNoTraceSendsNoTraceparent(t *testing.T) {
 				traceID: tc.traceID,
 			}
 			req, _ := json.Marshal(map[string]string{"url": srv.URL, "method": "GET"})
-			if _, err := c.handleHTTPFetch(context.Background(), string(req)); err != nil {
+			if _, err := c.handleHTTPFetch(context.Background(), string(req), ""); err != nil {
 				t.Fatalf("fetch: %v", err)
 			}
 			// UNMEASURED guard: if the request never arrived, "no header" is
@@ -164,7 +164,7 @@ func TestAnEmptyGuestTraceparentDoesNotSilenceTheHop(t *testing.T) {
 		"url": srv.URL, "method": "GET",
 		"headers": map[string]string{"traceparent": ""},
 	})
-	if _, err := c.handleHTTPFetch(context.Background(), string(req)); err != nil {
+	if _, err := c.handleHTTPFetch(context.Background(), string(req), ""); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	if !seen {

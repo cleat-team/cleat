@@ -52,7 +52,7 @@ func TestAWorkflowCannotFetchTheHostsOwnNetwork(t *testing.T) {
 	} {
 		t.Run(tc.url, func(t *testing.T) {
 			req, _ := json.Marshal(map[string]string{"url": tc.url, "method": "GET"})
-			_, err := c.handleHTTPFetch(ctx, string(req))
+			_, err := c.handleHTTPFetch(ctx, string(req), "")
 			if err == nil {
 				t.Fatalf("fetching %s succeeded; it must be refused (%s)", tc.url, tc.why)
 			}
@@ -87,7 +87,7 @@ func TestAPermittedDestinationIsFetchedNotRefused(t *testing.T) {
 
 	c := &dbServiceCaller{egress: &engine.EgressGuard{AllowLoopback: true}}
 	req, _ := json.Marshal(map[string]string{"url": srv.URL, "method": "GET"})
-	resp, err := c.handleHTTPFetch(context.Background(), string(req))
+	resp, err := c.handleHTTPFetch(context.Background(), string(req), "")
 	if err != nil {
 		t.Fatalf("a permitted destination was refused: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestAGuestCannotChooseANonHTTPScheme(t *testing.T) {
 	c := &dbServiceCaller{}
 	for _, u := range []string{"file:///etc/passwd", "gopher://example.com/", "ftp://example.com/"} {
 		req, _ := json.Marshal(map[string]string{"url": u, "method": "GET"})
-		_, err := c.handleHTTPFetch(context.Background(), string(req))
+		_, err := c.handleHTTPFetch(context.Background(), string(req), "")
 		if err == nil {
 			t.Errorf("%s was accepted", u)
 			continue
