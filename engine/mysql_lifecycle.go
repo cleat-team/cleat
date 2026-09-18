@@ -1229,9 +1229,61 @@ func (s *MySQLStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID strin
 // blanket wrap costs nothing and cannot mislabel an unrelated failure.
 func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	return wrapRejectedResult(
-		s.finalizeWorkflowSegmentInner(ctx, runID, workerID, generation, newEvents,
+		s.finalizeWorkflowSegmentRetrying(ctx, runID, workerID, generation, newEvents,
 			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
 		runID, result)
+}
+
+// finalizeWorkflowSegmentRetrying retries finalizeWorkflowSegmentInner's whole
+// transaction when InnoDB refuses it with a lock conflict. cleat#1883.
+//
+// SAME SHAPE AS startNewRunUnderIdempotencyKey (cleat#1753/#1755), on a
+// DIFFERENT call site -- isDeadlockError and isLockWaitTimeout already existed
+// and this is the second place they were needed and were not called. The
+// argument for safety is the same one that function's comment gives:
+// finalizeWorkflowSegmentInner opens exactly one transaction
+// (`tx, err := s.db.BeginTx`), does the event append and the terminal update
+// inside it, and `defer tx.Rollback()` unwinds ALL of it on any error path.
+// InnoDB's deadlock victim is rolled back server-side before it returns 1213,
+// so a losing attempt leaves nothing committed and replaying it from the top
+// is sound.
+//
+// FOUND BY A PORTS TEST, NOT BY READING THE START-PATH FIX. cleat#1883's
+// samples-go/mysql leg -- TestRepeatsOfOneSignalDoNotReachAQuorum, which
+// finalizes a workflow after several concurrent signal deliveries race to
+// quorum -- terminated with status=failed and
+// `error: "... append events in tx: increment event_count: Error 1213 ..."`,
+// the same unretried code straight out of the same two classifiers, at a call
+// site #1755 did not touch. Postgres and MSSQL passed the identical test:
+// neither serialises concurrent UPDATEs to one row the way InnoDB's gap locks
+// do, the same asymmetry #1753's comment measures for the start path.
+//
+// NO SLEEP BETWEEN ATTEMPTS, for the same reason as the start path: the
+// victim's lock is already released by the time this returns, so there is
+// nothing to wait for and a backoff would only add latency to the path a
+// worker is blocking on to report a workflow's outcome.
+func (s *MySQLStore) finalizeWorkflowSegmentRetrying(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	const maxAttempts = 8
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := s.finalizeWorkflowSegmentInner(ctx, runID, workerID, generation, newEvents,
+			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
+		if err == nil {
+			return nil
+		}
+		if !isDeadlockError(err) && !isLockWaitTimeout(err) {
+			return err
+		}
+		lastErr = err
+	}
+	// Reported as itself rather than as a bare 1213, for the same reason the
+	// start path does: a caller seeing this has hit genuine sustained
+	// contention on one workflow's finalize, and the attempt count is the
+	// thing they can act on.
+	return fmt.Errorf(
+		"finalize workflow segment: %d attempts all lost a lock conflict: %w",
+		maxAttempts, lastErr)
 }
 
 // startNewRunUnderIdempotencyKey runs the idempotent start, retrying the whole
