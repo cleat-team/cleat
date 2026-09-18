@@ -150,3 +150,55 @@ pub fn also_bad() {
 			"and must not be reported): %+v", len(findings), findings)
 	}
 }
+
+// TestTheMapOrderMessageComposesIntoASentence pins the defect that shipped with
+// R008: the message is built by substituting a `kind` into one template, and
+// the two kinds are grammatically different things.
+//
+//	"keys()"                 -> a CALL, reads as a subject on its own
+//	"a for-loop over a map"  -> a NOUN PHRASE
+//
+// The original template continued "... iteration order is not guaranteed by the
+// language", which composes correctly with the first and fuses into nonsense
+// with the second:
+//
+//	a for-loop over a map iteration order is not guaranteed by the language
+//
+// -- on a diagnostic that FAILS A BUILD, so it is the sentence a developer reads
+// at the moment they are least inclined to be charitable. The loop form is also
+// the more common of the two.
+//
+// The fix is a template that continues with a VERB, so any noun phrase composes.
+// Asserted for both kinds, because fixing one arm by rewording it alone would
+// leave the next `kind` added here to rediscover this.
+func TestTheMapOrderMessageComposesIntoASentence(t *testing.T) {
+	const preamble = "use std::collections::HashMap;\n"
+
+	for _, tc := range []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"the for-loop arm", "fn f() {\n let m: HashMap<String, u64> = g();\n for kv in &m { h(kv); }\n}",
+			"a for-loop over a map exposes an order"},
+		{"the method arm", "fn f() {\n let m: HashMap<String, u64> = g();\n let _ = m.keys();\n}",
+			"keys() exposes an order"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := findRustMapIterationFindings([]byte(preamble + tc.src))
+			if len(got) == 0 {
+				t.Fatal("no finding; this test proves nothing about the message")
+			}
+			if !strings.HasPrefix(got[0].message, tc.want) {
+				t.Errorf("message = %q,\nwant it to start %q -- the template must continue "+
+					"with a VERB so that a noun-phrase kind composes into a sentence",
+					got[0].message, tc.want)
+			}
+			// The specific regression: a template beginning with a noun fuses
+			// with the noun-phrase kind and the reader gets a garbled clause.
+			if strings.Contains(got[0].message, "map iteration order is") {
+				t.Errorf("message fused into a noun phrase: %q", got[0].message)
+			}
+		})
+	}
+}
