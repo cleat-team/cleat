@@ -14,6 +14,7 @@ cmd/cleat	TestRustBuildAcceptsProseNamingAForbiddenPattern	1
 cmd/cleat	TestRustBuildRefusesNondeterminism	1
 cmd/cleat	TestRustVetAnchorsTheTargetSkipAtTheCrateRoot	1
 cmd/cleat	TestRustVetSkipsSourcesThatAreNotTheArtifact	1
+cmd/cleat	TestRustVetWarnsOnHashIterationWithoutRefusingTheCrate	1
 cmd/cleat	TestTheASRowsOfTheBindingTableAreAsserted	1
 cmd/cleat	TestTheJavaScanActuallyUsesJavaCodeOnly	1
 cmd/cleat	TestTheJavaScanSkipsTestSources	1

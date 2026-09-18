@@ -1,0 +1,4 @@
+[package]
+name = "cleat-test-r101-hash-iteration"
+version = "0.1.0"
+edition = "2021"

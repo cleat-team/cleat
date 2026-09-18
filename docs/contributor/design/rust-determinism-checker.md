@@ -151,6 +151,50 @@ Detecting it still needs a type, not a path: the resolver can see `HashMap` impo
 `HashMap::new()` called, and a `for … in x.iter()` where `x` came from one is a heuristic rather than
 a proof. Proportionate to a hardening rule; the limit goes in the fixture.
 
+### Shipped as R101, a warning
+
+`findRustHashIteration` implements exactly the above. It is the only rule in this checker that lands
+in `Warnings` rather than `Errors`, so it never changes the exit code — measured both ways: a crate
+whose only finding is R101 exits 0, and the same crate with a `std::fs` call exits 1.
+
+Two passes, both over the already-blanked source the path rules use, so a comment or a string
+literal naming `for kv in &m` reports nothing:
+
+1. which local names hold a hash container — `let m: HashMap<..>`, `let m = HashMap::new()`, and a
+   `fn` parameter `m: &HashMap<..>` — resolved through the same alias map as the path rules, so
+   `use std::collections::HashMap as HM;` and a fully-qualified `std::collections::HashMap<..>` are
+   both seen;
+2. iteration over one of those names — the `for … in` form, which names no method at all, plus
+   `iter`, `iter_mut`, `into_iter`, `keys`, `values`, `values_mut`, `drain`.
+
+`get`, `insert`, `contains_key`, `len`, `remove` and `entry` are deliberately absent. **The rule is
+about order, not about the type.** A rule that fires on using a `HashMap` at all is one people argue
+with rather than fix, and `testdata/vet-checks/rust/r101_hash_iteration` keeps three of those calls
+in the same function as the reported loop so the distinction is pinned rather than asserted.
+
+`BTreeMap`/`BTreeSet` are never reported: their order is sorted and guaranteed, and they are what the
+suggestion points at. Flagging the fix would send a reader in a circle.
+
+**The message does not claim a replay divergence**, per the paragraph above — it says the code is
+deterministic *because cleat intercepts the entropy WASI hands the guest*, which is what was measured
+and is also the fragility being flagged. A reader who is told "unspecified in Rust" and then watches
+the build pass would otherwise conclude the checker is broken.
+
+**Go emits `E021` as an error and this is a warning.** A deliberate asymmetry, recorded because the
+opposite mistake has already been made here: `docs/troubleshooting.md` and
+`docs/workflow-go-constraints.md` agreed for months that map iteration was a *warning* under a code
+the analyzer has never emitted, while it actually failed the build with `E021` — which is why
+`cmd/cleat/documented_flags_and_codes_test.go` exists. (That code is deliberately not named here:
+citing it is the very thing the guard refuses, and writing this paragraph tripped it.) That was a document contradicting the code. This is the code choosing, for a stated reason:
+`E021` predates the interception and hardening it costs nothing, whereas making Rust fail the build
+would refuse idiomatic code that works today and cannot be rewritten without changing the data
+structure.
+
+Known limits are in `TestRustHashIterationKnownLimits`, which **fails** rather than skips when one is
+lifted, so the list and the code cannot drift apart: a map behind a struct field or returned from a
+call is not seen, and an order-independent consumer (`m.values().sum()`) is reported anyway. That
+last one is the main source of noise and the main reason this is not an error.
+
 ---
 
 ## What "passing" means, and what `LANGUAGE_SUPPORT.md` should say

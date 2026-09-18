@@ -576,6 +576,19 @@ func runVetRust(crateDir string) int {
 				Suggestion: f.suggestion,
 			})
 		}
+		// R101 goes to Warnings, not Errors, so it does not change the exit
+		// code. See findRustHashIteration for why this one is not a build
+		// failure when Go's E021 is.
+		for _, f := range findRustHashIteration(code) {
+			output.Warnings = append(output.Warnings, VetResult{
+				Code:       f.code,
+				File:       relPath,
+				Line:       f.line,
+				Column:     f.col,
+				Message:    f.message,
+				Suggestion: f.suggestion,
+			})
+		}
 	}
 
 	// Check for #[cleat_entry] functions.
@@ -643,4 +656,173 @@ func runVetRust(crateDir string) int {
 		return 1
 	}
 	return 0
+}
+
+// R101 -- hash-container iteration. A WARNING, and the severity is the whole
+// design of this rule; see the block above findRustHashIteration.
+const rustHashIterCode = "R101"
+
+const rustHashIterMessage = "iteration order of a HashMap/HashSet is unspecified in Rust, so this is " +
+	"deterministic only because cleat intercepts the entropy WASI hands the guest"
+
+const rustHashIterSuggestion = "Use BTreeMap/BTreeSet, whose iteration order is sorted and guaranteed by " +
+	"the API. If the order genuinely does not matter -- a sum, a count, a collect into another map -- " +
+	"this warning is noise and can be ignored; it cannot tell those apart."
+
+// rustHashContainers are the std types whose iteration order is randomised.
+// BTreeMap and BTreeSet are deliberately absent: their order is sorted and
+// guaranteed, and they are what the suggestion points at.
+var rustHashContainers = map[string]bool{"HashMap": true, "HashSet": true}
+
+// rustIterMethods are the methods that expose iteration ORDER. Deliberately not
+// every method that touches the map: get, insert, contains_key, len, remove and
+// entry are all order-independent and must stay silent, because a rule that
+// fires on using a HashMap at all is a rule about the type rather than about
+// determinism, and would be argued with rather than fixed.
+var rustIterMethods = map[string]bool{
+	"iter": true, "iter_mut": true, "into_iter": true,
+	"keys": true, "values": true, "values_mut": true,
+	"drain": true,
+}
+
+var (
+	// `let m: HashMap<..>` / `let mut m: HashMap<..>`, and the same for a fn
+	// parameter `m: &HashMap<..>`. One expression covers both because the
+	// binding-then-type shape is identical.
+	rustTypedBindingRe = regexp.MustCompile(`\b(?:let\s+(?:mut\s+)?)?([A-Za-z_][A-Za-z0-9_]*)\s*:\s*&?(?:mut\s+)?([A-Za-z_][A-Za-z0-9_:]*)\s*<`)
+
+	// `let m = HashMap::new()`, `HashMap::with_capacity(n)`, `HashMap::from(..)`.
+	rustCtorBindingRe = regexp.MustCompile(`\blet\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]*)?=\s*([A-Za-z_][A-Za-z0-9_:]*)\s*::\s*(?:new|with_capacity|with_hasher|with_capacity_and_hasher|from|from_iter)\b`)
+
+	// `for PAT in &m {` -- the loop form, which names no method at all.
+	rustForInRe = regexp.MustCompile(`\bfor\s+[^\n]*?\bin\s+&?(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|\.into_iter\b|\.iter\b)`)
+
+	// `m.iter()`, `m.keys()`, ...
+	rustMethodCallRe = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([a-z_]+)\s*\(`)
+)
+
+// resolvesToHashContainer reports whether a type token names HashMap or HashSet
+// once `use` aliases are applied.
+//
+// Through the SAME alias map the path rules use, so `use std::collections::
+// HashMap as HM;` is seen and a local `struct HashMap` shadowing the std one is
+// not mistaken for it -- the latter has no alias entry and no std path, so it
+// resolves to a bare name that is only treated as std if it IS the std spelling
+// and nothing else claimed it. That last case is a known hole, recorded in the
+// limitations list rather than papered over.
+func resolvesToHashContainer(tok string, aliases map[string]string) bool {
+	if full, ok := aliases[tok]; ok {
+		tok = full
+	}
+	if i := strings.LastIndex(tok, "::"); i >= 0 {
+		// A fully-qualified std::collections::HashMap<..> written inline.
+		if !strings.HasPrefix(tok, "std::collections") && !strings.HasPrefix(tok, "collections") {
+			// Some other module's type that merely ends in the same name.
+			if !strings.HasPrefix(tok, "HashMap") && !strings.HasPrefix(tok, "HashSet") {
+				return false
+			}
+		}
+		tok = tok[i+2:]
+	}
+	return rustHashContainers[tok]
+}
+
+// findRustHashIteration reports every place a HashMap or HashSet is ITERATED.
+//
+// A WARNING RATHER THAN AN ERROR, and the reason is not timidity. Under cleat
+// this code is deterministic today: WASI's random_get is intercepted
+// (engine/wasi_policy.go) and served from the same replay-stable source
+// cleat_random uses (engine/lifecycle.go Random, sha256 over workflow id, step
+// and sequence), so Rust's RandomState seeds identically on every replay and
+// iteration order reproduces. The divergence this rule sounds like it is
+// preventing does not currently happen.
+//
+// WHAT IT IS ACTUALLY FOR is the fragility of that arrangement. The property
+// holds because of an invariant in a DIFFERENT SUBSYSTEM, which nothing in this
+// file knows about and no test here pins. A Component Model migration to
+// wasi:random, a backend that forwards random_get instead of intercepting it,
+// or a std that stops seeding through WASI, each turn idiomatic code into a
+// replay divergence with no diagnostic anywhere. Saying so at build time is
+// cheap; discovering it from a diverged history is not.
+//
+// GO'S E021 IS AN ERROR AND THIS IS A WARNING, which is a deliberate asymmetry
+// and is called out because the opposite mistake has already been made here:
+// docs/troubleshooting.md and docs/workflow-go-constraints.md agreed for months
+// that map iteration was a WARNING under a code the analyzer has never emitted,
+// while it actually failed the build with E021, and
+// cmd/cleat/documented_flags_and_codes_test.go exists because of it. The code is
+// deliberately not named: citing a diagnostic nothing emits is the thing that
+// guard refuses, and the first draft of THIS comment's doc-side twin tripped it. That was a document contradicting the code. This is the code choosing,
+// for a stated reason: E021 predates the interception and hardening it costs
+// nothing, whereas making Rust fail the build would refuse idiomatic code that
+// works today and cannot be rewritten without changing the data structure.
+//
+// WHAT IT CANNOT SEE, stated rather than left for the next reader:
+//
+//   - a map reached through a STRUCT FIELD (self.counts.iter()) or returned
+//     from a call (make_map().iter()) -- the binding is not declared in a shape
+//     this matches, so it is silent;
+//   - a map in ANOTHER FILE, since the survey is per file, like every other
+//     rule here;
+//   - a local type named HashMap that shadows the std one, which is reported
+//     even though it may iterate in a defined order;
+//   - ORDER-INDEPENDENT consumers. m.values().sum(), .count(), .max(), and a
+//     collect() into another HashMap are all deterministic regardless of order
+//     and are reported anyway. Distinguishing them needs the type of the
+//     consumer, which this checker does not have. It is the main source of
+//     noise and the main reason this is not an error.
+func findRustHashIteration(code []byte) []rustFinding {
+	src := string(code)
+
+	aliases := map[string]string{}
+	for _, m := range rustUseRe.FindAllStringSubmatch(src, -1) {
+		expandRustUse(m[1], aliases)
+	}
+
+	// Pass one: which local names hold a hash container.
+	hashBindings := map[string]bool{}
+	for _, m := range rustTypedBindingRe.FindAllStringSubmatch(src, -1) {
+		if resolvesToHashContainer(m[2], aliases) {
+			hashBindings[m[1]] = true
+		}
+	}
+	for _, m := range rustCtorBindingRe.FindAllStringSubmatch(src, -1) {
+		if resolvesToHashContainer(m[2], aliases) {
+			hashBindings[m[1]] = true
+		}
+	}
+	if len(hashBindings) == 0 {
+		return nil
+	}
+
+	var out []rustFinding
+	seen := map[int]bool{}
+	add := func(off int) {
+		line := 1 + strings.Count(src[:off], "\n")
+		if seen[line] {
+			return
+		}
+		seen[line] = true
+		out = append(out, rustFinding{
+			line:       line,
+			col:        off - strings.LastIndex(src[:off], "\n"),
+			code:       rustHashIterCode,
+			message:    rustHashIterMessage,
+			suggestion: rustHashIterSuggestion,
+		})
+	}
+
+	// Pass two: iteration over one of them.
+	for _, loc := range rustForInRe.FindAllStringSubmatchIndex(src, -1) {
+		if hashBindings[src[loc[2]:loc[3]]] {
+			add(loc[0])
+		}
+	}
+	for _, loc := range rustMethodCallRe.FindAllStringSubmatchIndex(src, -1) {
+		if hashBindings[src[loc[2]:loc[3]]] && rustIterMethods[src[loc[4]:loc[5]]] {
+			add(loc[0])
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].line < out[j].line })
+	return out
 }
