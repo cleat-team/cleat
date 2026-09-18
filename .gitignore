@@ -193,6 +193,17 @@ session-*.json
 # Build products. 332 MB of these were tracked in HEAD, including binaries
 # built on three different machines (Mach-O arm64 and ELF x86-64 side by side).
 bin/
+
+# .bin/ is not a typo of bin/ above, and the difference is the whole point:
+# `bin/` does not match `.bin/`, so cleat#1838 wrote `go build -o .bin/cleat`
+# into a CI step and committed the 62MB result straight past a rule that had
+# been written for exactly this (cleat#1850). The rule was right and the path
+# walked around it by one character.
+#
+# Both names are covered now. A THIRD one will not be, so if you add a build
+# output directory, the question is not whether this file mentions yours -- it
+# is whether anything refuses a 62MB blob regardless of where it sits.
+.bin/
 cmd/cleat-worker/cleat-worker
 /durable-worker
 /durable-bench
