@@ -6,7 +6,7 @@ backend rather than a scheduler. Every plugin is four surfaces at once —
 **determinism**, **tenant isolation**, **egress**, and **liveness** — so each
 plugin added multiplies risk unless the boundary is governed.
 
-It is governed, quite well, by **thirteen total-coverage guards**. Until this
+It is governed, quite well, by **fourteen total-coverage guards**. Until this
 page they were discoverable only by reading test filenames across two packages,
 or by writing a plugin and watching CI reject it one rule at a time.
 
@@ -130,6 +130,40 @@ check.
 
 **Guard:** `TestEveryOutboundCallJoinsTheTrace`
 (`plugin/every_outbound_call_joins_the_trace_test.go`)
+
+---
+
+## Inter-plugin ordering
+
+### C14 — a plugin reading another plugin's context value declares the ordering dependency
+
+**Guard:** `TestEveryContextOrderDependencyHasProviderOuterOfConsumer`
+(`cmd/cleat-worker/plugin_context_order_test.go`)
+
+<!-- external-guard TestEveryContextOrderDependencyHasProviderOuterOfConsumer cmd/cleat-worker/plugin_context_order_test.go -->
+
+Middleware wraps in `plugin.Discover()`'s order, and a plugin later in that
+order wraps everything before it — so it runs first, and its context writes
+are visible to every plugin nested inside it. Two plugins with no declared
+relationship fall through to `topologicalSort`'s alphabetical tie-break
+(`plugin/registry.go:186`), which orders them by name rather than by whether
+one reads a value the other sets.
+
+cleat#1881: `audit-log` read `oauth-provider`'s session identity out of
+context this way, and it worked — because `"audit-log"` sorts before
+`"oauth-provider"`. Renaming either plugin, or giving either an unrelated
+`Requires` that moved it in the sort, would have silently reverted `user_id`
+to always-empty, with no test failing.
+
+**`Requires` is the wrong tool for this**, which is worth stating because it
+is the obvious first reach. Declaring one plugin `Requires` another makes
+`Discover()` refuse to run at all if the required plugin is not registered
+(`plugin/registry.go:193`) — a real functional coupling, not a documentation
+nicety, and wrong for two plugins that are each independently optional.
+`contextOrderDependencies` in the guard above is a plain list of
+(consumer, provider) name pairs, checked against the real registered order:
+add a row there when writing a plugin that reads a value another plugin's
+middleware sets.
 
 ---
 

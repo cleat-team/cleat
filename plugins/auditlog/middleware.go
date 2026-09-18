@@ -43,12 +43,16 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		duration := time.Since(start)
 
 		tid, _ := auth.TenantIDFromContext(r.Context())
-		p.enqueueAudit(tid, r.Method, r.URL.Path, rw.statusCode, r.RemoteAddr, r.UserAgent(), duration)
+		// ok is deliberately ignored: an unauthenticated request has no
+		// subject to record, and that is a fact worth an empty user_id, not a
+		// reason to refuse the request or fail this write. cleat#1881.
+		userID, _ := auth.SubjectFromContext(r.Context())
+		p.enqueueAudit(tid, userID, r.Method, r.URL.Path, rw.statusCode, r.RemoteAddr, r.UserAgent(), duration)
 	})
 }
 
 // recordAudit inserts a single audit event into the database.
-func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, method, path string, statusCode int, ipAddress, userAgent string, duration time.Duration) {
+func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, userID, method, path string, statusCode int, ipAddress, userAgent string, duration time.Duration) {
 	if p.db == nil {
 		return
 	}
@@ -100,7 +104,7 @@ func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, method, pa
 	_, err := p.db.Exec(insertCtx, plugin.Rebind(`
 			INSERT INTO audit_events (id, tenant_id, method, path, status_code, user_id, ip_address, user_agent, duration_ms)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		`, p.dialect), uuid.NewString(), tenantID, method, path, statusCode, "", ipAddress, userAgent, durationMs)
+		`, p.dialect), uuid.NewString(), tenantID, method, path, statusCode, userID, ipAddress, userAgent, durationMs)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		p.logger.Error("audit-log: record event", "error", err)
 	}
@@ -109,14 +113,15 @@ func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, method, pa
 // enqueueAudit enqueues an audit event for deferred writing.
 // If the buffer is nil (backward compat with direct construction),
 // it falls back to calling recordAudit synchronously.
-func (p *Plugin) enqueueAudit(tenantID uuid.UUID, method, path string, statusCode int, ipAddress, userAgent string, duration time.Duration) {
+func (p *Plugin) enqueueAudit(tenantID uuid.UUID, userID, method, path string, statusCode int, ipAddress, userAgent string, duration time.Duration) {
 	if p.buffer == nil {
-		p.recordAudit(context.Background(), tenantID, method, path, statusCode, ipAddress, userAgent, duration)
+		p.recordAudit(context.Background(), tenantID, userID, method, path, statusCode, ipAddress, userAgent, duration)
 		return
 	}
 	select {
 	case p.buffer <- queuedAuditEvent{
 		tenantID:   tenantID,
+		userID:     userID,
 		method:     method,
 		path:       path,
 		statusCode: statusCode,

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/google/uuid"
 )
@@ -1375,6 +1376,70 @@ func TestOA_Middleware_ValidTokenInjectsSession(t *testing.T) {
 	}
 	if gotSession.TenantID != testTenantID {
 		t.Errorf("expected tenant %s, got %s", testTenantID, gotSession.TenantID)
+	}
+}
+
+// TestOA_Middleware_ValidTokenSetsNeutralSubject covers cleat#1881: a valid
+// session now populates auth.SubjectFromContext alongside the OAuth-specific
+// SessionInfo, so a plugin auditing "who" (audit-log) does not have to know
+// OAuth answered the question.
+func TestOA_Middleware_ValidTokenSetsNeutralSubject(t *testing.T) {
+	store := newFakeDBStore()
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-0000000009a0")
+	store.AddSession(sessionID, testTenantID, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddda0", "subject@example.com", 0)
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	var gotSubject string
+	var gotOK bool
+	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSubject, gotOK = auth.SubjectFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/api/protected", nil)
+	req.Header.Set("Authorization", "Bearer dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddda0")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !gotOK {
+		t.Fatal("expected a subject in context for a valid session")
+	}
+	if gotSubject != "subject@example.com" {
+		t.Errorf("subject = %q, want %q", gotSubject, "subject@example.com")
+	}
+}
+
+// TestOA_Middleware_PassthroughDoesNotSetASubject is the mirror: a request
+// this middleware does not recognise as one of its own sessions (no bearer
+// token, wrong shape, wrong path) must leave auth.SubjectFromContext exactly
+// as it found it -- absent -- so that oauth-provider never claims an identity
+// for a request it did not authenticate.
+func TestOA_Middleware_PassthroughDoesNotSetASubject(t *testing.T) {
+	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	var gotOK bool
+	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, gotOK = auth.SubjectFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/api/protected", nil) // no Authorization header at all
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if gotOK {
+		t.Error("a request with no session token got a subject in context; " +
+			"oauth-provider must not claim an identity for a request it did not authenticate")
 	}
 }
 

@@ -197,6 +197,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`audit-log` now records who: `user_id` on every row was the empty string, always.** (cleat#1881)
+
+  The identity was already available — `oauth-provider` resolves an OAuth session to an email and
+  puts it in request context — but nothing read it. A new neutral `auth.SubjectFromContext`
+  (populated by `oauth-provider`, readable by any plugin) closes the gap without one plugin
+  importing the other; an unauthenticated request still records an empty `user_id` and is never
+  refused over a missing identity.
+
+  **The ordering this depends on is now declared, not inherited from the alphabet.** `audit-log`
+  reads context after the request has passed through every plugin wrapped around it, so it only
+  sees `oauth-provider`'s value because `"oauth-provider"` happens to sort after `"audit-log"` in
+  the tie-break `plugin.Discover()` falls back to when neither plugin declares a relationship.
+  Renaming either plugin would have silently reverted `user_id` to always-empty with no test
+  failing. A new plugin-contract clause (C14) and guard pin the real registered order instead —
+  `plugin.PluginInfo.Requires` was considered and rejected for this, since it makes plugin
+  discovery fail outright if the required plugin isn't registered, which is the wrong coupling
+  between two independently-optional features.
+
 - **`cleat build --target rust` refuses a workflow that iterates a `HashMap` or `HashSet` (R008).**
   (cleat#1864)
 

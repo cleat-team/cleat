@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
@@ -38,13 +39,16 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		auth := r.Header.Get("Authorization")
-		if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+		// Named authHeader rather than auth: this package imports
+		// github.com/cleat-team/cleat/auth below, and a local var named auth
+		// would shadow it for the rest of this closure.
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		token := strings.TrimPrefix(auth, "Bearer ")
+		token := strings.TrimPrefix(authHeader, "Bearer ")
 		if token == "" {
 			next.ServeHTTP(w, r)
 			return
@@ -118,6 +122,15 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 			UserEmail: userEmail.String,
 		}
 		ctx := context.WithValue(r.Context(), sessionContextKey{}, info)
+		// A NEUTRAL identity, alongside the OAuth-specific SessionInfo above --
+		// see auth.WithSubject for why a plugin auditing "who" should not have
+		// to know it was OAuth that answered. Only set when the database
+		// returned a real email: an invalid/NULL userEmail would otherwise set
+		// an empty subject that reads identically to "nothing authenticated
+		// this request", which is a different fact. cleat#1881.
+		if userEmail.Valid {
+			ctx = auth.WithSubject(ctx, userEmail.String)
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

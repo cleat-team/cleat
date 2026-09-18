@@ -68,7 +68,7 @@ func (p *Plugin) drainBuffer() {
 		select {
 		case evt := <-p.buffer:
 			p.recordAudit(context.Background(),
-				evt.tenantID, evt.method, evt.path,
+				evt.tenantID, evt.userID, evt.method, evt.path,
 				evt.statusCode, evt.ipAddress, evt.userAgent,
 				evt.duration,
 			)
