@@ -1,4 +1,4 @@
-module github.com/example/my-workflow
+module github.com/example/my-agent
 
 go 1.24
 

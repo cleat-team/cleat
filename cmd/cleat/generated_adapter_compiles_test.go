@@ -75,6 +75,21 @@ func TestGeneratedAdapterCompilesForEveryHostCall(t *testing.T) {
 		t.Fatalf("PrepareBuildDir: %v", err)
 	}
 
+	// PrepareBuildDir's own doc comment states the contract: "Write a minimal
+	// go.mod for wasip1 compilation. go mod tidy is run by the caller to
+	// generate go.sum." Every real caller (runBuild, cmd/cleat/main.go) does
+	// this before compiling; this test did not, and it worked only because
+	// the minimal go.mod it wrote happened to need no further resolution --
+	// which stopped being true the moment cleat/go.mod's own dependency
+	// versions changed (cleat#1888), and surfaced as an unrelated-looking
+	// "go: updates to go.mod needed" here rather than in the real build path,
+	// where the missing step this test lacked has always been present.
+	tidyCmd := exec.Command("go", "mod", "tidy")
+	tidyCmd.Dir = outDir
+	if out, err := tidyCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy in the generated build dir failed:\n%s\nerror: %v", out, err)
+	}
+
 	cmd := exec.Command("go", "build", "-o", filepath.Join(outDir, "entry.wasm"), ".")
 	cmd.Dir = outDir
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
