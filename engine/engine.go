@@ -273,6 +273,13 @@ func WithVersionValidation(fn func() error) EngineOption {
 }
 
 // WithAllowVersionMismatch allows replay despite version compatibility failures.
+//
+// EMBEDDER API, deliberately not a worker flag -- `engine_option_reachability_test.go`'s
+// exemption table: "escape hatch, deliberately not a worker flag." `cleat-worker`
+// never calls this; an embedder that links the engine directly can, when it has
+// its own reason to trust a mismatched version. cleat#1871 moved this and
+// WithAmbiguityResolver's reachability decisions from the guard's exemption
+// list, where an API's own reader would not find them, onto the option itself.
 func WithAllowVersionMismatch(allow bool) EngineOption {
 	return func(e *Engine) { e.allowVersionMismatch = allow }
 }
