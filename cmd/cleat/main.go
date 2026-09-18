@@ -1500,7 +1500,27 @@ func runRollback(name string, version int) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Rolled back %q to version %d. New instances will use version %d.\n", name, version, version)
+	// cleat#1887: this used to print the success message below and stop --
+	// no UPDATE, no INSERT, nothing. workflow_defs has no active/stable
+	// pointer column for it to have written to in the first place (only
+	// disabled_at and gc_eligible), and a new workflow start always takes
+	// the latest version regardless (cmd/cleat-worker/server.go's
+	// targetVersion default), so every "rollback" was a no-op that told the
+	// operator it had succeeded -- during exactly the kind of incident
+	// where that lie costs the most.
+	//
+	// FAILING LOUDLY, not implementing the write here: the real fix is a
+	// dedicated routing-table write (workflow_routing already exists and is
+	// already consulted before the version default -- see
+	// PickVersionByRouting, server.go), and cleat#1887 leaves open which
+	// tenant scope that write should take. runRollback opens a raw
+	// connection with no tenant context, unlike every RLS-scoped read path
+	// in this file; writing to the wrong tenant on a rollback command is a
+	// worse outcome than the no-op this replaces, so that has to be decided
+	// before the write is, not guessed here.
+	fmt.Fprintf(os.Stderr, "Error: cleat rollback is not implemented -- it validates the "+
+		"version but does not change what a new run resolves to. See cleat#1887.\n")
+	os.Exit(1)
 }
 
 // runSchedule manages cron schedules for recurring workflow execution.
