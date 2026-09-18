@@ -16,10 +16,6 @@ import (
 // check-db command
 // ---------------------------------------------------------------------------
 
-// runCheckDB verifies database connectivity and schema health.
-// It connects to the database, pings it, checks the schema migration version,
-// inspects workflow instance counts, and reports overall health status.
-
 // coreTableExistsSQL asks whether one core table exists, per dialect.
 //
 // THE TWO ARMS TAKE DIFFERENT NUMBERS OF PARAMETERS, which is unusual enough to
@@ -64,6 +60,9 @@ var latestMigrationSQL = plugin.Query{
 // the row-count branch, which prints a row count instead of a size.
 var errSizeEstimateNotPortable = errors.New("event history size estimate is PostgreSQL-only")
 
+// runCheckDB verifies database connectivity and schema health.
+// It connects to the database, pings it, checks the schema migration version,
+// inspects workflow instance counts, and reports overall health status.
 func runCheckDB(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	verbose := false
 	for _, arg := range args {

@@ -640,13 +640,6 @@ func TestCascadeDelete(t *testing.T) {
 	}
 }
 
-// addCascadeFKs adds ON DELETE CASCADE foreign keys to the test schema.
-// The approach differs by dialect because the test schemas have different FK states:
-//   - Postgres: no FKs at all, so add them directly.
-//   - MySQL: 4 tables have FKs (drop+re-add), concurrency_keys has none (add fresh).
-//   - MSSQL: 4 tables have inline REFERENCES (auto-named, IF EXISTS skips them),
-//     ADD CONSTRAINT creates named CASCADE FK alongside. concurrency_keys has no FK.
-//
 // mysqlCascadeChildTables are the five tables migrations/mysql/001_schema.sql
 // declares with a FOREIGN KEY to workflow_instances ON DELETE CASCADE.
 // Re-derive with:
@@ -660,6 +653,12 @@ var mysqlCascadeChildTables = []string{
 	"concurrency_keys",
 }
 
+// addCascadeFKs adds ON DELETE CASCADE foreign keys to the test schema.
+// The approach differs by dialect because the test schemas have different FK states:
+//   - Postgres: no FKs at all, so add them directly.
+//   - MySQL: 4 tables have FKs (drop+re-add), concurrency_keys has none (add fresh).
+//   - MSSQL: 4 tables have inline REFERENCES (auto-named, IF EXISTS skips them),
+//     ADD CONSTRAINT creates named CASCADE FK alongside. concurrency_keys has no FK.
 func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 	t.Helper()
 
