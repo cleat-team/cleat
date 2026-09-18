@@ -76,7 +76,25 @@ import sys
 # so `func (s *Store) Foo` keys on Foo. Anchoring is what keeps this out of
 # strings and nested funcs without needing a Go parser -- the same "anchor to
 # where the artifact lives, not to what it is called" move CLAUDE.md prescribes.
-DECL = re.compile(r'^(?:func\s+(?:\([^)]*\)\s*)?(\w+)|type\s+(\w+))\b')
+#
+# `var` AND `const` ARE HERE BECAUSE THEY WERE MISSING, and the guard's own
+# author walked into the gap. This read `func|type` until 2026-09-17, so a
+# package-level `var` that lost its doc comment was invisible -- and the guard
+# ran green over #1824, a PR that did exactly that to `forbiddenJavaPatterns`
+# in cmd/cleat/vet_java.go. Go attaches doc comments to a `var` by the same
+# adjacency rule it uses for a `func`; nothing about the hazard stops at the
+# keyword, only this pattern did.
+#
+# The widening was measured rather than assumed, because a scan that grows can
+# start refusing things that are fine. Over the last 80 commits on develop:
+#
+#     func|type only              0 findings
+#     with var|const              1 finding -- #1824, the true positive
+#
+# So the whole of the difference is the defect. A name inside a grouped
+# `var (` / `const (` block is indented and still does not register, which is
+# the conservative direction: untracked, never misreported.
+DECL = re.compile(r'^(?:func\s+(?:\([^)]*\)\s*)?(\w+)|(?:type|var|const)\s+(\w+))\b')
 
 
 def documented(src):
@@ -164,6 +182,37 @@ func beta() int { return 2 }
 '''
 
 
+# A `var` is the case this guard was blind to until 2026-09-17, so it carries a
+# known-positive of its own rather than relying on the `func` arms to stand for
+# every declaration kind. Reverting DECL to `func|type` fails exactly this arm,
+# which is the falsification the widening is worth.
+SELF_TEST_VAR_BEFORE = """package p
+
+// table is the list of things, with a paragraph explaining each column.
+var table = []string{"a"}
+"""
+
+SELF_TEST_VAR_BROKEN = """package p
+
+// table is the list of things, with a paragraph explaining each column.
+func helper() int { return 1 }
+
+var table = []string{"a"}
+"""
+
+# The control pairs a `const` with a `var` so both spellings are exercised in
+# the quiet direction too: a widening that starts reporting correctly-documented
+# declarations is the failure mode a known-positive alone cannot see.
+SELF_TEST_CONST_OK = """package p
+
+// limit is the ceiling.
+const limit = 10
+
+// table is the list of things.
+var table = []string{"a"}
+"""
+
+
 def self_test():
     """Both directions: it must FIRE on a known defect and stay quiet on a control.
 
@@ -183,6 +232,20 @@ def self_test():
     clean = documented(SELF_TEST_OK)
     if not clean.get('alpha') or not clean.get('beta'):
         print('SELF-TEST FAILED: the detector reports a correctly documented pair as undocumented')
+        ok = False
+
+    # A `var` that lost its doc comment: the case DECL could not see until
+    # 2026-09-17. Asserted by NAME rather than by a count, so a widening that
+    # happens to report something else does not satisfy it.
+    vb, vbroken = documented(SELF_TEST_VAR_BEFORE), documented(SELF_TEST_VAR_BROKEN)
+    if not (vb.get('table') and vbroken.get('table') is False):
+        print('SELF-TEST FAILED: the detector does not see a var losing its doc comment')
+        ok = False
+
+    # ...and the quiet direction, for both spellings.
+    c = documented(SELF_TEST_CONST_OK)
+    if not c.get('limit') or not c.get('table'):
+        print('SELF-TEST FAILED: a correctly documented const/var reads as undocumented')
         ok = False
 
     # A method's receiver must not become part of the name, or every method

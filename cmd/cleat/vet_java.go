@@ -8,7 +8,6 @@ import (
 	"strings"
 )
 
-// forbiddenJavaPatterns lists Java APIs that are not allowed in workflow code.
 // javaCodeOnly returns src with every comment and every string, text block or
 // character literal replaced by spaces, byte offsets and line endings
 // untouched.
@@ -154,6 +153,7 @@ func javaCodeOnly(src []byte) []byte {
 	return out
 }
 
+// forbiddenJavaPatterns lists Java APIs that are not allowed in workflow code.
 var forbiddenJavaPatterns = []struct {
 	pattern    string
 	code       string
