@@ -221,21 +221,50 @@ func TestRecordEventReturnsAfterAFailedFlushAndDoesNotAdvanceTheChain(t *testing
 func TestTheOrderingComparisonReportsAFireAndForgetFlush(t *testing.T) {
 	_, store := newOrderingHarness(t, nil)
 
-	// What a fire-and-forget recordEvent would do: dispatch the flush and
-	// return without waiting for it.
-	go func() { _ = store.flushEventForStep(context.Background(), "wf-1670", stampedRecord(0)) }()
+	// What a fire-and-forget recordEvent would do: return without waiting, and
+	// let the flush land afterwards.
+	//
+	// IN ORDER, ON ONE GOROUTINE, AND THAT IS THE FIX FOR cleat#1842. This
+	// spawned the flush and then stamped the return, so two goroutines
+	// incremented one counter with nothing ordering them and the assertion held
+	// only when the main one happened to win. -count=300 passes on a laptop and
+	// it fails on a loaded runner, which is why it surfaced as an unexplained
+	// red rather than as a bug. WS-3 reproduced it deterministically by
+	// inserting a 2ms sleep before the stamp; the goroutine then wins every
+	// time.
+	//
+	// Fire-and-forget is an ORDERING -- the call returns, the flush lands later
+	// -- and an ordering does not need a goroutine to express. Doing the two
+	// steps in that order produces exactly the observable this drives the
+	// comparison against, with no race to lose: returnSeq is 1, flushSeq is 2.
+	// What the test pins is unchanged, which is the point: it is still the same
+	// comparison, against a deliberate violation, required to report it.
+	//
+	// No wait on store.flushed either. The flush has completed by the time the
+	// call below returns, so a receive would be ceremony implying concurrency
+	// that is no longer here -- and the sibling above still needs its wait,
+	// because there recordEvent really may flush on another goroutine.
 	returnSeq := store.seq.Add(1)
-
-	<-store.flushed
+	_ = store.flushEventForStep(context.Background(), "wf-1670", stampedRecord(0))
 	flushSeq := store.flushSeq.Load()
 
 	if flushSeq < returnSeq {
 		t.Fatalf("the comparison accepted a fire-and-forget flush: flush stamped %d, "+
 			"return stamped %d.\n\n"+
 			"Then TestADurableCallsEventIsDurableBeforeRecordEventReturns is green "+
-			"whichever order the engine uses, and it is not a guard. The likely cause "+
-			"is the wait on flushed being removed: without it the flush may not have "+
-			"stamped at all, leaving 0, and 0 is less than every return stamp.",
+			"whichever order the engine uses, and it is not a guard.\n\n"+
+			"Two causes, and neither is the one this message used to name. Either the "+
+			"two statements above have been reordered so the flush no longer lands "+
+			"after the return -- in which case this is not simulating fire-and-forget "+
+			"any more -- or flushEventForStep stopped stamping, leaving flushSeq at 0, "+
+			"which is less than every return stamp.\n\n"+
+			"It used to say the likely cause was the wait on `flushed` being removed, "+
+			"which was wrong and expensive: when this test failed it failed by LOSING "+
+			"A RACE, and the observed values were flushSeq=1 returnSeq=2 -- the flush "+
+			"had stamped, and stamped first. The message sent its reader hunting for a "+
+			"deleted receive that was still there. A guard whose diagnosis is wrong "+
+			"costs more than one that just asserts, because the wrong lead gets "+
+			"followed. cleat#1842.",
 			flushSeq, returnSeq)
 	}
 }
