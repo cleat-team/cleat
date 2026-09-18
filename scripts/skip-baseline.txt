@@ -10,7 +10,10 @@ cmd/cleat	TestBuildRefusesAFlagAfterThePath	1
 cmd/cleat	TestBuildStillAcceptsTheDocumentedOrder	1
 cmd/cleat	TestJavaBuildRefusesNondeterminism	1
 cmd/cleat	TestPythonBuildRefusesNondeterminism	3
-cmd/cleat	TestRollbackFailsLoudlyInsteadOfLying	2
+cmd/cleat	TestRollbackClearRemovesThePin	1
+cmd/cleat	TestRollbackRefusesToDiscardALiveExperiment	1
+cmd/cleat	TestRollbackToAnUnknownVersionWritesNothing	1
+cmd/cleat	TestRollbackWritesAPinANewRunWillResolveTo	1
 cmd/cleat	TestRunBuild_PythonTarget_WasmRoundtrip	2
 cmd/cleat	TestRustBuildAcceptsProseNamingAForbiddenPattern	1
 cmd/cleat	TestRustBuildRefusesNondeterminism	1
@@ -21,6 +24,7 @@ cmd/cleat	TestTheASRowsOfTheBindingTableAreAsserted	1
 cmd/cleat	TestTheJavaScanActuallyUsesJavaCodeOnly	1
 cmd/cleat	TestTheJavaScanSkipsTestSources	1
 cmd/cleat	TestThePythonVetSaysWhetherItRan	3
+cmd/cleat	TestTheRollbackPinIsWhatVersionResolutionReads	1
 cmd/cleat	TestVetAS	2
 cmd/cleat	TestVetExitCode	1
 cmd/cleat	TestVetPython	3

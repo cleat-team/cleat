@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -204,8 +205,17 @@ func main() {
 	case "versions":
 		runVersions(args[1])
 	case "rollback":
+		// `rollback --clear <name>` removes the pin and returns the workflow
+		// to latest-wins. Parsed positionally like the rest of this dispatch
+		// rather than with a FlagSet, to match `rollback <name> <version>`
+		// beside it; cleat#1887.
+		if len(args) >= 3 && args[1] == "--clear" {
+			runRollbackClear(args[2])
+			return
+		}
 		if len(args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: cleat rollback <workflow-name> <version>\n")
+			fmt.Fprintf(os.Stderr, "Usage: cleat rollback <workflow-name> <version>\n"+
+				"       cleat rollback --clear <workflow-name>\n")
 			os.Exit(1)
 		}
 		version, err := strconv.Atoi(args[2])
@@ -1470,57 +1480,147 @@ func runVersions(name string) {
 
 // runRollback sets the active version for a workflow by confirming the version
 // exists and printing instructions for new instances.
+// runRollback pins new runs of a workflow to a specific version.
+//
+// WHAT IT WRITES, AND WHY THERE. workflow_defs has no active-version column
+// (only disabled_at and gc_eligible), and adding one would put a SECOND
+// mechanism in front of the same question -- new-run version resolution --
+// whose failure mode when the two disagree is silent. workflow_routing is
+// already that mechanism: server.go consults PickVersionByRouting BEFORE
+// falling back to the latest version, the table has a foreign key to
+// (name, version) so the target cannot dangle, and its reads are RLS-scoped.
+// A rollback is therefore a routing rule at weight 1.0, and needs no new
+// resolution path at all.
+//
+// TENANT SCOPE, which cleat#1893 correctly refused to guess. This resolves it
+// exactly as `deploy` does -- resolveDeployTenant: --tenant flag, then
+// CLEAT_TENANT_ID, then the single-tenant default. Matching deploy is the
+// whole argument: a rollback that landed on a different tenant than the
+// deploy it reverses would be worse than the no-op this replaces, and the
+// only way to be sure they agree is to call the same function.
+//
+// REPLACE, NOT ADD. Existing rules for this workflow are deleted in the same
+// transaction, so a rollback is never partially applied on top of a weighted
+// experiment. If an experiment is live, the command refuses rather than
+// silently discarding it -- see the weight check below.
+//
+// THE PIN PERSISTS across later deploys, and `--clear` removes it. The
+// alternative -- a deploy silently clearing it -- means shipping N+2 after a
+// rollback re-exposes the version the operator withdrew, which is the same
+// class of surprise this command was fixed for. `deploy` warns when a pin
+// exists instead.
 func runRollback(name string, version int) {
-	connStr := getDBConnStr()
-	if connStr == "" {
-		fmt.Fprintf(os.Stderr, "Error: --db flag or CLEAT_DATABASE_URL is required\n")
-		os.Exit(1)
-	}
-
-	db, err := openPostgresDB(connStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
-		os.Exit(1)
-	}
+	db := openRollbackDB()
 	defer db.Close()
 
-	if err := db.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error pinging database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
+	tenantID := resolveDeployTenant(buildTenantID, os.Getenv("CLEAT_TENANT_ID"))
+
+	tx, err := db.Begin()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting transaction: %v\n", err)
 		os.Exit(1)
 	}
+	defer tx.Rollback()
 
 	var exists bool
-	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM workflow_defs WHERE name = $1 AND version = $2)", name, version).Scan(&exists)
+	err = tx.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3)",
+		name, version, tenantID).Scan(&exists)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error checking version: %v\n", err)
 		os.Exit(1)
 	}
 	if !exists {
-		fmt.Fprintf(os.Stderr, "Error: workflow %q version %d not found\nUse 'cleat versions <name>' to list available versions.\n", name, version)
+		fmt.Fprintf(os.Stderr, "Error: workflow %q version %d not found for tenant %s\n"+
+			"Use 'cleat versions <name>' to list available versions.\n", name, version, tenantID)
 		os.Exit(1)
 	}
 
-	// cleat#1887: this used to print the success message below and stop --
-	// no UPDATE, no INSERT, nothing. workflow_defs has no active/stable
-	// pointer column for it to have written to in the first place (only
-	// disabled_at and gc_eligible), and a new workflow start always takes
-	// the latest version regardless (cmd/cleat-worker/server.go's
-	// targetVersion default), so every "rollback" was a no-op that told the
-	// operator it had succeeded -- during exactly the kind of incident
-	// where that lie costs the most.
-	//
-	// FAILING LOUDLY, not implementing the write here: the real fix is a
-	// dedicated routing-table write (workflow_routing already exists and is
-	// already consulted before the version default -- see
-	// PickVersionByRouting, server.go), and cleat#1887 leaves open which
-	// tenant scope that write should take. runRollback opens a raw
-	// connection with no tenant context, unlike every RLS-scoped read path
-	// in this file; writing to the wrong tenant on a rollback command is a
-	// worse outcome than the no-op this replaces, so that has to be decided
-	// before the write is, not guessed here.
-	fmt.Fprintf(os.Stderr, "Error: cleat rollback is not implemented -- it validates the "+
-		"version but does not change what a new run resolves to. See cleat#1887.\n")
-	os.Exit(1)
+	// A weighted experiment is someone else's deliberate state. Refusing is
+	// recoverable (clear it, then roll back); silently discarding it is not.
+	var experiment int
+	err = tx.QueryRow(
+		"SELECT COUNT(*) FROM workflow_routing WHERE workflow_name = $1 AND tenant_id = $2 AND weight < 1.0",
+		name, tenantID).Scan(&experiment)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading routing rules: %v\n", err)
+		os.Exit(1)
+	}
+	if experiment > 0 {
+		fmt.Fprintf(os.Stderr, "Error: %q has %d weighted routing rule(s) -- a rollback would "+
+			"discard a live experiment.\nRun 'cleat rollback --clear %s' first if that is what you want.\n",
+			name, experiment, name)
+		os.Exit(1)
+	}
+
+	if _, err = tx.Exec(
+		"DELETE FROM workflow_routing WHERE workflow_name = $1 AND tenant_id = $2",
+		name, tenantID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error clearing existing routing: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err = tx.Exec(
+		"INSERT INTO workflow_routing (workflow_name, target_version, weight, tenant_id) VALUES ($1, $2, 1.0, $3)",
+		name, version, tenantID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing routing rule: %v\n", err)
+		os.Exit(1)
+	}
+
+	// The success message comes AFTER the commit returns, which is the whole
+	// defect cleat#1887 recorded: the previous version printed it having
+	// written nothing at all.
+	if err := tx.Commit(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error committing rollback: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Rolled back %q to version %d. New runs will use version %d until "+
+		"'cleat rollback --clear %s'.\n", name, version, version, name)
+}
+
+// runRollbackClear removes the pin, returning the workflow to latest-wins.
+func runRollbackClear(name string) {
+	db := openRollbackDB()
+	defer db.Close()
+
+	tenantID := resolveDeployTenant(buildTenantID, os.Getenv("CLEAT_TENANT_ID"))
+
+	res, err := db.Exec(
+		"DELETE FROM workflow_routing WHERE workflow_name = $1 AND tenant_id = $2",
+		name, tenantID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error clearing routing for %q: %v\n", name, err)
+		os.Exit(1)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// Not an error: clearing an unpinned workflow is the state the caller
+		// asked for. Said plainly so it is not read as a silent success on a
+		// misspelled name.
+		fmt.Printf("%q had no routing rules; new runs already use the latest version.\n", name)
+		return
+	}
+	fmt.Printf("Cleared %d routing rule(s) for %q. New runs will use the latest version.\n", n, name)
+}
+
+// openRollbackDB is the connection both rollback paths share.
+func openRollbackDB() *sql.DB {
+	connStr := getDBConnStr()
+	if connStr == "" {
+		fmt.Fprintf(os.Stderr, "Error: --db flag or CLEAT_DATABASE_URL is required\n")
+		os.Exit(1)
+	}
+	db, err := openPostgresDB(connStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
+		os.Exit(1)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		fmt.Fprintf(os.Stderr, "Error pinging database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
+		os.Exit(1)
+	}
+	return db
 }
 
 // runSchedule manages cron schedules for recurring workflow execution.
