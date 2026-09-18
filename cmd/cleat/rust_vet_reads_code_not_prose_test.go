@@ -123,18 +123,9 @@ func TestRustCodeOnlyStillSeesTheKnownPositive(t *testing.T) {
 		"    // reads a file, which the checker must still catch below\n" +
 		"    let _ = std::fs::read_to_string(\"data.txt\");\n}\n"
 
-	got := string(rustCodeOnly([]byte(src)))
-	hits := 0
-	for _, fb := range forbiddenRustPatterns {
-		if fb.pattern == "" {
-			continue
-		}
-		if strings.Contains(got, fb.pattern) {
-			hits++
-		}
-	}
-	if hits == 0 {
-		t.Fatalf("no forbidden pattern survives in code that plainly uses one:\n%s", got)
+	got := rustCodeOnly([]byte(src))
+	if len(findForbiddenRustPaths(got)) == 0 {
+		t.Fatalf("nothing is reported in code that plainly reaches std::fs:\n%s", string(got))
 	}
 }
 

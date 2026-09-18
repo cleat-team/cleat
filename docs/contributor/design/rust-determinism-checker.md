@@ -8,7 +8,11 @@ record rather than something inferred afterwards from the code that happened to 
 
 ## The problem
 
-`cmd/cleat/vet_rust.go` matches **15 literal substrings** (`forbiddenRustPatterns`) with
+> **Implemented in cleat#1811.** This note is left in the tense it was written in — it describes the
+> state the decision was made against, not the state of the tree. Rewriting it to match what was
+> built would destroy the only record of what the alternatives were.
+
+`cmd/cleat/vet_rust.go` matched **15 literal substrings** (`forbiddenRustPatterns`) with
 `strings.Contains` over each line — 14 forbidden spellings and one allowed-marker row.
 `DurableLeaves`, `DurableClosure` and `Pure` in its output are permanently `0`: there is no call
 graph and no reachability, so those three fields are placeholders, not measurements.

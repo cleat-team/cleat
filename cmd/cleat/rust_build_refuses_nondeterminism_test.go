@@ -57,7 +57,7 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 	}
 
 	// ARM 1 -- KNOWN POSITIVE. A plain single-module import of the standard
-	// filesystem module is on forbiddenRustPatterns, so the gate must refuse
+	// filesystem module resolves to a path on forbiddenRustPaths, so the gate must refuse
 	// the build and must do so BEFORE cargo runs: an artifact that was never
 	// compiled cannot be deployed by accident.
 	t.Run("known positive is refused, and for the determinism reason", func(t *testing.T) {
@@ -84,25 +84,76 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 		}
 	})
 
-	// ARM 2 -- KNOWN LIMIT. The same non-determinism, spelled with a grouped
-	// import, is invisible to a substring matcher. This arm exists so that
-	// "5 of 5 languages refuse a bad fixture" cannot be read as parity of
-	// ENFORCEMENT between a whole-program analysis and a list of strings.
+	// ARM 1b -- THE FIXTURE THAT USED TO BE THE KNOWN LIMIT. A grouped import
+	// spells the same reach in a way no literal in the old table matched;
+	// cleat#1811 replaced that table with a `use` resolver and it is now
+	// caught. Promoted here from the arm below, following that arm's own
+	// instructions.
+	//
+	// Asserted on R001 rather than on the exit status, for the same reason as
+	// the arm above: this fixture's crate layout makes cargo fail anyway.
+	t.Run("a grouped import is refused, now that paths are resolved", func(t *testing.T) {
+		out := build(t, "r001_grouped_import")
+
+		if !strings.Contains(out, "R001") {
+			t.Errorf("the grouped-import fixture was not refused. It reaches the filesystem "+
+				"through `use std::{fs, io}` and `fs::read_to_string`, which the resolver "+
+				"must see (cleat#1811).\n\noutput:\n%s", out)
+		}
+		// The resolution is part of the finding, not decoration: "R001 at
+		// fs::read_to_string" sends the reader to a name that is in no table.
+		if !strings.Contains(out, "std::fs") {
+			t.Errorf("the finding does not name the RESOLVED path, so the reader cannot tell "+
+				"which module it reached.\n\noutput:\n%s", out)
+		}
+	})
+
+	// ARM 1c -- AN ALIASED IMPORT. `use std::time::SystemTime as ST; ST::now()`
+	// contains the forbidden spelling nowhere at all.
+	t.Run("an aliased clock is refused, and the finding names both forms", func(t *testing.T) {
+		out := build(t, "r005_aliased_now")
+
+		if !strings.Contains(out, "R005") {
+			t.Errorf("an aliased SystemTime::now was not refused.\n\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, "ST::now") || !strings.Contains(out, "std::time::SystemTime::now") {
+			t.Errorf("the finding must name what was WRITTEN and what it RESOLVES TO; one "+
+				"without the other is unactionable.\n\noutput:\n%s", out)
+		}
+		// Duration is imported here on purpose. The old table needed an
+		// explicit allow row for it; the prefix rule excludes it by
+		// construction, and a regression to substring matching would flag it.
+		if strings.Contains(out, "R00") && strings.Contains(out, "Duration") {
+			t.Errorf("std::time::Duration was reported. It is what h.DurableSleep() takes "+
+				"and is under neither forbidden prefix.\n\noutput:\n%s", out)
+		}
+	})
+
+	// ARM 2 -- KNOWN LIMIT, now a method call rather than a grouped import.
+	// The resolver matches PATH expressions; `t.elapsed()` names no module, so
+	// a crate exactly as non-deterministic as r005_aliased_now next door goes
+	// unreported. Seeing it needs a receiver's type, which the design note
+	// declines and which tree-sitter would not have supplied either.
+	//
+	// This arm exists so that "5 of 5 languages refuse a bad fixture" cannot be
+	// read as parity of ENFORCEMENT between a whole-program analysis and a
+	// path resolver.
 	//
 	// It is also a tripwire: if the Rust checker is ever strengthened, this
 	// goes red. That is good news, not a regression -- see the failure text.
 	t.Run("known limit escapes the checker, and says so out loud", func(t *testing.T) {
-		out := build(t, "known_limit_grouped_use")
+		out := build(t, "known_limit_trait_method")
 
 		if strings.Contains(out, "determinism check failed") || strings.Contains(out, "Error [R0") {
-			t.Errorf("the Rust checker now CATCHES the grouped-import fixture.\n\n"+
+			t.Errorf("the Rust checker now CATCHES the trait-method fixture.\n\n"+
 				"This is an improvement, not a regression. Three things to do:\n"+
-				"  1. move this fixture to the known-positive arm above;\n"+
+				"  1. move this fixture to a known-positive arm above;\n"+
 				"  2. write a new known-limit fixture for whatever still escapes\n"+
 				"     -- do not leave this arm empty, or the next reader has no\n"+
 				"     way to tell a strong checker from an unwired one;\n"+
-				"  3. update LANGUAGE_SUPPORT.md, which describes Rust\n"+
-				"     enforcement as a substring scan.\n\noutput:\n%s", out)
+				"  3. update LANGUAGE_SUPPORT.md and\n"+
+				"     docs/contributor/design/rust-determinism-checker.md, which\n"+
+				"     both say the checker has no type resolution.\n\noutput:\n%s", out)
 		}
 	})
 }
