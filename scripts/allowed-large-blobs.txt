@@ -1,0 +1,13 @@
+# Tracked blobs over 25 MiB (26,214,400 bytes), with a reason for each.
+#
+# EMPTY as of cleat#1859: today's two deliberate fixtures
+# (tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm and
+# its .component.wasm sibling, 19,300,914 bytes each) both clear the
+# threshold on their own and need no entry here. Add one only for a blob
+# that genuinely must ship in the repo over 25 MiB, with the issue that
+# explains why.
+#
+# Format: one entry per line, "path<TAB>reason", read by
+# scripts/check-tracked-blob-size.sh. A stale entry (the path no longer
+# exists, or is no longer over the threshold) fails the check rather than
+# being silently ignored -- see that script's header comment.
