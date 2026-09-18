@@ -1,9 +1,18 @@
 # Design: crash recovery for external calls
 
-Status: **design, not implemented.** Supersedes the approach that was sketched in
-`engine/flush.go` (`flushCallIntent` / `completeCallEvent`) and **deleted in Phase A** rather
-than wired in — see §2 for why. The detector and the `pendingSentinel` constant were kept:
-they are the read half of this design and they work.
+Status: **implemented, all six phases.** Superseded the approach that was sketched in
+`engine/flush.go` (`flushCallIntent` / `completeCallEvent`), which was **deleted in Phase A**
+rather than wired in — see §2 for why.
+
+> **Corrected 2026-09-18 (cleat#1865).** This line read "design, not implemented" for weeks
+> after Phase F landed (2026-09-02), and §9's "Open questions" still asked one Phase D–F had
+> already answered — found stale when it was cited as current evidence on cleat#1778 and was
+> wrong. IMPROVEMENT-PLAN §1.4 (archived to `IMPROVEMENT-PLAN-CLOSED.md`) is the authoritative
+> phase-by-phase record; §8 and §9 below are corrected to match it, not merely re-marked.
+
+Idempotency keys (Tier 1), write-ahead intent (Tier 2) and resolution — automatic, then admin
+(Tier 3) — are all live and reachable from the shipped worker. The detector and the
+`pendingSentinel` constant that Phase A kept are the read half of this design.
 
 Companion to [`durable-calls.md`](durable-calls.md), which describes the contract as it
 stands today. IMPROVEMENT-PLAN item 1.4.
@@ -189,10 +198,13 @@ Detection alone leaves the workflow stuck. Three exits, in order of preference:
 2. **Typed error to the guest.** `ErrAmbiguous` already exists as error code 5. Today the
    detail arrives as a formatted string *inside the workflow result*, so tooling has to parse
    prose. It should be a structured value carrying step, service, operation and key.
-3. **Admin force-resolve.** Supply an outcome for a pending step by hand. This lands on the
-   admin API, whose store methods are still stubs — and which has **no tenant ownership check**
-   (IMPROVEMENT-PLAN 1.7). That check must exist first; otherwise this ships a cross-tenant
-   write primitive.
+3. **Admin force-resolve.** Supply an outcome for a pending step by hand. **Done, phase F,
+   2026-09-02**: `engine.ResolveStep` (`engine/admin_intent.go`), reachable at
+   `POST /api/admin/instances/{id}/steps/{step}/resolve`. It builds on phase E's
+   `ResolveCallIntent`, needed no new SQL, and the outcome is written as though the call had
+   returned it — `EventRecord.ResolvedBy` records separately that it was asserted rather than
+   observed. Resolving an already-resolved step is a conflict (409), not a silent overwrite.
+   §1.7's tenant ownership check landed first, as this phase's own dependency required.
 
 ### Telemetry
 
@@ -233,34 +245,56 @@ intent write removed, it is measuring something else.
 | Phase | Work | Effort | Depends on |
 |---|---|---|---|
 | ~~**A**~~ | ~~Delete `flushCallIntent`/`completeCallEvent`; keep the detector; correct `durable-calls.md`; drop the baseline entries~~ ✅ **done** | — | — |
-| **B** | Tier 1 idempotency keys | ~1 session | `Caller` interface change |
-| **C** | 2.4 crash harness + counting-service fixture | ~1 session | — |
+| ~~**B**~~ | ~~Tier 1 idempotency keys~~ ✅ **done** — `DurableCallIdempotencyKey` (`engine/idempotency.go`), an optional `IdempotentCaller` rather than a breaking `ServiceCaller` change, `dbServiceCaller` implements it and sends `Idempotency-Key` | ~1 session | `Caller` interface change |
+| ~~**C**~~ | ~~2.4 crash harness + counting-service fixture~~ ✅ **done** — `tests/crash`, wired into the cluster job | ~1 session | — |
 | ~~**D**~~ | ~~Tier 2 intent + schema migration~~ ✅ **done 2026-08-05** — migration `020` on three dialects, `WriteCallIntent`/`CompleteCallIntent`, `CallSemantics` + `WithWriteAheadIntentOps`, the `freshCall` branch, the detector retargeted off `pendingSentinel`, and `--write-ahead-intent-ops` on the worker | — | — |
-| **E** | Tier 3 resolution hook + typed error | ~1 session | D |
-| **F** | Admin force-resolve | ~0.5 session | E, **and 1.7's ownership check** |
+| ~~**E**~~ | ~~Tier 3 resolution hook~~ ✅ **done 2026-08-05** — `AmbiguityResolver`, `ResolveCallIntent` on all three dialects, resolution persisted before replay continues. **Typed error still open** — see §6, item 2 | ~1 session | D |
+| ~~**F**~~ | ~~Admin force-resolve~~ ✅ **done 2026-09-02** — `ResolveStep`, `POST /api/admin/instances/{id}/steps/{step}/resolve` | ~0.5 session | E, **and 1.7's ownership check** |
 
-**Phase A is done.** It removed 101 lines of engine code and the 17 tests that were its only
-callers — code that read as a finished durability feature, was cited by 48 test references,
-and could not be used. Everything below waits for durable-call correctness to become a
-priority.
+**Phase A was the fix that let everything else be trusted.** It removed 101 lines of engine
+code and the 17 tests that were its only callers — code that read as a finished durability
+feature, was cited by 48 test references, and could not be used.
 
-**Best value when it does: B.** Idempotency keys need no schema change, cost no extra write,
-and solve the problem outright wherever the callee supports them. It is the only tier that
-makes duplicates *impossible* rather than *visible*.
+**B shipped the best-value tier first, as planned.** Idempotency keys need no schema change,
+cost no extra write, and solve the problem outright wherever the callee supports them — the
+only tier that makes duplicates *impossible* rather than merely *visible*.
 
-**Sequencing constraint: do not start D before C.** The reason this defect survived is that
-nothing could observe it. Building the fix before the observation is repeating the mistake.
+**The sequencing constraint held: D did not start before C.** The reason the original defect
+survived was that nothing could observe it; §1.4's own history in IMPROVEMENT-PLAN found a
+second instance of exactly that shape while building C (event writes silently dropped by
+RLS, fixed first — see the archived entry) before D could have measured anything real.
 
-## 9. Open questions
+All six phases are done. IMPROVEMENT-PLAN §1.4, archived to `IMPROVEMENT-PLAN-CLOSED.md`, is
+the phase-by-phase record with tests and measurements; this section states only the shape.
 
-- **Where is policy declared** — at the call site (per-call argument, most precise) or on the
-  service registration (less repetition, coarser)? Probably both, with the call site winning.
-- **Should `IdempotentKey` be the default** for operations that declare themselves idempotent
-  in a plugin manifest? Attractive, but it makes the guarantee depend on a third-party
-  declaration.
-- **What should a `WriteAheadIntent` workflow do when it cannot resolve?** Fail the workflow,
-  or suspend it for operator attention? Suspension is probably right — the information needed
-  to decide is outside the system — but it needs a state to suspend into.
-- **Does the key belong in the event history?** Deriving it is free and it never changes, so
-  storing it is redundant — except for admin tooling, which would otherwise have to recompute
-  it to talk to the external service.
+## 9. Open questions, and what became of each
+
+All four were open when this section was written. None still is; each was settled by
+implementation rather than by revisiting this document, which is exactly how a section like
+this goes stale silently — **corrected 2026-09-18, cleat#1865**, after one of the four was
+cited as still-open evidence on cleat#1778 and was wrong. Re-check a list like this against
+the tree before trusting it, the same rule CLAUDE.md gives for any other status claim.
+
+- **Where is policy declared?** **Decided: service registration, not the call site.**
+  `WithWriteAheadIntentOps` (`engine/callintent.go`) takes `service.operation` pairs, fed by
+  the worker's `--write-ahead-intent-ops` flag. The call-site form this question also
+  considered was not built — it would need a new argument on the `DurableCall` host function
+  and every SDK that binds it, an ABI change that registration avoids and forecloses nothing
+  about adding later.
+- **Should `IdempotentKey` be the default for manifest-declared idempotent operations?**
+  **Decided: no.** `HostFuncDef.Idempotent` (`plugin/manifest.go`) is declarative only and
+  does not reach a registration's `FuncOptions` — a manifest author cannot set it, by design;
+  see that field's own doc comment for why the natural assumption is the wrong one. Idempotency
+  keys are opt-in per operation through `WithWriteAheadIntentOps`/`IdempotentCaller`, never
+  inferred from a manifest.
+- **What should a `WriteAheadIntent` workflow do when it cannot resolve?** **Built: suspend,
+  into a real state.** `engine.ResolveStep` (`engine/admin_intent.go`) records an operator's
+  answer for a step a crash left pending; replay then reads `EventRecord.ResolvedBy` instead
+  of re-calling. `engine.ReReplay` returns the workflow to `ready`, keeping its history. Both
+  are reachable over HTTP at `cmd/cleat-worker/api_admin.go`. Automatic resolution (an
+  `AmbiguityResolver` hook, tried first, before any human is involved) shipped the same day.
+- **Does the key belong in the event history?** **Decided: no, and this one held.**
+  `EventRecord` (`engine/types.go`) carries no idempotency-key field. The key is re-derived
+  wherever it is needed — including by `ResolveStep`
+  (`engine/callintent.go:289`, `DurableCallIdempotencyKey(workflowID, runID, step)`) — because
+  deriving it is free and it never changes, exactly the reasoning this question started from.
