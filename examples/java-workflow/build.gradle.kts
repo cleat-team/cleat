@@ -1,14 +1,7 @@
-buildscript {
-    repositories {
-        mavenCentral()
-    }
-    dependencies {
-        classpath("org.teavm:teavm-gradle-plugin:0.10.2")
-    }
+plugins {
+    java
+    id("org.teavm") version "0.10.2"
 }
-
-apply(plugin = "java")
-apply(plugin = "org.teavm")
 
 group = "com.cleat.example"
 version = "0.1.0"
@@ -29,17 +22,23 @@ java {
 }
 
 teavm {
-    // TeaVM 0.10.2 configuration:
-    // - Flat configuration (no nested "wasm {}" block)
-    // - Use .set() for Kotlin DSL Property delegates
-    // - Use auto-generated cleat.WorkflowEntry from annotation processor:
-    //   WorkflowEntry -> CleatEntryIndex -> *_Export classes -> user methods
-    //   This chain prevents TeaVM from tree-shaking @CleatEntry exports.
-    mainClass.set("cleat.WorkflowEntry")
-    fileName.set("workflow.wasm")
-    outputDir.set(layout.buildDirectory.dir("wasm"))
-    targetType.set("WASM")
-    optimizationLevel.set("FULL")
-    debugInformationGenerated.set(false)
-    sourceMapsGenerated.set(false)
+    // TeaVM 0.10.2, matching examples/saga-java-port's proven-working
+    // Groovy build.gradle: a NESTED "wasm {}" block, not the flat
+    // Property.set() style this file assumed before cleat#1890. Kotlin DSL
+    // only synthesizes typed accessors for the shape the plugin actually
+    // exposes, and at this pinned version that shape is nested per target.
+    wasm {
+        // Use the generated WorkflowEntry as the analysis root.
+        // WorkflowEntry -> CleatEntryIndex -> *_Export classes -> user methods.
+        // This reference chain preserves all @CleatEntry exports automatically.
+        //
+        // .set(), not "=" -- these are Property<T>/DirectoryProperty, not
+        // plain vars. saga-java-port's Groovy sibling can use "=" because
+        // Groovy's dynamic dispatch accepts it as sugar for .set(); Kotlin
+        // DSL does not extend that sugar to a plugin's own Property fields.
+        mainClass.set("cleat.WorkflowEntry")
+        targetFileName.set("workflow.wasm")
+        outputDir.set(file("build/wasm"))
+        optimization.set(org.teavm.gradle.api.OptimizationLevel.BALANCED)
+    }
 }

@@ -16,6 +16,25 @@ func runBuildJava(pattern, outDir, channel string, workflowVersion int) {
 	if javaDir == "" {
 		javaDir = "."
 	}
+	// RESOLVED TO ABSOLUTE HERE, before it is used to build gradleBin below.
+	// exec.Command resolves a RELATIVE executable path against cmd.Dir, not
+	// against the caller's cwd -- and cmd.Dir is set to javaDir a few lines
+	// down. A relative javaDir with its own gradlew wrapper therefore looked
+	// for "<javaDir>/<javaDir>/gradlew", doubled, and failed with "no such
+	// file or directory" on a project that plainly had one. cleat#1890.
+	//
+	// Invisible until now because no Java fixture combined a gradlew wrapper
+	// with a caller passing a relative path: tests/plugin-harness's fixtures
+	// have wrappers but are invoked through an absolute t.TempDir()-adjacent
+	// path (absolute needs no resolution, so cmd.Dir doubling never
+	// triggers), and examples/saga-java-port has no wrapper of its own, so it
+	// falls back to a bare "gradle" resolved via PATH regardless of cmd.Dir.
+	// examples/java-workflow is the first fixture with both properties, and
+	// exposed it the first time someone ran `cleat build --target java
+	// examples/java-workflow` from the repo root instead of an absolute path.
+	if abs, err := filepath.Abs(javaDir); err == nil {
+		javaDir = abs
+	}
 
 	// Validate build file exists (Groovy or Kotlin DSL).
 	gradleFile := filepath.Join(javaDir, "build.gradle")
@@ -40,10 +59,11 @@ func runBuildJava(pattern, outDir, channel string, workflowVersion int) {
 	// because runVetJava is pure Go and needs no toolchain, so a project with
 	// determinism errors is refused on a machine that could not have built it.
 	//
-	// forbiddenJavaPatterns is substring matching, so passing it is not
-	// evidence of determinism. It is a much longer list than Rust's and still
-	// has whole APIs missing -- see the known-limit fixture referenced in
-	// java_build_refuses_nondeterminism_test.go.
+	// runVetJava resolves imports and fully-qualified names to a canonical
+	// path before matching (cleat#1812), not the literal-spelling table this
+	// comment used to describe. It still has real limits -- java.nio and
+	// reflection with a computed argument -- see the known-limit fixture
+	// referenced in java_build_refuses_nondeterminism_test.go.
 	if code := runVetJava(javaDir); code != 0 {
 		fmt.Fprintf(os.Stderr, "\nError: determinism check failed for %s -- no artifact was emitted.\n", javaDir)
 		fmt.Fprintf(os.Stderr, "Fix the errors above, or run 'cleat vet --lang java %s' to see them again.\n", javaDir)
@@ -113,9 +133,10 @@ func runBuildJava(pattern, outDir, channel string, workflowVersion int) {
 	}
 
 	// Use workflow name from directory name. Derived BEFORE the metadata is
-	// written, because the metadata needs it -- see nonGoMetadata.
-	absDir, _ := filepath.Abs(javaDir)
-	name := filepath.Base(absDir)
+	// written, because the metadata needs it -- see nonGoMetadata. javaDir is
+	// already absolute (resolved at the top of this function), so no second
+	// filepath.Abs is needed here.
+	name := filepath.Base(javaDir)
 	name = strings.ReplaceAll(name, "-", "_")
 
 	// Inject cleat.metadata. Must pass wasm.Metadata.Validate(), which
