@@ -382,6 +382,25 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		}()
 	}
 
+	// cleat#1889: made absolute HERE, before anything below computes a path
+	// from it. wasmPath (below) is `filepath.Join(outDir, wasmFile)`, which
+	// if outDir were left relative is relative to THIS process's cwd -- but
+	// buildCmd.Dir (below) is set to outDir too, so the "go build -o
+	// wasmPath" subprocess resolves that SAME relative wasmPath against ITS
+	// OWN cwd (outDir), landing one directory too deep
+	// (outDir/outDir/<wasmFile>) and leaving nothing at the path this
+	// process then os.Stat's, reporting a build that actually succeeded as
+	// "WASM binary not found". os.MkdirTemp above already returns an
+	// absolute path, so this changes nothing for the outDir=="" case --
+	// only for the -o <relative-path> case, which is the common, documented
+	// one (README.md's own Quick Start uses `-o ./out`).
+	abs, err := filepath.Abs(outDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not resolve %s to an absolute path: %v\n", outDir, err)
+		os.Exit(1)
+	}
+	outDir = abs
+
 	goVersion := result.GoVersion
 	if goVersion == "" {
 		goVersion = "1.26"
