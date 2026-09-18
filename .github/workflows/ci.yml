@@ -1020,11 +1020,11 @@ jobs:
     # reached 51 passing checks with one unrelated lint failure between it and
     # develop.
     #
-    # Go only for now, which is 8 of the 10. The two Python examples are excluded
-    # BY NAME in the script, against cleat#1854: their documented command works
-    # (cleat#1836 fixed the relative --entry), but this job installs no Python
-    # toolchain, so it cannot run them. Adding componentize-py, a python3 >= 3.10
-    # and a PYTHONPATH reaching python-sdk/ takes this to 10 of 10.
+    # All 10 of 10 now. cleat#1854: the two Python examples' documented command
+    # already worked (cleat#1836 fixed the relative --entry) -- this job just
+    # installed no Python toolchain to run them. `pip install .` puts cleat_sdk
+    # on the interpreter's own path, which the determinism gate (cleat#1833)
+    # imports before componentize-py is ever consulted -- no PYTHONPATH needed.
     steps:
       - uses: actions/checkout@v7
 
@@ -1032,6 +1032,17 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION_STABLE }}
           cache: true
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Python SDK
+        working-directory: python-sdk
+        run: |
+          pip install --upgrade pip
+          pip install .
+          pip install "componentize-py>=0.12.0"
 
       - name: Build the cleat CLI
         run: go build -o .bin/cleat ./cmd/cleat
