@@ -27,10 +27,10 @@ image) alongside the existing pool. Both pools connect to the same database.
 
 ```bash
 # Old pool (blue) -- currently handling all workflows
-cleat-worker --db "$DATABASE_URL" --concurrency 20 --api-addr :8080
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20 --api-addr :8080
 
 # New pool (green) -- starts alongside the old pool
-cleat-worker-v2 --db "$DATABASE_URL" --concurrency 20 --api-addr :8081
+cleat-worker-v2 --db "$CLEAT_DATABASE_URL" --concurrency 20 --api-addr :8081
 ```
 
 In a Kubernetes environment, deploy the new pool as a separate deployment:
@@ -84,13 +84,13 @@ tables. This is safe because:
 
 ```bash
 # Both pools point at the same database URL
-export DATABASE_URL="postgres://user:pass@db-host:5432/cleat?sslmode=require"
+export CLEAT_DATABASE_URL="postgres://user:pass@db-host:5432/cleat?sslmode=require"
 
 # Blue pool (old)
-cleat-worker --db "$DATABASE_URL" --concurrency 20
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 
 # Green pool (new)
-cleat-worker-v2 --db "$DATABASE_URL" --concurrency 20
+cleat-worker-v2 --db "$CLEAT_DATABASE_URL" --concurrency 20
 ```
 
 ### Step 3: Set old workers to drain
@@ -284,7 +284,7 @@ workers coming back online:
 
 ```bash
 # Start the old binary (or deploy old container image)
-cleat-worker-v1 --db "$DATABASE_URL" --concurrency 20 --api-addr :8080
+cleat-worker-v1 --db "$CLEAT_DATABASE_URL" --concurrency 20 --api-addr :8080
 ```
 
 In Kubernetes:

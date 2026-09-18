@@ -29,8 +29,8 @@ Namespaces isolate workflow definitions and instances. Use them to separate
 environments, teams, or tenants:
 
 ```bash
-cleat deploy --db "$DATABASE_URL" --namespace staging --name place_order ./out/order.wasm
-cleat-worker --db "$DATABASE_URL" --namespace staging
+cleat deploy --db "$CLEAT_DATABASE_URL" --namespace staging --name place_order ./out/order.wasm
+cleat-worker --db "$CLEAT_DATABASE_URL" --namespace staging
 ```
 
 Each namespace has its own set of `workflow_defs` and `workflow_instances`.
@@ -40,7 +40,7 @@ Each namespace has its own set of `workflow_defs` and `workflow_instances`.
 Control how many workflow instances a worker processes simultaneously:
 
 ```bash
-cleat-worker --db "$DATABASE_URL" --concurrency 20
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 ```
 
 Set `--concurrency` based on available CPU and the workload's I/O profile. A
@@ -50,7 +50,7 @@ connection usage to tune this value.
 ### Heartbeat interval
 
 ```bash
-cleat-worker --db "$DATABASE_URL" --heartbeat 10s
+cleat-worker --db "$CLEAT_DATABASE_URL" --heartbeat 10s
 ```
 
 The heartbeat interval controls how often the worker updates `heartbeat_at` in
@@ -61,7 +61,7 @@ recovery but more database writes.
 ### Poll interval
 
 ```bash
-cleat-worker --db "$DATABASE_URL" --poll 250ms
+cleat-worker --db "$CLEAT_DATABASE_URL" --poll 250ms
 ```
 
 Controls how often the worker polls for new work when the queue is empty.
@@ -130,7 +130,7 @@ left with RLS enabled but not forced.
 Start the worker with `--api-addr` to expose a `/metrics` endpoint:
 
 ```bash
-cleat-worker --db "$DATABASE_URL" --api-addr :8080
+cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080
 ```
 
 Prometheus metrics are available at `http://localhost:8080/metrics`.
@@ -229,10 +229,10 @@ instances can run concurrently against the same database:
 
 ```bash
 # Worker 1
-cleat-worker --db "$DATABASE_URL" --concurrency 10
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 10
 
 # Worker 2 (different machine)
-cleat-worker --db "$DATABASE_URL" --concurrency 10
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 10
 ```
 
 `SELECT ... FOR UPDATE SKIP LOCKED` ensures each workflow instance is claimed by
@@ -310,7 +310,7 @@ query. If the database connection is lost, the worker will:
 The worker handles SIGINT and SIGTERM for graceful shutdown:
 
 ```bash
-cleat-worker --db "$DATABASE_URL"
+cleat-worker --db "$CLEAT_DATABASE_URL"
 
 # In another terminal:
 kill -TERM <worker_pid>

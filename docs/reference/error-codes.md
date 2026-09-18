@@ -281,11 +281,11 @@ the environment. Use `h.DurableCall()` for filesystem operations.
 **Example:**
 ```go
 // BAD -- os operations:
-dbURL := os.Getenv("DATABASE_URL")
+dbURL := os.Getenv("CLEAT_DATABASE_URL")
 data, err := os.ReadFile("/path/to/config.json")
 
 // GOOD -- configuration via workflow input:
-// Pass DATABASE_URL as part of the workflow input payload
+// Pass CLEAT_DATABASE_URL as part of the workflow input payload
 ```
 
 ---
@@ -424,11 +424,11 @@ variables. Return an error instead of calling `os.Exit`.
 **Example:**
 ```go
 // BAD -- environment-dependent:
-dbURL := os.Getenv("DATABASE_URL")
+dbURL := os.Getenv("CLEAT_DATABASE_URL")
 os.Exit(1)
 
 // GOOD -- input-driven configuration:
-// Pass DATABASE_URL as a workflow input field
+// Pass CLEAT_DATABASE_URL as a workflow input field
 // Return error instead of exiting:
 return "", fmt.Errorf("processing failed")
 ```

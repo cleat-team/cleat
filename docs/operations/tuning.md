@@ -258,7 +258,7 @@ burst = rps × 2 (handle brief spikes)
 
 ```bash
 cleat-worker \
-  --db "$DATABASE_URL" \
+  --db "$CLEAT_DATABASE_URL" \
   --concurrency 2 \
   --heartbeat 30s \
   --poll 2s \
@@ -271,7 +271,7 @@ cleat-worker \
 
 ```bash
 cleat-worker \
-  --db "$DATABASE_URL" \
+  --db "$CLEAT_DATABASE_URL" \
   --concurrency 10 \
   --heartbeat 5s \
   --poll 500ms \
@@ -286,7 +286,7 @@ cleat-worker \
 
 ```bash
 cleat-worker \
-  --db "$DATABASE_URL" \
+  --db "$CLEAT_DATABASE_URL" \
   --concurrency 40 \
   --heartbeat 3s \
   --poll 100ms \

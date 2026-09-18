@@ -18,7 +18,7 @@ func (p *Plugin) RegisterCommands() []plugin.Command {
 		Description: "Enqueue a job (--tenant=<uuid> --queue=<name> [--payload='{}'] [--dsn=<url>])",
 		Run: func(args []string) error {
 			fs := flag.NewFlagSet("enqueue", flag.ExitOnError)
-			dsn := fs.String("dsn", os.Getenv("DATABASE_URL"), "PostgreSQL DSN (default: $DATABASE_URL)")
+			dsn := fs.String("dsn", os.Getenv("CLEAT_DATABASE_URL"), "PostgreSQL DSN (default: $CLEAT_DATABASE_URL)")
 			tenantStr := fs.String("tenant", "", "Tenant UUID")
 			queueName := fs.String("queue", "", "Queue name")
 			payloadStr := fs.String("payload", "{}", "JSON payload")

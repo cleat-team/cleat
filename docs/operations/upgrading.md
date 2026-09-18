@@ -24,7 +24,7 @@ kill -TERM $(pgrep cleat-worker)
 
 # 3. Wait for the worker to shut down gracefully,
 #    then start the new binary
-cleat-worker --db "$DATABASE_URL" --concurrency 20
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 ```
 
 The worker on SIGTERM will:
@@ -72,7 +72,7 @@ startup, so you must coordinate the binary and configuration change:
 
 ```bash
 # Good: update config and binary together
-cleat-worker --db "$DATABASE_URL" --concurrency 20 --new-flag value
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20 --new-flag value
 
 # Bad: mismatched binary and config
 # cleat-worker v1 with --new-flag => error
@@ -89,7 +89,7 @@ No manual steps are needed:
 
 ```bash
 # Simply start the worker -- it applies migrations if needed
-cleat-worker --db "$DATABASE_URL"
+cleat-worker --db "$CLEAT_DATABASE_URL"
 ```
 
 The worker logs applied migrations:
@@ -191,7 +191,7 @@ git diff --name-only <previous-tag>..<this-tag> -- migrations/ |
 - **Set the timeout on the connection the migration tool makes, not in a `psql`
   session.** This is the protection, not a supplement to one — and the
   distinction is the part that is easy to get wrong. Migrations are applied by
-  the worker at startup (`cleat-worker --db "$DATABASE_URL"`), which opens its
+  the worker at startup (`cleat-worker --db "$CLEAT_DATABASE_URL"`), which opens its
   own connection from the DSN; a `SET lock_timeout = '5s';` you type into a
   separate `psql` session has no effect on it whatsoever. Put it in the DSN or
   the environment:
@@ -199,13 +199,13 @@ git diff --name-only <previous-tag>..<this-tag> -- migrations/ |
   ```
   # Postgres. lib/pq forwards `options` in the startup packet and reads
   # PGOPTIONS (connector.go: `Options string `postgres:"options" env:"PGOPTIONS"``).
-  DATABASE_URL='postgres://.../cleat?options=-c%20lock_timeout%3D5s'
+  CLEAT_DATABASE_URL='postgres://.../cleat?options=-c%20lock_timeout%3D5s'
   # or, equivalently:
-  PGOPTIONS='-c lock_timeout=5s' cleat-worker --db "$DATABASE_URL"
+  PGOPTIONS='-c lock_timeout=5s' cleat-worker --db "$CLEAT_DATABASE_URL"
 
   # MySQL. go-sql-driver sends unrecognised DSN parameters as session
   # system variables on connect (dsn.go: `Params map[string]string`).
-  DATABASE_URL='user:pw@tcp(host:3306)/cleat?lock_wait_timeout=5'
+  CLEAT_DATABASE_URL='user:pw@tcp(host:3306)/cleat?lock_wait_timeout=5'
   ```
 
   A migration that cannot take its lock then fails fast and can be retried,
@@ -283,16 +283,16 @@ rules are:
 ```bash
 # Phase 1: both worker versions run concurrently
 # Old workers (v1) handling existing workflows
-cleat-worker-v1 --db "$DATABASE_URL"
+cleat-worker-v1 --db "$CLEAT_DATABASE_URL"
 
 # New workers (v2) also connect and claim from the queue
-cleat-worker-v2 --db "$DATABASE_URL"
+cleat-worker-v2 --db "$CLEAT_DATABASE_URL"
 
 # Phase 2: old workers are drained (see zero-downtime deploy guide)
 kill -TERM $(pgrep cleat-worker-v1)
 
 # Phase 3: only new workers remain
-cleat-worker-v2 --db "$DATABASE_URL"
+cleat-worker-v2 --db "$CLEAT_DATABASE_URL"
 ```
 
 During the coexistence window:
@@ -319,7 +319,7 @@ kill -TERM $(pgrep cleat-worker)
 cp cleat-worker-v1 /usr/local/bin/cleat-worker
 
 # 3. Restart
-cleat-worker --db "$DATABASE_URL"
+cleat-worker --db "$CLEAT_DATABASE_URL"
 ```
 
 ### Kubernetes rollback
@@ -346,7 +346,7 @@ answer to "the migration is the problem" is not a command:
 | a `Down` function in `migration/runner.go` | none |
 | a `migrate` subcommand on `cleat` or `cleatctl` | none |
 
-This section used to prescribe `cleat migrate down --db "$DATABASE_URL"` and
+This section used to prescribe `cleat migrate down --db "$CLEAT_DATABASE_URL"` and
 `--target 001`. The command, the flag and the migration files are all absent
 (cleat#1315), so an operator reaching for the documented way back was reaching
 for something that has never existed — at the moment they could least afford
