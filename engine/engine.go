@@ -151,7 +151,22 @@ func WithChildWorkflowStore(cws ChildWorkflowStore) EngineOption {
 	return func(e *Engine) { e.childWfStore = cws }
 }
 
-// WithFetcher sets the HTTP fetcher.
+// WithFetcher sets the HTTP fetcher, and nothing in a shipped binary calls it.
+//
+// cleat ships no default Fetcher and cmd/cleat-worker sets none, so every
+// cleat_fetch from a stock worker takes the failure branch at
+// engine/lifecycle.go:529 -- not a misconfiguration an operator can fix, but
+// the designed state (IMPROVEMENT-PLAN 3.317). cleat_fetch works only when the
+// engine is embedded and the host supplies one.
+//
+// This is a REAL GAP rather than a deliberate extension point, which is why it
+// is worth saying here: the error text tells whoever HITS it, and the exemption
+// table in engine_option_reachability_test.go tells whoever audits reachability,
+// but neither reaches someone deciding from this declaration whether cleat_fetch
+// is available to them. cleat#1878.
+//
+// If you wire a fetcher, the caveat in ABI.md 2.48 and the explanation above
+// that error both stop being true and should go with it.
 func WithFetcher(f Fetcher) EngineOption { return func(e *Engine) { e.fetcher = f } }
 
 func WithConcurrencyKeyStore(cks ConcurrencyKeyStore) EngineOption {
@@ -219,7 +234,15 @@ func WithPluginCallGuard(g *PluginCallGuard) EngineOption {
 	return func(e *Engine) { e.pluginCallGuard = g }
 }
 
-// WithPluginCallObserver sets a post-invocation observer.
+// WithPluginCallObserver sets a post-invocation observer, and no shipped binary
+// sets one.
+//
+// An embedder API: cmd/cleat-worker instruments plugin calls with metrics and
+// tracing instead, so an unset observer is the designed default rather than a
+// gap, and leaving it nil costs nothing. Recorded here rather than only in
+// engine_option_reachability_test.go's exemption table, which is where this
+// decision lived until cleat#1878 -- a reachability guard's exemption list is
+// not where anyone reads an API's intent.
 func WithPluginCallObserver(o PluginCallObserver) EngineOption {
 	return func(e *Engine) { e.pluginCallObserver = o }
 }
