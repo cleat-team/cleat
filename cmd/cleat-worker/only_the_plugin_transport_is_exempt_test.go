@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -53,14 +55,47 @@ func TestOnlyThePluginTransportCarriesThePrivateHostExemption(t *testing.T) {
 		t.Fatal("no non-test Go files were read; the scan measured nothing")
 	}
 
-	const want = "cmd/cleat-worker/plugin_egress.go"
-	if len(setters) != 1 || setters[0] != want {
-		t.Errorf("PluginHostExempt is set in %v, want exactly [%s].\n"+
-			"Every other guard serves guest code -- the workflow fetch path in "+
-			"cmd/cleat-worker/setup.go and the embedded runner in cleat/embedded. "+
-			"An operator's plugin exemption reaching one of those would let a "+
-			"WORKFLOW reach the deployment's private network, which is the thing "+
-			"engine/egress_policy.go exists to refuse.", setters, want)
+	// TWO TRANSPORTS, both operator-destination. The second was added when the
+	// service forwarder moved behind the guard, and the test is widened rather
+	// than worked around: the assignment could have been hidden in this file's
+	// blessed neighbour and the scan would have passed while the wiring changed,
+	// which is the failure this scan exists to make visible.
+	//
+	// The principle #1627 draws is not "plugins are special". It is WHO CHOSE
+	// THE HOST. A plugin endpoint is operator configuration; so is a service
+	// endpoint, registered by the same kind of flag. A guest reaches both --
+	// a workflow calls an llm host function, and a workflow names a service --
+	// but in neither case does the guest supply the DESTINATION. It selects
+	// among destinations the operator registered. That is the line, and the
+	// guest fetch path is on the other side of it: there the guest supplies the
+	// URL itself, so no exemption may ever appear there.
+	want := map[string]string{
+		"cmd/cleat-worker/plugin_egress.go": "plugin endpoints, cleat#1627 -- " +
+			"a self-hosted model server on loopback",
+		"cmd/cleat-worker/service_egress.go": "service endpoints -- a sidecar on " +
+			"loopback or payments.svc.cluster.local, which is RFC1918 by construction. " +
+			"Its exempt set is the registered endpoint URLs themselves, so it has no " +
+			"flag with which to name a host the deployment does not already call",
+	}
+	for _, f := range setters {
+		if _, ok := want[f]; !ok {
+			t.Errorf("PluginHostExempt is set in %s, which is not a transport allowed to carry it.\n"+
+				"The permitted files are %v. Every other guard serves guest-CHOSEN "+
+				"destinations -- the workflow fetch path in cmd/cleat-worker/setup.go and "+
+				"the embedded runner in cleat/embedded. An operator's exemption reaching "+
+				"one of those would let a WORKFLOW reach the deployment's private network "+
+				"with a host of its own choosing, which is the thing engine/egress_policy.go "+
+				"exists to refuse.", f, keysOf(want))
+		}
+	}
+	// And the other direction: a file dropping the exemption silently is a
+	// behaviour change too, and one that would show up as a broken deployment
+	// rather than as a test failure.
+	for f := range want {
+		if !slices.Contains(setters, f) {
+			t.Errorf("%s no longer sets PluginHostExempt; it is one of the two transports "+
+				"that must carry it, because %s", f, want[f])
+		}
 	}
 }
 
@@ -199,3 +234,12 @@ func repoRootForExemptionScan(t *testing.T) string {
 }
 
 var _ = engine.EgressGuard{}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}

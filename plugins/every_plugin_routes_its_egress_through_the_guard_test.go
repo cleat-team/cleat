@@ -61,54 +61,6 @@ type egressFinding struct {
 //     either today -- all eight guarded clients name env.HTTPTransport inline --
 //     so the strictness costs nothing now and would have to be revisited
 //     deliberately rather than by loosening this back to a substring.
-//
-// dialsThroughEgressGuard reports whether an `&http.Transport{...}` literal sets
-// DialContext to a selector on a call to something named egressGuard -- the
-// worker's spelling of "guarded", as opposed to a plugin's env.HTTPTransport.
-//
-// Deliberately shallow. It matches the shape `X.egressGuard(...).DialContext`
-// and nothing else: a transport with no DialContext, or one dialing anything
-// else, is a finding. A helper that wrapped the guard under another name would
-// be reported, and should be -- the alternative is a matcher that accepts any
-// DialContext at all, which is the substring check this file replaced.
-func dialsThroughEgressGuard(t *ast.UnaryExpr) bool {
-	lit, ok := t.X.(*ast.CompositeLit)
-	if !ok {
-		return false
-	}
-	if sel, ok := lit.Type.(*ast.SelectorExpr); !ok || sel.Sel.Name != "Transport" {
-		return false
-	}
-	for _, el := range lit.Elts {
-		kv, ok := el.(*ast.KeyValueExpr)
-		if !ok {
-			continue
-		}
-		key, ok := kv.Key.(*ast.Ident)
-		if !ok || key.Name != "DialContext" {
-			continue
-		}
-		outer, ok := kv.Value.(*ast.SelectorExpr)
-		if !ok || outer.Sel.Name != "DialContext" {
-			return false
-		}
-		call, ok := outer.X.(*ast.CallExpr)
-		if !ok {
-			return false
-		}
-		fn, ok := call.Fun.(*ast.SelectorExpr)
-		// TWO NAMES, because the worker has two policies and they are not
-		// interchangeable: egressGuard is for a destination a GUEST named and
-		// consults the per-tenant allowlist; serviceEgressGuard is for one the
-		// OPERATOR named and does not. Both end at EgressGuard.DialContext.
-		//
-		// An allowlist of exact names rather than a suffix match, so a helper
-		// called anythingEgressGuard does not qualify by being spelled well.
-		return ok && (fn.Sel.Name == "egressGuard" || fn.Sel.Name == "serviceEgressGuard")
-	}
-	return false
-}
-
 func surveyEgress(fset *token.FileSet, path string, src []byte) (findings []egressFinding, clients int, err error) {
 	file, err := parser.ParseFile(fset, path, src, 0)
 	if err != nil {
@@ -175,6 +127,53 @@ func surveyEgress(fset *token.FileSet, path string, src []byte) (findings []egre
 		return true
 	})
 	return findings, clients, nil
+}
+
+// dialsThroughEgressGuard reports whether an `&http.Transport{...}` literal sets
+// DialContext to a selector on a call to something named egressGuard -- the
+// worker's spelling of "guarded", as opposed to a plugin's env.HTTPTransport.
+//
+// Deliberately shallow. It matches the shape `X.egressGuard(...).DialContext`
+// and nothing else: a transport with no DialContext, or one dialing anything
+// else, is a finding. A helper that wrapped the guard under another name would
+// be reported, and should be -- the alternative is a matcher that accepts any
+// DialContext at all, which is the substring check this file replaced.
+func dialsThroughEgressGuard(t *ast.UnaryExpr) bool {
+	lit, ok := t.X.(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	if sel, ok := lit.Type.(*ast.SelectorExpr); !ok || sel.Sel.Name != "Transport" {
+		return false
+	}
+	for _, el := range lit.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "DialContext" {
+			continue
+		}
+		outer, ok := kv.Value.(*ast.SelectorExpr)
+		if !ok || outer.Sel.Name != "DialContext" {
+			return false
+		}
+		call, ok := outer.X.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		fn, ok := call.Fun.(*ast.SelectorExpr)
+		// TWO NAMES, because the worker has two policies and they are not
+		// interchangeable: egressGuard is for a destination a GUEST named and
+		// consults the per-tenant allowlist; serviceEgressGuard is for one the
+		// OPERATOR named and does not. Both end at EgressGuard.DialContext.
+		//
+		// An allowlist of exact names rather than a suffix match, so a helper
+		// called anythingEgressGuard does not qualify by being spelled well.
+		return ok && (fn.Sel.Name == "egressGuard" || fn.Sel.Name == "serviceEgressGuard")
+	}
+	return false
 }
 
 func render(fset *token.FileSet, e ast.Expr) string {

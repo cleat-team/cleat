@@ -276,49 +276,6 @@ func (c *dbServiceCaller) resolveSecrets(ctx context.Context, service, operation
 	return resolved, nil
 }
 
-// serviceEgressGuard is the policy for a destination the OPERATOR named, as
-// opposed to egressGuard, which is the policy for one a GUEST named. The
-// difference is who chose the host, and it decides whether the per-tenant
-// allowlist has anything to say.
-//
-// egressGuard is built for http.fetch, where the URL comes from the guest.
-// There, no tenant allowlist means no permission: AllowHost stays nil and the
-// guard denies, deliberately rather than as a nil-check that opens the gate.
-// That is right when a workflow names the host.
-//
-// Here the operator named it -- in --bench-svc-url -- and the tenant chose
-// nothing. Consulting a per-tenant list for a destination no tenant selected
-// refuses every deployment that has not built a tenant egress table, which is
-// every deployment using this path today. Measured before TenantOptional was
-// set: "no egress allowlist is configured for this tenant, and an empty list
-// permits nothing", on a --bench-svc-url the operator had set explicitly.
-//
-// plugin_egress.go already draws this line, with TenantOptional set to "no
-// tenant in context" because a plugin's client serves both a host-function call
-// and a background sweep. Here the answer is unconditional: the tenant list is
-// never the right question for an operator-named host.
-//
-// THE FLOOR STILL APPLIES IN FULL, and deliberately so. An earlier draft also
-// carried PluginHostExempt here, reasoning that an operator naming a service on
-// loopback is describing their own machine exactly as the ollama case does.
-// TestOnlyThePluginTransportCarriesThePrivateHostExemption refused it, and
-// correctly: cleat#1627 confined that exemption to one file, because "a
-// workflow is code cleat did not write, so nothing a guest supplies may reach a
-// private address whatever the operator configured for plugins." A guest
-// supplies the SERVICE NAME here, and whether that is close enough to the
-// plugin case to share the exemption is a policy decision with its own guard
-// protecting it -- not something to settle inside a change about which dialer a
-// client uses. A registered endpoint on a private address is refused today.
-func (c *dbServiceCaller) serviceEgressGuard(ctx context.Context) *engine.EgressGuard {
-	if c.egress != nil {
-		return c.egress // a test supplied one
-	}
-	return &engine.EgressGuard{
-		OperatorAllows: operatorAllowFunc(c.operatorEgress),
-		TenantOptional: func(context.Context) bool { return true },
-	}
-}
-
 func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, error) {
 	url := fmt.Sprintf("%s/call/%s/%s", c.benchSvcURL, service, operation)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(requestJSON))
@@ -356,7 +313,7 @@ func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operat
 	// pool PER TENANT, not a shared one.
 	client := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx).DialContext},
+		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, c.benchSvcURL).DialContext},
 	}
 	t0 := time.Now()
 	resp, err := client.Do(req)
