@@ -33,7 +33,7 @@ var engineOptionsNotWired = map[string]string{
 	// guarded on this handler being non-nil -- never fire in a real worker.
 	// Continue-as-new works; the engine carries a second mechanism for it that
 	// nothing selects. See cleat#826, which is about the same feature.
-	"WithContinueAsNewHandler": "cleat#878: the worker calls execStore.ContinueAsNew directly, so the engine's handler branch is a dead alternate path",
+	"WithContinueAsNewHandler": "cleat#878 ALTERNATE PATH: the worker calls execStore.ContinueAsNew directly, so the engine's handler branch is a dead alternate path",
 
 	// TRIAGED 2026-09-07 (cleat#878). Four categories emerged, and the third
 	// was not one the issue anticipated:
