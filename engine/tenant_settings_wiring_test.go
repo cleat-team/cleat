@@ -18,29 +18,33 @@ var (
 	_ TenantSettingsReader = (*MSSQLStore)(nil)
 )
 
-// ShardedStore deliberately does NOT implement it, and this test is here so
-// that stays a decision rather than an oversight.
+// ShardedStore now implements TenantSettingsReader (cleat#1853), and this
+// test's job changed from "is this still undecided" to "is this still the
+// decision that was made".
 //
-// A sharded deployment splits one tenant's workflows across several databases,
-// each with its own tenant_settings table and no mechanism keeping them in
-// step. Reading from one shard silently ignores what an operator wrote to the
-// others; reading from all of them costs N queries on the dispatch path;
-// requiring agreement means deciding what to do when they disagree. None of
-// those is obviously right, and none was needed for 3.94 step 3, so the answer
-// today is that a sharded deployment resolves to the flag defaults.
+// The semantics chosen: read every shard (all were opened for the same
+// tenant, so any of them has a candidate answer), use the first non-empty
+// result found in shard order, and if a LATER shard disagrees, log it rather
+// than silently preferring one. Full reasoning is on ShardedStore.GetTenantSettings
+// in sharded_store.go. That is closest to "read all and require agreement"
+// among the three this test used to list, with the disagreement WARNED about
+// rather than turned into a read failure -- a read failure here already
+// degrades to the operator's flags, and an operator's own mistake (writing
+// tenant_settings inconsistently across shards, since nothing fans the write
+// out) should not additionally fail every workflow on the tenant.
 //
-// If you are here because you just made ShardedStore implement the interface:
-// good, but pick one of those three semantics on purpose and write down which,
-// because the failure mode of picking by accident is settings that are honoured
-// for some of a tenant's workflows and not others.
-func TestShardedStoreDeliberatelyDoesNotReadTenantSettings(t *testing.T) {
+// If you are here because GetTenantSettings changed shape again: update this
+// test to assert the interface is still satisfied and that the new semantics
+// are documented on the method, the same way this update did -- rather than
+// deleting it, which is what lets a fourth "accidental" semantics ship
+// unnoticed.
+func TestShardedStoreHonoursTenantSettingsWithDocumentedSemantics(t *testing.T) {
 	var s any = (*ShardedStore)(nil)
-	if _, ok := s.(TenantSettingsReader); ok {
-		t.Fatal("ShardedStore now implements TenantSettingsReader.\n\n" +
-			"That is a real decision with three defensible answers (read one " +
-			"shard, read all and require agreement, or read all and merge) and " +
-			"the wrong one gives a tenant its settings on some workflows and the " +
-			"flags on others. Update this test with the semantics chosen and why, " +
-			"rather than deleting it.")
+	if _, ok := s.(TenantSettingsReader); !ok {
+		t.Fatal("ShardedStore no longer implements TenantSettingsReader.\n\n" +
+			"cleat#1853 made this a deliberate implementation, not an absence: every " +
+			"tenant on a sharded deployment silently got the operator's flags before " +
+			"it existed. If this regressed, the fix is in engine/sharded_store.go, " +
+			"not in loosening this test.")
 	}
 }

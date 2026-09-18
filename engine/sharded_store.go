@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -504,10 +505,6 @@ func (s *ShardedStore) DeliverSignal(ctx context.Context, workflowID, signalName
 	return shard.Store.DeliverSignal(ctx, workflowID, signalName, payload)
 }
 
-// ConsumeSignal routes by workflow ID.
-//
-// This is the reason ConsumeSignal takes a workflowID it does not strictly
-// need to identify the row: an id alone cannot be routed to a shard.
 // DeliverSignalIdempotent routes to the shard owning the workflow, like its
 // non-idempotent sibling.
 //
@@ -527,6 +524,10 @@ func (s *ShardedStore) DeliverSignalIdempotent(ctx context.Context, workflowID, 
 	return si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
 }
 
+// ConsumeSignal routes by workflow ID.
+//
+// This is the reason ConsumeSignal takes a workflowID it does not strictly
+// need to identify the row: an id alone cannot be routed to a shard.
 func (s *ShardedStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
@@ -2169,4 +2170,149 @@ func (s *ShardedStore) ResolveCallIntent(ctx context.Context, workflowID string,
 			shard.Config.Name, shard.Store)
 	}
 	return st.ResolveCallIntent(ctx, workflowID, rec, payload, workerID, generation, later)
+}
+
+// ---------------------------------------------------------------------------
+// Per-tenant and per-run limit overrides
+// ---------------------------------------------------------------------------
+//
+// ShardedStore implemented neither TenantSettingsReader nor RunLimitsReader,
+// which all three dialect stores do. Both are reached by a type assertion
+// that returns silently on failure -- deliberately, per each doc comment: a
+// read failure resolves to the tier above (tenant to operator, run to
+// tenant), and the fallback direction is safe because a tenant's own settings
+// are already clamped to the operator's, so an unreadable override can only
+// end up WIDER than intended, never past the operator's ceiling. Nothing here
+// is a limit escape.
+//
+// But "cannot be asked at all" is not "asked and got nothing", and the two
+// were conflated. Every failed READ already logs a warning naming its
+// fallback (tenantSettings, runLimits in engine.go); the missing-capability
+// case logged nothing, because to the `ok` check a ShardedStore looked
+// identical to a store that implements the interface and returned the zero
+// value. The first is recoverable and worth watching for; the second is a
+// permanent property of the deployment shape and was invisible.
+//
+// Neither warning needs its own dedup state. tenant_settings.go and engine.go
+// already gate GetTenantSettings/GetRunLimits behind a sync.Once per Engine,
+// and shardedStoreFactory.OpenStore builds a fresh ShardedStore per request --
+// so each warning fires at most once per request regardless, the same cadence
+// the read-failure warnings already have. GetTenantSettings additionally dedups
+// ACROSS shards within one call, so a store with several incapable shards logs
+// once rather than once per shard.
+
+// GetTenantSettings has no workflow ID to route by -- the interface reads
+// "the settings row for this store's tenant" and every shard was opened for
+// the SAME tenant (shardedStoreFactory.OpenStore takes one tenantID and opens
+// each shard with it), so any shard that has a row is a candidate answer.
+//
+// TestShardedStoreDeliberatelyDoesNotReadTenantSettings (tenant_settings_wiring_test.go)
+// named the decision this method makes and left it open, listing three
+// semantics: read one shard, read all and require agreement, or read all and
+// merge. This is closest to the second, with the disagreement handled rather
+// than refused:
+//
+//   - Read every shard rather than pinning to one. tenant_settings has no
+//     writer that fans out -- cleatctl set-tenant-setting takes one *sql.DB,
+//     so an operator sets it per shard by hand -- and pinning to shard 0 would
+//     silently miss an override written only to shard 1. Same replicated-data
+//     shape LoadWASM already assumes for WASM definitions.
+//   - "Require agreement" does NOT mean fail the read. A read failure here
+//     already has a documented safe direction -- resolve to the tier above --
+//     and turning a disagreement into an error would abandon that for the one
+//     case where degrading gracefully matters most: an operator has already
+//     made a mistake, and failing every workflow on the tenant over it would
+//     be a worse outcome than any single shard's answer. So it uses the first
+//     shard found (deterministic: shard order is fixed at construction) and
+//     LOGS the disagreement, converting the invisible failure mode the design
+//     note warned about into a visible one -- the same move every other
+//     warning added in this change makes.
+//   - Merging field-by-field was rejected: it would synthesize a
+//     TenantSettings that never existed as a coherent row on any shard.
+func (s *ShardedStore) GetTenantSettings(ctx context.Context) (TenantSettings, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+
+	warnedIncapable := false
+	var lastErr error
+	found := false
+	var result TenantSettings
+	var foundOn string
+	for _, shard := range shards {
+		reader, ok := shard.Store.(TenantSettingsReader)
+		if !ok {
+			if !warnedIncapable {
+				s.warnShardedTenantSettingsUnsupported(ctx, shard)
+				warnedIncapable = true
+			}
+			continue
+		}
+		settings, err := reader.GetTenantSettings(ctx)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if settings == (TenantSettings{}) {
+			continue
+		}
+		if !found {
+			found, result, foundOn = true, settings, shard.Config.Name
+			continue
+		}
+		if settings != result {
+			// Disagreement, not absence -- the case the design note above
+			// calls out as needing a policy rather than an accident. Keep the
+			// first shard found, deterministically (shard order is fixed at
+			// construction), and say so: a silently-preferred shard is the
+			// same failure mode this whole delegation exists to remove,
+			// wearing a different shape.
+			slog.Default().WarnContext(ctx,
+				"sharded store: shards disagree on tenant settings; using the first shard found "+
+					"and ignoring the rest -- an operator wrote tenant_settings inconsistently "+
+					"across shards, since nothing here fans a write out to all of them",
+				"tenant_settings_shard", foundOn, "ignored_shard", shard.Config.Name)
+		}
+	}
+	if found {
+		return result, nil
+	}
+	return TenantSettings{}, lastErr
+}
+
+// GetRunLimits routes by workflow ID, like every other per-workflow method:
+// a run lives on exactly one shard, so there is exactly one row to read.
+func (s *ShardedStore) GetRunLimits(ctx context.Context, workflowID string) (TenantSettings, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return TenantSettings{}, fmt.Errorf("get_run_limits: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	reader, ok := shard.Store.(RunLimitsReader)
+	if !ok {
+		s.warnShardedRunLimitsUnsupported(ctx, shard)
+		return TenantSettings{}, nil
+	}
+	return reader.GetRunLimits(ctx, workflowID)
+}
+
+// warnShardedTenantSettingsUnsupported and warnShardedRunLimitsUnsupported
+// name the shard so an operator can tell a permanent capability gap from a
+// transient read failure -- the latter already logs, with a fallback named,
+// from tenantSettings/runLimits in engine.go and tenant_settings.go.
+// ShardedStore has no *Engine to log through and no logger field of its own
+// (unlike PostgresStore's WithLogger/log()), so this goes through
+// slog.Default() directly, same as PostgresStore.log() falls back to when no
+// logger was configured.
+func (s *ShardedStore) warnShardedTenantSettingsUnsupported(ctx context.Context, shard *Shard) {
+	slog.Default().WarnContext(ctx,
+		"sharded store: shard cannot be asked for tenant settings; every workflow on it "+
+			"silently gets the worker's flag values instead of the tenant's override",
+		"shard", shard.Config.Name, "store_type", fmt.Sprintf("%T", shard.Store))
+}
+
+func (s *ShardedStore) warnShardedRunLimitsUnsupported(ctx context.Context, shard *Shard) {
+	slog.Default().WarnContext(ctx,
+		"sharded store: shard cannot be asked for run limits; every workflow on it "+
+			"silently gets the tenant's settings instead of its own override",
+		"shard", shard.Config.Name, "store_type", fmt.Sprintf("%T", shard.Store))
 }

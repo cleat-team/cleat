@@ -175,6 +175,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployments are unchanged — the three dialect stores always implemented these methods. A shard
   whose store cannot honour the guarantee still fails loudly, and now names the shard.
 
+- **A sharded deployment now honours per-tenant and per-run limit overrides, and says so when it
+  can't.** (cleat#1853)
+
+  `ShardedStore` was also missing `GetTenantSettings` and `GetRunLimits`, which all three dialect
+  stores implement. Both are reached by a type assertion that returns **with no log at all** on
+  failure, so every workflow on a sharded deployment silently got the worker's flag values for
+  `WasmInstanceTimeout`, `WasmWallClockCeiling`, `HostRetryBudget` and `MaxWorkflowDuration`,
+  regardless of what a tenant or a run had configured.
+
+  **This is not a limit escape.** A tenant's settings are already clamped to the operator's, and a
+  run's to its tenant's, so the fallback can only ever be wider than intended, never past the
+  operator's ceiling.
+
+  Both now route to the shard that has the answer. `GetRunLimits` routes by workflow ID, like the
+  rest of `ShardedStore`. `GetTenantSettings` has no workflow ID to route by — every shard was
+  opened for the same tenant — so it tries each shard and uses the first non-empty result, which
+  survives an operator having written the override to only one shard (the writer, `cleatctl
+  set-tenant-setting`, takes one connection and has no fan-out across shards). A shard that
+  genuinely cannot answer now logs a warning naming itself, once per request, instead of nothing.
+
 ### Added
 
 - **Pre-emptive cancellation, with a terminal status of its own.**
