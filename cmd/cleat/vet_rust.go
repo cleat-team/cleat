@@ -799,7 +799,7 @@ func findRustMapIterationFindings(code []byte) []rustFinding {
 		out = append(out, rustFinding{
 			line: line, col: col,
 			code: "R008",
-			message: fmt.Sprintf("%s iteration order is not guaranteed by the language and is not to be relied on for a durable replay",
+			message: fmt.Sprintf("%s exposes an order the language does not guarantee, and a durable replay must not rely on it",
 				kind),
 			suggestion: rustHashMapSuggestion,
 		})
