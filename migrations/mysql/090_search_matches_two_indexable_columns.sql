@@ -1,0 +1,11 @@
+-- No-op on MySQL, deliberately and for the same reason migration 033 gives.
+--
+-- MySQL has no trigram index, and FULLTEXT does not match arbitrary-substring
+-- LIKE semantics -- a FULLTEXT index here would return different rows, not the
+-- same rows faster, which is worse than being slow.
+--
+-- The Go-side change that accompanies this migration is what helps MySQL:
+-- Search now spans two short text columns instead of four, two of which were
+-- JSON cast to text. That is cheaper on every dialect whether or not an index
+-- exists, which is why it is the half that matters.
+SELECT 1;

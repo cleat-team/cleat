@@ -59,21 +59,35 @@ func applyWorkflowFilters(qb *QueryBuilder, d Dialect, filter WorkflowFilter) {
 	if filter.ErrorContains != "" {
 		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
 	}
+	if filter.ResultContains != "" {
+		qb.AddLikeCondition(d.castExpr("result"), "%"+filter.ResultContains+"%", true)
+	}
 	if filter.Search != "" {
 		pattern := "%" + filter.Search + "%"
-		icol := d.castExpr("input")
-		rcol := d.castExpr("result")
 		n := qb.NextPos()
-		// Search matches def_name in addition to input/result/error content: a
-		// general "Search" box, as opposed to the targeted filters above, is
-		// most often used to find workflows of a given type by name. DefName is
-		// the precise form of that question and this stays the loose one.
-		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s OR %s)",
-			d.likeExpr(icol, n, true),
-			d.likeExpr(rcol, n+1, true),
-			d.likeExpr("error_msg", n+2, true),
-			d.likeExpr("def_name", n+3, true)))
-		qb.AddArgs(pattern, pattern, pattern, pattern)
+		// TWO COLUMNS, NOT FOUR, AND BOTH INDEXABLE. A disjunction is only as
+		// indexable as its WORST branch, so ORing input and result -- JSONB
+		// cast to text, which no index covers -- forced a sequential scan over
+		// the whole filter. It dragged down error_msg with it, which has had a
+		// pg_trgm GIN index since migration 033 and could never be used from
+		// here: the index existed, was maintained on every write, and returned
+		// nothing to any Search.
+		//
+		// Both remaining columns are short text, so this is cheaper than the
+		// old form on every dialect even where neither is indexed. On
+		// PostgreSQL both now carry trigram indexes and the planner can take a
+		// BitmapOr across them.
+		//
+		// PAYLOAD SEARCH IS NOW EXPLICIT: InputContains and ResultContains.
+		// A general search box that silently scans every stored payload is a
+		// trap -- the cost is invisible at the call site and grows with total
+		// history, without bound, since both workflow-row retention flags
+		// default to 0. Naming the expensive question is both faster and more
+		// honest than hiding it inside the cheap one.
+		qb.AddRaw(fmt.Sprintf("AND (%s OR %s)",
+			d.likeExpr("error_msg", n, true),
+			d.likeExpr("def_name", n+1, true)))
+		qb.AddArgs(pattern, pattern)
 	}
 }
 
