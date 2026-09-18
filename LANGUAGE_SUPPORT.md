@@ -309,12 +309,12 @@ that completely — which is why this section states the mechanism rather than a
 | **Go** | whole-program analysis (`analyze()` in `cmd/cleat`) | the durable closure, computed from the type-checked call graph | — |
 | **Python** | AST call-graph and closure analysis (`python-sdk/cleat_sdk/vet.py`) | what the entry point reaches, across functions | a forbidden call spelled so the `(module, function)` table does not match it |
 | **AssemblyScript** | AST analysis **inside the compiler** (`packages/cleat-as/transform`) | what the entry point reaches, across functions | a call site with no dotted member access |
-| **Java** | literal substring matching, over source with comments, strings, text blocks and character literals blanked first (`cmd/cleat/vet_java.go`) | a listed spelling in executable code | any other spelling; any module not listed |
+| **Java** | import and fully-qualified-name resolution over source with comments, strings, text blocks and character literals blanked first (`cmd/cleat/vet_java.go`) | a path expression **resolving** to a listed class, member or package -- so static imports, wildcard imports (against a known class list) and fully-qualified calls are all seen | java.nio, which is on no list at all; reflection with a computed argument, which no resolver can evaluate |
 | **Rust** | `use`-declaration resolution over source with comments, strings and `#[cfg(test)]` items blanked first (`cmd/cleat/vet_rust.go`) | a path expression **resolving** to a listed module — so grouped imports, nested groups and `as` aliases are all seen | a **method** call, which names no module (`t.elapsed()`); any module not listed; a glob import, which names nothing locally |
 
 Re-derive the shape of each, rather than trusting the row:
 
-    grep -c '^\s*{`' cmd/cleat/vet_rust.go cmd/cleat/vet_java.go   # pattern-table entries
+    grep -c '^\s*{"' cmd/cleat/vet_rust.go cmd/cleat/vet_java.go   # resolved-path table entries
     grep -oE '"PY[0-9]{3}"' python-sdk/cleat_sdk/vet.py | sort -u | wc -l
     grep -ln 'runVet' cmd/cleat/build_*.go                          # which builds gate
 
@@ -325,18 +325,20 @@ Its checks run as part of `asc`, not beside it: `runBuildAssemblyScript` passes
 removed, reordered, or skipped while the build still succeeds; a check inside the compiler cannot
 drift out of sync with it, because there is only one invocation.
 
-### A longer pattern list is not a stronger check
+### A longer list is not a stronger check, and neither is a resolver over the wrong list
 
-Java's table is roughly twice Rust's and misses `java.nio` entirely — the API Java has recommended
-over `java.io` since 1.7. So it covers the legacy spelling and not its replacement:
+Java's checker resolves imports and fully-qualified names (cleat#1812), which fixed how a listed
+API is spelled, not which APIs are listed. `java.nio` is on no list at all — the API Java has
+recommended over `java.io` since 1.7 — so it covers the legacy package and not its replacement:
 
     import java.io.File;                 // reported
     Files.readString(Path.of("x"));      // not reported
 
-Rust's misses grouped imports, which is what rustfmt produces from repeated single-module lines:
+Rust's resolves the same forms Java's does now (cleat#1811) — a grouped import is caught, not
+missed. What it still cannot see is a **method** call, which names no module at all:
 
-    use std::fs;                         // reported
-    use std::{fs, io};                   // not reported
+    SystemTime::now();                   // reported -- a path expression
+    t.elapsed();                         // not reported -- names no module, only a receiver's type
 
 Both are measured, and each has a fixture pinning it: see the `known_limit_*` directories under
 `testdata/vet-checks/`, and the `*_build_refuses_nondeterminism_test.go` files, which assert **both**

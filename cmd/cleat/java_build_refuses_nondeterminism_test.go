@@ -15,30 +15,36 @@ import (
 // they have to be asserted together, and the assertions are on TEXT because a
 // build can fail for many reasons that are not determinism.
 //
-// # What is different about Java, and why the known limit is a better one
+// # What changed here, and what did not
 //
-// forbiddenJavaPatterns is far longer than Rust's -- around thirty entries
-// against Rust's dozen -- and covers java.io, java.net, java.sql, java.time
-// and java.util.concurrent. It is still substring matching, and length is not
-// strength: it does not mention java.nio anywhere.
+// cleat#1812 replaced the literal-spelling table (`forbiddenJavaPatterns`)
+// with a resolver (`forbiddenJavaPaths`, `findForbiddenJavaPaths`) that
+// resolves imports and fully-qualified names before matching, the same shape
+// #1811 gave the Rust checker. TestFindForbiddenJavaPathsSeesWhatSpellingsMissed
+// carries the form-by-form cases (static imports, wildcard imports, fully
+// qualified calls, variable naming); this file stays at the build-integration
+// level, one known-positive and one known-limit, unchanged in shape.
+//
+// java.nio remains the known limit -- the resolver fixed WHICH spellings of a
+// listed API are seen, not WHICH APIs are listed, and java.nio.file was never
+// on the list:
 //
 //	$ grep -c 'java\.nio' cmd/cleat/vet_java.go
 //	0
 //
 // That is not a corner. java.nio.file is the API Java has recommended over
 // java.io for filesystem work since 1.7, so the checker covers the legacy
-// spelling and misses its replacement -- the escape is what a modern codebase
-// would write first. A list of forbidden strings ages against the language it
-// is checking, and nothing about it fails when it does.
+// package and misses its replacement -- the escape is what a modern codebase
+// would write first.
 //
 // # One asymmetry with the Rust side worth knowing
 //
-// vet_java.go SKIPS comment lines (`vet_java.go:118-123`) and vet_rust.go does
-// not. Verified behaviourally rather than by reading, because the Rust side
-// taught that lesson the expensive way (cleat#1782): a Java comment naming
-// System.currentTimeMillis() reports 0 errors, while the same text as code
-// reports 1. That is why this fixture's comment may quote the patterns it
-// describes and the Rust fixture's may not.
+// vet_java.go SKIPS comment lines (via javaCodeOnly) and vet_rust.go does
+// (via rustCodeOnly, the same shape). Verified behaviourally rather than by
+// reading, because the Rust side taught that lesson the expensive way
+// (cleat#1782): a Java comment naming System.currentTimeMillis() reports 0
+// errors, while the same text as code reports 1. That is why this fixture's
+// comment may quote the patterns it describes and the Rust fixture's may not.
 func TestJavaBuildRefusesNondeterminism(t *testing.T) {
 	if testing.Short() {
 		t.Skip("needs the cleat binary, which TestMain does not build in short mode")
@@ -124,6 +130,45 @@ func TestJavaBuildRefusesNondeterminism(t *testing.T) {
 				"     way to tell a strong checker from an unwired one;\n"+
 				"  3. update LANGUAGE_SUPPORT.md, which describes Java\n"+
 				"     enforcement as a substring scan.\n\noutput:\n%s", out)
+		}
+	})
+
+	// ARMS 3-6 -- cleat#1812's own known positives: four cases the old
+	// literal-spelling table could not see, each measured against it before
+	// the resolver existed (see docs/contributor/design/java-determinism-checker.md
+	// and each fixture's own comment for the measurement).
+	positives := []struct {
+		fixture, code string
+	}{
+		{"j001_static_import", "J001"},
+		{"j004_fully_qualified_time", "J007"},
+		{"j020_reflection", "J020"},
+		{"naming_does_not_decide", "J015"},
+	}
+	for _, tc := range positives {
+		t.Run(tc.fixture+" is refused, and for the determinism reason", func(t *testing.T) {
+			out := build(t, tc.fixture)
+
+			if !strings.Contains(out, tc.code) {
+				t.Errorf("the build did not report %s for %s.\n\noutput:\n%s", tc.code, tc.fixture, out)
+			}
+			if !strings.Contains(out, "no artifact was emitted") {
+				t.Errorf("the build reported a determinism finding but did not say it "+
+					"declined to emit an artifact.\n\noutput:\n%s", out)
+			}
+		})
+	}
+
+	// ARM 7 -- MUST ALLOW. The old table refused this file with TWO false
+	// positives on one line (J008 from "new java.io.", J016 from "InputStream"
+	// as a substring of "ByteArrayInputStream"). A resolver that only ever
+	// widens what is caught is not the property being asserted here -- this
+	// arm is the one that catches a resolver refusing something fine.
+	t.Run("pure_byte_array_stream is NOT refused", func(t *testing.T) {
+		out := build(t, "pure_byte_array_stream")
+
+		if strings.Contains(out, "determinism check failed") || strings.Contains(out, "Error [J0") {
+			t.Errorf("the build refused a pure, in-memory byte stream.\n\noutput:\n%s", out)
 		}
 	})
 }
