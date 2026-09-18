@@ -8,6 +8,7 @@ cmd/cleat	TestAnAssemblyScriptDefaultMakesAParameterOptional	2
 cmd/cleat	TestAnUnreadablePathIsNotAFinding	2
 cmd/cleat	TestBuildRefusesAFlagAfterThePath	1
 cmd/cleat	TestBuildStillAcceptsTheDocumentedOrder	1
+cmd/cleat	TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds	1
 cmd/cleat	TestJavaBuildRefusesNondeterminism	1
 cmd/cleat	TestPythonBuildRefusesNondeterminism	3
 cmd/cleat	TestRollbackClearRemovesThePin	1
@@ -19,7 +20,6 @@ cmd/cleat	TestRustBuildAcceptsProseNamingAForbiddenPattern	1
 cmd/cleat	TestRustBuildRefusesNondeterminism	1
 cmd/cleat	TestRustVetAnchorsTheTargetSkipAtTheCrateRoot	1
 cmd/cleat	TestRustVetSkipsSourcesThatAreNotTheArtifact	1
-cmd/cleat	TestScaffoldedProjectsActuallyBuild	1
 cmd/cleat	TestTheASRowsOfTheBindingTableAreAsserted	1
 cmd/cleat	TestTheJavaScanActuallyUsesJavaCodeOnly	1
 cmd/cleat	TestTheJavaScanSkipsTestSources	1

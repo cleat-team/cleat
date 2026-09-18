@@ -13,7 +13,7 @@ import (
 // and polls the published state below. That split is the point of the
 // template -- see README.md, "Why the browser does not wait".
 //
-//go:wasmexport submit_order
+// @cleatEntry(name="submit_order")
 func SubmitOrder(h cleat.HostCalls, input string) (string, error) {
 	h.LogKV("order_received", "input", input)
 
@@ -42,4 +42,7 @@ func SubmitOrder(h cleat.HostCalls, input string) (string, error) {
 	return `{"ok":true}`, nil
 }
 
-func main() {}
+// No func main here on purpose: `cleat build` generates gen_main_stub.go,
+// which declares it. A main in this file collides with the generated one --
+// "other declaration of main" -- and is why this template did not build
+// (cleat#1888). basic and agent have never declared one.
