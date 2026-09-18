@@ -1,0 +1,89 @@
+### --memory-soft-limit
+
+| Type | Default | Description |
+|------|---------|-------------|
+| float | `0.80` | Memory soft limit fraction (0.0-1.0) |
+
+When system memory usage exceeds this fraction, the worker stops claiming new
+work from the database but continues executing in-flight workflows.
+
+---
+### --compaction-threshold
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | (host default) | Number of events before history compaction triggers |
+
+Compaction collapses event history for long-running workflows, retaining only
+the compacted state.
+
+---
+### --compaction-interval
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `5m` | Interval between compaction checks |
+
+---
+### --max-body-size
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int64 | `1048576` (1 MiB) | Maximum request body size in bytes |
+
+General endpoints use this limit.
+
+**Five endpoints do not, and this flag does not move any of them.** There are
+four ceilings in total:
+
+| limit | endpoints | moved by |
+|---|---|---|
+| `--max-body-size`, 1 MiB default | everything not listed below | this flag |
+| **64 KB**, fixed | `POST /api/workflows/:id/signal`, `POST /api/workflows/:id/cancel`, `POST /api/workflows/:id/update/:name` | nothing |
+| **10 MiB**, fixed | `POST /api/definitions` (WASM upload) | nothing |
+| **1 KB**, fixed | `POST /api/dead-letters/:id/terminate` | nothing |
+
+This line named only "signal endpoints" until cleat#1332, so cancel was
+undocumented — and cancel is the one most likely to be reached in practice,
+because its field is a free-text `reason`. It then said "which of the two it
+is" until cleat#1338 established that there were four.
+
+**Every one of them answers an oversized body with `413`**, naming the limit
+and the knob, so a request that fails does not need this page to explain
+itself:
+
+    {"error":"request body too large: the limit is 1048576 bytes, set by --max-body-size"}
+    {"error":"request body too large: the limit is 65536 bytes, fixed for the signal, cancel and update endpoints and not changed by --max-body-size"}
+    {"error":"request body too large: the limit is 10485760 bytes, fixed for the definition upload endpoint and not changed by --max-body-size"}
+
+Seven of the sixteen bounded endpoints used to answer `400 {"error":"invalid
+JSON: http: request body too large"}` instead — a status asserting the body was
+malformed, on a body that was never read. cleat#1338 made all sixteen agree;
+that is a status-code change for those seven, and clients branching on `400`
+for an oversized body need to handle `413`.
+
+---
+### --version-gc-max-age
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `720h` (30 days) | Age at which a **deprecated** version becomes eligible for collection |
+
+A version that is not deprecated is never collected, whatever its age.
+`cleatctl versions gc --max-age=DURATION` and
+`POST /api/versions/gc?max_age=DURATION` override it per invocation.
+
+Go duration syntax, so `720h` rather than `30d` — and a bare number is refused:
+`--max-age=7` is seven *nanoseconds* to Go, not seven days.
+
+---
+### --max-quota-events
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `0` | Max events per workflow (0 = unlimited) |
+
+Limits the total number of events a single workflow instance can generate.
+When exceeded, the workflow is terminated with a quota error.
+
+---
