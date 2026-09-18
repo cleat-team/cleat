@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"runtime/debug"
 	"strings"
 	"text/template"
-
-	"golang.org/x/mod/module"
 )
 
 //go:embed templates/agent/*
@@ -91,6 +89,7 @@ func Hello(h cleat.HostCalls, input string) (string, error) {
 	}
 
 	writeYAML(dir, projectName)
+	tidyScaffold(dir)
 	fmt.Printf("Created basic project in %s/\n", dir)
 }
 
@@ -109,9 +108,6 @@ func scaffoldAgent(projectName string) {
 		}
 		if strings.HasSuffix(dest, ".go") {
 			data = stripScaffoldBuildTag(data)
-		}
-		if dest == "go.mod" {
-			data = substituteScaffoldModuleVersion(data)
 		}
 		if err := os.WriteFile(filepath.Join(dir, dest), data, 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", dest, err)
@@ -147,6 +143,7 @@ func scaffoldAgent(projectName string) {
 	}
 
 	writeYAML(dir, projectName)
+	tidyScaffold(dir)
 	fmt.Printf("Created AI agent project in %s/\n", dir)
 }
 
@@ -197,9 +194,6 @@ func scaffoldWorkflow(projectName string) {
 		if strings.HasSuffix(dest, ".go") {
 			data = stripScaffoldBuildTag(data)
 		}
-		if dest == "go.mod" {
-			data = substituteScaffoldModuleVersion(data)
-		}
 		if err := os.WriteFile(filepath.Join(dir, dest), data, 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", dest, err)
 			os.Exit(1)
@@ -214,6 +208,7 @@ func scaffoldWorkflow(projectName string) {
 	copyTemplate("README.md", "README.md")
 	copyTemplate("docker-compose.yml", "docker-compose.yml")
 
+	tidyScaffold(dir)
 	fmt.Printf("Created workflow project in %s/\n", dir)
 }
 
@@ -250,7 +245,6 @@ func scaffoldFullstack(projectName string) {
 		// repository's own go.mod, exactly as the workflow template does.
 		if dest == "go.mod.txt" {
 			dest = "go.mod"
-			data = substituteScaffoldModuleVersion(data)
 		}
 		if strings.HasSuffix(dest, ".go") {
 			data = stripScaffoldBuildTag(data)
@@ -262,6 +256,7 @@ func scaffoldFullstack(projectName string) {
 		os.Exit(1)
 	}
 
+	tidyScaffold(dir)
 	fmt.Printf("Created full-stack project in %s/\n", dir)
 	fmt.Printf("  next: cd %s && make up && make logs | grep rate-limiter\n", dir)
 	fmt.Printf("  the rate limiter must report mode=db; see README.md\n")
@@ -307,70 +302,33 @@ func stripScaffoldBuildTag(data []byte) []byte {
 	return []byte(s)
 }
 
-// scaffoldModuleVersionPlaceholder is the token a go.mod.txt template writes
-// instead of a literal version, substituted at generation time by
-// substituteScaffoldModuleVersion.
-const scaffoldModuleVersionPlaceholder = "{{CLEAT_MODULE_VERSION}}"
-
-// scaffoldLastKnownGoodVersion is the fallback used when the running binary's
-// own build info does not name a real release -- update it when cutting a new
-// tag. It is a FALLBACK, not the primary mechanism: a binary built from a
-// tagged release (which is what a `go install`'d or released `cleat` is)
-// always takes the branch below that reads its own version, so this constant
-// going stale between releases costs nothing in the case that matters and
-// only degrades the local-build case, which already has the full source tree.
-const scaffoldLastKnownGoodVersion = "v0.2.0"
-
-// cleatModuleVersion returns the module version a freshly scaffolded
-// project's go.mod should require.
+// tidyScaffold resolves the scaffold's dependencies and writes its go.sum.
 //
-// cleat#1888: every go.mod.txt template hardcoded "v0.0.0", a version that
-// was never tagged, so `go mod tidy` in a fresh scaffold failed outright with
-// "unknown revision v0.0.0" for every user, on the first command any
-// template's own README tells them to run.
+// WHY THE SCAFFOLD DOES NOT PIN A VERSION ITSELF. The generated code imports
+// github.com/cleat-team/cleat/cleat, which is its own Go module (cleat/go.mod)
+// and HAS NEVER BEEN TAGGED -- `go list -m -versions` on it returns nothing,
+// while the parent module has v0.1.0 and v0.2.0. cleat#1888 shipped a version
+// stamped into a require for the PARENT module, which the scaffold does not
+// import, so `go mod tidy` rewrote it anyway and a scaffold that skipped tidy
+// failed with "missing go.sum entry".
 //
-// PREFER THE RUNNING BINARY'S OWN VERSION, so a generated project pins
-// exactly the cleat that generated it -- consistent by construction, with
-// nothing here to update at release time. debug.ReadBuildInfo reports this
-// the same way `cleat version` already does (runVersion, this package).
+// So the go.mod written above carries `module` and `go` and nothing else, and
+// this resolves the rest. That is correct whether or not the SDK is ever
+// tagged: with a tag, tidy selects it; without one, tidy selects a
+// pseudo-version off the default branch. Either way the scaffold builds, which
+// stamping a version of a module it does not import never achieved.
 //
-// BUT NOT EVERY VALUE IT CAN REPORT IS USABLE. A plain local `go build`
-// inside this repo's own checkout does NOT report "(devel)" the way older Go
-// toolchains did -- verified empirically, 2026-09-18, go1.27: it reports a
-// PSEUDO-version derived from the checkout's VCS state, e.g.
-// "v0.1.1-0.20260918073609-1c504ef5bf65". module.IsPseudoVersion is the
-// correct discriminator (this project already depends on golang.org/x/mod);
-// a hand-rolled "does it look like vX.Y.Z" regex would work today but is the
-// kind of check this repo's own guards have repeatedly shown drifts quietly
-// as the version format's edge cases change.
-//
-// A pseudo-version is not necessarily UNRESOLVABLE -- if the exact commit it
-// names is reachable from a public remote, go mod tidy can often fetch it --
-// but it is not the stable, cache-friendly answer a fresh project should pin
-// to, and a contributor's local build is exactly the case where falling back
-// to a known-good tag costs nothing (they have the full source tree; they are
-// not relying on the generated project's pin for anything).
-func cleatModuleVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok || info.Main.Version == "" || info.Main.Version == "(devel)" {
-		return scaffoldLastKnownGoodVersion
+// NOT FATAL ON FAILURE. tidy needs the network, and a user behind a proxy or
+// offline should get a project plus one instruction, not no project. The
+// message names the command rather than the failure, because "run go mod tidy"
+// is the whole remedy.
+func tidyScaffold(dir string) {
+	cmd := exec.Command("go", "mod", "tidy")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nWarning: could not resolve dependencies (%v).\n"+
+			"Run 'go mod tidy' in %s before building.\n%s\n", err, dir, out)
 	}
-	if module.IsPseudoVersion(info.Main.Version) {
-		return scaffoldLastKnownGoodVersion
-	}
-	return info.Main.Version
-}
-
-// substituteScaffoldModuleVersion replaces scaffoldModuleVersionPlaceholder
-// with the version cleatModuleVersion resolves to. A literal ReplaceAll
-// rather than text/template: go.mod.txt is not template syntax anywhere else
-// in it, and every other placeholder-bearing template in this package
-// (README.md) already uses text/template for a DIFFERENT reason -- project
-// NAME substitution, which every template needs and go.mod does not.
-// Introducing text/template here for one token would mean two substitution
-// mechanisms doing the same job.
-func substituteScaffoldModuleVersion(data []byte) []byte {
-	return []byte(strings.ReplaceAll(string(data), scaffoldModuleVersionPlaceholder, cleatModuleVersion()))
 }
 
 // scaffoldBasicGoMod is basic's go.mod, as a literal rather than an embedded
@@ -378,6 +336,5 @@ func substituteScaffoldModuleVersion(data []byte) []byte {
 // file is written inline, a few lines above), and adding a whole embed.FS for
 // one file would be a heavier change than the defect warrants.
 func scaffoldBasicGoMod(projectName string) string {
-	return fmt.Sprintf("module %s\n\ngo 1.24\n\nrequire github.com/cleat-team/cleat %s\n",
-		projectName, cleatModuleVersion())
+	return fmt.Sprintf("module %s\n\ngo 1.24\n", projectName)
 }
