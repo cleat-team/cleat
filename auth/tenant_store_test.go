@@ -22,7 +22,7 @@ func TestTenantStore_CreateTenant(t *testing.T) {
 
 	ts := NewTenantStore(db)
 
-	tid, err := ts.CreateTenant(context.Background(), "test-tenant", "Test Tenant")
+	tid, err := ts.CreateTenant(context.Background(), "test-tenant", "Test Tenant", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestTenantStore_CreateTenant_ReturnsUUID(t *testing.T) {
 
 	ts := NewTenantStore(db)
 
-	tid, err := ts.CreateTenant(context.Background(), "returns-uuid", "Test")
+	tid, err := ts.CreateTenant(context.Background(), "returns-uuid", "Test", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
@@ -77,12 +77,12 @@ func TestTenantStore_CreateTenant_DuplicateName(t *testing.T) {
 
 	ts := NewTenantStore(db)
 
-	_, err := ts.CreateTenant(context.Background(), "duplicate", "First")
+	_, err := ts.CreateTenant(context.Background(), "duplicate", "First", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("first CreateTenant: %v", err)
 	}
 
-	_, err = ts.CreateTenant(context.Background(), "duplicate", "Second")
+	_, err = ts.CreateTenant(context.Background(), "duplicate", "Second", uuid.MustParse(DefaultOrgUUID))
 	if err == nil {
 		t.Fatal("expected error for duplicate tenant name")
 	}
@@ -99,11 +99,11 @@ func TestTenantStore_CreateTenant_MultipleTenants(t *testing.T) {
 
 	ts := NewTenantStore(db)
 
-	tid1, err := ts.CreateTenant(context.Background(), "tenant-a", "Tenant A")
+	tid1, err := ts.CreateTenant(context.Background(), "tenant-a", "Tenant A", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant tenant-a: %v", err)
 	}
-	tid2, err := ts.CreateTenant(context.Background(), "tenant-b", "Tenant B")
+	tid2, err := ts.CreateTenant(context.Background(), "tenant-b", "Tenant B", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant tenant-b: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestTenantStore_CreateAPIKey(t *testing.T) {
 
 	ts := NewTenantStore(db)
 
-	tid, err := ts.CreateTenant(context.Background(), "key-tenant", "Key Tenant")
+	tid, err := ts.CreateTenant(context.Background(), "key-tenant", "Key Tenant", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestTenantStore_CreateAPIKey_DifferentKeys(t *testing.T) {
 
 	ts := NewTenantStore(db)
 
-	tid, err := ts.CreateTenant(context.Background(), "multi-key-tenant", "Multi Key Tenant")
+	tid, err := ts.CreateTenant(context.Background(), "multi-key-tenant", "Multi Key Tenant", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestTenantStore_RevokeAPIKey(t *testing.T) {
 
 	ts := NewTenantStore(db)
 
-	tid, err := ts.CreateTenant(context.Background(), "revoke-tenant", "Revoke Tenant")
+	tid, err := ts.CreateTenant(context.Background(), "revoke-tenant", "Revoke Tenant", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestTenantStore_RevokeAPIKey_DoubleRevokeIsIdempotent(t *testing.T) {
 
 	ts := NewTenantStore(db)
 
-	tid, err := ts.CreateTenant(context.Background(), "double-revoke-tenant", "Double Revoke")
+	tid, err := ts.CreateTenant(context.Background(), "double-revoke-tenant", "Double Revoke", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestTenantStore_RevokeAPIKey_RevokedKeyCannotAuthenticate(t *testing.T) {
 
 	ts := NewTenantStore(db)
 
-	tid, err := ts.CreateTenant(context.Background(), "auth-after-revoke", "Auth After Revoke")
+	tid, err := ts.CreateTenant(context.Background(), "auth-after-revoke", "Auth After Revoke", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestNewTenantStore(t *testing.T) {
 		t.Fatal("NewTenantStore returned nil")
 	}
 	// Verify it's functional.
-	tid, err := ts.CreateTenant(context.Background(), "new-test", "New Test")
+	tid, err := ts.CreateTenant(context.Background(), "new-test", "New Test", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
@@ -427,7 +427,7 @@ func TestStoreAndMiddleware_EndToEnd(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	ts := NewTenantStore(db)
-	tid, err := ts.CreateTenant(context.Background(), "e2e-tenant", "E2E Tenant")
+	tid, err := ts.CreateTenant(context.Background(), "e2e-tenant", "E2E Tenant", uuid.MustParse(DefaultOrgUUID))
 	if err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}

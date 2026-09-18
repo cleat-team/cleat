@@ -70,22 +70,31 @@ func NewTenantStoreForDialect(db *sql.DB, dialect string) (*TenantStore, error) 
 	}
 }
 
-// CreateTenant creates a new tenant. Returns the tenant ID.
-func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string) (uuid.UUID, error) {
+// CreateTenant creates a new tenant under the given org. Returns the tenant ID.
+//
+// orgID IS REQUIRED, and immutable once set -- enforced by a database
+// trigger (cleat#1898's migration), not just this signature. Every tenant
+// records its org at creation; the alternative is a backfill over tenants
+// whose org nobody recorded, which is exactly what this avoids. See
+// cleat-internal/org-model-design-2026-09-18.md for the model:
+// a microservice maps to a tenant, an org groups a customer's tenants and
+// is the billing and ownership entity.
+func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string, orgID uuid.UUID) (uuid.UUID, error) {
 	// PostgreSQL only, and it says so rather than emitting PostgreSQL SQL to
 	// another database. RETURNING is the obstacle: MySQL has no equivalent and
 	// SQL Server spells it OUTPUT, so this needs a different statement shape
-	// per dialect rather than a different table name. It has no production
-	// caller today (scripts/check-test-only-code.sh lists it), so the shape is
-	// not written until something needs it -- but a silent PostgreSQL fallback
-	// is exactly the failure this file was fixed for.
+	// per dialect rather than a different table name. It DOES have a
+	// production caller now -- cmd/cleat-worker's --create-tenant flag,
+	// cleat#1114 -- so a silent PostgreSQL fallback here would not be an
+	// inert gap, it would be the exact failure this file was fixed for,
+	// reaching a real deployment.
 	if s.dialect != DialectPostgres {
 		return uuid.Nil, fmt.Errorf("auth: CreateTenant is not implemented for %s", s.dialect)
 	}
 	var tid uuid.UUID
 	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO admin.tenants (name, display_name) VALUES ($1, $2) RETURNING tenant_id`,
-		name, displayName).Scan(&tid)
+		`INSERT INTO admin.tenants (name, display_name, org_id) VALUES ($1, $2, $3) RETURNING tenant_id`,
+		name, displayName, orgID).Scan(&tid)
 	return tid, err
 }
 

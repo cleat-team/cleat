@@ -172,7 +172,18 @@ var (
 	// Server rather than emitting PostgreSQL SQL at them, because RETURNING has
 	// no MySQL equivalent and SQL Server spells it OUTPUT. That refusal is the
 	// correct behaviour and this flag surfaces it verbatim.
-	createTenantNamed = flag.String("create-tenant", "", "Create a tenant with the given name, print its UUID, and exit (PostgreSQL only)")
+	createTenantNamed = flag.String("create-tenant", "", "Create a tenant with the given name, print its UUID, and exit (PostgreSQL only). Requires --org")
+
+	// cleat#1898. admin.tenants.org_id is NOT NULL and immutable once set, so
+	// --create-tenant needs an org to put the new tenant under -- there is no
+	// implicit default here, matching the schema: the operator names the org
+	// explicitly, the same way they name the tenant.
+	//
+	// --create-org is the other half, mirroring --create-tenant exactly:
+	// admin.orgs has to have a row before anything can reference it, and
+	// until this flag there was no command that made one.
+	createOrgNamed = flag.String("create-org", "", "Create an org with the given name, print its UUID, and exit (PostgreSQL only)")
+	tenantOrgID    = flag.String("org", "", "Org UUID for --create-tenant (required). Create one first with --create-org")
 
 	// Migration.Down finally has a caller. cleat#1290.
 	//

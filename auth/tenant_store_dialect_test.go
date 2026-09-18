@@ -3,6 +3,8 @@ package auth
 import (
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 // API key creation was PostgreSQL-only. CreateAPIKey wrote
@@ -91,19 +93,24 @@ func TestUnknownDialectIsRefused(t *testing.T) {
 	}
 }
 
-// TestTheTwoDeadMethodsRefuseNonPostgres. CreateTenant and RevokeAPIKey have no
-// production caller (scripts/check-test-only-code.sh lists both), and their
-// statements are still PostgreSQL-shaped -- RETURNING has no MySQL equivalent
-// and SQL Server spells it OUTPUT. Rather than leave them emitting PostgreSQL
-// SQL to whatever they are given, they refuse. Writing the per-dialect shapes
-// for methods nothing calls would be inventing an untested API.
-func TestTheTwoDeadMethodsRefuseNonPostgres(t *testing.T) {
+// TestCreateTenantAndRevokeAPIKeyRefuseNonPostgres.
+//
+// This used to be named for a claim that was true of both methods: neither
+// had a production caller (scripts/check-test-only-code.sh listed both), and
+// their statements are still PostgreSQL-shaped -- RETURNING has no MySQL
+// equivalent and SQL Server spells it OUTPUT. That stopped being true of
+// CreateTenant when cmd/cleat-worker's --create-tenant flag started calling
+// it (cleat#1114) -- RevokeAPIKey remains test-only. Renamed rather than left
+// claiming "dead" about a method a real deployment now calls: whichever is
+// or isn't dead changes over time, and the assertion below (refuses cleanly
+// on a dialect it cannot serve) is the property worth keeping regardless.
+func TestCreateTenantAndRevokeAPIKeyRefuseNonPostgres(t *testing.T) {
 	for _, d := range []string{DialectMySQL, DialectMSSQL} {
 		s, err := NewTenantStoreForDialect(nil, d)
 		if err != nil {
 			t.Fatalf("NewTenantStoreForDialect(%q): %v", d, err)
 		}
-		if _, err := s.CreateTenant(t.Context(), "n", "d"); err == nil {
+		if _, err := s.CreateTenant(t.Context(), "n", "d", uuid.MustParse(DefaultOrgUUID)); err == nil {
 			t.Errorf("CreateTenant on %s did not refuse", d)
 		}
 		if err := s.RevokeAPIKey(t.Context(), [16]byte{}); err == nil {
