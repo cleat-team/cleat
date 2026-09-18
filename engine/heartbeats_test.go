@@ -10,10 +10,16 @@ import (
 type errorCaller struct {
 	calls  int
 	errMsg string
+	// errSvc returns a structured service error instead of a bare message, for
+	// tests about non-retryable CODES. It takes precedence over errMsg.
+	errSvc *ServiceError
 }
 
 func (c *errorCaller) Call(_ context.Context, _, _, _ string) (string, error) {
 	c.calls++
+	if c.errSvc != nil {
+		return "", c.errSvc
+	}
 	var err error
 	if c.errMsg != "" {
 		err = fmt.Errorf("%s", c.errMsg)

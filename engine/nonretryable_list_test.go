@@ -54,7 +54,13 @@ func TestMalformedNonRetryableListIsRefusedNotSilentlyIgnored(t *testing.T) {
 	// difference in call count below is attributable to the parse and not to the
 	// retry loop being broken in general.
 	t.Run("well-formed list is honoured", func(t *testing.T) {
-		caller := &countingErroringCaller{err: errors.New("INSUFFICIENT_FUNDS: balance too low")}
+		// A ServiceError, because a declaration matches the CODE a service gave
+		// rather than words in its message. Before that change this fixture was
+		// errors.New("INSUFFICIENT_FUNDS: balance too low") and matched by
+		// substring -- which is the coupling the code channel removed.
+		caller := &countingErroringCaller{err: &ServiceError{
+			Code: "INSUFFICIENT_FUNDS", Message: "balance too low",
+		}}
 		s := &execSession{engine: NewEngine(nil, caller)}
 		s.DurableCallWithRetry(context.Background(), nil, "svc", "op", `{}`,
 			maxAttempts, 1, 100, 1, `["INSUFFICIENT_FUNDS"]`, 0, 0)
@@ -66,7 +72,13 @@ func TestMalformedNonRetryableListIsRefusedNotSilentlyIgnored(t *testing.T) {
 	})
 
 	t.Run("malformed list is refused", func(t *testing.T) {
-		caller := &countingErroringCaller{err: errors.New("INSUFFICIENT_FUNDS: balance too low")}
+		// A ServiceError, because a declaration matches the CODE a service gave
+		// rather than words in its message. Before that change this fixture was
+		// errors.New("INSUFFICIENT_FUNDS: balance too low") and matched by
+		// substring -- which is the coupling the code channel removed.
+		caller := &countingErroringCaller{err: &ServiceError{
+			Code: "INSUFFICIENT_FUNDS", Message: "balance too low",
+		}}
 		s := &execSession{engine: NewEngine(nil, caller)}
 
 		// Not a JSON array. A plausible SDK slip, not a hostile input.
