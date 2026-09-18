@@ -2,8 +2,19 @@ module github.com/cleat-team/cleat/cleat
 
 go 1.26.0
 
+// github.com/cleat-team/cleat is required at the CURRENT published root
+// version, not a placeholder. v0.0.0 was never a real tag: it resolved fine
+// inside this repo, where `replace` below overrides it unconditionally
+// regardless of the declared version, but for every consumer outside this
+// repo -- no replace applies to a dependency -- it failed outright with
+// "unknown revision v0.0.0" the moment anything needed this module's own
+// go.mod (cleat#1888). UPDATE THIS at each release, per
+// docs/project/release-process.md's "update go.mod or version constants
+// that reference the old version" step -- it is not self-updating, and
+// wasm/build.go's sdkRequiredVersion has no version here to fall back to
+// otherwise, since this file IS the source it reads.
 require (
-	github.com/cleat-team/cleat v0.0.0
+	github.com/cleat-team/cleat v0.2.0
 	github.com/google/uuid v1.6.0
 )
 

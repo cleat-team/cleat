@@ -240,10 +240,14 @@ Open `CHANGELOG.md` and:
 Check for any hardcoded version strings in the codebase:
 
 ```bash
-grep -r 'v[0-9]\+\.[0-9]\+\.[0-9]\+' --include="*.go" --include="*.rs" .
+grep -r 'v[0-9]\+\.[0-9]\+\.[0-9]\+' --include="*.go" --include="*.rs" --include="*.mod" .
 ```
 
 If any go.mod or version constants reference the old version, update them.
+`--include="*.mod"` is not decoration: `cleat/go.mod`'s own `require
+github.com/cleat-team/cleat vX.Y.Z` line is exactly this kind of reference
+(cleat#1888 found it stuck at a version that was never even tagged), and the
+pattern above missed it entirely without that flag.
 
 That grep will not find the Homebrew formula, which is Ruby — bump it
 explicitly:

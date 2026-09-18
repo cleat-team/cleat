@@ -19,7 +19,7 @@ module github.com/cleat-team/cleat/tests/cross-language
 go 1.26.0
 
 require (
-	github.com/cleat-team/cleat v0.0.0
+	github.com/cleat-team/cleat v0.2.0
 	github.com/cleat-team/cleat/cleat v0.0.0
 )
 

@@ -112,6 +112,7 @@ func TestEveryScaffoldIsCoveredByTheBuildConstraintTable(t *testing.T) {
 		"scaffoldBasic":       true,
 		"scaffoldFullstack":   true,
 		"scaffoldAgentPython": true, // exempt: scaffolds Python, no Go files
+		"scaffoldBasicGoMod":  true, // exempt: returns a go.mod string, no Go source, no build tag
 	}
 	for _, m := range declared {
 		if !covered[m[1]] {

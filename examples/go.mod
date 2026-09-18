@@ -50,7 +50,7 @@ require (
 // import the root module (plugins/dag for dagrun, engine for cleattest),
 // so examples needs both replaces, not just cleat/'s -- a replace directive
 // is not transitive across module boundaries.
-require github.com/cleat-team/cleat v0.0.0 // indirect
+require github.com/cleat-team/cleat v0.2.0 // indirect
 
 replace (
 	github.com/cleat-team/cleat => ../
