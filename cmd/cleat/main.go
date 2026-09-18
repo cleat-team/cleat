@@ -150,6 +150,7 @@ func main() {
 			}
 		}
 		remainder := fs.Args()
+		refuseTrailingFlags("build", remainder)
 		if len(remainder) > 0 {
 			pattern = remainder[0]
 		}
@@ -166,6 +167,7 @@ func main() {
 		vetCI := fs.Bool("ci", false, "output in GitHub Actions annotation format (takes precedence over --json)")
 		fs.Parse(os.Args[2:])
 		remainder := fs.Args()
+		refuseTrailingFlags("vet", remainder)
 		if len(remainder) > 0 {
 			pattern = remainder[0]
 		}

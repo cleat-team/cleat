@@ -146,8 +146,12 @@ func TestRustBuildAcceptsProseNamingAForbiddenPattern(t *testing.T) {
 	}
 
 	dir := filepath.Join("..", "..", "testdata", "vet-checks", "rust", "prose_names_a_pattern")
-	out, _ := exec.Command(cleatBinary, "build", "--target", "rust", dir,
-		"-o", t.TempDir()).CombinedOutput()
+	// -o BEFORE the path. Written the other way round it was silently ignored
+	// and the artifact would have gone to the working directory, which is
+	// cmd/cleat/ under `go test` -- cleat#1800. This test is the instance the
+	// refusal added there found in this repo's own suite.
+	out, _ := exec.Command(cleatBinary, "build", "--target", "rust",
+		"-o", t.TempDir(), dir).CombinedOutput()
 	got := string(out)
 
 	// ASSERT ON THE DETERMINISM CODES, not on the exit status. This fixture
