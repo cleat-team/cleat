@@ -151,6 +151,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before. If a worker now refuses to start, it was silently enforcing the wrong limits before.
   The fix is to supply a database or to say `mode: "memory"` and mean it.
 
+### Fixed
+
+- **Write-ahead call intent now works on a sharded deployment, and an operator can resolve an
+  ambiguous call there.** (cleat#1778)
+
+  `ShardedStore` implemented `WorkflowStore` and not the two call-intent interfaces, so on a
+  sharded worker:
+
+  - Declaring any operation in `--write-ahead-intent-ops` made that operation **fail outright**.
+    The engine refuses rather than downgrading to at-least-once — deliberately, since a
+    durability guarantee that is configured, believed and absent is the failure this feature
+    exists to remove — so the call was not dispatched and the error named the store.
+  - `ResolveStep`, the documented way out of an ambiguous call, answered
+    `store *engine.ShardedStore cannot resolve call intents`. An operator holding an answer from
+    the external service had no way to record it.
+
+  All three intent methods now route to the shard that owns the workflow, like every other
+  per-workflow operation. The pending row, its completion, the replay that reports it ambiguous
+  and the operator's resolution all land in the same database.
+
+  **Who is affected: sharded deployments that declared a write-ahead operation.** Unsharded
+  deployments are unchanged — the three dialect stores always implemented these methods. A shard
+  whose store cannot honour the guarantee still fails loudly, and now names the shard.
+
 ### Added
 
 - **Pre-emptive cancellation, with a terminal status of its own.**
