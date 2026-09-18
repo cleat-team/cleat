@@ -761,7 +761,7 @@ type RetryPolicy struct {
 	InitialInterval    time.Duration
 	BackoffCoefficient float64
 	MaxInterval        time.Duration
-	NonRetryableErrors []string // error substrings that skip retry
+	NonRetryableErrors []string // service error CODES that skip retry
 }
 
 // DefaultRetryPolicy returns a sensible default retry policy.

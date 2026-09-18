@@ -814,12 +814,41 @@ func SideEffectTyped[T any](h HostCalls, fn func() (T, error)) (T, error) {
 
 // ---- Helpers ----
 
-// isNonRetryable returns true if err matches any of the non-retryable
-// substrings.
+// isNonRetryable reports whether err is one of the CODES this call declared it
+// will not retry.
+//
+// THIS IS THE SDK-SIDE HALF OF A DECISION THE HOST USUALLY MAKES, and the two
+// must agree. DurableCallWithRetry hands the policy to the host when it fits;
+// the loop that calls this is the fallback for a policy the host refused as
+// too long. Before this, the host matched codes while the fallback matched
+// substrings of the message -- so the same workflow got different retry
+// semantics depending on how long its backoff was, which is not a difference
+// anyone would predict from reading it.
+//
+// MATCHED AS A PREFIX OF THE DECLARED CODE, not by extracting a code from the
+// message. engine.ServiceError.Error() writes "CODE: message (correlation_id=
+// ...)", with message and id both optional, so a declared code matches when
+// the text IS it or BEGINS with it followed by a colon.
+//
+// An earlier version extracted the leading token and required it to look like
+// a code -- upper case, digits, underscores -- to keep an ordinary message
+// like "timeout: deadline exceeded" from being read as a code named "timeout".
+// That rule would have rejected PascalCase codes, which is the most common
+// convention there is: AWS ships InvalidParameterValue and ResourceNotFound.
+// Comparing against what the CALLER DECLARED needs no such rule, because a
+// message only matches if the caller named that exact code.
+//
+// An error with no code -- a transport failure, or a service that does not
+// speak the contract -- matches nothing, deliberately. Whether to retry it is
+// then decided by the classification the host already attached, which is a
+// sounder answer than searching an arbitrary message for a caller's word.
 func isNonRetryable(err error, nonRetryableErrors []string) bool {
-	errMsg := err.Error()
-	for _, substr := range nonRetryableErrors {
-		if strings.Contains(errMsg, substr) {
+	msg := err.Error()
+	for _, code := range nonRetryableErrors {
+		if code == "" {
+			continue
+		}
+		if msg == code || strings.HasPrefix(msg, code+":") {
 			return true
 		}
 	}

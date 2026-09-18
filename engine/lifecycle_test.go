@@ -366,7 +366,12 @@ func findMetricLine(t *testing.T, exposition, metricName string) string {
 }
 
 func TestDurableCallWithRetry_FreshNonRetryable(t *testing.T) {
-	errCaller := &errorCaller{calls: 0, errMsg: "NON_RETRYABLE: invalid input"}
+	// errSvc, not errMsg: a declaration matches the code a service gave, not
+	// its message. This fixture relied on substring matching before that
+	// channel was replaced.
+	errCaller := &errorCaller{calls: 0, errSvc: &ServiceError{
+		Code: "NON_RETRYABLE", Message: "invalid input",
+	}}
 	s := newTestExecSession()
 	s.engine.caller = errCaller
 

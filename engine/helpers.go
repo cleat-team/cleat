@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // truncateWithHash truncates s to maxLen bytes, appending "... [sha256=<hash>]"
@@ -103,10 +102,31 @@ func packAcquireLockResult(acquired bool, errCode uint32) int64 {
 	return int64(uint64(a)<<8 | uint64(errCode))
 }
 
-// isDefinitelyNonRetryable checks if an error should not be retried.
-// Returns true if the error's Retryable() method returns false, or if
-// the error message matches any of the non-retryable patterns.
-func isDefinitelyNonRetryable(err error, nonRetryablePatterns []string) bool {
+// isDefinitelyNonRetryable reports whether an error must not be retried.
+//
+// Two channels, in order: the error's own Retryable() answer, then the
+// workflow's declared non-retryable CODES matched against the code a called
+// service gave for the failure.
+//
+// THE SECOND CHANNEL USED TO BE A SUBSTRING MATCH ON THE MESSAGE, and that was
+// a live defect rather than a stylistic one. The callee's raw response body
+// became the caller's error message, so the callee's PROSE decided the
+// caller's retry behaviour: rewording "insufficient funds" to "balance too
+// low" flipped a caller from fail-fast to retry on a non-idempotent operation,
+// across a team boundary, with nothing declaring the coupling.
+//
+// The intent was always a code. The comment on this feature in durablecalls.go
+// describes a workflow saying "do not retry INSUFFICIENT_FUNDS" -- spelled
+// like a code, matched like prose. Now it is matched like a code: EXACTLY, and
+// only against what the service itself declared the failure to be.
+//
+// An error with no ServiceError in its chain matches no pattern at all. That
+// is the intended outcome, not a gap: a plain HTTP failure, a transport error
+// or a third-party service that does not speak the contract is classified by
+// the status rules the forwarder already applies -- 4xx permanent except 408
+// and 429 -- which is a sounder answer than searching an arbitrary body for a
+// caller's chosen word.
+func isDefinitelyNonRetryable(err error, nonRetryableCodes []string) bool {
 	// Check if error self-reports as non-retryable via Retryable interface.
 	var re RetryableError
 	if errors.As(err, &re) {
@@ -115,16 +135,18 @@ func isDefinitelyNonRetryable(err error, nonRetryablePatterns []string) bool {
 		}
 	}
 
-	// Check non-retryable error substrings.
-	if len(nonRetryablePatterns) > 0 {
-		errMsg := err.Error()
-		for _, p := range nonRetryablePatterns {
-			if strings.Contains(errMsg, p) {
-				return true
-			}
+	if len(nonRetryableCodes) == 0 {
+		return false
+	}
+	var se *ServiceError
+	if !errors.As(err, &se) || se.Code == "" {
+		return false
+	}
+	for _, c := range nonRetryableCodes {
+		if c == se.Code {
+			return true
 		}
 	}
-
 	return false
 }
 

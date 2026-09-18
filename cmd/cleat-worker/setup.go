@@ -364,24 +364,61 @@ func (c *dbServiceCaller) forwardToService(ctx context.Context, baseURL, service
 		return "", engine.NewTransientError(service+"."+operation, "", fmt.Errorf("read response: %w", err))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", benchSvcStatusError(resp.StatusCode, body)
+		return "", serviceStatusError(resp.StatusCode, body)
 	}
 	slog.Debug("BENCH-SVC-CALL", "duration_ms", time.Since(t0).Milliseconds(), "body_bytes", len(body))
 	return string(body), nil
 }
 
-// benchSvcStatusError classifies a non-200 from bench-svc by its status code.
+// serviceStatusError turns a non-200 from a called service into a classified
+// error, preferring what the service SAID over what its status implies.
 //
-// 4xx means bench-svc understood the request and rejected it, so sending the
-// same bytes again produces the same rejection. 408 and 429 are the documented
-// exceptions -- they are explicit invitations to try again. Everything else,
-// including every 5xx, stays retryable.
-func benchSvcStatusError(status int, body []byte) error {
-	err := fmt.Errorf("%s", string(body))
-	if status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests {
-		return engine.NewPermanentError("bench-svc", "", err)
+// TWO CHANNELS, IN ORDER.
+//
+// If the body is the structured error contract -- a JSON object with a
+// non-empty "code" -- the service has described its own failure, and this
+// keeps that description intact: the code a workflow's non-retryable
+// declarations match, a correlation id linking to the callee's logs, and the
+// service's own statement about whether retrying is worth anything. A stated
+// "retryable" wins over the status, because a service knows things a status
+// code cannot express -- a 500 that is genuinely permanent, a 400 that will
+// succeed once a dependency catches up.
+//
+// Otherwise the status decides, exactly as before: 4xx means the service
+// understood the request and rejected it, so sending the same bytes again
+// produces the same rejection; 408 and 429 are the documented exceptions,
+// explicit invitations to try again; everything else, including every 5xx,
+// stays retryable. That path is what every service not speaking this contract
+// gets, and it is unchanged.
+//
+// THE CLASSIFICATION IS DECIDED HERE AND NOWHERE ELSE. ServiceError
+// deliberately does not implement RetryableError, so there is no second
+// answer for errors.As to find first depending on unwrap order.
+//
+// WHAT IS NOT CARRIED YET: a diagnostic tier. A service's internal detail is
+// useful to a caller inside the same trust boundary and must not leave it, and
+// cleat cannot tell those apart until exposure classes exist. Until then this
+// carries only the part that is contract.
+func serviceStatusError(status int, body []byte) error {
+	statusSaysPermanent := status >= 400 && status < 500 &&
+		status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
+
+	if se := engine.ParseServiceError(body, status); se != nil {
+		permanent := statusSaysPermanent
+		if stated, retryable := se.RetryableFromService(); stated {
+			permanent = !retryable
+		}
+		if permanent {
+			return engine.NewPermanentError("service", "", se)
+		}
+		return engine.NewTransientError("service", "", se)
 	}
-	return engine.NewTransientError("bench-svc", "", err)
+
+	err := fmt.Errorf("%s", string(body))
+	if statusSaysPermanent {
+		return engine.NewPermanentError("service", "", err)
+	}
+	return engine.NewTransientError("service", "", err)
 }
 
 // egressGuard is the policy this caller enforces for one request.

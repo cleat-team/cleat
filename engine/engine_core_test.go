@@ -676,10 +676,16 @@ func TestIsDefinitelyNonRetryable_RetryableTrue(t *testing.T) {
 	}
 }
 
-func TestIsDefinitelyNonRetryable_PatternMatch(t *testing.T) {
-	err := errors.New("something went wrong with connection refused")
-	if !isDefinitelyNonRetryable(err, []string{"connection refused"}) {
-		t.Error("should be non-retryable when error matches pattern")
+func TestIsDefinitelyNonRetryable_CodeMatch(t *testing.T) {
+	// The declaration names a CODE, and matches the code the service gave --
+	// not words in its message. Rewritten from a substring test when the
+	// matching channel changed; see isDefinitelyNonRetryable for why.
+	err := NewTransientError("service", "", &ServiceError{
+		Code:    "CONNECTION_REFUSED",
+		Message: "something went wrong",
+	})
+	if !isDefinitelyNonRetryable(err, []string{"CONNECTION_REFUSED"}) {
+		t.Error("should be non-retryable when the service's code matches a declaration")
 	}
 }
 
@@ -697,17 +703,25 @@ func TestIsDefinitelyNonRetryable_NoInterface(t *testing.T) {
 	}
 }
 
-func TestIsDefinitelyNonRetryable_NoInterface_PatternMatch(t *testing.T) {
+func TestIsDefinitelyNonRetryable_PlainErrorMatchesNoDeclaration(t *testing.T) {
+	// A plain error carries no service code, so no declaration can match it --
+	// deliberately. It is classified by the status rules the forwarder applies,
+	// which is a sounder answer than searching its text for a caller's word.
 	err := errors.New("plain error with fatal signal")
-	if !isDefinitelyNonRetryable(err, []string{"fatal"}) {
-		t.Error("plain error should be non-retryable when pattern matches")
+	if isDefinitelyNonRetryable(err, []string{"fatal"}) {
+		t.Error("a plain error matched a declaration by its text; the substring channel " +
+			"is gone, and matching prose is what it was removed for")
 	}
 }
 
-func TestIsDefinitelyNonRetryable_BothRetryableAndPattern(t *testing.T) {
-	err := &retryableError{retryable: true}
-	if !isDefinitelyNonRetryable(err, []string{"retryable error"}) {
-		t.Error("pattern match should make it non-retryable even though Retryable()=true")
+func TestIsDefinitelyNonRetryable_ADeclaredCodeOverridesRetryableTrue(t *testing.T) {
+	// A service may report a failure as retryable while the CALLER has declared
+	// that code must not be retried -- the caller knows whether its own
+	// operation is safe to repeat, and that judgement wins.
+	retry := true
+	err := &ServiceError{Code: "DUPLICATE_CHARGE", Retry: &retry}
+	if !isDefinitelyNonRetryable(err, []string{"DUPLICATE_CHARGE"}) {
+		t.Error("a caller's declaration did not override the service's retryable=true")
 	}
 }
 

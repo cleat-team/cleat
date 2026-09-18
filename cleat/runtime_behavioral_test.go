@@ -412,10 +412,18 @@ func TestIsNonRetryableMultiplePatterns(t *testing.T) {
 	}
 }
 
-func TestIsNonRetryableSubstring(t *testing.T) {
+// INVERTED DELIBERATELY. This asserted that a declared name matched anywhere in
+// the message, which is the coupling that made a callee's PROSE decide a
+// caller's retry behaviour: rewording an error flipped a non-idempotent call
+// between fail-fast and retried, across a team boundary, with nothing
+// declaring the dependency. A declaration now names a CODE, and a code is what
+// the error leads with.
+func TestIsNonRetryableDoesNotMatchACodeMentionedMidMessage(t *testing.T) {
 	err := errors.New("something with Timeout in the middle")
-	if !isNonRetryable(err, []string{"Timeout"}) {
-		t.Error("expected isNonRetryable to match substring 'Timeout'")
+	if isNonRetryable(err, []string{"Timeout"}) {
+		t.Error("a declared code matched because it appeared inside the message. " +
+			"A service must not be able to change a caller's control flow by what " +
+			"it writes in a sentence.")
 	}
 }
 

@@ -129,13 +129,13 @@ func TestHTTPFetchStatusIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestBenchSvcStatusClassification(t *testing.T) {
+func TestServiceStatusClassification(t *testing.T) {
 	for _, tc := range []struct {
 		status    int
 		retryable bool
 		why       string
 	}{
-		{http.StatusBadRequest, false, "bench-svc understood the request and rejected it"},
+		{http.StatusBadRequest, false, "the service understood the request and rejected it"},
 		{http.StatusNotFound, false, "the route does not exist"},
 		{http.StatusRequestTimeout, true, "408 is an explicit invitation to try again"},
 		{http.StatusTooManyRequests, true, "429 is an explicit invitation to try again"},
@@ -143,7 +143,7 @@ func TestBenchSvcStatusClassification(t *testing.T) {
 		{http.StatusBadGateway, true, "5xx may well succeed on a retry"},
 	} {
 		t.Run(fmt.Sprintf("%d", tc.status), func(t *testing.T) {
-			err := benchSvcStatusError(tc.status, []byte("body"))
+			err := serviceStatusError(tc.status, []byte("body"))
 			if got := retryabilityOf(err); got != tc.retryable {
 				t.Errorf("status %d: retryable=%v, want %v (%s)", tc.status, got, tc.retryable, tc.why)
 			}
