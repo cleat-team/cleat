@@ -90,6 +90,7 @@ done
 # here and the sweep reports nothing -- which is why parse_findings' output is
 # checked against a known-positive in --self-test rather than trusted.
 parse_findings() {
+    # shellcheck disable=SC2016  # the backticks are literal: the guard wraps each declaration name in them
     sed -n 's/^\(.*\): `\([^`]*\)` had a doc comment at .* and has none at .*$/\1	\2/p'
 }
 
@@ -139,8 +140,10 @@ sweep() {
     while IFS=$'\t' read -r c f n; do
         p="$(git rev-parse -q --verify "${c}^" 2>/dev/null)"
         if grep -qF "$(printf '%s\t%s\t%s' "$p" "$f" "$n")" "$live_file" 2>/dev/null; then
+            # shellcheck disable=SC2016  # the backticks are literal: the guard wraps each declaration name in them
             printf 'STILL LIVE  %s `%s`  (broke at %s)\n' "$f" "$n" "${c:0:8}"
         else
+            # shellcheck disable=SC2016  # the backticks are literal: the guard wraps each declaration name in them
             printf 'repaired    %s `%s`  (broke at %s, fixed since)\n' "$f" "$n" "${c:0:8}"
         fi
     done < "$hits_file" | sort -r
@@ -233,6 +236,7 @@ GO
     out="$(cd "$tmp" && sweep HEAD 50)"; rc=$?
 
     # The known-positive: a defect that is still live must be reported as such.
+    # shellcheck disable=SC2016  # the backticks are literal: the guard wraps each declaration name in them
     if ! printf '%s\n' "$out" | grep -q 'STILL LIVE.*live.go.*`Alpha`'; then
         echo 'SELF-TEST FAILED: the sweep did not report a defect that is still live'
         ok=1
@@ -245,6 +249,7 @@ GO
     fi
     # ...but it must still be SEEN, or pass 1 is broken and the sweep would be
     # silent for the wrong reason.
+    # shellcheck disable=SC2016  # the backticks are literal: the guard wraps each declaration name in them
     if ! printf '%s\n' "$out" | grep -q 'repaired.*fixed.go.*`Delta`'; then
         echo 'SELF-TEST FAILED: the sweep did not see the repaired defect at all'
         ok=1
