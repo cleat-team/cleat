@@ -159,7 +159,7 @@ func TestRustBuildAcceptsProseNamingAForbiddenPattern(t *testing.T) {
 	// the build exits non-zero for a reason that has nothing to do with the
 	// checker -- the same trap rust_build_refuses_nondeterminism_test.go
 	// records, where "the build fails" passed against a tree with no gate.
-	for _, code := range []string{"R001", "R002", "R003", "R004", "R005", "R006", "R007"} {
+	for _, code := range []string{"R001", "R002", "R003", "R004", "R005", "R006", "R007", "R008"} {
 		if strings.Contains(got, code) {
 			t.Errorf("the build reported %s against a crate whose only mention of a "+
 				"forbidden pattern is in comments and string literals (cleat#1782).\n\n"+
