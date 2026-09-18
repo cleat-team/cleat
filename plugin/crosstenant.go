@@ -45,14 +45,27 @@ import (
 // tests it for emptiness rather than for presence -- which is what stops a
 // pooled connection carrying a spent bypass to its next borrower.
 //
-// MYSQL IS INERT; SQL SERVER IS NOT, AS OF cleat#1552. MySQL has no row-level
-// security at all, so there is nothing there to lift and never will be. On SQL
-// Server this now sets a `cross_tenant` key in SESSION_CONTEXT, for the same
-// transaction's life and by the same route the tenant takes (see
-// engine/plugindb_tenant.go's markCrossTenantOnTx). It lifts nothing YET --
-// applyTenantScoping still installs no SQL Server policy to read it -- so the
-// observable behaviour is unchanged until that lands. It is safe to write in a
-// plugin that runs on all three.
+// MYSQL IS INERT; SQL SERVER IS NOT, AND NO LONGER ONLY IN PRINCIPLE. MySQL has
+// no row-level security at all, so there is nothing there to lift and never
+// will be -- see engine/mysql_tenant_predicate_test.go, which is the whole of
+// the isolation on that dialect.
+//
+// On SQL Server this sets a `cross_tenant` key in SESSION_CONTEXT for the same
+// transaction's life, by the same route the tenant takes (see
+// engine/plugindb_tenant.go's markCrossTenantOnTx). This comment used to end
+// "it lifts nothing YET -- applyTenantScoping still installs no SQL Server
+// policy to read it". THAT IS NO LONGER TRUE and had become stale in the
+// dangerous direction: it described a live security mechanism as inert.
+//
+// applyTenantScopingMSSQL creates dbo.fn_tenant_filter, whose predicate is
+//
+//	WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)
+//	   OR CAST(SESSION_CONTEXT(N'cross_tenant') AS NVARCHAR(4000)) <> N''
+//
+// and binds it with CREATE SECURITY POLICY ... WITH (STATE = ON), as a FILTER
+// predicate and as BLOCK predicates after INSERT and UPDATE. So the bypass is
+// read, and the observable behaviour on SQL Server now matches PostgreSQL.
+// It is safe to write in a plugin that runs on all three.
 //
 // THE REASON THIS PARAGRAPH USED TO GIVE WAS FALSE: "SQL Server scopes a tenant
 // at the connector, so ... plugin statements were never scoped". Plugins do not

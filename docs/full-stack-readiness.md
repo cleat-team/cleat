@@ -93,7 +93,7 @@ The bar is the buyer's most demanding common requirement, not parity with the ca
 | Area | The bar | Status | Gap |
 |---|---|---|---|
 | Durable workflows | Survives crashes, compensates, replays | **Clears** | — |
-| Multi-tenant isolation | Enforced below application code | **Clears** | RLS, optional per-tenant roles, and a posture check |
+| Multi-tenant isolation | Enforced below application code | **Clears on PostgreSQL and SQL Server** | MySQL has no row-level security; see below |
 | Rate limiting | Cluster-wide, per tenant, observable | **Clears, badly configured** | `db` mode exists; default is `memory`, fallback is silent, fails open |
 | Feature flags | Targeting, percentage rollout, kill switch | **Probably clears** | No experimentation platform — rarely the deciding requirement |
 | Audit | Who did what, retained, exportable | **Partial** | HTTP-level, not semantic; no tamper-evidence or export tooling |
@@ -106,6 +106,22 @@ The bar is the buyer's most demanding common requirement, not parity with the ca
 **Four of ten miss.** Two of those four — egress and secrets — are the kind that end an evaluation
 rather than lose a comparison, because they are security answers rather than feature answers. The
 read model is the one that costs every adopter the most hand-written code.
+
+### Tenant isolation is not the same mechanism on every dialect
+
+"Enforced below application code" is true on two of the three supported databases and not the third, and the row above says "Clears" without that distinction being obvious.
+
+| | How a tenant boundary is enforced |
+|---|---|
+| **PostgreSQL** | Row-level security policies, plus optional per-tenant roles |
+| **SQL Server** | `CREATE SECURITY POLICY ... WITH (STATE = ON)` — a FILTER predicate and BLOCK predicates after INSERT and UPDATE, reading `SESSION_CONTEXT` |
+| **MySQL** | **Nothing in the database.** `applyTenantScoping` returns without acting, and `grep -ril "row.level security\|CREATE POLICY" migrations/mysql` finds nothing |
+
+On MySQL, isolation is the `AND tenant_id = ?` predicate written into every query — which is real, and is guarded: `engine/mysql_tenant_predicate_test.go` (cleat#1031) refuses any MySQL statement touching a tenant-scoped table without one.
+
+But the guard is **static analysis over the source**, not enforcement by the database. A missing predicate on PostgreSQL or SQL Server returns no rows; on MySQL it returns another tenant's. As that test's own comment puts it: *"on this dialect a missing predicate has nothing whatever behind it, on any connection, for every tenant-scoped table."*
+
+That is a defensible position — MySQL offers nothing better — but it is a different guarantee, and a buyer comparing deployment targets should be told which one they are getting rather than reading "RLS" and assuming it is uniform.
 
 Identity was the fourth and is the one that has moved: it is no longer an open question but a
 recorded decision ([`enterprise-identity-decision.md`](enterprise-identity-decision.md)) awaiting a
