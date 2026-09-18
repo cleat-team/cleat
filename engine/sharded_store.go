@@ -2084,3 +2084,89 @@ func (s *ShardedStore) GetChildCompletedAtMs(ctx context.Context, runID string) 
 	}
 	return shard.Store.GetChildCompletedAtMs(ctx, runID)
 }
+
+// ---------------------------------------------------------------------------
+// Write-ahead call intent
+// ---------------------------------------------------------------------------
+//
+// ShardedStore implemented WorkflowStore and not callIntentStore, so
+// Engine.intentStore() refused it and freshCallWithIntent returned WITHOUT
+// DISPATCHING. Declaring any operation --write-ahead-intent-ops on a sharded
+// worker failed that operation outright, and turning the write-ahead default
+// on (cleat#1778) would have failed every durable call.
+//
+// The refusal was intentStore() working as designed -- it chooses a loud
+// failure over a silent downgrade to at-least-once. What was missing is the
+// capability, not the check.
+//
+// WHERE THE CHECK NOW LIVES, because it moved and that is deliberate.
+// A ShardedStore satisfies callIntentStore unconditionally at the type level,
+// since capability is a property of the shard a workflow lands on rather than
+// of the store in front of them. So intentStore()'s type assertion now always
+// succeeds and the real check happens per workflow, in intentShard below. That
+// is not a weakening: freshCallWithIntent calls intentStore() on every call
+// rather than at startup, so both the old check and the new one fire at the
+// same moment, and both refuse before dispatch.
+
+// intentShard returns the owning shard's store as a callIntentStore, or an
+// error naming the shard that cannot honour the guarantee.
+//
+// It reuses intentStore()'s wording ("does not implement write-ahead call
+// intent") because an operator reading a log has no reason to care which
+// layer refused, and adds the shard name, which is the part they need in order
+// to fix it.
+func (s *ShardedStore) intentShard(op, workflowID string) (callIntentStore, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return nil, fmt.Errorf("%s: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG", op)
+	}
+	st, ok := shard.Store.(callIntentStore)
+	if !ok {
+		return nil, fmt.Errorf("%s: shard %q store %T does not implement write-ahead call intent",
+			op, shard.Config.Name, shard.Store)
+	}
+	return st, nil
+}
+
+// WriteCallIntent routes by workflow ID.
+//
+// The pending row has to land on the shard that holds the workflow's history:
+// the completion, the replay that reports the call ambiguous, and the operator
+// query that finds it all route by the same ID, so an intent written anywhere
+// else is an ambiguous call nobody can locate.
+func (s *ShardedStore) WriteCallIntent(ctx context.Context, workflowID string, rec EventRecord, workerID string, generation int64) error {
+	st, err := s.intentShard("write_call_intent", workflowID)
+	if err != nil {
+		return err
+	}
+	return st.WriteCallIntent(ctx, workflowID, rec, workerID, generation)
+}
+
+// CompleteCallIntent routes by workflow ID, to the shard WriteCallIntent used.
+func (s *ShardedStore) CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string, workerID string, generation int64) error {
+	st, err := s.intentShard("complete_call_intent", workflowID)
+	if err != nil {
+		return err
+	}
+	return st.CompleteCallIntent(ctx, workflowID, rec, payload, checksum, workerID, generation)
+}
+
+// ResolveCallIntent routes by workflow ID.
+//
+// Separate from the two above because it satisfies callIntentResolver, a
+// different interface: resolveAmbiguity asserts on that one and, failing it,
+// logs and reports the call ambiguous rather than erroring. So a sharded store
+// without this method degraded quietly -- a resolver could answer and the
+// answer could not be recorded.
+func (s *ShardedStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64, later []EventRecord) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("resolve_call_intent: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	st, ok := shard.Store.(callIntentResolver)
+	if !ok {
+		return fmt.Errorf("resolve_call_intent: shard %q store %T cannot record a resolved call intent",
+			shard.Config.Name, shard.Store)
+	}
+	return st.ResolveCallIntent(ctx, workflowID, rec, payload, workerID, generation, later)
+}
