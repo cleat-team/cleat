@@ -123,13 +123,13 @@ evidence and the open design questions, and this section is the summary and the 
 
 | | Gap | Issue | Kind | Clears which bar |
 |---|---|---|---|---|
-| 1 | Egress policy for outbound HTTP | [#1565](https://github.com/cleat-team/cleat/issues/1565) | security | Outbound network |
-| 2 | Deterministic plugin order | [#1566](https://github.com/cleat-team/cleat/issues/1566) | bug | — (correctness) |
-| 3 | `cleat init --template fullstack` | [#1567](https://github.com/cleat-team/cleat/issues/1567) | adoption | — (time to evaluate) |
-| 4 | `Host` → tenant binding | [#1568](https://github.com/cleat-team/cleat/issues/1568) | security | Per-tenant URLs |
-| 5 | Counter-based tenant quotas | [#1569](https://github.com/cleat-team/cleat/issues/1569) | feature | Commercial packaging |
-| 6 | Per-tenant secrets | [#1570](https://github.com/cleat-team/cleat/issues/1570) | security | Secrets |
-| 7 | A queryable read model | [#1571](https://github.com/cleat-team/cleat/issues/1571) | feature | Reading your own data |
+| 1 | Egress policy for outbound HTTP — **shipped** | [#1565](https://github.com/cleat-team/cleat/issues/1565) | security | Outbound network |
+| 2 | Deterministic plugin order — **shipped** | [#1566](https://github.com/cleat-team/cleat/issues/1566) | bug | — (correctness) |
+| 3 | `cleat init --template fullstack` — **shipped** | [#1567](https://github.com/cleat-team/cleat/issues/1567) | adoption | — (time to evaluate) |
+| 4 | `Host` → tenant binding — **shipped** | [#1568](https://github.com/cleat-team/cleat/issues/1568) | security | Per-tenant URLs |
+| 5 | Counter-based tenant quotas — **shipped**, defaults off | [#1569](https://github.com/cleat-team/cleat/issues/1569) | feature | Commercial packaging |
+| 6 | Per-tenant secrets — **shipped**; rotation absent | [#1570](https://github.com/cleat-team/cleat/issues/1570) | security | Secrets |
+| 7 | A queryable read model — **declined** | [#1571](https://github.com/cleat-team/cleat/issues/1571) | feature | Reading your own data |
 | 8 | `chat_stream` → SSE bridge — **shipped** | [#1572](https://github.com/cleat-team/cleat/issues/1572) | feature | Interactive AI |
 
 Related and filed separately while writing the playbooks:
@@ -139,6 +139,16 @@ eviction — a prerequisite for any per-tenant artifact deploy.
 **Four of the eight are security or correctness**, and those are the ones whose absence ends an
 evaluation rather than losing a comparison. Items 1, 4 and 6 are the security three; item 2 is a
 plain bug and the cheapest thing on the list.
+
+> **Status, 2026-09-18.** Seven of the eight have shipped. Item 7, the queryable read model, was
+> **declined** rather than built (#1571, closed NOT_PLANNED) — its gap is intact and this row says so
+> rather than quietly dropping it. `scripts/check-readiness-doc.py` now fails CI if a row here
+> disagrees with the issue it cites, in either direction.
+>
+> This table had gone 125 commits without an update and still said four of ten bars missed, while
+> nine of the ten gaps had closed. The failure direction is worth naming: most stale documents
+> oversell, and an overclaim gets contradicted the first time someone tries the feature. This one
+> **undersold**, and an underclaim just quietly loses an evaluation with nothing to contradict it.
 
 ### 1. Egress policy for outbound HTTP — *security, highest priority*
 
