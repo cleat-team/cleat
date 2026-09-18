@@ -181,6 +181,19 @@ type dbServiceCaller struct {
 	// because the floor sits underneath it. cleat#1565.
 	operatorEgress *engine.HostAllowlist
 
+	// serviceEndpoints maps a service name to the base URL that serves it, from
+	// --service-endpoints. Empty means no service is registered and every named
+	// call falls through to --bench-svc-url or to a permanent refusal.
+	//
+	// A MAP RATHER THAN A DB LOOKUP, deliberately, and this is the first half of
+	// a two-step. A flag map removes the worker rebuild for a deployment whose
+	// service set is fixed at boot, which is most of them, and costs no
+	// migration, no cache and no per-call query. A tenant-scoped
+	// service_endpoints table is the half that makes the set changeable without
+	// a restart and different per tenant -- and it needs a cache, because this
+	// sits on the call path.
+	serviceEndpoints map[string]string
+
 	// secrets resolves ${secret:name} in a request on the way OUT to the
 	// service, and the direction is the whole point.
 	//
@@ -229,10 +242,22 @@ func (c *dbServiceCaller) call(ctx context.Context, service, operation, requestJ
 	if service == "http" && operation == "fetch" {
 		return c.handleHTTPFetch(ctx, requestJSON, idempotencyKey)
 	}
-	if c.benchSvcURL != "" {
-		return c.forwardToBenchSvc(ctx, service, operation, requestJSON, idempotencyKey)
+	// A REGISTERED ENDPOINT WINS OVER THE CATCH-ALL, so adding one changes
+	// nothing for a deployment that has none. --bench-svc-url stays what it was:
+	// a single forwarder for every service, which a benchmark wants and a real
+	// deployment does not.
+	if base, ok := c.serviceEndpoints[service]; ok {
+		return c.forwardToService(ctx, base, service, operation, requestJSON, idempotencyKey)
 	}
-	return "", engine.NewPermanentError("call", "", fmt.Errorf("service %s.%s not configured: no endpoint registered", service, operation))
+	if c.benchSvcURL != "" {
+		return c.forwardToService(ctx, c.benchSvcURL, service, operation, requestJSON, idempotencyKey)
+	}
+	// Names the way out, because "not configured" without it sends a reader to
+	// look for a plugin they do not need to write.
+	return "", engine.NewPermanentError("call", "", fmt.Errorf(
+		"service %s.%s not configured: no endpoint registered. Register one with "+
+			"--service-endpoints %s=https://your-service, or implement it as a plugin",
+		service, operation, service))
 }
 
 // resolveSecrets substitutes ${secret:name} in a request on its way to the
@@ -276,11 +301,18 @@ func (c *dbServiceCaller) resolveSecrets(ctx context.Context, service, operation
 	return resolved, nil
 }
 
-func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, error) {
-	url := fmt.Sprintf("%s/call/%s/%s", c.benchSvcURL, service, operation)
+// forwardToService POSTs a durable call to a registered service.
+//
+// TAKES THE BASE URL RATHER THAN READING c.benchSvcURL, which is the whole of
+// the change that turns a benchmarking hook into an extension point. Everything
+// else here was already right for the job: the conventional route, the trace
+// header, the idempotency key, and an error classification that decides whether
+// the engine retries.
+func (c *dbServiceCaller) forwardToService(ctx context.Context, baseURL, service, operation, requestJSON, idempotencyKey string) (string, error) {
+	url := fmt.Sprintf("%s/call/%s/%s", baseURL, service, operation)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(requestJSON))
 	if err != nil {
-		return "", engine.NewPermanentError("bench-svc", "", fmt.Errorf("create request: %w", err))
+		return "", engine.NewPermanentError(service+"."+operation, "", fmt.Errorf("create request: %w", err))
 	}
 	plugin.SetTraceparent(req, c.traceID)
 	req.Header.Set("Content-Type", "application/json")
@@ -312,18 +344,24 @@ func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operat
 	// written as though it will -- this becomes a hot path and the answer is a
 	// pool PER TENANT, not a shared one.
 	client := &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, c.benchSvcURL).DialContext},
+		Timeout: 30 * time.Second,
+		// THE ENDPOINT IN HAND, not c.benchSvcURL. This forwarder now serves
+		// every registered service, so exempting the bench URL would grant a
+		// host this call is not dialling and refuse the one it is: every
+		// --service-endpoints destination on a private address would be denied,
+		// which is most of them -- a sidecar on loopback, or a cluster-internal
+		// name, which is RFC1918 by construction.
+		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, baseURL).DialContext},
 	}
 	t0 := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", engine.NewTransientError("bench-svc", "", err)
+		return "", engine.NewTransientError(service+"."+operation, "", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", engine.NewTransientError("bench-svc", "", fmt.Errorf("read response: %w", err))
+		return "", engine.NewTransientError(service+"."+operation, "", fmt.Errorf("read response: %w", err))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", benchSvcStatusError(resp.StatusCode, body)
@@ -1402,6 +1440,10 @@ type Worker struct {
 	// caller, so the caller's own field is out of reach from there.
 	egress *engine.EgressGuard
 
+	// serviceEndpoints maps a service name to its base URL, from
+	// --service-endpoints. Passed to every dbServiceCaller this worker builds.
+	serviceEndpoints map[string]string
+
 	// egressAllow answers "which hosts may this tenant's workflows reach".
 	// Nil denies every guest-initiated fetch. cleat#1565.
 	egressAllow *engine.TenantEgressStore
@@ -2377,15 +2419,16 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// egressAllow is what makes http.fetch usable at all: without it the guard
 	// has no allowlist and refuses every destination. cleat#1565.
 	caller := &dbServiceCaller{
-		store:          execStore,
-		workerID:       w.id,
-		benchSvcURL:    *benchSvcURL,
-		egressAllow:    w.egressAllow,
-		operatorEgress: w.operatorEgress,
-		privateHosts:   w.privateHosts,
-		egress:         w.egress,
-		traceID:        traceID,
-		secrets:        w.secrets,
+		store:            execStore,
+		workerID:         w.id,
+		benchSvcURL:      *benchSvcURL,
+		serviceEndpoints: w.serviceEndpoints,
+		egressAllow:      w.egressAllow,
+		operatorEgress:   w.operatorEgress,
+		privateHosts:     w.privateHosts,
+		egress:           w.egress,
+		traceID:          traceID,
+		secrets:          w.secrets,
 	}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(execStore.(engine.SignalStore)),
