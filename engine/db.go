@@ -401,6 +401,37 @@ func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key strin
 	return value.String, tx.Commit()
 }
 
+// ListQueryState returns every key a run published. cleat#1571.
+//
+// SELECTS THE WHOLE COLUMN AND DECODES IN GO, rather than using each dialect's
+// JSON functions as GetQueryState does. The single-key readers need the
+// database to reach INTO the document -- ->> here, JSON_EXTRACT on MySQL,
+// JSON_VALUE on SQL Server -- and those spellings genuinely differ. Reading the
+// whole document needs none of that, so all four stores share one shape and
+// one decoder, and there is no per-dialect JSON semantics to diverge.
+func (s *PostgresStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list query state: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var raw sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`SELECT query_state FROM workflow_instances WHERE id = $1`, workflowID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return map[string]string{}, tx.Commit()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list query state: %w", err)
+	}
+	out, derr := decodeQueryState(raw)
+	if derr != nil {
+		return nil, derr
+	}
+	return out, tx.Commit()
+}
+
 // ListWorkflows returns workflow instances filtered by the given filter parameters,
 // ordered by creation time DESC. Supports search by input content, error message,
 // and combined full-text search, as well as pagination via Offset/Limit.

@@ -1464,6 +1464,10 @@ func (s *stubWorkflowStore) PollCancellation(ctx context.Context, workflowID str
 func (s *stubWorkflowStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
 	return "", nil
 }
+
+func (s *stubWorkflowStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
 func (s *stubWorkflowStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	return nil, nil
 }

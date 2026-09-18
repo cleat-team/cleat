@@ -297,6 +297,26 @@ type WorkflowStore interface {
 	// GetQueryState returns the query state for a workflow instance key.
 	GetQueryState(ctx context.Context, workflowID, key string) (string, error)
 
+	// ListQueryState returns everything a run published, as key -> value.
+	//
+	// WHY THIS EXISTS, given cleat#1119 deliberately decided the opposite.
+	// That issue asked whether published state should be enumerable at all and
+	// answered no: a keyed-only reader means the caller must know what it is
+	// asking for, which keeps published state a contract rather than a bag.
+	// The HTTP route still carries the refusal that decision produced.
+	//
+	// Reversed on the operational case cleat#1119 itself names -- "a run
+	// misbehaved and you do not know what it published". Owner decision
+	// (cleat#1571): query state is a semantically limited standard interface,
+	// and being able to VIEW it is part of that. Anything elaborate belongs in
+	// app-specific code, which is why this returns the map and stops there: no
+	// projection, no join, no aggregation.
+	//
+	// An unknown workflow yields an empty map and no error, matching
+	// GetQueryState's existing answer for a key that is not there. A caller
+	// asking what a run published, when there is no such run, has an answer.
+	ListQueryState(ctx context.Context, workflowID string) (map[string]string, error)
+
 	// ListWorkflows returns workflow instances filtered by the given filter parameters.
 	// Supported filters: Status, InputContains, ErrorContains, Search.
 	// Supports pagination via Offset and Limit (default 100, max 1000).

@@ -381,6 +381,10 @@ func (m *mockShardStore) GetQueryState(ctx context.Context, workflowID, key stri
 	return "", nil
 }
 
+func (m *mockShardStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
 func (m *mockShardStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	m.recordCall("ListWorkflows")
 	if m.listWorkflowsFn != nil {

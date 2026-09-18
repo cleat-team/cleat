@@ -263,6 +263,10 @@ func (m *mockStore) GetQueryState(ctx context.Context, workflowID, key string) (
 	return "", nil
 }
 
+func (m *mockStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
 func (m *mockStore) ListWorkflows(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error) {
 	if m.listWorkflowsFn != nil {
 		return m.listWorkflowsFn(ctx, filter)

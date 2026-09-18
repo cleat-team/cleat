@@ -442,6 +442,23 @@ func (s *MySQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 	return value.String, nil
 }
 
+// ListQueryState returns every key a run published. See the PostgreSQL
+// implementation for why this reads the whole column rather than using MySQL's
+// JSON functions.
+func (s *MySQLStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT query_state FROM workflow_instances WHERE id = ? AND tenant_id = ?`,
+		workflowID, s.tenantID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list query state: %w", err)
+	}
+	return decodeQueryState(raw)
+}
+
 // ---------------------------------------------------------------------------
 // DeliverSignal / PollSignal / PollCancellation / PollAndClaimSignal
 // ---------------------------------------------------------------------------

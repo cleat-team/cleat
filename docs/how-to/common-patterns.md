@@ -642,14 +642,28 @@ Query state persists across replays and ContinueAsNew.
 
 ### Reading a key you do not know
 
-**The HTTP API is keyed-only by design: every reader takes the key as a required
-argument, and there is no endpoint that lists which keys a run published.** That
-keeps published state a contract between the workflow and the callers that know
-what to ask for, rather than a bag whose shape callers discover at runtime.
+Omit `?key=` and the endpoint lists everything the run published:
 
-For the case where you genuinely do not know — a run misbehaved and you want to
-see everything it published — use the debugger, which is DBA-authenticated by
-connection string rather than by a tenant API key:
+```bash
+curl -H "Authorization: Bearer $KEY" \
+  "$BASE/api/workflows/$ID/query"
+# {"state":{"stage":"packing","order_id":"A-11"}}
+```
+
+**This changed in cleat#1571.** It used to 400, on the reasoning that a
+keyed-only reader keeps published state a contract between the workflow and the
+callers that know what to ask for, rather than a bag whose shape callers
+discover at runtime. That reasoning still describes how published state is best
+*used* — it is a semantically limited interface, and anything elaborate belongs
+in application code rather than being shoehorned into cleat. What it did not
+justify was refusing to let you **see** what a run published, which is the
+operational case the original decision itself named.
+
+`?key=` with an empty value is still a lookup of the key published as `""`, not
+a request to list. Only the complete absence of the parameter lists.
+
+For a run you cannot reach over HTTP at all — no tenant API key to hand — the
+debugger is DBA-authenticated by connection string instead:
 
 ```bash
 cleatctl --db "$DSN" debug <workflow-id> --entry-point <name>
