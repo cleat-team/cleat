@@ -400,15 +400,31 @@ After rollback:
 
 ### What `cleat rollback` does
 
-`cleat rollback` updates the active version pointer in `workflow_defs`. It
-does **not**:
+`cleat rollback` writes a routing rule pinning new runs to the named version.
+
+It is a row in `workflow_routing` at weight 1.0, replacing any existing rules
+for that workflow in one transaction. That table is what the worker already
+consults before falling back to the latest version, so a rollback needs no
+separate resolution path. **`workflow_defs` has no active-version column** --
+an earlier version of this document said it did, and the command wrote nothing
+at all (cleat#1887).
+
+The pin **persists** across later deploys. Deploying a newer version after a
+rollback does not re-expose it; run `cleat rollback --clear <name>` to return
+the workflow to latest-wins. This is deliberate: a deploy silently clearing the
+pin would re-ship the version an operator had withdrawn.
+
+A rollback is refused if the workflow has weighted routing rules, rather than
+discarding a live experiment; clear them first.
+
+It does **not**:
 
 - Terminate running instances
 - Delete the newer version from the database
 - Change the WASM binary stored for any version
 - Replay completed instances
 
-The active version is used only for **new** workflow instances. Running
+The pinned version is used only for **new** workflow instances. Running
 instances continue with the version they started on, which is correct for
 deterministic replay.
 
