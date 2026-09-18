@@ -16,9 +16,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Run starts the delivery retry loop. It runs every 30 seconds, finding
-// undelivered webhook deliveries whose next_attempt_at <= now() and
-// attempting HTTP POST delivery. Returns when ctx is cancelled.
 // deliveryInterval is how often Run processes due deliveries.
 //
 // A var rather than a literal so that the test which proves Run marks its own
@@ -28,6 +25,9 @@ import (
 // outright rather than degrading it. cleat#1512.
 var deliveryInterval = 30 * time.Second
 
+// Run starts the delivery retry loop. It runs every 30 seconds, finding
+// undelivered webhook deliveries whose next_attempt_at <= now() and
+// attempting HTTP POST delivery. Returns when ctx is cancelled.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
 		p.logger.Warn("notifications: no database, delivery loop disabled")

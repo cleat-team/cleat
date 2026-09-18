@@ -9,6 +9,12 @@ import (
 	"testing"
 )
 
+// unlistedHost is on no allowlist and resolves to nothing. A NAME rather than
+// a loopback literal: the test below needs a destination the ALLOWLIST gate
+// refuses, and an httptest server is a loopback literal that cleat#1627's
+// separate, earlier refuser catches first for a different reason.
+const unlistedHost = "http://api.example.com/probe"
+
 // cleat#1565, owner decision 2026-09-14: the embedded runner takes an explicit
 // allowlist rather than inheriting the worker's or defaulting open.
 //
@@ -28,8 +34,6 @@ import (
 // Nothing needs to be listening: with no allowlist configured the refusal
 // happens BEFORE any resolution, which is also why an unroutable name costs no
 // DNS and cannot flake.
-const unlistedHost = "http://api.example.com/probe"
-
 func TestTheEmbeddedRunnerRefusesEgressWithoutAnAllowlist(t *testing.T) {
 	r := New() // no WithEgressAllowlist
 	var fetchErr error

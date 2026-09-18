@@ -137,7 +137,6 @@ func (c *costCommand) Estimate() *CostEstimate {
 	return est
 }
 
-// Format returns a human-readable cost estimate.
 // storageModelCaveats is printed beside the storage figures rather than only
 // in --help, because the figure is what an operator sizes a deployment from.
 // The measurements behind each line are in the note on the model in Estimate.
@@ -157,6 +156,7 @@ const storageModelCaveats = `  NOTE ON STORAGE: the figures above assume every e
 
 `
 
+// Format returns a human-readable cost estimate.
 func (c *costCommand) Format() string {
 	est := c.Estimate()
 

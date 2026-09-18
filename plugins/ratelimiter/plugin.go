@@ -30,7 +30,6 @@ func New() plugin.Plugin {
 	return &Plugin{}
 }
 
-// Config holds optional configuration for the rate-limiter plugin.
 // The modes this plugin understands. They are constants because Init now
 // REFUSES anything else, and a refusal that compares against a loose string
 // literal is one typo away from refusing a mode that works.
@@ -39,6 +38,7 @@ const (
 	modeDB     = "db"
 )
 
+// Config holds optional configuration for the rate-limiter plugin.
 type Config struct {
 	// Mode selects the rate-limiting backend: "memory" (default) for
 	// per-worker token buckets, or "db" for a DB-backed sliding-window
