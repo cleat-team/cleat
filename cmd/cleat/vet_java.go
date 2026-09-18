@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -153,46 +155,369 @@ func javaCodeOnly(src []byte) []byte {
 	return out
 }
 
-// forbiddenJavaPatterns lists Java APIs that are not allowed in workflow code.
-var forbiddenJavaPatterns = []struct {
-	pattern    string
+// forbiddenJavaPaths lists RESOLVED Java paths a workflow may not reach,
+// replacing the literal-spelling table this checker shipped with. cleat#1812.
+//
+// The difference is not cosmetic. A spelling table asks "does this text
+// appear"; a path table asks "where does this name resolve to", and ordinary
+// Java writes the same reach in spellings the first question cannot see:
+//
+//	import static java.lang.System.currentTimeMillis;
+//	currentTimeMillis()                    // no "System." anywhere
+//
+//	var clock = java.time.Clock.systemUTC();  // fully qualified, no import
+//
+// Neither is evasion; both are what an IDE's auto-import or a style guide
+// produces. See docs/contributor/design/java-determinism-checker.md for why
+// this is a hand-written resolver rather than tree-sitter or bytecode --
+// briefly, the Go bindings for tree-sitter-java are cgo and cmd/cleat is
+// deliberately pure-Go cross-compilable, and bytecode analysis is staged for
+// later because it costs the toolchain-free `cleat vet` path that a resolver
+// does not.
+//
+// A prefix matches a resolved path P when P == prefix or P starts with
+// prefix + ".". ENTRIES ARE CHECKED IN ORDER, and the first match wins -- so a
+// specific class (java.io.File, J013) is listed before the general package it
+// lives in (java.io, J004), letting the specific entry keep its more precise
+// message while the general one still catches every OTHER class under that
+// package, the same net the old import-substring pattern cast. `except`
+// exempts named classes from a package-level entry: java.io.ByteArrayInputStream
+// and its siblings are pure, in-memory, and were only ever caught because
+// "InputStream" and "new java.io." are both substrings of their names -- the
+// false positive this table exists to remove. See the design doc for the
+// measurement.
+//
+// THREAD IS DELIBERATELY NOT HERE. `Thread.sleep` and `new Thread(` are the
+// only two forms the old table forbade; a class-level entry for
+// "java.lang.Thread" would also refuse `Thread.currentThread()` and a plain
+// `Thread t` declaration, neither of which was ever forbidden. Both forms are
+// matched separately, below the table, by findForbiddenJavaPaths.
+var forbiddenJavaPaths = []struct {
+	prefix     string
 	code       string
 	message    string
 	suggestion string
+	except     []string
 }{
-	{`System.currentTimeMillis()`, "J001", "wall-clock time is non-deterministic across replays", "Use h.Now() for deterministic time"},
-	{`Math.random()`, "J002", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness"},
-	{`Thread.sleep`, "J003", "thread sleeping is non-deterministic across replays", "Use h.DurableSleep() for deterministic timers"},
-	{`import java.io.`, "J004", "I/O operations produce non-replayable side effects (file contents differ across replays)", "Use h.DurableCall() to interact with external services"},
-	{`import java.net.`, "J005", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
-	{`import java.sql.`, "J006", "database access produces non-replayable side effects (database state differs across replays)", "Use h.DurableCall() to interact with databases"},
-	{`import java.time.`, "J007", "wall-clock time imports may cause non-determinism", "Use h.Now() for deterministic time"},
-	{`new java.io.`, "J008", "I/O operations produce non-replayable side effects (file contents differ across replays)", "Use h.DurableCall() to interact with external services"},
-	{`new java.net.`, "J009", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
-	{`new java.sql.`, "J010", "database access produces non-replayable side effects (database state differs across replays)", "Use h.DurableCall() to interact with databases"},
-	{`new Thread(`, "J011", "threading is non-deterministic across replays (thread scheduling differs between runs)", "Workflow code is single-threaded by design"},
-	{`new Timer(`, "J012", "timers are non-deterministic across replays", "Use h.DurableSleep() for deterministic timers"},
-	{`new File(`, "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
-	{`new Socket(`, "J014", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
-	{`new ServerSocket(`, "J014", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
-	{`java.io.File`, "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
-	{`Socket socket`, "J014", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
-	{`ServerSocket`, "J014", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
-	{`Connection con`, "J015", "database access produces non-replayable side effects (database state differs across replays)", "Use h.DurableCall() to interact with databases"},
-	{`InputStream`, "J016", "I/O stream usage produces non-replayable side effects (stream state differs across replays)", "Use h.DurableCall() to interact with external services"},
-	{`OutputStream`, "J016", "I/O stream usage produces non-replayable side effects (stream state differs across replays)", "Use h.DurableCall() to interact with external services"},
-	{`FileReader`, "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
-	{`FileWriter`, "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
-	{`FileInputStream`, "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
-	{`FileOutputStream`, "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
-	{`ObjectInputStream`, "J016", "I/O stream usage produces non-replayable side effects (stream state differs across replays)", "Use h.DurableCall() to interact with external services"},
-	{`ObjectOutputStream`, "J016", "I/O stream usage produces non-replayable side effects (stream state differs across replays)", "Use h.DurableCall() to interact with external services"},
-	{`Random random`, "J002", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness"},
-	{`new Random(`, "J002", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness"},
-	{`Runtime.getRuntime()`, "J017", "runtime execution is non-deterministic across replays (OS process state differs between runs)", "Use h.DurableCall() for side effects"},
-	{`ProcessBuilder`, "J018", "process spawning is non-deterministic across replays (process behavior differs between runs)", "Use h.DurableCall() for side effects"},
-	{`java.util.concurrent`, "J019", "concurrent execution is non-deterministic across replays (thread scheduling differs between runs)", "Workflow code is single-threaded by design"},
-	{`import java.util.Random`, "J002", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness"},
+	{"java.lang.System.currentTimeMillis", "J001", "wall-clock time is non-deterministic across replays", "Use h.Now() for deterministic time", nil},
+	{"java.lang.Math.random", "J002", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness", nil},
+	{"java.util.Random", "J002", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness", nil},
+	{"java.lang.Thread.sleep", "J003", "thread sleeping is non-deterministic across replays", "Use h.DurableSleep() for deterministic timers", nil},
+	{"java.io.File", "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage", nil},
+	{"java.io.FileReader", "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage", nil},
+	{"java.io.FileWriter", "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage", nil},
+	{"java.io.FileInputStream", "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage", nil},
+	{"java.io.FileOutputStream", "J013", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage", nil},
+	{"java.io.InputStream", "J016", "I/O stream usage produces non-replayable side effects (stream state differs across replays)", "Use h.DurableCall() to interact with external services", nil},
+	{"java.io.OutputStream", "J016", "I/O stream usage produces non-replayable side effects (stream state differs across replays)", "Use h.DurableCall() to interact with external services", nil},
+	{"java.io.ObjectInputStream", "J016", "I/O stream usage produces non-replayable side effects (stream state differs across replays)", "Use h.DurableCall() to interact with external services", nil},
+	{"java.io.ObjectOutputStream", "J016", "I/O stream usage produces non-replayable side effects (stream state differs across replays)", "Use h.DurableCall() to interact with external services", nil},
+	// Everything else under java.io -- BufferedReader, PrintWriter,
+	// RandomAccessFile, DataInputStream and the rest -- falls through to this
+	// general entry, the same reach the old `import java.io.` pattern had.
+	//
+	// THE EXCEPTIONS ARE TWO KINDS, found by running this checker against
+	// crates/cleat-java's own annotation processor (build-time codegen, never
+	// workflow code, and a useful stress corpus for exactly this reason).
+	// ByteArrayInputStream and its three siblings are pure in-memory adapters:
+	// no filesystem, no stream tied to an OS resource, fully replayable.
+	// IOException and its siblings are the second kind and a DIFFERENT
+	// argument: a `catch (IOException e)` or `throws IOException` is a type
+	// reference, not an I/O operation -- it names what MIGHT be thrown by a
+	// call this table already catches on its own. Measured: without this
+	// second group, CleatEntryProcessor.java went from the old checker's 2
+	// findings (its two `import java.io.` lines) to 11 once every USE of the
+	// imported names was resolved -- 9 of the 11 were `IOException` at a
+	// catch or throws site. The resolver making every reach visible is the
+	// point; making a non-hazard visible nine times over is not.
+	{"java.io", "J004", "I/O operations produce non-replayable side effects (file contents differ across replays)", "Use h.DurableCall() to interact with external services",
+		[]string{
+			"java.io.ByteArrayInputStream", "java.io.ByteArrayOutputStream", "java.io.StringReader", "java.io.StringWriter",
+			"java.io.IOException", "java.io.FileNotFoundException", "java.io.UncheckedIOException",
+			"java.io.EOFException", "java.io.InterruptedIOException", "java.io.NotSerializableException",
+		}},
+	{"java.net.Socket", "J014", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services", nil},
+	{"java.net.ServerSocket", "J014", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services", nil},
+	// Same reasoning as java.io's exception group, above.
+	{"java.net", "J005", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services",
+		[]string{
+			"java.net.UnknownHostException", "java.net.MalformedURLException", "java.net.SocketException",
+			"java.net.SocketTimeoutException", "java.net.URISyntaxException", "java.net.ConnectException",
+		}},
+	{"java.sql.Connection", "J015", "database access produces non-replayable side effects (database state differs across replays)", "Use h.DurableCall() to interact with databases", nil},
+	// Same reasoning again: SQLException is what a database call MIGHT throw,
+	// not a database call.
+	{"java.sql", "J006", "database access produces non-replayable side effects (database state differs across replays)", "Use h.DurableCall() to interact with databases",
+		[]string{"java.sql.SQLException"}},
+	// Not a package-wide java.time ban: Duration and Period are pure value
+	// types with no wall-clock read in their constructors, and the old
+	// `import java.time.` pattern banning them was never a deliberate choice,
+	// just a side effect of matching the whole package. Only the two
+	// "what time is it right now" entry points are named.
+	{"java.time.Clock", "J007", "wall-clock time is non-deterministic across replays", "Use h.Now() for deterministic time", nil},
+	{"java.time.Instant", "J007", "wall-clock time is non-deterministic across replays", "Use h.Now() for deterministic time", nil},
+	{"java.util.Timer", "J012", "timers are non-deterministic across replays", "Use h.DurableSleep() for deterministic timers", nil},
+	{"java.lang.Runtime.getRuntime", "J017", "runtime execution is non-deterministic across replays (OS process state differs between runs)", "Use h.DurableCall() for side effects", nil},
+	{"java.lang.ProcessBuilder", "J018", "process spawning is non-deterministic across replays (process behavior differs between runs)", "Use h.DurableCall() for side effects", nil},
+	{"java.util.concurrent", "J019", "concurrent execution is non-deterministic across replays (thread scheduling differs between runs)", "Workflow code is single-threaded by design", nil},
+	// Reflection is undecidable for static analysis -- Class.forName with a
+	// computed name cannot be resolved by any resolver, bytecode included --
+	// so the rule is to forbid the entry point outright rather than imply
+	// coverage that does not exist. See the design doc's "stated limits".
+	{"java.lang.Class.forName", "J020", "reflection defeats static determinism analysis and may reach non-deterministic operations", "Avoid Class.forName in workflow code; use h.DurableCall() if dynamic dispatch is required", nil},
+}
+
+// javaImplicitLangTypes are the java.lang simple names this checker resolves
+// WITHOUT an import, because java.lang.* is implicitly imported into every
+// Java compilation unit by the language spec itself -- an import statement
+// for any of these would be redundant and no real project writes one.
+var javaImplicitLangTypes = map[string]string{
+	"System":         "java.lang.System",
+	"Math":           "java.lang.Math",
+	"Thread":         "java.lang.Thread",
+	"Class":          "java.lang.Class",
+	"Runtime":        "java.lang.Runtime",
+	"ProcessBuilder": "java.lang.ProcessBuilder",
+}
+
+// javaKnownForbiddenTypes maps the SIMPLE name of every class-shaped entry in
+// forbiddenJavaPaths to its fully qualified name. It exists only to resolve a
+// wildcard import (`import java.io.*;`) against the classes this checker
+// knows about -- there is no JDK class index here, so a wildcard resolves a
+// name in this map and nothing else. That is a stated limit, not a bug: a
+// class reached only through a wildcard import, and not in this map, is
+// simply invisible -- the conservative (under-report, never misreport)
+// direction. The wildcard IMPORT LINE ITSELF is still caught, by the general
+// package-prefix entries above matching the bare package name.
+var javaKnownForbiddenTypes = map[string]string{
+	"File":               "java.io.File",
+	"FileReader":         "java.io.FileReader",
+	"FileWriter":         "java.io.FileWriter",
+	"FileInputStream":    "java.io.FileInputStream",
+	"FileOutputStream":   "java.io.FileOutputStream",
+	"InputStream":        "java.io.InputStream",
+	"OutputStream":       "java.io.OutputStream",
+	"ObjectInputStream":  "java.io.ObjectInputStream",
+	"ObjectOutputStream": "java.io.ObjectOutputStream",
+	"Socket":             "java.net.Socket",
+	"ServerSocket":       "java.net.ServerSocket",
+	"Connection":         "java.sql.Connection",
+	"Random":             "java.util.Random",
+	"Timer":              "java.util.Timer",
+	"Clock":              "java.time.Clock",
+	"Instant":            "java.time.Instant",
+}
+
+type javaFinding struct {
+	line, col                 int
+	code, message, suggestion string
+}
+
+var (
+	// The path group allows a trailing "*" -- a wildcard import -- as well as
+	// an ordinary dotted name. Dropping it here would silently un-match every
+	// wildcard import line rather than matching it with an empty capture;
+	// caught by TestFindForbiddenJavaPathsSeesWhatSpellingsMissed, whose
+	// wildcard case reported the import line but not the class it resolved.
+	javaImportRe    = regexp.MustCompile(`(?m)^\s*import\s+(static\s+)?([A-Za-z_][A-Za-z0-9_.]*(?:\.\*)?)\s*;`)
+	javaPathRe      = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)((?:\.[A-Za-z_][A-Za-z0-9_]*)+)`)
+	javaBareCallRe  = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
+	javaNewThreadRe = regexp.MustCompile(`\bnew\s+Thread\s*\(`)
+)
+
+// matchForbiddenJavaPath reports the row a resolved path falls under, honouring
+// each row's `except` list. Entries are checked in table order and the first
+// match (that is not excepted) wins.
+func matchForbiddenJavaPath(path string) (int, bool) {
+	for i, f := range forbiddenJavaPaths {
+		if path != f.prefix && !strings.HasPrefix(path, f.prefix+".") {
+			continue
+		}
+		excepted := false
+		for _, e := range f.except {
+			if path == e {
+				excepted = true
+				break
+			}
+		}
+		if !excepted {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// findForbiddenJavaPaths resolves every path expression in already-blanked
+// source and reports the ones that reach a forbidden class or member.
+//
+// THREE INDEPENDENT PASSES, because Java's import forms are three different
+// shapes and each needs its own resolution:
+//
+//  1. Dotted chains (java.time.Clock.systemUTC(), or System.currentTimeMillis()
+//     once "System" resolves) -- an explicit class import, java.lang's
+//     implicit set, or a fully-qualified spelling that resolves to itself.
+//  2. Bare calls (currentTimeMillis()) -- only reachable through a static
+//     import, since Java has no bare function calls otherwise.
+//  3. Bare type names used as a declaration, a constructor argument list, or
+//     a generic parameter (Connection conn, new Connection(), List<Connection>)
+//     -- reachable through an explicit class import, a wildcard import
+//     matching a KNOWN forbidden class, or java.lang's implicit set.
+//
+// DEDUPLICATED BY (code, resolved path, line): a line naming one reach twice
+// does not print twice.
+func findForbiddenJavaPaths(code []byte) []javaFinding {
+	src := string(code)
+	lines := strings.Split(src, "\n")
+
+	classAliases := map[string]string{}
+	for name, fqn := range javaImplicitLangTypes {
+		classAliases[name] = fqn
+	}
+	staticAliases := map[string]string{}
+	wildcardPackages := map[string]bool{}
+
+	for _, m := range javaImportRe.FindAllStringSubmatch(src, -1) {
+		isStatic := m[1] != ""
+		path := m[2]
+		if strings.HasSuffix(path, ".*") {
+			pkg := strings.TrimSuffix(path, ".*")
+			if isStatic {
+				// A static wildcard (`import static java.lang.Math.*;`) cannot
+				// be resolved without knowing every static member of the named
+				// class, which this checker does not index. Stated limit,
+				// same shape as the class wildcard below.
+				continue
+			}
+			wildcardPackages[pkg] = true
+			continue
+		}
+		parts := strings.Split(path, ".")
+		simple := parts[len(parts)-1]
+		if isStatic {
+			staticAliases[simple] = path
+		} else {
+			classAliases[simple] = path
+		}
+	}
+	// Resolve a wildcard import against the classes this checker knows about.
+	for simple, fqn := range javaKnownForbiddenTypes {
+		if _, already := classAliases[simple]; already {
+			continue
+		}
+		pkg := fqn[:strings.LastIndex(fqn, ".")]
+		if wildcardPackages[pkg] {
+			classAliases[simple] = fqn
+		}
+	}
+
+	// Precompute which aliased simple names are worth scanning for at all
+	// (pass 3), and compile each name's boundary regex once rather than once
+	// per line -- a file of any real size makes the difference between a
+	// vet run and a hang.
+	type typeCheck struct {
+		re  *regexp.Regexp
+		fqn string
+	}
+	var typeChecks []typeCheck
+	for simple, fqn := range classAliases {
+		if _, ok := matchForbiddenJavaPath(fqn); ok {
+			typeChecks = append(typeChecks, typeCheck{
+				re:  regexp.MustCompile(`\b` + regexp.QuoteMeta(simple) + `\b`),
+				fqn: fqn,
+			})
+		}
+	}
+
+	var out []javaFinding
+	seen := map[string]bool{}
+	add := func(line, col, idx int, resolved, why string) {
+		f := forbiddenJavaPaths[idx]
+		key := fmt.Sprintf("%s|%s|%d", f.code, resolved, line)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		msg := f.message
+		if why != "" {
+			msg = f.message + " " + why
+		}
+		out = append(out, javaFinding{line: line, col: col, code: f.code, message: msg, suggestion: f.suggestion})
+	}
+
+	for lineIdx, line := range lines {
+		lineNum := lineIdx + 1
+
+		// Pass 1: dotted chains.
+		for _, m := range javaPathRe.FindAllStringSubmatchIndex(line, -1) {
+			head := line[m[2]:m[3]]
+			rest := line[m[4]:m[5]]
+			written := head + rest
+			resolved := written
+			if base, ok := classAliases[head]; ok {
+				resolved = base + rest
+			}
+			idx, ok := matchForbiddenJavaPath(resolved)
+			if !ok {
+				continue
+			}
+			why := fmt.Sprintf("(reaches %s)", resolved)
+			if resolved != written {
+				why = fmt.Sprintf("(imported as %q, which resolves to %s)", head, resolved)
+			}
+			add(lineNum, m[0]+1, idx, resolved, why)
+		}
+
+		// Pass 2: bare calls reached through a static import.
+		for _, m := range javaBareCallRe.FindAllStringSubmatchIndex(line, -1) {
+			name := line[m[2]:m[3]]
+			full, ok := staticAliases[name]
+			if !ok {
+				continue
+			}
+			idx, ok := matchForbiddenJavaPath(full)
+			if !ok {
+				continue
+			}
+			why := fmt.Sprintf("(imported statically as %q, which resolves to %s)", name, full)
+			add(lineNum, m[0]+1, idx, full, why)
+		}
+
+		// Pass 3: bare type names -- declarations, constructors, generics.
+		for _, tc := range typeChecks {
+			for _, m := range tc.re.FindAllStringIndex(line, -1) {
+				// Skip an occurrence that is the tail of a dotted chain pass 1
+				// already resolved (e.g. the "File" in "java.io.File") -- it
+				// is preceded by '.', so it is not a bare use of the name.
+				if m[0] > 0 && line[m[0]-1] == '.' {
+					continue
+				}
+				idx, ok := matchForbiddenJavaPath(tc.fqn)
+				if !ok {
+					continue
+				}
+				why := fmt.Sprintf("(resolves to %s)", tc.fqn)
+				add(lineNum, m[0]+1, idx, tc.fqn, why)
+			}
+		}
+
+		// Thread is deliberately not in forbiddenJavaPaths -- see the table's
+		// doc comment. Its one forbidden form is matched directly.
+		if loc := javaNewThreadRe.FindStringIndex(line); loc != nil {
+			out = append(out, javaFinding{
+				line: lineNum, col: loc[0] + 1, code: "J011",
+				message:    "threading is non-deterministic across replays (thread scheduling differs between runs)",
+				suggestion: "Workflow code is single-threaded by design",
+			})
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].line != out[j].line {
+			return out[i].line < out[j].line
+		}
+		return out[i].col < out[j].col
+	})
+	return out
 }
 
 // runVetJava performs static analysis on a Java project by scanning for
@@ -270,7 +595,7 @@ func runVetJava(projectDir string) int {
 	var output VetOutput
 	output.Summary.Functions = len(javaFiles)
 
-	// Scan each .java file for forbidden patterns.
+	// Scan each .java file for forbidden reaches.
 	for _, javaFile := range javaFiles {
 		relPath, _ := filepath.Rel(projectDir, javaFile)
 		data, err := os.ReadFile(javaFile)
@@ -288,29 +613,19 @@ func runVetJava(projectDir string) int {
 		// AFTER code, a string literal, and a block-comment interior whose line
 		// does not begin with "*". All three named a forbidden spelling without
 		// using it, and since #1791 each refused a build. cleat#1820.
-		lines := strings.Split(string(javaCodeOnly(data)), "\n")
-		for lineIdx, line := range lines {
-			lineNum := lineIdx + 1 // 1-based
-			trimmed := strings.TrimSpace(line)
-
-			for _, fb := range forbiddenJavaPatterns {
-				if fb.pattern == "" {
-					continue
-				}
-				if strings.Contains(trimmed, fb.pattern) {
-					col := strings.Index(trimmed, fb.pattern) + 1 // 1-based
-
-					vr := VetResult{
-						Code:       fb.code,
-						File:       relPath,
-						Line:       lineNum,
-						Column:     col,
-						Message:    fb.message,
-						Suggestion: fb.suggestion,
-					}
-					output.Errors = append(output.Errors, vr)
-				}
-			}
+		//
+		// findForbiddenJavaPaths RESOLVES rather than matches substrings --
+		// cleat#1812 -- so a grouped, aliased or fully-qualified reach is seen
+		// the same as the spelling the old table happened to list.
+		for _, fnd := range findForbiddenJavaPaths(javaCodeOnly(data)) {
+			output.Errors = append(output.Errors, VetResult{
+				Code:       fnd.code,
+				File:       relPath,
+				Line:       fnd.line,
+				Column:     fnd.col,
+				Message:    fnd.message,
+				Suggestion: fnd.suggestion,
+			})
 		}
 	}
 
