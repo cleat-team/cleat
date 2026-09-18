@@ -431,6 +431,20 @@ jobs:
           scripts/check-migration-versions.sh --self-test
           scripts/check-migration-versions.sh
 
+      # Nothing refused a large tracked blob on SIZE. `.gitignore` gained
+      # `bin/` on 2026-08-09 after 332MB of tracked build products; cleat#1838
+      # then wrote `go build -o .bin/cleat` and committed 62,095,458 bytes
+      # straight past that rule, one character off it (`.bin/` != `bin/`).
+      # Two gitignore rules now exist and the next output directory will pick
+      # a third -- enumerating paths cannot catch a path nobody has thought
+      # of yet. 25 MiB, chosen against a clean tree (the 62MB blob is gone,
+      # #1858), admits this repo's two deliberate 19.3MB fixtures and would
+      # have refused the accident by more than 2x. cleat#1859.
+      - name: Tracked blob size guard
+        run: |
+          scripts/check-tracked-blob-size.sh --self-test
+          scripts/check-tracked-blob-size.sh
+
       # A declaration inserted between a doc comment and the declaration it
       # documents. Go attaches doc comments by ADJACENCY, so the whole block
       # silently becomes the newcomer's documentation and the original is left
