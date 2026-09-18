@@ -31,6 +31,40 @@ func TenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	return tenantctx.From(ctx)
 }
 
+// subjectContextKey is unexported, so a second declaration of an identical
+// struct elsewhere is a DIFFERENT key that silently reads nothing -- the same
+// reason tenantctx exists as its own package (see WithTenantID above). This
+// one does not need that package: nothing outside plugins reads or writes a
+// subject, so there is no cross-package cycle to avoid, and a plain
+// unexported type here is the whole mechanism.
+type subjectContextKey struct{}
+
+// WithSubject sets the authenticated identity string in the context -- the
+// end of a durable call chain, not a display name: whatever an authentication
+// plugin resolved a request to (an email, a subject claim, an API key's
+// owner), for another plugin to attribute an action to without depending on
+// which authentication method produced it. cleat#1881.
+//
+// Deliberately neutral rather than named after OAuth. oauthprovider is the
+// only plugin that populates it today, but it is not the only way a request
+// could be authenticated -- an API-key caller has nowhere else to put a
+// subject, and a helper only OAuth could fill would need replacing the first
+// time someone audits an API-key request.
+func WithSubject(ctx context.Context, subject string) context.Context {
+	return context.WithValue(ctx, subjectContextKey{}, subject)
+}
+
+// SubjectFromContext extracts the authenticated identity string set by
+// WithSubject. ok is false when nothing set one -- an unauthenticated
+// request, or an authentication method that has not been wired to call
+// WithSubject yet -- and callers should treat that the same as an empty
+// subject rather than an error: recording that a caller's identity was not
+// captured is not a reason to refuse the request that revealed it.
+func SubjectFromContext(ctx context.Context) (string, bool) {
+	subject, ok := ctx.Value(subjectContextKey{}).(string)
+	return subject, ok
+}
+
 // TenantResolver is the only thing this middleware needs from a store: turning
 // an API key hash into a tenant.
 //

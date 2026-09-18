@@ -35,6 +35,7 @@ func New() plugin.Plugin {
 // It is distinct from auditEvent in routes.go which is used for JSON serialization.
 type queuedAuditEvent struct {
 	tenantID   uuid.UUID
+	userID     string
 	method     string
 	path       string
 	statusCode int

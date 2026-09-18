@@ -146,7 +146,7 @@ func TestAuditRowsAreScopedToTheirTenant(t *testing.T) {
 	// It is NOT marked AcrossAllTenants, deliberately: it writes one tenant's
 	// row and had the tenant in hand all along. Bypassing here would pass this
 	// arm and silently disable isolation for every audit write.
-	p.recordAudit(ctx, mine, "GET", "/mine", 200, "127.0.0.1", "probe", time.Millisecond)
+	p.recordAudit(ctx, mine, "someone@example.com", "GET", "/mine", 200, "127.0.0.1", "probe", time.Millisecond)
 
 	var mineCount int
 	if err := su.QueryRowContext(ctx,

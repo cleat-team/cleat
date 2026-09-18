@@ -139,7 +139,7 @@ func TestTheAuditInsertWorksOnMySQLsIDColumn(t *testing.T) {
 		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	tenant := uuid.New()
-	p.recordAudit(context.Background(), tenant, "GET", "/api/workflows", 200,
+	p.recordAudit(context.Background(), tenant, "someone@example.com", "GET", "/api/workflows", 200,
 		"127.0.0.1", "test-agent", 3*time.Millisecond)
 
 	var n int
