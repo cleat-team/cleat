@@ -544,10 +544,11 @@ CREATE INDEX IF NOT EXISTS idx_instances_terminal_completed
 -- Memory sample lookups
 CREATE INDEX IF NOT EXISTS idx_mem_samples_def ON workflow_memory_samples (def_name, recorded_at DESC);
 
--- GIN index on input for JSONB containment queries
-CREATE INDEX IF NOT EXISTS idx_instances_input_gin
-    ON workflow_instances
-    USING GIN (input jsonb_path_ops);
+-- No GIN index on input. One existed here and was dropped by migration 091:
+-- nothing in the codebase queries input with `@>`, and it cost 66% on every
+-- workflow start (measured: 127.6ms vs 76.8ms for 20,000 inserts) plus 38%
+-- size overhead. 091 carries the numbers and the one statement to add it back
+-- for a deployment that writes containment queries by hand.
 
 -- ── Row-Level Security ──────────────────────────────────────────────────────
 
