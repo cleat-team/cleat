@@ -129,6 +129,36 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 		}
 	})
 
+	// ARM 1d -- R008 KNOWN POSITIVE. The issue's own measured example: a
+	// parameter typed &HashMap, iterated directly. cleat#1864.
+	t.Run("a HashMap parameter iterated with a for-loop is refused", func(t *testing.T) {
+		out := build(t, "r008_hashmap_iteration")
+
+		if !strings.Contains(out, "R008") {
+			t.Errorf("iterating a HashMap parameter was not refused.\n\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, "no artifact was emitted") {
+			t.Errorf("the build reported R008 but did not say it declined to emit an "+
+				"artifact.\n\noutput:\n%s", out)
+		}
+	})
+
+	// ARM 1e -- R008 NEGATIVE CONTROL. Construction, insertion, lookup and
+	// removal on a HashMap are all deterministic; only enumeration order is
+	// not. A rule that fired on the type rather than the usage would refuse
+	// this crate too.
+	t.Run("constructing, inserting into and looking up in a HashMap is not refused", func(t *testing.T) {
+		out := build(t, "r008_safe_map_usage")
+
+		if strings.Contains(out, "R008") {
+			t.Errorf("a crate that never enumerates a HashMap's contents was refused for "+
+				"HashMap iteration order.\n\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, "Vetting Rust crate") {
+			t.Fatalf("the vet stage did not run, so finding no R008 says nothing.\n\noutput:\n%s", out)
+		}
+	})
+
 	// ARM 2 -- KNOWN LIMIT, now a method call rather than a grouped import.
 	// The resolver matches PATH expressions; `t.elapsed()` names no module, so
 	// a crate exactly as non-deterministic as r005_aliased_now next door goes
@@ -154,6 +184,40 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 				"  3. update LANGUAGE_SUPPORT.md and\n"+
 				"     docs/contributor/design/rust-determinism-checker.md, which\n"+
 				"     both say the checker has no type resolution.\n\noutput:\n%s", out)
+		}
+	})
+
+	// ARM 2b -- R008 KNOWN LIMIT: a map reached through a struct field.
+	// The receiver of an order-producing method call must be a bare tracked
+	// identifier; `self.counts` is a field access, not a binding this
+	// checker resolved. See the fixture's own header for why this is the
+	// right limit to accept rather than close.
+	t.Run("a HashMap behind a struct field escapes the checker, and says so out loud", func(t *testing.T) {
+		out := build(t, "known_limit_map_via_struct_field")
+
+		if strings.Contains(out, "R008") {
+			t.Errorf("the Rust checker now CATCHES a HashMap reached through a struct field.\n\n"+
+				"This is an improvement, not a regression. Three things to do:\n"+
+				"  1. move this fixture to r008_hashmap_iteration;\n"+
+				"  2. write a new known-limit fixture for whatever still escapes;\n"+
+				"  3. update LANGUAGE_SUPPORT.md and\n"+
+				"     docs/contributor/design/rust-determinism-checker.md.\n\noutput:\n%s", out)
+		}
+	})
+
+	// ARM 2c -- R008 KNOWN LIMIT: a HashMap that is never bound to a name,
+	// iterated immediately off a `.collect::<HashMap<_, _>>()` chain. R008
+	// tracks bindings; a value with no name has nothing to track.
+	t.Run("collecting straight into a HashMap and iterating inline escapes the checker", func(t *testing.T) {
+		out := build(t, "known_limit_collect_into_map")
+
+		if strings.Contains(out, "R008") {
+			t.Errorf("the Rust checker now CATCHES an inline .collect::<HashMap<_, _>>() chain.\n\n"+
+				"This is an improvement, not a regression. Three things to do:\n"+
+				"  1. move this fixture to r008_hashmap_iteration;\n"+
+				"  2. write a new known-limit fixture for whatever still escapes;\n"+
+				"  3. update LANGUAGE_SUPPORT.md and\n"+
+				"     docs/contributor/design/rust-determinism-checker.md.\n\noutput:\n%s", out)
 		}
 	})
 }

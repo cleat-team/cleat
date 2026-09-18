@@ -469,6 +469,373 @@ func lastRustSegment(p string) string {
 	return parts[len(parts)-1]
 }
 
+// ---------------------------------------------------------------------------
+// R008: HashMap/HashSet iteration order. cleat#1864.
+//
+// Everything above matches a MODULE PATH a workflow may not reach at all.
+// This rule is a different shape: reaching std::collections::HashMap is not
+// forbidden -- constructing, inserting into and looking up in one are all
+// deterministic. Only enumerating its contents in an unspecified order is the
+// hazard, so the rule has to fire on a USAGE PATTERN (which methods are
+// called on a value of that type) rather than on a name appearing at all.
+// That needs a type, which the resolver above deliberately does not carry
+// (docs/contributor/design/rust-determinism-checker.md, "No type resolution").
+//
+// WHAT THIS BUYS INSTEAD: syntactic binding tracking, scoped to one function
+// body at a time. A parameter's declared type, or a `let` binding's
+// annotation or constructor call, is resolved as a type via the SAME alias
+// map that resolves a path; a name resolving to HashMap or HashSet is
+// tracked for the rest of that function, and an iteration-shaped use of a
+// tracked name is reported.
+//
+// WHAT IT CANNOT SEE, matching the two documented fixtures:
+//   - a map reached through a struct field or returned from a call
+//     (self.counts.iter(), config.map.values()) -- the receiver is not a bare
+//     tracked identifier (known_limit_map_via_struct_field)
+//   - a map that is never bound to a name at all, iterated immediately off a
+//     `.collect::<HashMap<_, _>>()` chain (known_limit_collect_into_map)
+// Per the "over-report rather than under-report" rule this file already
+// follows for file-scoped imports, a name shadowed mid-function under a
+// DIFFERENT, non-map type keeps its earlier tracked status -- rare, and the
+// safe direction for a gate.
+//
+// THIS IS DEFENCE IN DEPTH, NOT A CORRECTNESS FIX, and the message below must
+// not claim otherwise. Measured 2026-09-17
+// (docs/contributor/design/rust-determinism-checker.md, "The HashMap rule"):
+// cleat intercepts the WASI random_get import a HashMap's RandomState reads to
+// seed its hasher and binds it to a value deterministic in (workflow ID,
+// step) rather than OS entropy (engine/wasmtime_wasi_determinism.go,
+// engine/wasi_policy.go). Two replays of ONE workflow therefore see the same
+// order today. What is not guaranteed is the Rust language's own contract,
+// and a hardening rule against that is worth having independent of how any
+// one runtime happens to seed it.
+
+// forbiddenRustMapTypes lists the resolved TYPES whose iteration this rule
+// covers -- a different table from forbiddenRustPaths' module paths, and
+// matched by equality, not by prefix: neither type has a meaningful sub-path.
+var forbiddenRustMapTypes = map[string]bool{
+	"std::collections::HashMap": true,
+	"std::collections::HashSet": true,
+}
+
+// rustMapOrderMethods are receiver methods whose result exposes a HashMap's
+// or HashSet's enumeration order. get, get_mut, insert, remove,
+// contains_key, len, entry and clear are deliberately absent: none of them
+// depends on iteration order.
+var rustMapOrderMethods = map[string]bool{
+	"iter": true, "iter_mut": true, "keys": true,
+	"values": true, "values_mut": true, "into_iter": true, "drain": true,
+}
+
+const rustHashMapSuggestion = "Use BTreeMap/BTreeSet for deterministic ordered iteration, or collect and sort the keys before iterating a HashMap/HashSet"
+
+// resolveRustTypeHead strips a type-position expression down to the path its
+// base type resolves to, the same question matchForbiddenRustPath asks of a
+// call site's resolved path.
+//
+//	&HashMap<String, u64>            -> strip '&'      -> HashMap<String, u64> -> strip generics -> HashMap -> alias lookup
+//	&mut HashSet<u32>                -> strip '&mut '  -> ditto
+//	std::collections::HashMap<K, V>  -> strip generics -> std::collections::HashMap (already a full path, used as written)
+//
+// A bare identifier is looked up in aliases (the same map expandRustUse
+// populates from this file's `use` declarations); a path already containing
+// "::" needs no lookup, since writing one out in full requires no import.
+func resolveRustTypeHead(text string, aliases map[string]string) string {
+	t := strings.TrimSpace(text)
+	for {
+		switch {
+		case strings.HasPrefix(t, "&mut "):
+			t = strings.TrimSpace(t[len("&mut "):])
+		case strings.HasPrefix(t, "&"):
+			t = strings.TrimSpace(t[1:])
+		default:
+			goto stripped
+		}
+	}
+stripped:
+	if idx := strings.IndexByte(t, '<'); idx >= 0 {
+		t = t[:idx]
+	}
+	t = strings.TrimSpace(t)
+	if t == "" || strings.Contains(t, "::") {
+		return t
+	}
+	if full, ok := aliases[t]; ok {
+		return full
+	}
+	return t
+}
+
+// splitRustTopLevelCommas splits s on commas not nested inside (), <> or [].
+// expandRustUse already has this shape for `{}` import groups; a parameter
+// list and a generic argument list nest in the other three bracket kinds
+// instead of that one, so this is a sibling rather than a reuse of it.
+func splitRustTopLevelCommas(s string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(', '<', '[':
+			depth++
+		case ')', '>', ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, s[start:])
+}
+
+// skipRustAngleBrackets advances past a balanced <...> starting at src[i], or
+// returns i unchanged if src[i] is not '<'. Needed for a function's own
+// generic parameters, fn foo<T: Bar<Baz>>(...), where the naive
+// strings.Index(src[i:], ">") stops at Baz's closing angle bracket instead of
+// the function's own.
+func skipRustAngleBrackets(src string, i int) int {
+	if i >= len(src) || src[i] != '<' {
+		return i
+	}
+	depth := 0
+	for j := i; j < len(src); j++ {
+		switch src[j] {
+		case '<':
+			depth++
+		case '>':
+			depth--
+			if depth == 0 {
+				return j + 1
+			}
+		}
+	}
+	return -1
+}
+
+// skipRustParens advances past a balanced (...) starting at src[i], which
+// must be '(', returning the index one past the matching ')'. Depth-counted
+// for the same reason as skipRustAngleBrackets: a parameter's own type can
+// nest parens, fn foo(f: Box<dyn Fn(u32) -> u32>).
+func skipRustParens(src string, i int) int {
+	if i >= len(src) || src[i] != '(' {
+		return -1
+	}
+	depth := 0
+	for j := i; j < len(src); j++ {
+		switch src[j] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return j + 1
+			}
+		}
+	}
+	return -1
+}
+
+// rustFuncSpan is one function's parameter-list text and its body's byte
+// range in the source that produced it, [bodyStart, bodyEnd).
+type rustFuncSpan struct {
+	params             string
+	bodyStart, bodyEnd int
+}
+
+var rustFnNameRe = regexp.MustCompile(`\bfn\s+[A-Za-z_][A-Za-z0-9_]*`)
+
+// findRustFuncSpans locates every function's parameter list and body in
+// already-blanked source, by hand rather than with one regex: a parameter's
+// type can nest angle brackets and parens arbitrarily deep
+// (Box<dyn Fn(u32) -> u32>), which is exactly what a fixed-depth regex gets
+// wrong.
+//
+// A NESTED fn (a closure-adjacent inner function, or one defined inside
+// another's body) is found as its own span AND falls inside its enclosing
+// function's body text, so the outer function's binding tracking sees the
+// inner one's `let`s too. That over-tracks rather than under-tracks, which
+// this file already treats as the safe direction for a gate.
+func findRustFuncSpans(src string) []rustFuncSpan {
+	var spans []rustFuncSpan
+	for _, loc := range rustFnNameRe.FindAllStringIndex(src, -1) {
+		i := loc[1]
+		i = skipRustAngleBrackets(src, i)
+		if i < 0 {
+			continue
+		}
+		for i < len(src) && (src[i] == ' ' || src[i] == '\t' || src[i] == '\n' || src[i] == '\r') {
+			i++
+		}
+		if i >= len(src) || src[i] != '(' {
+			continue
+		}
+		parenEnd := skipRustParens(src, i)
+		if parenEnd < 0 {
+			continue
+		}
+		params := src[i+1 : parenEnd-1]
+		j := parenEnd
+		for j < len(src) && src[j] != '{' && src[j] != ';' {
+			j++
+		}
+		if j >= len(src) || src[j] != '{' {
+			continue // a trait method with no body, or a signature this does not parse
+		}
+		depth, bodyEnd := 0, -1
+		for k := j; k < len(src); k++ {
+			switch src[k] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					bodyEnd = k + 1
+				}
+			}
+			if bodyEnd >= 0 {
+				break
+			}
+		}
+		if bodyEnd < 0 {
+			continue
+		}
+		spans = append(spans, rustFuncSpan{params: params, bodyStart: j, bodyEnd: bodyEnd})
+	}
+	return spans
+}
+
+// rustParamBindingType returns a function parameter's name and resolved
+// type, for a parameter of the shape "[mut] name: Type". self, &self and
+// &mut self have no ':' and return ok=false; so does a destructuring
+// pattern parameter, which this does not parse -- a documented miss, not a
+// crash.
+func rustParamBindingType(param string, aliases map[string]string) (name, resolved string, ok bool) {
+	p := strings.TrimSpace(param)
+	idx := strings.IndexByte(p, ':')
+	if p == "" || idx < 0 {
+		return "", "", false
+	}
+	name = strings.TrimSpace(p[:idx])
+	name = strings.TrimSpace(strings.TrimPrefix(name, "mut "))
+	if name == "" || strings.ContainsAny(name, "(){}&") {
+		return "", "", false
+	}
+	resolved = resolveRustTypeHead(p[idx+1:], aliases)
+	return name, resolved, resolved != ""
+}
+
+var rustLetRe = regexp.MustCompile(`(?s)\blet\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([^=;]+?))?\s*=\s*([^;]+);`)
+
+// rustConstructorCallRe matches a constructor-style call at the start of a
+// let-binding's right-hand side, HashMap::new(), HashSet::with_capacity(8),
+// HashMap::from([...]). It deliberately does not match Default::default() --
+// resolving that needs the TARGET type, which is bidirectional inference this
+// checker does not do -- or .collect::<HashMap<_, _>>(), which
+// known_limit_collect_into_map documents as a limit rather than silently
+// accepting.
+var rustConstructorCallRe = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_:]*)::(?:new|with_capacity|from)\s*[(<]`)
+
+// findRustMapBindingsInFunc returns the names, tracked for one function, that
+// resolve to a forbidden map type -- from its parameters and from `let`
+// bindings inside body.
+func findRustMapBindingsInFunc(body, params string, aliases map[string]string) map[string]bool {
+	tracked := map[string]bool{}
+	for _, p := range splitRustTopLevelCommas(params) {
+		name, resolved, ok := rustParamBindingType(p, aliases)
+		if ok && forbiddenRustMapTypes[resolved] {
+			tracked[name] = true
+		}
+	}
+	for _, m := range rustLetRe.FindAllStringSubmatch(body, -1) {
+		name, typeAnnotation, rhs := m[1], m[2], m[3]
+		resolved := ""
+		if strings.TrimSpace(typeAnnotation) != "" {
+			resolved = resolveRustTypeHead(typeAnnotation, aliases)
+		}
+		if resolved == "" {
+			if ctor := rustConstructorCallRe.FindStringSubmatch(rhs); ctor != nil {
+				resolved = resolveRustTypeHead(ctor[1], aliases)
+			}
+		}
+		if forbiddenRustMapTypes[resolved] {
+			tracked[name] = true
+		}
+	}
+	return tracked
+}
+
+var (
+	rustForInRe         = regexp.MustCompile(`\bfor\b[^{;]*?\bin\s+(?:&mut\s+|&\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\{`)
+	rustMapMethodCallRe = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\.(iter_mut|iter|keys|values_mut|values|into_iter|drain)\s*\(`)
+)
+
+// findRustMapIterationFindings resolves every function body in already-blanked
+// source and reports an iteration-shaped use of a name tracked as a HashMap
+// or HashSet within that function.
+//
+// DEDUPLICATED BY LINE, for the same reason findForbiddenRustPaths dedupes:
+// `for (k, v) in &m {}` on one line matches only the for-in shape, but a
+// chained `m.iter().rev()` could in principle be revisited by an overlapping
+// scan; one report per line is what a reader acts on.
+func findRustMapIterationFindings(code []byte) []rustFinding {
+	src := string(code)
+
+	aliases := map[string]string{}
+	for _, m := range rustUseRe.FindAllStringSubmatch(src, -1) {
+		expandRustUse(m[1], aliases)
+	}
+
+	var out []rustFinding
+	seen := map[int]bool{}
+	report := func(pos int, kind string) {
+		line := 1 + strings.Count(src[:pos], "\n")
+		if seen[line] {
+			return
+		}
+		seen[line] = true
+		col := pos - strings.LastIndex(src[:pos], "\n")
+		out = append(out, rustFinding{
+			line: line, col: col,
+			code: "R008",
+			message: fmt.Sprintf("%s iteration order is not guaranteed by the language and is not to be relied on for a durable replay",
+				kind),
+			suggestion: rustHashMapSuggestion,
+		})
+	}
+
+	for _, span := range findRustFuncSpans(src) {
+		body := src[span.bodyStart:span.bodyEnd]
+		tracked := findRustMapBindingsInFunc(body, span.params, aliases)
+		if len(tracked) == 0 {
+			continue
+		}
+
+		for _, loc := range rustForInRe.FindAllStringSubmatchIndex(body, -1) {
+			name := body[loc[2]:loc[3]]
+			if tracked[name] {
+				report(span.bodyStart+loc[0], "a for-loop over a map")
+			}
+		}
+		for _, loc := range rustMapMethodCallRe.FindAllStringSubmatchIndex(body, -1) {
+			name := body[loc[2]:loc[3]]
+			method := body[loc[4]:loc[5]]
+			if tracked[name] && rustMapOrderMethods[method] {
+				report(span.bodyStart+loc[0], fmt.Sprintf("%s()", method))
+			}
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].line != out[j].line {
+			return out[i].line < out[j].line
+		}
+		return out[i].col < out[j].col
+	})
+	return out
+}
+
 // runVetRust performs static analysis on a Rust crate.
 // Returns 0 on success (no errors), 1 if errors were found.
 func runVetRust(crateDir string) int {
@@ -566,7 +933,9 @@ func runVetRust(crateDir string) int {
 		// Since #1784 this decides whether an artifact is emitted, so the same
 		// comment now fails a BUILD.
 		code := withoutCfgTest(rustCodeOnly(data))
-		for _, f := range findForbiddenRustPaths(code) {
+		findings := findForbiddenRustPaths(code)
+		findings = append(findings, findRustMapIterationFindings(code)...)
+		for _, f := range findings {
 			output.Errors = append(output.Errors, VetResult{
 				Code:       f.code,
 				File:       relPath,

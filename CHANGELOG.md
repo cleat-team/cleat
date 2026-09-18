@@ -197,6 +197,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`cleat build --target rust` refuses a workflow that iterates a `HashMap` or `HashSet` (R008).**
+  (cleat#1864)
+
+  Iterating a map is idiomatic Rust requiring no unusual act, unlike every other rule this checker
+  enforces (opening a file, spawning a thread, reading the clock) — so it was the rule an author was
+  least likely to suspect was missing. `HashMap`/`HashSet` default to a per-process random hash
+  seed, so their enumeration order is not guaranteed by the language.
+
+  **This is hardening, not a fix for an observed divergence.** cleat intercepts the WASI
+  `random_get` import a `HashMap`'s hasher seeds from and binds it to a value deterministic in
+  (workflow ID, step), so two replays of one workflow see the same order today regardless. The rule
+  guards a language guarantee cleat is not relying on staying true, and its message does not claim
+  otherwise.
+
+  Construction, insertion, lookup and removal on a `HashMap`/`HashSet` are unaffected — only
+  enumerating one (`for x in m`, `.iter()`, `.keys()`, `.values()`, `.into_iter()`, `.drain()`)
+  triggers R008, which suggests `BTreeMap`/`BTreeSet`.
+
+  **Detected via syntactic binding tracking, not a full type checker**, matching this checker's
+  existing no-toolchain design: a function parameter's declared type or a `let`'s type
+  annotation/constructor call is tracked within that function, and an enumerating use of a tracked
+  name is reported. Two shapes are known, documented limits rather than silent misses — a map
+  reached through a struct field, and one enumerated inline off a `.collect::<HashMap<_, _>>()`
+  chain with no intermediate binding — see `testdata/vet-checks/rust/known_limit_*`.
+
 - **Pre-emptive cancellation, with a terminal status of its own.**
   `POST /api/workflows/:id/cancel` accepts `{"preemptive": true}`, which stops the workflow and
   records **`cancelled`** rather than asking it to stop. (cleat#1153)

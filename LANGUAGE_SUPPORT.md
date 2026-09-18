@@ -310,7 +310,7 @@ that completely — which is why this section states the mechanism rather than a
 | **Python** | AST call-graph and closure analysis (`python-sdk/cleat_sdk/vet.py`) | what the entry point reaches, across functions | a forbidden call spelled so the `(module, function)` table does not match it |
 | **AssemblyScript** | AST analysis **inside the compiler** (`packages/cleat-as/transform`) | what the entry point reaches, across functions | a call site with no dotted member access |
 | **Java** | import and fully-qualified-name resolution over source with comments, strings, text blocks and character literals blanked first (`cmd/cleat/vet_java.go`) | a path expression **resolving** to a listed class, member or package -- so static imports, wildcard imports (against a known class list) and fully-qualified calls are all seen | java.nio, which is on no list at all; reflection with a computed argument, which no resolver can evaluate |
-| **Rust** | `use`-declaration resolution over source with comments, strings and `#[cfg(test)]` items blanked first (`cmd/cleat/vet_rust.go`) | a path expression **resolving** to a listed module — so grouped imports, nested groups and `as` aliases are all seen | a **method** call, which names no module (`t.elapsed()`); any module not listed; a glob import, which names nothing locally |
+| **Rust** | `use`-declaration resolution over source with comments, strings and `#[cfg(test)]` items blanked first (`cmd/cleat/vet_rust.go`); plus, since cleat#1864, per-function syntactic binding tracking for one usage pattern (HashMap/HashSet iteration order, R008) | a path expression **resolving** to a listed module — so grouped imports, nested groups and `as` aliases are all seen; **and** a HashMap/HashSet whose type is declared on a function parameter or a `let` binding, when it is later enumerated (`for x in m`, `m.iter()`, `.keys()`, `.values()`, `.into_iter()`, `.drain()`) |a method call whose receiver is not a bare tracked identifier -- a struct field (`self.counts.iter()`), a value returned from a call, or a map produced inline by `.collect::<HashMap<_, _>>()` and iterated without ever being bound to a name; any module not on the path list; a glob import, which names nothing locally |
 
 Re-derive the shape of each, rather than trusting the row:
 
@@ -335,10 +335,21 @@ recommended over `java.io` since 1.7 — so it covers the legacy package and not
     Files.readString(Path.of("x"));      // not reported
 
 Rust's resolves the same forms Java's does now (cleat#1811) — a grouped import is caught, not
-missed. What it still cannot see is a **method** call, which names no module at all:
+missed. What it still cannot see, in general, is a **method** call, which names no module at all:
 
     SystemTime::now();                   // reported -- a path expression
     t.elapsed();                         // not reported -- names no module, only a receiver's type
+
+**One method-call shape is an exception, since cleat#1864, and it is narrow on purpose.** A HashMap
+or HashSet's *enumeration order* is not itself a module reference, so R008 tracks the receiver's
+type through a syntactic binding — a function parameter or a `let` — rather than through a path:
+
+    fn total(m: &HashMap<String, u64>) { for (k, v) in m { ... } }   // reported -- m is a tracked binding
+    self.counts.iter()                                                // not reported -- a struct field, not a binding
+    pairs.into_iter().collect::<HashMap<_, _>>().into_iter()          // not reported -- never bound to a name
+
+The middle and bottom rows are `known_limit_map_via_struct_field` and `known_limit_collect_into_map`.
+Neither generalises to method calls at large: `t.elapsed()` above is exactly as unseen as before.
 
 Both are measured, and each has a fixture pinning it: see the `known_limit_*` directories under
 `testdata/vet-checks/`, and the `*_build_refuses_nondeterminism_test.go` files, which assert **both**

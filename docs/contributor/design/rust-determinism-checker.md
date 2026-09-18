@@ -125,6 +125,22 @@ as clean. Reporting the resolved path **beside what was written** is deliberate:
 
 ## The HashMap rule, and why it is hardening rather than a correctness fix
 
+> **Implemented in cleat#1864, as R008.** The approach below ("a type, not a path... a heuristic
+> rather than a proof") is what shipped: syntactic binding tracking, scoped to one FUNCTION at a
+> time rather than to the whole file the way `use`-alias resolution above stays. A parameter's
+> declared type, or a `let`'s type annotation or constructor call, is resolved through the same
+> alias map a call site is; a name that resolves to `HashMap`/`HashSet` is tracked for the rest of
+> that function, and an iteration-shaped use of it -- `for x in m`, `m.iter()`, `.keys()`,
+> `.values()`, `.into_iter()`, `.drain()` -- is reported as R008. Function scoping (rather than
+> file scoping, which the existing resolver already uses for imports) is what this rule needed on
+> its own: a file-wide binding table would read a `Vec` named the same as an unrelated `HashMap` in
+> a different function and flag its ordinary `.iter()`. Two limits are fixtures rather than
+> paragraphs, per this file's own stated preference: `known_limit_map_via_struct_field` (a map
+> reached through `self.field`, where the receiver is not a bare tracked identifier) and
+> `known_limit_collect_into_map` (a value never bound to a name, enumerated straight off a
+> `.collect::<HashMap<_, _>>()` chain). This section otherwise describes the decision as it was
+> made, not the code that resulted.
+
 `HashMap`/`HashSet` default to `RandomState`, seeded per process, so iteration order varies between
 runs. The issue asks whether that seed reaches cleat's intercepted `random_get` before the rule's
 severity can be decided. **Measured 2026-09-17, with a negative control:**
