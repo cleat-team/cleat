@@ -94,7 +94,7 @@ func TestAnOrgIDIsImmutableOnceSet(t *testing.T) {
 			}
 
 			// The default tenant, backfilled to the default org by migration
-			// 090 (postgres) / 078 (mysql) / 082 (mssql). MySQL permits only
+			// 091 (postgres) / 078 (mysql) / 082 (mssql). MySQL permits only
 			// one tenant row ever (tiers.yaml's singleton constraint), so this
 			// test uses the row every dialect already has rather than
 			// inserting its own -- which means a REGRESSION here (the trigger

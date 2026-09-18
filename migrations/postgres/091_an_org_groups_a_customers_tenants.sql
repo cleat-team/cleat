@@ -1,4 +1,4 @@
--- cleat migration 090 (postgres): an org groups a customer's tenants
+-- cleat migration 091 (postgres): an org groups a customer's tenants
 --
 -- cleat#1898. `admin.tenants` is flat -- no parent, no group. That blocks the
 -- owner's model (see cleat-internal/org-model-design-2026-09-18.md): a

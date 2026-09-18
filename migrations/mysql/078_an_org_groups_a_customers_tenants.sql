@@ -1,6 +1,6 @@
 -- cleat migration 078 (mysql): an org groups a customer's tenants
 --
--- cleat#1898. See migrations/postgres/090_an_org_groups_a_customers_tenants.sql
+-- cleat#1898. See migrations/postgres/091_an_org_groups_a_customers_tenants.sql
 -- for the full reasoning: admin.orgs carries identity only (no plan, limit or
 -- usage column -- billing systems key on org_id from outside), org_id is
 -- immutable by trigger rather than by convention, and existing tenants get a
