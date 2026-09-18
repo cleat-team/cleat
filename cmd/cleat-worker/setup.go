@@ -165,6 +165,11 @@ type dbServiceCaller struct {
 	// an httptest server. cleat#1565.
 	egress *engine.EgressGuard
 
+	// privateHosts is the operator's set of hosts permitted to be private
+	// addresses, from --plugin-egress-allow-private. Never nil: the zero value
+	// permits nothing.
+	privateHosts *pluginPrivateHosts
+
 	// egressAllow is the per-tenant allowlist source. Nil denies every
 	// guest-initiated fetch, which is the correct behaviour for a worker
 	// that was not given one: an absent policy is not permission.
@@ -271,18 +276,6 @@ func (c *dbServiceCaller) resolveSecrets(ctx context.Context, service, operation
 	return resolved, nil
 }
 
-// benchSvcHTTPClient is a shared HTTP client for bench-svc forwarding with
-// connection pooling enabled. Creating a new client per call exhausts ephemeral
-// ports and adds TCP handshake latency under high concurrency.
-var benchSvcHTTPClient = &http.Client{
-	Timeout: 30 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 100,
-		IdleConnTimeout:     90 * time.Second,
-	},
-}
-
 func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, error) {
 	url := fmt.Sprintf("%s/call/%s/%s", c.benchSvcURL, service, operation)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(requestJSON))
@@ -296,8 +289,34 @@ func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operat
 		// that does not recognise it ignores it, so this is safe to always send.
 		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
+	// GUARDED, AND PER CALL RATHER THAN POOLED, which reverses the trade this
+	// used to make. It held a package-level http.Client with a bare
+	// &http.Transport{} and connection pooling, on the reasoning that a client
+	// per call exhausts ephemeral ports under load. That is true, and it bought
+	// the speed by skipping the egress floor entirely: the one forwarder that
+	// reaches an operator-named service was the one outbound path in the worker
+	// that could dial loopback, RFC1918 or 169.254.169.254.
+	//
+	// POOLING AND A PER-TENANT POLICY ARE NOT COMPOSABLE THE OBVIOUS WAY, which
+	// is why handleHTTPFetch builds its client per call too and why copying that
+	// is the fix rather than adding a guarded dialer to the shared client.
+	// EgressGuard checks at DIAL. net/http keys idle connections by scheme, host
+	// and proxy -- not by tenant -- so a connection opened for tenant A and
+	// reused for tenant B never dials again, and B's allowlist is never
+	// consulted. A shared pool with a guarded dialer would be guarded only for
+	// whichever tenant happened to open the connection.
+	//
+	// The cost is one handshake per call on a path that today carries
+	// --bench-svc-url only. If this forwarder becomes the way a workflow reaches
+	// a registered service -- the "no endpoint registered" error below is
+	// written as though it will -- this becomes a hot path and the answer is a
+	// pool PER TENANT, not a shared one.
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, c.benchSvcURL).DialContext},
+	}
 	t0 := time.Now()
-	resp, err := benchSvcHTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", engine.NewTransientError("bench-svc", "", err)
 	}
@@ -1372,6 +1391,17 @@ type Worker struct {
 	tenantPools *plugin.TenantPools
 	plugList    []*plugin.LoadedPlugin
 
+	// privateHosts is the operator's --plugin-egress-allow-private set, carried
+	// to every dbServiceCaller.
+	privateHosts *pluginPrivateHosts
+
+	// egress is a test-supplied guard, mirroring dbServiceCaller.egress and
+	// carrying the same caveat: production never sets it, and
+	// TestNoProductionCodeAllowsLoopbackEgress keeps it that way. It exists
+	// because a test driving executeWorkflow builds a Worker rather than a
+	// caller, so the caller's own field is out of reach from there.
+	egress *engine.EgressGuard
+
 	// egressAllow answers "which hosts may this tenant's workflows reach".
 	// Nil denies every guest-initiated fetch. cleat#1565.
 	egressAllow *engine.TenantEgressStore
@@ -2352,6 +2382,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		benchSvcURL:    *benchSvcURL,
 		egressAllow:    w.egressAllow,
 		operatorEgress: w.operatorEgress,
+		privateHosts:   w.privateHosts,
+		egress:         w.egress,
 		traceID:        traceID,
 		secrets:        w.secrets,
 	}

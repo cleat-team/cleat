@@ -1423,6 +1423,7 @@ func main() {
 		heartbeatInterval:                *heartbeatInterval,
 		reclaimTimeout:                   *reclaimTimeout,
 		flushRetryWindow:                 *flushRetryWindow,
+		privateHosts:                     pluginPrivateHosts,
 		egressAllow:                      egressAllow,
 		secrets:                          secretStore,
 		operatorEgress:                   operatorEgress,
