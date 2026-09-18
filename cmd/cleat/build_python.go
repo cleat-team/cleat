@@ -73,6 +73,31 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 		}
 	}
 
+	// Resolve the entry against the process working directory, which is the
+	// only place a path the user typed can mean anything.
+	//
+	// WHY THE SCRIPT CANNOT DO THIS. build_wasm.py runs with cmd.Dir set to
+	// the SDK root (wasm/build.go, `cmd.Dir = sdkRoot`), so every relative
+	// resolution it makes lands in python-sdk/ rather than where the user is
+	// standing -- and there are three of them, not one: validate_entry's
+	// `Path(entry_file).exists()`, and the two `Path(entry_file).resolve()`
+	// calls that derive componentize-py's package directory and the output
+	// path. The script is RIGHT for the direct invocation its own usage line
+	// documents; what is wrong is handing it a path whose meaning depends on a
+	// directory cleat chose and the user cannot see.
+	//
+	// Both documented Python examples pass a relative --entry, so both build
+	// commands in their READMEs failed from every working directory (cleat#1836).
+	//
+	// The --output path was made absolute for exactly this reason, and is
+	// commented below; the entry never got the same treatment.
+	abs, err := filepath.Abs(pyFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not resolve %s against the working directory: %v\n", pyFile, err)
+		os.Exit(1)
+	}
+	pyFile = abs
+
 	// If no function name was specified, try to auto-detect it from the file.
 	if funcName == "" {
 		fn, err := detectEntryFunction(pyFile)

@@ -40,14 +40,21 @@ set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 2
 
-# Examples whose documented command is known broken, as "dir<TAB>reason" lines.
+# Examples this job does not run, as "dir<TAB>reason" lines.
+#
+# TWO KINDS OF REASON, and they are not interchangeable. An entry may be here
+# because the documented command is BROKEN (an issue against the product), or
+# because THIS JOB cannot run it (an issue against the job). Both were the first
+# kind until cleat#1836 was fixed; both are now the second. Saying which is the
+# point -- "known broken" over an example that builds perfectly well by hand is
+# a claim about the product that nothing would ever recheck.
 #
 # NOT an associative array: macOS ships bash 3.2, which has none, and a script
 # the author cannot run locally is how this job would come to be trusted without
 # being exercised -- which is the failure this whole file exists to prevent.
 KNOWN_BROKEN="\
-examples/python-langchain\tcleat#1836 - a relative --entry is resolved against the SDK root
-examples/python-hello\tcleat#1836 - a relative --entry is resolved against the SDK root"
+examples/python-langchain\tcleat#1854 - this job installs no Python toolchain
+examples/python-hello\tcleat#1854 - this job installs no Python toolchain"
 
 known_broken_reason() {
   printf '%b\n' "$KNOWN_BROKEN" | while IFS="$(printf '\t')" read -r d reason; do
