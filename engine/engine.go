@@ -191,7 +191,30 @@ func WithStreamHub(h *StreamHub) EngineOption {
 // WithTenantID sets the tenant ID.
 func WithTenantID(id string) EngineOption { return func(e *Engine) { e.tenantID = id } }
 
-// WithPluginCallGuard sets the plugin call guard.
+// WithPluginCallGuard sets the plugin call guard, which authorizes one WASM
+// plugin's call_plugin call into another.
+//
+// NEVER CALLED IN PRODUCTION, and if it were, still NEVER CONSULTED -- two
+// separate absences, and that is a decision rather than a gap. This option
+// itself has no non-test caller: grepping the bare name would also match this
+// comment and the declaration below, so ask for the CALL SHAPE instead --
+// `grep -rn 'WithPluginCallGuard(' --include='*.go' . | grep -v _test.go |
+// grep -v '^engine/engine.go:.*func '` -- which returns nothing.
+// pluginCallGuard.Check is reached at both call_plugin sites in plugins.go,
+// each gated on `s.callerPluginName != ""` -- and nothing outside a _test.go
+// file ever assigns callerPluginName (see its own comment in types.go), so
+// even a worker that DID configure a guard here would find that condition
+// false on every real invocation.
+//
+// This is not WithAmbiguityResolver's shape (nil is a designed no-op default
+// for an optional embedder feature) -- it is a guard for a call path,
+// call_plugin between WASM plugins, that PluginLoader.LoadPlugin cannot
+// currently reach either: LoadPlugin has no non-test callers
+// (IMPROVEMENT-PLAN 3.315). Wiring this guard's trigger ahead of the thing it
+// guards would be backwards, so `engine_option_reachability_test.go`'s
+// exemption table excuses this option with exactly that reasoning. cleat#1873
+// puts the same reasoning here, where a reader of this function -- rather
+// than of a reachability guard's exemption list -- will find it.
 func WithPluginCallGuard(g *PluginCallGuard) EngineOption {
 	return func(e *Engine) { e.pluginCallGuard = g }
 }
