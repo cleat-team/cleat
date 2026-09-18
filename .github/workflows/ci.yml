@@ -1021,10 +1021,10 @@ jobs:
     # develop.
     #
     # Go only for now, which is 8 of the 10. The two Python examples are excluded
-    # BY NAME in the script, against cleat#1836 -- their documented command is
-    # broken today for a reason that has nothing to do with this job. Adding the
-    # Python toolchain here is worth doing once that is fixed; until then it
-    # would be a job that installs componentize-py to skip two examples.
+    # BY NAME in the script, against cleat#1854: their documented command works
+    # (cleat#1836 fixed the relative --entry), but this job installs no Python
+    # toolchain, so it cannot run them. Adding componentize-py, a python3 >= 3.10
+    # and a PYTHONPATH reaching python-sdk/ takes this to 10 of 10.
     steps:
       - uses: actions/checkout@v7
 
