@@ -28,6 +28,7 @@
 #
 # table					class		why
 admin.tenants	exempt	the tenant itself; its lifecycle is the thing others hang off
+admin.orgs	exempt	cleat#1898; same shape as admin.tenants (created_at + suspended, no updated_at) -- it groups tenants the same way tenants group everything else
 admin.plugin_tables	exempt	registry of plugin-owned tables, not operator-created
 public.plugin_defs	exempt	derived from plugin binaries, not operator-created
 admin.tenant_api_keys	member

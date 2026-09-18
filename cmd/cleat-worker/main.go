@@ -264,6 +264,50 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Handle --create-org (standalone mode: create an org and exit).
+	//
+	// Placed before --create-tenant for the same reason that flag is placed
+	// before --generate-api-key: admin.tenants.org_id REFERENCES
+	// admin.orgs(org_id) and is NOT NULL, so a tenant cannot be created before
+	// its org exists. cleat#1898.
+	if *createOrgNamed != "" {
+		dbURL := *dbURL
+		if dbURL == "" {
+			dbURL = os.Getenv("DATABASE_URL")
+		}
+		if dbURL == "" {
+			logger.ErrorContext(context.Background(), "--db or DATABASE_URL required for --create-org", "worker_id", workerID)
+			os.Exit(1)
+		}
+		gdb, err := sql.Open(sqlDriverName(*driver), dbURL)
+		if err != nil {
+			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or DATABASE_URL environment variable", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+		defer gdb.Close()
+		store, tsErr := auth.NewTenantStoreForDialect(gdb, *driver)
+		if tsErr != nil {
+			logger.ErrorContext(context.Background(), "cannot create an org", "worker_id", workerID, "error", tsErr)
+			os.Exit(1)
+		}
+		// auth.CreateOrg refuses on MySQL and SQL Server for the same reason
+		// CreateTenant does -- surfaced as-is, naming the dialect.
+		oid, cErr := store.CreateOrg(context.Background(), *createOrgNamed)
+		if cErr != nil {
+			logger.ErrorContext(context.Background(), "failed to create org", "worker_id", workerID, "name", *createOrgNamed, "error", cErr)
+			os.Exit(1)
+		}
+		fmt.Printf("\n")
+		fmt.Printf("=== CLEAT ORG ===\n")
+		fmt.Printf("Org ID: %s\n", oid)
+		fmt.Printf("Name:   %s\n", *createOrgNamed)
+		fmt.Printf("\n")
+		fmt.Printf("Create a tenant under it with:\n")
+		fmt.Printf("  cleat-worker --create-tenant <name> --org %s --db \"$DSN\"\n", oid)
+		fmt.Printf("\n")
+		os.Exit(0)
+	}
+
 	// Handle --create-tenant (standalone mode: create a tenant and exit).
 	//
 	// Placed before --generate-api-key because that is the order they are used
@@ -271,6 +315,21 @@ func main() {
 	// admin.tenant_api_keys.tenant_id REFERENCES admin.tenants(tenant_id) -- and
 	// before this flag there was no command that created one. See cleat#1114.
 	if *createTenantNamed != "" {
+		// cleat#1898: admin.tenants.org_id is NOT NULL and immutable once set.
+		// No implicit default -- the operator names the org, the same way
+		// they already name the tenant. A missing --org is refused here,
+		// before any connection is opened, rather than left to surface as a
+		// database NOT NULL violation that names a column instead of a flag.
+		if *tenantOrgID == "" {
+			logger.ErrorContext(context.Background(), "--org is required with --create-tenant", "worker_id", workerID,
+				"hint", "create one first with --create-org <name>")
+			os.Exit(1)
+		}
+		orgUUID, uErr := uuid.Parse(*tenantOrgID)
+		if uErr != nil {
+			logger.ErrorContext(context.Background(), "--org is not a valid UUID", "worker_id", workerID, "org", *tenantOrgID, "error", uErr)
+			os.Exit(1)
+		}
 		dbURL := *dbURL
 		if dbURL == "" {
 			dbURL = os.Getenv("DATABASE_URL")
@@ -297,7 +356,7 @@ func main() {
 		// auth.CreateTenant refuses on MySQL and SQL Server rather than emitting
 		// PostgreSQL SQL at them. Surfaced as-is: the message names the dialect,
 		// which is more useful than anything this layer could add.
-		tid, cErr := store.CreateTenant(context.Background(), *createTenantNamed, display)
+		tid, cErr := store.CreateTenant(context.Background(), *createTenantNamed, display, orgUUID)
 		if cErr != nil {
 			logger.ErrorContext(context.Background(), "failed to create tenant", "worker_id", workerID, "name", *createTenantNamed, "error", cErr)
 			os.Exit(1)

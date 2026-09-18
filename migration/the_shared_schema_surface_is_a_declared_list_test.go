@@ -26,6 +26,12 @@ import (
 // number would have been satisfied by a rename.
 var (
 	sharedTables = []string{
+		// Migration 091, cleat#1898. Shared for the same reason admin.tenants
+		// is: an org groups tenants across the whole database, not per pool --
+		// a per-pool copy would let two pools disagree about which org a
+		// tenant belongs to, which is exactly the trust-boundary question
+		// org_id exists to answer.
+		"admin.orgs",
 		"admin.plugin_tables",
 		"admin.tenant_api_keys",
 		"admin.tenant_roles",
@@ -69,6 +75,10 @@ var (
 		// and 023 could not pin the one above.
 		"admin.in_flight_workflow_ids",
 		"admin.revoke_plugin_from_tenant",
+		// Migration 091, cleat#1898. A trigger function on the shared
+		// admin.tenants table, so it is shared by construction -- there is
+		// nowhere per-pool for it to live.
+		"admin.tenants_org_id_is_immutable",
 		"cleat.assert_tenant_set",
 		"cleat.tenant_row_is_visible",
 	}

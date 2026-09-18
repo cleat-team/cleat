@@ -14,6 +14,7 @@ package main
 // as incomplete -- the same false alarm this list is being fixed for, arriving
 // from the opposite direction.
 var coreTables = []string{
+	"admin.orgs",
 	"admin.plugin_tables",
 	"admin.tenant_api_keys",
 	"admin.tenant_roles",
