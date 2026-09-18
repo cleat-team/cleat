@@ -473,11 +473,16 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 	filter := engine.WorkflowFilter{
 		Status:        q.Get("status"),
 		InputContains: q.Get("input_contains"),
-		ErrorContains: q.Get("error_contains"),
-		Search:        q.Get("search"),
-		DefName:       q.Get("def_name"),
-		ErrorCode:     q.Get("error_code"),
-		IDPrefix:      q.Get("id_prefix"),
+		// result_contains is the counterpart to input_contains. Both are
+		// unindexed payload scans; `search` no longer covers them, so the
+		// expensive question is now asked explicitly instead of being hidden
+		// inside the cheap one.
+		ResultContains: q.Get("result_contains"),
+		ErrorContains:  q.Get("error_contains"),
+		Search:         q.Get("search"),
+		DefName:        q.Get("def_name"),
+		ErrorCode:      q.Get("error_code"),
+		IDPrefix:       q.Get("id_prefix"),
 		// cleat#1172 measured this parameter being ACCEPTED and IGNORED:
 		// `?concurrency_key=NONSENSE-XYZ` returned the same rows as the real
 		// key and as no filter at all. A parameter that is read and discarded

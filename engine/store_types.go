@@ -412,10 +412,20 @@ type WorkflowMemoryStats struct {
 type WorkflowFilter struct {
 	Status        string
 	InputContains string
-	ErrorContains string
-	Search        string
-	Offset        int
-	Limit         int
+	// ResultContains is the counterpart to InputContains for the result
+	// payload. Both are UNINDEXED on every dialect and deliberately so: a
+	// trigram index over serialized JSON amplifies every write, which
+	// migrations/postgres/033 records rejecting for that reason. They are
+	// separate parameters so that the cost is chosen rather than inherited --
+	// Search used to include both and made every search pay for them.
+	ResultContains string
+	ErrorContains  string
+	// Search is a substring match over def_name and error_msg -- the two short,
+	// indexable columns. It deliberately does NOT cover input or result; ask
+	// for those with InputContains and ResultContains.
+	Search string
+	Offset int
+	Limit  int
 
 	// The four below address columns the row already carries. Before them the
 	// only way to ask "the runs of workflow X" was Search, a four-way substring
