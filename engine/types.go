@@ -632,22 +632,32 @@ const (
 
 // execSession implements HostHandler for a single execution or replay.
 type execSession struct {
-	engine           *Engine
-	history          []EventRecord
-	stepCount        int
-	isReplay         bool
-	nowMs            int64
-	randomSeq        int64 // monotonic counter for deterministic Random()
-	suspendErr       *SuspendError
-	deferrals        map[string]string // registered defer callbacks (deferID -> description)
-	inDeferPhase     bool              // true while the guest is draining its defer table (cleat#1155)
-	workflowID       string            // parent workflow instance ID (for child workflows)
-	defName          string            // workflow definition name (for metrics labels)
-	execRunID        string            // current execution run ID
-	queryState       map[string]string // key-value state set via SetQueryState
-	tenantID         string            // tenant ID injected into plugin function context
-	callerPluginName string            // for WASM plugins, the calling plugin's name (for call_plugin enforcement)
-	queryHandlers    []string          // registered query handler names
+	engine       *Engine
+	history      []EventRecord
+	stepCount    int
+	isReplay     bool
+	nowMs        int64
+	randomSeq    int64 // monotonic counter for deterministic Random()
+	suspendErr   *SuspendError
+	deferrals    map[string]string // registered defer callbacks (deferID -> description)
+	inDeferPhase bool              // true while the guest is draining its defer table (cleat#1155)
+	workflowID   string            // parent workflow instance ID (for child workflows)
+	defName      string            // workflow definition name (for metrics labels)
+	execRunID    string            // current execution run ID
+	queryState   map[string]string // key-value state set via SetQueryState
+	tenantID     string            // tenant ID injected into plugin function context
+
+	// callerPluginName is read by pluginCallGuard.Check at both call_plugin
+	// sites in plugins.go, but nothing outside a _test.go file assigns it.
+	// Grepping the bare name also matches this explanation, so exclude
+	// comment lines rather than just _test.go ones: `grep -n callerPluginName
+	// engine/*.go | grep -v _test.go | grep -vE '^\S+:[0-9]+:\s*//'` returns
+	// the two read sites and the field declaration and nothing else. So the
+	// guard's trigger condition, `callerPluginName != ""`, is false on every
+	// real invocation, and Check is never actually consulted outside a test
+	// that sets this field by hand. See WithPluginCallGuard for why.
+	callerPluginName string   // for WASM plugins, the calling plugin's name (for call_plugin enforcement)
+	queryHandlers    []string // registered query handler names
 
 	// Scope management for virtual object instances.
 	scopePrefix  string   // "vo:<type>:<key>:" prefix, empty if no scope
