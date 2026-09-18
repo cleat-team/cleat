@@ -1376,6 +1376,91 @@ func TestRunBuild_JavaTarget_NoBuildFile(t *testing.T) {
 	}
 }
 
+// TestRunBuild_JavaTarget_RelativePathWithGradlew is cleat#1890. exec.Command
+// resolves a relative gradleBin against cmd.Dir, not the caller's cwd -- and
+// runBuildJava sets cmd.Dir to javaDir a few lines after computing gradlew's
+// path FROM javaDir. A relative javaDir with its own gradlew wrapper looked
+// for "<javaDir>/<javaDir>/gradlew", doubled, and failed with "no such file
+// or directory" on a project that plainly had one.
+//
+// A FAKE gradlew stands in for the real one so this test needs no network and
+// no Java toolchain: it only has to prove which PATH was invoked, not that a
+// real TeaVM build succeeds -- examples/java-workflow's own build is what
+// proves that, verified by hand against `cleat build --target java`.
+func TestRunBuild_JavaTarget_RelativePathWithGradlew(t *testing.T) {
+	if os.Getenv("TEST_BUILD_JAVA_RELPATH") == "1" {
+		dir := os.Getenv("TEST_BUILD_DIR") // relative, resolved against cmd.Dir below
+		runBuildJava(dir, ".", "latest", 1)
+		return
+	}
+
+	parent := t.TempDir()
+	const projName = "javaproj"
+	projDir := filepath.Join(parent, projName)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projDir, "build.gradle.kts"), []byte("// stub\n"), 0o644); err != nil {
+		t.Fatalf("write build.gradle.kts: %v", err)
+	}
+	// A clean, determinism-passing source so the gate does not refuse before
+	// ever reaching the gradlew path this test is about.
+	javaSrc := `public class Main {
+    public static int workflow(byte[] data) {
+        java.io.ByteArrayInputStream s = new java.io.ByteArrayInputStream(data);
+        return s.read();
+    }
+}
+`
+	if err := os.WriteFile(filepath.Join(projDir, "Main.java"), []byte(javaSrc), 0o644); err != nil {
+		t.Fatalf("write Main.java: %v", err)
+	}
+	// A fake gradlew: no real Gradle or network needed. It only has to prove
+	// IT was the one invoked (marker on stderr) and exit non-zero, since a
+	// clean exit would have this test observe success for the wrong reason --
+	// "the process ran" is what this test measures, not "the build succeeded".
+	fakeGradlew := "#!/bin/sh\necho FAKE_GRADLEW_INVOKED >&2\nexit 7\n"
+	gradlewPath := filepath.Join(projDir, "gradlew")
+	if err := os.WriteFile(gradlewPath, []byte(fakeGradlew), 0o755); err != nil {
+		t.Fatalf("write fake gradlew: %v", err)
+	}
+
+	// RELATIVE, deliberately, and relative to the TEST BINARY's own cwd (this
+	// package directory) rather than to a chdir'd subprocess -- TestMain
+	// builds the cleat CLI with `go build` on first use, and a subprocess
+	// started outside any Go module (t.TempDir() lives under the OS temp
+	// root) fails that step before ever reaching the code under test. A
+	// relative path with many ".." segments is still a relative path, and
+	// exercises the exact same cmd.Dir-relative resolution in runBuildJava.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	relProjDir, err := filepath.Rel(cwd, projDir)
+	if err != nil {
+		t.Fatalf("Rel: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunBuild_JavaTarget_RelativePathWithGradlew$")
+	cmd.Env = append(os.Environ(),
+		"TEST_BUILD_JAVA_RELPATH=1",
+		"TEST_BUILD_DIR="+relProjDir, // RELATIVE, deliberately -- this is the bug's precondition
+	)
+	out, err := cmd.CombinedOutput()
+
+	if strings.Contains(string(out), "no such file or directory") {
+		t.Fatalf("gradlew path was doubled against cmd.Dir instead of resolved once -- "+
+			"a relative javaDir with its own gradlew wrapper is exactly cleat#1890's "+
+			"precondition.\n\noutput:\n%s", out)
+	}
+	if !strings.Contains(string(out), "FAKE_GRADLEW_INVOKED") {
+		t.Fatalf("the fake gradlew was never invoked at all -- this test measured nothing.\n\noutput:\n%s", out)
+	}
+	if err == nil {
+		t.Fatal("expected a non-zero exit (the fake gradlew exits 7), got none")
+	}
+}
+
 func TestRunBuild_RustTarget_NoCargoToml(t *testing.T) {
 	if os.Getenv("TEST_BUILD_RUST") == "1" {
 		dir := os.Getenv("TEST_BUILD_DIR")
