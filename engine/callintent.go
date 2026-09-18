@@ -269,6 +269,30 @@ type AmbiguityResolver interface {
 
 // WithAmbiguityResolver sets the resolver consulted when replay finds a call
 // that was dispatched but whose outcome was never recorded.
+//
+// EMBEDDER API. `cleat-worker` never calls this -- confirmed by
+// `grep -rln WithAmbiguityResolver --include='*.go' . | grep -v _test`, which
+// returns only this file -- and that is the designed default, not a gap: a
+// nil resolver makes resolveAmbiguity return ("", false) without calling
+// anything, leaving the ambiguity exactly as it was and reported as such,
+// "not a worse one" than the state it started in (see resolveAmbiguity's own
+// comment on the same phrase, in the resolver-error branch). A worker
+// deployment relies on the always-available manual path instead --
+// `POST /api/admin/instances/{id}/steps/{step}/resolve` (`engine.ResolveStep`)
+// followed by `engine.ReReplay` -- which needs no resolver configured.
+//
+// Automatic resolution is an extension point for an embedder that links the
+// engine directly and can supply one: most services that accept an
+// idempotency key can also answer "what happened to this one", turning most
+// ambiguities into non-events instead of an operator's manual check. See
+// `AmbiguityResolver`'s doc comment for the guarantee it must uphold.
+//
+// Recorded because it was found stale twice: two independent sessions read
+// the same zero-non-test-callers grep and concluded, wrongly, that automatic
+// resolution was simply unbuilt (cleat#1778). The decision already existed --
+// `engine_option_reachability_test.go`'s exemption table, "EMBEDDER API: nil
+// is the designed default; degrades to no-op" -- but a reachability guard's
+// exemption list is not somewhere an API's own reader consults. cleat#1871.
 func WithAmbiguityResolver(r AmbiguityResolver) EngineOption {
 	return func(e *Engine) { e.ambiguityResolver = r }
 }
