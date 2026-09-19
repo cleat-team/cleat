@@ -20,9 +20,13 @@ import (
 // a working directory, because `go test ./...` runs each package in its own.
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	// FATAL, NOT SKIP. scripts/check-skips.sh calls this its case (c): a
+	// precondition that is always satisfiable in this repo. These tests live
+	// inside the checkout they are asking about, so "not a git checkout" means
+	// the run is broken, and a skip would report that as a pass.
 	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		t.Skipf("not a git checkout: %v", err)
+		t.Fatalf("cannot locate the checkout these tests live in: %v", err)
 	}
 	return strings.TrimSpace(string(out))
 }
