@@ -902,19 +902,20 @@ schedule's own tenant before starting the run and before advancing the schedule
 -- so a non-default tenant's cron fires, and the run it starts is recorded under
 that tenant.
 
-With this set, the claim sees every tenant in a single query. Each claimed
-workflow then executes against a store scoped to its **own** tenant, so the
-widened view lasts exactly as long as the claim; everything downstream of it --
-event history, state, child workflows, schedules -- is tenant-scoped again
-immediately.
+With this set, each claimed workflow still executes against a store scoped to
+its **own** tenant, so the widened view lasts exactly as long as the claim;
+everything downstream of it -- event history, state, child workflows, schedules
+-- is tenant-scoped again immediately.
 
-The alternative would be polling each tenant separately, one query per tenant
-per tick. This is one query per tick regardless of tenant count, which is the
-point.
+**How the claim is widened is [`--claim-strategy`](#--claim-strategy), and the
+default no longer needs a grant.** The table below describes what the `global`
+strategy requires; `rotate`, the default, requires none of it for the *claim*.
+The **schedule** half is unchanged either way -- `024` on PostgreSQL, the
+`cleat_admin` grant on SQL Server -- because nothing yet reads due schedules
+across tenants without an exemption.
 
-**It requires a database-side grant, and it is off by default because of that.**
-Turning it on should be a deliberate act rather than something an upgrade does
-for you.
+So the flag is still off by default, but what turning it on now asks of the
+deployment depends on the strategy.
 
 | dialect | what the deployment must do |
 |---------|-----------------------------|
@@ -929,6 +930,69 @@ and it does not fail to start: on a mixed fleet the flag says what the operator
 wants while the store says what is actually possible, and those can disagree.
 
 A missing grant therefore narrows a worker rather than stopping it.
+
+### --claim-strategy
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `rotate` | How `--claim-across-tenants` claims work: `rotate` or `global` |
+
+**`rotate`** polls tenants in turn, each getting a bounded share of the batch:
+
+1. read the tenant list from `admin.tenants`, and
+2. claim within each chosen tenant through a store scoped to that tenant --
+   which runs the **same** single-statement `FOR UPDATE SKIP LOCKED` claim the
+   single-tenant path runs, with a tenant predicate.
+
+It needs **no database-side grant**, because `admin.tenants` carries no
+row-level security and `cleat_app` already holds `SELECT` on it. Every read of
+`workflow_instances` still happens under some tenant's own RLS context.
+
+That is what makes multi-tenant dispatch possible on **managed PostgreSQL**.
+`BYPASSRLS` can only be granted by a true superuser, and RDS, Cloud SQL and
+Azure do not have one -- AWS documents the RDS master role as
+`LOGIN NOSUPERUSER INHERIT CREATEDB CREATEROLE`. Applying `023` as a role of
+that shape fails:
+
+```
+ERROR:  permission denied to create role
+DETAIL:  Only roles with the BYPASSRLS attribute may create roles with the
+         BYPASSRLS attribute.
+```
+
+`rotate` is also **fair**. `global` orders `priority ASC, created_at` across
+every tenant at once, so the tenant holding the oldest rows wins every slot
+until its backlog drains. Under `rotate` a tenant with 10,000 queued runs takes
+its share of each batch and no more, and the rotation cursor -- worker-local, no
+shared table -- resumes past the tenants it served so the rest are reached on
+later ticks.
+
+**`global`** is the older `admin.claim_workflows` path: one query per tick
+regardless of tenant count. That is faster, and is also exactly why one tenant's
+backlog can take the whole batch. It is kept as the way back while `rotate`
+proves itself and is **expected to be retired**.
+
+An unrecognised value is refused at startup rather than defaulted — an operator
+who typed `globl` to get the old mechanism would otherwise silently get the new
+one.
+
+### --claim-tenants-per-tick
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `16` | With `--claim-strategy=rotate`, the most tenants one dispatch tick will poll |
+
+The rotating claim trades one query per tick for one enumeration plus up to *k*
+claims, so *k* needs a ceiling that is not the tenant count: a deployment with
+10,000 tenants must not issue 10,000 queries per second.
+
+Tenants beyond the ceiling are **not skipped** — the cursor resumes past the
+ones served, so they are reached on a later tick. This bounds queries per tick,
+not which tenants get served.
+
+The default sits above the batch sizes a dispatch tick usually asks for, so in
+the common case the limit fills before the ceiling is reached and the ceiling
+costs nothing. `0` uses the default.
 
 ### Why SQL Server's opt-in exists, and what it costs to turn on
 
