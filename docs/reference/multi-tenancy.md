@@ -59,13 +59,13 @@ the per-query predicate is the whole of the isolation there."
 Measured 2026-09-17 against live databases built by running `migrations/` to
 head, read from the catalogs (`pg_class`, `pg_policies`,
 `sys.security_predicates`) rather than from the SQL files. All three dialects
-carry **20 tenant-bearing tables**.
+carry **21 tenant-bearing tables**.
 
 | | PostgreSQL | SQL Server | MySQL |
 |---|---|---|---|
-| tenant-bearing tables | 20 | 20 | 20 |
-| RLS / filter predicates | **16** (`ENABLE` + `FORCE`) | **13** | **0** |
-| policies | 17 | 13 | — |
+| tenant-bearing tables | 21 | 21 | 21 |
+| RLS / filter predicates | **17** (`ENABLE` + `FORCE`) | **14** | **0** |
+| policies | 18 | 14 | — |
 | **write-blocking predicates** | n/a (`FORCE` covers writes) | **0** | 0 |
 | backstop active for an admin connection | no (`FORCE` applies to the owner) | **no** | — |
 

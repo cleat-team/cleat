@@ -41,6 +41,7 @@ public.tenant_settings	member
 public.tenant_secrets	member
 admin.tenant_egress_allow	member	migration 079; absent from the issue's list of eleven
 public.tenant_domains	member	migration 080; absent from the issue's list of eleven
+public.queues	member	cleat#1116, #1702's twelfth instance; migration 093/092/092
 public.workflow_instances	not-an-entity	the run
 public.event_history	not-an-entity	run events
 public.workflow_promises	not-an-entity	run-scoped

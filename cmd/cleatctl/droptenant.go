@@ -72,8 +72,10 @@ import (
 //     081_a_secret_never_reaches_the_guest.sql (cleat#1570)
 //   - workflow_defs, ON DELETE CASCADE from
 //     059_a_dropped_tenants_definitions_go_with_it.sql (cleat#1201)
+//   - queues, ON DELETE CASCADE from
+//     093_a_queue_declares_its_own_concurrency_limit.sql (cleat#1116)
 //
-// Both cascade off admin.tenants, which drop_tenant deletes LAST -- that
+// All cascade off admin.tenants, which drop_tenant deletes LAST -- that
 // ordering is what 039 relied on and what 059 relies on. Reading only the
 // function's DELETE statements to maintain this list is how tenant_settings
 // came to be missing from it for twenty migrations.
@@ -102,6 +104,11 @@ var dropTenantTables = []struct {
 	// most: an operator deleting a tenant wants to see that its credentials
 	// went with it.
 	{"tenant_secrets", `SELECT count(*) FROM tenant_secrets WHERE tenant_id = $1`},
+	// ON DELETE CASCADE from migrations/postgres/093 (cleat#1116). Listed
+	// for the count, as tenant_domains and tenant_secrets are above: a
+	// dropped tenant's declared concurrency limits go with it, and the
+	// operator wants to see that.
+	{"queues", `SELECT count(*) FROM queues WHERE tenant_id = $1`},
 	// cleat#1644. Both carry tenant_id since 056 and neither has a foreign key
 	// to anything, so neither was deleted OR counted: a dropped tenant's memory
 	// profile -- which workflows it ran, and how much memory each used --

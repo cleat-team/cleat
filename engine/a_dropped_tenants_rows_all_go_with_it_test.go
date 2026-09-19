@@ -134,6 +134,12 @@ func seedRemainingTenantTables(t *testing.T, ctx context.Context, db *sql.DB, te
 		{"admin.tenant_egress_allow",
 			`INSERT INTO admin.tenant_egress_allow (tenant_id, host) VALUES ($1, $2)`,
 			[]any{tenant, "egress-" + tag + ".example.test"}},
+		// cleat#1116. ON DELETE CASCADE from admin.tenants, like tenant_settings
+		// and tenant_domains above -- droptenant.go lists it in its preview for
+		// the same reason.
+		{"public.queues",
+			`INSERT INTO queues (tenant_id, name, concurrency_limit) VALUES ($1, $2, 3)`,
+			[]any{tenant, "queue-" + tag}},
 		// cleat#1644. Neither has a foreign key to anything, so neither
 		// cascaded, and neither was named by any DELETE.
 		{"public.workflow_memory_stats",
