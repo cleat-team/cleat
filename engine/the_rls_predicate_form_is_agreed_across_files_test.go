@@ -8,8 +8,15 @@ import (
 	"testing"
 )
 
-// cleat#1541. Three files have to agree on two string literals: this package's
-// constants, migration 075, and migrations/mssql/optional/cross_tenant_claim.sql.
+// cleat#1541. Two files have to agree on two string literals: migration 075 and
+// migrations/mssql/optional/cross_tenant_claim.sql.
+//
+// THREE, until the widened cross-tenant claim was retired. The third was this
+// package's rlsPredicatePlain/rlsPredicateAdmin constants, read by the
+// capability probe that told an operator whether the opt-in had taken. The
+// probe went with the mechanism it reported on, and the constants with it --
+// so the expected values are declared HERE now, which is the honest place for
+// them: they are what this test asserts, not what the engine uses.
 //
 // A typo in a migration does not fail loudly. `form = N'admn'` is refused by the
 // table's CHECK constraint at apply time, which is the good case -- but a
@@ -32,6 +39,11 @@ func migrationsDirForRLSTest(t *testing.T) string {
 	}
 	return dir
 }
+
+const (
+	rlsPredicatePlain = "plain"
+	rlsPredicateAdmin = "admin"
+)
 
 func TestTheMarkerValuesAreSpelledTheSameEverywhere(t *testing.T) {
 	dir := migrationsDirForRLSTest(t)

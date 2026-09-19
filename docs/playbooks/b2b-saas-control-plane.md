@@ -140,7 +140,7 @@ non-payment can still see its own runs; blocking that punishes the wrong thing.
 
 Enforcement is one predicate in the tenant enumeration, which both the dispatch claim and the
 due-schedule read go through — so a single line stops work and cron together. That choke point is a
-side effect of `--claim-strategy=rotate`: before it, the claim was one widened query inside a
+side effect of the per-tenant claim: before it, the claim was one widened query inside a
 `SECURITY DEFINER` function and there was nowhere central to put this.
 
 `admin.tenants.suspended` had been in the schema since migration 001 with **no Go code reading it**.

@@ -106,8 +106,7 @@ rather than telling you to apply a file you cannot apply.
 | capability | on managed PostgreSQL |
 |---|---|
 | single-tenant dispatch | works, unchanged |
-| cross-tenant claim | **works**, with `--claim-strategy=rotate` — it claims each tenant's work under that tenant's own RLS context and needs no exemption |
-| cross-tenant claim via `--claim-strategy=global` | unavailable; `admin.claim_workflows` has no exemption to use |
+| cross-tenant claim | **works** — each tenant's work is claimed under that tenant's own RLS context, and no exemption is involved |
 | **a non-default tenant's cron** | **does not fire.** `024`'s due-schedule read has no grant-free equivalent yet, so only the worker's own tenant's schedules fire. The worker warns about this at startup. |
 
 That last row is the one to check against your requirements before deploying a

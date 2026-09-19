@@ -40,13 +40,20 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	// file supplies the canonical copy vary per run -- and with it the wording
 	// of any failure. A guard whose message changes between identical runs is
 	// hard to trust and harder to bisect.
+	// THE COUNTS CAME DOWN when the widened cross-tenant claim was retired:
+	// each dialect had one such claim and each carried a copy of this
+	// predicate, so MySQL and SQL Server lost one apiece, and PostgreSQL's
+	// copy lived in the admin.claim_workflows function rather than in this
+	// file. Lowering a census because statements were deleted is the intended
+	// edit; the guard's question -- do the remaining sites all spell it the
+	// same way -- is unchanged.
 	files := []struct {
 		name string
 		want int
 	}{
 		{"store_lifecycle.go", 3},
-		{"mysql_lifecycle.go", 4},
-		{"mssql_lifecycle.go", 4},
+		{"mysql_lifecycle.go", 3},
+		{"mssql_lifecycle.go", 3},
 	}
 
 	// The clock is the one licensed difference between dialects.
@@ -102,8 +109,8 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 		}
 	}
 
-	if total != 11 {
-		t.Errorf("found %d sites in total, expected 11", total)
+	if total != 9 {
+		t.Errorf("found %d sites in total, expected 9", total)
 	}
 
 	// The original design note, kept as an assertion because it is the property
