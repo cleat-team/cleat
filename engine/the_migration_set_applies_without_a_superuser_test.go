@@ -57,8 +57,17 @@ func TestTheMigrationSetAppliesWithoutASuperuser(t *testing.T) {
 		t.Fatalf("opening the admin connection: %v", err)
 	}
 	defer admin.Close()
+	// "Configured and unreachable" is a FAILURE, not a skip -- the distinction
+	// bootstrapScratchDB draws for the same reason, and the one
+	// scripts/check-skips.sh exists to keep: a skip is indistinguishable from a
+	// pass, so a CI service that quietly stopped resolving would read as this
+	// test having run.
 	if err := admin.Ping(); err != nil {
-		t.Skipf("no postgres available: %v", err)
+		if postgresConfiguredForTest() {
+			t.Fatalf("configured postgres database at %s is unreachable: %v",
+				redactPostgresDSN(adminDSN), err)
+		}
+		t.Skipf("no postgres available (default DSN, none configured): %v", err)
 	}
 
 	const scratch = "cleat_managed_pg_test"

@@ -84,23 +84,25 @@
 -- nothing else. Every other role stays constrained for the whole window, which
 -- DISABLE would not give.
 --
--- Restored from a recorded list rather than recomputed, because after the
--- toggle the tables no longer answer "were you forced?". ON COMMIT DROP plus
--- the runner's per-migration transaction means a failure anywhere below rolls
--- the exemption back with everything else -- applyMigration wraps each file in
--- its own transaction, and DDL is transactional here.
-DROP TABLE IF EXISTS cleat_forced_086;
-CREATE TEMP TABLE cleat_forced_086 ON COMMIT DROP AS
-SELECT c.oid::regclass AS rel
-  FROM pg_class c
- WHERE c.relforcerowsecurity
-   AND c.oid = ANY (ARRAY['tenant_settings', 'tenant_secrets']::regclass[]);
-
+-- THE LIST IS A LITERAL IN BOTH BLOCKS, not state carried between them.
+-- The first version recorded the forced tables in a TEMP TABLE ... ON COMMIT
+-- DROP, which works under the Go runner -- applyMigration wraps each file in a
+-- transaction -- and is destroyed instantly under the OTHER applier:
+-- deploy/postgres/100-apply-migrations.sh runs `psql -f` with no -1, so every
+-- statement autocommits and the temp table is dropped by its own CREATE. The
+-- cluster deployment caught that; a local harness that had been made to match
+-- the runner did not, because it only ever modelled one of the two appliers.
+--
+-- Restoring is guarded on RLS being ENABLED rather than on what was recorded:
+-- FORCE is meaningless without it, and every table here has had both since
+-- 001_schema.sql.
 DO $forced$
 DECLARE r regclass;
 BEGIN
-    FOR r IN SELECT rel FROM cleat_forced_086 LOOP
-        EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', r);
+    FOREACH r IN ARRAY ARRAY['tenant_settings', 'tenant_secrets']::regclass[] LOOP
+        IF (SELECT relforcerowsecurity FROM pg_class WHERE oid = r) THEN
+            EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', r);
+        END IF;
     END LOOP;
 END $forced$;
 
@@ -123,7 +125,9 @@ ALTER TABLE tenant_secrets ALTER COLUMN created_at SET DEFAULT now();
 DO $forced$
 DECLARE r regclass;
 BEGIN
-    FOR r IN SELECT rel FROM cleat_forced_086 LOOP
-        EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', r);
+    FOREACH r IN ARRAY ARRAY['tenant_settings', 'tenant_secrets']::regclass[] LOOP
+        IF (SELECT relrowsecurity FROM pg_class WHERE oid = r) THEN
+            EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', r);
+        END IF;
     END LOOP;
 END $forced$;

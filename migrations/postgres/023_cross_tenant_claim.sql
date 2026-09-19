@@ -226,6 +226,12 @@ DO $do$ BEGIN
     --
     --   ERROR:  must be able to SET ROLE "cleat_dispatcher"   (SQLSTATE 42501)
     --
+    -- and when the role does not exist at all the refusal is a DIFFERENT
+    -- SQLSTATE -- undefined_object, 42704, not 42501 -- so both are caught.
+    -- Catching only the first passed every run against a cluster where some
+    -- earlier superuser run had left the role behind, and failed the first
+    -- genuinely clean one.
+    --
     -- which is what re-applying this file as a non-superuser hit, against a
     -- cluster where a superuser had created the role earlier. Asking the
     -- database to do it and catching the refusal answers both questions at
@@ -233,7 +239,7 @@ DO $do$ BEGIN
     -- PostgreSQL 16's WITH SET.
     BEGIN
         EXECUTE 'ALTER FUNCTION admin.claim_workflows(text, text[], integer) OWNER TO cleat_dispatcher';
-    EXCEPTION WHEN insufficient_privilege THEN
+    EXCEPTION WHEN insufficient_privilege OR undefined_object THEN
         RAISE NOTICE 'cannot give the function to cleat_dispatcher (SQLSTATE %); it keeps the migrating role as its owner and will not see across tenants. Use --claim-strategy=rotate, which needs no exemption.', SQLSTATE;
     END;
 END $do$;
