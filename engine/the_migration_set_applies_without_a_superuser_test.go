@@ -265,12 +265,15 @@ func TestTheMigrationSetAppliesWithoutASuperuser(t *testing.T) {
 		}
 	})
 
-	t.Run("the cross-tenant function exists and reports itself unavailable", func(t *testing.T) {
+	t.Run("the cross-tenant function is created despite the missing role", func(t *testing.T) {
 		// 023 degrades rather than aborting, and what it leaves behind is
-		// deliberate: the function exists, owned by the migrating role, so
-		// CheckCrossTenantCapability reports "its owner does not have
-		// BYPASSRLS" -- true, and a better thing to tell an RDS operator than
-		// "apply 023", a file they cannot apply.
+		// deliberate: the function exists, owned by the migrating role.
+		//
+		// The worker no longer CALLS it -- the widened claim is retired and
+		// every loop goes through the per-tenant rotation -- so what this
+		// asserts is narrower than it was: that a migration which cannot
+		// create its role still applies. The subtest that checked the
+		// capability probe's wording went with the probe.
 		var owner string
 		var ownerBypass bool
 		err := db.QueryRow(`
@@ -284,16 +287,6 @@ func TestTheMigrationSetAppliesWithoutASuperuser(t *testing.T) {
 		if ownerBypass {
 			t.Errorf("admin.claim_workflows is owned by %s, which has BYPASSRLS; "+
 				"that cannot happen on a platform where no superuser could grant it", owner)
-		}
-
-		cap := NewPostgresStore(db).CheckCrossTenantCapability(ctx)
-		if cap.Claim {
-			t.Error("the capability probe reports the cross-tenant claim as available " +
-				"on a database whose function owner has no exemption")
-		}
-		if !strings.Contains(cap.ClaimReason, "BYPASSRLS") {
-			t.Errorf("the probe's reason does not name the missing attribute, so an "+
-				"operator cannot tell this from a missing migration: %q", cap.ClaimReason)
 		}
 	})
 }

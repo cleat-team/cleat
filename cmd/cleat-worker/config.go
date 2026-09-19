@@ -471,16 +471,8 @@ var (
 		"Set false to run this worker against its own tenant only. A worker reports on both loops at startup "+
 		"which mechanism it actually has, so a half-completed setup says so rather than running silently "+
 		"single-tenant.")
-	claimStrategy = flag.String("claim-strategy", claimStrategyRotate,
-		"How --claim-across-tenants claims work: `rotate` polls tenants in turn, each getting a bounded "+
-			"share of the batch, using the same per-tenant claim the single-tenant path runs -- it needs NO "+
-			"database-side grant, which is what makes multi-tenant dispatch possible on managed PostgreSQL, "+
-			"where BYPASSRLS cannot be granted at all. `global` is the older admin.claim_workflows path: one "+
-			"query per tick regardless of tenant count, which is faster and is also why one tenant's backlog "+
-			"can take the whole batch. `global` is kept as the way back while `rotate` proves itself, and is "+
-			"expected to be retired.")
 	claimTenantsPerTick = flag.Int("claim-tenants-per-tick", defaultClaimTenantsPerTick,
-		"With --claim-strategy=rotate, the most tenants one dispatch tick will poll. Unserved tenants are "+
+		"The most tenants one dispatch tick will poll when claiming across tenants. Unserved tenants are "+
 			"not skipped -- the rotation cursor resumes past them on the next tick -- so this bounds queries "+
 			"per tick rather than which tenants get served. 0 uses the default.")
 	maxWorkflowDuration  = flag.Duration("max-workflow-duration", 0, "CEILING on wall-clock duration for ONE workflow execution segment (0 = no limit); a workflow that suspends and resumes gets a fresh deadline each time. Workflows exceeding it are cancelled and fail with a timeout error. A tenant may set a LOWER value in tenant_settings, and a single run a lower one still at start; neither can raise it. With 0 here the operator sets no bound, so a tenant's value stands alone -- which is how a deployment that never set this flag can still give one tenant a deadline. cleat#1117.")

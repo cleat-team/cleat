@@ -901,7 +901,7 @@ tenant's workflows never execute.
 superuser can grant, and one managed PostgreSQL cannot grant at all. Turning
 that on had to be a deliberate act, so it was off.
 
-[`--claim-strategy=rotate`](#--claim-strategy), the default, asks nothing of the
+[The per-tenant mechanism](#how-cross-tenant-work-is-served) asks nothing of the
 deployment: it reads the tenant list from `admin.tenants`, which carries no
 row-level security, and then does the per-tenant work under each tenant's own
 RLS context. Nothing is exempt from a policy and nothing has to be granted — at
@@ -922,13 +922,11 @@ its **own** tenant, so the widened view lasts exactly as long as the claim;
 everything downstream of it -- event history, state, child workflows, schedules
 -- is tenant-scoped again immediately.
 
-**How this is done is [`--claim-strategy`](#--claim-strategy), and the default
-needs no grant for either half.** The table below describes what the `global`
-strategy requires; `rotate`, the default, requires none of it -- not for the
-claim and not for the due-schedule read.
-
-So the flag is still off by default, but what turning it on asks of the
-deployment depends on the strategy.
+**It needs no grant for either half.** The table below is what the *retired*
+widened query required; the mechanism that replaced it requires none of it —
+not for the claim and not for the due-schedule read. It is kept because a
+deployment may still carry those grants, and because `admin.in_flight_workflow_ids`
+(the plugin sweep, migration 073) still uses the same `cleat_dispatcher` role.
 
 | dialect | what the deployment must do |
 |---------|-----------------------------|
@@ -944,19 +942,17 @@ wants while the store says what is actually possible, and those can disagree.
 
 A missing grant therefore narrows a worker rather than stopping it.
 
-### --claim-strategy
+### How cross-tenant work is served
 
-| Type | Default | Description |
-|------|---------|-------------|
-| string | `rotate` | How `--claim-across-tenants` claims work: `rotate` or `global` |
+Not a flag — there is one mechanism, and this is what it does.
 
-**`rotate`** covers both loops, by the same two-phase method: read the tenant
-list from `admin.tenants`, then do the per-tenant work through a store scoped to
-that tenant.
+Both loops use the same two-phase method: read the tenant list from
+`admin.tenants`, then do the per-tenant work through a store scoped to that
+tenant.
 
 **The dispatch claim** polls tenants in turn, each getting a bounded share of
 the batch, running the **same** single-statement `FOR UPDATE SKIP LOCKED` claim
-the single-tenant path runs with a tenant predicate added.
+the single-tenant path runs, with a tenant predicate added.
 
 **The due-schedule read covers every tenant on every tick**, and that difference
 is deliberate. Work that waits a tick is work that waits a tick; a cron schedule
@@ -974,37 +970,27 @@ own RLS context.
 
 That is what makes multi-tenant dispatch possible on **managed PostgreSQL**.
 `BYPASSRLS` can only be granted by a true superuser, and RDS, Cloud SQL and
-Azure do not have one -- AWS documents the RDS master role as
-`LOGIN NOSUPERUSER INHERIT CREATEDB CREATEROLE`. Applying `023` as a role of
-that shape fails:
+Azure do not have one — AWS documents the RDS master role as
+`LOGIN NOSUPERUSER INHERIT CREATEDB CREATEROLE`.
 
-```
-ERROR:  permission denied to create role
-DETAIL:  Only roles with the BYPASSRLS attribute may create roles with the
-         BYPASSRLS attribute.
-```
+It is also **fair**. The mechanism it replaced ordered
+`priority ASC, created_at` across every tenant at once, so the tenant holding
+the oldest rows won every slot until its backlog drained. Now a tenant with
+10,000 queued runs takes its share of each batch and no more, and the rotation
+cursor — worker-local, no shared table — resumes past the tenants it served so
+the rest are reached on later ticks.
 
-`rotate` is also **fair**. `global` orders `priority ASC, created_at` across
-every tenant at once, so the tenant holding the oldest rows wins every slot
-until its backlog drains. Under `rotate` a tenant with 10,000 queued runs takes
-its share of each batch and no more, and the rotation cursor -- worker-local, no
-shared table -- resumes past the tenants it served so the rest are reached on
-later ticks.
-
-**`global`** is the older `admin.claim_workflows` path: one query per tick
-regardless of tenant count. That is faster, and is also exactly why one tenant's
-backlog can take the whole batch. It is kept as the way back while `rotate`
-proves itself and is **expected to be retired**.
-
-An unrecognised value is refused at startup rather than defaulted — an operator
-who typed `globl` to get the old mechanism would otherwise silently get the new
-one.
+> **Retired: `--claim-strategy`.** It selected between this and
+> `admin.claim_workflows`, the older single widened query behind a `BYPASSRLS`
+> role. That existed to keep the old mechanism reachable while this one proved
+> itself. The flag is gone, and so is the path it selected; the SQL functions
+> remain in the schema for now and nothing calls them.
 
 ### --claim-tenants-per-tick
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `16` | With `--claim-strategy=rotate`, the most tenants one dispatch tick will poll |
+| int | `16` | The most tenants one dispatch tick will poll when claiming across tenants |
 
 The rotating claim trades one query per tick for one enumeration plus up to *k*
 claims, so *k* needs a ceiling that is not the tenant count: a deployment with

@@ -114,15 +114,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// REFUSED rather than defaulted. A misspelt --claim-strategy that fell
-	// through to "rotate" would look like it worked, and the operator who
-	// typed --claim-strategy=globl to get the old mechanism back would get the
-	// new one instead -- which is the opposite of what the flag is for.
-	if err := validateClaimStrategy(*claimStrategy); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
 	// Before anything else, and before any database is needed: --verify-backend
 	// answers "does this binary have the wasmtime backend?" and exits.
 	if *verifyBackend {
@@ -1523,7 +1514,6 @@ func main() {
 		storeFactory:                     factory,
 		taskQueues:                       taskQueues,
 		claimAcrossTenants:               *claimAcrossTenants,
-		claimStrategy:                    *claimStrategy,
 		claimTenantsPerTick:              *claimTenantsPerTick,
 		concurrency:                      *concurrency,
 		maxReclaimPerTick:                *maxReclaimPerTick,

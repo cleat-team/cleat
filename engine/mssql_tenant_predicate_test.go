@@ -141,22 +141,6 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select step, checksum from event_history where workflow_id = @p1 order by step",
 		Reason: scopedByCaller,
 	},
-	// Moved from c73d2d0f2d8b when cleat#1090 added started_at to the claim's
-	// SET list (#1094). Re-made rather than swapped: the addition changes no
-	// WHERE clause and no row selection, so "deliberately cross-tenant" still
-	// describes this statement for the same reason it did before.
-	// Re-made again at cleat#1186, which added the claimable-concurrency-key
-	// filter to this statement's WHERE clause. Unlike #1094 above, this one DOES
-	// change row selection, so the reason was re-checked rather than carried:
-	// the added predicate correlates the key to the candidate row's OWN tenant
-	// (ck.tenant_id = workflow_instances.tenant_id), so it can only ever remove
-	// rows from the result, never admit a row from a tenant this statement would
-	// not already have returned. The statement is still deliberately
-	// cross-tenant, and still gated on cleat_admin membership in Go.
-	"mssql_lifecycle.go:claimWorkflowsAcrossTenantsOnce#949d6280509b": {
-		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
-		Reason: deliberatelyCrossTenant,
-	},
 	"mssql_lifecycle.go:heartbeatOnce#06ee287986f2": {
 		SQL:    "update workflow_instances set heartbeat_at = sysutcdatetime() where id = @p1 a",
 		Reason: scopedByCaller,
@@ -229,18 +213,6 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	"mssql_schedules.go:compactHistoryOnce#a78ab9d633bc": {
 		SQL:    "update workflow_instances set compaction_state = @p2, compaction_step = @p3, c",
 		Reason: scopedByCompactionSweep,
-	},
-	// DIGEST MOVED IN cleat#1702, AND THE REASON IS RESTATED RATHER THAN
-	// CARRIED. The column list changed `enabled` to `disabled_at` when
-	// workflow_schedules' retirement spelling converted (migration 081). The
-	// statement is the CROSS-TENANT due read and must not be scoped -- that is
-	// what it exists for, and it is why the worker can fire cron for every
-	// tenant from one process. Re-checked against the new text: the SELECT
-	// carries no tenant predicate and takes no tenant parameter, exactly as
-	// before, and the conversion touched only which column says "retired".
-	"mssql_schedules.go:GetDueSchedulesAcrossTenants#1cce8b9e4e94": {
-		SQL:    "select name, def_name, entry_point, cron_expression, input, disabled_at, next_",
-		Reason: deliberatelyCrossTenant,
 	},
 	"mssql_signals_promises.go:GetChildResult#18eaf4c5f15d": {
 		SQL:    "select isnull(result, '{}'), status, error_msg from workflow_instances where ",

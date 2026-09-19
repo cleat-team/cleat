@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -106,7 +108,6 @@ func newRotatingWorker(t *testing.T, backlog map[string]int) (*Worker, *tenantSt
 	// than short-circuiting one of them to the worker's own store.
 	w.storeTenantID = ""
 	w.claimAcrossTenants = true
-	w.claimStrategy = claimStrategyRotate
 	return w, factory, ls
 }
 
@@ -262,51 +263,6 @@ func TestARotatingClaimRefusesWhatItCannotDo(t *testing.T) {
 	})
 }
 
-// claimGeneral prefers the rotation and falls back to the widened query only
-// when it cannot rotate.
-func TestClaimGeneralPrefersTheRotation(t *testing.T) {
-	t.Run("rotates when it can", func(t *testing.T) {
-		w, _, ls := newRotatingWorker(t, map[string]int{"a": 5, "b": 5})
-		if _, err := w.claimGeneral(4); err != nil {
-			t.Fatalf("claimGeneral: %v", err)
-		}
-		if ls.lists != 1 {
-			t.Errorf("tenant list read %d times; want 1 -- claimGeneral did not take the rotating path", ls.lists)
-		}
-	})
-
-	t.Run("honours claim-strategy=global", func(t *testing.T) {
-		w, _, ls := newRotatingWorker(t, map[string]int{"a": 5, "b": 5})
-		w.claimStrategy = claimStrategyGlobal
-		// The listing store is not a CrossTenantClaimer, so claimGeneral falls
-		// through to the scoped claim. What matters is that it never
-		// enumerated tenants: the operator asked for the other mechanism.
-		if _, err := w.claimGeneral(4); err != nil {
-			t.Fatalf("claimGeneral: %v", err)
-		}
-		if ls.lists != 0 {
-			t.Errorf("tenant list read %d times under claim-strategy=global; want 0", ls.lists)
-		}
-	})
-}
-
-// validateClaimStrategy accepts the two mechanisms and refuses anything else.
-//
-// A misspelt strategy that fell through to the default would hand an operator
-// asking for `global` the very mechanism they were trying to opt out of.
-func TestAnUnknownClaimStrategyIsRefused(t *testing.T) {
-	for _, ok := range []string{claimStrategyRotate, claimStrategyGlobal} {
-		if err := validateClaimStrategy(ok); err != nil {
-			t.Errorf("validateClaimStrategy(%q) = %v; want accepted", ok, err)
-		}
-	}
-	for _, bad := range []string{"", "globl", "Rotate", "round-robin"} {
-		if err := validateClaimStrategy(bad); err == nil {
-			t.Errorf("validateClaimStrategy(%q) = nil; want refused", bad)
-		}
-	}
-}
-
 // Cross-tenant dispatch is ON by default.
 //
 // The doc guard ties the documented default to the code, and would not notice
@@ -315,10 +271,11 @@ func TestAnUnknownClaimStrategyIsRefused(t *testing.T) {
 // asked for that, is a non-default tenant's workflows sitting unexecuted with
 // nothing to say why.
 //
-// The reason it was ever off was the grant. admin.claim_workflows needs a
+// The reason it was ever off was the grant. admin.claim_workflows needed a
 // BYPASSRLS owner, which only a superuser can grant and managed PostgreSQL
-// cannot grant at all, so enabling it had to be deliberate. The rotating
-// strategy asks nothing of the deployment, so that reason is gone.
+// cannot grant at all, so enabling it had to be deliberate. The per-tenant
+// mechanism that replaced it asks nothing of the deployment, so that reason is
+// gone -- along with the mechanism itself.
 func TestCrossTenantDispatchIsOnByDefault(t *testing.T) {
 	f := flag.Lookup("claim-across-tenants")
 	if f == nil {
@@ -327,19 +284,111 @@ func TestCrossTenantDispatchIsOnByDefault(t *testing.T) {
 	if f.DefValue != "true" {
 		t.Errorf("--claim-across-tenants defaults to %q, want \"true\". If this was "+
 			"deliberate, the reason belongs here: the flag was off only because the "+
-			"cross-tenant claim needed a BYPASSRLS grant, and --claim-strategy=rotate "+
-			"needs none.", f.DefValue)
+			"cross-tenant claim needed a BYPASSRLS grant, and the per-tenant rotation "+
+			"that replaced it needs none.", f.DefValue)
 	}
 
-	// And the strategy that makes it grant-free must be the default too --
-	// defaulting the flag on while defaulting the strategy to `global` would
-	// turn a feature that asks nothing of the deployment into one that fails
-	// on every database without 023.
-	s := flag.Lookup("claim-strategy")
-	if s == nil {
-		t.Fatal("--claim-strategy no longer exists")
+	// --claim-strategy is GONE, and its absence is asserted rather than
+	// assumed. It existed to keep the widened query reachable while the
+	// rotation proved itself; leaving the flag behind after retiring one of
+	// its two values would leave an operator a knob with one position, and a
+	// `global` that silently did something else.
+	if flag.Lookup("claim-strategy") != nil {
+		t.Error("--claim-strategy still exists; the widened query it selected is retired, " +
+			"so the flag has nothing left to choose between")
 	}
-	if s.DefValue != claimStrategyRotate {
-		t.Errorf("--claim-strategy defaults to %q, want %q", s.DefValue, claimStrategyRotate)
+}
+
+// Both loops go through the rotation when --claim-across-tenants is on, and
+// through the worker's own store when it is off.
+//
+// This replaces two tests that asserted a CHOICE between mechanisms --
+// "prefers the rotation", "honours claim-strategy=global". There is one
+// mechanism now, so what is left to assert is that the flag still decides
+// whether other tenants are served at all, which is the half of those tests
+// that outlived --claim-strategy.
+func TestBothLoopsUseTheRotationOnlyWhenAsked(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		enabled   bool
+		wantLists int
+	}{
+		{"flag on: the tenant list is read", true, 1},
+		{"flag off: it is not", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("claim", func(t *testing.T) {
+				w, _, ls := newRotatingWorker(t, map[string]int{"a": 5, "b": 5})
+				w.claimAcrossTenants = tc.enabled
+				if _, err := w.claimGeneral(4); err != nil {
+					t.Fatalf("claimGeneral: %v", err)
+				}
+				if ls.lists != tc.wantLists {
+					t.Errorf("tenant list read %d times, want %d", ls.lists, tc.wantLists)
+				}
+			})
+			t.Run("schedules", func(t *testing.T) {
+				w, _, ls := newRotatingWorker(t, map[string]int{"a": 0, "b": 0})
+				w.claimAcrossTenants = tc.enabled
+				if _, err := w.dueSchedules(); err != nil {
+					t.Fatalf("dueSchedules: %v", err)
+				}
+				if ls.lists != tc.wantLists {
+					t.Errorf("tenant list read %d times, want %d", ls.lists, tc.wantLists)
+				}
+			})
+		})
 	}
+}
+
+// The startup report says which mode the worker is actually in, for both loops.
+//
+// It used to report on two mechanisms and the grants one of them needed. With
+// the widened query retired there is one question left -- can this worker serve
+// other tenants at all -- and it is a property of the worker rather than of a
+// migration. The half that mattered is preserved: silence is not the only
+// evidence, and a narrowed worker says so before its loops begin.
+func TestTheStartupReportSaysWhetherOtherTenantsAreServed(t *testing.T) {
+	report := func(t *testing.T, withFactory bool) string {
+		t.Helper()
+		var buf bytes.Buffer
+		w, _, _ := newRotatingWorker(t, map[string]int{"a": 0})
+		if !withFactory {
+			w.storeFactory = nil
+		}
+		w.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		w.reportCrossTenantCapability()
+		return buf.String()
+	}
+
+	t.Run("able: both loops reported available", func(t *testing.T) {
+		out := report(t, true)
+		for _, want := range []string{
+			"workflow claim is available by tenant rotation",
+			"due-schedule read is available by tenant rotation",
+			"no database grant is required",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the report does not mention %q:\n%s", want, out)
+			}
+		}
+		// The grant warnings went with the mechanism that needed them. On
+		// managed PostgreSQL the 024 warning fired on every healthy worker
+		// forever, pointing at a migration nobody there can apply.
+		for _, unwanted := range []string{"apply 024", "BYPASSRLS", "023"} {
+			if strings.Contains(out, unwanted) {
+				t.Errorf("the report still mentions %q, which no loop needs now:\n%s", unwanted, out)
+			}
+		}
+	})
+
+	t.Run("unable: said once, with the reason", func(t *testing.T) {
+		out := report(t, false)
+		if !strings.Contains(out, "cannot serve other tenants") {
+			t.Errorf("a worker that cannot rotate was not told so:\n%s", out)
+		}
+		if !strings.Contains(out, "no store factory") {
+			t.Errorf("the report does not carry the reason:\n%s", out)
+		}
+	})
 }
