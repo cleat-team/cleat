@@ -1398,11 +1398,25 @@ func main() {
 	if *migrateDBURL != "" {
 		budget.Migrate = migratePoolMaxConns
 	}
-	if tenantPools == nil {
-		// No tenant pools are built without --tenant-isolation=role, so the
-		// per-tenant term does not apply and must not be reported as if it did.
-		budget.TenantPerPool = 0
-	}
+	// WHO ACTUALLY HAS A POOL PER TENANT, asked rather than assumed.
+	//
+	// This used to read `if tenantPools == nil { budget.TenantPerPool = 0 }`,
+	// and plugin.TenantPools is built only under --tenant-isolation=role,
+	// which is PostgreSQL-only. So the census reported the per-tenant term as
+	// ZERO on MySQL and SQL Server -- the two dialects that ALWAYS have it,
+	// because their factories are constructed with .WithTenantPoolMaxConns()
+	// and size a pool per tenant from the same flag.
+	//
+	// The term was suppressed precisely where it is largest, which is the
+	// defect cleat#1486 exists for, recurring in the one term a worker serving
+	// many tenants notices first.
+	//
+	// Two independent sources, and either is enough: the role-isolation pools,
+	// and a factory that pools per tenant by construction. On PostgreSQL with
+	// --tenant-isolation=role only the first applies; on SQL Server and MySQL
+	// only the second; and both read the same flag, so there is nothing to
+	// reconcile.
+	budget.TenantPerPool = perTenantPoolCeiling(tenantPools, factory, *tenantPoolMaxConns)
 	logger.InfoContext(ctx, "database connection budget",
 		"worker_id", workerID, "pools", budget.Describe(),
 		"configured_budget", *connectionBudgetFlag,

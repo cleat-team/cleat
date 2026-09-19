@@ -499,11 +499,22 @@ var (
 			"and the non-overridable floor. A malformed entry stops the worker at boot.")
 
 	benchSvcURL        = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
-	tenantPoolMaxConns = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool, used by --tenant-isolation=role. PostgreSQL only: plugin.TenantPools authenticates as a PostgreSQL login role (cleat#1307). The help text said MySQL/MSSQL, which was the opposite of the implementation.")
-	logLevel           = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-	enableAdminAPI     = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
-	verifyBackend      = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
-	listPlugins        = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
+	tenantPoolMaxConns = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool. "+
+		"It governs THREE things, and the help text has twice claimed one of them:\n"+
+		"  * PostgreSQL with --tenant-isolation=role: plugin.TenantPools, which authenticates as a "+
+		"PostgreSQL login role (cleat#1307).\n"+
+		"  * SQL Server, always: MSSQLStoreFactory pools per tenant because RLS reads SESSION_CONTEXT, "+
+		"set per CONNECTION, so a shared pool cannot scope a tenant.\n"+
+		"  * MySQL, always: MySQLStoreFactory gives each tenant its own database.\n"+
+		"An earlier text said MySQL/MSSQL, a later one said `PostgreSQL only` and called the first the "+
+		"opposite of the implementation. Both were half right, which is how the connection census came "+
+		"to report the per-tenant term as zero on the two dialects that always have it.\n"+
+		"A pool with no traffic drains to nothing: every one is built with a 5-minute "+
+		"ConnMaxLifetime, so this is a ceiling for a tenant EXECUTING work, not a resting cost.")
+	logLevel       = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	enableAdminAPI = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
+	verifyBackend  = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
+	listPlugins    = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
 )
 
 func applyChildBindingOverrideEnv() {

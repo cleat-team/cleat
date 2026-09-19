@@ -982,3 +982,8 @@ func (s *MySQLStore) GetChildCompletedAtMs(ctx context.Context, runID string) (i
 	}
 	return completedAt.Time.UnixMilli(), true, nil
 }
+
+// TenantPoolMaxConns reports this factory's per-tenant pool ceiling. See
+// engine.PerTenantPooler: each tenant has its own database here, so its own
+// pool.
+func (f *MySQLStoreFactory) TenantPoolMaxConns() int { return f.tenantPoolMaxConns }
