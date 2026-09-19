@@ -96,6 +96,7 @@ var seededByDropTenantFixture = []string{
 	"public.concurrency_keys",
 	"public.event_history",
 	"public.idempotency_keys",
+	"public.queue_holders",
 	"public.workflow_defs",
 	"public.workflow_instances",
 	"public.workflow_promises",

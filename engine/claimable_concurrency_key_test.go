@@ -7,9 +7,11 @@ import (
 	"testing"
 )
 
-// The claim path's concurrency-key filter is written out ELEVEN TIMES -- three
-// statements in store_lifecycle.go, four each in mysql_ and mssql_lifecycle.go.
-// This test is the reason that is safe.
+// The claim path's concurrency-key filter is written out many times over --
+// two arms, at different site counts: the mutex arm (a bare key is held by at
+// most one run) appears at NINE sites, the registered-queue arm (a declared
+// queue admits at most concurrency_limit holders) at SIX. This test is the
+// reason that duplication is safe.
 //
 // # Why it is not one shared constant
 //
@@ -17,11 +19,11 @@ import (
 // That broke TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate and its
 // SQL Server twin, and the header of mssql_tenant_predicate_test.go says why in
 // so many words -- "It also cannot see SQL built by concatenation." Those guards
-// read each raw string literal on its own. Splicing turned eleven whole
-// statements into twenty-two fragments, so the half holding `workflow_instances`
-// no longer held the `tenant_id = @pN` that justified it, and the guard that is
-// the WHOLE of tenant isolation on the two dialects without row-level security
-// started reporting violations it could not evaluate.
+// read each raw string literal on its own. Splicing turned whole statements
+// into fragments, so the half holding `workflow_instances` no longer held the
+// `tenant_id = @pN` that justified it, and the guard that is the WHOLE of
+// tenant isolation on the two dialects without row-level security started
+// reporting violations it could not evaluate.
 //
 // A predicate cannot be shared by concatenation and checked by those guards at
 // the same time. The guards win: they protect tenant isolation, this protects
@@ -34,7 +36,17 @@ import (
 // predicate exactly". If one site gains the filter and another does not, nothing
 // errors: the count simply stops describing what is claimable, or one claim path
 // hands out a run another would have deferred. No statement fails, no row is
-// malformed. That is what makes eleven copies worth a guard.
+// malformed. That is what makes every copy worth a guard.
+//
+// # Two arms, two site counts
+//
+// cleat#1116 split the predicate. The mutex arm keeps the original shape --
+// `concurrency_key_hash IS NULL OR NOT EXISTS (…)` -- and still appears at the
+// count/claim sites *and* at the sticky claim path, which was
+// deliberately left mutex-only (it is an orthogonal routing path, not queue
+// admission). The registered arm -- `count(queue_holders) < concurrency_limit`
+// -- appears only where a declared queue is actually being admitted against:
+// CountRunnableWorkflows and ClaimWorkflows, one each per dialect.
 func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T) {
 	// Ordered, not a map: Go randomises map iteration, which would make WHICH
 	// file supplies the canonical copy vary per run -- and with it the wording
@@ -48,69 +60,102 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	// edit; the guard's question -- do the remaining sites all spell it the
 	// same way -- is unchanged.
 	files := []struct {
-		name string
-		want int
+		name           string
+		mutexWant      int
+		registeredWant int
 	}{
-		{"store_lifecycle.go", 3},
-		{"mysql_lifecycle.go", 3},
-		{"mssql_lifecycle.go", 3},
+		{"store_lifecycle.go", 3, 2},
+		{"mysql_lifecycle.go", 3, 2},
+		{"mssql_lifecycle.go", 3, 2},
 	}
 
 	// The clock is the one licensed difference between dialects.
 	clock := regexp.MustCompile(`now\(\)|NOW\(6\)|SYSUTCDATETIME\(\)`)
 	space := regexp.MustCompile(`\s+`)
 
-	// Grab from "AND (workflow_instances.concurrency_key_hash" to the closing
-	// "))" that ends the NOT EXISTS arm.
-	// Requires the expires_at test, which is what distinguishes the DEFERRAL
-	// predicate from other clauses that also mention concurrency_key_hash.
+	// The mutex arm names the workflow row `w.` at the count/claim sites (which
+	// LEFT JOIN queues and alias it) and `workflow_instances.` at the
+	// sticky sites (which do not). Normalise both to `w.` so the
+	// copies compare equal.
+	//
+	// Grab from "concurrency_key_hash IS NULL OR NOT EXISTS" to the ")" that
+	// closes the NOT EXISTS arm. Requires the expires_at test, which is what
+	// distinguishes the DEFERRAL predicate from other clauses that also mention
+	// concurrency_key_hash.
 	//
 	// cleat#1186 added one: SQL Server's claim carries
 	// `AND (concurrency_key_hash IS NULL OR EXISTS (... k.workflow_id = ...id))`
 	// to require that a run holds its OWN key. That is a different question --
 	// "do I hold it" rather than "is it held by someone else, right now" -- and
-	// without this the guard counted it as a fifth copy in that file and failed.
-	// It failing was correct: two clauses that look alike and mean different
-	// things is exactly what it exists to notice. The fix is to say which one
-	// this test is about, not to loosen it.
-	extract := regexp.MustCompile(`(?s)AND \(workflow_instances\.concurrency_key_hash IS NULL\s*OR NOT EXISTS.*?ck\.expires_at.*?workflow_instances\.id\)\)`)
+	// without the expires_at discriminator the guard counted it as an extra copy
+	// and failed. It failing was correct: two clauses that look alike and mean
+	// different things is exactly what it exists to notice.
+	mutex := regexp.MustCompile(`(?s)concurrency_key_hash IS NULL\s*OR NOT EXISTS.*?workflow_id <>\s*w\.id\)`)
 
-	var canon string
-	var canonFrom string
-	total := 0
+	// The registered arm: the subquery counting live queue_holders, compared
+	// against the declared limit. Grabbed from the opening paren of the count
+	// subquery through the "< q.concurrency_limit)" comparison.
+	registered := regexp.MustCompile(`(?s)\(SELECT count\(\*\) FROM queue_holders qh\s+WHERE.*?< q\.concurrency_limit\s*\)`)
+
+	var mutexCanon, regCanon, mutexFrom, regFrom string
+	mutexTotal, regTotal := 0, 0
 
 	for _, f := range files {
-		name, want := f.name, f.want
-		src, err := os.ReadFile(name)
+		raw, err := os.ReadFile(f.name)
 		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+			t.Fatalf("read %s: %v", f.name, err)
 		}
-		hits := extract.FindAllString(string(src), -1)
-		if len(hits) != want {
-			t.Errorf("%s: found %d copies of the claimable-concurrency-key predicate, expected %d.\n\n"+
+		src := strings.ReplaceAll(string(raw), "workflow_instances.", "w.")
+
+		mh := mutex.FindAllString(src, -1)
+		if len(mh) != f.mutexWant {
+			t.Errorf("%s: found %d copies of the mutex arm, expected %d.\n\n"+
 				"A claim or count statement either lost the filter or gained one that does not "+
 				"match the shape this test looks for. Both are the divergence this test exists "+
-				"to catch -- see the comment above.", name, len(hits), want)
+				"to catch -- see the comment above.", f.name, len(mh), f.mutexWant)
 			continue
 		}
-		total += len(hits)
-
-		for i, h := range hits {
+		mutexTotal += len(mh)
+		for i, h := range mh {
 			norm := space.ReplaceAllString(clock.ReplaceAllString(h, "<CLOCK>"), " ")
-			if canon == "" {
-				canon, canonFrom = norm, name
+			if mutexCanon == "" {
+				mutexCanon, mutexFrom = norm, f.name
 				continue
 			}
-			if norm != canon {
-				t.Errorf("%s copy %d differs from the one in %s.\n\n  this: %s\n  that: %s\n\n"+
+			if norm != mutexCanon {
+				t.Errorf("%s mutex copy %d differs from the one in %s.\n\n  this: %s\n  that: %s\n\n"+
 					"Every site must carry the same predicate modulo the dialect clock "+
-					"function. Divergence here is silent at runtime.", name, i+1, canonFrom, norm, canon)
+					"function. Divergence here is silent at runtime.", f.name, i+1, mutexFrom, norm, mutexCanon)
+			}
+		}
+
+		rh := registered.FindAllString(src, -1)
+		if len(rh) != f.registeredWant {
+			t.Errorf("%s: found %d copies of the registered-queue arm, expected %d.\n\n"+
+				"A count or claim statement either lost the queue-limit filter or gained one "+
+				"that does not match the shape this test looks for.", f.name, len(rh), f.registeredWant)
+			continue
+		}
+		regTotal += len(rh)
+		for i, h := range rh {
+			norm := space.ReplaceAllString(clock.ReplaceAllString(h, "<CLOCK>"), " ")
+			if regCanon == "" {
+				regCanon, regFrom = norm, f.name
+				continue
+			}
+			if norm != regCanon {
+				t.Errorf("%s registered copy %d differs from the one in %s.\n\n  this: %s\n  that: %s\n\n"+
+					"Every site must carry the same predicate modulo the dialect clock "+
+					"function. Divergence here is silent at runtime.", f.name, i+1, regFrom, norm, regCanon)
 			}
 		}
 	}
 
-	if total != 9 {
-		t.Errorf("found %d sites in total, expected 9", total)
+	if mutexTotal != 9 {
+		t.Errorf("found %d mutex-arm sites in total, expected 9", mutexTotal)
+	}
+	if regTotal != 6 {
+		t.Errorf("found %d registered-arm sites in total, expected 6", regTotal)
 	}
 
 	// The original design note, kept as an assertion because it is the property
@@ -119,12 +164,12 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	// would shift every index after its insertion point, at four sites per
 	// dialect, and the failure would be a query that RUNS and matches the wrong
 	// rows.
-	if regexp.MustCompile(`\$\d|@p\d|\?`).MatchString(canon) {
-		t.Errorf("the predicate has acquired a placeholder:\n  %s\n\n"+
-			"It must reference only columns and literals. See the comment above.", canon)
+	if regexp.MustCompile(`\$\d|@p\d|\?`).MatchString(mutexCanon + regCanon) {
+		t.Errorf("a predicate arm has acquired a placeholder:\n  %s\n  %s\n\n"+
+			"It must reference only columns and literals. See the comment above.", mutexCanon, regCanon)
 	}
-	if !strings.Contains(canon, "ck.tenant_id = workflow_instances.tenant_id") {
-		t.Errorf("the predicate no longer correlates the key to the candidate row's tenant:\n  %s\n\n"+
-			"Without it a key held by one tenant can defer another tenant's run.", canon)
+	if !strings.Contains(mutexCanon, "ck.tenant_id = w.tenant_id") {
+		t.Errorf("the mutex arm no longer correlates the key to the candidate row's tenant:\n  %s\n\n"+
+			"Without it a key held by one tenant can defer another tenant's run.", mutexCanon)
 	}
 }

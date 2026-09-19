@@ -218,6 +218,22 @@ func (s *MySQLStore) beginTx(ctx context.Context) (*sql.Tx, error) {
 	return tx, nil
 }
 
+// beginTxReadCommitted starts a claim transaction at READ COMMITTED isolation.
+//
+// cleat#1116. MySQL's default REPEATABLE READ fixes a consistent-read snapshot
+// at the transaction's first read, so a plain SELECT count(*) of queue_holders
+// taken after the queues row is locked would still read the stale snapshot and
+// two concurrent claims could both see "one slot free" and both insert. READ
+// COMMITTED makes each statement read the latest committed rows, so the count
+// under the queues lock is the authoritative number of holders.
+func (s *MySQLStore) beginTxReadCommitted(ctx context.Context) (*sql.Tx, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return nil, fmt.Errorf("begin tx read committed: %w", err)
+	}
+	return tx, nil
+}
+
 // inClausePlaceholders returns a comma-separated list of n "?" placeholders
 // for use in MySQL IN (...)-clauses.
 func inClausePlaceholders(n int) string {
@@ -719,6 +735,12 @@ func (s *MySQLStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflo
 	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE workflow_id = ? AND tenant_id = ?`, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("release workflow concurrency keys: %w", err)
+	}
+	// A registered queue's slot lives in queue_holders; release it with the bare
+	// keys so a finished run frees its queue slot the same way it frees a mutex.
+	_, err = s.db.ExecContext(ctx, `DELETE FROM queue_holders WHERE workflow_id = ? AND tenant_id = ?`, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("release workflow concurrency keys: queue holders: %w", err)
 	}
 	return nil
 }

@@ -39,6 +39,7 @@ var mysqlCleanupTables = []string{
 	"workflow_promises",
 	"workflow_signals",
 	"concurrency_keys",
+	"queue_holders",
 	"idempotency_keys",
 	"event_history",
 	"workflow_memory_samples",

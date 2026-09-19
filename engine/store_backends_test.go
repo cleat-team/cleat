@@ -640,17 +640,18 @@ func TestCascadeDelete(t *testing.T) {
 	}
 }
 
-// mysqlCascadeChildTables are the five tables migrations/mysql/001_schema.sql
-// declares with a FOREIGN KEY to workflow_instances ON DELETE CASCADE.
-// Re-derive with:
+// mysqlCascadeChildTables are the tables the shipped MySQL migrations declare
+// with a FOREIGN KEY to workflow_instances ON DELETE CASCADE -- five in
+// 001_schema.sql, plus queue_holders in 093 (cleat#1116). Re-derive with:
 //
-//	grep -c "REFERENCES workflow_instances(id) ON DELETE CASCADE" migrations/mysql/001_schema.sql
+//	grep -rc "REFERENCES workflow_instances(id) ON DELETE CASCADE" migrations/mysql/*.sql
 var mysqlCascadeChildTables = []string{
 	"event_history",
 	"workflow_signals",
 	"workflow_promises",
 	"workflow_update_requests",
 	"concurrency_keys",
+	"queue_holders",
 }
 
 // addCascadeFKs adds ON DELETE CASCADE foreign keys to the test schema.
@@ -692,17 +693,17 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 	case testutil.DialectMySQL:
 		// NOTHING IS ADDED HERE, AND NOTHING IS REMOVED LATER. cleat#1364.
 		//
-		// migrations/mysql/001_schema.sql declares all five of these foreign
-		// keys with ON DELETE CASCADE already -- which is exactly what this
-		// test needs, so there was never anything to add. What the code here
-		// used to do was drop each shipped constraint and re-add an equivalent,
-		// and removeCascadeFKs then dropped it again on the way out, leaving
-		// the test database permanently without the constraints its own schema
-		// ships. Measured on a database created empty: 5 before
+		// The shipped migrations declare these foreign keys with ON DELETE
+		// CASCADE already (001_schema.sql plus queue_holders in 093) -- which is
+		// exactly what this test needs, so there was never anything to add. What
+		// the code here used to do was drop each shipped constraint and re-add an
+		// equivalent, and removeCascadeFKs then dropped it again on the way out,
+		// leaving the test database permanently without the constraints its own
+		// schema ships. Measured on a database created empty: 5 before
 		// TestCascadeDelete, 0 after, with the test PASSING.
 		//
 		// The damage landed on other tests. MySQL's DeleteCompletedWorkflows
-		// and DeleteDeadLetteredWorkflows rely on that cascade for five child
+		// and DeleteDeadLetteredWorkflows rely on that cascade for the child
 		// tables, deliberately and documented as such, so
 		// TestRetentionDeletesEveryChildRowOnPostgresAndMySQL failed its MySQL
 		// arm on every full-suite run and passed in isolation.

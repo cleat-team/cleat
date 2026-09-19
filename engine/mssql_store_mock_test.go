@@ -52,6 +52,13 @@ func TestMSSQLStore_ClaimWorkflow_Success(t *testing.T) {
 	inputJSON := `{"input":"x"}`
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
+			// Candidate SELECT (statement 1 of the multi-statement claim): one
+			// runnable row with no concurrency key, so the acquire step admits it
+			// without an INSERT.
+			match: "CONVERT(NVARCHAR(36), w.tenant_id)",
+			data:  [][]driver.Value{{"wf-1", "t-1", nil, nil, int64(0)}},
+		},
+		{
 			match: "SET status = 'running'",
 			data: [][]driver.Value{
 				{
@@ -99,6 +106,10 @@ func TestMSSQLStore_ClaimWorkflow_Success(t *testing.T) {
 
 func TestMSSQLStore_ClaimWorkflow_ScanError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "CONVERT(NVARCHAR(36), w.tenant_id)",
+			data:  [][]driver.Value{{"wf-1", "t-1", nil, nil, int64(0)}},
+		},
 		{
 			match: "SET status = 'running'",
 			err:   errors.New("scan failed"),

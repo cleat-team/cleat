@@ -53,17 +53,30 @@ func (s *MSSQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
 	}
 	var n int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT count(*) FROM workflow_instances
-		WHERE status IN ('ready', 'terminating')
-		  AND next_wake_at <= SYSUTCDATETIME()
-		  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p1, ','))
-  AND (workflow_instances.concurrency_key_hash IS NULL
-       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
-                         AND ck.tenant_id = workflow_instances.tenant_id
-                         AND ck.expires_at > SYSUTCDATETIME()
-                         AND ck.workflow_id <> workflow_instances.id))
-		  AND tenant_id = @p2
+		SELECT count(*) FROM workflow_instances w
+		LEFT JOIN queues q ON q.tenant_id = w.tenant_id AND q.name = w.concurrency_key AND q.disabled_at IS NULL
+		WHERE w.status IN ('ready', 'terminating')
+		  AND w.next_wake_at <= SYSUTCDATETIME()
+		  AND w.task_queue IN (SELECT value FROM STRING_SPLIT(@p1, ','))
+		  AND (
+		    (q.name IS NULL AND (
+		      w.concurrency_key_hash IS NULL
+		      OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+		                      WHERE ck.key_hash = w.concurrency_key_hash
+		                        AND ck.tenant_id = w.tenant_id
+		                        AND ck.expires_at > SYSUTCDATETIME()
+		                        AND ck.workflow_id <> w.id)
+		    ))
+		    OR
+		    (q.name IS NOT NULL AND (
+		      (SELECT count(*) FROM queue_holders qh
+		        WHERE qh.tenant_id = w.tenant_id
+		          AND qh.queue_name = q.name
+		          AND qh.expires_at > SYSUTCDATETIME()
+		          AND qh.workflow_id <> w.id) < q.concurrency_limit
+		    ))
+		  )
+		  AND w.tenant_id = @p2
 	`, strings.Join(s.taskQueues, ","), s.tenantID).Scan(&n)
 	return n, err
 }
@@ -109,56 +122,84 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 
 	tqParam := s.buildTaskQueueParam()
 
-	// Acquire the keys BEFORE the claim, in the same transaction.
-	//
-	// cleat#1186. The predicate in the claim asks "does anybody ELSE hold this
-	// key"; when the answer is no for two runs wanting the same key, both pass
-	// and both would be claimed. Taking the key is what makes it exclusive.
-	//
-	// THIS IS THE THIRD SHAPE, and the divergence is deliberate. PostgreSQL does
-	// it in one statement with a data-modifying CTE; MySQL does it per candidate
-	// between its two phases because it has no RETURNING. SQL Server has neither
-	// data-modifying CTEs nor a way to feed OUTPUT back into the same statement,
-	// so the acquisition is a separate INSERT ... SELECT that runs first. The
-	// UPDATE below then claims only runs that hold their own key.
-	//
-	// ROW_NUMBER is not decoration. Two candidates wanting the SAME key in one
-	// INSERT ... SELECT would both be inserted and violate the primary key --
-	// SQL Server has no per-row "ignore this conflict", so the statement would
-	// FAIL rather than the loser losing gracefully. Deduping to one row per
-	// (key_hash, tenant_id) inside the select is what turns a contended batch
-	// into a winner and a non-claim. The ordering matches the claim's own
-	// (priority, created_at), so the run that would have been claimed first is
-	// the one that gets the key.
-	//
-	// UPDLOCK/ROWLOCK/READPAST on the candidate read is what makes this safe
-	// across workers: the rows are locked by this transaction before the insert
-	// and stay locked until commit, so no other claimer sits between its own
-	// read and write on them.
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
-		SELECT c.concurrency_key_hash, c.concurrency_key, c.id,
-		       DATEADD(second, @p5, SYSUTCDATETIME()), c.tenant_id
-		FROM (
-			SELECT w.id, w.tenant_id, w.concurrency_key, w.concurrency_key_hash,
-			       ROW_NUMBER() OVER (PARTITION BY w.concurrency_key_hash, w.tenant_id
-			                          ORDER BY w.priority ASC, w.created_at) AS rn
-			FROM workflow_instances w WITH (READPAST, UPDLOCK, ROWLOCK)
-			WHERE w.status IN ('ready', 'terminating')
-			  AND w.next_wake_at <= SYSUTCDATETIME()
-			  AND w.task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
-			  AND w.tenant_id = @p4
-			  AND w.concurrency_key_hash IS NOT NULL
-			  AND NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-			                   WHERE ck.key_hash = w.concurrency_key_hash
-			                     AND ck.tenant_id = w.tenant_id)
-		) c
-		WHERE c.rn = 1
-	`, workerID, tqParam, limit, s.tenantID, int64(claimedKeyTTL.Seconds())); err != nil {
-		return nil, fmt.Errorf("claim workflows: acquire concurrency keys: %w", err)
+	// Step 1: select candidate rows, locking them UPDLOCK/READPAST (SQL Server's
+	// FOR UPDATE SKIP LOCKED) and carrying the registered flag via a LEFT JOIN.
+	// The LEFT JOIN reads queues without a lock hint, so it does not lock the
+	// queue rows -- those are locked in sorted order by the next step.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT w.id, CONVERT(NVARCHAR(36), w.tenant_id) AS tenant_id, w.concurrency_key, w.concurrency_key_hash,
+		       CASE WHEN q.name IS NOT NULL THEN 1 ELSE 0 END AS registered
+		FROM workflow_instances w WITH (READPAST, UPDLOCK, ROWLOCK)
+		LEFT JOIN queues q ON q.tenant_id = w.tenant_id AND q.name = w.concurrency_key AND q.disabled_at IS NULL
+		WHERE w.status IN ('ready', 'terminating')
+		  AND w.next_wake_at <= SYSUTCDATETIME()
+		  AND w.task_queue IN (SELECT value FROM STRING_SPLIT(@p1, ','))
+		  AND (
+		    (q.name IS NULL AND (
+		      w.concurrency_key_hash IS NULL
+		      OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+		                      WHERE ck.key_hash = w.concurrency_key_hash
+		                        AND ck.tenant_id = w.tenant_id
+		                        AND ck.expires_at > SYSUTCDATETIME()
+		                        AND ck.workflow_id <> w.id)
+		    ))
+		    OR
+		    (q.name IS NOT NULL AND (
+		      (SELECT count(*) FROM queue_holders qh
+		        WHERE qh.tenant_id = w.tenant_id
+		          AND qh.queue_name = q.name
+		          AND qh.expires_at > SYSUTCDATETIME()
+		          AND qh.workflow_id <> w.id) < q.concurrency_limit
+		    ))
+		  )
+		  AND w.tenant_id = @p2
+		ORDER BY w.priority ASC, w.created_at
+		OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
+	`, tqParam, s.tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows: select candidates: %w", err)
+	}
+	var cands []claimCandidate
+	for rows.Next() {
+		var c claimCandidate
+		var registered int
+		if err := rows.Scan(&c.id, &c.tenantID, &c.key, &c.hash, &registered); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("claim workflows: scan candidate: %w", err)
+		}
+		c.registered = registered != 0
+		cands = append(cands, c)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("claim workflows: candidates rows: %w", err)
+	}
+	rows.Close()
+
+	// Step 2: lock the registered queues among the candidate keys, sorted.
+	limits, err := s.lockRegisteredQueueLimits(ctx, tx, cands)
+	if err != nil {
+		return nil, err
 	}
 
-	rows, err := tx.QueryContext(ctx, `
+	// Step 3: acquire each candidate's key.
+	var ids []string
+	for _, c := range cands {
+		ok, err := s.acquireCandidateConcurrencyKey(ctx, tx, c, limits)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			ids = append(ids, c.id)
+		}
+	}
+	if len(ids) == 0 {
+		tx.Rollback()
+		return nil, nil
+	}
+
+	// Step 4: update the claimed rows and read them back through OUTPUT.
+	rows2, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
@@ -170,76 +211,22 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
 		       INSERTED.next_wake_at,
-		       -- CONVERT, not the raw column. SQL Server stores UNIQUEIDENTIFIER
-		       -- in a mixed-endian layout, and go-mssqldb scans it into a Go
-		       -- string as the 16 raw bytes rather than the canonical text --
-		       -- "\x11\x11..." where the caller expects
-		       -- "11111111-1111-1111-1111-111111111111". The same workaround is
-		       -- applied in ResolveTenantFromAPIKey for the same reason.
-		       --
-		       -- This was cosmetic until the worker began routing execution on
-		       -- WorkflowInstance.TenantID: 16 raw bytes are neither empty nor
-		       -- equal to the worker's own tenant, so storeForTenant tried to
-		       -- open a store for them and the factory rejected them as an
-		       -- invalid UUID -- failing every workflow on SQL Server.
 		       CONVERT(NVARCHAR(36), INSERTED.tenant_id) AS tenant_id,
 		       INSERTED.created_at,
 		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
 		       COALESCE(INSERTED.priority, 0) AS priority,
 		       INSERTED.trace_id,
 		       COALESCE(INSERTED.pending_terminal_status, '') AS pending_terminal_status
-		WHERE id IN (
-			SELECT id
-			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
-			WHERE status IN ('ready', 'terminating')
-			  AND next_wake_at <= SYSUTCDATETIME()
-			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
-  AND (workflow_instances.concurrency_key_hash IS NULL
-       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
-                         AND ck.tenant_id = workflow_instances.tenant_id
-                         AND ck.expires_at > SYSUTCDATETIME()
-                         AND ck.workflow_id <> workflow_instances.id))
-			  AND tenant_id = @p4
-			  -- Holds its own key, or has none.
-			  --
-			  -- REDUNDANT WITH THE PREDICATE BELOW, and kept deliberately --
-			  -- both were falsified to find out which does the work, and the
-			  -- answer is "either, independently":
-			  --
-			  --   invert this clause  -> still 1 of 2 claimed (the predicate
-			  --                          excluded the loser, because the
-			  --                          INSERT above is a SEPARATE EARLIER
-			  --                          STATEMENT and the predicate sees it)
-			  --   disable the INSERT  -> 0 of 2 claimed (this clause excluded
-			  --                          both, since neither holds a key)
-			  --
-			  -- That asymmetry is why the three dialects are shaped
-			  -- differently. On PostgreSQL the candidates and the predicate are
-			  -- evaluated in ONE snapshot, so the predicate cannot see the
-			  -- acquisition and an explicit "is in the acquired set" test is
-			  -- load-bearing. Here it is not, because ordinary statement
-			  -- ordering already does it.
-			  --
-			  -- Kept anyway: it states the requirement rather than relying on
-			  -- the reader deducing it from statement order, and mutual
-			  -- exclusion is worth two independent enforcements.
-			  AND (workflow_instances.concurrency_key_hash IS NULL
-			       OR EXISTS (SELECT 1 FROM concurrency_keys k
-			                   WHERE k.key_hash = workflow_instances.concurrency_key_hash
-			                     AND k.tenant_id = workflow_instances.tenant_id
-			                     AND k.workflow_id = workflow_instances.id))
-			ORDER BY priority ASC, created_at
-			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
-		)
-	`, workerID, tqParam, limit, s.tenantID)
+		WHERE id IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+		  AND tenant_id = @p3
+	`, workerID, strings.Join(ids, ","), s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
 	}
-	defer rows.Close()
+	defer rows2.Close()
 
 	var wfs []*WorkflowInstance
-	for rows.Next() {
+	for rows2.Next() {
 		var wf WorkflowInstance
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
@@ -249,7 +236,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		var traceID sql.NullString
 		var pendingTerminal sql.NullString
 
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
+		if err := rows2.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID,
 			&pendingTerminal); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
@@ -271,7 +258,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		wf.PendingTerminalStatus = pendingTerminal.String
 		wfs = append(wfs, &wf)
 	}
-	if err := rows.Err(); err != nil {
+	if err := rows2.Err(); err != nil {
 		return nil, fmt.Errorf("claim workflows rows: %w", err)
 	}
 
@@ -282,14 +269,127 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
 
-// ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
-// that are sticky to this worker. Uses the sticky_worker_id filter for
-// low-contention claiming. Returns fewer than limit if not enough sticky
-// workflows are ready. Callers should fall back to ClaimWorkflows for remaining capacity.
-// ClaimStickyWorkflows retries on errors SQL Server guarantees it rolled back --
-// a deadlock victim claimed nothing, so replaying the claim is sound. Errors
-// that leave the outcome unknown are not retried; see
-// withRollbackGuaranteedRetry (IMPROVEMENT-PLAN.md 2.26).
+func (s *MSSQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, cands []claimCandidate) (map[string]int, error) {
+	limits := map[string]int{}
+	seen := map[string]bool{}
+	var keys []string
+	for _, c := range cands {
+		if c.registered && !seen[*c.key] {
+			seen[*c.key] = true
+			keys = append(keys, *c.key)
+		}
+	}
+	if len(keys) == 0 {
+		return limits, nil
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT name, concurrency_limit FROM queues WITH (UPDLOCK, ROWLOCK)
+		WHERE tenant_id = @p1
+		  AND name IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+		  AND disabled_at IS NULL
+		ORDER BY name
+	`, s.tenantID, strings.Join(keys, ","))
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows: lock registered queues: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var limit int
+		if err := rows.Scan(&name, &limit); err != nil {
+			return nil, fmt.Errorf("claim workflows: scan queue limit: %w", err)
+		}
+		limits[name] = limit
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim workflows: queue limits rows: %w", err)
+	}
+	return limits, nil
+}
+
+func (s *MSSQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]int) (bool, error) {
+	if !c.registered {
+		if c.hash == nil {
+			return true, nil // no key at all
+		}
+		// Bare key: mutex via INSERT ... WHERE NOT EXISTS, the shape AcquireConcurrencyKey
+		// already uses -- SQL Server has no INSERT IGNORE.
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+			SELECT @p1, @p2, @p3, DATEADD(second, @p4, SYSUTCDATETIME()), @p5
+			WHERE NOT EXISTS (
+				SELECT 1 FROM concurrency_keys
+				WHERE key_hash = @p1 AND tenant_id = @p5 AND expires_at > SYSUTCDATETIME()
+			)
+		`, c.hash, c.key, c.id, int64(claimedKeyTTL.Seconds()), c.tenantID)
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: acquire concurrency key: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			return true, nil
+		}
+		// Not inserted: either this run already holds the key (a re-claim after a
+		// lost fence) or another run took it.
+		var holder string
+		err = tx.QueryRowContext(ctx,
+			`SELECT workflow_id FROM concurrency_keys WHERE key_hash = @p1 AND tenant_id = @p2`,
+			c.hash, c.tenantID).Scan(&holder)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil // released between insert and read; not ours
+		}
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: concurrency key holder: %w", err)
+		}
+		return holder == c.id, nil
+	}
+
+	// Registered queue: semaphore under the queues lock.
+	limit, ok := limits[*c.key]
+	if !ok {
+		// The candidate predicate saw it registered, but the lock step did not.
+		return false, nil
+	}
+	var selfHolds bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM queue_holders qh
+			WHERE qh.tenant_id = @p1 AND qh.queue_name = @p2 AND qh.workflow_id = @p3
+			  AND qh.expires_at > SYSUTCDATETIME()
+		) THEN 1 ELSE 0 END
+	`, c.tenantID, *c.key, c.id).Scan(&selfHolds)
+	if err != nil {
+		return false, fmt.Errorf("claim workflows: queue self-hold check: %w", err)
+	}
+	if selfHolds {
+		return true, nil
+	}
+	var held int
+	err = tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM queue_holders qh
+		WHERE qh.tenant_id = @p1 AND qh.queue_name = @p2 AND qh.expires_at > SYSUTCDATETIME()
+	`, c.tenantID, *c.key).Scan(&held)
+	if err != nil {
+		return false, fmt.Errorf("claim workflows: count queue holders: %w", err)
+	}
+	if held >= limit {
+		return false, nil // at capacity
+	}
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at)
+		SELECT @p1, @p2, @p3, DATEADD(second, @p4, SYSUTCDATETIME())
+		WHERE NOT EXISTS (
+			SELECT 1 FROM queue_holders
+			WHERE tenant_id = @p1 AND queue_name = @p2 AND workflow_id = @p3
+		)
+	`, c.tenantID, *c.key, c.id, int64(claimedKeyTTL.Seconds()))
+	if err != nil {
+		return false, fmt.Errorf("claim workflows: acquire queue holder: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	var claimed []*WorkflowInstance
 	err := withRollbackGuaranteedRetry(ctx, "claim sticky workflows", mssqlTxRetries, mssqlTxRetryDelay, func() error {

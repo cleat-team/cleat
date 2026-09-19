@@ -292,6 +292,11 @@ func dropTenantFixture(t *testing.T, ctx context.Context, adminDB *sql.DB, tenan
 		t.Fatalf("seed concurrency_keys(%s): %v", tag, err)
 	}
 	if _, err := adminDB.ExecContext(ctx,
+		`INSERT INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at) VALUES ($1, $2, $3, now() + interval '1 hour')`,
+		tenant, "q-"+tag, wfID); err != nil {
+		t.Fatalf("seed queue_holders(%s): %v", tag, err)
+	}
+	if _, err := adminDB.ExecContext(ctx,
 		// request_id is NOT NULL as of cleat#1416; the tag makes it unique per
 		// row, which is all this seed needs.
 		`INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, tenant_id)

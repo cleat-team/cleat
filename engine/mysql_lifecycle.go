@@ -54,23 +54,36 @@ func (s *MySQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
 
 	var n int
 	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT count(*) FROM workflow_instances
-		WHERE status IN ('ready', 'terminating')
-		  AND next_wake_at <= NOW(6)
-		  AND task_queue IN (%s)
-  AND (workflow_instances.concurrency_key_hash IS NULL
-       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
-                         AND ck.tenant_id = workflow_instances.tenant_id
-                         AND ck.expires_at > NOW(6)
-                         AND ck.workflow_id <> workflow_instances.id))
-		  AND tenant_id = ?
+		SELECT count(*) FROM workflow_instances w
+		LEFT JOIN queues q ON q.tenant_id = w.tenant_id AND q.name = w.concurrency_key AND q.disabled_at IS NULL
+		WHERE w.status IN ('ready', 'terminating')
+		  AND w.next_wake_at <= NOW(6)
+		  AND w.task_queue IN (%s)
+		  AND (
+		    (q.name IS NULL AND (
+		      w.concurrency_key_hash IS NULL
+		      OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+		                      WHERE ck.key_hash = w.concurrency_key_hash
+		                        AND ck.tenant_id = w.tenant_id
+		                        AND ck.expires_at > NOW(6)
+		                        AND ck.workflow_id <> w.id)
+		    ))
+		    OR
+		    (q.name IS NOT NULL AND (
+		      (SELECT count(*) FROM queue_holders qh
+		        WHERE qh.tenant_id = w.tenant_id
+		          AND qh.queue_name = q.name
+		          AND qh.expires_at > NOW(6)
+		          AND qh.workflow_id <> w.id) < q.concurrency_limit
+		    ))
+		  )
+		  AND w.tenant_id = ?
 	`, placeholders), args...).Scan(&n)
 	return n, err
 }
 
 func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
-	tx, err := s.beginTx(ctx)
+	tx, err := s.beginTxReadCommitted(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: begin: %w", err)
 	}
@@ -78,119 +91,85 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 
 	tqClause, tqArgs := s.taskQueueClause()
 
-	// Step 1: Select IDs with SKIP LOCKED.
-	// Arg order: task_queue values..., tenant_id, limit
-	selArgs := make([]any, 0)
+	// Step 1: select candidate rows with SKIP LOCKED and a snapshot predicate.
+	// The predicate branches on whether the key names a registered queue; see the
+	// same comment on the postgres claim for why this is a snapshot and the
+	// acquire below is the guarantee.
+	selArgs := make([]any, 0, len(tqArgs)+2)
 	selArgs = append(selArgs, tqArgs...)
 	selArgs = append(selArgs, s.tenantID, limit)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, tenant_id, concurrency_key, concurrency_key_hash FROM workflow_instances
-		WHERE status IN ('ready', 'terminating')
-		  AND next_wake_at <= NOW(6)
-		  AND task_queue IN (%s)
-  AND (workflow_instances.concurrency_key_hash IS NULL
-       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
-                         AND ck.tenant_id = workflow_instances.tenant_id
-                         AND ck.expires_at > NOW(6)
-                         AND ck.workflow_id <> workflow_instances.id))
-		  AND tenant_id = ?
-		ORDER BY priority ASC, created_at
+		SELECT w.id, w.tenant_id, w.concurrency_key, w.concurrency_key_hash,
+		       (q.name IS NOT NULL) AS registered
+		FROM workflow_instances w
+		LEFT JOIN queues q ON q.tenant_id = w.tenant_id AND q.name = w.concurrency_key AND q.disabled_at IS NULL
+		WHERE w.status IN ('ready', 'terminating')
+		  AND w.next_wake_at <= NOW(6)
+		  AND w.task_queue IN (%s)
+		  AND (
+		    (q.name IS NULL AND (
+		      w.concurrency_key_hash IS NULL
+		      OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+		                      WHERE ck.key_hash = w.concurrency_key_hash
+		                        AND ck.tenant_id = w.tenant_id
+		                        AND ck.expires_at > NOW(6)
+		                        AND ck.workflow_id <> w.id)
+		    ))
+		    OR
+		    (q.name IS NOT NULL AND (
+		      (SELECT count(*) FROM queue_holders qh
+		        WHERE qh.tenant_id = w.tenant_id
+		          AND qh.queue_name = q.name
+		          AND qh.expires_at > NOW(6)
+		          AND qh.workflow_id <> w.id) < q.concurrency_limit
+		    ))
+		  )
+		  AND w.tenant_id = ?
+		ORDER BY w.priority ASC, w.created_at
 		LIMIT ?
-		FOR UPDATE SKIP LOCKED
+		FOR UPDATE OF w SKIP LOCKED
 	`, tqClause), selArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: select: %w", err)
 	}
-	defer rows.Close()
-
-	type candidate struct {
-		id       string
-		tenantID string
-		key      *string
-		hash     []byte
-	}
-	var cands []candidate
+	var cands []claimCandidate
 	for rows.Next() {
-		var c candidate
-		if err := rows.Scan(&c.id, &c.tenantID, &c.key, &c.hash); err != nil {
+		var c claimCandidate
+		if err := rows.Scan(&c.id, &c.tenantID, &c.key, &c.hash, &c.registered); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("claim workflows: scan id: %w", err)
 		}
 		cands = append(cands, c)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, fmt.Errorf("claim workflows: rows: %w", err)
 	}
 	rows.Close()
 
-	// Acquire each candidate's concurrency key, and drop the ones that lose.
-	//
-	// cleat#1186. THIS IS THE DIALECT THAT DIVERGES, deliberately and with the
-	// repository owner's agreement. PostgreSQL and SQL Server do the same work
-	// inside the claim STATEMENT -- a data-modifying CTE with
-	// `ON CONFLICT DO NOTHING RETURNING`, and `INSERT ... OUTPUT` respectively.
-	// MySQL has no RETURNING, so there is no way to learn which rows an
-	// INSERT IGNORE actually inserted from within one statement.
-	//
-	// It is still correct, and the reason is the FOR UPDATE SKIP LOCKED above:
-	// every candidate row is locked by this transaction before we get here and
-	// stays locked until it commits, so no other claimer can be between its own
-	// select and update on these rows. The acquisition is serialised by the row
-	// locks rather than by the statement.
-	//
-	// Why the predicate alone is not enough, on any dialect: it asks "does
-	// anybody ELSE hold this key". When the answer is no for two candidates
-	// wanting the same key, both pass and both would be claimed. Taking the key
-	// is what makes it exclusive.
-	ids := make([]string, 0, len(cands))
+	// Step 2: lock the registered queues among the candidate keys, sorted.
+	limits, err := s.lockRegisteredQueueLimits(ctx, tx, cands)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 3: acquire each candidate's key.
+	var ids []string
 	for _, c := range cands {
-		if c.hash == nil {
-			ids = append(ids, c.id)
-			continue
-		}
-		res, err := tx.ExecContext(ctx, `
-			INSERT IGNORE INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
-			VALUES (?, ?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?)
-		`, c.hash, c.key, c.id, int64(claimedKeyTTL.Seconds()), c.tenantID)
+		ok, err := s.acquireCandidateConcurrencyKey(ctx, tx, c, limits)
 		if err != nil {
-			return nil, fmt.Errorf("claim workflows: acquire concurrency key: %w", err)
+			return nil, err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return nil, fmt.Errorf("claim workflows: acquire concurrency key: %w", err)
-		}
-		if n > 0 {
-			ids = append(ids, c.id)
-			continue
-		}
-		// INSERT IGNORE affected nothing: the key row already exists. Either
-		// THIS run holds it -- a re-claim after a lost fence, which the
-		// predicate above deliberately lets through -- or another run took it
-		// between the select and here. Only the first is claimable, and the two
-		// are indistinguishable without asking.
-		var holder string
-		err = tx.QueryRowContext(ctx,
-			`SELECT workflow_id FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?`,
-			c.hash, c.tenantID).Scan(&holder)
-		if err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return nil, fmt.Errorf("claim workflows: concurrency key holder: %w", err)
-			}
-			// Released between the INSERT and this read. Not ours, not claimed;
-			// the next poll will pick it up.
-			continue
-		}
-		if holder == c.id {
+		if ok {
 			ids = append(ids, c.id)
 		}
 	}
-
 	if len(ids) == 0 {
 		tx.Rollback()
 		return nil, nil
 	}
 
-	// Step 2: Update the claimed rows.
+	// Step 4: update the claimed rows.
 	idClause := inClausePlaceholders(len(ids))
 	idArgs := make([]any, len(ids))
 	for i, id := range ids {
@@ -213,7 +192,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		return nil, fmt.Errorf("claim workflows: update: %w", err)
 	}
 
-	// Step 3: Fetch the full rows.
+	// Step 5: fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, COALESCE(pending_terminal_status, '') AS pending_terminal_status
 		FROM workflow_instances
@@ -237,6 +216,126 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	}
 
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
+}
+
+func (s *MySQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, cands []claimCandidate) (map[string]int, error) {
+	limits := map[string]int{}
+	seen := map[string]bool{}
+	var keys []string
+	for _, c := range cands {
+		if c.registered && !seen[*c.key] {
+			seen[*c.key] = true
+			keys = append(keys, *c.key)
+		}
+	}
+	if len(keys) == 0 {
+		return limits, nil
+	}
+	phs := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
+	args := make([]any, 0, len(keys)+1)
+	for _, k := range keys {
+		args = append(args, k)
+	}
+	args = append(args, s.tenantID)
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT name, concurrency_limit FROM queues
+		WHERE name IN (%s) AND tenant_id = ? AND disabled_at IS NULL
+		ORDER BY name
+		FOR UPDATE
+	`, phs), args...)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows: lock registered queues: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var limit int
+		if err := rows.Scan(&name, &limit); err != nil {
+			return nil, fmt.Errorf("claim workflows: scan queue limit: %w", err)
+		}
+		limits[name] = limit
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim workflows: queue limits rows: %w", err)
+	}
+	return limits, nil
+}
+
+func (s *MySQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]int) (bool, error) {
+	if !c.registered {
+		if c.hash == nil {
+			return true, nil // no key at all
+		}
+		// Bare key: mutex via INSERT IGNORE, exactly the old per-candidate acquire.
+		res, err := tx.ExecContext(ctx, `
+			INSERT IGNORE INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+			VALUES (?, ?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?)
+		`, c.hash, c.key, c.id, int64(claimedKeyTTL.Seconds()), c.tenantID)
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: acquire concurrency key: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: acquire concurrency key rows: %w", err)
+		}
+		if n > 0 {
+			return true, nil
+		}
+		// INSERT IGNORE affected nothing: either this run already holds the key
+		// (a re-claim after a lost fence) or another run took it.
+		var holder string
+		err = tx.QueryRowContext(ctx,
+			`SELECT workflow_id FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?`,
+			c.hash, c.tenantID).Scan(&holder)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil // released between insert and read; not ours
+		}
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: concurrency key holder: %w", err)
+		}
+		return holder == c.id, nil
+	}
+
+	// Registered queue: semaphore under the queues lock.
+	limit, ok := limits[*c.key]
+	if !ok {
+		// The candidate predicate saw it registered, but the lock step did not
+		// (disabled or deleted between the two statements). Not claimable.
+		return false, nil
+	}
+	var selfHolds bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM queue_holders qh
+			WHERE qh.tenant_id = ? AND qh.queue_name = ? AND qh.workflow_id = ? AND qh.expires_at > NOW(6)
+		)
+	`, c.tenantID, *c.key, c.id).Scan(&selfHolds)
+	if err != nil {
+		return false, fmt.Errorf("claim workflows: queue self-hold check: %w", err)
+	}
+	if selfHolds {
+		return true, nil
+	}
+	var held int
+	err = tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM queue_holders qh
+		WHERE qh.tenant_id = ? AND qh.queue_name = ? AND qh.expires_at > NOW(6)
+	`, c.tenantID, *c.key).Scan(&held)
+	if err != nil {
+		return false, fmt.Errorf("claim workflows: count queue holders: %w", err)
+	}
+	if held >= limit {
+		return false, nil // at capacity
+	}
+	res, err := tx.ExecContext(ctx, `
+		INSERT IGNORE INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at)
+		VALUES (?, ?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND))
+	`, c.tenantID, *c.key, c.id, int64(claimedKeyTTL.Seconds()))
+	if err != nil {
+		return false, fmt.Errorf("claim workflows: acquire queue holder: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
