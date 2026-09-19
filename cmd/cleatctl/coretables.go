@@ -26,6 +26,7 @@ var coreTables = []string{
 	"idempotency_keys",
 	"plugin_defs",
 	"queues",
+	"queue_holders",
 	"tenant_domains",
 	"tenant_secrets",
 	"tenant_settings",

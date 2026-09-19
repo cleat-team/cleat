@@ -973,11 +973,18 @@ func (s *PostgresStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, work
 	if err != nil {
 		return fmt.Errorf("release workflow concurrency keys: %w", err)
 	}
+	// A registered queue's slot lives in queue_holders; release it with the bare
+	// keys so a finished run frees its queue slot the same way it frees a mutex.
+	_, err = tx.ExecContext(ctx, `DELETE FROM queue_holders WHERE workflow_id = $1 AND tenant_id = $2`, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("release workflow concurrency keys: queue holders: %w", err)
+	}
 	return tx.Commit()
 }
 
 // ReapExpiredConcurrencyKeys deletes all expired concurrency keys
-// for the current tenant. Returns the number of keys deleted.
+// for the current tenant. Returns the number of rows deleted (keys plus queue
+// holders).
 func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -990,7 +997,15 @@ func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, 
 		return 0, fmt.Errorf("reap expired concurrency keys: %w", err)
 	}
 	n, _ := result.RowsAffected()
-	return n, tx.Commit()
+
+	// A worker that dies holding a registered-queue claim leaves a queue_holders
+	// row behind; it ages out on the same backstop TTL as a bare key.
+	hresult, err := tx.ExecContext(ctx, `DELETE FROM queue_holders WHERE expires_at < now() AND tenant_id = $1`, s.tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("reap expired concurrency keys: queue holders: %w", err)
+	}
+	hn, _ := hresult.RowsAffected()
+	return n + hn, tx.Commit()
 }
 
 // GetConcurrencyKeyCount returns the number of non-expired concurrency keys

@@ -210,6 +210,12 @@ func (s *MSSQLStore) releaseWorkflowConcurrencyKeysOnce(ctx context.Context, wor
 	if err != nil {
 		return fmt.Errorf("release workflow concurrency keys: %w", err)
 	}
+	// A registered queue's slot lives in queue_holders; release it with the bare
+	// keys so a finished run frees its queue slot the same way it frees a mutex.
+	_, err = tx.ExecContext(ctx, `DELETE FROM queue_holders WHERE workflow_id = @p1 AND tenant_id = @p2`, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("release workflow concurrency keys: queue holders: %w", err)
+	}
 	return tx.Commit()
 }
 

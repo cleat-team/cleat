@@ -1440,6 +1440,13 @@ func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 	createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
+			// Candidate SELECT (statement 1 of the three-statement claim): one
+			// runnable row with no concurrency key, so the acquire step admits it
+			// without an INSERT.
+			match: "SELECT c.id",
+			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
+		},
+		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
@@ -1464,6 +1471,10 @@ func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 func TestPostgresStore_ClaimWorkflows_NoTenantID(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT c.id",
+			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
+		},
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
@@ -1518,6 +1529,10 @@ func TestPostgresStore_ClaimStickyWorkflows_Success(t *testing.T) {
 func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT c.id",
+			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
+		},
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
@@ -5293,6 +5308,10 @@ func TestPostgresStore_ListWorkflows_WithOffset(t *testing.T) {
 
 func TestPostgresStore_ClaimWorkflows_ScanError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT c.id",
+			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
+		},
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{

@@ -299,7 +299,8 @@ func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID 
 }
 
 // ReapExpiredConcurrencyKeys deletes all expired concurrency keys
-// for the current tenant. Returns the number of keys deleted.
+// for the current tenant. Returns the number of rows deleted (keys plus queue
+// holders).
 func (s *MySQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
 		DELETE FROM concurrency_keys WHERE expires_at < NOW(6) AND tenant_id = ?
@@ -308,7 +309,17 @@ func (s *MySQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, err
 		return 0, fmt.Errorf("ReapExpiredConcurrencyKeys: %w", err)
 	}
 	n, _ := result.RowsAffected()
-	return n, nil
+
+	// A worker that dies holding a registered-queue claim leaves a queue_holders
+	// row behind; it ages out on the same backstop TTL as a bare key.
+	hresult, err := s.db.ExecContext(ctx, `
+		DELETE FROM queue_holders WHERE expires_at < NOW(6) AND tenant_id = ?
+	`, s.tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("ReapExpiredConcurrencyKeys: queue holders: %w", err)
+	}
+	hn, _ := hresult.RowsAffected()
+	return n + hn, nil
 }
 
 // ---------------------------------------------------------------------------
