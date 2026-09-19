@@ -89,7 +89,7 @@ and `public.tenant_domains` are structurally identical to `public.workflow_routi
 
 | table | why |
 |---|---|
-| `admin.tenants` | the tenant itself; its lifecycle is the thing the others hang off — see below |
+| `admin.tenants` | the tenant itself; its lifecycle is the thing the others hang off — it is **suspended**, not disabled, and that acts on other entities' work. See below. |
 | `admin.orgs` | the same shape one level up: it groups tenants the way tenants group everything else (`created_at` + `suspended`, no `updated_at`) |
 | `admin.plugin_tables` | registry of plugin-owned tables, not operator-created |
 | `public.plugin_defs` | derived from plugin binaries, not operator-created |
@@ -110,17 +110,50 @@ concurrency key is not retired, it *expires*.
 
 `admin.tenants` is exempt, and the reason is not that its lifecycle is simpler. Every other entity
 here is a thing a tenant owns; the tenant is what they hang off, and its own off switch has to act
-on **other entities' work** — stopping runs from being claimed and schedules from firing — rather
-than on a row anyone reads. `admin.orgs` is exempt for the same reason one level up.
+on **other entities' work** rather than on a row anyone reads. `admin.orgs` is exempt for the same
+reason one level up.
 
-That is a different mechanism from `disabled_at`, which is why it is exempt rather than
-non-conforming. `admin.tenants.suspended` is the column reserved for it, and the
-[B2B control-plane playbook](../playbooks/b2b-saas-control-plane.md) is where the tenant lifecycle
-— suspension and deletion — is documented.
+So the tenant has its own two states, spelled `admin.tenants.suspended`:
 
-Deletion, for every entity here, is `cleatctl drop-tenant`: it removes the tenant's rows across
-the full set of tenant-scoped tables. Retiring a single entity and deleting a whole tenant are the
-two ends of the same lifecycle, and nothing in between removes one entity permanently.
+| | suspended |
+|---|---|
+| new workflows claimed | **no** |
+| cron schedules fired | **no** |
+| `POST /start` | **403**, naming the reason |
+| runs already executing | **finish normally**, heartbeating as usual |
+| reads — runs, history, state | **unaffected** |
+
+```
+cleatctl suspend-tenant <tenant-id>     # reversible
+cleatctl resume-tenant  <tenant-id>
+cleatctl drop-tenant    <tenant-id>     # not
+```
+
+The last two rows of that table are the design rather than omissions.
+
+**A run mid-flight is not frozen.** Suspension stops new claims; it does not interrupt what is
+already executing. That is why suspension needs no special handling anywhere else in the engine —
+nothing is left half-run for the reclaim loop to find, and `cleat_workflows_stuck` never sees a
+population that is not actually stuck. To stop work that is already running, cancel it: suspension
+and cancellation are different instruments, and conflating them would make the reversible one
+destructive.
+
+**Reads stay open on purpose.** A tenant suspended for non-payment can still see its own runs;
+blocking that punishes the wrong thing and makes the state harder to reason about rather than
+easier.
+
+Enforcement is one predicate in the worker's tenant enumeration, which both the dispatch claim and
+the due-schedule read go through — so a single line stops work and cron together. A tenant with no
+`admin.tenants` row is **not** suspended: that table is a registry a deployment can run without
+populating, so treating absent as suspended would refuse every start on a configuration that works
+today.
+
+Deletion is the other end: `cleatctl drop-tenant` removes the tenant's rows across the full set of
+tenant-scoped tables. Retiring one entity and deleting a whole tenant are the two ends of the same
+lifecycle, and nothing in between removes a single entity permanently.
+
+See the [B2B control-plane playbook](../playbooks/b2b-saas-control-plane.md) for the operational
+cases these serve.
 
 ---
 
