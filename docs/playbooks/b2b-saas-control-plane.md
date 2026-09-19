@@ -114,6 +114,40 @@ tenant's data. Two binaries, opposite requirements, one database.
 Provisioning a tenant is a row. **Deleting one is a first-class command**, which is rarer than it
 should be and directly answers a GDPR erasure request.
 
+**Between "nothing" and "gone" there is now `cleatctl suspend-tenant`.** A non-paying customer, a
+tenant under investigation for abuse, and an offboarding grace period all want the same thing: the
+work stopped and the data kept. Deleting is the wrong instrument for all three, and until this
+existed it was the only one.
+
+What suspension stops, and what it deliberately does not:
+
+| | suspended |
+|---|---|
+| new workflows claimed | **no** |
+| cron schedules fired | **no** |
+| `POST /start` | **403**, naming the reason |
+| runs already executing | **finish normally**, heartbeating as usual |
+| reads — runs, history, state | **unaffected** |
+
+The last two rows are the design. A run mid-flight is not frozen, so nothing is left half-done for
+the reclaim loop to find and `cleat_workflows_stuck` never sees a population that is not actually
+stuck — which is why suspension needs no special handling anywhere else in the engine. To stop work
+already running, cancel it: suspension and cancellation are different instruments, and conflating
+them would make the reversible one destructive.
+
+Reads staying open is a product decision rather than an implementation limit. A tenant suspended for
+non-payment can still see its own runs; blocking that punishes the wrong thing.
+
+Enforcement is one predicate in the tenant enumeration, which both the dispatch claim and the
+due-schedule read go through — so a single line stops work and cron together. That choke point is a
+side effect of `--claim-strategy=rotate`: before it, the claim was one widened query inside a
+`SECURITY DEFINER` function and there was nowhere central to put this.
+
+`admin.tenants.suspended` had been in the schema since migration 001 with **no Go code reading it**.
+A column named `suspended` that does nothing is worse than an absent one — the first operator to
+reach for it in an incident sets it, sees nothing happen, and has spent the minutes that mattered
+finding that out.
+
 `cleatctl drop-tenant` removes a tenant's rows across the full set of tenant-scoped tables and
 reports counts per table, with a dry-run mode (`cmd/cleatctl/droptenant.go`). The list it reports
 against is maintained deliberately, and the comment on it is worth reading as a lesson in how this

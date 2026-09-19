@@ -23,6 +23,8 @@
 //	deploy workflow <name> <wasm>    — deploy a new workflow WASM binary
 //	deploy plugin <name> <wasm>      — deploy a plugin WASM binary
 //	drop-tenant <tenant-id>          — permanently delete a tenant and all its data
+//	suspend-tenant <tenant-id>       — stop new work for a tenant, reversibly
+//	resume-tenant <tenant-id>        — undo suspend-tenant
 //	revoke-api-key [flags]           — revoke a cleat API key (credential rotation)
 package main
 
@@ -123,6 +125,10 @@ func main() {
 		runCheckDB(ctx, db, d, args[1:])
 	case "drop-tenant":
 		runDropTenant(ctx, db, d, args[1:])
+	case "suspend-tenant":
+		runSuspendTenant(ctx, db, d, args[1:], true)
+	case "resume-tenant":
+		runSuspendTenant(ctx, db, d, args[1:], false)
 	case "revoke-api-key":
 		runRevokeAPIKey(ctx, db, args[1:])
 	case "set-tenant-setting":
@@ -158,6 +164,8 @@ Commands:
   check-db [--verbose]            verify database connectivity and schema health
   debug <id> [--entry-point <n>] [--watch]  step-through workflow event replay
   drop-tenant <tenant-id> [--dry-run] [--yes]  permanently delete a tenant and all its data
+  suspend-tenant <tenant-id> [--yes]           stop new work for a tenant, reversibly
+  resume-tenant <tenant-id>                    undo suspend-tenant
   revoke-api-key [--key-id|--key-hash|--key-stdin|--list]  revoke an API key
   egress-allow list <tenant>      show which hosts a tenant's workflows may fetch
   egress-allow add <tenant> <host>...     permit hosts (.example.com = subdomains)
