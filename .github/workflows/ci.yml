@@ -83,8 +83,44 @@ concurrency:
   # On a pull_request the group stays per-ref and cancellation is the setting's
   # real purpose: pushing twice to a branch should not run the suite twice.
   #
+  # AND A BODY EDIT MUST NOT SUPERSEDE THE RUN IT RACES (cleat#1688).
+  #
+  # `edited` is subscribed above because a BASE CHANGE fires it and nothing
+  # else does. But `edited` also fires for a title or body edit, and
+  # `github.ref` is identical for EVERY pull_request activity type -- so the
+  # edited run landed in the same group as the synchronize run it followed and
+  # cancelled it. Editing a PR description while checks ran destroyed them, and
+  # a superseded run renders as a failure rather than as "replaced", so the
+  # symptom is a PR that looks broken because its author wrote a sentence.
+  #
+  # The fix is in the GROUP, not in a job-level `if:`. A conditional decides
+  # whether JOBS execute; the cancellation happens when the RUN is created, so
+  # a skipped-jobs run still supersedes. Giving the no-op edited run a group of
+  # its own is what stops it cancelling anything.
+  #
+  # `github.run_id` is unique per run, so such a run shares a group with
+  # nothing and cancels nothing. An `edited` that DID change the base keeps the
+  # per-ref group: it is a real re-evaluation of a different target and should
+  # supersede, which is the case the trigger exists for.
+  #
+  # WHY THE JOBS STILL RUN. Skipping them would need every one of the 33
+  # required contexts to keep reporting while skipped, and cleat's contexts
+  # come straight from their jobs with no aggregating gate. cleat-ports solves
+  # exactly this with a `ports-gate` job carrying `if: always()` in front of
+  # conditional work -- the pattern is known and it is a larger change than
+  # this repo needs today. The cost here is bounded and smaller than it looks:
+  # before, a body edit ran the suite once and threw away a partial run; now it
+  # runs the suite once and KEEPS the run it used to destroy.
+  #
   # `scripts/check-workflow-concurrency.sh` guards both halves.
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  #
+  # KEPT ON ONE LINE DELIBERATELY. check-workflow-concurrency.sh reads the
+  # single line matching `^\s*group:` and asks whether it contains github.sha,
+  # github.run_id or github.ref. A folded `>-` scalar hides the expression from
+  # that grep, and the guard then reports this file as sharing one group across
+  # pushes -- a false alarm, but a loud one. Fails in the safe direction; still
+  # not worth triggering.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
