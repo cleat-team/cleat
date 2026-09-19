@@ -514,9 +514,29 @@ func applyChildBindingOverrideEnv() {
 	}
 }
 
+// resolveDBURL falls back to the environment when --db is absent.
+//
+// CLEAT_DATABASE_URL, NOT THE GENERIC DATABASE_URL, and the two binaries used
+// to disagree: cmd/cleat read CLEAT_DATABASE_URL while cmd/cleat-worker and
+// cmd/cleat-bench read DATABASE_URL. Same flag name, same repo, different
+// variable -- and both names appear in the SAME operations documents
+// (troubleshooting.md, deploying-to-production.md, zero-downtime-deploy.md,
+// disaster-recovery.md, upgrading.md), so a reader had to work out which
+// binary took which.
+//
+// Unified on the NAMESPACED name rather than the conventional one, which is
+// the direction that costs more doc churn and is still right: DATABASE_URL is
+// what every other service in a shared pod or container also sets, so a
+// generic name means an unrelated application's database can silently become
+// cleat's. That is a correctness hazard, not a style preference -- and the
+// failure is quiet, because connecting to the wrong database succeeds.
+//
+// No fallback to the generic name. A fallback would reintroduce exactly the
+// collision the namespace exists to prevent, and the refusal below names the
+// variable so nobody has to guess.
 func resolveDBURL() {
 	if *dbURL == "" {
-		*dbURL = os.Getenv("DATABASE_URL")
+		*dbURL = os.Getenv("CLEAT_DATABASE_URL")
 	}
 }
 

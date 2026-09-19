@@ -665,7 +665,7 @@ Additional verification queries:
 
 ```bash
 # Verify all expected tables exist
-cleatctl check-db --db "$DATABASE_URL" --verbose
+cleatctl check-db --db "$CLEAT_DATABASE_URL" --verbose
 
 # Check that the schema version is current
 cleatctl versions list | head -20
@@ -728,14 +728,14 @@ psql "$STANDBY_URL" -c "SELECT pg_is_in_recovery();"
 # Should return: f (false = not in recovery = writable)
 
 # Step 4: Update worker connection strings (DNS-based or config-based)
-export DATABASE_URL="postgres://user:pass@promoted-standby:5432/cleat?sslmode=require"
+export CLEAT_DATABASE_URL="postgres://user:pass@promoted-standby:5432/cleat?sslmode=require"
 
 # Step 5: Restart workers pointing at the new primary
 pkill -TERM cleat-worker
-cleat-worker --db "$DATABASE_URL" --concurrency 20
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 
 # Step 6: Verify failover
-cleatctl check-db --db "$DATABASE_URL"
+cleatctl check-db --db "$CLEAT_DATABASE_URL"
 ```
 
 ### Validate
@@ -744,10 +744,10 @@ After failover, validate the system:
 
 ```bash
 # 1. Database connectivity
-cleatctl check-db --db "$DATABASE_URL"
+cleatctl check-db --db "$CLEAT_DATABASE_URL"
 
 # 2. Schema health
-psql "$DATABASE_URL" -c "SELECT version, applied_at FROM schema_migrations ORDER BY version;"
+psql "$CLEAT_DATABASE_URL" -c "SELECT version, applied_at FROM schema_migrations ORDER BY version;"
 
 # 3. Workflow distribution
 curl -s http://worker:8080/api/admin/stats
@@ -756,7 +756,7 @@ curl -s http://worker:8080/api/admin/stats
 curl -s http://worker:8080/api/workflows?status=running | jq '. | length'
 
 # 5. Verify the reaper has cycled (~10 seconds after worker start, at default settings)
-psql "$DATABASE_URL" -c "
+psql "$CLEAT_DATABASE_URL" -c "
     SELECT status, COUNT(*) FROM workflow_instances GROUP BY status;
 "
 ```
@@ -785,12 +785,12 @@ psql "$STANDBY_URL" -c "
 pg_ctlcluster 16 main promote
 
 # Step 4: Redirect workers back to the original primary
-export DATABASE_URL="postgres://user:pass@original-primary:5432/cleat?sslmode=require"
+export CLEAT_DATABASE_URL="postgres://user:pass@original-primary:5432/cleat?sslmode=require"
 pkill -TERM cleat-worker
-cleat-worker --db "$DATABASE_URL" --concurrency 20
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 
 # Step 5: Verify
-cleatctl check-db --db "$DATABASE_URL"
+cleatctl check-db --db "$CLEAT_DATABASE_URL"
 ```
 
 ## Backup validation procedure

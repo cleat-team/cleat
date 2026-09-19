@@ -14,7 +14,7 @@ drives execution. It supports PostgreSQL, MySQL, and SQL Server backends.
 
 | Type | Default | Env var |
 |------|---------|---------|
-| string | `""` (required) | `DATABASE_URL` |
+| string | `""` (required) | `CLEAT_DATABASE_URL` |
 
 PostgreSQL (or MySQL/SQL Server) connection URL. The worker connects to your
 existing database; it does not manage it. Example:

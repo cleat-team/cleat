@@ -18,7 +18,7 @@ Available built-in plugins:
 Plugins are configured via a JSON file passed to the worker with the `--plugin-config` flag:
 
 ```bash
-cleat-worker --db "$DATABASE_URL" --plugin-config ./plugins.json
+cleat-worker --db "$CLEAT_DATABASE_URL" --plugin-config ./plugins.json
 ```
 
 The config file supports environment variable substitution with `${VAR}` syntax:

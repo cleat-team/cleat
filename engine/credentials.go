@@ -34,19 +34,26 @@ func NewEnvCredentialProvider(dbURL string) *EnvCredentialProvider {
 	return &EnvCredentialProvider{dbURL: dbURL}
 }
 
-// GetConnectionString resolves the connection string by checking the --db
-// flag first, then DATABASE_URL, then CLEAT_DATABASE_URL.
+// GetConnectionString resolves the connection string from the --db flag, then
+// CLEAT_DATABASE_URL.
+//
+// IT USED TO READ BOTH, AND IN THE WORSE ORDER: --db, then the generic
+// DATABASE_URL, then CLEAT_DATABASE_URL. So when both were set -- which is
+// precisely the shared pod or container this namespace exists to survive --
+// the collision-prone name WON, and cleat connected to whatever other service
+// had set it. The failure is silent, because connecting to the wrong database
+// succeeds.
+//
+// Now only the namespaced name, matching cmd/cleat, cmd/cleat-worker and
+// cmd/cleat-bench. No fallback, because a fallback is the collision.
 func (p *EnvCredentialProvider) GetConnectionString(_ context.Context) (string, error) {
 	if p.dbURL != "" {
 		return p.dbURL, nil
 	}
-	if v := os.Getenv("DATABASE_URL"); v != "" {
-		return v, nil
-	}
 	if v := os.Getenv("CLEAT_DATABASE_URL"); v != "" {
 		return v, nil
 	}
-	return "", fmt.Errorf("no database connection string found: set --db, DATABASE_URL, or CLEAT_DATABASE_URL")
+	return "", fmt.Errorf("no database connection string found: set --db or CLEAT_DATABASE_URL")
 }
 
 // ---- VaultCredentialProvider ----

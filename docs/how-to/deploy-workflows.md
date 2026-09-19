@@ -49,10 +49,10 @@ Use `cleat deploy` to insert the built WASM binary into the `workflow_defs` data
 
 ```bash
 # Deploy with a specific name and namespace.
-cleat deploy --db "$DATABASE_URL" --name place_order --namespace staging ./out/place_order.wasm
+cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order --namespace staging ./out/place_order.wasm
 
 # Deploy to a specific task queue.
-cleat deploy --db "$DATABASE_URL" --name place_order --task-queue high-memory ./out/place_order.wasm
+cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order --task-queue high-memory ./out/place_order.wasm
 ```
 
 The deploy command:
@@ -68,19 +68,19 @@ Each `cleat deploy` creates a new version. Versions are auto-incremented integer
 
 ```bash
 # Deploy v1.
-cleat deploy --db "$DATABASE_URL" --name place_order ./out/place_order.wasm
+cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order ./out/place_order.wasm
 # Deployed workflow "place_order" version 1
 
 # Deploy v2 after making changes.
 cleat build -o ./out ./path/to/workflow/
-cleat deploy --db "$DATABASE_URL" --name place_order ./out/place_order.wasm
+cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order ./out/place_order.wasm
 # Deployed workflow "place_order" version 2
 ```
 
 ### Listing versions
 
 ```bash
-cleat versions --db "$DATABASE_URL" place_order
+cleat versions --db "$CLEAT_DATABASE_URL" place_order
 # 2
 # 1
 ```
@@ -88,7 +88,7 @@ cleat versions --db "$DATABASE_URL" place_order
 ### Rollback
 
 ```bash
-cleat rollback --db "$DATABASE_URL" place_order 1
+cleat rollback --db "$CLEAT_DATABASE_URL" place_order 1
 # Rolled back "place_order" to version 1.
 # New instances will use version 1.
 ```
@@ -131,10 +131,10 @@ If your workflow calls child workflows, pin their versions at build time for rep
 
 ```bash
 # Resolve child versions from the database and write a lock file.
-cleat build -o ./out --db "$DATABASE_URL" ./path/to/workflow/
+cleat build -o ./out --db "$CLEAT_DATABASE_URL" ./path/to/workflow/
 
 # Or manually create/update the lock file.
-cleat lock --db "$DATABASE_URL" ./path/to/workflow/
+cleat lock --db "$CLEAT_DATABASE_URL" ./path/to/workflow/
 ```
 
 This generates a `cleat.lock` file that pins each child workflow to a specific version. During deployment, the lock file ensures the parent is paired with the correct child versions.

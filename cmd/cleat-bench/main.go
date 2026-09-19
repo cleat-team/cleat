@@ -39,7 +39,7 @@ func main() {
 	flag.Parse()
 
 	if *dbURL == "" {
-		*dbURL = os.Getenv("DATABASE_URL")
+		*dbURL = os.Getenv("CLEAT_DATABASE_URL")
 	}
 	if *dbURL == "" || *workflowName == "" {
 		fmt.Fprintf(os.Stderr, "Usage: cleat-bench --db <url> --workflow <name> [--driver postgres] [--count 100] [--concurrency 10]\n")

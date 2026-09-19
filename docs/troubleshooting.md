@@ -136,7 +136,7 @@ See the [Python SDK documentation](../python-sdk/README.md) for setup instructio
 ### Symptom: Worker fails to start -- "no database connection string found"
 
 ```
-Error: no database connection string found: set --db, DATABASE_URL, or CLEAT_DATABASE_URL
+Error: no database connection string found: set --db, CLEAT_DATABASE_URL, or CLEAT_DATABASE_URL
 ```
 
 **Diagnosis: How to confirm**
@@ -146,7 +146,7 @@ The worker has no configured database URL. Check the credential resolution order
 ```bash
 # Check each source:
 echo "CLI flag:  $CLEAT_DB_URL"        # --db flag
-echo "Env var 1: $DATABASE_URL"         # environment variable
+echo "Env var 1: $CLEAT_DATABASE_URL"         # environment variable
 echo "Env var 2: $CLEAT_DATABASE_URL"   # environment variable
 ```
 
@@ -159,7 +159,7 @@ Set the database connection string via one of:
 cleat-worker --db "postgres://user:pass@host:5432/cleat?sslmode=require"
 
 # Environment variable:
-export DATABASE_URL="postgres://user:pass@host:5432/cleat?sslmode=require"
+export CLEAT_DATABASE_URL="postgres://user:pass@host:5432/cleat?sslmode=require"
 
 # Or for cleat-specific override:
 export CLEAT_DATABASE_URL="postgres://user:pass@host:5432/cleat?sslmode=require"
