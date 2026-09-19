@@ -109,6 +109,11 @@ var dropTenantTables = []struct {
 	// dropped tenant's declared concurrency limits go with it, and the
 	// operator wants to see that.
 	{"queues", `SELECT count(*) FROM queues WHERE tenant_id = $1`},
+	// ON DELETE CASCADE from workflow_instances, via migrations/postgres/094
+	// (cleat#1116's semaphore holder). Listed for the count, as queues is
+	// above: a dropped tenant's queue holders go with its workflow_instances,
+	// and the operator wants to see that.
+	{"queue_holders", `SELECT count(*) FROM queue_holders WHERE tenant_id = $1`},
 	// cleat#1644. Both carry tenant_id since 056 and neither has a foreign key
 	// to anything, so neither was deleted OR counted: a dropped tenant's memory
 	// profile -- which workflows it ran, and how much memory each used --
