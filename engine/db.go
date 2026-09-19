@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/lib/pq"
@@ -1886,6 +1887,10 @@ type PostgresStoreFactory struct {
 	metrics                  *prometheus.Metrics
 	syncCommitOff            bool
 
+	// schemaReady is set once OpenStore has confirmed the schema exists. See
+	// there for why it is a latch rather than a per-call statement.
+	schemaReady atomic.Bool
+
 	logger *slog.Logger
 }
 
@@ -1944,11 +1949,32 @@ func (f *PostgresStoreFactory) WithLogger(l *slog.Logger) *PostgresStoreFactory 
 }
 
 // OpenStore creates a PostgresStore scoped to the given tenant and task queues.
+//
+// This is a struct allocation and nothing more -- every tenant shares the one
+// *sql.DB -- which is what lets cmd/cleat-worker resolve a store per workflow
+// rather than caching one per tenant forever. The returned closer is a no-op
+// for the same reason: there is no per-tenant pool here to lease. See
+// engine.TenantPoolReaper.
 func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, taskQueues ...string) (WorkflowStore, io.Closer, error) {
 	// Ensure the schema exists.
+	//
+	// ONCE PER FACTORY, NOT ONCE PER CALL. A schema does not stop existing, so
+	// re-issuing CREATE SCHEMA IF NOT EXISTS buys nothing and costs a round
+	// trip -- which did not matter while the worker opened a store once per
+	// tenant and cached it, and does as soon as it opens one per workflow.
+	// Nothing outside this factory drops the schema; a deployment that did
+	// would need a restart for far more than this.
 	if f.schemaName != "" && f.schemaName != "public" {
-		if _, err := f.db.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS `+pq.QuoteIdentifier(f.schemaName)); err != nil {
-			return nil, nil, fmt.Errorf("create schema %s: %w", f.schemaName, err)
+		if !f.schemaReady.Load() {
+			if _, err := f.db.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS `+pq.QuoteIdentifier(f.schemaName)); err != nil {
+				return nil, nil, fmt.Errorf("create schema %s: %w", f.schemaName, err)
+			}
+			// LATCHED ON SUCCESS ONLY, not with sync.Once. A Once would record
+			// a transient failure -- a connection blip during startup -- as
+			// the permanent answer and refuse every later OpenStore with it.
+			// Two callers racing here both issue an idempotent statement,
+			// which is the cheaper of the two mistakes by a wide margin.
+			f.schemaReady.Store(true)
 		}
 	}
 	store := NewPostgresStore(f.db, taskQueues...)

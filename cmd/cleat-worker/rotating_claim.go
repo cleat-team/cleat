@@ -179,7 +179,7 @@ func (w *Worker) claimRotating(limit int) ([]*engine.WorkflowInstance, error) {
 			want = remaining
 		}
 
-		st, serr := w.storeForTenant(tenantID)
+		st, release, serr := w.storeForTenant(tenantID)
 		if serr != nil {
 			// One tenant whose store will not open must not stop the tick:
 			// the others are still servable, and a worker that claims nothing
@@ -192,6 +192,12 @@ func (w *Worker) claimRotating(limit int) ([]*engine.WorkflowInstance, error) {
 			continue
 		}
 		wfs, cerr := st.ClaimWorkflows(w.ctx, w.id, want)
+		// Released as soon as the claim returns, not deferred to the end of
+		// the tick: this loop walks up to claimTenantsPerTick tenants, and a
+		// deferred release would pin every one of their pools until the last
+		// had been tried. The claimed workflows carry no reference to the
+		// store -- executeWorkflow resolves its own, under its own lease.
+		release()
 		if cerr != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("rotating claim: tenant %s: %w", tenantID, cerr)

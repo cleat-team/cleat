@@ -180,7 +180,7 @@ func TestMSSQLIndexes_TenantReadyUsedByPlanner(t *testing.T) {
 
 	factory := NewMSSQLStoreFactory(dsn)
 	defer factory.Close()
-	pool, err := factory.getOrCreateTenantPool(ctx, DefaultTenantUUID)
+	pool, err := tenantPoolDB(ctx, factory, DefaultTenantUUID)
 	if err != nil {
 		t.Fatalf("getOrCreateTenantPool: %v", err)
 	}

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // Dialect identifies the SQL dialect of a database backend.
@@ -57,4 +58,39 @@ type StoreFactory interface {
 // and an absent method cannot be mistaken for either.
 type PerTenantPooler interface {
 	TenantPoolMaxConns() int
+}
+
+// TenantPoolReaper is implemented by a StoreFactory whose per-tenant pools can
+// be released while the process keeps running.
+//
+// It is the counterpart to plugin.TenantPools.EvictIdle, which cmd/cleat-worker
+// has reaped on a timer since cleat#1470. The store factories had no equivalent:
+// MySQLStoreFactory and MSSQLStoreFactory released a tenant's pool only at
+// Close(), so a worker that served a tenant once kept its *sql.DB and the
+// connection-opener goroutine behind it for the life of the process. Small per
+// tenant, unbounded in tenants, and invisible from either side -- the role pools
+// had a reaper and the store pools did not, and nothing said so.
+//
+// # The contract a caller has to keep
+//
+// EvictIdle closes pools, and a store handed out by OpenStore holds its *sql.DB
+// directly. The closer OpenStore returns is therefore a LEASE: a pool with an
+// outstanding lease is never evicted, however idle it looks. Any caller holding
+// a store for longer than the idle window -- a workflow execution, a worker's
+// process-wide store -- must hold that closer for exactly as long, or its next
+// query meets a closed pool.
+//
+// A factory that shares one pool across tenants does not implement this, rather
+// than implementing it as a no-op: "nothing to reap" and "reaped nothing this
+// time" are different answers, and an absent method cannot be mistaken for
+// either. Same reasoning as PerTenantPooler above.
+type TenantPoolReaper interface {
+	// EvictIdle closes unleased pools untouched for maxIdle and reports how
+	// many. A non-positive maxIdle evicts nothing.
+	EvictIdle(maxIdle time.Duration) int
+
+	// TenantPoolCount is how many pools are open right now. It exists so a
+	// test can prove an eviction happened rather than trusting the count
+	// EvictIdle returns about itself.
+	TenantPoolCount() int
 }

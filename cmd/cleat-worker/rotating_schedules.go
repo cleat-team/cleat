@@ -58,7 +58,7 @@ func (w *Worker) dueSchedulesByTenant() ([]engine.Schedule, error) {
 		reached  int
 	)
 	for _, tenantID := range tenants {
-		st, serr := w.storeForTenant(tenantID)
+		st, release, serr := w.storeForTenant(tenantID)
 		if serr != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("rotating due-schedule read: tenant %s: %w", tenantID, serr)
@@ -66,6 +66,11 @@ func (w *Worker) dueSchedulesByTenant() ([]engine.Schedule, error) {
 			continue
 		}
 		schedules, gerr := st.GetDueSchedules(w.ctx)
+		// Released per tenant rather than deferred: this loop reads EVERY
+		// tenant every tick, so deferring would hold the whole estate's pools
+		// open for the length of the sweep. The rows it returns are plain
+		// data; firing a schedule opens its own store below.
+		release()
 		if gerr != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("rotating due-schedule read: tenant %s: %w", tenantID, gerr)

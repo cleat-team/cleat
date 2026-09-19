@@ -41,26 +41,43 @@ func (f *shardedStoreFactory) OpenStore(ctx context.Context, tenantID string, ta
 	stores := make([]engine.WorkflowStore, len(f.factories))
 	closers := make([]func() error, len(f.factories))
 	for i, sf := range f.factories {
-		s, _, err := sf.OpenStore(ctx, tenantID, taskQueues...)
+		s, shardCloser, err := sf.OpenStore(ctx, tenantID, taskQueues...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open shard %d for tenant %s: %w", i, tenantID, err)
 		}
 		stores[i] = s
-		// Deliberately not the closer returned above. These stores share the
-		// process-wide per-shard *sql.DB pools, which this factory does not own
-		// and must not close when a single request finishes. Today those
-		// closers are no-ops, so calling them would be harmless -- the point is
-		// that it would stop being harmless the moment they were not, and the
-		// failure would be a closed pool under live traffic.
-		closers[i] = func() error { return nil }
+		// THE SHARD'S OWN CLOSER, kept rather than dropped. It used to be
+		// replaced with a no-op, on the reasoning that these stores share
+		// process-wide per-shard *sql.DB pools this factory does not own and
+		// must not close when one request finishes -- true of what the closer
+		// was then, which was nothing at all.
+		//
+		// cleat#1928 gave it a meaning: it is a LEASE on the tenant's pool, and
+		// closing it says this caller is finished, not that the pool should
+		// shut. Dropping it now would pin every shard's pool for every tenant
+		// the API has ever served, which is the leak this is all about, one
+		// level up. Every shard here is a PostgresStoreFactory, which shares
+		// one pool and hands out a no-op, so today the two behave identically
+		// -- the point is which of them stays right if a per-tenant-pool
+		// dialect is ever sharded.
+		closers[i] = shardCloser.Close
 	}
 
 	ss, err := engine.NewShardedStore(f.configs, stores, closers)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build sharded store for tenant %s: %w", tenantID, err)
 	}
-	return ss, nopCloser{}, nil
+	// Closing this closes each shard's, which releases each shard's lease.
+	// The ShardedStore is per-caller -- built fresh above -- so closing it
+	// tears down nothing shared.
+	return ss, shardedStoreCloser{ss}, nil
 }
+
+// shardedStoreCloser releases the per-shard leases a ShardedStore was built
+// with. See OpenStore.
+type shardedStoreCloser struct{ ss *engine.ShardedStore }
+
+func (c shardedStoreCloser) Close() error { c.ss.Close(); return nil }
 
 // DriverName reports the first shard's driver. All shards share a driver.
 func (f *shardedStoreFactory) DriverName() string {
@@ -77,8 +94,3 @@ func (f *shardedStoreFactory) Dialect() engine.Dialect {
 	}
 	return f.factories[0].Dialect()
 }
-
-// nopCloser is a closer that owns nothing.
-type nopCloser struct{}
-
-func (nopCloser) Close() error { return nil }

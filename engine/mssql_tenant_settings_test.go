@@ -112,7 +112,7 @@ func TestMSSQLTenantSettingsAreIsolatedByTheSecurityPolicy(t *testing.T) {
 	// The isolation claim, on the pool the store actually uses. No tenant_id in
 	// the query text, so dbo.TenantFilter_Settings is the only thing that can
 	// restrict the result.
-	poolA, err := factory.getOrCreateTenantPool(ctx, tenantA)
+	poolA, err := tenantPoolDB(ctx, factory, tenantA)
 	if err != nil {
 		t.Fatalf("getOrCreateTenantPool(A): %v", err)
 	}

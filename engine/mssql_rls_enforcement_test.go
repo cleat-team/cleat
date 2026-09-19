@@ -245,11 +245,11 @@ func TestMSSQLTenantIsolation_UnderRealSecurityPolicies(t *testing.T) {
 
 	// The same pools OpenStore builds on, for the raw cross-tenant checks
 	// below.
-	poolA, err := factory.getOrCreateTenantPool(ctx, tenantA)
+	poolA, err := tenantPoolDB(ctx, factory, tenantA)
 	if err != nil {
 		t.Fatalf("getOrCreateTenantPool(A): %v", err)
 	}
-	poolB, err := factory.getOrCreateTenantPool(ctx, tenantB)
+	poolB, err := tenantPoolDB(ctx, factory, tenantB)
 	if err != nil {
 		t.Fatalf("getOrCreateTenantPool(B): %v", err)
 	}
@@ -392,11 +392,11 @@ func TestMSSQLTenantIsolation_WorkflowPromises_UnderRealSecurityPolicies(t *test
 	factory := NewMSSQLStoreFactory(dsn)
 	defer factory.Close()
 
-	poolA, err := factory.getOrCreateTenantPool(ctx, tenantA)
+	poolA, err := tenantPoolDB(ctx, factory, tenantA)
 	if err != nil {
 		t.Fatalf("getOrCreateTenantPool(A): %v", err)
 	}
-	poolB, err := factory.getOrCreateTenantPool(ctx, tenantB)
+	poolB, err := tenantPoolDB(ctx, factory, tenantB)
 	if err != nil {
 		t.Fatalf("getOrCreateTenantPool(B): %v", err)
 	}

@@ -757,10 +757,20 @@ type MySQLStoreFactory struct {
 	baseDSN string
 
 	// tenantDBs maps tenantID -> per-tenant connection pool.
-	tenantDBs map[string]*sql.DB
+	//
+	// Leased rather than bare, so EvictIdle can reclaim a pool no store is
+	// holding. See leasedPool for why a timestamp alone is not enough.
+	tenantDBs map[string]*leasedPool
 
 	idempotencyKeyTTL  time.Duration
 	tenantPoolMaxConns int
+
+	// clock is time.Now unless a test replaces it, so eviction can be tested
+	// without sleeping. Same reasoning as plugin.TenantPools.clock: a test
+	// that waits for real time to pass is measuring the scheduler as much as
+	// the code, and the usual repair -- widening the window -- makes it slower
+	// and no more truthful.
+	clock func() time.Time
 
 	logger *slog.Logger
 }
@@ -778,10 +788,18 @@ func NewMySQLStoreFactory(masterDB *sql.DB, baseDSN string, idempotencyKeyTTL ..
 	return &MySQLStoreFactory{
 		masterDB:           masterDB,
 		baseDSN:            baseDSN,
-		tenantDBs:          make(map[string]*sql.DB),
+		tenantDBs:          make(map[string]*leasedPool),
 		idempotencyKeyTTL:  ttl,
 		tenantPoolMaxConns: 25,
 	}
+}
+
+// now reports the current time through the injectable clock.
+func (f *MySQLStoreFactory) now() time.Time {
+	if f.clock == nil {
+		return time.Now()
+	}
+	return f.clock()
 }
 
 // WithLogger sets the structured logger on the factory. Stores created by
@@ -842,7 +860,7 @@ func (f *MySQLStoreFactory) CreateTenantDatabase(ctx context.Context, tenantID s
 
 	// Check if we already have a pool for this tenant.
 	if existing, ok := f.tenantDBs[tenantID]; ok {
-		return existing, nil
+		return existing.db, nil
 	}
 
 	// Creating the database and opening its pool is the longest unlogged
@@ -882,7 +900,7 @@ func (f *MySQLStoreFactory) CreateTenantDatabase(ctx context.Context, tenantID s
 		return nil, fmt.Errorf("ping tenant db %s: %w", dbName, err)
 	}
 
-	f.tenantDBs[tenantID] = tenantDB
+	f.tenantDBs[tenantID] = newLeasedPool(tenantDB, f.now())
 	// Duration rather than a bare "done": how long this took is the fact that
 	// had to be reconstructed by hand from migration timestamps when it was
 	// slow, and it is free to report here.
@@ -898,8 +916,12 @@ func (f *MySQLStoreFactory) DropTenantDatabase(tenantID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if db, ok := f.tenantDBs[tenantID]; ok {
-		db.Close()
+	// Closed regardless of any outstanding lease, unlike EvictIdle. Dropping
+	// the database underneath a store is the point of this command; leaving
+	// the pool open so a doomed query can reach a dropped schema would be the
+	// worse answer, and an operator asking for a drop is not asking to wait.
+	if p, ok := f.tenantDBs[tenantID]; ok {
+		p.db.Close()
 		delete(f.tenantDBs, tenantID)
 	}
 
@@ -907,22 +929,48 @@ func (f *MySQLStoreFactory) DropTenantDatabase(tenantID string) error {
 	return err
 }
 
-// getOrCreateTenantDB returns the connection pool for a tenant,
-// creating the tenant database if needed.
-func (f *MySQLStoreFactory) getOrCreateTenantDB(ctx context.Context, tenantID string) (*sql.DB, error) {
+// getOrCreateTenantPool returns the leased pool for a tenant, creating the
+// tenant database if needed.
+func (f *MySQLStoreFactory) getOrCreateTenantPool(ctx context.Context, tenantID string) (*leasedPool, error) {
 	f.mu.RLock()
-	db, ok := f.tenantDBs[tenantID]
+	p, ok := f.tenantDBs[tenantID]
 	f.mu.RUnlock()
 	if ok {
-		return db, nil
+		return p, nil
 	}
-	return f.CreateTenantDatabase(ctx, tenantID)
+	if _, err := f.CreateTenantDatabase(ctx, tenantID); err != nil {
+		return nil, err
+	}
+	f.mu.RLock()
+	p, ok = f.tenantDBs[tenantID]
+	f.mu.RUnlock()
+	if !ok {
+		// CreateTenantDatabase succeeded, so the entry it installed was
+		// removed between its unlock and this read -- only DropTenantDatabase
+		// or Close does that. Reporting it beats returning a nil pool to a
+		// caller that will dereference it.
+		return nil, fmt.Errorf("tenant pool for %s was removed while it was being opened", tenantID)
+	}
+	return p, nil
 }
 
 // TenantDB returns a *sql.DB connection pool for the given tenant, creating
 // a new per-tenant database and connection pool if one does not already exist.
+//
+// The returned pool carries NO LEASE, so a caller that holds it across an
+// eviction window can have it closed underneath. Every in-tree caller uses it
+// briefly and immediately (migrations at startup, cleatctl); anything holding
+// one for the length of a workflow should go through OpenStore, whose closer
+// is the lease.
 func (f *MySQLStoreFactory) TenantDB(ctx context.Context, tenantID string) (*sql.DB, error) {
-	return f.getOrCreateTenantDB(ctx, tenantID)
+	p, err := f.getOrCreateTenantPool(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	// Stamped, so a caller using this path keeps the pool out of the sweep's
+	// way for the idle window even without a lease.
+	p.lastUsed.Store(f.now().UnixNano())
+	return p.db, nil
 }
 
 // OpenStore creates a MySQLStore scoped to the given tenant and task queues.
@@ -931,18 +979,24 @@ func (f *MySQLStoreFactory) TenantDB(ctx context.Context, tenantID string) (*sql
 // NOTE: Encryption at rest (--encrypt-sensitive-payloads) is not yet supported
 // on MySQL backends. See PostgresStore.WithEncryption for the reference implementation.
 func (f *MySQLStoreFactory) OpenStore(ctx context.Context, tenantID string, taskQueues ...string) (WorkflowStore, io.Closer, error) {
-	tenantDB, err := f.getOrCreateTenantDB(ctx, tenantID)
+	p, err := f.getOrCreateTenantPool(ctx, tenantID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open store for tenant %s: %w", tenantID, err)
 	}
+	// THE RETURNED CLOSER IS A LEASE, not a pool shutdown: it says this caller
+	// is finished with the store. Callers that hold a store for an unbounded
+	// time -- a workflow execution, the worker's process-wide store -- must
+	// hold the lease for exactly as long, or EvictIdle will close the pool
+	// underneath them.
+	lease := p.acquire(f.now)
 
-	store := NewMySQLStore(tenantDB, taskQueues...)
+	store := NewMySQLStore(p.db, taskQueues...)
 	store.tenantID = tenantID
 	store = store.WithLogger(f.logger)
 	// Set last: WithLogger returns a copy, so anything set before it survives
 	// only by accident of struct copying. See ClaimWorkflowsAcrossTenants.
 	store.perTenantDatabase = true
-	return store, nopCloser{}, nil
+	return store, lease, nil
 }
 
 // Close closes all tenant connection pools.
@@ -950,11 +1004,25 @@ func (f *MySQLStoreFactory) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	for tenantID, db := range f.tenantDBs {
-		db.Close()
+	for tenantID, p := range f.tenantDBs {
+		p.db.Close()
 		delete(f.tenantDBs, tenantID)
 	}
 	return nil
+}
+
+// EvictIdle closes every tenant pool that no store holds and that nothing has
+// opened or released within maxIdle, and reports how many were closed.
+// See engine.TenantPoolReaper.
+func (f *MySQLStoreFactory) EvictIdle(maxIdle time.Duration) int {
+	return evictIdleLeasedPools(&f.mu, f.tenantDBs, maxIdle, f.now)
+}
+
+// TenantPoolCount reports how many tenant pools are open right now.
+func (f *MySQLStoreFactory) TenantPoolCount() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return len(f.tenantDBs)
 }
 
 // DriverName returns "mysql".

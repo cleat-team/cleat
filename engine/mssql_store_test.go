@@ -434,9 +434,9 @@ func TestNewMSSQLStoreFactory_EmptyConnStr(t *testing.T) {
 func TestGetOrCreateTenantPool_InvalidUUID(t *testing.T) {
 	f := &MSSQLStoreFactory{
 		connStr:   "sqlserver://localhost",
-		tenantDBs: make(map[string]*sql.DB),
+		tenantDBs: make(map[string]*leasedPool),
 	}
-	_, err := f.getOrCreateTenantPool(context.Background(), "not-a-valid-uuid")
+	_, err := tenantPoolDB(context.Background(), f, "not-a-valid-uuid")
 	if err == nil {
 		t.Fatal("expected error for invalid UUID, got nil")
 	}
@@ -448,7 +448,7 @@ func TestGetOrCreateTenantPool_InvalidUUID(t *testing.T) {
 func TestOpenStore_InvalidUUID(t *testing.T) {
 	f := &MSSQLStoreFactory{
 		connStr:   "sqlserver://localhost",
-		tenantDBs: make(map[string]*sql.DB),
+		tenantDBs: make(map[string]*leasedPool),
 	}
 	_, _, err := f.OpenStore(context.Background(), "not-a-valid-uuid")
 	if err == nil {
@@ -642,12 +642,6 @@ func TestTenantSessionConnector_SuccessWithPrepare(t *testing.T) {
 	}
 	if wrapped.Conn != driver.Conn(mockConn) {
 		t.Fatal("wrapper does not carry the connection the connector opened")
-	}
-}
-
-func TestMSSQLNopCloser(t *testing.T) {
-	if err := (mssqlNopCloser{}).Close(); err != nil {
-		t.Errorf("mssqlNopCloser.Close() = %v, want nil", err)
 	}
 }
 
