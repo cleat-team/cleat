@@ -163,48 +163,16 @@ func TestAdminLoginDeleteScheduleCannotCrossTenants(t *testing.T) {
 	}
 }
 
-// TestAdminLoginSetScheduleEnabledCannotCrossTenants — quieter than deletion
-// and therefore worse to diagnose: the row is still listed, still shows a
-// next_run_at, and never fires.
-func TestAdminLoginSetScheduleEnabledCannotCrossTenants(t *testing.T) {
-	storeA, storeB := adminLoginStores(t)
-	const name = "tenant-a-billing-sweep"
-	mustCreateSchedule(t, storeA, name)
-
-	// See the deletion case above: not-found is the correct report, and the
-	// nil this expected until cleat#1297 is what made the API answer
-	// 200 {"status":"disabled"} to a tenant that changed nothing.
-	if err := storeB.SetScheduleEnabled(context.Background(), name, false); !errors.Is(err, ErrScheduleNotFound) {
-		t.Errorf("tenant B SetScheduleEnabled returned %v, want ErrScheduleNotFound", err)
-	}
-
-	got := scheduleNamed(t, storeA, name)
-	if got == nil {
-		t.Fatalf("tenant A's schedule %q disappeared entirely", name)
-	}
-	if got.Disabled() {
-		t.Errorf("tenant B disabled tenant A's schedule %q", name)
-	}
-}
-
-// TestAdminLoginUpdateScheduleNextRunCannotCrossTenants was here until
-// UpdateScheduleNextRun was deleted.
-//
-// It is not ported, because the property it asserted is already covered by
-// TestAdminLoginClaimDueScheduleCannotCrossTenants below, against the statement
-// the scheduler loop ACTUALLY runs. The removed test's own comment claimed to
-// cover "the same statement the scheduler loop uses to advance a firing" -- true
-// when written, false once the loop moved to the fenced CAS, and nothing
-// noticed. So it was a tenant-isolation test for a statement no production code
-// ran, sitting beside one for the statement that does.
-
-// TestAdminLoginGetDueSchedulesStaysWithinItsTenant covers the read.
+// GetDueSchedules stays within its tenant on an admin login.
 //
 // GetDueSchedules is the tenant-scoped method -- the one whose whole contract
-// is "my tenant's due schedules". GetDueSchedulesAcrossTenants is the
-// deliberate cross-tenant read and is not under test here. If the scoped one
-// answers with every tenant's rows on this connection, a worker configured for
-// per-tenant dispatch fires other tenants' workflows under its own tenant.
+// is "my tenant's due schedules". If it answers with every tenant's rows on
+// this connection, a worker fires other tenants' workflows under its own
+// tenant.
+//
+// It used to have a cross-tenant sibling to be distinguished from. That
+// sibling is retired, which makes this the only reader of these rows and the
+// contract correspondingly simpler.
 func TestAdminLoginGetDueSchedulesStaysWithinItsTenant(t *testing.T) {
 	storeA, storeB := adminLoginStores(t)
 	ctx := context.Background()

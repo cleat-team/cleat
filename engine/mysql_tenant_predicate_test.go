@@ -94,35 +94,6 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
 		Reason: mysqlScopedByCandidateQuery,
 	},
-	// Re-made again at cleat#1186, which added the claimable-concurrency-key
-	// filter to this statement's WHERE clause. Unlike #1094 above, this one DOES
-	// change row selection, so the reason was re-checked rather than carried:
-	// the added predicate correlates the key to the candidate row's OWN tenant
-	// (ck.tenant_id = workflow_instances.tenant_id), so it can only ever remove
-	// rows from the result, never admit a row from a tenant this statement would
-	// not already have returned. The statement is still deliberately
-	// cross-tenant, and still gated on cleat_admin membership in Go.
-	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants#4d4c8656690d": {
-		SQL:    "select id from workflow_instances where status in ('ready', 'terminating') and",
-		Reason: mysqlDeliberatelyCrossTenant,
-	},
-	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants#e468197bcf08": {
-		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
-		Reason: mysqlDeliberatelyCrossTenant,
-	},
-	"mysql_lifecycle.go:ClaimWorkflowsAcrossTenants#df24f728e6ed": {
-		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
-		Reason: mysqlDeliberatelyCrossTenant,
-	},
-	// DIGEST MOVED IN cleat#1702; see the mssql twin for the full note. The
-	// column list changed `enabled` to `disabled_at` (migration 077) and
-	// nothing else: re-checked against the new text, this is still the
-	// cross-tenant due read with no tenant predicate and no tenant parameter,
-	// which is the property the exemption is about.
-	"mysql_ops.go:GetDueSchedulesAcrossTenants#94fc5e397863": {
-		SQL:    "select name, def_name, entry_point, cron_expression, input, disabled_at, next_",
-		Reason: mysqlDeliberatelyCrossTenant,
-	},
 	"mysql_store.go:ResolveTenantFromAPIKey#fec661be20f9": {
 		SQL:    "select tenant_id from tenant_api_keys where key_hash = ? and disabled_at is nul",
 		Reason: mysqlMustNotScope,
