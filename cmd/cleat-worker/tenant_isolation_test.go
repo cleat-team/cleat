@@ -247,3 +247,14 @@ func TestStartWorkflowUsesAuthenticatedTenant(t *testing.T) {
 		t.Error("run was attributed to the default tenant, which is the defect 1.7 describes")
 	}
 }
+
+// nopCloser is a closer that owns nothing.
+//
+// It lived in sharded_factory.go until cleat#1928, where the closer OpenStore
+// returns became a LEASE on the tenant's connection pool. Nothing in
+// production hands out a closer that owns nothing any more -- the sharded
+// factory passes its shards' leases through, and the per-tenant-pool factories
+// return real ones. These stubs still need something to return.
+type nopCloser struct{}
+
+func (nopCloser) Close() error { return nil }

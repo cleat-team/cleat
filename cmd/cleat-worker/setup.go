@@ -1405,13 +1405,6 @@ type Worker struct {
 	// existed.
 	storeFactory engine.StoreFactory
 
-	// tenantStores caches the result per tenant. OpenStore is cheap on
-	// PostgreSQL (same *sql.DB, a new struct) but not on MySQL or SQL Server,
-	// where it builds and caches a connection pool per tenant -- SQL Server has
-	// to, because its RLS reads SESSION_CONTEXT, set per connection. Caching
-	// here keeps the cost to once per tenant on every dialect.
-	tenantStores sync.Map // map[string]engine.WorkflowStore
-
 	// taskQueues is what `store` was opened with; a tenant-scoped store has to
 	// poll the same set or it would see a different slice of the work.
 	taskQueues []string
@@ -1780,9 +1773,23 @@ func (w *Worker) Run() {
 
 	// Background tenant-pool reaper. cleat#1470.
 	//
-	// LAUNCHED only when tenant pools exist -- they are built solely under
-	// --tenant-isolation=role, and a loop that ticks forever over a nil manager
-	// is a health-tracked goroutine reporting success for doing nothing.
+	// LAUNCHED only when there is something to reap. There are two independent
+	// sources of per-tenant pools and a worker can have either, both or
+	// neither:
+	//
+	//   - plugin.TenantPools, built solely under --tenant-isolation=role,
+	//     which is PostgreSQL-only.
+	//   - the store factory itself, on MySQL and SQL Server, where a tenant's
+	//     RLS or database makes a shared pool impossible. cleat#1928.
+	//
+	// The second used to have no reaper at all, so a MySQL or SQL Server worker
+	// held a pool for every tenant it had ever served until the process ended
+	// -- the asymmetry was invisible from either side, because each of the two
+	// looked complete on its own.
+	//
+	// A loop that ticks forever over neither is a health-tracked goroutine
+	// reporting success for doing nothing, which is why this is still a guard
+	// rather than an unconditional launch.
 	//
 	// Its context is initialised UNCONDITIONALLY above, with the others.
 	// TestEveryPreparedLoopIsLaunched caught the first version of this, which
@@ -1790,7 +1797,7 @@ func (w *Worker) Run() {
 	// with no entry in the loop-context map, so the watchdog could neither
 	// cancel nor restart it. Preparing a context for a loop that is not
 	// launched is harmless; launching one without a context is not.
-	if w.tenantPools != nil {
+	if w.hasReapablePools() {
 		w.registerLoopFunc("tenant_pool_reaper", w.tenantPoolReaperLoop)
 		w.launchLoop("tenant_pool_reaper", w.tenantPoolReaperLoop)
 	}
@@ -2232,9 +2239,11 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 				// claim. Resolved here rather than captured from execStore
 				// below because this defer is registered before that
 				// assignment and must also record for a workflow whose
-				// execution failed. storeForTenant caches, so the repeat
-				// lookup is a map read. See cleat#1040.
-				memStore, memStoreErr := w.storeForTenant(wf.TenantID)
+				// execution failed. The repeat lookup is a map read plus a
+				// struct; the pool it leases is already open, because the
+				// execution's own lease has not dropped yet. See cleat#1040.
+				memStore, memRelease, memStoreErr := w.storeForTenant(wf.TenantID)
+				defer memRelease()
 				if memStoreErr != nil {
 					// Recording a sample is not worth failing anything over,
 					// and the execution path above has already reported this
@@ -2253,7 +2262,15 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// run a tenant other than the one its dispatch loop is scoped to -- and
 	// because the store comes from OpenStore(wf.TenantID), it is correct by
 	// construction rather than by a check downstream.
-	execStore, storeErr := w.storeForTenant(wf.TenantID)
+	execStore, execRelease, storeErr := w.storeForTenant(wf.TenantID)
+	// THE LEASE SPANS THE WHOLE EXECUTION, and this is the call site the lease
+	// exists for. Every other holder of a tenant store is bounded -- a claim
+	// tick, a schedule fire, an HTTP request -- but a workflow can sit inside
+	// one activity for an hour without touching the database, so "nothing has
+	// opened a store for this tenant recently" says nothing about whether one
+	// is in use. Releasing here and re-resolving per statement would reopen
+	// that window; holding it for the run closes it.
+	defer execRelease()
 	if storeErr != nil {
 		errMsg := fmt.Sprintf("workflow %s: no store for tenant %s: %v", wf.ID, wf.TenantID, storeErr)
 		w.logger.ErrorContext(context.Background(), "tenant store unavailable",
@@ -3095,6 +3112,41 @@ func (w *Worker) expireDeferPhases() {
 	}
 }
 
+// reapIdleTenantPools releases what both sources will give up, and reports the
+// total.
+//
+// SEPARATE FROM THE LOOP ON PURPOSE. The loop's interval is five minutes, so a
+// test of the tick body through the ticker would have to either wait or fake
+// time; a test of the loop's WIRING that builds its own two sources proves
+// only that the test can add. Extracting the decision means a test can hand a
+// worker a factory and a pool manager and assert which of them got reaped --
+// the same lesson as perTenantPoolCeiling in connection_budget.go.
+func (w *Worker) reapIdleTenantPools(idleWindow time.Duration) int {
+	evicted := 0
+	if w.tenantPools != nil {
+		evicted += w.tenantPools.EvictIdle(idleWindow)
+	}
+	if reaper, ok := w.storeFactory.(engine.TenantPoolReaper); ok {
+		// The store factory's pools are LEASED, so this closes only the ones
+		// no store is holding -- a workflow sitting inside a long activity
+		// keeps its tenant's pool whatever the clock says. See
+		// engine.TenantPoolReaper.
+		evicted += reaper.EvictIdle(idleWindow)
+	}
+	return evicted
+}
+
+// hasReapablePools reports whether this worker holds per-tenant pools that can
+// be released without stopping the process. See tenantPoolReaperLoop for the
+// two sources and why they are reaped together.
+func (w *Worker) hasReapablePools() bool {
+	if w.tenantPools != nil {
+		return true
+	}
+	_, ok := w.storeFactory.(engine.TenantPoolReaper)
+	return ok
+}
+
 // tenantPoolReaperLoop releases tenant pools nobody has touched.
 //
 // IT IS HOUSEKEEPING, NOT A BUDGET, and the distinction is the whole of
@@ -3112,6 +3164,15 @@ func (w *Worker) expireDeferPhases() {
 // already been closed by database/sql and what is reclaimed is the struct and
 // the map entry. Evicting sooner would trade a real reconnect -- role lookup,
 // TCP, TLS, auth -- for a few bytes.
+//
+// IT REAPS BOTH SOURCES OF PER-TENANT POOL. cleat#1928 added the second: the
+// store factory's own pools on MySQL and SQL Server, which had no reaper and so
+// accumulated one *sql.DB -- and the connection-opener goroutine database/sql
+// runs behind it -- per tenant the worker had ever served. They are reaped
+// together because they are the same fact about a worker ("what is this tenant
+// still costing me when nobody is asking for it"), and splitting them into two
+// loops would mean two health entries, two intervals and two chances for one of
+// them to be the one that was never launched.
 func (w *Worker) tenantPoolReaperLoop() {
 	defer w.wg.Done()
 	const (
@@ -3132,7 +3193,7 @@ func (w *Worker) tenantPoolReaperLoop() {
 			// No error to classify: eviction touches no database. Closing the
 			// pools happens asynchronously inside EvictIdle precisely so this
 			// tick cannot block on another tenant's in-flight query.
-			evicted := w.tenantPools.EvictIdle(idleWindow)
+			evicted := w.reapIdleTenantPools(idleWindow)
 			if evicted > 0 {
 				w.logger.InfoContext(w.ctx, "Tenant pool reaper: released idle pools",
 					"worker_id", w.id, "count", evicted, "idle_window", idleWindow)
@@ -3206,6 +3267,18 @@ func (w *Worker) scheduleLoop() {
 				continue
 			}
 
+			// Tenant stores opened while firing this tick's schedules, released
+			// together when the tick ends.
+			//
+			// NOT DEFERRED, because the enclosing function is the schedule loop
+			// and it does not return until the worker stops -- a defer here
+			// would pin every tenant's pool for the life of the process, which
+			// is the leak cleat#1928 is about, rebuilt one level up. NOT
+			// RELEASED AT EACH `continue` EITHER: the body below has six of
+			// them at three nesting depths, and the cost of missing one is an
+			// invisible pinned pool. Collecting them makes the release
+			// unmissable and bounds the hold to a single tick.
+			var tickStoreReleases []func()
 			for _, sch := range schedules {
 				// Build input with entry point if specified.
 				input := sch.Input
@@ -3234,7 +3307,8 @@ func (w *Worker) scheduleLoop() {
 					// that does not set one.
 					tenantID = engine.DefaultTenantUUID
 				}
-				schStore, terr := w.storeForTenant(tenantID)
+				schStore, releaseSchStore, terr := w.storeForTenant(tenantID)
+				tickStoreReleases = append(tickStoreReleases, releaseSchStore)
 				if terr != nil {
 					// Refuse rather than fall back to w.store: firing this
 					// schedule through the wrong tenant's store would write one
@@ -3448,6 +3522,9 @@ func (w *Worker) scheduleLoop() {
 				}
 
 				w.logger.InfoContext(w.ctx, "Scheduler: fired schedule", "worker_id", w.id, "schedule", sch.Name, "workflow_id", runID, "scheduled_at", scheduled.Format(time.RFC3339), "next_at", nextRun.Format(time.RFC3339), "timezone", loc.String())
+			}
+			for _, release := range tickStoreReleases {
+				release()
 			}
 			w.scheduleMu.Unlock()
 			w.Metrics.RecordBackgroundLoop(w.ctx, "schedule", "ok")
@@ -4171,7 +4248,8 @@ func (w *Worker) waitForDB() {
 // happened to the workflow, and there is no caller here that could act on it.
 func (w *Worker) failStrandedUpdates(wf *engine.WorkflowInstance, terminalStatus string) {
 	ctx := context.Background()
-	st := w.storeFor(wf)
+	st, release := w.storeFor(wf)
+	defer release()
 	if st == nil {
 		return
 	}
@@ -4239,7 +4317,8 @@ func classifyTerminalErrorCode(errorCode string, deadLettered bool) string {
 // panic path cannot be one: a recovered panic is a crash, not a call that ran
 // out of attempts.
 func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string, eligibleForDLQ bool, history []engine.EventRecord) (applied, deadLettered bool) {
-	st := w.storeFor(wf)
+	st, release := w.storeFor(wf)
+	defer release()
 	ctx := context.Background()
 
 	// A claim carrying a pending terminal outcome cannot be failed, because
@@ -4465,7 +4544,8 @@ func (w *Worker) releaseForAnotherWorker(wf *engine.WorkflowInstance, reason, op
 		"def_name", wf.DefName, "def_version", wf.DefVersion,
 		"check", op, "reason", reason)
 
-	st := w.storeFor(wf)
+	st, release := w.storeFor(wf)
+	defer release()
 	backoff := w.unservableBackoff
 	if backoff <= 0 {
 		backoff = defaultUnservableBackoff
@@ -4603,7 +4683,8 @@ func (w *Worker) finishDeferPhase(wf *engine.WorkflowInstance, execStore engine.
 // no-op it is: another worker owns the workflow, so there is nothing to
 // release. See recordTerminalFailure for why this is not an error.
 func (w *Worker) releaseWorkflow(wf *engine.WorkflowInstance) {
-	st := w.storeFor(wf)
+	st, release := w.storeFor(wf)
+	defer release()
 	ctx := context.Background()
 	err := st.ReleaseWorkflow(ctx, wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 	if errors.Is(err, engine.ErrFenceLost) {
@@ -4813,28 +4894,47 @@ func scheduleAdvance(expr string, scheduled time.Time, loc *time.Location, now t
 }
 
 // storeForTenant returns the store execution should write through for a
-// workflow belonging to tenantID.
+// workflow belonging to tenantID, and the release the caller must call when it
+// is finished with it.
 //
 // With no factory configured there is nothing to route with, so the caller
 // gets the worker's own store and executeWorkflow's scope check refuses
 // anything outside it. That is the pre-routing behaviour, kept deliberately
 // rather than silently degrading to "write it under whatever tenant we have".
-func (w *Worker) storeForTenant(tenantID string) (engine.WorkflowStore, error) {
+//
+// # RELEASE IS NOT OPTIONAL, AND IT IS NOT A POOL SHUTDOWN
+//
+// On MySQL and SQL Server the factory keeps a connection pool per tenant, and
+// cleat#1928 gave those pools a reaper so a worker no longer holds one for
+// every tenant it has ever served. The closer OpenStore returns is the lease
+// that reaper honours: a pool with an outstanding lease is never evicted,
+// however idle it looks. Skipping the release pins the pool forever -- which
+// looks exactly like the leak the reaper was added to fix, with more code.
+// Calling it early closes nothing; it says this caller is done.
+//
+// # Why there is no cache here any more
+//
+// There used to be a sync.Map of tenant -> store, on the grounds that OpenStore
+// was expensive on the per-tenant-pool dialects. It is not: the pool is cached
+// inside the factory, so a warm tenant's OpenStore is a struct allocation on
+// every dialect. What the cache actually did was hold a store -- and therefore
+// a pool -- for the life of the process, which is precisely what made the pools
+// unreapable. Removing it leaves one lifetime instead of two.
+//
+// The one path where OpenStore was NOT free was PostgreSQL with a non-public
+// schema, which issued CREATE SCHEMA IF NOT EXISTS per call; that is now
+// latched after the first success. See engine.PostgresStoreFactory.OpenStore.
+func (w *Worker) storeForTenant(tenantID string) (engine.WorkflowStore, func(), error) {
 	if w.storeFactory == nil || tenantID == "" || tenantID == w.storeTenantID {
-		return w.store, nil
+		// The worker's own store holds a lease for the life of the process,
+		// taken where it was opened in main. Nothing to release here.
+		return w.store, func() {}, nil
 	}
-	if cached, ok := w.tenantStores.Load(tenantID); ok {
-		return cached.(engine.WorkflowStore), nil
-	}
-	st, _, err := w.storeFactory.OpenStore(w.ctx, tenantID, w.taskQueues...)
+	st, closer, err := w.storeFactory.OpenStore(w.ctx, tenantID, w.taskQueues...)
 	if err != nil {
-		return nil, err
+		return nil, func() {}, err
 	}
-	// LoadOrStore rather than Store: two workflows for a new tenant can arrive
-	// together, and both should end up using the same store rather than one
-	// silently replacing the other's.
-	actual, _ := w.tenantStores.LoadOrStore(tenantID, st)
-	return actual.(engine.WorkflowStore), nil
+	return st, func() { _ = closer.Close() }, nil
 }
 
 // storeFor is storeForTenant for the paths that cannot report an error: the
@@ -4847,14 +4947,14 @@ func (w *Worker) storeForTenant(tenantID string) (engine.WorkflowStore, error) {
 // is the lesser evil -- a workflow stuck in `running` forever with no record
 // of why is worse than a failure row under the wrong tenant, and the log line
 // says which happened.
-func (w *Worker) storeFor(wf *engine.WorkflowInstance) engine.WorkflowStore {
-	st, err := w.storeForTenant(wf.TenantID)
+func (w *Worker) storeFor(wf *engine.WorkflowInstance) (engine.WorkflowStore, func()) {
+	st, release, err := w.storeForTenant(wf.TenantID)
 	if err != nil {
 		w.logger.ErrorContext(context.Background(), "no tenant store on a failure path; falling back to the worker store",
 			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		return w.store
+		return w.store, func() {}
 	}
-	return st
+	return st, release
 }
 
 // reportCrossTenantCapability logs, once at startup, which mode this worker is

@@ -194,10 +194,23 @@ func (s *apiServer) storeFor(r *http.Request) (engine.WorkflowStore, error) {
 		return nil, fmt.Errorf("no store factory configured, cannot scope request to tenant %s", tid)
 	}
 
-	st, _, err := s.factory.OpenStore(r.Context(), tid.String(), s.taskQueues...)
+	st, lease, err := s.factory.OpenStore(r.Context(), tid.String(), s.taskQueues...)
 	if err != nil {
 		return nil, fmt.Errorf("open store for tenant %s: %w", tid, err)
 	}
+	// THE LEASE IS RELEASED WHEN THE REQUEST ENDS, not when this returns.
+	//
+	// On MySQL and SQL Server that closer holds the tenant's connection pool
+	// open against the reaper (engine.TenantPoolReaper), and the handler is
+	// about to use the store. Releasing here would leave it unleased for the
+	// whole request; releasing in the caller would mean a release at each of
+	// the thirty-odd scopedStore call sites, which is exactly the kind of
+	// bookkeeping scopedStore exists so that nobody has to remember.
+	//
+	// net/http cancels the request context when ServeHTTP returns (or when the
+	// client disconnects first), so AfterFunc gives request scope exactly, in
+	// one place, and cannot be forgotten at a call site.
+	context.AfterFunc(r.Context(), func() { _ = lease.Close() })
 	return st, nil
 }
 

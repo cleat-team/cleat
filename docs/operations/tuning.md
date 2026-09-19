@@ -366,13 +366,29 @@ its gates — `--batch-flush-disabled` and `--no-per-step-flush` — default to
 `concurrency + 5` you will be short by 60 per worker, and the symptom is
 connection exhaustion under load.
 
-**The tenant pool is unbounded in tenant count.** With
-`--tenant-isolation=role` a worker opens a pool per tenant it has touched and
-does not release them, so there is no fixed total to quote — see cleat#1470.
-Budget for the tenants a worker will actually serve.
+**The tenant pool is unbounded in tenant count, and reaped.** A worker opens a
+pool per tenant it touches, from either of two sources — `--tenant-isolation=role`
+on PostgreSQL, and the store factory itself on MySQL and SQL Server — so there
+is no fixed total to quote. Budget for the tenants a worker will actually serve.
 
-Nothing in the worker sums these or logs the total at startup, so the
-arithmetic above is the only place it exists.
+A background loop (`tenant_pool_reaper`, every five minutes) closes pools
+nothing has used for fifteen minutes, so the count follows the tenants a worker
+is serving rather than the tenants it has ever seen. Fifteen minutes is three
+times the pools' own `ConnMaxLifetime`, so by the time one is closed its
+connections have already gone and what is reclaimed is the pool object and its
+goroutine.
+
+> The reaper is **housekeeping, not a budget**. A timer can only shrink an
+> overshoot after the fact; between two ticks the pool count is whatever demand
+> made it. The bound lives at admission — see cleat#1470.
+
+The store factory's pools are additionally **leased**: a pool a running
+workflow still holds is never closed, however idle the clock says it is
+(cleat#1928). A workflow can sit inside one activity for an hour without
+touching the database, so idleness alone does not mean "unused".
+
+The worker logs this whole budget at startup (`database connection budget`),
+and refuses to start when `--connection-budget` cannot cover the fixed pools.
 
 If you run multiple workers, multiply by the worker count. Use PgBouncer in
 transaction mode between workers and PostgreSQL to reduce the total connection

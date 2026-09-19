@@ -858,11 +858,24 @@ func main() {
 			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 		}
 
-		s, _, err := factory.OpenStore(ctx, defaultTenantID, taskQueues...)
+		// THE LEASE IS DELIBERATELY NEVER RELEASED. On MySQL and SQL Server
+		// this closer is a lease on the default tenant's connection pool (see
+		// engine.TenantPoolReaper), and the store it guards is the worker's
+		// own: the dispatch, heartbeat, reaper and scheduler loops all write
+		// through it for the life of the process, and none of them calls
+		// OpenStore, so nothing would ever stamp the pool as used. Releasing
+		// here would leave the one pool the worker always needs looking idle,
+		// and the reaper would close it out from under every loop at the first
+		// quiet quarter of an hour.
+		//
+		// Held for the process, released when the process ends. Named rather
+		// than assigned to _ so that reads as the decision it is.
+		s, processStoreLease, err := factory.OpenStore(ctx, defaultTenantID, taskQueues...)
 		if err != nil {
 			logger.ErrorContext(context.Background(), "failed to open database store — check that the database is accessible and the schema exists", "worker_id", workerID, "error", err)
 			os.Exit(1)
 		}
+		_ = processStoreLease
 		store = s
 
 		// Start periodic cleanup of expired idempotency keys. Every dialect:
