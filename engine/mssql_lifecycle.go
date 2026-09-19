@@ -390,6 +390,14 @@ func (s *MSSQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql
 	return n > 0, nil
 }
 
+// ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
+// that are sticky to this worker. Uses the sticky_worker_id filter for
+// low-contention claiming. Returns fewer than limit if not enough sticky
+// workflows are ready. Callers should fall back to ClaimWorkflows for remaining capacity.
+// ClaimStickyWorkflows retries on errors SQL Server guarantees it rolled back --
+// a deadlock victim claimed nothing, so replaying the claim is sound. Errors
+// that leave the outcome unknown are not retried; see
+// withRollbackGuaranteedRetry (IMPROVEMENT-PLAN.md 2.26).
 func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	var claimed []*WorkflowInstance
 	err := withRollbackGuaranteedRetry(ctx, "claim sticky workflows", mssqlTxRetries, mssqlTxRetryDelay, func() error {
