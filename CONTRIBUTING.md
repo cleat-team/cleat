@@ -77,6 +77,29 @@ git config core.hooksPath .githooks
 composes with `--signoff`, `--amend` and `git rebase --signoff` rather than
 signing anything twice.
 
+### Claude-Stream
+
+The same hook stamps a second trailer naming the workstream that produced the
+commit, which `Stream Trailer Check` enforces the same way `DCO Check`
+enforces the first. It needs one more setting, **per checkout**:
+
+```
+git config --local cleat.stream <stream>
+```
+
+The hook refuses a commit when this is unset, and refuses a value the check
+would reject. Both refusals print the accepted values, which it reads out of
+`.github/workflows/stream-trailer-check.yml` rather than keeping its own copy.
+
+It refuses rather than defaulting because there is no default worth having: a
+wrong stream is not "unattributed", it is attributed to someone else. That is
+the failure the check was written after — two pull requests went out as
+`coordinator`, and the coordinator session found a red pull request carrying
+its own name that it had not opened.
+
+A message that already names a stream is left alone, so `git commit --trailer`
+and a rebase onto a checkout that never set the config both work.
+
 The same setting enables `.githooks/pre-commit`, which refuses a commit that
 adds an `IMPROVEMENT-PLAN.md` section outside your sandbox's allocated block.
 CI cannot check that — it asserts uniqueness and block membership, both of
