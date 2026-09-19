@@ -342,7 +342,18 @@ Per pool, with the gate each sits behind (cleat#1470):
 | adaptive flusher | `--batch-flush-max-connections` | **50** | unless `--batch-flush-disabled` *or* `--no-per-step-flush` |
 | shard | 15 **per shard** | — | only when sharding is configured |
 | migrate | 2 | — | only with `--migrate-db`, and only at boot |
-| tenant | `--tenant-pool-max-conns` **per tenant** | 25 × *T* | only with `--tenant-isolation=role` |
+| tenant | `--tenant-pool-max-conns` **per tenant** | 25 × *T*<sub>active</sub> | **always** on SQL Server and MySQL; on PostgreSQL only with `--tenant-isolation=role` |
+
+*T*<sub>active</sub>, not *T*: every per-tenant pool is built with a five-minute
+`ConnMaxLifetime`, so a tenant that is not executing anything holds no
+connections. This term is a ceiling for tenants working at once, which
+`--concurrency` already bounds — not a cost per tenant the worker has ever seen.
+
+`only with --tenant-isolation=role` was wrong here for the same reason the
+worker's own connection census was: that mode is PostgreSQL-only, while
+`MSSQLStoreFactory` and `MySQLStoreFactory` pool per tenant by construction —
+SQL Server because its RLS reads a per-connection `SESSION_CONTEXT`, MySQL
+because each tenant has its own database.
 
 ```
 default single-node worker, no sharding, no --migrate-db:

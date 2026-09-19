@@ -447,3 +447,8 @@ func (f *MSSQLStoreFactory) DriverName() string { return "mssql" }
 
 // Dialect returns DialectMSSQL.
 func (f *MSSQLStoreFactory) Dialect() Dialect { return DialectMSSQL }
+
+// TenantPoolMaxConns reports this factory's per-tenant pool ceiling. See
+// engine.PerTenantPooler: SQL Server's RLS reads SESSION_CONTEXT, set per
+// connection, so a shared pool cannot scope a tenant here.
+func (f *MSSQLStoreFactory) TenantPoolMaxConns() int { return f.tenantPoolMaxConns }

@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"github.com/cleat-team/cleat/engine"
 )
 
 // shardPoolMaxConns is the fixed per-shard ceiling, set at the shard pool's
@@ -119,4 +121,37 @@ func checkConnectionBudget(budget int, b connectionBudget) error {
 			budget, b.Describe())
 	}
 	return nil
+}
+
+// perTenantPoolCeiling is the census's per-tenant term: the ceiling for ONE
+// tenant's pool, or 0 when this worker opens no pool per tenant.
+//
+// EXTRACTED SO IT CAN BE TESTED. It lived inline in main(), which nothing can
+// call, and the bug it had was not in the arithmetic -- connectionBudget was
+// right -- but in the value handed to it. A test over connectionBudget alone
+// passes with this decision made wrongly, which is measured rather than
+// assumed: reverting this to its old form leaves such a test green.
+//
+// Two independent sources, and either is enough:
+//
+//   - rolePools: plugin.TenantPools, built only under --tenant-isolation=role
+//     and therefore only on PostgreSQL.
+//   - factory: MySQL and SQL Server pool per tenant BY CONSTRUCTION, because
+//     each scopes a tenant to something a shared pool cannot carry -- a
+//     database, and a per-connection SESSION_CONTEXT respectively.
+//
+// Gating on the first alone reported zero on exactly the two dialects that
+// always have the term. Both read the same flag, so the max is not a
+// reconciliation, just the answer when both apply.
+func perTenantPoolCeiling(rolePools any, factory any, flagValue int) int {
+	ceiling := 0
+	if rolePools != nil {
+		ceiling = flagValue
+	}
+	if pooler, ok := factory.(engine.PerTenantPooler); ok {
+		if n := pooler.TenantPoolMaxConns(); n > ceiling {
+			ceiling = n
+		}
+	}
+	return ceiling
 }
