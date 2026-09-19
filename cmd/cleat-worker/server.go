@@ -812,6 +812,34 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		tenantID = engine.DefaultTenantUUID
 	}
 
+	// A suspended tenant may not start new work.
+	//
+	// 403, not 503: this is a decision about the caller rather than a
+	// condition of the server, and a retry will not help until an operator
+	// resumes the tenant. The draining and memory-pressure branches above are
+	// 503 for exactly the opposite reason.
+	//
+	// READS ARE NOT AFFECTED, deliberately. A tenant suspended for
+	// non-payment should still be able to see its own runs and history --
+	// blocking that punishes the wrong thing and makes the state harder to
+	// reason about, not easier.
+	//
+	// Costs one primary-key lookup on a small table per start, next to the
+	// ListVersions call below that every start already makes.
+	if susp, ok := st.(engine.TenantSuspensionReader); ok {
+		suspended, serr := susp.IsTenantSuspended(r.Context(), tenantID)
+		if serr != nil {
+			s.writeError(w, 500, serr.Error())
+			return
+		}
+		if suspended {
+			s.writeError(w, http.StatusForbidden,
+				"tenant is suspended; no new workflows may be started. "+
+					"Runs already executing finish normally, and reads are unaffected.")
+			return
+		}
+	}
+
 	// Find the latest version of this workflow.
 	versions, err := st.ListVersions(r.Context(), name)
 	if err != nil {
