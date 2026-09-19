@@ -156,6 +156,13 @@ $pg_trgm_index$;
 -- and that is the narrower query operators should be pointed at instead of
 -- a free-text ILIKE scan over serialized JSON.
 --
+-- SUPERSEDED BY MIGRATION 091, which drops idx_instances_input_gin. The
+-- reasoning above stands -- `@>` IS the right query for this shape -- but no
+-- code ever wrote one, and the index cost 66% on every workflow start
+-- (measured: 127.6ms vs 76.8ms per 20,000 inserts) plus 38% size overhead. 091
+-- carries the numbers and the single statement to restore it for a deployment
+-- that writes containment queries by hand.
+--
 -- The general Search filter overall: even granting error_msg and def_name
 -- their own indexes, Search ORs all four conditions together in one WHERE
 -- clause. PostgreSQL can only satisfy an OR of multiple conditions via
