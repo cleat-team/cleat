@@ -3,18 +3,25 @@
 Every state a workflow instance can be in, what moves it between them, and which of those states
 are terminal.
 
-Derived from the code on **2026-09-02**, and revised on **2026-09-04** when the defer phase
-gained its first writer (IMPROVEMENT-PLAN §3.112) — not from intent. Every claim below names the file that
-implements it, and the enumerations carry the command that re-derives them — because the natural
-mental model of this state machine is wrong in two places, and both are recorded here rather than
-left to be rediscovered.
+Derived from the code on **2026-09-02**, revised **2026-09-04** when the defer phase gained its
+first writer (IMPROVEMENT-PLAN §3.112), and re-verified against `develop` on **2026-09-19** — not
+from intent. Every claim below names the symbol that implements it, and the enumerations carry the
+command that re-derives them, because the natural mental model of this state machine is wrong in
+two places and both are recorded here rather than left to be rediscovered.
+
+**This file cites SYMBOLS, not `file:line`.** It used to cite lines, and on 2026-09-19 all twelve
+were stale — several landing in a *different function this same document names*, so
+`store_lifecycle.go:505` was offered as `MoveToDeadLetterQueue` and pointed into `CompleteWorkflow`.
+A reader who follows that finds plausible code and concludes the document is right. The repo makes
+the same argument for its cross-tenant ledger: *"Keyed by FUNCTION rather than by line,
+deliberately: a line number changes every time anything above it moves."*
 
 ---
 
 ## The statuses
 
 `workflow_instances.status` is a `TEXT` column with no `CHECK` constraint
-(`migrations/postgres/001_schema.sql:227`, default `'ready'`). Eight values are written. The
+(`migrations/postgres/001_schema.sql`, the `workflow_instances` definition, default `'ready'`). Eight values are written. The
 seventh, `terminating`, gained its writer on 2026-09-04 (see the defer phase below); the eighth,
 `cancelled`, on 2026-09-14 (cleat#1153).
 
@@ -38,10 +45,25 @@ grep -rn "UPDATE workflow_instances" -A 3 migrations/postgres/*.sql \
   | grep -oE "status = '[a-z_]+'" | sort -u
 ```
 
-Both halves are needed. Some transitions are written in Go and some inside
-`finalize_workflow_status`, a PL/pgSQL function; a survey of either alone is incomplete. The Go
-command returns all six; the SQL one returns `done`, `failed`, `ready` and `running` only, since
-`terminated` and `dead_lettered` are never set from a procedure.
+plus the two that no literal-matching grep can find:
+
+```
+grep -rn "preemptivelySettle\|preemptivelySettleOnce" --include="*.go" engine/ \
+  | grep -v _test.go | grep -oE "status(Terminated|Cancelled)" | sort -u
+```
+
+**Three halves are needed, and the third is the one that bites.** Some transitions are written in
+Go, some inside `finalize_workflow_status` (a PL/pgSQL function), and `terminated` and `cancelled`
+are written through a **parameter** — `preemptivelySettle(ctx, id, reason, statusTerminated)` —
+rather than a literal, so the first command cannot see them.
+
+That is not a hypothetical gap. The first command returns six values, this document describes
+eight, and until 2026-09-19 the sentence here said "the Go command returns all six" — written when
+six was the whole vocabulary, and left standing as two more were added. Anyone re-deriving the set
+from the published command got six and had no way to know what was missing.
+
+The SQL command returns `done`, `failed`, `ready` and `running` only: `terminated`,
+`cancelled` and `dead_lettered` are never set from a procedure.
 
 **Scope the grep to `UPDATE workflow_instances`.** An unscoped
 `grep -rhoE "SET status = '[a-z_]+'"` also sweeps `promises` and `signals`, which have their own
@@ -52,18 +74,18 @@ nine values for what is a six-value column.
 
 This is the first place the obvious model is wrong. **A sleeping workflow is `ready`, not
 `suspended`** — the worker finalizes a suspending segment with `finalStatus = "ready"` and a
-`next_wake_at` (`cmd/cleat-worker/setup.go:1801-1805`). Nothing anywhere executes
+`next_wake_at` (`executeWorkflow`'s suspend arm, `cmd/cleat-worker/setup.go`). Nothing anywhere executes
 `SET status = 'suspended'`.
 
 The name survives in three places, and none of them make it a status:
 
-- `validFinalStatus` (`engine/store_lifecycle.go:318`) accepts `"suspended"` — but the Postgres
+- `validFinalStatus` (`validFinalStatus`, `engine/store_lifecycle.go`) accepts `"suspended"` — but the Postgres
   `finalize_workflow_status` function has `WHEN 'done' / 'failed' / 'ready'` and `RAISE
   EXCEPTION` on anything else (`migrations/postgres/004_fix_finalize_workflow_status_fence.sql`).
   Passing `"suspended"` would pass the Go check and raise in the database. No caller does: the
   worker passes only `"done"` or `"ready"`.
 - Read predicates of the form `WHERE id = $1 AND status IN ('ready', 'suspended')`
-  (`engine/store_signals.go:162`, `engine/store_promises.go:52,81`, and the MSSQL equivalents)
+  (`engine/store_signals.go`, `engine/store_promises.go`, and the MSSQL equivalents)
   admit a value that is never present. They are correct but the second term is dead.
 - Suspension *is* a real concept — it is what the guest does, and the host reports it through
   `SuspendResult`. It is simply not represented in this column.
@@ -290,12 +312,19 @@ stateDiagram-v2
     running --> failed: FailWorkflow
     running --> dead_lettered: MoveToDeadLetterQueue (retries exhausted)
 
-    ready --> terminated: TerminateWorkflow (admin)
-    running --> terminated: TerminateWorkflow (admin)
-    ready --> cancelled: CancelWorkflow (preemptive)
-    running --> cancelled: CancelWorkflow (preemptive)
+    ready --> terminated: TerminateWorkflow (admin, no defers)
+    running --> terminated: TerminateWorkflow (admin, no defers)
+    ready --> cancelled: CancelWorkflow (preemptive, no defers)
+    running --> cancelled: CancelWorkflow (preemptive, no defers)
     ready --> failed: parent close policy TERMINATE
     running --> failed: parent close policy TERMINATE
+
+    ready --> terminating: outcome decided, defers registered
+    running --> terminating: outcome decided, defers registered
+    terminating --> terminated: FinalizeDeferPhase
+    terminating --> cancelled: FinalizeDeferPhase
+    terminating --> failed: FinalizeDeferPhase / ExpireDeferPhases
+    terminating --> done: FinalizeDeferPhase (force-complete)
 
     done --> [*]
     failed --> [*]
@@ -304,18 +333,24 @@ stateDiagram-v2
     dead_lettered --> [*]
 ```
 
+`terminating` was absent from this diagram until 2026-09-19, while the status table above has
+described it since 2026-09-04. It is the only non-terminal state a workflow can be in that a
+worker will not start new work for, and leaving it out made the diagram agree with the *obvious*
+model of the state machine rather than with the code — which is the failure this whole document
+exists to prevent.
+
 ### What performs each transition
 
 | transition | implementation |
 |---|---|
-| → `ready` (enqueue) | column default, `migrations/postgres/001_schema.sql:227` |
-| `ready` → `running` | `ClaimWorkflow` / `ClaimWorkflows`, `engine/store_lifecycle.go:17,35` |
-| `running` → `ready` (suspend, release, reap) | `engine/store_lifecycle.go:565`, `finalize_workflow_status` `WHEN 'ready'`, `ReapStaleInstances` |
-| `running` → `done` | `CompleteWorkflow` / `FinalizeWorkflowSegment`, `engine/store_lifecycle.go:223,339` |
-| `running` → `failed` | `FailWorkflow`, `engine/store_lifecycle.go:399` |
-| `*` → `failed` (parent) | `enforceParentClosePolicy` TERMINATE arm, `engine/store_lifecycle.go:467` |
-| `running` → `dead_lettered` | `MoveToDeadLetterQueue`, `engine/store_lifecycle.go:505` |
-| `*` → `terminated` | `TerminateWorkflow`, `engine/db.go:1128`, `mysql_ops.go`, `mssql_operations.go` |
+| → `ready` (enqueue) | column default, `migrations/postgres/001_schema.sql` |
+| `ready` → `running` | `ClaimWorkflow` / `ClaimWorkflows`, `engine/store_lifecycle.go` |
+| `running` → `ready` (suspend, release, reap) | `finalizeWorkflowSegmentInner`, `finalize_workflow_status` `WHEN 'ready'`, `ReapStaleInstances` |
+| `running` → `done` | `CompleteWorkflow` / `FinalizeWorkflowSegment`, `engine/store_lifecycle.go` |
+| `running` → `failed` | `FailWorkflow`, `engine/store_lifecycle.go` |
+| `*` → `failed` (parent) | `enforceParentClosePolicy` TERMINATE arm, `engine/store_lifecycle.go` |
+| `running` → `dead_lettered` | `MoveToDeadLetterQueue`, `engine/store_lifecycle.go` |
+| `*` → `terminated` | `TerminateWorkflow` → `preemptivelySettle`, `engine/db.go`, `mysql_ops.go`, `mssql_operations.go` |
 | `*` → `cancelled` | `CancelWorkflow`, `engine/db.go`, `mysql_ops.go`, `mssql_operations.go` — all three share `TerminateWorkflow`'s body (`preemptivelySettle`), parameterised on the outcome |
 
 ### Which terminal transitions close the workflow's children
@@ -324,12 +359,20 @@ stateDiagram-v2
 the runnable set, on all three dialects: `CompleteWorkflow`, `FailWorkflow`,
 `FinalizeWorkflowSegment`, `MoveToDeadLetterQueue`, `ContinueAsNew` (which
 closes the current run), `adminForceResolve` (force-complete and force-fail),
-and — since 2026-09-02 — `TerminateWorkflow`.
+`preemptivelySettle` (which is both `TerminateWorkflow` and `CancelWorkflow`,
+since 2026-09-02), and the two defer-phase exits — `FinalizeDeferPhase` and
+`ExpireDeferPhases`, the deadline sweep.
 
 Re-derive with
 `grep -rn "enforceParentClosePolicy(" --include='*.go' engine/ | grep -v _test`
-and map each hit to its enclosing `func`; the list above is that mapping on
-2026-09-02.
+and map each hit to its enclosing `func`. **Map it, rather than reading the
+hit count**: each dialect spells the same call twice, once in the exported
+method and once in its `…Once` retry body, so eighteen hits are nine callers.
+
+The list above is that mapping on **2026-09-19**. It gained the two defer-phase
+exits since the 2026-09-02 version of this list, which is the expected way for
+it to change: a new terminal path that forgets this call leaves a parent's
+children running forever, and nothing else notices.
 
 Terminate was the exception until then, and nothing stated why: force-completing
 a parent failed its `TERMINATE` children while terminating the same parent left

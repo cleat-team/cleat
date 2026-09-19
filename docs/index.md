@@ -13,6 +13,7 @@
 - **Understand the architecture** -- [Architecture Overview](explanation/architecture.md)
 - **Monitor workflows visually** -- [Web UI / Admin Dashboard](../web/README.md)
 - **Understand what state a workflow is in** -- [Workflow Lifecycle](reference/workflow-lifecycle.md)
+- **Retire an API key, schedule or secret without deleting it** -- [Entity Lifecycle](reference/entity-lifecycle.md)
 - **See the full CLI reference** -- [CLI Reference](reference/cli.md)
 - **Migrate from Temporal/DBOS/Restate** -- [Migration Guides](migration/)
 - **Troubleshoot common issues** -- [Troubleshooting Guide](troubleshooting.md)
