@@ -97,6 +97,11 @@ type wasmtimeConfig struct {
 	// because it bounds a process-wide CACHE rather than anything one
 	// execution may consume, which is what the fields in that struct are.
 	moduleCacheMaxEntries int
+
+	// moduleCacheMaxBytes bounds the same cache by estimated resident size.
+	// 0 means DefaultModuleCacheMaxBytes. Both bounds apply; see moduleLRU
+	// for why a count alone could not say what a hundred entries cost.
+	moduleCacheMaxBytes int64
 }
 
 // WasmtimeOption configures a wasmtimeBackend, applied at construction time
@@ -182,13 +187,29 @@ func WithWasmtimeDeferBudget(d time.Duration) WasmtimeOption {
 // across every tenant, for the life of the process.
 //
 // ENTRIES, NOT BYTES, and the flag help says so rather than implying a memory
-// bound it cannot enforce: a compiled *wasmtime.Module exposes no cheap size,
-// and Serialize() would cost a serialisation on every insert.
+// It bounds map and list overhead independently of artifact size, which is why
+// it survives alongside the byte bound rather than being replaced by it: a
+// deployment with thousands of tiny artifacts is bounded by this one.
 //
 // n <= 0 uses DefaultModuleCacheMaxEntries.
 func WithWasmtimeModuleCacheMaxEntries(n int) WasmtimeOption {
 	return func(c *wasmtimeConfig) {
 		c.moduleCacheMaxEntries = n
+	}
+}
+
+// WithWasmtimeModuleCacheMaxBytes bounds the compiled-module cache by
+// ESTIMATED resident size -- CompiledSizeEstimate over each entry's wasm.
+//
+// This is the bound a deployment can actually size against. The entry count
+// could not say whether a hundred modules was 8.6 MB or 4.6 GB; measured on
+// this repo's own artifacts, both are true depending on the guest language.
+// cleat#1907.
+//
+// n <= 0 uses DefaultModuleCacheMaxBytes.
+func WithWasmtimeModuleCacheMaxBytes(n int64) WasmtimeOption {
+	return func(c *wasmtimeConfig) {
+		c.moduleCacheMaxBytes = n
 	}
 }
 

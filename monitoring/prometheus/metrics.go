@@ -87,6 +87,7 @@ type Metrics struct {
 	eventHistorySize               metric.Int64UpDownCounter
 	wasmCacheEntries               metric.Int64UpDownCounter
 	wasmCompiledModuleCacheEntries metric.Int64UpDownCounter
+	wasmCompiledModuleCacheBytes   metric.Int64UpDownCounter
 	wasmCacheBytes                 metric.Int64UpDownCounter
 	workflowsStuck                 metric.Int64UpDownCounter
 	eventHistoryRowCount           metric.Int64UpDownCounter
@@ -144,6 +145,7 @@ type Metrics struct {
 	lastWorkflowMemoryEstimate         map[workflowMemoryKey]float64 // keyed by (tenant, defName)
 	lastWasmCacheEntries               int64
 	lastWasmCompiledModuleCacheEntries int64
+	lastWasmCompiledModuleCacheBytes   int64
 	lastWasmCacheBytes                 int64
 	lastWorkflowsStuck                 int64
 	lastEventHistoryRowCount           int64
@@ -463,10 +465,18 @@ func New(cfg Config) (*Metrics, error) {
 	// cache they measure.
 	m.wasmCompiledModuleCacheEntries, err = meter.Int64UpDownCounter(
 		"cleat_wasm_compiled_module_cache_entries",
-		metric.WithDescription("Number of compiled wasmtime Modules retained (the --wasm-module-cache-max-entries LRU). Bounded by ENTRY COUNT; a compiled module exposes no cheap size, so there is deliberately no bytes counterpart."),
+		metric.WithDescription("Number of compiled wasmtime Modules retained (the --wasm-module-cache-max-entries LRU). Bounded by entry count AND by estimated bytes -- see cleat_wasm_compiled_module_cache_bytes, which is the one to size a deployment against."),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_wasm_compiled_module_cache_entries: %w", err)
+	}
+
+	m.wasmCompiledModuleCacheBytes, err = meter.Int64UpDownCounter(
+		"cleat_wasm_compiled_module_cache_bytes",
+		metric.WithDescription("ESTIMATED resident size of the compiled-module cache (the --wasm-module-cache-max-mb LRU). Estimated from each entry's wasm length, not measured from native code: a compiled module exposes no cheap size. The entries gauge beside this one cannot say whether a hundred modules is 8.6 MB or 4.6 GB; measured on cleat's own artifacts, both are true depending on the guest language."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_wasm_compiled_module_cache_bytes: %w", err)
 	}
 
 	m.workflowsStuck, err = meter.Int64UpDownCounter(
@@ -1178,6 +1188,18 @@ func (m *Metrics) SetWasmCompiledModuleCacheEntries(ctx context.Context, count i
 
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.wasmCompiledModuleCacheEntries.Add(ctx, delta, metric.WithAttributes(attrs...))
+}
+
+// SetWasmCompiledModuleCacheBytes sets the compiled-module cache's estimated
+// size gauge.
+func (m *Metrics) SetWasmCompiledModuleCacheBytes(ctx context.Context, bytes int64, extraAttrs ...attribute.KeyValue) {
+	m.mu.Lock()
+	delta := bytes - m.lastWasmCompiledModuleCacheBytes
+	m.lastWasmCompiledModuleCacheBytes = bytes
+	m.mu.Unlock()
+
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.wasmCompiledModuleCacheBytes.Add(ctx, delta, metric.WithAttributes(attrs...))
 }
 
 // SetWasmCacheEntries sets the WASM cache entries gauge.

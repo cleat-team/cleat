@@ -270,10 +270,26 @@ var (
 		"Maximum age of a DEPRECATED version before it becomes eligible for GC. A version "+
 			"that is not deprecated is never collected whatever its age.")
 
-	deadLetterRetentionDays       = flag.Int("dead-letter-retention-days", 0, "Days to retain dead-lettered workflow_instances rows before permanently deleting them, along with their event_history, signals and promises. 0 (default) disables this. Separate from --completed-workflow-retention-days, which never touches dead-lettered workflows: a dead-lettered run is the one an operator most wants to inspect afterwards, so it has its own lifecycle and its own knob rather than being swept up with completed work.")
-	wasmCacheMaxEntries           = flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
-	wasmCacheMaxMB                = flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
-	wasmModuleCacheMaxEntries     = flag.Int("wasm-module-cache-max-entries", engine.DefaultModuleCacheMaxEntries, "Max COMPILED-MODULE cache entries (LRU eviction). Distinct from --wasm-cache-max-entries, which bounds the WASM BYTE cache: this one bounds compiled native code, and until cleat#1563 it had no bound at all. Entries rather than megabytes because a compiled module exposes no cheap size; observe it with cleat_wasm_compiled_module_cache_entries.")
+	deadLetterRetentionDays   = flag.Int("dead-letter-retention-days", 0, "Days to retain dead-lettered workflow_instances rows before permanently deleting them, along with their event_history, signals and promises. 0 (default) disables this. Separate from --completed-workflow-retention-days, which never touches dead-lettered workflows: a dead-lettered run is the one an operator most wants to inspect afterwards, so it has its own lifecycle and its own knob rather than being swept up with completed work.")
+	wasmCacheMaxEntries       = flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
+	wasmCacheMaxMB            = flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
+	wasmModuleCacheMaxEntries = flag.Int("wasm-module-cache-max-entries", engine.DefaultModuleCacheMaxEntries,
+		"Max COMPILED-MODULE cache entries (LRU eviction). Distinct from --wasm-cache-max-entries, which "+
+			"bounds the WASM BYTE cache: this one bounds compiled native code. It bounds map and list "+
+			"overhead independently of artifact size, which is why it survives alongside "+
+			"--wasm-module-cache-max-mb rather than being replaced by it. Observe with "+
+			"cleat_wasm_compiled_module_cache_entries.")
+	wasmModuleCacheMaxMB = flag.Int("wasm-module-cache-max-mb", int(engine.DefaultModuleCacheMaxBytes>>20),
+		"Max ESTIMATED size of the compiled-module cache, in MB (LRU eviction). THIS is the bound to size a "+
+			"deployment against: the entry count could not say what a hundred modules cost, and measured on "+
+			"cleat's own artifacts a hundred is 8.6 MB of AssemblyScript or 4.6 GB of Python -- a ~500x "+
+			"spread in what one flag value means.\n"+
+			"ESTIMATED, not measured: a compiled wasmtime Module exposes no cheap size, so each entry is "+
+			"costed at 4x the wasm it came from -- above the 3.1x maximum measured for a release build, because an estimate that UNDER-counts would let the cache hold more than this bound says. The outliers are tiny "+
+			"AssemblyScript artifacts (high ratio, negligible bytes) and debug builds (low ratio, so the "+
+			"estimate over-counts and the cache merely holds fewer). Over-counting shrinks the cache; it "+
+			"cannot overrun this bound. See engine.CompiledSizeEstimateMultiplier for the measurements.\n"+
+			"Observe with cleat_wasm_compiled_module_cache_bytes. cleat#1907.")
 	schemaName                    = flag.String("schema", "public", "PostgreSQL schema for cleat tables (default \"public\"). Sets search_path on connections; CREATE SCHEMA IF NOT EXISTS on startup.")
 	disableChecksumVerification   = flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
 	wasmMemoryMaxMB               = flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
