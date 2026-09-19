@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"io"
 	"strings"
 	"sync"
@@ -299,5 +300,42 @@ func TestAnUnknownClaimStrategyIsRefused(t *testing.T) {
 		if err := validateClaimStrategy(bad); err == nil {
 			t.Errorf("validateClaimStrategy(%q) = nil; want refused", bad)
 		}
+	}
+}
+
+// Cross-tenant dispatch is ON by default.
+//
+// The doc guard ties the documented default to the code, and would not notice
+// the pair being flipped back together. This names the decision instead: a
+// worker that executes only its own tenant's work, on a deployment that never
+// asked for that, is a non-default tenant's workflows sitting unexecuted with
+// nothing to say why.
+//
+// The reason it was ever off was the grant. admin.claim_workflows needs a
+// BYPASSRLS owner, which only a superuser can grant and managed PostgreSQL
+// cannot grant at all, so enabling it had to be deliberate. The rotating
+// strategy asks nothing of the deployment, so that reason is gone.
+func TestCrossTenantDispatchIsOnByDefault(t *testing.T) {
+	f := flag.Lookup("claim-across-tenants")
+	if f == nil {
+		t.Fatal("--claim-across-tenants no longer exists")
+	}
+	if f.DefValue != "true" {
+		t.Errorf("--claim-across-tenants defaults to %q, want \"true\". If this was "+
+			"deliberate, the reason belongs here: the flag was off only because the "+
+			"cross-tenant claim needed a BYPASSRLS grant, and --claim-strategy=rotate "+
+			"needs none.", f.DefValue)
+	}
+
+	// And the strategy that makes it grant-free must be the default too --
+	// defaulting the flag on while defaulting the strategy to `global` would
+	// turn a feature that asks nothing of the deployment into one that fails
+	// on every database without 023.
+	s := flag.Lookup("claim-strategy")
+	if s == nil {
+		t.Fatal("--claim-strategy no longer exists")
+	}
+	if s.DefValue != claimStrategyRotate {
+		t.Errorf("--claim-strategy defaults to %q, want %q", s.DefValue, claimStrategyRotate)
 	}
 }

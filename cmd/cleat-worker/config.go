@@ -453,17 +453,24 @@ var (
 	maxQuotaChildren        = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited). Deliberately unbounded: unlike --max-quota-events, exceeding this FAILS the workflow rather than rolling it over, so a default would break working deployments at whatever number was chosen, and nobody has usage data to choose from. cleat#1829.")
 	maxQuotaConcurrencyKeys = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited). Deliberately unbounded: unlike --max-quota-events, exceeding this FAILS the workflow rather than rolling it over, so a default would break working deployments at whatever number was chosen, and nobody has usage data to choose from. cleat#1829.")
 	maxQuotaSchedules       = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited). Deliberately unbounded: unlike --max-quota-events, exceeding this FAILS the workflow rather than rolling it over, so a default would break working deployments at whatever number was chosen, and nobody has usage data to choose from. cleat#1829.")
-	claimAcrossTenants      = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. "+
-		"Requires a database-side grant, and on SQL Server it now requires TWO steps rather than one.\n"+
-		"PostgreSQL: migrations/postgres/023_cross_tenant_claim.sql.\n"+
-		"SQL Server: apply migrations/mssql/optional/cross_tenant_claim.sql -- which is NOT applied "+
-		"automatically, because the predicate it installs costs the index seek on any query that does "+
-		"not carry its own tenant predicate (5760 logical reads against 33, measured; cleat#1491) -- "+
-		"and THEN grant dbo.cleat_admin membership as migrations/mssql/012_admin_role.sql documents. "+
-		"012 alone is no longer enough: since cleat#1541 the shipped predicate is the plain one, and a "+
-		"member of cleat_admin under it reads IS_ROLEMEMBER = 1 and sees zero rows.\n"+
-		"A worker started with this flag reports on both loops at startup whether it actually has the "+
-		"capability, so a half-completed setup says so rather than running silently single-tenant.")
+	claimAcrossTenants      = flag.Bool("claim-across-tenants", true, "Execute work for every tenant, not only this worker's own. "+
+		"DEFAULTS ON since the default mechanism stopped needing a database grant: --claim-strategy=rotate "+
+		"reads the tenant list from admin.tenants -- which carries no row-level security -- and then claims "+
+		"and reads due schedules under each tenant's OWN RLS context. Nothing is exempt from a policy and "+
+		"nothing has to be granted.\n"+
+		"It was off by default because the only mechanism was admin.claim_workflows, whose owner needs "+
+		"BYPASSRLS: a privilege only a superuser can grant, and one managed PostgreSQL cannot grant at all. "+
+		"Turning that on had to be a deliberate act. `rotate` asks nothing of the deployment, so leaving a "+
+		"non-default tenant's work unexecuted by default stopped being caution and became a surprise.\n"+
+		"WITH ONE TENANT THIS COSTS ONE QUERY PER TICK -- the tenant list -- and nothing else changes.\n"+
+		"--claim-strategy=global still needs the grants: migrations/postgres/023_cross_tenant_claim.sql and "+
+		"024_cross_tenant_schedules.sql on PostgreSQL; on SQL Server, migrations/mssql/optional/"+
+		"cross_tenant_claim.sql (NOT auto-applied: its predicate costs the index seek on any query without "+
+		"its own tenant predicate, 5760 logical reads against 33, cleat#1491) and THEN dbo.cleat_admin "+
+		"membership per migrations/mssql/012_admin_role.sql. 012 alone is not enough since cleat#1541.\n"+
+		"Set false to run this worker against its own tenant only. A worker reports on both loops at startup "+
+		"which mechanism it actually has, so a half-completed setup says so rather than running silently "+
+		"single-tenant.")
 	claimStrategy = flag.String("claim-strategy", claimStrategyRotate,
 		"How --claim-across-tenants claims work: `rotate` polls tenants in turn, each getting a bounded "+
 			"share of the batch, using the same per-tenant claim the single-tenant path runs -- it needs NO "+

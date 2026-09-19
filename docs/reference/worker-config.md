@@ -888,13 +888,28 @@ Set `0` to remove the bound and restore the full int32 range.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `false` | Claim runnable work for every tenant in one query instead of only this worker's own |
+| bool | `true` | Execute work for every tenant, not only this worker's own |
 
-A worker holds one store, scoped to one tenant, and by default its dispatch
-loop claims through it. That claim only ever returns rows for that one tenant --
-enforced by row-level security on PostgreSQL and SQL Server, and by an explicit
-`tenant_id` predicate on MySQL -- which means a non-default tenant's workflows
-never execute.
+A worker holds one store, scoped to one tenant. With this off, its dispatch
+loop claims through that store, and the claim only ever returns rows for that
+one tenant -- enforced by row-level security on PostgreSQL and SQL Server, and
+by an explicit `tenant_id` predicate on MySQL -- which means a non-default
+tenant's workflows never execute.
+
+**This defaults to `true`**, and did not always. The only mechanism used to be
+`admin.claim_workflows`, whose owner needs `BYPASSRLS` — a privilege only a
+superuser can grant, and one managed PostgreSQL cannot grant at all. Turning
+that on had to be a deliberate act, so it was off.
+
+[`--claim-strategy=rotate`](#--claim-strategy), the default, asks nothing of the
+deployment: it reads the tenant list from `admin.tenants`, which carries no
+row-level security, and then does the per-tenant work under each tenant's own
+RLS context. Nothing is exempt from a policy and nothing has to be granted — at
+which point leaving a non-default tenant's work unexecuted by default stopped
+being caution and became a surprise.
+
+**With one tenant this costs one query per tick** — the tenant list — and
+nothing else changes. Set it to `false` to hold a worker to its own tenant.
 
 Their **schedules** are the other half, and this flag covers both. The firing
 loop reads due schedules through the same widened path, then re-scopes to the
