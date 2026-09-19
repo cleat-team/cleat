@@ -1,7 +1,11 @@
 #!/bin/sh
 # ---------------------------------------------------------------------------
-# Append the DCO Signed-off-by trailer, so `git commit` behaves like
-# `git commit --signoff` without anyone having to remember the flag.
+# Append the two trailers every commit here is expected to carry, so
+# `git commit` behaves like `git commit --signoff` plus the stream stamp
+# without anyone having to remember either.
+#
+#   Signed-off-by:  the DCO, enforced by .github/workflows/dco-check.yml
+#   Claude-Stream:  who worked, enforced by .github/workflows/stream-trailer-check.yml
 #
 # Install once per clone:
 #
@@ -9,9 +13,17 @@
 #
 # Git does not track .git/hooks, which is why this lives in the tree and is
 # opted into by config rather than installed automatically. Nothing here is
-# load-bearing for CI: .github/workflows/dco-check.yml is what actually fails
-# a pull request whose commits lack the trailer. This hook only saves you the
-# `git rebase --signoff` afterwards.
+# load-bearing for CI: the workflows above are what actually fail a pull
+# request whose commits lack a trailer. This hook only saves you the rewrite
+# afterwards.
+#
+# THE STREAM HALF EXISTS BECAUSE THE CHECK ARRIVED WITHOUT IT. The stream
+# check argues for itself by citing this very arrangement -- "the repo's own
+# answer to a discipline people have to remember is the DCO arrangement: a
+# hook that adds it, a check that enforces it" -- and then shipped only the
+# check. Its own measurement of the convention before enforcement was 53%
+# compliance; two pull requests went out unmarked on 2026-09-18 for no reason
+# other than that nothing added the line.
 # ---------------------------------------------------------------------------
 set -eu
 
@@ -46,4 +58,75 @@ fi
 git interpret-trailers \
 	--if-exists doNothing \
 	--trailer "Signed-off-by: $NAME <$EMAIL>" \
+	--in-place "$MSG_FILE"
+
+# ---------------------------------------------------------------------------
+# Claude-Stream: which workstream produced this commit.
+#
+# Already present -- an explicit --trailer, or an amend of a stamped commit --
+# is left exactly as written. The config is a default for commits that do not
+# say, not an override of ones that do.
+# ---------------------------------------------------------------------------
+if grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]' "$MSG_FILE"; then
+	exit 0
+fi
+
+STREAM=$(git config cleat.stream || true)
+
+# REFUSED when unset, for the same reason the signoff above is: there is no
+# sensible default. A default would not be "unattributed", it would be
+# attributed to somebody else -- which is the failure the stream check was
+# written after. Two of one session's pull requests went out as `coordinator`,
+# and the coordinator session found a red pull request carrying its own name
+# that it had not opened.
+#
+# Per CHECKOUT rather than global, because a stream is a working tree here.
+# `git config --local` in a worktree writes the shared repository config, which
+# is what you want: every worktree of one checkout belongs to one stream.
+# The valid set is READ FROM THE CHECK rather than repeated here -- including
+# in the messages below, which is why it is extracted before they are printed.
+#
+# Two lists would drift, and the drift is silent in the direction that matters:
+# a hook with a stale set refuses a value CI would have accepted, or stamps one
+# CI will reject, and both look like the hook is broken rather than out of
+# date. tests/hooks asserts the alternation appears nowhere in this file.
+#
+# If the file cannot be read -- a checkout without .github, an editing mistake
+# mid-rebase -- validation is SKIPPED rather than the commit refused. CI still
+# catches a bad value, and a hook that blocks every commit because it could not
+# parse a workflow file is a worse failure than the one it is guarding against.
+CHECK_FILE=$(git rev-parse --show-toplevel)/.github/workflows/stream-trailer-check.yml
+VALID=''
+if [ -r "$CHECK_FILE" ]; then
+	VALID=$(sed -n "s/^[[:space:]]*VALID='\(.*\)'[[:space:]]*$/\1/p" "$CHECK_FILE")
+fi
+
+if [ -z "$STREAM" ]; then
+	echo "prepare-commit-msg: cannot stamp the workstream — git config" >&2
+	echo "cleat.stream is not set in this checkout." >&2
+	echo "" >&2
+	echo "  git config --local cleat.stream <stream>" >&2
+	echo "" >&2
+	if [ -n "$VALID" ]; then
+		echo "where <stream> matches: $VALID" >&2
+	else
+		echo "for one of the values .github/workflows/stream-trailer-check.yml accepts." >&2
+	fi
+	echo "" >&2
+	echo "There is no default worth falling back to: a wrong value is not" >&2
+	echo "'unattributed', it is attributed to another session. See" >&2
+	echo "that workflow and WORKSTREAM.md." >&2
+	exit 1
+fi
+
+if [ -n "$VALID" ] && ! printf '%s' "$STREAM" | grep -Eq "$VALID"; then
+	echo "prepare-commit-msg: git config cleat.stream is '$STREAM', which" >&2
+	echo "$(basename "$CHECK_FILE") does not accept. Valid values match:" >&2
+	echo "  $VALID" >&2
+	exit 1
+fi
+
+git interpret-trailers \
+	--if-exists doNothing \
+	--trailer "Claude-Stream: $STREAM" \
 	--in-place "$MSG_FILE"
