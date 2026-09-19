@@ -4,11 +4,6 @@ engine/engine.go	func Engine.EncryptSensitivePayloads
 engine/engine.go	func Engine.Encryption
 engine/engine.go	func WithWasmCumulativeAllocationMax
 engine/executor.go	func Engine.RunDeferCompiled
-engine/queue_store.go	func NewQueueStore
-engine/queue_store.go	func QueueStore.CreateQueue
-engine/queue_store.go	func QueueStore.DisableQueue
-engine/queue_store.go	func QueueStore.GetQueue
-engine/queue_store.go	func QueueStore.ListQueues
 engine/tenant_egress_store.go	func TenantEgressStore.Invalidate
 monitoring/prometheus/metrics.go	func Metrics.RecordWasmCompileDuration
 plugin/signing.go	func MustRegisterOfficialPublicKey

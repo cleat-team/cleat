@@ -43,6 +43,10 @@ engine/plugin_loader.go	func PluginLoader.ResolvePlugin
 engine/plugin_loader.go	func PluginLoader.SetLimits
 engine/plugin_resolver.go	func ResolvePlugins
 engine/plugins.go	func PluginRegistry.RegisterIdempotent
+engine/queue_store.go	func NewQueueStore
+engine/queue_store.go	func QueueStore.CreateQueue
+engine/queue_store.go	func QueueStore.DisableQueue
+engine/queue_store.go	func QueueStore.ListQueues
 engine/redact.go	func RedactMap
 engine/redact.go	func ResetPatterns
 engine/replayer.go	func Engine.ReplayCompiled
