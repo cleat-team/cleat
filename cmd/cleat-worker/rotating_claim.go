@@ -14,24 +14,6 @@ import (
 // caller reports it once rather than every tick.
 var errRotatingClaimUnavailable = errors.New("rotating claim unavailable")
 
-// claimStrategyRotate is the two-phase per-tenant claim; claimStrategyGlobal is
-// admin.claim_workflows, the single widened query it replaces.
-const (
-	claimStrategyRotate = "rotate"
-	claimStrategyGlobal = "global"
-)
-
-// validateClaimStrategy accepts only the two mechanisms that exist.
-func validateClaimStrategy(v string) error {
-	switch v {
-	case claimStrategyRotate, claimStrategyGlobal:
-		return nil
-	default:
-		return fmt.Errorf("--claim-strategy %q is not a strategy; use %q or %q",
-			v, claimStrategyRotate, claimStrategyGlobal)
-	}
-}
-
 // defaultClaimTenantsPerTick bounds how many tenants one dispatch tick will
 // poll.
 //

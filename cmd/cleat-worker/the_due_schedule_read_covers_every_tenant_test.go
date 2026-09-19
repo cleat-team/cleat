@@ -130,28 +130,3 @@ func TestADueScheduleReadRefusesWhatItCannotDo(t *testing.T) {
 		}
 	})
 }
-
-// dueSchedules prefers the per-tenant read, and honours claim-strategy=global.
-func TestDueSchedulesPrefersThePerTenantRead(t *testing.T) {
-	t.Run("reads per tenant when it can", func(t *testing.T) {
-		w, _, ls := newRotatingWorker(t, map[string]int{"a": 0, "b": 0})
-		if _, err := w.dueSchedules(); err != nil {
-			t.Fatalf("dueSchedules: %v", err)
-		}
-		if ls.lists != 1 {
-			t.Errorf("tenant list read %d times; want 1 -- dueSchedules did not take the "+
-				"per-tenant path", ls.lists)
-		}
-	})
-
-	t.Run("honours claim-strategy=global", func(t *testing.T) {
-		w, _, ls := newRotatingWorker(t, map[string]int{"a": 0, "b": 0})
-		w.claimStrategy = claimStrategyGlobal
-		if _, err := w.dueSchedules(); err != nil {
-			t.Fatalf("dueSchedules: %v", err)
-		}
-		if ls.lists != 0 {
-			t.Errorf("tenant list read %d times under claim-strategy=global; want 0", ls.lists)
-		}
-	})
-}

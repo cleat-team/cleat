@@ -15,7 +15,10 @@ import (
 // A test may drop its own probe table. It may not drop a SHIPPED one and walk
 // away.
 //
-// TestMSSQLCapabilityFollowsTheInstalledPredicate did exactly that: it dropped
+// TestMSSQLCapabilityFollowsTheInstalledPredicate did exactly that. That test
+// is gone -- it covered the cross-tenant capability probe, retired with the
+// widened claim -- but the lesson is why THIS guard exists, so it is kept by
+// name rather than rewritten into the abstract. It dropped
 // admin.rls_predicate_form to exercise the unknown-marker arm, asserted, and
 // ended. Migration 075 is what creates that table, and migration.Runner only
 // applies versions schema_migrations has not recorded -- so the table stayed

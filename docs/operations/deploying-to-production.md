@@ -106,9 +106,8 @@ rather than telling you to apply a file you cannot apply.
 | capability | on managed PostgreSQL |
 |---|---|
 | single-tenant dispatch | works, unchanged |
-| cross-tenant claim | **works** with `--claim-strategy=rotate`, the default — it claims each tenant's work under that tenant's own RLS context and needs no exemption |
-| a non-default tenant's cron | **works** with the same strategy: due schedules are read per tenant, under that tenant's own RLS context |
-| `--claim-strategy=global`, either loop | unavailable; `admin.claim_workflows` and `admin.get_due_schedules` have no exemption to use |
+| cross-tenant claim | **works** — each tenant's work is claimed under that tenant's own RLS context, and no exemption is involved |
+| a non-default tenant's cron | **works** the same way: due schedules are read per tenant, under that tenant's own RLS context |
 
 **Multi-tenancy on a managed instance is therefore complete**, and the default
 configuration is the one that works there. Until the due-schedule read gained a

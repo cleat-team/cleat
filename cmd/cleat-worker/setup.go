@@ -1423,44 +1423,22 @@ type Worker struct {
 	// deliberate act rather than an upgrade side effect.
 	claimAcrossTenants bool
 
-	// claimStrategy selects HOW cross-tenant work is claimed once
-	// claimAcrossTenants is on: "rotate" (the two-phase per-tenant claim) or
-	// "global" (admin.claim_workflows, the single widened query).
-	//
-	// Two mechanisms exist during the changeover, not permanently. "rotate"
-	// needs no RLS exemption and gives each tenant a bounded share of every
-	// batch; "global" is one query per tick regardless of tenant count, which
-	// is faster and is also exactly why one tenant's backlog can take the
-	// whole batch. The flag is the way back if the rotation's extra round
-	// trips measure badly on a real deployment.
-	claimStrategy string
-
 	// claimTenantsPerTick bounds how many tenants one rotating tick polls.
 	claimTenantsPerTick int
 
-	// tenantRotation is the cursor "rotate" resumes from. Worker-local: see
+	// tenantRotation is the cursor the claim resumes from. Worker-local: see
 	// the type's doc for why there is no shared counter table.
 	tenantRotation tenantRotation
 
-	// rotatingSchedulesUnavailableOnce is the schedule loop's equivalent, and
-	// separate for the reason crossTenantSchedulesUnsupportedOnce is separate
-	// from the claim's: the two loops can be in different states, and one line
-	// covering both would report whichever fired first.
+	// The two "this worker cannot serve other tenants" warnings, one per loop.
+	//
+	// SEPARATE, and not merged now that they say nearly the same thing: the
+	// two loops reach the answer independently, so one Once covering both
+	// would report whichever fired first and silence the other -- leaving an
+	// operator told that cron is narrowed with nothing said about dispatch, or
+	// the reverse, according to which ticked first after boot.
 	rotatingSchedulesUnavailableOnce sync.Once
-
-	// rotatingUnavailableOnce keeps the "cannot rotate, falling back" warning
-	// to one line. Separate from crossTenantUnsupportedOnce because the two
-	// describe different missing capabilities and a worker can hit both.
-	rotatingUnavailableOnce sync.Once
-
-	// crossTenantUnsupportedOnce keeps the fallback warning to one line.
-	crossTenantUnsupportedOnce sync.Once
-
-	// crossTenantSchedulesUnsupportedOnce is separate from the claim's, because
-	// 023 and 024 are separate migrations: a deployment can have the claim and
-	// not the schedule read, and collapsing the two warnings would report only
-	// whichever failed first.
-	crossTenantSchedulesUnsupportedOnce sync.Once
+	rotatingUnavailableOnce          sync.Once
 
 	concurrency       int
 	maxReclaimPerTick int
@@ -4902,80 +4880,35 @@ func (w *Worker) reportCrossTenantCapability() {
 		return
 	}
 
-	// The rotating claim needs no grant, so reporting a missing 023 against a
-	// worker that will never call admin.claim_workflows would be a warning
-	// about a capability it does not use -- and on managed PostgreSQL, where
-	// BYPASSRLS cannot be granted at all, it would fire on every healthy
-	// worker forever.
-	//
-	// The SCHEDULE half is reported either way, because the rotating claim
-	// does NOT replace it: 024's admin.get_due_schedules is still how a
-	// non-default tenant's cron is seen. A deployment on the rotating claim
-	// without 024 executes every tenant's workflows and fires only its own
-	// tenant's schedules, which is a real and confusing state to be in, so it
-	// is said out loud.
-	if w.claimStrategy != claimStrategyGlobal {
-		if err := w.rotatingClaimAvailability(); err != nil {
-			w.logger.WarnContext(w.ctx,
-				"claim-strategy=rotate is set but this worker cannot rotate; it will try the widened query",
-				"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
-			// Only the widened query is left, so report what IT can do.
-			w.reportScheduleCapability()
-			return
-		}
-		w.logger.InfoContext(w.ctx,
-			"cross-tenant workflow claim is available by tenant rotation; no database grant is required",
-			"worker_id", w.id, "tenant_id", w.storeTenantID,
-			"tenants_per_tick", w.claimTenantsPerTick)
-		// BOTH halves are grant-free now. The schedule read used to be the one
-		// this mechanism did not cover, and a worker on the rotating path was
-		// told at startup that a missing 024 meant only its own tenant's cron
-		// would fire. That is no longer true, and repeating it would send an
-		// operator to apply a migration they do not need -- or, on managed
-		// PostgreSQL, one they cannot apply.
-		//
-		// EVERY tenant is read each tick rather than a share of them: a
-		// schedule that is due must fire, which is the one place the claim's
-		// bargain does not carry over. See dueSchedulesByTenant.
-		w.logger.InfoContext(w.ctx,
-			"cross-tenant due-schedule read is available by tenant rotation; no database grant is required",
-			"worker_id", w.id, "tenant_id", w.storeTenantID)
-		return
-	}
-
-	checker, ok := w.store.(engine.CrossTenantCapabilityChecker)
-	if !ok {
+	// ONE MECHANISM, so one answer. This used to report on two: the widened
+	// query behind admin.claim_workflows, whose availability was a property of
+	// the 023/024 grants, and the rotation, whose availability is a property
+	// of this worker. The widened query is retired, so the grant questions are
+	// gone with it -- including the warning about a missing 024, which on
+	// managed PostgreSQL fired on every healthy worker forever and pointed at
+	// a migration nobody there can apply.
+	if err := w.rotatingClaimAvailability(); err != nil {
 		w.logger.WarnContext(w.ctx,
-			"claim-across-tenants is set but this store cannot report whether it supports it; "+
-				"the loops will fall back and say so on their first tick",
-			"worker_id", w.id)
+			"claim-across-tenants is set but this worker cannot serve other tenants; "+
+				"it will claim and fire cron for its own tenant only",
+			"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
 		return
 	}
-
-	capability := checker.CheckCrossTenantCapability(w.ctx)
-	for _, c := range []struct {
-		what   string
-		ok     bool
-		reason string
-		effect string
-	}{
-		{"workflow claim", capability.Claim, capability.ClaimReason,
-			"only this worker's own tenant's workflows will execute"},
-		{"due-schedule read", capability.Schedules, capability.SchedulesReason,
-			"only this worker's own tenant's cron will fire"},
-	} {
-		if c.ok {
-			w.logger.InfoContext(w.ctx, "cross-tenant "+c.what+" is available",
-				"worker_id", w.id, "tenant_id", w.storeTenantID)
-			continue
-		}
-		w.logger.WarnContext(w.ctx, "cross-tenant "+c.what+" is NOT available; "+c.effect,
-			"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", c.reason)
-	}
+	// BOTH loops, said separately because they are bounded differently: the
+	// claim serves a share of tenants per tick, the schedule read serves every
+	// tenant every tick. See dueSchedulesByTenant for why that asymmetry is
+	// deliberate.
+	w.logger.InfoContext(w.ctx,
+		"cross-tenant workflow claim is available by tenant rotation; no database grant is required",
+		"worker_id", w.id, "tenant_id", w.storeTenantID,
+		"tenants_per_tick", w.claimTenantsPerTick)
+	w.logger.InfoContext(w.ctx,
+		"cross-tenant due-schedule read is available by tenant rotation; no database grant is required",
+		"worker_id", w.id, "tenant_id", w.storeTenantID)
 }
 
-// rotatingClaimAvailability reports whether this worker can claim by rotation,
-// with the same reasons claimRotating would give.
+// rotatingClaimAvailability reports whether this worker can serve tenants
+// other than its own, with the same reasons claimRotating would give.
 //
 // Separate from claimRotating so that startup can answer the question without
 // claiming anything, which is the difference between "it will tell you on its
@@ -4988,35 +4921,6 @@ func (w *Worker) rotatingClaimAvailability() error {
 		return fmt.Errorf("%w: this store cannot enumerate tenants", errRotatingClaimUnavailable)
 	}
 	return nil
-}
-
-// reportScheduleCapability states whether a non-default tenant's cron can fire.
-//
-// The claim and the schedule read are separate capabilities backed by separate
-// migrations, and the rotating claim replaces only the first of them.
-func (w *Worker) reportScheduleCapability() {
-	checker, ok := w.store.(engine.CrossTenantCapabilityChecker)
-	if !ok {
-		// Silence here would read as "cron is fine". The widened-query report
-		// says so in the same situation and this must too, or the rotating
-		// path is quieter about an unanswerable question purely because it
-		// reached the question by a different route.
-		w.logger.WarnContext(w.ctx,
-			"this store cannot report whether a non-default tenant's cron can fire; "+
-				"the schedule loop will fall back and say so on its first tick",
-			"worker_id", w.id, "tenant_id", w.storeTenantID)
-		return
-	}
-	capability := checker.CheckCrossTenantCapability(w.ctx)
-	if capability.Schedules {
-		w.logger.InfoContext(w.ctx, "cross-tenant due-schedule read is available",
-			"worker_id", w.id, "tenant_id", w.storeTenantID)
-		return
-	}
-	w.logger.WarnContext(w.ctx,
-		"cross-tenant due-schedule read is NOT available; only this worker's own tenant's cron will fire. "+
-			"--claim-strategy=rotate reads due schedules per tenant and needs no grant",
-		"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", capability.SchedulesReason)
 }
 
 // dueSchedules reads the schedules that are ready to fire.
@@ -5045,37 +4949,15 @@ func (w *Worker) dueSchedules() ([]engine.Schedule, error) {
 		// deployment that never applied 024 -- or cannot, because BYPASSRLS is
 		// ungrantable on managed PostgreSQL -- still fires every tenant's cron.
 		//
-		// Skipped only when the operator asked for the other mechanism by name
-		// or when this worker cannot read per tenant at all.
-		if w.claimStrategy != claimStrategyGlobal {
-			schedules, err := w.dueSchedulesByTenant()
-			if !errors.Is(err, errRotatingClaimUnavailable) {
-				return schedules, err
-			}
-			w.rotatingSchedulesUnavailableOnce.Do(func() {
-				w.logger.WarnContext(w.ctx,
-					"cannot read due schedules per tenant; trying the widened query instead",
-					"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
-			})
+		schedules, err := w.dueSchedulesByTenant()
+		if !errors.Is(err, errRotatingClaimUnavailable) {
+			return schedules, err
 		}
-		if xt, ok := w.store.(engine.CrossTenantScheduleReader); ok {
-			schedules, err := xt.GetDueSchedulesAcrossTenants(w.ctx)
-			if !errors.Is(err, engine.ErrCrossTenantClaimUnsupported) {
-				return schedules, err
-			}
-			w.crossTenantSchedulesUnsupportedOnce.Do(func() {
-				w.logger.WarnContext(w.ctx,
-					"claim-across-tenants is set but this store cannot read due schedules across "+
-						"tenants; only this worker's own tenant's schedules will fire",
-					"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
-			})
-			return w.store.GetDueSchedules(w.ctx)
-		}
-		w.crossTenantSchedulesUnsupportedOnce.Do(func() {
+		w.rotatingSchedulesUnavailableOnce.Do(func() {
 			w.logger.WarnContext(w.ctx,
-				"claim-across-tenants is set but this store does not support reading due schedules "+
-					"across tenants; only this worker's own tenant's schedules will fire",
-				"worker_id", w.id, "tenant_id", w.storeTenantID)
+				"claim-across-tenants is set but this worker cannot read due schedules per "+
+					"tenant; only this worker's own tenant's cron will fire",
+				"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
 		})
 	}
 	return w.store.GetDueSchedules(w.ctx)
@@ -5115,43 +4997,21 @@ func (w *Worker) claimGeneral(limit int) ([]*engine.WorkflowInstance, error) {
 		// still gets cross-tenant dispatch, and one that did gets a fair share
 		// per tenant instead of whoever has the oldest backlog.
 		//
-		// It is skipped only when the operator asked for the other mechanism
-		// by name, or when this worker cannot rotate at all.
-		if w.claimStrategy != claimStrategyGlobal {
-			wfs, err := w.claimRotating(limit)
-			if !errors.Is(err, errRotatingClaimUnavailable) {
-				return wfs, err
-			}
-			w.rotatingUnavailableOnce.Do(func() {
-				w.logger.WarnContext(w.ctx,
-					"cannot claim by tenant rotation; trying the widened query instead",
-					"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
-			})
+		wfs, err := w.claimRotating(limit)
+		if !errors.Is(err, errRotatingClaimUnavailable) {
+			return wfs, err
 		}
-		if xt, ok := w.store.(engine.CrossTenantClaimer); ok {
-			wfs, err := xt.ClaimWorkflowsAcrossTenants(w.ctx, w.id, limit)
-			if !errors.Is(err, engine.ErrCrossTenantClaimUnsupported) {
-				return wfs, err
-			}
-			// The store implements the interface but cannot honour it here --
-			// a MySQL store on the per-tenant-database topology, for instance.
-			// Fall through to the scoped claim rather than returning the error
-			// every tick, which would look like a database fault.
-			w.crossTenantUnsupportedOnce.Do(func() {
-				w.logger.WarnContext(w.ctx,
-					"claim-across-tenants is set but this store's topology cannot honour it; "+
-						"claiming only this worker's own tenant",
-					"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
-			})
-			return w.store.ClaimWorkflows(w.ctx, w.id, limit)
-		}
-		// Once, not every tick: this is a static property of the store, and at
-		// the poll interval it would otherwise be one line per second forever.
-		w.crossTenantUnsupportedOnce.Do(func() {
+		// The rotation is unavailable as a STATIC property of this worker --
+		// no store factory, or a store that cannot enumerate tenants -- so
+		// this is one line, not one per tick. Claiming this worker's own
+		// tenant is the honest fallback: it is what the worker can actually
+		// do, and stopping instead would turn a narrowed worker into a dead
+		// one.
+		w.rotatingUnavailableOnce.Do(func() {
 			w.logger.WarnContext(w.ctx,
-				"claim-across-tenants is set but this store does not support it; "+
+				"claim-across-tenants is set but this worker cannot rotate; "+
 					"claiming only this worker's own tenant",
-				"worker_id", w.id, "tenant_id", w.storeTenantID)
+				"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
 		})
 	}
 	return w.store.ClaimWorkflows(w.ctx, w.id, limit)
