@@ -83,15 +83,52 @@
 -- like an idle queue.
 -- ===========================================================================
 
+-- DEGRADES ON MANAGED POSTGRESQL RATHER THAN ABORTING THE MIGRATION RUN.
+--
+-- BYPASSRLS can only be granted by a true superuser, and RDS, Cloud SQL and
+-- Azure do not have one. Measured on PostgreSQL 16 against a role of exactly
+-- the shape AWS documents for the RDS master user:
+--
+--   ERROR:  permission denied to create role
+--   DETAIL:  Only roles with the BYPASSRLS attribute may create roles with
+--            the BYPASSRLS attribute.
+--
+-- Unhandled, that error stopped the whole migration run at file 23 of 72 and
+-- took 040 and 073 down with it -- so cleat could not be INSTALLED on managed
+-- PostgreSQL at all, not merely run single-tenant there.
+--
+-- Caught, the file continues and the function below is created owned by the
+-- migrating role instead. That is deliberate rather than a consolation: an
+-- owner without BYPASSRLS is the exact state
+-- PostgresStore.CheckCrossTenantCapability already probes for and already
+-- words correctly -- "exists and is executable, but its owner does not have
+-- BYPASSRLS" -- which is a truer thing to tell an RDS operator than "does not
+-- exist; apply 023", a file they cannot apply.
+--
+-- The degradation is the repo's existing idiom for this, not a new one:
+-- 001_schema.sql's create_tenant_role catches its own CREATE ROLE failure and
+-- warns "skipping (single-tenant mode)".
+--
+-- Cross-tenant dispatch is NOT lost on those platforms. --claim-strategy=rotate
+-- claims each tenant's work under that tenant's own RLS context and needs no
+-- exemption at all; this function is what the older `global` strategy uses.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cleat_dispatcher') THEN
-        CREATE ROLE cleat_dispatcher NOLOGIN BYPASSRLS;
+        BEGIN
+            CREATE ROLE cleat_dispatcher NOLOGIN BYPASSRLS;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'cleat_dispatcher needs BYPASSRLS, which only a superuser can grant, and this connection is not one. The cross-tenant claim function is still created but will not see across tenants; use --claim-strategy=rotate, which needs no grant. (SQLSTATE %)', SQLSTATE;
+        END;
     ELSIF NOT (SELECT rolbypassrls FROM pg_roles WHERE rolname = 'cleat_dispatcher') THEN
         -- Pre-existing but without the attribute: the function would be owned
         -- by a role that cannot see across tenants, so the claim would return
         -- nothing and the dispatch loop would look idle forever.
-        ALTER ROLE cleat_dispatcher BYPASSRLS;
+        BEGIN
+            ALTER ROLE cleat_dispatcher BYPASSRLS;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'cleat_dispatcher exists without BYPASSRLS and this connection cannot grant it. (SQLSTATE %)', SQLSTATE;
+        END;
     END IF;
 END
 $$;
@@ -105,10 +142,14 @@ $$;
 --
 -- SELECT and UPDATE only. The body reads candidates and marks them running; it
 -- has no reason to insert or delete, and the grant should not imply it can.
+-- Conditional on the role, for the reason the block above gives: on managed
+-- PostgreSQL it does not exist and these would abort the run.
 DO $do$ BEGIN
-    EXECUTE format('GRANT USAGE ON SCHEMA %I TO cleat_dispatcher', current_schema());
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cleat_dispatcher') THEN
+        EXECUTE format('GRANT USAGE ON SCHEMA %I TO cleat_dispatcher', current_schema());
+        EXECUTE 'GRANT SELECT, UPDATE ON workflow_instances TO cleat_dispatcher';
+    END IF;
 END $do$;
-GRANT SELECT, UPDATE ON workflow_instances TO cleat_dispatcher;
 
 -- Dropped before it is created, for the reason 003_procedures.sql documents at
 -- length: 040_claim_terminating_workflows.sql replaces this function with one
@@ -177,7 +218,31 @@ AS $$
               w.generation, COALESCE(w.priority, 0), COALESCE(w.trace_id, '');
 $$;
 
-ALTER FUNCTION admin.claim_workflows(text, text[], integer) OWNER TO cleat_dispatcher;
+DO $do$ BEGIN
+    -- ATTEMPTED, NOT GUARDED ON THE ROLE'S EXISTENCE. "Does cleat_dispatcher
+    -- exist" is the wrong question: ALTER ... OWNER TO also requires the
+    -- current role to be a MEMBER of the target, so a role that exists but
+    -- was created by somebody else still fails --
+    --
+    --   ERROR:  must be able to SET ROLE "cleat_dispatcher"   (SQLSTATE 42501)
+    --
+    -- and when the role does not exist at all the refusal is a DIFFERENT
+    -- SQLSTATE -- undefined_object, 42704, not 42501 -- so both are caught.
+    -- Catching only the first passed every run against a cluster where some
+    -- earlier superuser run had left the role behind, and failed the first
+    -- genuinely clean one.
+    --
+    -- which is what re-applying this file as a non-superuser hit, against a
+    -- cluster where a superuser had created the role earlier. Asking the
+    -- database to do it and catching the refusal answers both questions at
+    -- once, and needs no version-specific reasoning about pg_has_role and
+    -- PostgreSQL 16's WITH SET.
+    BEGIN
+        EXECUTE 'ALTER FUNCTION admin.claim_workflows(text, text[], integer) OWNER TO cleat_dispatcher';
+    EXCEPTION WHEN insufficient_privilege OR undefined_object THEN
+        RAISE NOTICE 'cannot give the function to cleat_dispatcher (SQLSTATE %); it keeps the migrating role as its owner and will not see across tenants. Use --claim-strategy=rotate, which needs no exemption.', SQLSTATE;
+    END;
+END $do$;
 
 -- REVOKE first: PostgreSQL grants EXECUTE to PUBLIC on new functions by
 -- default, which would hand the exemption to every role in the database.

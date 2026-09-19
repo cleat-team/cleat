@@ -49,6 +49,53 @@
 -- SET NOT NULL / SET DEFAULT, all of which are no-ops on a migrated database.
 --
 
+
+-- ── The backfill needs the owner's exemption back for the length of it ──────
+--
+-- WHY THIS IS HERE AT ALL. The comment above says the rows are visible
+-- because "migrations are applied by a superuser in every configuration cleat
+-- ships". That was true when it was written and is no longer the configuration
+-- cleat supports: managed PostgreSQL -- RDS, Cloud SQL, Azure -- has no
+-- superuser at all, so the migrating role is subject to these policies like
+-- any other, and the UPDATEs below do not return fewer rows, they RAISE:
+--
+--   ERROR:  cleat.tenant_id is not set -- tenant context required for
+--           RLS-scoped query
+--
+-- because 001_schema.sql's policies are fail-closed through
+-- cleat.assert_tenant_set() rather than COALESCE-ing to a default. The
+-- statement is refused before it matches anything, so this fails even on a
+-- fresh database where the backfill has nothing to do.
+--
+-- NO FORCE, NOT DISABLE. mssql/077 turns five security policies OFF around the
+-- same backfill because SQL Server has no owner exemption to restore. Here
+-- there is one: FORCE is what subjects the TABLE OWNER to its own policies
+-- (001_schema.sql:614), so dropping FORCE restores the owner's exemption and
+-- nothing else. Every other role stays constrained for the whole window, which
+-- DISABLE would not give.
+--
+-- THE LIST IS A LITERAL IN BOTH BLOCKS, not state carried between them.
+-- The first version recorded the forced tables in a TEMP TABLE ... ON COMMIT
+-- DROP, which works under the Go runner -- applyMigration wraps each file in a
+-- transaction -- and is destroyed instantly under the OTHER applier:
+-- deploy/postgres/100-apply-migrations.sh runs `psql -f` with no -1, so every
+-- statement autocommits and the temp table is dropped by its own CREATE. The
+-- cluster deployment caught that; a local harness that had been made to match
+-- the runner did not, because it only ever modelled one of the two appliers.
+--
+-- Restoring is guarded on RLS being ENABLED rather than on what was recorded:
+-- FORCE is meaningless without it, and every table here has had both since
+-- 001_schema.sql.
+DO $forced$
+DECLARE r regclass;
+BEGIN
+    FOREACH r IN ARRAY ARRAY['admin.tenant_api_keys', 'admin.tenant_roles', 'admin.tenant_egress_allow', 'workflow_defs', 'workflow_schedules', 'workflow_routing', 'workflow_tags', 'tenant_domains']::regclass[] LOOP
+        IF (SELECT relforcerowsecurity FROM pg_class WHERE oid = r) THEN
+            EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', r);
+        END IF;
+    END LOOP;
+END $forced$;
+
 ALTER TABLE admin.tenant_api_keys ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
 UPDATE admin.tenant_api_keys SET updated_at = created_at WHERE updated_at IS NULL;
 ALTER TABLE admin.tenant_api_keys ALTER COLUMN updated_at SET NOT NULL;
@@ -88,6 +135,18 @@ ALTER TABLE tenant_domains ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
 UPDATE tenant_domains SET updated_at = created_at WHERE updated_at IS NULL;
 ALTER TABLE tenant_domains ALTER COLUMN updated_at SET NOT NULL;
 ALTER TABLE tenant_domains ALTER COLUMN updated_at SET DEFAULT now();
+
+-- Owner exemption withdrawn again, on exactly the tables it was granted on.
+DO $forced$
+DECLARE r regclass;
+BEGIN
+    FOREACH r IN ARRAY ARRAY['admin.tenant_api_keys', 'admin.tenant_roles', 'admin.tenant_egress_allow', 'workflow_defs', 'workflow_schedules', 'workflow_routing', 'workflow_tags', 'tenant_domains']::regclass[] LOOP
+        IF (SELECT relrowsecurity FROM pg_class WHERE oid = r) THEN
+            EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', r);
+        END IF;
+    END LOOP;
+END $forced$;
+
 
 
 COMMENT ON COLUMN admin.tenant_api_keys.updated_at IS

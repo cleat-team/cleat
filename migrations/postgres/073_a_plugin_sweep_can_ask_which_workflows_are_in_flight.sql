@@ -75,11 +75,26 @@
 -- bare ALTER FUNCTION ... OWNER TO would fail the whole migration rather than
 -- this one statement. That cannot happen through the ordered runner -- 023
 -- sorts first -- but these files are also applied by hand.
+-- THE DISCRIMINATOR IS 023'S FUNCTION, NOT ITS ROLE.
+--
+-- "No cleat_dispatcher" used to mean one thing -- 023 was skipped -- and now
+-- means two. Since 023 degrades rather than aborting when BYPASSRLS cannot be
+-- granted (managed PostgreSQL has no superuser to grant it), a database can
+-- have had 023 applied in full and still have no such role.
+--
+-- admin.claim_workflows separates the cases: 023 creates it unconditionally,
+-- so its absence still means 023 never ran, which is the out-of-order hand
+-- application this guard was written for. Its presence with no role means 023
+-- ran and degraded, and this file should degrade the same way rather than
+-- refuse to apply.
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cleat_dispatcher') THEN
+    IF to_regprocedure('admin.claim_workflows(text, text[], integer)') IS NULL THEN
         RAISE EXCEPTION
             'cleat_dispatcher does not exist: apply migrations/postgres/023_cross_tenant_claim.sql first';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cleat_dispatcher') THEN
+        RAISE NOTICE 'cleat_dispatcher does not exist because 023 could not create it on this platform; admin.in_flight_workflow_ids is created without the exemption and will see only the caller''s own tenant.';
     END IF;
 END
 $$;
@@ -109,7 +124,31 @@ AS $$
     SELECT w.id FROM workflow_instances w WHERE w.status IN ('ready', 'running');
 $$;
 
-ALTER FUNCTION admin.in_flight_workflow_ids() OWNER TO cleat_dispatcher;
+DO $do$ BEGIN
+    -- ATTEMPTED, NOT GUARDED ON THE ROLE'S EXISTENCE. "Does cleat_dispatcher
+    -- exist" is the wrong question: ALTER ... OWNER TO also requires the
+    -- current role to be a MEMBER of the target, so a role that exists but
+    -- was created by somebody else still fails --
+    --
+    --   ERROR:  must be able to SET ROLE "cleat_dispatcher"   (SQLSTATE 42501)
+    --
+    -- and when the role does not exist at all the refusal is a DIFFERENT
+    -- SQLSTATE -- undefined_object, 42704, not 42501 -- so both are caught.
+    -- Catching only the first passed every run against a cluster where some
+    -- earlier superuser run had left the role behind, and failed the first
+    -- genuinely clean one.
+    --
+    -- which is what re-applying this file as a non-superuser hit, against a
+    -- cluster where a superuser had created the role earlier. Asking the
+    -- database to do it and catching the refusal answers both questions at
+    -- once, and needs no version-specific reasoning about pg_has_role and
+    -- PostgreSQL 16's WITH SET.
+    BEGIN
+        EXECUTE 'ALTER FUNCTION admin.in_flight_workflow_ids() OWNER TO cleat_dispatcher';
+    EXCEPTION WHEN insufficient_privilege OR undefined_object THEN
+        RAISE NOTICE 'cannot give the function to cleat_dispatcher (SQLSTATE %); it keeps the migrating role as its owner and will not see across tenants. Use --claim-strategy=rotate, which needs no exemption.', SQLSTATE;
+    END;
+END $do$;
 
 -- REVOKE first: PostgreSQL grants EXECUTE to PUBLIC on a new function by
 -- default, which would hand the exemption to every role in the database.
