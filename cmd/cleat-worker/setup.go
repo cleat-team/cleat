@@ -1442,6 +1442,12 @@ type Worker struct {
 	// the type's doc for why there is no shared counter table.
 	tenantRotation tenantRotation
 
+	// rotatingSchedulesUnavailableOnce is the schedule loop's equivalent, and
+	// separate for the reason crossTenantSchedulesUnsupportedOnce is separate
+	// from the claim's: the two loops can be in different states, and one line
+	// covering both would report whichever fired first.
+	rotatingSchedulesUnavailableOnce sync.Once
+
 	// rotatingUnavailableOnce keeps the "cannot rotate, falling back" warning
 	// to one line. Separate from crossTenantUnsupportedOnce because the two
 	// describe different missing capabilities and a worker can hit both.
@@ -4890,13 +4896,27 @@ func (w *Worker) reportCrossTenantCapability() {
 			w.logger.WarnContext(w.ctx,
 				"claim-strategy=rotate is set but this worker cannot rotate; it will try the widened query",
 				"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
-		} else {
-			w.logger.InfoContext(w.ctx,
-				"cross-tenant workflow claim is available by tenant rotation; no database grant is required",
-				"worker_id", w.id, "tenant_id", w.storeTenantID,
-				"tenants_per_tick", w.claimTenantsPerTick)
+			// Only the widened query is left, so report what IT can do.
+			w.reportScheduleCapability()
+			return
 		}
-		w.reportScheduleCapability()
+		w.logger.InfoContext(w.ctx,
+			"cross-tenant workflow claim is available by tenant rotation; no database grant is required",
+			"worker_id", w.id, "tenant_id", w.storeTenantID,
+			"tenants_per_tick", w.claimTenantsPerTick)
+		// BOTH halves are grant-free now. The schedule read used to be the one
+		// this mechanism did not cover, and a worker on the rotating path was
+		// told at startup that a missing 024 meant only its own tenant's cron
+		// would fire. That is no longer true, and repeating it would send an
+		// operator to apply a migration they do not need -- or, on managed
+		// PostgreSQL, one they cannot apply.
+		//
+		// EVERY tenant is read each tick rather than a share of them: a
+		// schedule that is due must fire, which is the one place the claim's
+		// bargain does not carry over. See dueSchedulesByTenant.
+		w.logger.InfoContext(w.ctx,
+			"cross-tenant due-schedule read is available by tenant rotation; no database grant is required",
+			"worker_id", w.id, "tenant_id", w.storeTenantID)
 		return
 	}
 
@@ -4972,8 +4992,7 @@ func (w *Worker) reportScheduleCapability() {
 	}
 	w.logger.WarnContext(w.ctx,
 		"cross-tenant due-schedule read is NOT available; only this worker's own tenant's cron will fire. "+
-			"The rotating claim does not cover this -- it is a separate grant (024), and there is no "+
-			"grant-free equivalent for it yet",
+			"--claim-strategy=rotate reads due schedules per tenant and needs no grant",
 		"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", capability.SchedulesReason)
 }
 
@@ -4998,6 +5017,24 @@ func (w *Worker) reportScheduleCapability() {
 // worker rather than stop it firing anything at all.
 func (w *Worker) dueSchedules() ([]engine.Schedule, error) {
 	if w.claimAcrossTenants {
+		// The per-tenant read is tried FIRST, and is the default, for the same
+		// reason the rotating claim is: it needs no database-side grant, so a
+		// deployment that never applied 024 -- or cannot, because BYPASSRLS is
+		// ungrantable on managed PostgreSQL -- still fires every tenant's cron.
+		//
+		// Skipped only when the operator asked for the other mechanism by name
+		// or when this worker cannot read per tenant at all.
+		if w.claimStrategy != claimStrategyGlobal {
+			schedules, err := w.dueSchedulesByTenant()
+			if !errors.Is(err, errRotatingClaimUnavailable) {
+				return schedules, err
+			}
+			w.rotatingSchedulesUnavailableOnce.Do(func() {
+				w.logger.WarnContext(w.ctx,
+					"cannot read due schedules per tenant; trying the widened query instead",
+					"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
+			})
+		}
 		if xt, ok := w.store.(engine.CrossTenantScheduleReader); ok {
 			schedules, err := xt.GetDueSchedulesAcrossTenants(w.ctx)
 			if !errors.Is(err, engine.ErrCrossTenantClaimUnsupported) {
