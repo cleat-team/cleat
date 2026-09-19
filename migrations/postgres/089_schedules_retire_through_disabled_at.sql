@@ -104,6 +104,50 @@
 
 -- ── Backfill, in both directions, while `enabled` is still the authority ─────
 
+-- ── The backfill needs the owner's exemption back for the length of it ──────
+--
+-- WHY THIS IS HERE AT ALL. The comment above says the rows are visible
+-- because "migrations are applied by a superuser in every configuration cleat
+-- ships". That was true when it was written and is no longer the configuration
+-- cleat supports: managed PostgreSQL -- RDS, Cloud SQL, Azure -- has no
+-- superuser at all, so the migrating role is subject to these policies like
+-- any other, and the UPDATEs below do not return fewer rows, they RAISE:
+--
+--   ERROR:  cleat.tenant_id is not set -- tenant context required for
+--           RLS-scoped query
+--
+-- because 001_schema.sql's policies are fail-closed through
+-- cleat.assert_tenant_set() rather than COALESCE-ing to a default. The
+-- statement is refused before it matches anything, so this fails even on a
+-- fresh database where the backfill has nothing to do.
+--
+-- NO FORCE, NOT DISABLE. mssql/077 turns five security policies OFF around the
+-- same backfill because SQL Server has no owner exemption to restore. Here
+-- there is one: FORCE is what subjects the TABLE OWNER to its own policies
+-- (001_schema.sql:614), so dropping FORCE restores the owner's exemption and
+-- nothing else. Every other role stays constrained for the whole window, which
+-- DISABLE would not give.
+--
+-- Restored from a recorded list rather than recomputed, because after the
+-- toggle the tables no longer answer "were you forced?". ON COMMIT DROP plus
+-- the runner's per-migration transaction means a failure anywhere below rolls
+-- the exemption back with everything else -- applyMigration wraps each file in
+-- its own transaction, and DDL is transactional here.
+DROP TABLE IF EXISTS cleat_forced_089;
+CREATE TEMP TABLE cleat_forced_089 ON COMMIT DROP AS
+SELECT c.oid::regclass AS rel
+  FROM pg_class c
+ WHERE c.relforcerowsecurity
+   AND c.oid = ANY (ARRAY['workflow_schedules']::regclass[]);
+
+DO $forced$
+DECLARE r regclass;
+BEGIN
+    FOR r IN SELECT rel FROM cleat_forced_089 LOOP
+        EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', r);
+    END LOOP;
+END $forced$;
+
 DO $$
 BEGIN
     IF EXISTS (
@@ -129,6 +173,14 @@ BEGIN
          WHERE enabled AND disabled_at IS NOT NULL;
     END IF;
 END $$;
+-- Owner exemption withdrawn again, on exactly the tables it was granted on.
+DO $forced$
+DECLARE r regclass;
+BEGIN
+    FOR r IN SELECT rel FROM cleat_forced_089 LOOP
+        EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', r);
+    END LOOP;
+END $forced$;
 
 -- ── The due-schedule index moves to the new column ──────────────────────────
 --
@@ -187,7 +239,28 @@ $$;
 -- either is not a visible error: the wrong owner silently loses the BYPASSRLS
 -- the cross-tenant read depends on, and a missing REVOKE hands the exemption
 -- to PUBLIC.
-ALTER FUNCTION admin.get_due_schedules() OWNER TO cleat_dispatcher;
+-- Conditional for the reason 023 gives: on managed PostgreSQL the role cannot
+-- be created, and this statement aborting the run was how a degraded 023 took
+-- later files down with it.
+DO $do$ BEGIN
+    -- ATTEMPTED, NOT GUARDED ON THE ROLE'S EXISTENCE. "Does cleat_dispatcher
+    -- exist" is the wrong question: ALTER ... OWNER TO also requires the
+    -- current role to be a MEMBER of the target, so a role that exists but
+    -- was created by somebody else still fails --
+    --
+    --   ERROR:  must be able to SET ROLE "cleat_dispatcher"   (SQLSTATE 42501)
+    --
+    -- which is what re-applying this file as a non-superuser hit, against a
+    -- cluster where a superuser had created the role earlier. Asking the
+    -- database to do it and catching the refusal answers both questions at
+    -- once, and needs no version-specific reasoning about pg_has_role and
+    -- PostgreSQL 16's WITH SET.
+    BEGIN
+        EXECUTE 'ALTER FUNCTION admin.get_due_schedules() OWNER TO cleat_dispatcher';
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE 'cannot give the function to cleat_dispatcher (SQLSTATE %); it keeps the migrating role as its owner and will not see across tenants. Use --claim-strategy=rotate, which needs no exemption.', SQLSTATE;
+    END;
+END $do$;
 
 -- REVOKE first: PostgreSQL grants EXECUTE to PUBLIC on new functions by
 -- default, which would hand the exemption to every role in the database.

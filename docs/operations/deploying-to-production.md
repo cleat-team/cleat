@@ -67,6 +67,62 @@ cleat-worker --db "$DATABASE_URL" --poll 250ms
 Controls how often the worker polls for new work when the queue is empty.
 Lower values reduce latency for new workflows but increase database load.
 
+## Managed PostgreSQL
+
+RDS, Aurora, Cloud SQL and Azure Database for PostgreSQL are supported, and the
+migration set applies on all of them as of this change. It did not before: 8 of
+72 migrations failed against a role with no superuser, and the first failure was
+`005_app_role.sql`, so cleat could not be **installed** on a managed instance at
+all.
+
+**What is different there, and it is not configuration.** None of these
+platforms gives you a PostgreSQL superuser. AWS documents the RDS master role as
+
+```sql
+CREATE ROLE postgres WITH LOGIN NOSUPERUSER INHERIT CREATEDB CREATEROLE
+  NOREPLICATION VALID UNTIL 'infinity'
+```
+
+and `rds_superuser`, `cloudsqlsuperuser` and `azure_pg_admin` are
+highest-privileged roles rather than superusers. `TestTheMigrationSetAppliesWithoutASuperuser` builds a role of exactly that shape and applies the whole set
+through it on every run.
+
+### One capability is genuinely unavailable
+
+`BYPASSRLS` can only be granted by a true superuser:
+
+```
+ERROR:  permission denied to create role
+DETAIL:  Only roles with the BYPASSRLS attribute may create roles with the
+         BYPASSRLS attribute.
+```
+
+So `023_cross_tenant_claim.sql` and `024_cross_tenant_schedules.sql` cannot
+create `cleat_dispatcher`. They now **say so and continue** rather than aborting
+the run: the functions are created owned by the migrating role, and the worker's
+startup check reports the claim as unavailable, naming the missing attribute
+rather than telling you to apply a file you cannot apply.
+
+| capability | on managed PostgreSQL |
+|---|---|
+| single-tenant dispatch | works, unchanged |
+| cross-tenant claim | **works**, with `--claim-strategy=rotate` — it claims each tenant's work under that tenant's own RLS context and needs no exemption |
+| cross-tenant claim via `--claim-strategy=global` | unavailable; `admin.claim_workflows` has no exemption to use |
+| **a non-default tenant's cron** | **does not fire.** `024`'s due-schedule read has no grant-free equivalent yet, so only the worker's own tenant's schedules fire. The worker warns about this at startup. |
+
+That last row is the one to check against your requirements before deploying a
+multi-tenant cleat on a managed instance.
+
+### Row-level security is unaffected
+
+Three migrations backfill columns on RLS-forced tables and relied on the
+migrating connection being a superuser. They now drop `FORCE ROW LEVEL SECURITY`
+for the length of the backfill and restore it — which returns the **table
+owner's** exemption and nothing else, leaving every other role constrained
+throughout. Each migration runs in its own transaction, so a failure rolls the
+exemption back with everything else, and the test above asserts that no table is
+left with RLS enabled but not forced.
+
 ## Monitoring
 
 ### Prometheus metrics

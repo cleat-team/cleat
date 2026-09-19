@@ -70,7 +70,42 @@ END $$;
 -- granted SUPERUSER or BYPASSRLS to debug something and left it -- is exactly
 -- the failure this migration exists to prevent, and re-applying the migrations
 -- should correct it rather than preserve it.
-ALTER ROLE cleat_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+--
+-- ONE ATTRIBUTE AT A TIME, AND ONLY WHEN IT DIFFERS. The single
+-- `ALTER ROLE cleat_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`
+-- this replaces was unconditional, and PostgreSQL checks the PRIVILEGE to
+-- change an attribute rather than whether the value changes -- so setting
+-- NOSUPERUSER on a role that is already NOSUPERUSER still requires SUPERUSER.
+--
+-- Measured on PostgreSQL 16 against a role of exactly the shape AWS documents
+-- for the RDS master user (`LOGIN NOSUPERUSER INHERIT CREATEDB CREATEROLE`):
+--
+--   ERROR:  permission denied to alter role
+--   DETAIL:  Only roles with the SUPERUSER attribute may change the SUPERUSER
+--            attribute.
+--
+-- -- and it fired eight lines after CREATE ROLE ... NOSUPERUSER had just
+-- created the role with the value being asserted. That made this file the
+-- FIRST of eight to fail on managed PostgreSQL, where no true superuser
+-- exists (RDS, Cloud SQL, Azure).
+--
+-- Skipping a no-op costs nothing and loses nothing: the drift this guards
+-- against is a value that DIFFERS, which is the case still executed. A
+-- deployment that really did grant SUPERUSER to cleat_app on managed
+-- PostgreSQL still fails here, loudly, and should -- the security property is
+-- violated and the platform cannot restore it.
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    SELECT rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
+      INTO r FROM pg_roles WHERE rolname = 'cleat_app';
+
+    IF r.rolsuper     THEN ALTER ROLE cleat_app NOSUPERUSER;  END IF;
+    IF r.rolcreatedb  THEN ALTER ROLE cleat_app NOCREATEDB;   END IF;
+    IF r.rolcreaterole THEN ALTER ROLE cleat_app NOCREATEROLE; END IF;
+    IF r.rolbypassrls THEN ALTER ROLE cleat_app NOBYPASSRLS;  END IF;
+END $$;
 
 -- Schema access. USAGE only: no CREATE, so the role cannot come to own
 -- anything in these schemas later.

@@ -87,7 +87,28 @@ AS $$
               COALESCE(w.pending_terminal_status, '');
 $$;
 
-ALTER FUNCTION admin.claim_workflows(text, text[], integer) OWNER TO cleat_dispatcher;
+-- Conditional for the reason 023 gives at length: on managed PostgreSQL the
+-- role cannot be created, and this statement aborting the run was how a
+-- degraded 023 still took the whole migration set down with it.
+DO $do$ BEGIN
+    -- ATTEMPTED, NOT GUARDED ON THE ROLE'S EXISTENCE. "Does cleat_dispatcher
+    -- exist" is the wrong question: ALTER ... OWNER TO also requires the
+    -- current role to be a MEMBER of the target, so a role that exists but
+    -- was created by somebody else still fails --
+    --
+    --   ERROR:  must be able to SET ROLE "cleat_dispatcher"   (SQLSTATE 42501)
+    --
+    -- which is what re-applying this file as a non-superuser hit, against a
+    -- cluster where a superuser had created the role earlier. Asking the
+    -- database to do it and catching the refusal answers both questions at
+    -- once, and needs no version-specific reasoning about pg_has_role and
+    -- PostgreSQL 16's WITH SET.
+    BEGIN
+        EXECUTE 'ALTER FUNCTION admin.claim_workflows(text, text[], integer) OWNER TO cleat_dispatcher';
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE 'cannot give the function to cleat_dispatcher (SQLSTATE %); it keeps the migrating role as its owner and will not see across tenants. Use --claim-strategy=rotate, which needs no exemption.', SQLSTATE;
+    END;
+END $do$;
 
 -- REVOKE first: PostgreSQL grants EXECUTE to PUBLIC on new functions by
 -- default, which would hand the exemption to every role in the database.

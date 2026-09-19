@@ -58,25 +58,48 @@
 
 -- 023 creates cleat_dispatcher. Guarded anyway: a database that somehow has
 -- 024 without 023 should get a role, not a cryptic "role does not exist".
+-- Degrades exactly as 023 does, and for the same reason; see the long note
+-- there. On managed PostgreSQL the role cannot be created, the due-schedule
+-- function is still created owned by the migrating role, and
+-- CheckCrossTenantCapability reports it as unavailable with the owner named.
+--
+-- UNLIKE THE CLAIM, THERE IS NO GRANT-FREE ALTERNATIVE FOR THIS ONE YET.
+-- --claim-strategy=rotate replaces 023's function; nothing yet replaces this
+-- one, so a non-default tenant's cron does not fire on managed PostgreSQL.
+-- The worker says so at startup rather than leaving it to be noticed.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cleat_dispatcher') THEN
-        CREATE ROLE cleat_dispatcher NOLOGIN BYPASSRLS;
+        BEGIN
+            CREATE ROLE cleat_dispatcher NOLOGIN BYPASSRLS;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'cleat_dispatcher needs BYPASSRLS, which only a superuser can grant, and this connection is not one. A non-default tenant''s cron will not fire on this deployment. (SQLSTATE %)', SQLSTATE;
+        END;
     ELSIF NOT (SELECT rolbypassrls FROM pg_roles WHERE rolname = 'cleat_dispatcher') THEN
-        ALTER ROLE cleat_dispatcher BYPASSRLS;
+        BEGIN
+            ALTER ROLE cleat_dispatcher BYPASSRLS;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'cleat_dispatcher exists without BYPASSRLS and this connection cannot grant it. (SQLSTATE %)', SQLSTATE;
+        END;
     END IF;
 END
 $$;
 
 DO $do$ BEGIN
-    EXECUTE format('GRANT USAGE ON SCHEMA %I TO cleat_dispatcher', current_schema());
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cleat_dispatcher') THEN
+        EXECUTE format('GRANT USAGE ON SCHEMA %I TO cleat_dispatcher', current_schema());
+    END IF;
 END $do$;
 
 -- SELECT only. The owner of a SECURITY DEFINER function needs its own table
 -- privileges regardless of the RLS exemption -- those are two different checks,
 -- and 023 shipped once without this GRANT and failed with "permission denied
 -- for table" against a non-superuser role.
-GRANT SELECT ON workflow_schedules TO cleat_dispatcher;
+DO $do$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cleat_dispatcher') THEN
+        EXECUTE 'GRANT SELECT ON workflow_schedules TO cleat_dispatcher';
+    END IF;
+END $do$;
 
 -- The column list is the contract with engine's scanDueSchedules. It matches
 -- the tenant-scoped GetDueSchedules on every dialect, in order, so both feed
@@ -170,7 +193,25 @@ $fn$;
 END
 $guard$;
 
-ALTER FUNCTION admin.get_due_schedules() OWNER TO cleat_dispatcher;
+DO $do$ BEGIN
+    -- ATTEMPTED, NOT GUARDED ON THE ROLE'S EXISTENCE. "Does cleat_dispatcher
+    -- exist" is the wrong question: ALTER ... OWNER TO also requires the
+    -- current role to be a MEMBER of the target, so a role that exists but
+    -- was created by somebody else still fails --
+    --
+    --   ERROR:  must be able to SET ROLE "cleat_dispatcher"   (SQLSTATE 42501)
+    --
+    -- which is what re-applying this file as a non-superuser hit, against a
+    -- cluster where a superuser had created the role earlier. Asking the
+    -- database to do it and catching the refusal answers both questions at
+    -- once, and needs no version-specific reasoning about pg_has_role and
+    -- PostgreSQL 16's WITH SET.
+    BEGIN
+        EXECUTE 'ALTER FUNCTION admin.get_due_schedules() OWNER TO cleat_dispatcher';
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE 'cannot give the function to cleat_dispatcher (SQLSTATE %); it keeps the migrating role as its owner and will not see across tenants. Use --claim-strategy=rotate, which needs no exemption.', SQLSTATE;
+    END;
+END $do$;
 
 -- REVOKE first: PostgreSQL grants EXECUTE to PUBLIC on new functions by
 -- default, which would hand the exemption to every role in the database.
