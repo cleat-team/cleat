@@ -6,6 +6,7 @@ import (
 	"log"
 	"runtime/debug"
 	"sync"
+	"time"
 )
 
 // PanicError is returned when a plugin host function panics.
@@ -36,13 +37,55 @@ func (e *PanicError) Unwrap() error { return nil }
 // the worker. The tracker exists for Go-compiled plugins only.
 type PluginHealthTracker struct {
 	mu        sync.RWMutex
-	unhealthy map[string]error // plugin name -> fatal error
+	unhealthy map[string]*pluginFailure
+
+	// cooldown is how long a panicked plugin is refused before one call is
+	// allowed through to see whether it still panics.
+	//
+	// NOT PERMANENT, AND THAT IS THE WHOLE DESIGN. This tracker's own comment
+	// said future invocations "will return this error without executing", and
+	// nothing enforced it -- RecoverPluginFunc called the function regardless
+	// and IsHealthy had no caller outside its own tests. Wiring the check in
+	// as written would have made the promise true and created a worse problem:
+	//
+	//   - the commonest panic is INPUT-TRIGGERED, so one malformed request
+	//     would disable the plugin for every tenant;
+	//   - nothing calls MarkHealthy, so there is no way back;
+	//   - PluginHealthStatus is not surfaced over HTTP, so there is no way to
+	//     see it either.
+	//
+	// Permanent plus unrecoverable plus invisible is a denial of service a
+	// caller can trigger on purpose. A cooldown keeps the protection that
+	// matters -- a plugin whose state is genuinely broken is not hammered --
+	// while an input-specific panic costs one window rather than an outage.
+	cooldown time.Duration
 }
+
+// pluginFailure is why a plugin was refused and when, so the cooldown has
+// something to measure from.
+type pluginFailure struct {
+	err error
+	at  time.Time
+}
+
+// DefaultPluginCooldown is how long a panicked plugin is refused by default.
+//
+// Long enough that a plugin panicking on every call is called seldom rather
+// than continuously, short enough that an input-specific panic does not read
+// as an outage to the tenants that sent well-formed input.
+const DefaultPluginCooldown = 30 * time.Second
 
 // NewPluginHealthTracker creates a new PluginHealthTracker.
 func NewPluginHealthTracker() *PluginHealthTracker {
+	return NewPluginHealthTrackerWithCooldown(DefaultPluginCooldown)
+}
+
+// NewPluginHealthTrackerWithCooldown is NewPluginHealthTracker with an explicit
+// cooldown. Tests use it to avoid sleeping; production has no reason to.
+func NewPluginHealthTrackerWithCooldown(cooldown time.Duration) *PluginHealthTracker {
 	return &PluginHealthTracker{
-		unhealthy: make(map[string]error),
+		unhealthy: make(map[string]*pluginFailure),
+		cooldown:  cooldown,
 	}
 }
 
@@ -58,16 +101,45 @@ func (t *PluginHealthTracker) MarkHealthy(pluginName string) {
 // will return this error without executing the function.
 func (t *PluginHealthTracker) MarkUnhealthy(pluginName string, err error) {
 	t.mu.Lock()
-	t.unhealthy[pluginName] = err
+	t.unhealthy[pluginName] = &pluginFailure{err: err, at: time.Now()}
 	t.mu.Unlock()
+}
+
+// refusalFor reports the error a call should be refused with, or nil to let it
+// through. An entry whose cooldown has elapsed is CLEARED and the call allowed:
+// that call is the probe, and if it panics again RecoverPluginFunc marks the
+// plugin afresh.
+//
+// Clearing rather than keeping a half-open flag is deliberate -- the state a
+// reader has to hold is then just "refused until this instant", and a probe
+// that succeeds needs no separate transition to become healthy again.
+func (t *PluginHealthTracker) refusalFor(pluginName string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	f, ok := t.unhealthy[pluginName]
+	if !ok {
+		return nil
+	}
+	if time.Since(f.at) >= t.cooldown {
+		delete(t.unhealthy, pluginName)
+		return nil
+	}
+	return f.err
 }
 
 // IsHealthy reports whether the plugin is healthy.
 func (t *PluginHealthTracker) IsHealthy(pluginName string) bool {
 	t.mu.RLock()
-	_, ok := t.unhealthy[pluginName]
+	f, ok := t.unhealthy[pluginName]
 	t.mu.RUnlock()
-	return !ok
+	if !ok {
+		return true
+	}
+	// A plugin past its cooldown reports healthy: the next call will be let
+	// through, so saying otherwise would describe a refusal that is not going
+	// to happen. This is a read-only view and does not clear the entry --
+	// refusalFor does that, on the call path, under a write lock.
+	return time.Since(f.at) >= t.cooldown
 }
 
 // UnhealthyError returns the error that caused the plugin to be marked
@@ -75,7 +147,11 @@ func (t *PluginHealthTracker) IsHealthy(pluginName string) bool {
 func (t *PluginHealthTracker) UnhealthyError(pluginName string) error {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.unhealthy[pluginName]
+	f, ok := t.unhealthy[pluginName]
+	if !ok {
+		return nil
+	}
+	return f.err
 }
 
 // HealthStatus describes the runtime health of a single plugin.
@@ -93,22 +169,39 @@ func (t *PluginHealthTracker) UnhealthyStatus() []HealthStatus {
 	defer t.mu.RUnlock()
 
 	statuses := make([]HealthStatus, 0, len(t.unhealthy))
-	for name, err := range t.unhealthy {
-		s := HealthStatus{Name: name, Healthy: false}
-		if err != nil {
-			s.Error = err.Error()
+	for name, f := range t.unhealthy {
+		s := HealthStatus{Name: name, Healthy: time.Since(f.at) >= t.cooldown}
+		if f.err != nil {
+			s.Error = f.err.Error()
 		}
 		statuses = append(statuses, s)
 	}
 	return statuses
 }
 
-// RecoverPluginFunc wraps a PluginFunc with panic recovery.
-// If the wrapped function panics, the panic is caught, the plugin is
-// marked unhealthy via the provided tracker, and a PanicError is returned.
-// The full stack trace is logged using the standard log package.
+// RecoverPluginFunc wraps a PluginFunc with panic recovery AND the refusal that
+// recovery is for.
+//
+// If the wrapped function panics, the panic is caught, the plugin is marked
+// unhealthy, and a PanicError is returned with the stack logged. Calls during
+// the cooldown that follows are refused WITHOUT reaching the plugin.
+//
+// THE REFUSAL IS THE PART THAT WAS MISSING. This function's doc comment, and
+// the tracker's, both said future invocations would "return this error without
+// executing" -- and the closure ended `return fn(ctx, inputJSON)`
+// unconditionally. IsHealthy and UnhealthyError had no callers outside their
+// own tests. A plugin that panicked on every call was re-entered on every call,
+// forever, with a stack trace logged each time.
+//
+// Checked HERE rather than at the call site in engine/plugins.go, because this
+// wrapper is what owns the promise: every path to a plugin function goes
+// through it, and a check at one call site is a check the next call site can
+// forget.
 func RecoverPluginFunc(pluginName string, tracker *PluginHealthTracker, fn PluginFunc) PluginFunc {
 	return func(ctx context.Context, inputJSON string) (outputJSON string, err error) {
+		if refusal := tracker.refusalFor(pluginName); refusal != nil {
+			return "", refusal
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				stack := string(debug.Stack())
@@ -126,12 +219,16 @@ func RecoverPluginFunc(pluginName string, tracker *PluginHealthTracker, fn Plugi
 	}
 }
 
-// RecoverPluginStreamFunc wraps a PluginStreamFunc with panic recovery.
+// RecoverPluginStreamFunc wraps a PluginStreamFunc with panic recovery and the
+// same refusal RecoverPluginFunc applies.
 // If the wrapped function panics during setup (before returning the channel),
 // the panic is caught and handled like RecoverPluginFunc. Panics during
 // channel consumption are not caught here — the consumer must handle them.
 func RecoverPluginStreamFunc(pluginName string, tracker *PluginHealthTracker, fn PluginStreamFunc) PluginStreamFunc {
 	return func(ctx context.Context, inputJSON string) (ch <-chan StreamEvent, err error) {
+		if refusal := tracker.refusalFor(pluginName); refusal != nil {
+			return nil, refusal
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				stack := string(debug.Stack())
