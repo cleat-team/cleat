@@ -1302,6 +1302,19 @@ jobs:
           # accumulated. Move or restructure it freely.
           - name: crash
             path: ./tests/crash/...
+          # NOTE (cleat-review -> WS-3): .github/workflows/ is WS-3's under
+          # WORKSTREAM.md's shared-files table. Added here rather than left
+          # unwired for the same reason the crash entry above gives -- a suite
+          # no job runs is not coverage, and UNWIRED_SUITES is how the last set
+          # of dead suites accumulated. Move or restructure it freely.
+          #
+          # hooks needs a Go toolchain and git, and nothing else: it runs
+          # .githooks/prepare-commit-msg against throwaway repositories it
+          # creates with `git init`, because the hook reads `git config` and
+          # running it against this checkout would pass or fail according to
+          # whose machine it ran on.
+          - name: hooks
+            path: ./tests/hooks/...
     steps:
       - uses: actions/checkout@v7
 
