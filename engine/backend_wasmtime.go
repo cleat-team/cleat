@@ -167,7 +167,7 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 
 	b := &wasmtimeBackend{
 		engine:       eng,
-		moduleCache:  newModuleLRU(bcfg.moduleCacheMaxEntries),
+		moduleCache:  newModuleLRU(bcfg.moduleCacheMaxEntries, bcfg.moduleCacheMaxBytes),
 		compileLocks: new(sync.Map),
 		metaCache:    new(sync.Map),
 		limits:       lim,
@@ -741,7 +741,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 				mu.Unlock()
 				return nil, fmt.Errorf("host: compile: %w", err)
 			}
-			b.moduleCache.store(wKey, module)
+			b.moduleCache.store(wKey, module, len(wasmBytes))
 		}
 		mu.Unlock()
 	}

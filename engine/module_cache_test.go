@@ -21,9 +21,9 @@ import (
 // actually full.
 func TestCompiledModuleCacheIsBounded(t *testing.T) {
 	const max = 4
-	c := newModuleLRU(max)
+	c := newModuleLRU(max, 1<<40)
 	for i := 0; i < max*5; i++ {
-		c.store(fmt.Sprintf("key-%02d", i), &wasmtime.Module{})
+		c.store(fmt.Sprintf("key-%02d", i), &wasmtime.Module{}, 0)
 	}
 	if got := c.len(); got != max {
 		t.Errorf("cache holds %d entries with a bound of %d.\n\n"+
@@ -39,16 +39,16 @@ func TestCompiledModuleCacheIsBounded(t *testing.T) {
 // above while evicting the hottest entry -- which is worse than no cache for
 // exactly the workload a cache exists for.
 func TestCompiledModuleCacheEvictsLeastRecentlyUsed(t *testing.T) {
-	c := newModuleLRU(3)
+	c := newModuleLRU(3, 1<<40)
 	for _, k := range []string{"a", "b", "c"} {
-		c.store(k, &wasmtime.Module{})
+		c.store(k, &wasmtime.Module{}, 0)
 	}
 
 	// Touch "a" so it is no longer the coldest, then overflow by one.
 	if _, ok := c.load("a"); !ok {
 		t.Fatal("a should be cached")
 	}
-	c.store("d", &wasmtime.Module{})
+	c.store("d", &wasmtime.Module{}, 0)
 
 	if _, ok := c.load("b"); ok {
 		t.Error("b survived: it was the least recently USED and should have gone")
@@ -125,4 +125,70 @@ func TestAnInstanceSurvivesItsModuleBeingEvicted(t *testing.T) {
 		}()
 		_ = module.Exports()
 	}()
+}
+
+// The cache is bounded by ESTIMATED BYTES as well as by entry count.
+//
+// This is the bound cleat#1907 exists for. The entry count could not say what
+// a hundred modules cost -- measured on this repo's artifacts, a hundred is
+// 8.6 MB of AssemblyScript or 4.6 GB of Python -- so a deployment had no
+// number to size against.
+func TestCompiledModuleCacheIsBoundedInBytes(t *testing.T) {
+	// Entry bound deliberately generous, so only the byte bound can bite.
+	// Sizes derived from the multiplier rather than written as literals: a
+	// change to it should move this test's arithmetic, not break it.
+	const wasmLen = 1 << 20
+	perEntry := CompiledSizeEstimate(wasmLen)
+	const wantEntries = 3
+	maxBytes := perEntry*wantEntries + perEntry/2 // room for 3, not 4
+	c := newModuleLRU(1000, maxBytes)
+
+	for i := 0; i < 20; i++ {
+		c.store(fmt.Sprintf("key-%02d", i), &wasmtime.Module{}, wasmLen)
+	}
+
+	if got := c.estimatedBytes(); got > maxBytes {
+		t.Errorf("cache holds an estimated %d bytes against a bound of %d", got, maxBytes)
+	}
+	if got := c.len(); got != wantEntries {
+		t.Errorf("cache holds %d entries; want %d (a %d-byte bound at %d each). "+
+			"The entry bound is 1000 here, so only the byte bound can be doing this.",
+			got, wantEntries, maxBytes, perEntry)
+	}
+}
+
+// One entry larger than the whole bound is KEPT, not evicted on insert.
+//
+// The alternative is a cache that compiles a large artifact, immediately drops
+// it, and recompiles it on every call forever -- which is worse than holding
+// it, and is invisible except as latency. The bound is a target for the SET.
+func TestAnOversizedModuleIsHeldRatherThanThrashed(t *testing.T) {
+	c := newModuleLRU(1000, 1<<20) // 1 MB bound
+	c.store("huge", &wasmtime.Module{}, 10<<20)
+
+	if got := c.len(); got != 1 {
+		t.Fatalf("cache holds %d entries after storing one oversized module; want 1. "+
+			"Evicting it on insert means recompiling it on every call.", got)
+	}
+	if _, ok := c.load("huge"); !ok {
+		t.Error("the oversized module was not retrievable, so every call would recompile it")
+	}
+}
+
+// A store with no source length contributes nothing to the byte bound, and is
+// still bounded by the entry count.
+//
+// That is the honest answer for a caller that cannot supply a length: an
+// invented figure would make the byte gauge a guess about a guess.
+func TestAModuleWithNoSourceLengthIsStillBounded(t *testing.T) {
+	c := newModuleLRU(3, 1<<40)
+	for i := 0; i < 10; i++ {
+		c.store(fmt.Sprintf("key-%02d", i), &wasmtime.Module{}, 0)
+	}
+	if got := c.estimatedBytes(); got != 0 {
+		t.Errorf("estimated bytes = %d for entries with no source length; want 0", got)
+	}
+	if got := c.len(); got != 3 {
+		t.Errorf("cache holds %d entries against an entry bound of 3", got)
+	}
 }

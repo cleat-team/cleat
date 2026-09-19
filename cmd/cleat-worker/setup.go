@@ -2038,6 +2038,9 @@ func (w *Worker) dispatchLoop() {
 		if c, ok := w.wasmtimeBackend.(interface{ CompiledModuleCacheEntries() int }); ok {
 			w.Metrics.SetWasmCompiledModuleCacheEntries(w.ctx, int64(c.CompiledModuleCacheEntries()))
 		}
+		if c, ok := w.wasmtimeBackend.(interface{ CompiledModuleCacheBytes() int64 }); ok {
+			w.Metrics.SetWasmCompiledModuleCacheBytes(w.ctx, c.CompiledModuleCacheBytes())
+		}
 		updateThroughputGauges()
 
 		if !w.memoryController.CanClaim() {

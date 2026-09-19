@@ -548,6 +548,59 @@ when `--rate-limit-per-tenant` is set to a non-zero value.
 
 ---
 
+### --wasm-module-cache-max-mb
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `512` | Max **estimated** size of the compiled-module cache, in MB (LRU eviction) |
+
+**Two different caches, and this is the larger one.** `--wasm-cache-max-mb`
+above bounds the WASM *byte* cache — the artifacts as uploaded.
+`--wasm-module-cache-max-mb` bounds the compiled *native code* wasmtime
+produces from them, which measures 2–3× larger for a release build.
+
+This is the bound to size a deployment against. Its sibling,
+`--wasm-module-cache-max-entries`, cannot say what a hundred modules cost —
+measured on cleat's own artifacts, a hundred entries is **8.6 MB of
+AssemblyScript or 4.6 GB of Python**, a ~500× spread in what one flag value
+means. Both bounds apply: the entry count still bounds map and list overhead
+independently of artifact size.
+
+**Estimated, not measured**, and every layer says so. A compiled
+`wasmtime.Module` exposes no cheap size, and `Serialize()` would cost a
+serialisation plus a transient allocation the size of the module — 46 MB for
+the Python component — to learn a number the input length already predicts. So
+each entry is costed at **4× the wasm it came from**.
+
+| artifact | wasm | compiled | ratio |
+|---|---|---|---|
+| widget-store (AssemblyScript) | 9.5 KB | 86 KB | 9.1× |
+| rust-workflow (release) | 149 KB | 458 KB | 3.1× |
+| java-workflow | 299 KB | 694 KB | 2.3× |
+| hostcallsjava | 506 KB | 1.04 MB | 2.1× |
+| **call_all_plugins (Python)** | **19.3 MB** | **46.0 MB** | 2.4× |
+| rust-workflow (debug) | 5.2 MB | 1.1 MB | 0.2× |
+
+Release builds sit in 2.1×–3.1×, and the multiplier is **4** rather than 3 so
+that it clears the measured maximum instead of approximating it — an estimate
+that *under*-counts would let the cache hold more than this bound says, which
+is the one failure it cannot tolerate. The cost is that a typical artifact is
+over-counted by about a third, so a given value holds correspondingly fewer
+modules than raw arithmetic suggests.
+
+Both outliers fail safely: tiny AssemblyScript modules run high but cost tens
+of kilobytes, and debug builds run low so the estimate over-counts them
+further. Over-counting shrinks the cache; it cannot overrun the bound.
+
+Observe it with `cleat_wasm_compiled_module_cache_bytes`, beside the entries
+gauge.
+
+One module larger than the whole bound is **kept**, not evicted on insert —
+otherwise the cache would compile a large artifact, drop it, and recompile it
+on every call.
+
+---
+
 ### --wasm-memory-max-mb
 
 | Type | Default | Description |
