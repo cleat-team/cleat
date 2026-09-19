@@ -150,6 +150,10 @@ var crossTenantLedger = map[string]bypassKind{
 	"plugins/oauthprovider/routes.go:(*Plugin).extractSession":      kindTenantIsTheLookup,
 	"plugins/oauthprovider/routes.go:(*Plugin).handleCallback":      kindTenantIsTheLookup,
 	"plugins/webhookingest/routes.go:(*Plugin).handleIngestWebhook": kindTenantIsTheLookup,
+	// run_id is a workflow run id, unique across every tenant, and the WHERE
+	// clause is keyed on it alone -- the write reaches at most one row, the
+	// one that run named. Not a sweep: cleat#1715.
+	"plugins/jobqueue/finalize_observer.go:(*Plugin).ObserveFinalize": kindTenantIsTheLookup,
 }
 
 // crossTenantSite is one AcrossAllTenants call, located by go/ast.

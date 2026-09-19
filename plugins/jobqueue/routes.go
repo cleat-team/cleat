@@ -55,8 +55,27 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 
 // JobResponse is the JSON shape returned for a single job.
 type JobResponse struct {
-	JobID       uuid.UUID       `json:"job_id"`
-	QueueName   string          `json:"queue_name"`
+	JobID     uuid.UUID `json:"job_id"`
+	QueueName string    `json:"queue_name"`
+
+	// Status is one of six values, in the order a job can reach them:
+	//
+	//	pending    -> enqueued, not yet claimed
+	//	running    -> claimed by a worker, being processed
+	//	dispatched -> the workflow it names was STARTED. Outcome unknown.
+	//	completed  -> the workflow finished successfully (ObserveFinalize)
+	//	failed     -> the workflow finished unsuccessfully (ObserveFinalize),
+	//	              OR StartWorkflow itself errored and no run ever existed
+	//	abandoned  -> the run is gone and no outcome was ever recorded (the
+	//	              abandonment sweep, background.go) -- not "completed" and
+	//	              not "failed", because neither is a claim this plugin can
+	//	              support once the run itself cannot be asked
+	//
+	// UNTIL cleat#1715, "dispatched" did not exist: a job whose workflow ran
+	// to completion and one whose workflow failed on its first line both read
+	// "completed" the moment StartWorkflow returned, because that write
+	// happened at DISPATCH, not at the workflow's own end. See RunID's
+	// comment for how that stayed invisible even once run_id existed.
 	Status      string          `json:"status"`
 	Payload     json.RawMessage `json:"payload"`
 	CreatedAt   time.Time       `json:"created_at"`
@@ -71,13 +90,13 @@ type JobResponse struct {
 	// and no response carried it -- so the link from a job to its run existed
 	// in the database and was reachable through no API at all. cleat#1715.
 	//
-	// That is what made a job's status unfalsifiable from outside. A job whose
-	// workflow failed and one whose workflow did the work both read
-	// `"status": "completed"`, because status is written when the run is
-	// STARTED, and the only field that could have distinguished them was not
-	// returned. Exposing it does not fix the status semantics -- that is the
-	// rest of cleat#1715 -- but it makes the claim checkable, which is the
-	// precondition for anyone noticing it is wrong.
+	// That is what made a job's status unfalsifiable from outside. Before
+	// this field was exposed, a job whose workflow failed and one whose
+	// workflow did the work both read `"status": "completed"`, because status
+	// was written when the run was STARTED, and the only field that could
+	// have distinguished them was not returned. Exposing it made the claim
+	// checkable; Status's own comment above is the rest of cleat#1715, the
+	// fix the checkable claim turned out to need.
 	//
 	// Empty rather than null-typed: a job with no def_name never dispatches a
 	// workflow, and "no run" is not an error or an unknown. omitempty keeps it
