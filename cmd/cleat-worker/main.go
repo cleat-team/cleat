@@ -282,15 +282,15 @@ func main() {
 	if *createOrgNamed != "" {
 		dbURL := *dbURL
 		if dbURL == "" {
-			dbURL = os.Getenv("DATABASE_URL")
+			dbURL = os.Getenv("CLEAT_DATABASE_URL")
 		}
 		if dbURL == "" {
-			logger.ErrorContext(context.Background(), "--db or DATABASE_URL required for --create-org", "worker_id", workerID)
+			logger.ErrorContext(context.Background(), "--db or CLEAT_DATABASE_URL required for --create-org", "worker_id", workerID)
 			os.Exit(1)
 		}
 		gdb, err := sql.Open(sqlDriverName(*driver), dbURL)
 		if err != nil {
-			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or DATABASE_URL environment variable", "worker_id", workerID, "error", err)
+			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or CLEAT_DATABASE_URL environment variable", "worker_id", workerID, "error", err)
 			os.Exit(1)
 		}
 		defer gdb.Close()
