@@ -922,14 +922,12 @@ its **own** tenant, so the widened view lasts exactly as long as the claim;
 everything downstream of it -- event history, state, child workflows, schedules
 -- is tenant-scoped again immediately.
 
-**How the claim is widened is [`--claim-strategy`](#--claim-strategy), and the
-default no longer needs a grant.** The table below describes what the `global`
-strategy requires; `rotate`, the default, requires none of it for the *claim*.
-The **schedule** half is unchanged either way -- `024` on PostgreSQL, the
-`cleat_admin` grant on SQL Server -- because nothing yet reads due schedules
-across tenants without an exemption.
+**How this is done is [`--claim-strategy`](#--claim-strategy), and the default
+needs no grant for either half.** The table below describes what the `global`
+strategy requires; `rotate`, the default, requires none of it -- not for the
+claim and not for the due-schedule read.
 
-So the flag is still off by default, but what turning it on now asks of the
+So the flag is still off by default, but what turning it on asks of the
 deployment depends on the strategy.
 
 | dialect | what the deployment must do |
@@ -952,16 +950,27 @@ A missing grant therefore narrows a worker rather than stopping it.
 |------|---------|-------------|
 | string | `rotate` | How `--claim-across-tenants` claims work: `rotate` or `global` |
 
-**`rotate`** polls tenants in turn, each getting a bounded share of the batch:
+**`rotate`** covers both loops, by the same two-phase method: read the tenant
+list from `admin.tenants`, then do the per-tenant work through a store scoped to
+that tenant.
 
-1. read the tenant list from `admin.tenants`, and
-2. claim within each chosen tenant through a store scoped to that tenant --
-   which runs the **same** single-statement `FOR UPDATE SKIP LOCKED` claim the
-   single-tenant path runs, with a tenant predicate.
+**The dispatch claim** polls tenants in turn, each getting a bounded share of
+the batch, running the **same** single-statement `FOR UPDATE SKIP LOCKED` claim
+the single-tenant path runs with a tenant predicate added.
+
+**The due-schedule read covers every tenant on every tick**, and that difference
+is deliberate. Work that waits a tick is work that waits a tick; a cron schedule
+that waits a tick has *fired late*, and with enough tenants a minutely schedule
+quietly becomes an every-few-minutes one. The schedule loop runs on a 15-second
+ticker against cron whose finest granularity is a minute, which is what makes a
+full pass affordable — roughly a second of a fifteen-second tick at a thousand
+tenants. At tens of thousands on one worker the answer is more workers with
+fewer tenants each, not a shorter pass.
 
 It needs **no database-side grant**, because `admin.tenants` carries no
 row-level security and `cleat_app` already holds `SELECT` on it. Every read of
-`workflow_instances` still happens under some tenant's own RLS context.
+`workflow_instances` and `workflow_schedules` still happens under some tenant's
+own RLS context.
 
 That is what makes multi-tenant dispatch possible on **managed PostgreSQL**.
 `BYPASSRLS` can only be granted by a true superuser, and RDS, Cloud SQL and

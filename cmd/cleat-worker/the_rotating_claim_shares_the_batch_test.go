@@ -21,6 +21,10 @@ type queuedTenantStore struct {
 	mu        sync.Mutex
 	remaining int
 	asked     []int // limits this tenant was asked for, in call order
+
+	// Schedule fixtures, used by the due-schedule tests in the sibling file.
+	scheduleReads int
+	scheduleErr   error
 }
 
 func (s *queuedTenantStore) ClaimWorkflows(_ context.Context, _ string, limit int) ([]*engine.WorkflowInstance, error) {

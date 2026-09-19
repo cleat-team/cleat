@@ -509,13 +509,23 @@ func TestReportCrossTenantCapability_RotatingPath(t *testing.T) {
 		}
 	})
 
-	t.Run("still reports a missing schedule grant", func(t *testing.T) {
+	// SUPERSEDED, deliberately. This subtest used to assert that the rotating
+	// path still reported a missing 024 and told the operator only their own
+	// tenant's cron would fire. That was true when the rotation covered the
+	// claim and nothing else. It now reads due schedules per tenant too, so
+	// repeating the old line would send an operator to apply a migration they
+	// do not need -- or, on managed PostgreSQL, one they cannot apply.
+	t.Run("does not report a missing schedule grant it no longer needs", func(t *testing.T) {
 		out := report(t, true, engine.CrossTenantCapability{
 			SchedulesReason: "admin.get_due_schedules does not exist; apply 024",
 		})
-		for _, want := range []string{"cron will fire", "024", "does not cover this"} {
-			if !strings.Contains(out, want) {
-				t.Errorf("the schedule report does not mention %q:\n%s", want, out)
+		if !strings.Contains(out, "due-schedule read is available by tenant rotation") {
+			t.Errorf("the schedule read was not reported as available by rotation:\n%s", out)
+		}
+		for _, unwanted := range []string{"only this worker's own tenant's cron will fire", "apply 024"} {
+			if strings.Contains(out, unwanted) {
+				t.Errorf("the report still says %q, which the per-tenant read makes false:\n%s",
+					unwanted, out)
 			}
 		}
 	})
