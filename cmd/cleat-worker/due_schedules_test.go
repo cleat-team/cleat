@@ -390,6 +390,15 @@ func TestReportCrossTenantCapability_SaysWhichModeTheWorkerIsIn(t *testing.T) {
 			defer w.cancel()
 			w.store = st
 			w.claimAcrossTenants = tc.flag
+			// This table is about the report for the WIDENED QUERY, whose
+			// availability is a property of the 023/024 grants. Since the
+			// rotating claim became the default it has its own report, backed
+			// by a different question -- "can this worker enumerate tenants
+			// and open a store per tenant" rather than "was a grant made" --
+			// and it is covered by TestReportCrossTenantCapability_RotatingPath
+			// below. Naming the mechanism here keeps each report asserted
+			// against the thing it actually reports on.
+			w.claimStrategy = claimStrategyGlobal
 			w.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 			w.reportCrossTenantCapability()
@@ -428,6 +437,7 @@ func TestReportCrossTenantCapability_SaysSoWhenItCannotTell(t *testing.T) {
 	w := newTestWorker(ms)
 	defer w.cancel()
 	w.claimAcrossTenants = true
+	w.claimStrategy = claimStrategyGlobal // see the table above: this is the widened query's report
 	w.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	w.reportCrossTenantCapability()
@@ -439,4 +449,85 @@ func TestReportCrossTenantCapability_SaysSoWhenItCannotTell(t *testing.T) {
 	if strings.Contains(out, "is available") {
 		t.Errorf("an unanswerable check was reported as available:\n%s", out)
 	}
+}
+
+// The rotating claim reports its own availability at startup, and does NOT
+// report a missing 023 grant it will never use.
+//
+// The second half is the point. On managed PostgreSQL the BYPASSRLS role
+// cannot be created at all, so a worker there will never have 023 -- and a
+// startup line warning that "only this worker's own tenant's workflows will
+// execute" would be both alarming and false on every healthy worker in the
+// deployment.
+//
+// The SCHEDULE half is still reported, because the rotation does not replace
+// it: 024 remains the only way a non-default tenant's cron is seen.
+func TestReportCrossTenantCapability_RotatingPath(t *testing.T) {
+	report := func(t *testing.T, withFactory bool, capability engine.CrossTenantCapability) string {
+		t.Helper()
+		var buf bytes.Buffer
+		// BOTH interfaces on one store, as PostgresStore has them. A fixture
+		// that split them would have the schedule report silently skipped for
+		// a reason no real deployment has.
+		st := &listingCapabilityStore{
+			capabilityStore: &capabilityStore{mockStore: &mockStore{}, capability: capability},
+			tenants:         []string{"t1", "t2"},
+		}
+		w := newTestWorker(st.mockStore)
+		defer w.cancel()
+		w.store = st
+		w.claimAcrossTenants = true
+		w.claimStrategy = claimStrategyRotate
+		if withFactory {
+			w.storeFactory = &tenantStoreFactory{
+				stores: map[string]*queuedTenantStore{}, openErr: map[string]error{},
+			}
+		}
+		w.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		w.reportCrossTenantCapability()
+		return buf.String()
+	}
+
+	t.Run("available, and says no grant is needed", func(t *testing.T) {
+		// Claim ungranted on purpose: the rotating path must not care.
+		out := report(t, true, engine.CrossTenantCapability{
+			Schedules:   true,
+			ClaimReason: "admin.claim_workflows does not exist; apply 023",
+		})
+		if !strings.Contains(out, "by tenant rotation") {
+			t.Errorf("the rotating claim was not reported as available:\n%s", out)
+		}
+		if strings.Contains(out, "only this worker's own tenant's workflows will execute") {
+			t.Errorf("warned about a missing 023 grant the rotating claim never uses:\n%s", out)
+		}
+	})
+
+	t.Run("says so when it cannot rotate", func(t *testing.T) {
+		out := report(t, false, engine.CrossTenantCapability{Schedules: true})
+		if !strings.Contains(out, "cannot rotate") {
+			t.Errorf("a worker with no store factory was not told it cannot rotate:\n%s", out)
+		}
+	})
+
+	t.Run("still reports a missing schedule grant", func(t *testing.T) {
+		out := report(t, true, engine.CrossTenantCapability{
+			SchedulesReason: "admin.get_due_schedules does not exist; apply 024",
+		})
+		for _, want := range []string{"cron will fire", "024", "does not cover this"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the schedule report does not mention %q:\n%s", want, out)
+			}
+		}
+	})
+}
+
+// listingCapabilityStore implements TenantLister and
+// CrossTenantCapabilityChecker together, which is what every real store does.
+type listingCapabilityStore struct {
+	*capabilityStore
+	tenants []string
+}
+
+func (s *listingCapabilityStore) ListTenantIDs(context.Context) ([]string, error) {
+	return s.tenants, nil
 }
