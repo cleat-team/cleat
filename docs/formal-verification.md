@@ -102,7 +102,7 @@ ClaimWorkflows(workerID, namespace, limit):
         AND namespace = $namespace
         AND (task_queue IS NULL OR task_queue = ANY($task_queues))
         AND next_wake_at <= now()
-      ORDER BY priority DESC, created_at ASC
+      ORDER BY priority ASC, created_at ASC
       LIMIT $limit
       FOR UPDATE SKIP LOCKED
     )

@@ -78,6 +78,12 @@ type apiServer struct {
 	maxBodySize int64
 	db          *sql.DB
 
+	// maxPriorityMagnitude mirrors --max-priority-magnitude and bounds the
+	// `priority` field of a start request in either direction. 0 means the
+	// operator set no bound. See engine.ValidatePriority for why the bound is
+	// symmetric about the default rather than a floor of zero.
+	maxPriorityMagnitude int
+
 	// factory opens per-tenant stores. Every backend already implements the
 	// tenant scoping this needs -- PostgreSQL sets cleat.tenant_id via
 	// set_config so its RLS policies apply, SQL Server hands out a per-tenant
@@ -766,6 +772,16 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	}
 	if input.Input == nil {
 		input.Input = json.RawMessage("{}")
+	}
+
+	// Before the tenant is resolved and before any database work, because this
+	// is a pure check on the body: an out-of-range priority is wrong whether or
+	// not the workflow exists, and validating it after ListVersions would
+	// answer such a request with 404 for a name that is also unknown. Refused
+	// rather than clamped -- see engine.ValidatePriority.
+	if err := engine.ValidatePriority(input.Priority, s.maxPriorityMagnitude); err != nil {
+		s.writeError(w, 400, err.Error())
+		return
 	}
 
 	// Resolve tenant_id: prefer tenant_id, fall back to deprecated namespace.

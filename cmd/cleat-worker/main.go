@@ -1586,14 +1586,15 @@ func main() {
 
 	if *apiAddr != "" {
 		api := &apiServer{
-			store:       store,
-			worker:      w,
-			maxBodySize: *maxBodySize,
-			db:          db,
-			factory:     factory,
-			taskQueues:  taskQueues,
-			requireAuth: *requireAuth,
-			streamHub:   streamHub,
+			store:                store,
+			worker:               w,
+			maxBodySize:          *maxBodySize,
+			maxPriorityMagnitude: *maxPriorityMagnitude,
+			db:                   db,
+			factory:              factory,
+			taskQueues:           taskQueues,
+			requireAuth:          *requireAuth,
+			streamHub:            streamHub,
 
 			maxStreamPollReaders: *maxStreamPollReadersFlag,
 			streamPollInterval:   *streamPollIntervalFlag,

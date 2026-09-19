@@ -852,6 +852,36 @@ but are not refused by it.
 
 ---
 
+### --max-priority-magnitude
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `1000` | Bound on a caller-supplied workflow `priority`, in either direction (0 disables the bound) |
+
+`priority` arrives in the start request body, is stored as a bare
+`INTEGER NOT NULL DEFAULT 0`, and the dispatch claim orders
+`priority ASC, created_at` -- **lower runs sooner**. Nothing narrowed the value,
+so the whole int32 range was reachable by any caller who could start a workflow.
+
+Within one tenant that lets a caller put one run permanently in front of its own
+queue. With [`--claim-across-tenants`](#--claim-across-tenants) the same ordering
+is **global**, so `priority: -2147483648` takes the front of every tenant's work
+indefinitely -- a caller deciding the order for a database they share.
+
+A request outside `-N..N` is **refused with 400**, not clamped. Zero already
+means "the default", so there is no value a clamp could substitute that means
+"the number you asked for was not available"; the refusal says what the bound is.
+This matches the per-run limit overrides decoded a few fields away, which refuse
+a negative rather than treating it as absent.
+
+**The bound is symmetric on purpose.** A negative priority is a supported way to
+put work ahead of the default without renumbering everything already at `0`, and
+cleat#1051 exists because a hand-rolled parser made negative values
+unexpressible. A floor of zero would close this hole by removing that feature,
+so the bound constrains *magnitude* rather than sign.
+
+Set `0` to remove the bound and restore the full int32 range.
+
 ## Multi-Tenancy
 
 ### --claim-across-tenants
