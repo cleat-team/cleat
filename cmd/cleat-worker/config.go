@@ -206,6 +206,13 @@ var (
 			"any Down SQL.")
 	createTenantDisplayName = flag.String("tenant-display-name", "", "Display name for --create-tenant (defaults to the name)")
 	maxBodySize             = flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
+	maxPriorityMagnitude    = flag.Int("max-priority-magnitude", engine.DefaultMaxPriorityMagnitude,
+		"Bound on a caller-supplied workflow `priority`, in either direction: a start request outside "+
+			"-N..N is refused with 400. SYMMETRIC because a negative priority is a supported way to put "+
+			"work ahead of the default 0 without renumbering (cleat#1051), so a floor of zero would remove "+
+			"a feature rather than close a hole. The hole is that the column is a bare INTEGER ordered "+
+			"`priority ASC`, so under --claim-across-tenants an unbounded value takes the front of EVERY "+
+			"tenant's queue. 0 disables the bound and restores the full int32 range.")
 	httpReadTimeout         = flag.Duration("http-read-timeout", 30*time.Second, "HTTP read timeout")
 	httpWriteTimeout        = flag.Duration("http-write-timeout", 60*time.Second, "HTTP write timeout")
 	httpIdleTimeout         = flag.Duration("http-idle-timeout", 120*time.Second, "HTTP idle timeout")
