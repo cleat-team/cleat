@@ -119,7 +119,23 @@ concurrency:
   # real purpose: pushing twice to a branch should not run the suite twice.
   #
   # `scripts/check-workflow-concurrency.sh` guards both halves.
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  # A BODY EDIT MUST NOT SUPERSEDE THE RUN IT RACES (cleat#1688).
+  #
+  # `edited` is subscribed above because a BASE CHANGE fires it and nothing
+  # else does -- but it also fires for a title or body edit, and `github.ref`
+  # is identical for every pull_request activity type. The edited run therefore
+  # landed in this group and cancelled the synchronize run it followed, and a
+  # superseded run renders as a failure rather than as "replaced".
+  #
+  # `github.run_id` is unique per run, so a no-op edited run shares a group
+  # with nothing and cancels nothing. An `edited` that DID change the base
+  # keeps the per-ref group: that is a real re-evaluation against a different
+  # target and should supersede, which is why the activity type exists here.
+  #
+  # ONE LINE ON PURPOSE: check-workflow-concurrency.sh reads the single line
+  # matching `^\s*group:` and looks for github.sha/run_id/ref in it. A folded
+  # `>-` scalar hides the expression and the guard reports a false alarm.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # CGO is load-bearing here, not incidental. Every step in this file used to run
