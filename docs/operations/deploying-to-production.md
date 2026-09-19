@@ -106,12 +106,16 @@ rather than telling you to apply a file you cannot apply.
 | capability | on managed PostgreSQL |
 |---|---|
 | single-tenant dispatch | works, unchanged |
-| cross-tenant claim | **works**, with `--claim-strategy=rotate` — it claims each tenant's work under that tenant's own RLS context and needs no exemption |
-| cross-tenant claim via `--claim-strategy=global` | unavailable; `admin.claim_workflows` has no exemption to use |
-| **a non-default tenant's cron** | **does not fire.** `024`'s due-schedule read has no grant-free equivalent yet, so only the worker's own tenant's schedules fire. The worker warns about this at startup. |
+| cross-tenant claim | **works** with `--claim-strategy=rotate`, the default — it claims each tenant's work under that tenant's own RLS context and needs no exemption |
+| a non-default tenant's cron | **works** with the same strategy: due schedules are read per tenant, under that tenant's own RLS context |
+| `--claim-strategy=global`, either loop | unavailable; `admin.claim_workflows` and `admin.get_due_schedules` have no exemption to use |
 
-That last row is the one to check against your requirements before deploying a
-multi-tenant cleat on a managed instance.
+**Multi-tenancy on a managed instance is therefore complete**, and the default
+configuration is the one that works there. Until the due-schedule read gained a
+grant-free equivalent this table had a fourth row saying a non-default tenant's
+cron did not fire — a deployment could execute every tenant's workflows and fire
+only its own tenant's schedules. If you are reading an older copy of this page,
+that is the row that changed.
 
 ### Row-level security is unaffected
 
