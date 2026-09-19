@@ -1468,6 +1468,12 @@ type Worker struct {
 	// Run once the health tracker and metrics exist. cleat#1347.
 	bgPlugins []plugin.HasBackground
 
+	// finalizeObservers are the plugins implementing plugin.HasFinalizeObserver
+	// -- discovered the same way as bgPlugins, above. Called after a run
+	// reaches "done" or "failed"; see that interface's doc comment for what
+	// the hook does and does not guarantee. cleat#1715.
+	finalizeObservers []plugin.HasFinalizeObserver
+
 	// bgWg is main()'s waitgroup, NOT w.wg, and the difference is load
 	// bearing. w.wg is awaited by Run itself with no timeout; bgWg is awaited
 	// after Run returns, under a 30-second cap. A plugin loop is third-party
@@ -2884,6 +2890,20 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// anything still pending against it is stranded. IMPROVEMENT-PLAN 3.238.
 	if finalStatus == "done" || finalStatus == "failed" {
 		w.failStrandedUpdates(wf, finalStatus)
+	}
+
+	// A plugin that started this run (jobqueue, currently the only one) wants
+	// to record its actual outcome. cleat#1715. Best-effort and after the
+	// fact -- see plugin.HasFinalizeObserver's doc comment for the gap this
+	// leaves and why the abandonment sweep is what actually closes it, not
+	// this call being made "soon enough".
+	if finalStatus == "done" || finalStatus == "failed" {
+		for _, obs := range w.finalizeObservers {
+			if obsErr := obs.ObserveFinalize(context.Background(), wf.ID, finalStatus); obsErr != nil {
+				w.logger.ErrorContext(context.Background(), "finalize observer failed",
+					"worker_id", w.id, "workflow_id", wf.ID, "plugin", obs.Info().Name, "error", obsErr)
+			}
+		}
 	}
 
 	// Post-finalization: logging and non-DB side effects.

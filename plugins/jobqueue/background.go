@@ -53,6 +53,61 @@ func (p *Plugin) runReaper(ctx context.Context) int {
 	return int(n)
 }
 
+// abandonedJobsQuery finds jobs stuck in "dispatched" whose run is no longer
+// in flight -- the run finished (or was reaped, terminated, cancelled or
+// dead-lettered by a path other than FinalizeWorkflowSegment) and no
+// ObserveFinalize write-back ever arrived to say what happened. cleat#1715.
+//
+// SAME THREE-DIALECT SHAPE AS plugins/blobstore/queries.go's staleWorkflowRefs,
+// reused rather than reinvented: admin.in_flight_workflow_ids() (migration
+// 073) on PostgreSQL, because workflow_instances there carries RLS that a
+// tenant-less background sweep cannot satisfy directly and that function is
+// the SECURITY DEFINER, no-argument, RLS-exempt escape hatch built for
+// exactly this. MySQL and SQL Server read workflow_instances directly --
+// neither has RLS on that table, so neither needed the function in the first
+// place.
+//
+// Marked ABANDONED, not "failed" and not "completed" -- see plugin.go's
+// design note (cleat#1715's design decision) for why: this sweep has no
+// evidence about the run's actual outcome, only that it is gone. Asserting
+// either "completed" or "failed" here would be the exact same unsupported
+// claim this issue exists to remove, moved one state to the right.
+var abandonedJobsQuery = plugin.Query{
+	Default: `UPDATE task_queue
+SET status = 'abandoned', completed_at = now()
+WHERE status = 'dispatched'
+  AND run_id NOT IN (SELECT id FROM admin.in_flight_workflow_ids())`,
+	MySQL: `UPDATE task_queue
+SET status = 'abandoned', completed_at = now()
+WHERE status = 'dispatched'
+  AND run_id NOT IN (SELECT id FROM workflow_instances WHERE status IN ('ready', 'running'))`,
+	MSSQL: `UPDATE task_queue
+SET status = 'abandoned', completed_at = now()
+WHERE status = 'dispatched'
+  AND run_id NOT IN (SELECT id FROM workflow_instances WHERE status IN ('ready', 'running'))`,
+}
+
+// sweepAbandonedJobs marks abandoned jobs whose run vanished with no recorded
+// outcome. Returns the number swept, or -1 on error (logged internally).
+//
+// A POSITIVE CONTROL BELONGS WITH EVERY CALLER OF THIS FUNCTION, not just
+// with this function's own test. This reaper has silently no-opped twice
+// before on this exact table (cleat#1133, #1134, #1141) -- "the reaper ran
+// without error" and "the reaper reaped anything" are different claims, and
+// only a caller that engineers a real abandoned row and checks the count
+// went to 1 can tell them apart. See background_test.go.
+func (p *Plugin) sweepAbandonedJobs(ctx context.Context) int {
+	n, err := p.db.Exec(ctx, plugin.Rebind(abandonedJobsQuery.For(p.dialect), p.dialect))
+	if err != nil {
+		p.logger.Error("jobqueue: abandonment sweep failed",
+			"plugin", p.Info().Name,
+			"error", err,
+		)
+		return -1
+	}
+	return int(n)
+}
+
 // Run starts the background worker goroutine. It polls the task_queue for
 // pending jobs and runs a periodic reaper to unstuck jobs left running by
 // crashed workers. Returns when ctx is cancelled.
@@ -97,6 +152,15 @@ func (p *Plugin) Run(ctx context.Context) error {
 			"jobs_reset", n,
 		)
 	}
+	// Same ticker, a second sweep. cleat#1715 asked for the abandonment
+	// sweep to extend the reaper rather than add a goroutine -- this is
+	// that: no new ticker, no new mechanism, one more statement per cycle.
+	if n := p.sweepAbandonedJobs(ctx); n >= 0 {
+		p.logger.Info("jobqueue: initial abandonment sweep completed",
+			"plugin", p.Info().Name,
+			"jobs_abandoned", n,
+		)
+	}
 
 	for {
 		select {
@@ -131,13 +195,23 @@ func (p *Plugin) Run(ctx context.Context) error {
 					"jobs_reset", n,
 				)
 			}
+			if n := p.sweepAbandonedJobs(ctx); n >= 0 {
+				p.logger.Info("jobqueue: abandonment sweep completed",
+					"plugin", p.Info().Name,
+					"duration_ms", time.Since(start).Milliseconds(),
+					"jobs_abandoned", n,
+				)
+			}
 		}
 	}
 }
 
 // pollPending scans for pending jobs and dispatches them. For each pending job,
 // it atomically claims the job (status -> 'running') and dispatches the
-// referenced workflow. Jobs without a def_name are marked completed immediately.
+// referenced workflow to status -> 'dispatched'; a job's terminal status
+// ('completed' or 'failed') is written back later, by ObserveFinalize, when
+// the workflow it started actually finishes. cleat#1715. Jobs without a
+// def_name have no run to wait for and are marked completed immediately.
 // Returns (claimed, dispatched, failed, error).
 func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 	rows, err := p.db.Query(ctx, queryPendingJobs.For(p.dialect))
@@ -222,12 +296,19 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 				"run_id", runID,
 			)
 
+			// "dispatched", not "completed" -- cleat#1715. The workflow was
+			// STARTED here; whether it succeeds is unknown until
+			// ObserveFinalize (plugin.go) writes back "completed" or
+			// "failed", or the abandonment sweep (below) concludes the run
+			// is gone with no write-back ever having arrived. completed_at
+			// is not set here for the same reason: it means when the run
+			// actually finished, and that is not this moment.
 			if _, updateErr := p.db.Exec(ctx, plugin.Rebind(`
 					UPDATE task_queue
-					SET status = 'completed', completed_at = now(), run_id = $4
+					SET status = 'dispatched', run_id = $4
 					WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
 				`, p.dialect), jobID, tenantID, queueName, runID); updateErr != nil {
-				p.logger.Error("jobqueue: mark completed", "job_id", jobID, "error", updateErr)
+				p.logger.Error("jobqueue: mark dispatched", "job_id", jobID, "error", updateErr)
 			}
 		} else {
 			p.logger.Info("jobqueue: job has no workflow target, marking completed",

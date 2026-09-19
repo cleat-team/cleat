@@ -498,14 +498,15 @@ func main() {
 		// The live tail for GET /api/workflows/{id}/stream. Built here rather
 		// than inside the API server because the engines this worker executes
 		// runs on are what publish to it. cleat#1572.
-		streamHub   = engine.NewStreamHub(*maxStreamReadersFlag)
-		plugList    []*plugin.LoadedPlugin
-		plugHandler http.Handler
-		plugMux     *http.ServeMux
-		bgWg        sync.WaitGroup
-		bgPlugins   []plugin.HasBackground
-		ratelim     *ipRateLimiter
-		tenantLim   *keyedRateLimiter
+		streamHub         = engine.NewStreamHub(*maxStreamReadersFlag)
+		plugList          []*plugin.LoadedPlugin
+		plugHandler       http.Handler
+		plugMux           *http.ServeMux
+		bgWg              sync.WaitGroup
+		bgPlugins         []plugin.HasBackground
+		finalizeObservers []plugin.HasFinalizeObserver
+		ratelim           *ipRateLimiter
+		tenantLim         *keyedRateLimiter
 	)
 
 	defaultTenantID := "00000000-0000-0000-0000-000000000000"
@@ -1232,6 +1233,13 @@ func main() {
 			// complete before this point.
 			bgPlugins = append(bgPlugins, p)
 		}
+		// SAME DISCOVERY SHAPE AS HasBackground, ABOVE. cleat#1715: a plugin
+		// that starts workflows (jobqueue) wants to know their terminal
+		// status; see plugin.HasFinalizeObserver's own doc comment for what
+		// this hook is and is not.
+		if p, ok := lp.Plugin.(plugin.HasFinalizeObserver); ok {
+			finalizeObservers = append(finalizeObservers, p)
+		}
 	}
 
 	// Load custom redaction patterns from file (if configured).
@@ -1507,6 +1515,7 @@ func main() {
 		maxReclaimPerTick:                *maxReclaimPerTick,
 		unservableBackoff:                *unservableBackoffFlag,
 		bgPlugins:                        bgPlugins,
+		finalizeObservers:                finalizeObservers,
 		bgWg:                             &bgWg,
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,

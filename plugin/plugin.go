@@ -347,6 +347,38 @@ type HasBackground interface {
 	Run(ctx context.Context) error
 }
 
+// HasFinalizeObserver: plugin wants to know when a workflow run it may have
+// started (via Environment.StartWorkflow) reaches a terminal status.
+//
+// NOT transactional with the write that produces finalStatus. cleat#1715's
+// design asked for a hook placed inside FinalizeWorkflowSegment's own
+// transaction, so a write-back races nothing -- but FinalizeWorkflowSegment
+// is called directly on a WorkflowStore (cmd/cleat-worker/setup.go), not
+// through the Engine, and WorkflowStore has four implementations (Postgres,
+// MySQL, MSSQL, Sharded). Threading a hook field through all four for a
+// capability exactly one plugin uses is the twenty-edits shape this issue's
+// own design note argues against for CompleteWorkflow; the same argument
+// applies here to the store interface.
+//
+// The gap this leaves is a crash between FinalizeWorkflowSegment's commit and
+// ObserveFinalize's own write -- a small, same-process window, not a network
+// round trip. It is not silently accepted: cleat#1715 also asks for an
+// abandonment sweep (a job whose run is no longer in flight and never
+// received a terminal write-back), which is exactly the backstop this gap
+// needs and would need to exist regardless of whether the hook were
+// transactional -- a WORKER that dies between commit and write-back leaves
+// the same gap a transactional hook cannot close on its own, because nothing
+// guarantees the write-back's SIDE of a two-write transaction runs either
+// once the process is gone. The sweep is the actual safety net either way.
+type HasFinalizeObserver interface {
+	Plugin
+	// ObserveFinalize is called AFTER a workflow run reaches "done" or
+	// "failed" (never "ready", which is a suspend, not a terminal status).
+	// Errors are logged and otherwise ignored: a plugin's own bookkeeping
+	// must never be able to fail a workflow's finalize.
+	ObserveFinalize(ctx context.Context, runID, finalStatus string) error
+}
+
 // HasHostFunctions: plugin adds functions callable from workflows.
 // These functions are automatically recorded in event history and
 // replayed deterministically -- plugin authors don't need to handle replay.

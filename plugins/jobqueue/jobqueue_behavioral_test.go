@@ -57,13 +57,22 @@ type fakeJobQueueStore struct {
 	failNextQuery bool // if true, next QueryContext returns error (cleared after use)
 	querySkip     int  // number of queries to let succeed before failNextQuery takes effect
 	execSkip      int  // number of execs to let succeed before failNextExec takes effect
+
+	// inFlightRunIDs stands in for workflow_instances' status IN ('ready',
+	// 'running') set, which this fake has no table for. sweepAbandonedJobs'
+	// query asks "is this run_id still in flight" -- a run_id present here
+	// answers yes, absent answers no (gone, whether finished, reaped, or
+	// never existed). A test drives this directly instead of standing up a
+	// second fake table for a single boolean question. cleat#1715.
+	inFlightRunIDs map[string]bool
 }
 
 func newFakeJobQueueStore() *fakeJobQueueStore {
 	return &fakeJobQueueStore{
-		rows:    make(map[string]*jqRow),
-		apiKeys: make(map[string]string),
-		now:     time.Now,
+		rows:           make(map[string]*jqRow),
+		apiKeys:        make(map[string]string),
+		now:            time.Now,
+		inFlightRunIDs: make(map[string]bool),
 	}
 }
 
@@ -135,6 +144,12 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execCancel(args)
 	case strings.Contains(query, "SET status = 'failed'"):
 		return c.execMarkFailed(args)
+	case strings.Contains(query, "SET status = 'dispatched'"):
+		return c.execMarkDispatched(args)
+	case strings.Contains(query, "SET status = 'abandoned'"):
+		return c.execSweepAbandoned(query)
+	case strings.Contains(query, "SET status = $1") && strings.Contains(query, "run_id"):
+		return c.execObserveFinalize(query, args)
 	case strings.Contains(query, "SET status = 'completed'") && strings.Contains(query, "run_id"):
 		return c.execMarkCompleted(args, true)
 	case strings.Contains(query, "SET status = 'completed'"):
@@ -451,6 +466,133 @@ func (c *fakeConn) execMarkCompleted(args []driver.NamedValue, hasRunID bool) (d
 		row.runID = &runID
 	}
 	return &fakeResult{rowsAffected: 1}, nil
+}
+
+// execMarkDispatched handles the dispatch-success write:
+//
+//	UPDATE task_queue SET status = 'dispatched', run_id = $4
+//	WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
+//
+// cleat#1715: this used to be the "completed" write. It no longer claims an
+// outcome -- only that the workflow was started. ObserveFinalize (below)
+// writes the real outcome back later.
+func (c *fakeConn) execMarkDispatched(args []driver.NamedValue) (driver.Result, error) {
+	jobID, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	queueName, err := argString(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	runID, err := argString(args, 4)
+	if err != nil {
+		return nil, err
+	}
+
+	key := rowKey(tid, queueName, jobID)
+	row, ok := c.store.rows[key]
+	if !ok {
+		return &fakeResult{rowsAffected: 0}, nil
+	}
+
+	row.status = "dispatched"
+	row.runID = &runID
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+// execSweepAbandoned handles the abandonment sweep (background.go's
+// abandonedJobsQuery):
+//
+//	UPDATE task_queue SET status = 'abandoned', completed_at = now()
+//	WHERE status = 'dispatched'
+//	  AND run_id NOT IN (SELECT id FROM <in-flight runs>)
+//
+// This fake has no workflow_instances table, so "still in flight" is
+// answered by store.inFlightRunIDs directly rather than by a second fake
+// table -- a test sets that map to say which run_ids are (still) running
+// and which are gone. Unconditional over every row, matching the real
+// query's lack of a tenant/queue scope: the sweep is cross-tenant by design
+// (plugin.AcrossAllTenants in the production caller).
+func (c *fakeConn) execSweepAbandoned(query string) (driver.Result, error) {
+	// GUARD READ FROM THE QUERY TEXT, same reasoning as execObserveFinalize
+	// above: hardcoding the in-flight check in Go regardless of what the
+	// real WHERE clause says would keep this green even if
+	// "AND run_id NOT IN (...)" were deleted from abandonedJobsQuery, which
+	// is the one line separating "abandon what is truly gone" from "abandon
+	// everything dispatched, in-flight or not".
+	guarded := strings.Contains(query, "run_id NOT IN")
+
+	now := c.store.now()
+	var count int64
+	for _, row := range c.store.rows {
+		if row.status != "dispatched" {
+			continue
+		}
+		if guarded && row.runID != nil && c.store.inFlightRunIDs[*row.runID] {
+			continue
+		}
+		row.status = "abandoned"
+		row.completedAt = &now
+		count++
+	}
+	return &fakeResult{rowsAffected: count}, nil
+}
+
+// execObserveFinalize handles plugin.HasFinalizeObserver's write-back
+// (finalize_observer.go):
+//
+//	UPDATE task_queue SET status = $2, completed_at = now()
+//	WHERE run_id = $1 AND status IN ('dispatched', 'abandoned')
+//
+// $2 is bound, not a literal -- "completed" or "failed" is read from the
+// argument rather than matched in the query text, which is why this needs
+// its own handler rather than reusing execMarkCompleted/execMarkFailed.
+// Matches by run_id across every tenant/queue, same as the production
+// query: the run that just finished names its job by run_id alone.
+//
+// THE GUARD IS READ FROM THE QUERY TEXT, not assumed. A fake that always
+// enforced "only overwrite dispatched/abandoned" in Go, independent of
+// whether the real WHERE clause says so, would stay green even if the guard
+// were deleted from finalize_observer.go -- exactly the "condition that
+// never decides anything" trap: falsifying the guard would produce an
+// unrecognized-query error from this fake rather than a wrong answer from
+// the code under test. Keying the match on "SET status = $2" alone (true of
+// both the guarded and unguarded SQL) and branching on the guard clause's
+// own text is what makes that falsification land on the real assertion.
+func (c *fakeConn) execObserveFinalize(query string, args []driver.NamedValue) (driver.Result, error) {
+	// $1 is status, $2 is run_id -- finalize_observer.go's own comment says
+	// why the order is this way round and not the more natural (runID,
+	// status): MySQL binds by text position, not by $N, and this ordering
+	// is what makes the two agree.
+	newStatus, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	runID, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	guarded := strings.Contains(query, "status IN ('dispatched', 'abandoned')")
+
+	now := c.store.now()
+	var count int64
+	for _, row := range c.store.rows {
+		if row.runID == nil || *row.runID != runID {
+			continue
+		}
+		if guarded && row.status != "dispatched" && row.status != "abandoned" {
+			continue
+		}
+		row.status = newStatus
+		row.completedAt = &now
+		count++
+	}
+	return &fakeResult{rowsAffected: count}, nil
 }
 
 // execResetStuckJobs handles the reaper query:
@@ -1351,7 +1493,10 @@ func TestPollCallsStartWorkflow(t *testing.T) {
 		t.Errorf("expected input %q, got %q", `{"x":1}`, string(calls[0].input))
 	}
 
-	// Verify job is completed with run_id stored.
+	// Verify job is DISPATCHED (not completed) with run_id stored. cleat#1715:
+	// dispatch only starts the workflow, it does not know the outcome, so
+	// status stays 'dispatched' and completed_at stays unset until
+	// ObserveFinalize (or the abandonment sweep) says otherwise.
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	key := rowKey(testTenantID.String(), "wf-queue", jobID)
@@ -1359,14 +1504,14 @@ func TestPollCallsStartWorkflow(t *testing.T) {
 	if !ok {
 		t.Fatal("expected job to exist")
 	}
-	if row.status != "completed" {
-		t.Errorf("expected status 'completed', got %q", row.status)
+	if row.status != "dispatched" {
+		t.Errorf("expected status 'dispatched', got %q", row.status)
 	}
 	if row.startedAt == nil {
 		t.Error("expected started_at to be set")
 	}
-	if row.completedAt == nil {
-		t.Error("expected completed_at to be set")
+	if row.completedAt != nil {
+		t.Error("expected completed_at to be unset -- the workflow's outcome is not yet known")
 	}
 	if row.runID == nil || *row.runID == "" {
 		t.Error("expected run_id to be set")
