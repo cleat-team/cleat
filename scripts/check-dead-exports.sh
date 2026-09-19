@@ -66,6 +66,17 @@
 #   scripts/check-dead-exports.sh              # fail on entries not in the baseline
 #   scripts/check-dead-exports.sh --update     # rewrite the baseline
 #
+# RUN --update AGAINST THE FINISHED DIFF, NOT WHILE STILL EDITING. cleat#1116
+# (cleat/queue_store.go) ran it mid-edit and got a wrong split: four methods
+# that are genuinely test-only landed in deadexports-baseline.txt (the
+# zero-callers-even-in-tests list) instead of exported-test-only-baseline.txt,
+# because at that moment in the edit the caller graph the scan saw was not
+# the one that shipped. CI's fresh scan against the final tree disagreed with
+# the committed baseline and failed. Re-running --update against the finished
+# tree produced the correct split. The tool has no way to warn about this
+# itself -- it can only see the tree it is pointed at, not whether more edits
+# are coming.
+#
 # The baseline (scripts/deadexports-baseline.txt) exists for the same reason
 # check-test-only-code.sh's does: there may be a backlog the day this lands.
 # New entries fail the build; every baseline entry needs a reason recorded
