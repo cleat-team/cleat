@@ -1792,9 +1792,33 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 	// so a workflow that published under "" is readable only by asking for it.
 	// Rejecting ?key= would make that key unreachable, which is a different
 	// and larger change than making a required argument required.
+	// NO ?key AT ALL LISTS EVERYTHING THE RUN PUBLISHED. cleat#1571.
+	//
+	// This used to 400 with "this endpoint reads one published key and cannot
+	// list them (cleat#1119)". That refusal was the RESOLUTION of cleat#1119,
+	// which asked whether published state should be enumerable and answered
+	// no: a keyed-only reader means the caller must know what it is asking
+	// for, which keeps published state a contract rather than a bag.
+	//
+	// Reversed on the operational case cleat#1119 itself named -- "a run
+	// misbehaved and you do not know what it published" -- and on the owner's
+	// framing that query state is a semantically limited standard interface,
+	// so viewing it is part of that interface. Anything elaborate is
+	// app-specific and is not shoehorned in here: this lists, and stops.
+	//
+	// THE DISTINCTION THE OLD CODE DREW IS PRESERVED EXACTLY, and it is the
+	// subtle part. `Has("key")` is true for `?key=` with an empty value, and a
+	// workflow CAN publish under "" -- measured on PostgreSQL 16,
+	// '{"":"v"}'::jsonb ->> '' -> 'v'. So `?key=` still reads that key, and
+	// only the complete ABSENCE of the parameter lists. Switching this to a
+	// Get("key") == "" check would make the empty key unreachable.
 	if !r.URL.Query().Has("key") {
-		s.writeError(w, 400, "the key query parameter is required; "+
-			"this endpoint reads one published key and cannot list them (cleat#1119)")
+		all, err := st.ListQueryState(r.Context(), id)
+		if err != nil {
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		s.writeJSON(w, 200, map[string]any{"state": all})
 		return
 	}
 	key := r.URL.Query().Get("key")

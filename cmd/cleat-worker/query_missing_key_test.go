@@ -1,16 +1,20 @@
 package main
 
-// cleat#1224, the half of it that survived.
+// cleat#1224, then cleat#1571.
 //
-// The issue as filed asked for enumeration. That was already decided against --
-// cleat#1119, closed at the owner's direction, and docs/how-to/common-patterns.md
-// says the HTTP API is keyed-only BY DESIGN. What is left is the opposite
-// change: if the key is a required argument, omitting it is a 400, not a 200
-// with an empty value.
+// cleat#1224 asked for enumeration and got the opposite: cleat#1119 had decided
+// published state was keyed-only BY DESIGN, so an absent ?key= became a 400
+// rather than a 200 with an empty value.
 //
-// The handler's own comment already said an empty value carries "three
-// meanings, one response". An absent ?key= was a fourth, and the only one the
-// design explicitly forbids.
+// cleat#1571 REVERSES the design half, on the operational case cleat#1119 itself
+// named -- "a run misbehaved and you do not know what it published" -- and on
+// the owner's framing that query state is a semantically limited standard
+// interface, so viewing it belongs to that interface. An absent ?key= now
+// lists.
+//
+// WHAT DID NOT CHANGE is the distinction below, and it is the subtle half: `?key=`
+// is a lookup of the key published as "", not a request to list. Both tests are
+// kept because one without the other permits the wrong fix.
 
 import (
 	"context"
@@ -20,23 +24,42 @@ import (
 	"testing"
 )
 
-func TestAQueryWithNoKeyIsA400(t *testing.T) {
-	queried := false
+func TestAQueryWithNoKeyListsEverythingPublished(t *testing.T) {
+	singleKeyRead := false
 	ms := existingWorkflow(&mockStore{})
 	ms.getQueryStateFn = func(_ context.Context, _, _ string) (string, error) {
-		queried = true
+		singleKeyRead = true
 		return "", nil
+	}
+	ms.listQueryStateFn = func(_ context.Context, _ string) (map[string]string, error) {
+		return map[string]string{"a": "1", "": "published-under-empty"}, nil
 	}
 	api := newTestAPIServer(ms)
 	rec := httptest.NewRecorder()
 	api.handleGetQueryState(rec,
 		httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/query", nil), "wf-1")
 
-	if rec.Code != 400 {
-		t.Errorf("a query with no key answered %d, want 400: %s", rec.Code, rec.Body.String())
+	if rec.Code != 200 {
+		t.Fatalf("a query with no key answered %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	if queried {
-		t.Error("the store was asked for a key the caller never supplied")
+	if singleKeyRead {
+		t.Error("the store was asked for a single key the caller never supplied")
+	}
+	var body struct {
+		State map[string]string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("undecodable body %q: %v", rec.Body.String(), err)
+	}
+	if body.State["a"] != "1" {
+		t.Errorf("state = %v, want the published keys", body.State)
+	}
+	// The key published as "" must appear in a listing. It is the one key the
+	// single-key reader makes awkward to ask for, so enumeration is where it
+	// becomes discoverable at all.
+	if _, ok := body.State[""]; !ok {
+		t.Error("the key published as \"\" is missing from the listing, which is the " +
+			"one place it can be discovered")
 	}
 }
 

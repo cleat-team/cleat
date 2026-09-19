@@ -508,6 +508,10 @@ func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.
 func (m *mockCompactStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
 	return "", nil
 }
+
+func (m *mockCompactStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
 func (m *mockCompactStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	return nil, nil
 }

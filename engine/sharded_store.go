@@ -682,6 +682,17 @@ func (s *ShardedStore) GetQueryState(ctx context.Context, workflowID, key string
 	return shard.Store.GetQueryState(ctx, workflowID, key)
 }
 
+// ListQueryState routes to the shard that owns the run, exactly as
+// GetQueryState does. Published state lives on the instance row, so there is
+// nothing to merge across shards.
+func (s *ShardedStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return nil, fmt.Errorf("list_query_state: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.ListQueryState(ctx, workflowID)
+}
+
 // ListWorkflows merges results from all shards.
 func (s *ShardedStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	s.mu.RLock()

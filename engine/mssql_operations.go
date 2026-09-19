@@ -79,6 +79,23 @@ func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 	return value.String, nil
 }
 
+// ListQueryState returns every key a run published. See the PostgreSQL
+// implementation for why this reads the whole column rather than using SQL
+// Server's JSON functions.
+func (s *MSSQLStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT query_state FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`,
+		workflowID, s.tenantID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list query state: %w", err)
+	}
+	return decodeQueryState(raw)
+}
+
 func (s *MSSQLStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
 	var out int
 	err := withRollbackGuaranteedRetry(ctx, "get event count", mssqlTxRetries, mssqlTxRetryDelay, func() error {

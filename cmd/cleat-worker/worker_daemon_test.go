@@ -61,6 +61,7 @@ type mockStore struct {
 	getChildResultFn                   func(ctx context.Context, runID string) (engine.ChildOutcome, error)
 	reapStaleInstancesFn               func(ctx context.Context, timeout time.Duration) (int, error)
 	getQueryStateFn                    func(ctx context.Context, workflowID, key string) (string, error)
+	listQueryStateFn                   func(ctx context.Context, workflowID string) (map[string]string, error)
 	listWorkflowsFn                    func(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error)
 	countWorkflowsFn                   func(ctx context.Context, filter engine.WorkflowFilter) (int, error)
 	getWorkflowByIDFn                  func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
@@ -316,6 +317,13 @@ func (m *mockStore) GetQueryState(ctx context.Context, workflowID, key string) (
 		return m.getQueryStateFn(ctx, workflowID, key)
 	}
 	return "", nil
+}
+
+func (m *mockStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	if m.listQueryStateFn != nil {
+		return m.listQueryStateFn(ctx, workflowID)
+	}
+	return map[string]string{}, nil
 }
 
 func (m *mockStore) ListWorkflows(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error) {
