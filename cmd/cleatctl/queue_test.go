@@ -200,10 +200,10 @@ func TestQueueCommandRefusesBadInput(t *testing.T) {
 	// Go's flag package silently drops: it stops parsing at the first non-flag
 	// argument, so --concurrency would never be seen and the operator would be
 	// told to pass a flag they just passed. `cleatctl set-secret <uuid> --name
-	// foo` and `cleatctl suspend-tenant <uuid> --yes` are both unusable today
-	// for exactly that reason (filed separately). parseInterspersed is what
-	// keeps this command out of that set, and these two cases are what hold it
-	// there.
+	// foo` and `cleatctl suspend-tenant <uuid> --yes` were both unusable for
+	// exactly that reason; that was cleat#1933, fixed in #1936, and the two
+	// commands now share this one's parser. parseFlagsAnywhere is what keeps
+	// this command out of that set, and these two cases are what hold it there.
 	for _, order := range []struct {
 		label     string
 		flagFirst bool
@@ -230,7 +230,7 @@ func TestQueueCommandRefusesBadInput(t *testing.T) {
 			}
 			// The limit actually landed -- "registered queue" printing is not
 			// the same as --concurrency having been read. This is the exact
-			// assertion that fails if parseInterspersed is replaced by a plain
+			// assertion that fails if parseFlagsAnywhere is replaced by a plain
 			// fs.Parse: the name-first case would refuse, and a flag-parsing
 			// bug that defaulted the limit to something would land the wrong
 			// number here rather than an error anywhere.
