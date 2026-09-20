@@ -130,7 +130,7 @@ func main() {
 	// Apply CLEAT_CHILD_BINDING_OVERRIDE env var as fallback when the flag is not set.
 	applyChildBindingOverrideEnv()
 
-	// Fall back to DATABASE_URL env var if --db is empty.
+	// Fall back to CLEAT_DATABASE_URL env var if --db is empty.
 	resolveDBURL()
 
 	// Set WASM output buffer size before any Runtime is created.
@@ -340,7 +340,7 @@ func main() {
 		}
 		gdb, err := sql.Open(sqlDriverName(*driver), dbURL)
 		if err != nil {
-			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or DATABASE_URL environment variable", "worker_id", workerID, "error", err)
+			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or CLEAT_DATABASE_URL environment variable", "worker_id", workerID, "error", err)
 			os.Exit(1)
 		}
 		defer gdb.Close()
@@ -435,7 +435,7 @@ func main() {
 		}
 		gdb, err := sql.Open(sqlDriverName(*driver), dbURL)
 		if err != nil {
-			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or DATABASE_URL environment variable", "worker_id", workerID, "error", err)
+			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or CLEAT_DATABASE_URL environment variable", "worker_id", workerID, "error", err)
 			os.Exit(1)
 		}
 		defer gdb.Close()
@@ -655,7 +655,7 @@ func main() {
 			*dbURL = os.Getenv("CLEAT_DATABASE_URL")
 		}
 		if *dbURL == "" {
-			fmt.Fprintln(os.Stderr, "error: the --db flag or DATABASE_URL environment variable must be set to a database connection string")
+			fmt.Fprintln(os.Stderr, "error: the --db flag or CLEAT_DATABASE_URL environment variable must be set to a database connection string")
 			os.Exit(1)
 		}
 

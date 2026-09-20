@@ -29,7 +29,7 @@ import (
 )
 
 func main() {
-	dbURL := flag.String("db", "", "Database connection URL (required, or set DATABASE_URL)")
+	dbURL := flag.String("db", "", "Database connection URL (required, or set CLEAT_DATABASE_URL)")
 	workflowName := flag.String("workflow", "", "Workflow definition name to benchmark")
 	entryPoint := flag.String("entry-point", "place_order", "Workflow entry point")
 	count := flag.Int("count", 100, "Number of workflow executions")

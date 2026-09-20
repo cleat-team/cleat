@@ -1419,7 +1419,10 @@ func getDBConnStr() string {
 		return dbConnStr
 	}
 	// Fall back to credential provider.
-	// For the "env" provider this checks --db, DATABASE_URL, then CLEAT_DATABASE_URL.
+	// For the "env" provider this checks --db, then CLEAT_DATABASE_URL.
+	// It used to check the generic DATABASE_URL in between, and prefer it; #1904
+	// removed that, because the generic name is what an unrelated service in the
+	// same pod also sets. See engine/credentials.go.
 	if dbCredProviderName != "" {
 		provider, err := engine.NewDBCredentialProvider(dbCredProviderName, "", dbCredPath)
 		if err == nil {
