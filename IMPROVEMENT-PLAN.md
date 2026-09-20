@@ -10135,6 +10135,30 @@ default-with-scope (`requires exactly these 33`), `--no-live`, `--check-live`
 (`33 contexts, declared list matches exactly`), and `--self-test` — 8 negative controls, 2 new
 ones for the live diff, and a positive control for each half.
 
+#### And the new output was wrong on its first CI run, in its own subject
+
+The `NOT CHECKED` block prints why the live list could not be read, taken from
+`gh`'s stderr. The first version took the LAST line. In the `Lint` job `GH_TOKEN`
+is not set at all, so `gh` answers with a four-line hint whose last line is a
+YAML fragment — and the guard printed:
+
+    check-required-contexts: NOT CHECKED -- whether branch protection on develop still
+      requires exactly these 33. Reading it needs admin scope, and this run did not read it:
+            GH_TOKEN: ${{ github.token }}
+
+A variable name where a reason belongs, in the paragraph this whole section is
+about. Fixed to prefer the line carrying an HTTP status and otherwise the first
+line, as `gh_error_reason`, which is pure and has four self-test cases — three
+of them built from the actual stderr shapes rather than invented. The third case
+puts the HTTP line **between** a preamble and a hint, so neither `lines[0]` nor
+`lines[-1]` satisfies it: reverting to either is red, which is what makes the
+case set pin a rule rather than a position.
+
+Worth recording rather than quietly amending: the defect was found because the
+change made the guard print something in CI that nobody had seen before. An
+output nobody reads cannot be wrong in a way anyone notices, which is most of
+why the original `OK, 32` survived three days.
+
 #### The second finding: the count was written down eleven times
 
 `grep -rn '32 required contexts\|32 contexts'` found the number asserted in nine workflow

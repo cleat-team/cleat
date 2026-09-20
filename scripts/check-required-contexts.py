@@ -76,6 +76,7 @@ since a check that rejects everything would also print its own "caught" line.
 import argparse
 import copy
 import os
+import re
 import subprocess
 import sys
 
@@ -294,8 +295,7 @@ def fetch_live(branch):
     except subprocess.TimeoutExpired:
         return None, f"gh did not answer within {LIVE_TIMEOUT_SECONDS}s"
     if proc.returncode != 0:
-        lines = [l for l in proc.stderr.strip().splitlines() if l.strip()]
-        return None, lines[-1] if lines else f"gh exited {proc.returncode}, silently"
+        return None, gh_error_reason(proc.stderr) or f"gh exited {proc.returncode}, silently"
     live = {l.strip() for l in proc.stdout.splitlines() if l.strip()}
     if not live:
         # An empty answer is not "develop requires nothing"; it is a jq path that
@@ -304,6 +304,30 @@ def fetch_live(branch):
         return None, ("branch protection returned no contexts at all, which is not a "
                       "state this repo is in -- treating the read as failed")
     return live, None
+
+
+def gh_error_reason(stderr):
+    """The one line of gh's stderr worth printing, or "" if there is none.
+
+    Shipped taking the LAST line, which was wrong in the first place it ran.
+    In CI the Lint job sets no GH_TOKEN, so gh answers with a four-line hint
+    whose last line is the YAML fragment `GH_TOKEN: ${{ github.token }}` -- and
+    the guard printed
+
+        this run did not read it:
+              GH_TOKEN: ${{ github.token }}
+
+    which names a variable rather than a reason. Prefer the line carrying an
+    HTTP status, since that is the answer when there IS one; otherwise the
+    first line, which is where gh puts the sentence.
+    """
+    lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    if not lines:
+        return ""
+    for line in lines:
+        if re.search(r"HTTP \d{3}", line):
+            return line
+    return lines[0]
 
 
 def diff_live(live, declared, branch="develop"):
@@ -442,6 +466,37 @@ def self_test():
         print(f"  {status:6s} {label}")
         if caught:
             print(f"         -> {caught[0]}")
+
+    # gh_error_reason, with the real CI stderr that made it necessary. Pure and
+    # falsifiable for the same reason diff_live is: this runs where gh cannot.
+    reason_cases = [
+        ("gh unauthenticated in CI: the sentence, not the YAML fragment",
+         "To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN "
+         "environment variable. Example:\n  env:\n    GH_TOKEN: "
+         "${{ github.token }}\n",
+         "To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN "
+         "environment variable. Example:"),
+        ("a token without admin scope: the HTTP line, wherever it sits",
+         "\ngh: Resource not accessible by integration (HTTP 403)\n",
+         "gh: Resource not accessible by integration (HTTP 403)"),
+        # A preamble ABOVE and a hint BELOW, so neither lines[0] nor lines[-1]
+        # answers this one -- it is the case that pins the rule rather than a
+        # position.
+        ("an HTTP line between a preamble and a hint is still the one picked",
+         "some preamble gh printed first\ngh: Bad credentials (HTTP 401)\n"
+         "Try: gh auth login\n",
+         "gh: Bad credentials (HTTP 401)"),
+        ("nothing on stderr is reported as nothing, not as a blank reason",
+         "   \n\n", ""),
+    ]
+    for label, stderr, want in reason_cases:
+        got = gh_error_reason(stderr)
+        status = "ok    " if got == want else "MISSED"
+        if got != want:
+            ok = False
+        print(f"  {status} gh_error_reason: {label}")
+        if got != want:
+            print(f"         -> got {got!r}, want {want!r}")
 
     # And its positive control, for the same reason the one above exists: a diff that
     # reported on every input would have "caught" both cases too.
