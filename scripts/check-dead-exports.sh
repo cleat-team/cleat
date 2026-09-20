@@ -77,6 +77,21 @@
 # itself -- it can only see the tree it is pointed at, not whether more edits
 # are coming.
 #
+# AND `git add` THE NEW FILES FIRST, for the same reason one layer down: the
+# cross-reference enumerates with `git ls-files` (see below), so an UNTRACKED
+# .go file does not exist as far as this scan is concerned and its calls into
+# everything else are invisible. cleat#1116's PR 3 hit exactly this. A new,
+# unstaged cmd/cleatctl/queue.go called four QueueStore methods and one new
+# one; --update left all four in exported-test-only-baseline.txt and ADDED the
+# fifth to deadexports-baseline.txt -- the zero-callers-even-in-tests list --
+# for a method being called one directory over. `git add` and re-run gave the
+# right answer: the four came out and the fifth was never added.
+#
+# The dangerous part is that this failure is silent and reads as a real
+# finding, so the obvious response is to accept the new baseline line. The
+# self-test below `git add`s its own fixture precisely because the scan reads
+# the index rather than the working tree.
+#
 # The baseline (scripts/deadexports-baseline.txt) exists for the same reason
 # check-test-only-code.sh's does: there may be a backlog the day this lands.
 # New entries fail the build; every baseline entry needs a reason recorded

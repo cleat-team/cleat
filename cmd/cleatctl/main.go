@@ -137,6 +137,8 @@ func main() {
 		runEgressAllow(ctx, db, d, args[1:])
 	case "set-secret":
 		runSetSecret(ctx, db, d, args[1:])
+	case "queue":
+		runQueue(ctx, db, d, args[1:])
 	case "reseal-payloads":
 		runResealPayloads(ctx, db, args[1:])
 	default:
@@ -170,6 +172,10 @@ Commands:
   egress-allow list <tenant>      show which hosts a tenant's workflows may fetch
   egress-allow add <tenant> <host>...     permit hosts (.example.com = subdomains)
   egress-allow remove <tenant> <host>...  revoke hosts
+  queue list <tenant>             show a tenant's declared concurrency queues
+  queue create <tenant> <name> --concurrency N  register one, admitting N at a time
+  queue disable <tenant> <name>   retire it (its key reverts to a mutex, N=1)
+  queue enable <tenant> <name>    put a retired queue back
   reseal-payloads --encryption-key-file <path> [--dry-run]
                                   bind pre-cleat#1776 payload ciphertexts to their tenant
 

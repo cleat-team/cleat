@@ -408,8 +408,12 @@ CREATE TABLE workflow_promises (
 
 #### concurrency_keys
 
-Per-key concurrency control -- ensures only one workflow holds a given key at
-a time.
+Per-key concurrency control for a key with **no registered queue behind it**: one row per
+key, so exactly one workflow holds it at a time. It is a mutex, and the primary key is what
+makes it one.
+
+A key that names a live row in `queues` takes the semaphore path below instead, and this
+table is not involved.
 
 ```sql
 CREATE TABLE concurrency_keys (
@@ -423,6 +427,55 @@ CREATE TABLE concurrency_keys (
     FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 );
 ```
+
+#### queues
+
+A **declared** concurrency limit, registered by an operator with `cleatctl queue create`.
+A workflow joins it by setting its `concurrency_key` to the queue's name; at most
+`concurrency_limit` of them are claimed at once and the rest **wait**, then are claimed as
+slots free. Work past the limit is deferred, never rejected.
+
+Registration is explicit, not implicit-on-first-use: a name exists before anything starts
+against it, so capacity is never conjured by whichever run happened to start first.
+
+```sql
+CREATE TABLE queues (
+    tenant_id          UUID NOT NULL REFERENCES admin.tenants(tenant_id) ON DELETE CASCADE,
+    name               TEXT NOT NULL,
+    concurrency_limit  INTEGER NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    disabled_at        TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, name)
+);
+```
+
+`disabled_at` follows the [entity contract](../reference/entity-lifecycle.md), and retiring a
+queue **does not stop its work** — every claim joins this table with
+`AND q.disabled_at IS NULL`, so a disabled queue reads as unregistered and its key falls back
+to the `concurrency_keys` mutex, N=1 rather than 0. That page explains why that is the right
+direction.
+
+#### queue_holders
+
+One row per admitted holder — the semaphore `concurrency_keys` cannot be, since its primary
+key admits only one row per key. Transient, and shaped like `concurrency_keys` rather than
+like `queues`: a terminal commit frees the slot, and a crashed worker's holder ages out on
+the same TTL backstop.
+
+```sql
+CREATE TABLE queue_holders (
+    tenant_id    UUID NOT NULL,
+    queue_name   TEXT NOT NULL,
+    workflow_id  TEXT NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
+    expires_at   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (tenant_id, queue_name, workflow_id)
+);
+```
+
+Counting holders cannot be decided by one statement's snapshot — two concurrent claims would
+each read one slot free and both insert — so the claim locks the `queues` row for the key
+(in sorted name order, against deadlock across multi-key claims) and counts under that lock.
 
 #### workflow_update_requests
 
