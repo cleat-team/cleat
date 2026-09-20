@@ -124,7 +124,7 @@ func queueCreate(ctx context.Context, store *engine.QueueStore, tenant string, a
 	fs.Usage = printQueueUsage
 	limit := fs.Int("concurrency", 0, "how many of this queue's runs may be claimed at once (>= 1)")
 
-	operands, err := parseInterspersed(fs, args)
+	operands, err := parseFlagsAnywhere(fs, args)
 	if err != nil {
 		osExit(2)
 		return
@@ -223,48 +223,6 @@ func queueSetRetired(ctx context.Context, store *engine.QueueStore, tenant strin
 	}
 	fmt.Printf("queue %q enabled for tenant %s; its declared limit is in force again.\n", name, tenant)
 	fmt.Printf("Workers apply it on their next claim -- there is no cache in front of it.\n")
-}
-
-// parseInterspersed parses flags that may appear on either side of operands,
-// returning the operands in order.
-//
-// # Why this exists rather than a plain fs.Parse
-//
-// Go's flag package stops parsing at the first non-flag argument. So
-// `create <name> --concurrency 4` -- the form this command's own usage text
-// prints, and the form anyone who has used a CLI will type -- leaves
-// --concurrency unparsed and the limit at its zero value. The refusal the
-// operator then meets is "--concurrency is required", about a flag they
-// passed.
-//
-// THAT IS NOT HYPOTHETICAL, WHICH IS WHY THIS IS NOT TREATED AS FUSSINESS.
-// `cleatctl set-secret <uuid> --name foo` prints its own usage and exits 1,
-// and `cleatctl suspend-tenant <uuid> --yes` exits with "exactly one tenant id
-// is required" -- both exactly as their usage strings document them, both for
-// this reason, and both verified by running them. Filed separately; not fixed
-// here, because they are different commands with a different review. This
-// command is written not to join them.
-//
-// `drop-tenant` is the one that gets it right, by hand-rolling its argument
-// loop. This is the same conclusion reached with the flag package still doing
-// the flag parsing: Parse consumes up to the next operand, the operand is set
-// aside, and Parse resumes on the rest -- so `--concurrency 4 <name>` still
-// reads 4 as the flag's VALUE rather than mistaking it for the name, which a
-// naive "first argument not starting with -" scan would get wrong.
-func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
-	var operands []string
-	rest := args
-	for {
-		if err := fs.Parse(rest); err != nil {
-			return nil, err
-		}
-		rest = fs.Args()
-		if len(rest) == 0 {
-			return operands, nil
-		}
-		operands = append(operands, rest[0])
-		rest = rest[1:]
-	}
 }
 
 func printQueueUsage() {

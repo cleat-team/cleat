@@ -9,11 +9,20 @@ import "flag"
 //
 // Go's flag package stops parsing at the first argument that is not a flag.
 // Every cleatctl subcommand whose argument vector begins with an operand --
-// `set-secret <tenant> --name x`, `suspend-tenant <tenant> --yes` -- therefore
-// received its flags unparsed and at their zero values, and then reported the
-// operator's flags as missing (cleat#1933). `suspend-tenant <tenant>` worked
-// and `suspend-tenant <tenant> --yes` did not, so adding the documented flag
-// broke a working command.
+// `set-secret <tenant> --name x`, `suspend-tenant <tenant> --yes`,
+// `queue create <tenant> <name> --concurrency 4` -- therefore received its
+// flags unparsed and at their zero values, and then reported the operator's
+// flags as missing (cleat#1933). `suspend-tenant <tenant>` worked and
+// `suspend-tenant <tenant> --yes` did not, so adding the documented flag broke
+// a working command.
+//
+// THAT WAS NOT HYPOTHETICAL, which is the sentence cleat#1116's PR 3 wrote
+// above its own copy of this function, having verified both commands by
+// running them. `queue` was then written not to join them. This is that
+// function and this one merged: two parsers for one rule, landed ten minutes
+// apart, is the shape that lets the two drift until only one of them handles
+// some case. `drop-tenant` and `set-tenant-setting` still hand-roll their own
+// loops; they are correct, and they are not third and fourth copies of this.
 //
 // # Why not scan for the first argument that does not start with "-"
 //
