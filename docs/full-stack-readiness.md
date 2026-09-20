@@ -94,18 +94,19 @@ The bar is the buyer's most demanding common requirement, not parity with the ca
 |---|---|---|---|
 | Durable workflows | Survives crashes, compensates, replays | **Clears** | — |
 | Multi-tenant isolation | Enforced below application code | **Clears on PostgreSQL and SQL Server** | MySQL has no row-level security; see below |
-| Rate limiting | Cluster-wide, per tenant, observable | **Clears, badly configured** | `db` mode exists; default is `memory`, fallback is silent, fails open |
+| Rate limiting | Cluster-wide, per tenant, observable | **Clears** | Silent fail-open fixed (#1581); default is still `memory` |
 | Feature flags | Targeting, percentage rollout, kill switch | **Probably clears** | No experimentation platform — rarely the deciding requirement |
-| Audit | Who did what, retained, exportable | **Partial** | HTTP-level, not semantic; no tamper-evidence or export tooling |
-| Identity | SSO, and SAML/SCIM for enterprise | **Decided, not yet built** | SAML via a customer-run terminator (#1582); SCIM deferred |
-| Secrets | Encrypted at rest, rotatable | **Does not clear** | `kvstore` is config storage, not a secrets manager |
-| Outbound network | Cannot be used to attack the host | **Does not clear** | No SSRF guard, no egress allowlist |
-| Reading your own data | Query a tenant's entities | **Does not clear** | One key at a time from a JSONB column |
-| Deploy and rollback | Atomic, fast, reversible | **Clears** | Pointer flip, version-pinned in-flight runs |
+| Audit | Who did what, retained, exportable | **Partial** | Subject attribution shipped (#1882); tamper-evidence and export still absent |
+| Identity | SSO, and SAML/SCIM for enterprise | **Clears** | Generic `oidc` provider + `issuer` column (#1582); SAML via a customer terminator; SCIM deferred |
+| Secrets | Encrypted at rest, rotatable | **Partial** | AES-256-GCM, per-tenant HKDF, tenant-ID AAD, never reaches the guest; rotation absent |
+| Outbound network | Cannot be used to attack the host | **Clears** | Three-layer guard at `DialContext`; both `http.fetch` paths covered (#1565) |
+| Reading your own data | Query a tenant's entities | **Does not clear** | Listable per run (#1902), still no projection or cross-run query |
+| Deploy and rollback | Atomic, fast, reversible | **Clears** | Routing-pin rollback (#1894); version-pinned in-flight runs |
 
-**Four of ten miss.** Two of those four — egress and secrets — are the kind that end an evaluation
-rather than lose a comparison, because they are security answers rather than feature answers. The
-read model is the one that costs every adopter the most hand-written code.
+**One of ten misses outright — a queryable read model — and two are partial (secrets rotation, and
+audit tamper-evidence/export).** Egress, identity and rate limiting, which missed at drafting, have
+since cleared. The read model remains the gap that costs every adopter the most hand-written code.
+*(Re-scored 2026-09-20 against the same method as the 2026-09-18 full-stack review.)*
 
 ### Tenant isolation is not the same mechanism on every dialect
 
@@ -123,12 +124,9 @@ But the guard is **static analysis over the source**, not enforcement by the dat
 
 That is a defensible position — MySQL offers nothing better — but it is a different guarantee, and a buyer comparing deployment targets should be told which one they are getting rather than reading "RLS" and assuming it is uniform.
 
-Identity was the fourth and is the one that has moved: it is no longer an open question but a
-recorded decision ([`enterprise-identity-decision.md`](enterprise-identity-decision.md)) awaiting a
-small piece of work (#1582) — cleat accepts a generic OIDC issuer and the customer terminates SAML.
-It still counts as missing here because **a decision is not a shipped capability**: the row changes
-when the issuer support exists, not when the reasoning is written down. SCIM stays deferred, and
-enterprise identity is not cleared by SAML alone in any case — SOC 2 is the larger gate.
+Identity has since cleared: the generic OIDC issuer and `issuer` column shipped (#1582), so the row
+above now reads **Clears** rather than "decided, not yet built". SCIM stays deferred, and enterprise
+identity is not cleared by SAML alone in any case — SOC 2 is the larger gate.
 
 ---
 
