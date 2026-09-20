@@ -117,9 +117,18 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 	}
 
 	// Check disk cache before querying database (saves DB round-trip).
+	//
+	// THE EMPTY TENANT IS NOT A TENANT HERE, it is the absence of one. This
+	// loader holds a bare *sql.DB and no tenant: its own SELECT below carries
+	// no tenant predicate and runs outside an RLS transaction, which is why
+	// engine/postgres_rls_reachability_test.go excludes it as a type with no
+	// production constructor. Sharing the disk cache's unscoped namespace is
+	// safe on exactly the same grounds and stops being safe at exactly the
+	// same moment: whoever wires this into a worker owes it a tenant here as
+	// well as an RLS transaction below. cleat#1931.
 	var wasmBytes []byte
 	if l.diskCache != nil {
-		wasmBytes = l.diskCache.LookupDef(name, version)
+		wasmBytes = l.diskCache.LookupDef("", name, version)
 	}
 
 	if wasmBytes == nil {
@@ -140,9 +149,10 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 			return nil, fmt.Errorf("load workflow def %s v%d: %w", name, version, err)
 		}
 
-		// Store to disk cache for future restarts.
+		// Store to disk cache for future restarts, in the unscoped namespace
+		// described above.
 		if l.diskCache != nil {
-			l.diskCache.StoreDef(name, version, wasmBytes)
+			l.diskCache.StoreDef("", name, version, wasmBytes)
 		}
 	}
 
