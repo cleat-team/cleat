@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Guard the required-status-context block in tiers.yaml.
 
-Branch protection on develop lists 32 required contexts. That list lives in GitHub,
+Branch protection on develop lists 33 required contexts. That list lives in GitHub,
 not in this tree, and nothing kept it honest against the tiers -- so five contexts had
 come to gate tier-2 code as must-pass with nothing recording the decision, and two
 packages inside a required context belonged to no tier at all.
@@ -30,33 +30,47 @@ it, and fails on:
      noticing the file already existed. They were identical when the check was added;
      the check is what keeps them so.
 
+  6. Disagreement with branch protection itself, in either direction, WHEN THE CALLER
+     CAN READ IT. Reading it needs admin scope and GITHUB_TOKEN does not have it, so
+     this is the one check that does not always run -- and the gap that left is the
+     whole of cleat#1937. Until then the comparison lived only in `--check-live`, a
+     mode nobody invoked, and the default run ended with
+
+         check-required-contexts: OK, 32 required contexts declared and consistent ...
+
+     on a tree where GitHub required 33. Every word of that is true, and it is
+     unreadable as anything but "32 is the number": a numerator whose denominator the
+     default path never fetched. `Web Dashboard` gated every merge into develop for
+     three days with no `covers:` and no `why_required` -- exactly the state this
+     block exists to end -- and the guard over the block printed OK each time.
+
+     So the default run now ATTEMPTS the read and says which of the two happened. It
+     fails on a disagreement and NEVER on an inability to read: a guard that goes red
+     because the network was slow teaches people to re-run rather than to read. When
+     it cannot read it prints NOT CHECKED, names why, and prints the date the two
+     lists were last compared (`required_contexts.measured`) -- so the count is never
+     handed over unqualified again.
+
 Check 3 only reaches `Test Go (...)` contexts, because the test-go matrix is the only
-place a context's packages are written down mechanically. `covers:` on the other 21 --
+place a context's packages are written down mechanically. `covers:` on the other 22 --
 `Tier 2 Gate`, `Cluster Integration Tests`, `Java Tests` and so on -- is a hand claim
 that nothing verifies. The self-test found that limit rather than being told it: its
 first version asked check 3 to catch a relabelled `Tier 2 Gate` and printed MISSED.
 
-WHAT IT CANNOT CHECK, stated because a guard whose limits are unwritten gets read as
-covering more than it does: whether the declared list still equals what GitHub
-actually requires. Reading branch protection needs admin scope and GITHUB_TOKEN does
-not have it. tier2.gated_by records the same limitation for its own mapping. The live
-half is one command, and `--report` prints it:
-
-    gh api repos/cleat-team/cleat/branches/develop/protection \
-      --jq '.required_status_checks.contexts[]' | sort
-
 Usage:
-    scripts/check-required-contexts.py              enforce (exit 1 on a finding)
+    scripts/check-required-contexts.py              enforce (exit 1 on a finding); the
+                                                    live diff runs if the caller can
+    scripts/check-required-contexts.py --no-live    enforce without the live attempt
     scripts/check-required-contexts.py --report     print the mapping and re-derivations
     scripts/check-required-contexts.py --self-test  negative control; see below
-    scripts/check-required-contexts.py --check-live diff against branch protection,
-                                                    when the caller has the scope
+    scripts/check-required-contexts.py --check-live only the live diff, and here being
+                                                    unable to read it IS an error (2)
 
 --self-test is not optional decoration. CLAUDE.md: "a verification script needs its own
 negative control ... a loop that cannot see the state it looks for does not fail -- it
-prints a confident green." It runs each of the four checks against a deliberately
-broken in-memory manifest and fails if any of them passes it -- plus a positive
-control, since six checks that reject everything would also print six "caught" lines.
+prints a confident green." It runs each check against a deliberately broken in-memory
+manifest and fails if any of them passes it -- plus a positive control for each half,
+since a check that rejects everything would also print its own "caught" line.
 """
 
 import argparse
@@ -71,6 +85,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKFLOW_DIR = os.path.join(REPO_ROOT, ".github", "workflows")
 REQUIRED_CHECKS_FILE = os.path.join(REPO_ROOT, ".github", "required-checks.txt")
 NEEDS_REASON = ("tier2", "undeclared")
+# The default run's live attempt is best-effort, so it must be bounded. A guard
+# that hangs on a slow API is a guard nobody runs.
+LIVE_TIMEOUT_SECONDS = 20
 
 findings = []
 
@@ -244,35 +261,83 @@ def report(tiers):
     print("\ntest-go matrix resolved against tier1/tier2.packages:")
     for name, kinds in sorted(matrix_tiers(tiers).items()):
         print(f"  {name:11s} {sorted(kinds)}")
-    print("\nThe live half this cannot see (needs admin scope):")
+    print("\nThe live half, which needs admin scope. The default run attempts it and "
+          "says\nso when it cannot; --check-live is the explicit mode. By hand:")
     print("  gh api repos/cleat-team/cleat/branches/develop/protection \\")
     print("    --jq '.required_status_checks.contexts[]' | sort")
 
 
-def check_live(tiers):
-    """Diff the declared list against branch protection. Needs admin scope."""
-    branch = tiers["required_contexts"].get("branch", "develop")
-    proc = subprocess.run(
-        ["gh", "api", f"repos/:owner/:repo/branches/{branch}/protection",
-         "--jq", ".required_status_checks.contexts[]"],
-        capture_output=True, text=True, cwd=REPO_ROOT)
+def declared_contexts(tiers):
+    return {c["context"] for c in tiers["required_contexts"]["contexts"]}
+
+
+def fetch_live(branch):
+    """What branch protection actually requires -> (set, None), or (None, why-not).
+
+    Reading it needs admin scope, so "cannot read" is the ORDINARY case and is not
+    an error here. What must never happen is a run that could not read printing a
+    line a reader takes for one that did -- see check 6 in the module docstring.
+
+    Every failure mode collapses to the same (None, reason) shape: gh absent, gh
+    unauthenticated, no network, and a slow API all mean the same thing to a caller,
+    and treating any of them as a finding would make a required check a function of
+    the runner's connectivity.
+    """
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/:owner/:repo/branches/{branch}/protection",
+             "--jq", ".required_status_checks.contexts[]"],
+            capture_output=True, text=True, cwd=REPO_ROOT,
+            timeout=LIVE_TIMEOUT_SECONDS)
+    except FileNotFoundError:
+        return None, "gh is not on PATH"
+    except subprocess.TimeoutExpired:
+        return None, f"gh did not answer within {LIVE_TIMEOUT_SECONDS}s"
     if proc.returncode != 0:
+        lines = [l for l in proc.stderr.strip().splitlines() if l.strip()]
+        return None, lines[-1] if lines else f"gh exited {proc.returncode}, silently"
+    live = {l.strip() for l in proc.stdout.splitlines() if l.strip()}
+    if not live:
+        # An empty answer is not "develop requires nothing"; it is a jq path that
+        # matched nothing, which is the shape of a renamed field. Reporting it as
+        # 33 deletions would be a confident wrong answer, so it reads as unreadable.
+        return None, ("branch protection returned no contexts at all, which is not a "
+                      "state this repo is in -- treating the read as failed")
+    return live, None
+
+
+def diff_live(live, declared, branch="develop"):
+    """Findings from comparing the live required set against the declared one.
+
+    Pure, and separate from fetch_live, so --self-test can falsify it with no token
+    and no network. Both directions are findings: a context required but not
+    declared is cleat#1937's shape, and one declared but no longer required is this
+    block claiming to govern something that has stopped gating anything.
+    """
+    out = []
+    for missing in sorted(live - declared):
+        out.append(f"required on {branch} but NOT declared in tiers.yaml: {missing!r}")
+    for extra in sorted(declared - live):
+        out.append(f"declared in tiers.yaml but NOT required on {branch}: {extra!r}")
+    return out
+
+
+def check_live(tiers):
+    """--check-live: the explicit mode, where being unable to read IS an error."""
+    branch = tiers["required_contexts"].get("branch", "develop")
+    live, why = fetch_live(branch)
+    if live is None:
         print(f"--check-live: cannot read branch protection for {branch} "
               f"(this usually means the token lacks admin scope):\n"
-              f"  {proc.stderr.strip()}", file=sys.stderr)
+              f"  {why}", file=sys.stderr)
         return 2
-    live = {l.strip() for l in proc.stdout.splitlines() if l.strip()}
-    declared = {c["context"] for c in tiers["required_contexts"]["contexts"]}
-    rc = 0
-    for missing in sorted(live - declared):
-        print(f"required on {branch} but NOT declared in tiers.yaml: {missing!r}")
-        rc = 1
-    for extra in sorted(declared - live):
-        print(f"declared in tiers.yaml but NOT required on {branch}: {extra!r}")
-        rc = 1
-    if rc == 0:
-        print(f"--check-live: {len(live)} contexts, declared list matches exactly.")
-    return rc
+    problems = diff_live(live, declared_contexts(tiers), branch)
+    for p in problems:
+        print(p)
+    if problems:
+        return 1
+    print(f"--check-live: {len(live)} contexts, declared list matches exactly.")
+    return 0
 
 
 def self_test():
@@ -354,6 +419,41 @@ def self_test():
             print(f"         -> {f}")
     else:
         print("  passes tiers.yaml as committed (positive control)")
+
+    # --- check 6, the live diff ------------------------------------------------------
+    #
+    # fetch_live is deliberately NOT exercised here. It needs admin scope this run may
+    # not have, and a self-test that quietly skips when a credential is missing is the
+    # exact shape the docstring above is about -- it would print the same thing whether
+    # the comparison worked or could not run. So the comparison is a pure function over
+    # two sets, and it is falsified with literals, on every machine, with no token.
+    declared = declared_contexts(base)
+    live_cases = [
+        ("a context required on develop but not declared here (cleat#1937's own shape)",
+         declared | {"Some Check Added In The GitHub UI"}),
+        ("a context declared here but no longer required on develop",
+         declared - {min(declared)}),
+    ]
+    for label, live in live_cases:
+        caught = diff_live(live, declared)
+        status = "caught" if caught else "MISSED"
+        if not caught:
+            ok = False
+        print(f"  {status:6s} {label}")
+        if caught:
+            print(f"         -> {caught[0]}")
+
+    # And its positive control, for the same reason the one above exists: a diff that
+    # reported on every input would have "caught" both cases too.
+    residual = diff_live(declared, declared)
+    if residual:
+        ok = False
+        print("  MISSED two identical lists should produce no findings, but:")
+        for f in residual:
+            print(f"         -> {f}")
+    else:
+        print("  passes the live diff over two identical lists (positive control)")
+
     return ok
 
 
@@ -362,6 +462,8 @@ def main():
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--check-live", action="store_true")
+    ap.add_argument("--no-live", action="store_true",
+                    help="skip the default run's live attempt (offline or hermetic runs)")
     args = ap.parse_args()
 
     if args.self_test:
@@ -381,17 +483,50 @@ def main():
         return check_live(tiers)
 
     check(tiers)
-    if findings:
+
+    # Check 6. Best-effort by construction: a disagreement is a finding, an inability
+    # to read is a sentence. The distinction is the point -- see the docstring.
+    branch = tiers["required_contexts"].get("branch", "develop")
+    n = len(tiers["required_contexts"]["contexts"])
+    if args.no_live:
+        live, why = None, "--no-live was passed"
+    else:
+        live, why = fetch_live(branch)
+    live_findings = diff_live(live, declared_contexts(tiers), branch) if live else []
+
+    if findings or live_findings:
         print("check-required-contexts: FAIL", file=sys.stderr)
-        for f in findings:
+        for f in findings + live_findings:
             print(f"  {f}", file=sys.stderr)
         print("\n  tiers.yaml's required_contexts block is the in-tree record of what "
               "blocks a merge.\n  Fix the entry, or if branch protection changed, update "
               "the block to match.", file=sys.stderr)
+        if live_findings:
+            print(f"\n  The last {len(live_findings)} came from reading branch "
+                  f"protection on {branch} itself, so\n  this tree and GitHub disagree "
+                  f"about what blocks a merge RIGHT NOW. Whichever\n  is wrong, both "
+                  f"halves move together -- tiers.yaml, .github/required-checks.txt,\n"
+                  f"  and required_contexts.measured to the date you compared them.",
+                  file=sys.stderr)
         return 1
-    n = len(tiers["required_contexts"]["contexts"])
-    print(f"check-required-contexts: OK, {n} required contexts declared and consistent "
+
+    print(f"check-required-contexts: OK, {n} contexts declared, internally consistent "
           f"with tiers.yaml and .github/workflows/.")
+    if live:
+        print(f"check-required-contexts: and branch protection on {branch} requires "
+              f"exactly these {n}.")
+    else:
+        # Never hand over the count unqualified. The line this replaces read
+        # "OK, 32 required contexts declared and consistent" on a tree where GitHub
+        # required 33, and nothing in it said the live list had not been opened.
+        print(f"check-required-contexts: NOT CHECKED -- whether branch protection on "
+              f"{branch} still\n  requires exactly these {n}. Reading it needs admin "
+              f"scope, and this run did not read it:\n    {why}\n"
+              f"  So {n} is what this tree DECLARES, not what GitHub "
+              f"enforces. The two lists were\n  last compared on "
+              f"{tiers['required_contexts'].get('measured')} "
+              f"(required_contexts.measured).\n"
+              f"  With the scope:  scripts/check-required-contexts.py --check-live")
     return 0
 
 

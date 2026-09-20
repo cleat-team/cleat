@@ -63,8 +63,10 @@ on:
   # temporary `gh-readonly-queue/...` ref, which fires `merge_group` and not
   # `pull_request`. Without this trigger the check never starts in queue
   # context, the queue waits for a status that cannot arrive, and NOTHING
-  # MERGES -- with no check going red. There are 32 required contexts on
-  # develop and every one of them has to report here.
+  # MERGES -- with no check going red. EVERY required context on develop has to
+  # report here. The list is tiers.yaml's `required_contexts` block; the count
+  # is deliberately not repeated here, because it was -- in nine workflow files
+  # at once -- and all nine said 32 while develop required 33 (cleat#1937).
   merge_group:
 concurrency:
   # Every push gets its own group; PR runs share one per ref and supersede.
