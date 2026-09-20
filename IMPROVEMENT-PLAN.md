@@ -10072,3 +10072,87 @@ overstated its own impact in the flattering direction, and the correction is in 
 comments rather than silently edited away.
 
 Files: `scripts/check-entity-contract.py`.
+
+### 3.266 A guard printed a count it had never fetched, so the one context it could not see gated every merge for three days — ✅ **FIXED 2026-09-20** (cleat#1937)
+
+`scripts/check-required-contexts.py` is the guard over `tiers.yaml: required_contexts`, the
+in-tree record of what blocks a merge into `develop`. On 2026-09-17 `Web Dashboard` was added
+to branch protection. Every run of the guard between then and 2026-09-20 ended:
+
+    check-required-contexts: OK, 32 required contexts declared and consistent with
+    tiers.yaml and .github/workflows/.
+
+while GitHub required 33.
+
+**Nothing in that sentence is false, and it cannot be read correctly.** It means *32 things are
+declared and those 32 are internally consistent*. It reads as *32 is the number* — a numerator
+whose denominator the default path never fetched. The comparison against branch protection
+lived in `--check-live`, a separate mode, and the script said so about itself in its own
+docstring ("WHAT IT CANNOT CHECK ... whether the declared list still equals what GitHub
+actually requires"). A limitation written in a docstring does not reach the person reading the
+success line.
+
+So `Web Dashboard` gated every PR into `develop` as must-pass for three days with no `covers:`
+classification and no `why_required` — which is, word for word, the state §3.402 created this
+block to end: *"a tier-2 package held to must-pass is a fine thing to decide and a bad thing to
+discover."* The drift arrived through the one gap that section had recorded in itself and left
+open.
+
+#### The decision #1937 deferred, and how it was resolved
+
+The report stopped short of choosing whether `--check-live` should run by default, on the
+grounds that it needs network and admin scope. Resolved as: **the default run attempts the read
+and says which of the two happened.**
+
+* It **fails on a disagreement** — the live list and the declared one differing is a real
+  finding whoever is looking.
+* It **never fails on an inability to read.** `GITHUB_TOKEN` has no admin scope, so CI will
+  normally land here, as will a fork PR and an offline laptop. A guard that goes red because
+  the network was slow teaches people to re-run rather than to read; §3.401 removed a required
+  check's wall-clock assertions for exactly this reason.
+* When it cannot read it prints `NOT CHECKED`, names why (`gh: Bad credentials (HTTP 401)`,
+  `--no-live was passed`, `gh is not on PATH`), and prints the date the two lists were last
+  compared. **The count is never handed over unqualified.** That is the half that works with no
+  credentials at all, and it is the half that matters: the failure here was not that nobody
+  could check, it was that the output did not say nobody had.
+
+`fetch_live` and `diff_live` are split so the comparison is a pure function over two sets.
+`--self-test` falsifies it with literals on any machine — a self-test that skips when a
+credential is absent prints the same thing whether it worked or never ran, which is this
+script's own docstring about itself.
+
+#### Verified by putting the defect back
+
+The declaration was reverted to its pre-fix state (`tiers.yaml` and
+`.github/required-checks.txt` at `2b9adac1`, so `total: 32` still matched its own list and only
+the new check could fire) and the new guard run against live branch protection:
+
+    check-required-contexts: FAIL
+      required on develop but NOT declared in tiers.yaml: 'Web Dashboard'
+
+One finding, from the one check that is new. Restored, all four modes green:
+default-with-scope (`requires exactly these 33`), `--no-live`, `--check-live`
+(`33 contexts, declared list matches exactly`), and `--self-test` — 8 negative controls, 2 new
+ones for the live diff, and a positive control for each half.
+
+#### The second finding: the count was written down eleven times
+
+`grep -rn '32 required contexts\|32 contexts'` found the number asserted in nine workflow
+files, `docs/project/release-process.md`, and `tiers.yaml`'s own header — none of them
+generated, all of them wrong. `.golangci.yml` already records what two copies of one fact do
+("two mechanisms with two baselines, which is the shape that let the routing tables in 2.72
+drift apart"); eleven copies drift eleven ways.
+
+They are not guarded, they are **deleted**. The nine workflow comments said "There are 32
+required contexts on develop and every one of them has to report here" — the number was
+decorative and the sentence is true without it. `release-process.md` points at
+`tiers.yaml: required_contexts` instead of restating a total. The count now lives in exactly
+two places that cannot disagree: `required_contexts.total`, which check 4 compares against the
+length of the list below it, and the guard's own output, which computes it.
+
+Historical counts in `CLAUDE.md` and §3.402 are left alone. "0 of 32 required contexts green"
+is a record of a measurement on a date, not a claim about today, and rewriting it would destroy
+the evidence to tidy a number.
+
+Files: `scripts/check-required-contexts.py`, `tiers.yaml`, `.github/required-checks.txt`,
+`docs/project/release-process.md`, nine files under `.github/workflows/`.

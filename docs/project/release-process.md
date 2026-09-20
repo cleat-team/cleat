@@ -54,7 +54,14 @@ wrong.
 | Branch | Required checks | Re-derive |
 |--------|-----------------|-----------|
 | `main` | `Build`, `Lint` | `gh api repos/cleat-team/cleat/branches/main/protection --jq .required_status_checks.contexts` |
-| `develop` | 32 contexts | `gh api repos/cleat-team/cleat/branches/develop/protection --jq '.required_status_checks.contexts \| length'` |
+| `develop` | every context in `tiers.yaml: required_contexts` | `gh api repos/cleat-team/cleat/branches/develop/protection --jq '.required_status_checks.contexts \| length'` |
+
+The count is not written here on purpose. It was, in this table and in nine
+workflow files, and every copy said 32 while branch protection required 33 —
+`Web Dashboard` was added on 2026-09-17 and declared in-tree on 2026-09-20
+(cleat#1937). `tiers.yaml: required_contexts` is the single in-tree list, and
+`scripts/check-required-contexts.py` diffs it against the live one whenever the
+caller has the admin scope to read it — saying so plainly when it cannot.
 
 `main` deliberately requires less than `develop`. Everything reaching `main` has
 already passed the full gate on `develop`; the release PR re-runs the suites

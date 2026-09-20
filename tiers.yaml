@@ -1271,7 +1271,7 @@ tier2:
 # ---------------------------------------------------------------------------
 # What blocks a merge, and which tier each blocking check speaks for.
 #
-# Branch protection on develop lists 32 required status contexts. That list lives in
+# Branch protection on develop lists 33 required status contexts. That list lives in
 # GitHub, not in this tree, so nothing kept it honest against the tiers above -- and it
 # had drifted in a direction nobody had written down. Measured 2026-09-04:
 #
@@ -1304,12 +1304,20 @@ tier2:
 #
 #     scripts/check-required-contexts.py --report
 #
-# and the live half, which no in-tree guard can see (reading branch protection needs
-# admin scope, which GITHUB_TOKEN does not have -- the same limitation tier2.gated_by
-# records for its own mapping):
+# The live half needs admin scope, which GITHUB_TOKEN does not have -- the same
+# limitation tier2.gated_by records for its own mapping. Since #1937 the guard's DEFAULT
+# run attempts it anyway and says which of the two happened, because the thing it used to
+# print was `OK, 32 required contexts declared and consistent`, on a tree where GitHub
+# required 33. A count in a success line reads as the number; that one was a numerator
+# with no denominator. By hand:
 #
 #     gh api repos/cleat-team/cleat/branches/develop/protection \
 #       --jq '.required_status_checks.contexts[]' | sort
+#
+# WHAT THAT GAP COST, once: `Web Dashboard` was added to branch protection on 2026-09-17
+# and declared here on 2026-09-20. For those three days it gated every merge with no
+# `covers:` and no `why_required` -- precisely the state this block was written to end,
+# arriving through the one gap the block's own guard had. cleat#1937, §3.266.
 #
 # THE POINT OF THIS BLOCK is not that gating tier 2 is wrong. It is that it was
 # undeclared. A tier-2 package held to must-pass is a fine thing to decide and a bad
@@ -1329,8 +1337,11 @@ tier2:
 # ---------------------------------------------------------------------------
 required_contexts:
   branch: develop
-  measured: 2026-09-04
-  total: 32
+  # `measured` is the date the declared list below was last compared against branch
+  # protection itself, not the date this file was last edited. Only --check-live and the
+  # default run's live attempt can move it; an entry added from a PR description cannot.
+  measured: 2026-09-20
+  total: 33
 
   # `covers` is one of:
   #   tier1        the context runs only tier-1 packages/modules
@@ -1479,6 +1490,22 @@ required_contexts:
         tier2.components sdk-rust -- "the only non-Go language with cross-language
         tests", so it is the one SDK whose break would show up as a cross-language
         failure rather than a compile error.
+    - context: Web Dashboard
+      workflow: ci.yml
+      job: test-web
+      covers: tier2
+      why_required: |
+        tier2.components admin-dashboard. The Svelte dashboard is COMMITTED as a built
+        bundle at cmd/cleat-worker/web/dist and served by the worker through go:embed, so
+        a break in web/ ships inside the binary -- there is no later packaging step that
+        would catch it.
+
+        What it does NOT cover, so `covers: tier2` is not read as more than it is: 5 of
+        25 source files have any test and there is no browser or end-to-end run. It
+        catches build breaks, type errors, and regressions in four components. The
+        comment above `test-web` in ci.yml is the full list, and admin-dashboard's
+        open_items record the same gap from the other side.
+
     - context: Build
       workflow: ci.yml
       job: build
