@@ -52,6 +52,7 @@ engine/runtime.go	func fuelMeter.NewFunctionListener
 engine/sharded_store.go	func ShardedStore.LoadEventHistoryBatch
 engine/store_types.go	func RetiredAt
 engine/testutil/mssql_admin.go	func AdminDB
+engine/testutil/mssql_row_disappearance.go	func ClearMSSQLRowDisappearanceAudit
 engine/testutil/mssql_row_disappearance.go	func InstallMSSQLRowDisappearanceAudit
 engine/testutil/mssql_row_disappearance.go	func MSSQLRowDisappearanceReportFor
 engine/testutil/mssql_row_disappearance.go	func MSSQLStatsDB

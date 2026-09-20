@@ -322,6 +322,11 @@ jobs:
           --publish 1433:1433
     env:
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
+      # cleat#982: arm the row-disappearance audit (a test-only AFTER DELETE
+      # trigger on workflow_instances) so a recurrence reports WHO deleted a
+      # missing row instead of only that it is gone. No-op for every dialect
+      # except SQL Server; see engine/testutil/mssql_row_disappearance.go.
+      CLEAT_TEST_MSSQL_ROW_AUDIT: "1"
     steps:
       - uses: actions/checkout@v7
 

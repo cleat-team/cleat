@@ -245,6 +245,11 @@ func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
 	applyMSSQLProcedures(t, db)
+	// cleat#982: arm the deletion audit and clear it, so this test's report sees
+	// only this test's deletes rather than every cleanup accumulated before it.
+	// Both are no-ops unless CLEAT_TEST_MSSQL_ROW_AUDIT is set.
+	testutil.InstallMSSQLRowDisappearanceAudit(t, db)
+	testutil.ClearMSSQLRowDisappearanceAudit(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 	store := openMSSQLTenantStore(t, DefaultTenantUUID)
 	report := mssqlRowDisappearanceReporter(t, db, store)
@@ -264,6 +269,11 @@ func (b *MSSQLBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowSt
 	}
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
+	// cleat#982: arm the deletion audit and clear it, so this test's report sees
+	// only this test's deletes rather than every cleanup accumulated before it.
+	// Both are no-ops unless CLEAT_TEST_MSSQL_ROW_AUDIT is set.
+	testutil.InstallMSSQLRowDisappearanceAudit(t, db)
+	testutil.ClearMSSQLRowDisappearanceAudit(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 	store := openMSSQLTenantStore(t, tenantID)
 	report := mssqlRowDisappearanceReporter(t, db, store)

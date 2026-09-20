@@ -130,6 +130,32 @@ func InstallMSSQLRowDisappearanceAudit(t *testing.T, db *sql.DB) {
 	}
 }
 
+// ClearMSSQLRowDisappearanceAudit empties the audit table. It is the scoping
+// half of arming the audit across a whole suite: the table is deliberately
+// absent from mssqlCleanupTables (a blanket DELETE there would erase its own
+// evidence), so without this every test's CleanupMSSQLTestData row stays put
+// and MSSQLDeletions reads them all -- a failure late in the run would print
+// hundreds of "this process" cleanups burying the one foreign deletion the
+// report exists to find. Clearing at the start of each test bounds the report
+// to that test's window, which is the window the flake lives in.
+//
+// Like Install it is a no-op unless MSSQLRowAuditEnv is set, and it takes the
+// same raw handle (the DSN's own login, which holds DELETE on the table).
+//
+// The scoping is best-effort, not a guarantee: the audit table is shared with
+// any other process using the database, and a concurrent process clearing it
+// can remove evidence this process has not yet read. The physical/visible half
+// of the report is the non-lossy backstop for that case.
+func ClearMSSQLRowDisappearanceAudit(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if !mssqlRowAuditEnabled() {
+		return
+	}
+	if _, err := db.Exec(`DELETE FROM ` + mssqlAuditTable); err != nil {
+		t.Fatalf("clear the cleat#982 deletion audit table: %v", err)
+	}
+}
+
 // UninstallMSSQLRowDisappearanceAudit removes the triggers and the audit table.
 // Safe to call whether or not they are installed.
 func UninstallMSSQLRowDisappearanceAudit(t *testing.T, db *sql.DB) {
