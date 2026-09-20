@@ -28,11 +28,15 @@ var ErrQueueAlreadyExists = errors.New("queue already exists")
 // against it. See migrations/postgres/093_a_queue_declares_its_own_concurrency_limit.sql
 // for the full design reasoning.
 //
-// THIS DOES NOT YET AFFECT THE CLAIM. Nothing reads ConcurrencyLimit at claim
-// time; that is separate work (generalising the claim predicate from
-// `NOT EXISTS` to `COUNT(*) < N`). A registered queue with no wiring behind it
-// is inert, deliberately -- this proves the entity in isolation, per the plan
-// recorded on cleat#1116.
+// THE CLAIM READS ConcurrencyLimit. A workflow whose concurrency_key equals a
+// live queue's name is admitted only while that queue holds fewer than
+// ConcurrencyLimit holders; the rest wait and are claimed as slots free. An
+// unregistered name -- and a DISABLED queue, which is the same thing to the
+// claim's LEFT JOIN -- keeps the bare-key mutex, N=1.
+//
+// This comment said the opposite until the claim was generalised: it read
+// "THIS DOES NOT YET AFFECT THE CLAIM", which was true of the registration-only
+// PR it was written in and false the moment the claim landed.
 type Queue struct {
 	Name             string
 	ConcurrencyLimit int
@@ -164,9 +168,23 @@ func (s *QueueStore) ListQueues(ctx context.Context, tenantID string) ([]Queue, 
 
 // DisableQueue retires a queue without deleting it, following the soft-flag
 // pattern cleat#1702 standardised (workflow_schedules.enabled and
-// workflow_defs.deprecated before it): new acquisition is refused, existing
-// holders drain. Idempotent -- disabling an already-disabled queue succeeds
-// and leaves its DisabledAt unchanged.
+// workflow_defs.deprecated before it). Idempotent -- disabling an
+// already-disabled queue succeeds and leaves its DisabledAt unchanged.
+//
+// # WHAT DISABLING DOES AT CLAIM TIME, WHICH IS NOT "REFUSE"
+//
+// Every claim statement joins `queues` with `AND q.disabled_at IS NULL`, so a
+// disabled queue is indistinguishable from an unregistered name -- and an
+// unregistered name takes the bare-key arm, which is the concurrency_keys
+// mutex. So disabling DROPS ADMISSION TO ONE AT A TIME; it does not stop the
+// work. Runs keep being claimed, serially, and nothing is cancelled.
+//
+// This comment claimed "new acquisition is refused, existing holders drain"
+// until TestADisabledQueueFallsBackToTheBareKeyMutex was written, which is
+// what a doc comment describing an intent rather than a caller is worth. The
+// fallback is the better behaviour of the two and is kept deliberately:
+// refusing instead would let one operator command silently wedge every run
+// carrying that key, with no error anywhere to say why.
 func (s *QueueStore) DisableQueue(ctx context.Context, tenantID, name string) error {
 	if s == nil || s.db == nil {
 		return errors.New("queue store has no database handle")
@@ -194,6 +212,44 @@ func (s *QueueStore) DisableQueue(ctx context.Context, tenantID, name string) er
 	})
 }
 
+// EnableQueue puts a retired queue back into service, clearing disabled_at.
+//
+// The other half of DisableQueue, and it exists because the entity contract
+// this table conforms to (docs/reference/entity-lifecycle.md) makes retirement
+// REVERSIBLE by design -- "deletion is a separate, irreversible operation".
+// Every sibling already honours that: suspend-tenant has resume-tenant,
+// versions deprecate has versions restore. Shipping the disable half alone
+// would have handed an operator a one-way door the contract says is not one.
+//
+// Idempotent in both directions, like DisableQueue: enabling a live queue
+// succeeds and changes nothing. Unknown names are ErrQueueNotFound, which is
+// the one case a caller does want to hear about.
+func (s *QueueStore) EnableQueue(ctx context.Context, tenantID, name string) error {
+	if s == nil || s.db == nil {
+		return errors.New("queue store has no database handle")
+	}
+	ctx, err := withQueueTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	return s.execTenantScoped(ctx, func(q querier) error {
+		res, err := q.ExecContext(ctx, enableQueueStmt(s.dialect), tenantID, name)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			// No row updated means either "no such queue" or "already live",
+			// because the statement's WHERE excludes rows whose disabled_at is
+			// already NULL. GetQueue separates them, exactly as DisableQueue
+			// does for the mirror case.
+			if _, getErr := s.GetQueue(ctx, tenantID, name); getErr != nil {
+				return getErr
+			}
+		}
+		return nil
+	})
+}
+
 // withQueueTenant puts tenantID into ctx the way beginTenantTx requires --
 // tenantctx.From(ctx), not a query parameter -- and returns it in a form the
 // caller can pass straight through. Every exported QueueStore method takes
@@ -203,12 +259,13 @@ func (s *QueueStore) DisableQueue(ctx context.Context, tenantID, name string) er
 // tenantID as a parameter but never wrap ctx themselves; they work today only
 // because their one real caller, ResolveSecretRefs, runs on a plugin-call ctx
 // that plugin_call_context.go already wrapped via this same tenantctx.With.
-// QueueStore has no such caller yet (that is PR 3's job, on cleat#1116's own
-// plan) -- a test calling CreateQueue on a bare context is exactly PR 1's own
-// falsification, and it failed on SQL Server specifically: PostgreSQL's RLS
-// exempts the superuser connection tests use, so the missing tenant context
-// was invisible there; SQL Server's FILTER PREDICATE is not exempted the same
-// way, so GetQueue read back "not found" immediately after a successful
+// QueueStore's caller is cmd/cleatctl's `queue` subcommand, and it reaches
+// these methods on a bare context.Background() -- which is exactly why the
+// wrapping has to happen here. A test calling CreateQueue on a bare context is
+// PR 1's own falsification, and it failed on SQL Server specifically:
+// PostgreSQL's RLS exempts the superuser connection tests use, so the missing
+// tenant context was invisible there; SQL Server's FILTER PREDICATE is not
+// exempted the same way, so GetQueue read back "not found" after a successful
 // CreateQueue. Wrapping here, rather than requiring every future caller to
 // remember to, is what makes that failure mode structural rather than a
 // caller's responsibility to get right every time.
@@ -305,6 +362,17 @@ func listQueuesStmt(dialect string) string {
 		return `SELECT name, concurrency_limit, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = @p1 ORDER BY name`
 	default:
 		return `SELECT name, concurrency_limit, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = $1 ORDER BY name`
+	}
+}
+
+func enableQueueStmt(dialect string) string {
+	switch dialect {
+	case "mysql":
+		return `UPDATE queues SET disabled_at = NULL, updated_at = NOW(6) WHERE tenant_id = ? AND name = ? AND disabled_at IS NOT NULL`
+	case "mssql":
+		return `UPDATE queues SET disabled_at = NULL, updated_at = SYSUTCDATETIME() WHERE tenant_id = @p1 AND name = @p2 AND disabled_at IS NOT NULL`
+	default:
+		return `UPDATE queues SET disabled_at = NULL, updated_at = now() WHERE tenant_id = $1 AND name = $2 AND disabled_at IS NOT NULL`
 	}
 }
 

@@ -7,7 +7,7 @@ belongs to it, and what is deliberately outside it.
 For runs, see [Workflow lifecycle](workflow-lifecycle.md). The two are separate on purpose: a run
 has a status that the engine advances, and an entity has a retirement instant that a person sets.
 
-Derived from the code on **2026-09-19**. Unlike most reference documents, this one describes
+Derived from the code on **2026-09-20**. Unlike most reference documents, this one describes
 something a guard already enforces — `scripts/check-entity-contract.py`, which runs in CI — so the
 drift this page can suffer is bounded. Where a statement here and the guard disagree, the guard is
 right and this page is a bug.
@@ -70,7 +70,7 @@ a checked-in list (`scripts/entity-contract.tsv`) rather than a predicate. `admi
 and `public.tenant_domains` are structurally identical to `public.workflow_routing` and
 `public.workflow_tags`, and no test over columns separates them.
 
-### Members — ten tables, subject to all four clauses
+### Members — eleven tables, subject to all four clauses
 
 | entity | what retiring it does |
 |---|---|
@@ -84,6 +84,7 @@ and `public.tenant_domains` are structurally identical to `public.workflow_routi
 | `tenant_settings` | the per-tenant override stops applying |
 | `tenant_secrets` | the secret stops resolving |
 | `tenant_domains` | the domain stops mapping to the tenant |
+| `queues` | the declared concurrency limit stops applying — see below, it is **not** a stop |
 
 ### Exempt — in the class, deliberately outside the contract
 
@@ -148,6 +149,31 @@ the due-schedule read go through — so a single line stops work and cron togeth
 populating, so treating absent as suspended would refuse every start on a configuration that works
 today.
 
+---
+
+## Retiring a queue changes admission; it does not stop it
+
+`queues` is the one member where "retired" is easy to read as "off", and it is not. Every claim
+statement joins the table with `AND q.disabled_at IS NULL`, so a disabled queue is
+indistinguishable from a name that was never registered — and an unregistered `concurrency_key` is
+cleat's original mechanism, a **mutex**. Disabling therefore drops admission from N to **one at a
+time**, not to zero. Runs keep being claimed, serially; nothing in flight is cancelled.
+
+```
+cleatctl queue disable <tenant> <name>    # N  ->  1, not 0
+cleatctl queue enable  <tenant> <name>    # back to N
+cleatctl suspend-tenant <tenant>          # THIS is the one that stops work
+```
+
+The fallback is deliberate, and it is the safer of the two directions: it never admits more than
+the declared limit did, and it cannot wedge a tenant's runs. Refusing instead would let one
+operator command silently stall every workflow carrying that key, with no error on any path to say
+why — a start still succeeds, the work simply never runs.
+
+`TestADisabledQueueFallsBackToTheBareKeyMutex` holds this on all three dialects, and
+`cleatctl queue disable` prints it in as many words, because it is the thing an operator is most
+likely to assume the opposite of.
+
 Deletion is the other end: `cleatctl drop-tenant` removes the tenant's rows across the full set of
 tenant-scoped tables. Retiring one entity and deleting a whole tenant are the two ends of the same
 lifecycle, and nothing in between removes a single entity permanently.
@@ -173,7 +199,7 @@ be skipped, and that ceiling lives in the script rather than in the list — bec
 allowlist has an obvious cheat: the cheapest way to make the guard pass is to add a line, and a
 pass bought that way looks exactly like conforming.
 
-As of 2026-09-19 the list is **empty**: 40 of 40 clauses (10 members × 4) are enforced.
+As of 2026-09-20 the list is **empty**: 44 of 44 clauses (11 members × 4) are enforced.
 
 **Cross-dialect membership is matched on the bare name.** MySQL cannot express a schema, so it
 writes `CREATE TABLE tenants` where the other two write `admin.tenants`. Comparing qualified names
