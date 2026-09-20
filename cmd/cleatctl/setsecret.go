@@ -31,18 +31,28 @@ func runSetSecret(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	fs := flag.NewFlagSet("set-secret", flag.ContinueOnError)
 	name := fs.String("name", "", "secret name, matching [A-Za-z0-9_.-]{1,128}")
 	fromFile := fs.String("from-file", "", "read the value from this file instead of stdin")
-	if err := fs.Parse(args); err != nil {
+	// parseFlagsAnywhere, not fs.Parse: the tenant UUID is args[0], and the flag
+	// package stops at the first operand, so `set-secret <uuid> --name openai`
+	// -- the order this command's own usage text and docs/how-to/use-secrets.md
+	// print -- reached here with *name still "" (cleat#1933).
+	operands, err := parseFlagsAnywhere(fs, args)
+	if err != nil {
+		// Exits rather than returning. fs is ContinueOnError, so Parse has
+		// already reported the bad flag and handed control back; returning
+		// silently made cleatctl exit 0 on a typo'd flag, which reads as a
+		// secret that was written.
+		osExit(1)
 		return
 	}
-	if fs.NArg() < 1 || *name == "" {
+	if len(operands) < 1 || *name == "" {
 		printSetSecretUsage()
 		osExit(1)
 		return
 	}
 
-	tenantID, err := uuid.Parse(fs.Arg(0))
+	tenantID, err := uuid.Parse(operands[0])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %q is not a tenant UUID: %v\n", fs.Arg(0), err)
+		fmt.Fprintf(os.Stderr, "error: %q is not a tenant UUID: %v\n", operands[0], err)
 		osExit(1)
 		return
 	}

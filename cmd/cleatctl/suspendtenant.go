@@ -58,16 +58,21 @@ func runSuspendTenant(ctx context.Context, db *sql.DB, d dialect, args []string,
 	fs.Usage = func() { fmt.Fprintf(os.Stderr, "%s", suspendTenantUsage) }
 	yes := fs.Bool("yes", false, "skip the confirmation prompt")
 
-	if err := fs.Parse(args); err != nil {
+	// parseFlagsAnywhere, not fs.Parse: the flag package stops at the first
+	// operand, so `suspend-tenant <uuid> --yes` counted TWO operands and failed
+	// with "exactly one tenant id is required" -- while the same command without
+	// the documented --yes worked (cleat#1933).
+	operands, err := parseFlagsAnywhere(fs, args)
+	if err != nil {
 		osExit(2)
 		return
 	}
-	if fs.NArg() != 1 {
+	if len(operands) != 1 {
 		fmt.Fprintf(os.Stderr, "error: exactly one tenant id is required\n\n%s", suspendTenantUsage)
 		osExit(2)
 		return
 	}
-	tenantID := fs.Arg(0)
+	tenantID := operands[0]
 
 	// The row is read first so the command can say what it is about to change
 	// rather than reporting a rowcount. A tenant that is ALREADY in the
@@ -76,7 +81,7 @@ func runSuspendTenant(ctx context.Context, db *sql.DB, d dialect, args []string,
 	// suspended this and when" is the question being asked.
 	var current bool
 	var tenantName string
-	err := db.QueryRowContext(ctx, d.rebind(
+	err = db.QueryRowContext(ctx, d.rebind(
 		`SELECT name, suspended FROM admin.tenants WHERE tenant_id = $1`),
 		tenantID).Scan(&tenantName, &current)
 	if err == sql.ErrNoRows {
