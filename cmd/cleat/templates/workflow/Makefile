@@ -1,13 +1,13 @@
 .PHONY: build test deploy clean
 
 build:
-	cleat build -o workflow.wasm .
+	cleat build -o ./out .
 
 test:
 	go test ./...
 
 deploy:
-	cleat deploy --db "$(DATABASE_URL)" --name my-workflow workflow.wasm
+	cleat deploy --name my-workflow ./out/process.wasm
 
 clean:
-	rm -f workflow.wasm
+	rm -rf ./out

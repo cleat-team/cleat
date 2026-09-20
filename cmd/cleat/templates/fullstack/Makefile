@@ -16,7 +16,7 @@ logs:
 # Deploy the compiled workflow. Needs an API key; the worker prints one on
 # first start when no keys exist (see README).
 deploy: build
-	cleat deploy my-fullstack-app ./out/my-fullstack-app.wasm
+	cleat deploy --name my-fullstack-app ./out/submit_order.wasm
 
 # Start one run. Idempotency-Key makes a retry of THIS request return the
 # original run instead of creating a second one.
