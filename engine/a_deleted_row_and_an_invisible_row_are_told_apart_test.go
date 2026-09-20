@@ -39,6 +39,11 @@ func TestTheDeletionAuditNamesWhoRemovedTheRow(t *testing.T) {
 	// own login; the deletes it watches still go through admin, because those
 	// are what have to match rows under the security policies.
 	testutil.InstallMSSQLRowDisappearanceAudit(t, raw)
+	// Scoped like MSSQLBackend.Setup: a prior test's Setup may already have
+	// installed the trigger, and the audit table survives it, so the assertion
+	// on len(dels) below must start from a clean table rather than from whatever
+	// accumulated.
+	testutil.ClearMSSQLRowDisappearanceAudit(t, raw)
 	t.Cleanup(func() { testutil.UninstallMSSQLRowDisappearanceAudit(t, raw) })
 
 	// Registered here, not only in the tests chasing the four failures: if this
