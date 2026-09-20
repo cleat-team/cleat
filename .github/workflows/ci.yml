@@ -449,7 +449,7 @@ jobs:
       # the same shape, and §2.4/§2.5/§2.7 are cited from code and resolve to
       # rows. It drives a deliberately headings-only reading and FAILS if that
       # reading stops disagreeing, so a regression to one namespace cannot pass.
-      - name: Plan cross-reference guard
+      - name: Plan cross-reference guard (self-test only, see above)
         run: scripts/check-plan-references.py --self-test
 
 
