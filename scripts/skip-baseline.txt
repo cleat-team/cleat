@@ -9,6 +9,7 @@ cmd/cleat	TestAnUnreadablePathIsNotAFinding	2
 cmd/cleat	TestBuildRefusesAFlagAfterThePath	1
 cmd/cleat	TestBuildStillAcceptsTheDocumentedOrder	1
 cmd/cleat	TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds	1
+cmd/cleat	TestEveryTemplateDocumentedCommandActuallyRuns	1
 cmd/cleat	TestJavaBuildRefusesNondeterminism	1
 cmd/cleat	TestPythonBuildRefusesNondeterminism	3
 cmd/cleat	TestRollbackClearRemovesThePin	1
