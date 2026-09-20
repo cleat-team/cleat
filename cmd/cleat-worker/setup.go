@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2257,11 +2258,21 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 
 	// ---- Tenant-scoped store ----
 	//
-	// Execution writes through this store, not w.store: event history, state,
-	// child workflows, schedules. Routing on wf.TenantID is what lets a worker
-	// run a tenant other than the one its dispatch loop is scoped to -- and
-	// because the store comes from OpenStore(wf.TenantID), it is correct by
-	// construction rather than by a check downstream.
+	// EVERY store call below this line goes through execStore, not w.store.
+	// Not "the writes" and not a list of them -- every call, reads included.
+	// This comment used to enumerate: "event history, state, child workflows,
+	// schedules". The enumeration was the defect. loadWASM is a READ, so it
+	// was not on the list, it was not routed, and because LoadWASM's statement
+	// carries no tenant predicate of its own it came back empty for every
+	// tenant but the worker's -- failing those runs terminally while their
+	// history was being written correctly one line away (cleat#1931).
+	//
+	// Routing on wf.TenantID is what lets a worker run a tenant other than the
+	// one its dispatch loop is scoped to -- and because the store comes from
+	// OpenStore(wf.TenantID), it is correct by construction rather than by a
+	// check downstream. Anything cached in front of such a call has to carry
+	// the tenant in its key for the same reason; a cache is consulted before
+	// the store and will answer ahead of it.
 	execStore, execRelease, storeErr := w.storeForTenant(wf.TenantID)
 	// THE LEASE SPANS THE WHOLE EXECUTION, and this is the call site the lease
 	// exists for. Every other holder of a tenant store is bounded -- a claim
@@ -2345,7 +2356,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// from here as well would publish one measurement under two names, which is
 	// the defect cleat#1317 already found in SetMemoryPressureRatio.
 	wasmStart := time.Now()
-	wasmBytes, err := w.loadWASM(wf.DefName, wf.DefVersion)
+	wasmBytes, err := w.loadWASM(execStore, w.cacheTenantFor(wf.TenantID), wf.DefName, wf.DefVersion)
 	w.Metrics.RecordWasmLoadLatency(context.Background(), time.Since(wasmStart), wf.DefName)
 	if err != nil {
 		w.logger.ErrorContext(context.Background(), "failed to load WASM", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
@@ -4140,12 +4151,46 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 // Nothing polls from outside the workflow any more, which is what lets the
 // delivery be an event in the history and therefore replayable.
 
-func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
-	key := fmt.Sprintf("%s:%d", defName, defVersion)
+// loadWASM returns the raw WASM bytes for one tenant's workflow definition.
+//
+// # It takes the store rather than using w.store, and that is the whole point
+//
+// Every other read and write in executeWorkflow goes through execStore, the
+// store resolved for the WORKFLOW's tenant. This call did not, and it was the
+// only one that did not. That matters more here than it would almost anywhere
+// else, because PostgresStore.LoadWASM's statement is
+//
+//	SELECT wasm_bytes FROM workflow_defs WHERE name = $1 AND version = $2
+//
+// with no tenant predicate at all (engine/store_deployment.go). Isolation is
+// entirely row-level security, and the RLS tenant is a property of the store
+// instance -- setRLSOnTx interpolates s.tenantID (engine/db.go) -- not of the
+// context. So reading through the worker's own store filtered every other
+// tenant's definition out, ErrNoRows became "wasm not found", and the run was
+// failed terminally. Every workflow belonging to a tenant other than the
+// worker's died that way, while its history, state and trace were being
+// written correctly through the right store. cleat#1931.
+//
+// # cacheTenant is not always the workflow's tenant
+//
+// storeForTenant returns the worker's own store when the workflow's tenant is
+// unset, so for those rows the bytes come from w.storeTenantID's store and
+// must be cached under that id. Keying on the workflow's "" instead would
+// file one worker's definitions under a name that means "whoever asked",
+// which is the same collision in a smaller costume.
+func (w *Worker) loadWASM(store engine.WorkflowStore, cacheTenant, defName string, defVersion int) ([]byte, error) {
+	// THE TENANT IS IN THE KEY. Without it the two caches below answer a
+	// lookup of ("orders", 1) with whichever tenant stored those bytes first,
+	// and definition names are caller-chosen. Note the ordering hazard: the
+	// caches are consulted BEFORE the store, so routing the store correctly
+	// without also keying the caches would convert the failure above into a
+	// silent cross-tenant execution -- strictly worse. Both halves are one
+	// change for that reason.
+	key := cacheTenant + "/" + defName + ":" + strconv.Itoa(defVersion)
 
 	// Check in-memory cache first.
 	if cached, ok := w.wasmCache.get(key); ok {
-		dbLen, err := w.store.GetWASMLength(w.ctx, defName, defVersion)
+		dbLen, err := store.GetWASMLength(w.ctx, defName, defVersion)
 		if err == nil {
 			if dbLen == int64(len(cached)) {
 				w.Metrics.RecordWasmCacheHit(w.ctx)
@@ -4161,7 +4206,7 @@ func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 
 	// Check disk cache before going to the database.
 	if w.wasmDiskCache != nil {
-		if cached := w.wasmDiskCache.LookupDef(defName, defVersion); cached != nil {
+		if cached := w.wasmDiskCache.LookupDef(cacheTenant, defName, defVersion); cached != nil {
 			w.Metrics.RecordWasmCacheMiss(w.ctx)
 			w.wasmCache.put(key, cached)
 			return cached, nil
@@ -4170,14 +4215,14 @@ func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 
 	w.Metrics.RecordWasmCacheMiss(w.ctx)
 
-	wasmBytes, err := w.store.LoadWASM(w.ctx, defName, defVersion)
+	wasmBytes, err := store.LoadWASM(w.ctx, defName, defVersion)
 	if err != nil {
 		return nil, err
 	}
 
 	// Store to disk cache for future restarts.
 	if w.wasmDiskCache != nil {
-		w.wasmDiskCache.StoreDef(defName, defVersion, wasmBytes)
+		w.wasmDiskCache.StoreDef(cacheTenant, defName, defVersion, wasmBytes)
 	}
 
 	w.wasmCache.put(key, wasmBytes)
@@ -4891,6 +4936,17 @@ func scheduleAdvance(expr string, scheduled time.Time, loc *time.Location, now t
 
 	// Within the bound: step one interval and drop nothing.
 	return next, 0
+}
+
+// cacheTenantFor names the tenant whose store storeForTenant will hand back
+// for tenantID, which is what any cache over that store has to be keyed on.
+// It has to track storeForTenant's own first condition; a second copy of that
+// rule is why this is a function rather than an expression at the call site.
+func (w *Worker) cacheTenantFor(tenantID string) string {
+	if w.storeFactory == nil || tenantID == "" || tenantID == w.storeTenantID {
+		return w.storeTenantID
+	}
+	return tenantID
 }
 
 // storeForTenant returns the store execution should write through for a
