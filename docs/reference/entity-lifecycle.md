@@ -91,7 +91,7 @@ and `public.tenant_domains` are structurally identical to `public.workflow_routi
 | table | why |
 |---|---|
 | `admin.tenants` | the tenant itself; its lifecycle is the thing the others hang off — it is **suspended**, not disabled, and that acts on other entities' work. See below. |
-| `admin.orgs` | the same shape one level up: it groups tenants the way tenants group everything else (`created_at` + `suspended`, no `updated_at`) |
+| `admin.orgs` | the same shape one level up: it groups tenants the way tenants group everything else (`created_at`, no `updated_at`) |
 | `admin.plugin_tables` | registry of plugin-owned tables, not operator-created |
 | `public.plugin_defs` | derived from plugin binaries, not operator-created |
 
