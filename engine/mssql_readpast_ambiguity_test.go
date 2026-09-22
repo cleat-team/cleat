@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -122,11 +123,21 @@ import (
 // clean-zero outcomes are logged with t.Logf so a reader can see which one a
 // given run hit, without either one failing the build.
 func TestAContendedMSSQLClaimNeverClaimsALockedRowThoughItMayNotSkipIt(t *testing.T) {
-	// No skip on an unset CLEAT_TEST_MSSQL, matching the PostgreSQL sibling
-	// test's own testutil.TestDB: MSSQLTestDB falls back to a default DSN and
-	// Fatals on a failed connection rather than skipping silently. CLAUDE.md's
-	// own rule is that an unset DSN skipping silently is the trap, not the
-	// safety net.
+	// Skip on an unset CLEAT_TEST_MSSQL, matching every other MSSQL-only test
+	// in this package (mssql_session_context_test.go,
+	// mssql_policy_coverage_test.go): single-dialect CI jobs like "Test
+	// MySQL" (.github/workflows/multi-db-ci.yml) deliberately set only their
+	// own dialect's DSN, so an MSSQL-only test that does not skip here fails
+	// every one of them. An earlier version of this comment argued the
+	// opposite -- "no skip, matching testutil.TestDB, because an unset DSN
+	// skipping silently is CLAUDE.md's own named trap" -- and that reasoning
+	// was wrong for this call site: the trap is a DSN dropped by mistake on a
+	// job that is SUPPOSED to test this dialect, not a job that legitimately
+	// never configures it. Caught by "Test MySQL" actually failing on this
+	// exact test in CI (cleat#1964).
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
