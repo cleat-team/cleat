@@ -984,7 +984,7 @@ func (s *PostgresStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, work
 
 // ReapExpiredConcurrencyKeys deletes all expired concurrency keys
 // for the current tenant. Returns the number of rows deleted (keys plus queue
-// holders).
+// holders plus queue rate tokens).
 func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -1005,7 +1005,19 @@ func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, 
 		return 0, fmt.Errorf("reap expired concurrency keys: queue holders: %w", err)
 	}
 	hn, _ := hresult.RowsAffected()
-	return n + hn, tx.Commit()
+
+	// cleat#1918. A rate token outlives its own usefulness the moment its
+	// window closes -- nothing re-reads an expired one, only the count-in-window
+	// query above (store_lifecycle.go's acquireCandidateConcurrencyKey), which
+	// already filters on expires_at > now(). Left unreaped it is dead weight
+	// rather than a correctness bug, but it is dead weight this same reaper
+	// already exists to remove for its two siblings.
+	rresult, err := tx.ExecContext(ctx, `DELETE FROM queue_rate_tokens WHERE expires_at < now() AND tenant_id = $1`, s.tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("reap expired concurrency keys: queue rate tokens: %w", err)
+	}
+	rn, _ := rresult.RowsAffected()
+	return n + hn + rn, tx.Commit()
 }
 
 // GetConcurrencyKeyCount returns the number of non-expired concurrency keys

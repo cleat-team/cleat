@@ -689,7 +689,16 @@ func (s *MSSQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, err
 		return 0, fmt.Errorf("reap expired concurrency keys: queue holders: %w", err)
 	}
 	hn, _ := hresult.RowsAffected()
-	return n + hn, tx.Commit()
+
+	// cleat#1918. A rate token outlives its own usefulness the moment its
+	// window closes; reaped for the same reason concurrency_keys and
+	// queue_holders are above.
+	rresult, err := tx.ExecContext(ctx, `DELETE FROM queue_rate_tokens WHERE expires_at <= SYSUTCDATETIME() AND tenant_id = @p1`, s.tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("reap expired concurrency keys: queue rate tokens: %w", err)
+	}
+	rn, _ := rresult.RowsAffected()
+	return n + hn + rn, tx.Commit()
 }
 
 func (s *MSSQLStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {

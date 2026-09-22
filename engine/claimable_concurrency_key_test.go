@@ -8,10 +8,13 @@ import (
 )
 
 // The claim path's concurrency-key filter is written out many times over --
-// two arms, at different site counts: the mutex arm (a bare key is held by at
-// most one run) appears at NINE sites, the registered-queue arm (a declared
-// queue admits at most concurrency_limit holders) at SIX. This test is the
-// reason that duplication is safe.
+// three arms, at different site counts: the mutex arm (a bare key is held by
+// at most one run) appears at NINE sites, the registered-queue arm (a
+// declared queue admits at most concurrency_limit holders) at SIX, and the
+// registered-queue RATE arm (cleat#1918: a declared queue admits at most
+// rate_limit holders per rate_period_seconds) at the same SIX -- it appears
+// only where the concurrency arm does, one AND-ed onto the other. This test
+// is the reason that duplication is safe.
 //
 // # Why it is not one shared constant
 //
@@ -38,7 +41,7 @@ import (
 // hands out a run another would have deferred. No statement fails, no row is
 // malformed. That is what makes every copy worth a guard.
 //
-// # Two arms, two site counts
+// # Three arms, two site counts
 //
 // cleat#1116 split the predicate. The mutex arm keeps the original shape --
 // `concurrency_key_hash IS NULL OR NOT EXISTS (…)` -- and still appears at the
@@ -46,7 +49,11 @@ import (
 // deliberately left mutex-only (it is an orthogonal routing path, not queue
 // admission). The registered arm -- `count(queue_holders) < concurrency_limit`
 // -- appears only where a declared queue is actually being admitted against:
-// CountRunnableWorkflows and ClaimWorkflows, one each per dialect.
+// CountRunnableWorkflows and ClaimWorkflows, one each per dialect. cleat#1918
+// adds the rate arm -- `count(queue_rate_tokens) < rate_limit`, guarded by
+// `rate_limit IS NULL OR` since an unlimited queue has no window to count --
+// AND-ed alongside the registered arm at exactly the same two sites per
+// dialect, never on its own.
 func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T) {
 	// Ordered, not a map: Go randomises map iteration, which would make WHICH
 	// file supplies the canonical copy vary per run -- and with it the wording
@@ -63,10 +70,11 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 		name           string
 		mutexWant      int
 		registeredWant int
+		rateWant       int
 	}{
-		{"store_lifecycle.go", 3, 2},
-		{"mysql_lifecycle.go", 3, 2},
-		{"mssql_lifecycle.go", 3, 2},
+		{"store_lifecycle.go", 3, 2, 2},
+		{"mysql_lifecycle.go", 3, 2, 2},
+		{"mssql_lifecycle.go", 3, 2, 2},
 	}
 
 	// The clock is the one licensed difference between dialects.
@@ -94,11 +102,19 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 
 	// The registered arm: the subquery counting live queue_holders, compared
 	// against the declared limit. Grabbed from the opening paren of the count
-	// subquery through the "< q.concurrency_limit)" comparison.
+	// subquery through the "< q.concurrency_limit)" comparison. Wrapped in its
+	// own parens at the call site (cleat#1918) so this capture still ends at
+	// the FIRST ")" following "q.concurrency_limit" -- the rate arm that
+	// follows it sits outside that capture, not inside it.
 	registered := regexp.MustCompile(`(?s)\(SELECT count\(\*\) FROM queue_holders qh\s+WHERE.*?< q\.concurrency_limit\s*\)`)
 
-	var mutexCanon, regCanon, mutexFrom, regFrom string
-	mutexTotal, regTotal := 0, 0
+	// The rate arm: cleat#1918, AND-ed onto the registered arm above. Grabbed
+	// from "rate_limit IS NULL OR" through the "< q.rate_limit)" comparison,
+	// the same shape as the registered arm one level down.
+	rate := regexp.MustCompile(`(?s)q\.rate_limit IS NULL OR\s*\(SELECT count\(\*\) FROM queue_rate_tokens qrt\s+WHERE.*?< q\.rate_limit\s*\)`)
+
+	var mutexCanon, regCanon, rateCanon, mutexFrom, regFrom, rateFrom string
+	mutexTotal, regTotal, rateTotal := 0, 0, 0
 
 	for _, f := range files {
 		raw, err := os.ReadFile(f.name)
@@ -149,6 +165,27 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 					"function. Divergence here is silent at runtime.", f.name, i+1, regFrom, norm, regCanon)
 			}
 		}
+
+		rateh := rate.FindAllString(src, -1)
+		if len(rateh) != f.rateWant {
+			t.Errorf("%s: found %d copies of the rate-limit arm, expected %d.\n\n"+
+				"A count or claim statement either lost the queue rate-limit filter or gained "+
+				"one that does not match the shape this test looks for.", f.name, len(rateh), f.rateWant)
+			continue
+		}
+		rateTotal += len(rateh)
+		for i, h := range rateh {
+			norm := space.ReplaceAllString(clock.ReplaceAllString(h, "<CLOCK>"), " ")
+			if rateCanon == "" {
+				rateCanon, rateFrom = norm, f.name
+				continue
+			}
+			if norm != rateCanon {
+				t.Errorf("%s rate-limit copy %d differs from the one in %s.\n\n  this: %s\n  that: %s\n\n"+
+					"Every site must carry the same predicate modulo the dialect clock "+
+					"function. Divergence here is silent at runtime.", f.name, i+1, rateFrom, norm, rateCanon)
+			}
+		}
 	}
 
 	if mutexTotal != 9 {
@@ -157,6 +194,9 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	if regTotal != 6 {
 		t.Errorf("found %d registered-arm sites in total, expected 6", regTotal)
 	}
+	if rateTotal != 6 {
+		t.Errorf("found %d rate-limit-arm sites in total, expected 6", rateTotal)
+	}
 
 	// The original design note, kept as an assertion because it is the property
 	// that lets this text sit inside statements numbered $N, ? and @pN alike --
@@ -164,9 +204,9 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	// would shift every index after its insertion point, at four sites per
 	// dialect, and the failure would be a query that RUNS and matches the wrong
 	// rows.
-	if regexp.MustCompile(`\$\d|@p\d|\?`).MatchString(mutexCanon + regCanon) {
-		t.Errorf("a predicate arm has acquired a placeholder:\n  %s\n  %s\n\n"+
-			"It must reference only columns and literals. See the comment above.", mutexCanon, regCanon)
+	if regexp.MustCompile(`\$\d|@p\d|\?`).MatchString(mutexCanon + regCanon + rateCanon) {
+		t.Errorf("a predicate arm has acquired a placeholder:\n  %s\n  %s\n  %s\n\n"+
+			"It must reference only columns and literals. See the comment above.", mutexCanon, regCanon, rateCanon)
 	}
 	if !strings.Contains(mutexCanon, "ck.tenant_id = w.tenant_id") {
 		t.Errorf("the mutex arm no longer correlates the key to the candidate row's tenant:\n  %s\n\n"+

@@ -300,7 +300,7 @@ func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID 
 
 // ReapExpiredConcurrencyKeys deletes all expired concurrency keys
 // for the current tenant. Returns the number of rows deleted (keys plus queue
-// holders).
+// holders plus queue rate tokens).
 func (s *MySQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
 		DELETE FROM concurrency_keys WHERE expires_at < NOW(6) AND tenant_id = ?
@@ -319,7 +319,18 @@ func (s *MySQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, err
 		return 0, fmt.Errorf("ReapExpiredConcurrencyKeys: queue holders: %w", err)
 	}
 	hn, _ := hresult.RowsAffected()
-	return n + hn, nil
+
+	// cleat#1918. A rate token outlives its own usefulness the moment its
+	// window closes; reaped for the same reason concurrency_keys and
+	// queue_holders are above.
+	rresult, err := s.db.ExecContext(ctx, `
+		DELETE FROM queue_rate_tokens WHERE expires_at < NOW(6) AND tenant_id = ?
+	`, s.tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("ReapExpiredConcurrencyKeys: queue rate tokens: %w", err)
+	}
+	rn, _ := rresult.RowsAffected()
+	return n + hn + rn, nil
 }
 
 // ---------------------------------------------------------------------------

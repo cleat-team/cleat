@@ -72,11 +72,20 @@ func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error)
 		    ))
 		    OR
 		    (q.name IS NOT NULL AND (
-		      (SELECT count(*) FROM queue_holders qh
-		        WHERE qh.tenant_id = w.tenant_id
-		          AND qh.queue_name = q.name
-		          AND qh.expires_at > now()
-		          AND qh.workflow_id <> w.id) < q.concurrency_limit
+		      (
+		        (SELECT count(*) FROM queue_holders qh
+		          WHERE qh.tenant_id = w.tenant_id
+		            AND qh.queue_name = q.name
+		            AND qh.expires_at > now()
+		            AND qh.workflow_id <> w.id) < q.concurrency_limit
+		      )
+		      AND (
+		        q.rate_limit IS NULL OR
+		        (SELECT count(*) FROM queue_rate_tokens qrt
+		          WHERE qrt.tenant_id = w.tenant_id
+		            AND qrt.queue_name = q.name
+		            AND qrt.expires_at > now()) < q.rate_limit
+		      )
 		    ))
 		  )
 	`, pq.Array(s.taskQueues)).Scan(&n); err != nil {
@@ -94,6 +103,17 @@ type claimCandidate struct {
 	key        *string
 	hash       []byte
 	registered bool
+}
+
+// registeredQueueLimits is what lockRegisteredQueueLimits reads off a locked
+// queues row: the concurrency semaphore's capacity, and -- cleat#1918 -- the
+// rate limiter's capacity and window. RateLimit and RatePeriodSeconds are nil
+// together when the queue has no rate limit, the same nil/nil convention
+// Queue itself uses (queue_store.go).
+type registeredQueueLimits struct {
+	concurrencyLimit  int
+	rateLimit         *int
+	ratePeriodSeconds *int
 }
 
 // logClaimKeyDecision records what a claim decided about one candidate's
@@ -191,11 +211,20 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			    ))
 			    OR
 			    (q.name IS NOT NULL AND (
-			      (SELECT count(*) FROM queue_holders qh
-			        WHERE qh.tenant_id = w.tenant_id
-			          AND qh.queue_name = q.name
-			          AND qh.expires_at > now()
-			          AND qh.workflow_id <> w.id) < q.concurrency_limit
+			      (
+			        (SELECT count(*) FROM queue_holders qh
+			          WHERE qh.tenant_id = w.tenant_id
+			            AND qh.queue_name = q.name
+			            AND qh.expires_at > now()
+			            AND qh.workflow_id <> w.id) < q.concurrency_limit
+			      )
+			      AND (
+			        q.rate_limit IS NULL OR
+			        (SELECT count(*) FROM queue_rate_tokens qrt
+			          WHERE qrt.tenant_id = w.tenant_id
+			            AND qrt.queue_name = q.name
+			            AND qrt.expires_at > now()) < q.rate_limit
+			      )
 			    ))
 			  )
 			ORDER BY w.priority ASC, w.created_at
@@ -284,8 +313,8 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 // which is what makes the count in acquireCandidateConcurrencyKey see a stable
 // number of holders: no other claim can be between its own count and insert for
 // the same queue while this transaction holds the queue's row.
-func (s *PostgresStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, cands []claimCandidate) (map[string]int, error) {
-	limits := map[string]int{}
+func (s *PostgresStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, cands []claimCandidate) (map[string]registeredQueueLimits, error) {
+	limits := map[string]registeredQueueLimits{}
 	seen := map[string]bool{}
 	var keys []string
 	for _, c := range cands {
@@ -298,7 +327,7 @@ func (s *PostgresStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.T
 		return limits, nil
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, concurrency_limit FROM queues
+		SELECT name, concurrency_limit, rate_limit, rate_period_seconds FROM queues
 		WHERE tenant_id = $1 AND name = ANY($2) AND disabled_at IS NULL
 		ORDER BY name
 		FOR UPDATE
@@ -309,11 +338,13 @@ func (s *PostgresStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.T
 	defer rows.Close()
 	for rows.Next() {
 		var name string
-		var limit int
-		if err := rows.Scan(&name, &limit); err != nil {
+		var ql registeredQueueLimits
+		var rateLimit, ratePeriodSeconds sql.NullInt64
+		if err := rows.Scan(&name, &ql.concurrencyLimit, &rateLimit, &ratePeriodSeconds); err != nil {
 			return nil, fmt.Errorf("claim workflows: scan queue limit: %w", err)
 		}
-		limits[name] = limit
+		ql.rateLimit, ql.ratePeriodSeconds = nullInt64Pair(rateLimit, ratePeriodSeconds)
+		limits[name] = ql
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("claim workflows: queue limits rows: %w", err)
@@ -324,8 +355,10 @@ func (s *PostgresStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.T
 // acquireCandidateConcurrencyKey acquires one candidate's concurrency key and
 // reports whether the candidate is claimed. A bare key keeps the mutex path; a
 // registered queue uses the semaphore path, safe because the queue's row was
-// locked by lockRegisteredQueueLimits.
-func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]int) (bool, error) {
+// locked by lockRegisteredQueueLimits. cleat#1918: a registered queue's rate
+// limit, if it has one, is a second and independent gate checked under the
+// same lock -- both must admit for the candidate to be claimed.
+func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]registeredQueueLimits) (bool, error) {
 	if !c.registered {
 		if c.hash == nil {
 			return true, nil // no key at all
@@ -360,7 +393,7 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 	}
 
 	// Registered queue: semaphore under the queues lock.
-	limit, ok := limits[*c.key]
+	ql, ok := limits[*c.key]
 	if !ok {
 		// The candidate predicate saw it registered, but the lock step did not
 		// (disabled or deleted between the two statements). Not claimable; the
@@ -368,7 +401,8 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 		return false, nil
 	}
 	// Re-claim: a run that already holds its own slot claims again after a lost
-	// fence, without counting against the limit.
+	// fence, without counting against the limit OR taking a new rate token --
+	// it is continuing an admission already granted, not a new one.
 	var selfHolds bool
 	err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (
@@ -392,8 +426,24 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 	if err != nil {
 		return false, fmt.Errorf("claim workflows: count queue holders: %w", err)
 	}
-	if held >= limit {
+	if held >= ql.concurrencyLimit {
 		return false, nil // at capacity
+	}
+	// cleat#1918: the rate limit, if declared, is checked under this same
+	// queues-row lock -- independent of the concurrency check above, so a free
+	// concurrency slot does not admit past a full rate window.
+	if ql.rateLimit != nil {
+		var rateHeld int
+		err = tx.QueryRowContext(ctx, `
+			SELECT count(*) FROM queue_rate_tokens qrt
+			WHERE qrt.tenant_id = $1 AND qrt.queue_name = $2 AND qrt.expires_at > now()
+		`, c.tenantID, *c.key).Scan(&rateHeld)
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: count queue rate tokens: %w", err)
+		}
+		if rateHeld >= *ql.rateLimit {
+			return false, nil // rate-limited
+		}
 	}
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at)
@@ -404,7 +454,18 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 		return false, fmt.Errorf("claim workflows: acquire queue holder: %w", err)
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n == 0 {
+		return false, nil
+	}
+	if ql.rateLimit != nil {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO queue_rate_tokens (tenant_id, queue_name, workflow_id, expires_at)
+			VALUES ($1, $2, $3, now() + make_interval(secs => $4))
+		`, c.tenantID, *c.key, c.id, *ql.ratePeriodSeconds); err != nil {
+			return false, fmt.Errorf("claim workflows: record rate token: %w", err)
+		}
+	}
+	return true, nil
 }
 
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
