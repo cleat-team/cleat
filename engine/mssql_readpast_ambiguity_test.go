@@ -10,10 +10,11 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// TestAContendedMSSQLClaimBlocksRatherThanReturningAnAmbiguousZero measures
+// TestAContendedMSSQLClaimNeverClaimsALockedRowThoughItMayNotSkipIt measures
 // the SQL Server half of cleat#923's ambiguity, which cleat#982's
 // investigation found had never actually been measured on this dialect --
-// and the answer is not the one #923's own doc comment predicts.
+// and the answer is neither the one #923's own doc comment predicts nor a
+// single fixed answer at all.
 //
 // # Why this test exists, and what it replaces
 //
@@ -26,10 +27,9 @@ import (
 // not, has never had one, and the misattribution was caught and corrected
 // twice independently in that issue's thread before anyone measured what SQL
 // Server's READPAST actually does under the same contention. This is that
-// measurement, and it found something different from what it went looking
-// for.
+// measurement.
 //
-// # What claimWorkflowsOnce's own doc comment claims, and what is measured here
+// # What claimWorkflowsOnce's own doc comment claims, and what was measured
 //
 // mssql_lifecycle.go says READPAST/UPDLOCK is "SQL Server's equivalent of FOR
 // UPDATE SKIP LOCKED". That is true of a BARE SELECT: three separate raw-SQL
@@ -40,21 +40,54 @@ import (
 // second session's READPAST SELECT correctly returning ZERO rows while a
 // first session holds UPDLOCK/ROWLOCK on all of them.
 //
-// It is NOT what claimWorkflowsOnce does end to end. Measured twice,
-// independently, both times identical: a holder connection (plain
-// db.Conn + BeginTx, session-context-scoped exactly like the claim path
-// scopes itself) takes UPDLOCK/ROWLOCK on every candidate row, and a THIRD
-// connection confirms via sys.dm_tran_locks -- at the exact instant between
-// the holder finishing its lock and the claim starting -- that the locks are
-// genuinely GRANTED (not WAITing), KEY-level, one per row, open_transaction_count=1.
-// Then store.ClaimWorkflows is called. It does not return zero. Its internal
-// candidate-SELECT (the same READPAST/UPDLOCK/ROWLOCK query proven correct
-// above) evidently treats the locked rows as available, and the SUBSEQUENT
-// UPDATE...OUTPUT that actually claims them then blocks on the genuinely-held
-// lock -- for over 300 seconds in one run, 60+ in a second, both times ended
-// only by killing the holder's session.
+// store.ClaimWorkflows end to end does NOT reliably do the same. Both
+// outcomes below are real and reproducible, on the exact same code, the
+// exact same query text, the exact same confirmed-locked state:
 //
-// # What was ruled out, so the next person does not re-derive it
+//   - BLOCKS. Measured first, twice, independently, both times this test ran
+//     ALONE (`go test -run <this test>`): a holder connection (plain
+//     db.Conn + BeginTx, session-context-scoped exactly like the claim path
+//     scopes itself) takes UPDLOCK/ROWLOCK on every candidate row, a THIRD
+//     connection confirms via sys.dm_tran_locks that the locks are
+//     genuinely GRANTED (not WAITing), KEY-level, one per row,
+//     open_transaction_count=1 -- and then store.ClaimWorkflows's internal
+//     UPDATE...OUTPUT blocks on the genuinely-held lock, for over 300
+//     seconds in one run and 60+ in a second, both times ended only by
+//     killing the holder's session.
+//
+//   - RETURNS CLEANLY WITH ZERO. Measured on two independent, complete
+//     `go test ./engine/` runs (the whole package, every dialect) -- in
+//     that context this test's own claim call reliably returns 0 rows with
+//     no error, inside the 3-second bound, which is exactly the SKIP
+//     LOCKED-like behavior the doc comment predicts.
+//
+// The two are not random noise on top of one shared answer: which one shows
+// up depends, reproducibly, on whether this test runs alone or as part of
+// the full suite. What does NOT flip it, tested directly:
+//
+//   - Running this exact test 3 times in one process (`-count=3`): blocks
+//     all 3 times. So bare repetition of the same query against the same
+//     tables is not sufficient on its own.
+//   - Running one ordinary, uncontended MSSQL claim
+//     (TestTheClaimActuallyLogsItsKeyDecision/mssql) immediately before this
+//     one, in the same process: still blocks. So "any prior claim query
+//     first" is not sufficient either.
+//
+// So something specific to the broader engine/ suite -- not just "more
+// queries ran first" -- changes the outcome, and it has not been isolated.
+// SQL Server plan caching / parameter sniffing (a plan compiled once, from
+// different candidate-row statistics, then reused) is the leading
+// candidate, because the plan cache is server/database-wide rather than
+// per-connection and therefore CAN carry state between two otherwise
+// unrelated `*sql.DB` pools the way nothing else this file ruled out can --
+// but this was not directly tested, and is exactly the kind of claim this
+// file's own culture requires a control for before it gets written down as
+// more than a candidate.
+//
+// # What was ruled out as an explanation for the raw-SQL vs Go-driven gap
+//
+// (i.e. why a fresh, isolated run of this test ever blocks at all, given
+// that byte-identical raw SQL against the same locked state does not)
 //
 //   - RCSI: sys.databases.is_read_committed_snapshot_on = 0 on the test
 //     database.
@@ -71,23 +104,24 @@ import (
 //   - The FILTER predicate itself: a bare table with fn_tenant_filter
 //     attached shows the same correct zero.
 //
-// What was NOT established is why the Go-driven path differs from the raw
-// SQL that is byte-for-byte the same query text. That gap is filed
-// separately (see the comment above testContendedClaimTimeout below) rather
-// than left implicit here.
+// What was NOT established is why the Go-driven path ever differs from raw
+// SQL that is byte-for-byte the same query text, nor what specifically about
+// running inside the full suite flips it back. That gap is filed separately
+// as cleat#1963 rather than guessed at here.
 //
-// # Why this test is fast rather than reproducing the measurement directly
+// # What this test actually asserts, and why it does not Fatal on either
+// liveness outcome
 //
-// The measurement above took 60-320 seconds per run, waiting out a genuine
-// SQL Server lock. That is not something to commit to a suite every SQL
-// Server job runs. This test bounds the same contended claim with a short
-// context timeout instead, and pins the OBSERVED behavior -- the claim call
-// does not return quickly with zero results; it is still blocked when the
-// timeout fires. If SQL Server's behavior here is ever fixed to genuinely
-// skip contended rows (matching the doc comment's own claim), this test
-// starts failing because the claim returns before the deadline -- which is
-// an improvement worth noticing, not a regression to silently paper over.
-func TestAContendedMSSQLClaimBlocksRatherThanReturningAnAmbiguousZero(t *testing.T) {
+// Given that both outcomes above are confirmed real, asserting one of them
+// as "the" answer makes this test order-dependent and flaky in real CI,
+// which is worse than useless -- a red run would train reviewers to expect
+// noise. What both outcomes agree on, and what the test does assert: the
+// claim must never actually CLAIM a row this test confirmed is genuinely,
+// currently locked. That would be a correctness bug distinct from, and
+// worse than, either measured liveness behavior. Both the block and the
+// clean-zero outcomes are logged with t.Logf so a reader can see which one a
+// given run hit, without either one failing the build.
+func TestAContendedMSSQLClaimNeverClaimsALockedRowThoughItMayNotSkipIt(t *testing.T) {
 	// No skip on an unset CLEAT_TEST_MSSQL, matching the PostgreSQL sibling
 	// test's own testutil.TestDB: MSSQLTestDB falls back to a default DSN and
 	// Fatals on a failed connection rather than skipping silently. CLAUDE.md's
@@ -223,34 +257,61 @@ func TestAContendedMSSQLClaimBlocksRatherThanReturningAnAmbiguousZero(t *testing
 	defer cancel()
 	claimed, claimErr := store.ClaimWorkflows(claimCtx, "worker-contended", 10)
 
-	if claimErr == nil {
-		// The doc comment's claim -- READPAST behaves like SKIP LOCKED --
-		// would predict claimed having length 0. What was actually measured,
-		// twice, is that the call does not return this fast at all; it is
-		// still blocked on the UPDATE when the 3s deadline fires, which is
-		// the branch below. Returning without error inside 3s is neither of
-		// the two measured outcomes, so it is reported as its own finding
-		// rather than forced into either bucket.
-		t.Fatalf("ClaimWorkflows returned inside the 3s bound with no error, claiming %d row(s). "+
-			"Neither measured outcome (a clean zero, matching SKIP LOCKED; or blocking on the "+
-			"write, measured twice against this exact query) predicts this. If READPAST's "+
-			"candidate-selection has started correctly excluding contended rows, this is an "+
-			"IMPROVEMENT worth its own investigation, not a value to special-case here.", len(claimed))
-	}
-	if ctxErr := claimCtx.Err(); ctxErr == nil {
-		// claimErr is non-nil but the deadline did not fire -- some OTHER
-		// error occurred (a connection failure, a genuine SQL error). That is
-		// not this test's finding either.
-		t.Fatalf("ClaimWorkflows returned an error before the 3s deadline, and it was not a "+
-			"context deadline: %v. That is a different failure from the one this test measures.",
-			claimErr)
+	// THE ONE OUTCOME THAT WOULD BE AN ACTUAL CORRECTNESS BUG, REGARDLESS OF
+	// WHICH LIVENESS BEHAVIOR SHOWS UP BELOW: claiming a row this test just
+	// confirmed is genuinely, currently locked by another session. Neither
+	// measured liveness outcome (block, or return zero) does this; if it
+	// ever does, that is worse than either and is not folded into the
+	// non-determinism note below.
+	for _, wf := range claimed {
+		for _, held := range got {
+			if wf.ID == held.ID {
+				t.Fatalf("ClaimWorkflows claimed %s, which the holder connection was confirmed "+
+					"(via sys.dm_tran_locks) to hold GRANTED UPDLOCK/ROWLOCK on -- this is a "+
+					"correctness bug, not the liveness question this test otherwise measures",
+					wf.ID)
+			}
+		}
 	}
 
-	t.Logf("ClaimWorkflows was still blocked when the 3s context deadline fired: %v. "+
-		"This matches both full-length measurements (60s and 320s, ended only by killing the "+
-		"holder's session) and contradicts claimWorkflowsOnce's own doc comment, which describes "+
-		"READPAST/UPDLOCK as SQL Server's equivalent of FOR UPDATE SKIP LOCKED. Filed as its own "+
-		"issue rather than fixed here: the mechanism producing the difference between this and "+
-		"the raw-SQL measurement (which correctly returns zero candidates under identical, "+
-		"externally-verified lock state) was not established.", claimErr)
+	if ctxErr := claimCtx.Err(); ctxErr != nil && claimErr != nil {
+		// BLOCKED. Matches both full-length measurements (60s and 320s,
+		// ended only by killing the holder's session) and contradicts
+		// claimWorkflowsOnce's own doc comment, which describes
+		// READPAST/UPDLOCK as SQL Server's equivalent of FOR UPDATE SKIP
+		// LOCKED.
+		t.Logf("ClaimWorkflows was still blocked when the 3s context deadline fired: %v.", claimErr)
+		return
+	}
+	if claimErr != nil {
+		// Some OTHER error -- a connection failure, a genuine SQL error --
+		// not the deadline. Not a liveness outcome this test has evidence
+		// about either way.
+		t.Fatalf("ClaimWorkflows returned an error before the 3s deadline, and it was not a "+
+			"context deadline: %v.", claimErr)
+	}
+
+	// RETURNED CLEANLY, CLAIMING NONE OF THE LOCKED ROWS. This matches
+	// claimWorkflowsOnce's own doc comment (READPAST behaving like SKIP
+	// LOCKED) and is the SAME outcome this file originally measured in raw
+	// SQL, outside Go entirely.
+	//
+	// It did NOT reproduce when this test first ran in isolation, twice
+	// (60s and 320s, both blocking). It DOES reproduce, reliably, when this
+	// test runs as part of the full engine/ suite rather than alone:
+	// confirmed on two independent complete suite runs, both showing this
+	// exact branch. Direct repetition within one process (-count=3, and
+	// running one ordinary uncontended MSSQL claim test first) did NOT
+	// reproduce it, so "any prior query warms something up" is already too
+	// broad an explanation; what specifically in the wider suite flips this
+	// has not been isolated. See the type doc comment and cleat#1963.
+	//
+	// So: NOT a Fatalf. Both liveness outcomes are real, both are logged,
+	// and this test's actual invariant -- a locked row is never claimed --
+	// is checked above regardless of which one shows up on a given run.
+	t.Logf("ClaimWorkflows returned cleanly with %d row(s), claiming none of the %d locked "+
+		"row(s). This is the SKIP-LOCKED-like outcome claimWorkflowsOnce's doc comment predicts, "+
+		"and reproduces reliably when this test runs inside the full engine/ suite rather than "+
+		"alone -- see the type doc comment for what was and was not isolated about why.",
+		len(claimed), len(got))
 }
