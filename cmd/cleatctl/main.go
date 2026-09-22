@@ -40,6 +40,19 @@ import (
 // osExit is replaced in tests to intercept os.Exit calls.
 var osExit = os.Exit
 
+// defaultTenantID is the tenant every cleatctl subcommand that does not take a
+// tenant argument operates on.
+//
+// Named rather than repeated because it is now read twice and the two readings
+// must agree: the store is opened for this tenant, and check-db locates this
+// tenant's per-tenant database (cleat#1956). A second spelling of the literal
+// is a second thing to get wrong.
+//
+// It is also the limit of what those subcommands can see on MySQL, where a
+// tenant's tables are in a database of their own -- stated here because the
+// hardcoding is easy to read as "tenant-agnostic" when it means the opposite.
+const defaultTenantID = "00000000-0000-0000-0000-000000000000"
+
 func main() {
 	dsn := flag.String("db", "",
 		"database DSN for a role that is a superuser or has BYPASSRLS "+
@@ -97,7 +110,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	store, closer, err := factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000")
+	store, closer, err := factory.OpenStore(ctx, defaultTenantID)
 	if err != nil {
 		log.Fatalf("failed to open database store: %v — check that the database is accessible and the public schema exists", err)
 	}
@@ -122,7 +135,7 @@ func main() {
 	case "debug":
 		runDebug(ctx, store, db, d, args[1:])
 	case "check-db":
-		runCheckDB(ctx, db, d, args[1:])
+		runCheckDB(ctx, db, d, *dsn, args[1:])
 	case "drop-tenant":
 		runDropTenant(ctx, db, d, args[1:])
 	case "suspend-tenant":

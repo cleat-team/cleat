@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
 	"os"
 	"strings"
@@ -63,7 +64,7 @@ var errSizeEstimateNotPortable = errors.New("event history size estimate is Post
 // runCheckDB verifies database connectivity and schema health.
 // It connects to the database, pings it, checks the schema migration version,
 // inspects workflow instance counts, and reports overall health status.
-func runCheckDB(ctx context.Context, db *sql.DB, d dialect, args []string) {
+func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []string) {
 	verbose := false
 	for _, arg := range args {
 		if arg == "--verbose" || arg == "-v" {
@@ -157,6 +158,56 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		issues = append(issues, "row-level security is not enforced by this database")
 	}
 
+	// 2c. Which database the RUNTIME figures below come from.
+	//
+	// On MySQL a tenant's per-tenant tables live in their own database,
+	// cleat_<tenant-id>, because MySQL has neither schemas-inside-a-database
+	// nor row-level security. --db names the BASE database, which holds the
+	// control-plane tables -- and which the migration set is applied to as
+	// well, so every per-tenant table exists there too, empty. A count against
+	// it therefore does not fail. It answers zero, confidently.
+	//
+	// That is what this command did until cleat#1956's audit. Measured against
+	// a deployment holding one workflow instance in the tenant database and
+	// none in the base one:
+	//
+	//	cleatctl check-db  ->  INSTANCES: 0 total ... STATUS: healthy
+	//	same row in the base database (control)  ->  INSTANCES: 1 total
+	//
+	// So the post-incident tool an operator reaches for on a sick MySQL
+	// deployment reported health about a database nothing runs in. The
+	// unqualified name was not wrong SQL; it resolved, to the wrong database.
+	//
+	// PostgreSQL and SQL Server take the empty qualifier and are unchanged:
+	// there the tenant's rows are in the database --db already names.
+	//
+	// ONE TENANT. check-db takes no tenant argument, so this reports the
+	// default tenant's runtime data. That is the whole of it on MySQL, which
+	// tiers.yaml D1 makes single-tenant; on a MySQL deployment that somehow
+	// has several, the figures below are one tenant's and the line printed
+	// says which.
+	runtimeQual, runtimeDBPresent, qualErr := d.tenantRuntimeQualifier(ctx, db, defaultTenantID)
+	switch {
+	case qualErr != nil:
+		fmt.Fprintf(os.Stderr, "RUNTIME DATA: WARNING: cannot locate the tenant database: %v\n", qualErr)
+		issues = append(issues, fmt.Sprintf("tenant database lookup failed: %v", qualErr))
+	case !runtimeDBPresent:
+		// An absence worth failing on, and the message names the benign cause
+		// so the operator is not sent hunting. cleat-worker CREATES this
+		// database on startup, so "not there" means no worker has ever run
+		// against this deployment -- which for a command that answers "can
+		// this database run cleat" is not health.
+		fmt.Fprintf(os.Stderr, "RUNTIME DATA: the per-tenant database %s does not exist\n",
+			engine.MySQLTenantDatabaseName(defaultTenantID))
+		issues = append(issues, fmt.Sprintf(
+			"per-tenant database %s does not exist: on MySQL cleat-worker creates it at "+
+				"startup, so this deployment has never run one (or it was dropped)",
+			engine.MySQLTenantDatabaseName(defaultTenantID)))
+	case runtimeQual != "":
+		fmt.Printf("RUNTIME DATA: %s (tenant %s)\n",
+			engine.MySQLTenantDatabaseName(defaultTenantID), defaultTenantID)
+	}
+
 	// 3. Table accessibility.
 	//
 	// coreTables is every table migrations/postgres/ creates, and it is checked
@@ -240,12 +291,13 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		Status string
 		Count  int64
 	}
-	rows, err := db.QueryContext(ctx, `
+	//nolint:gosec // G202: the only interpolated fragment is runtimeQual, which tenantRuntimeQualifier builds by backtick-quoting engine.MySQLTenantDatabaseName of a uuid.Parse'd tenant id, and which is empty on every dialect but MySQL. Nothing caller-controlled reaches this: check-db takes no arguments but --verbose.
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT status, COUNT(*) AS cnt
-		FROM workflow_instances
+		FROM %sworkflow_instances
 		GROUP BY status
 		ORDER BY status
-	`)
+	`, runtimeQual))
 	if err == nil {
 		defer rows.Close()
 		var totalInstances int64
@@ -307,7 +359,10 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		// expensive form and can fail where a plain COUNT(*) succeeds. Only
 		// when BOTH fail has the table proved unreadable.
 		var rowCount int64
-		if countErr := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM event_history").Scan(&rowCount); countErr == nil {
+		//nolint:gosec // G202: runtimeQual, as the instance count above.
+		if countErr := db.QueryRowContext(ctx,
+			fmt.Sprintf("SELECT COUNT(*) FROM %sevent_history", runtimeQual),
+		).Scan(&rowCount); countErr == nil {
 			fmt.Printf("EVENT HISTORY: %d rows\n", rowCount)
 		} else {
 			fmt.Fprintf(os.Stderr, "EVENT HISTORY: UNREADABLE: %v\n", countErr)
