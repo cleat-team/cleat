@@ -108,7 +108,7 @@ var seededByDropTenantFixture = []string{
 }
 
 // seedRemainingTenantTables covers the universe members dropTenantFixture does
-// not: the four that reach a tenant by ON DELETE CASCADE from admin.tenants,
+// not: the five that reach a tenant by ON DELETE CASCADE from admin.tenants,
 // and the two from cleat#1644 that reach it by nothing at all.
 //
 // The cascade ones are seeded even though no DELETE in admin.drop_tenant names
@@ -141,6 +141,14 @@ func seedRemainingTenantTables(t *testing.T, ctx context.Context, db *sql.DB, te
 		{"public.queues",
 			`INSERT INTO queues (tenant_id, name, concurrency_limit) VALUES ($1, $2, 3)`,
 			[]any{tenant, "queue-" + tag}},
+		// cleat#1918. ON DELETE CASCADE from admin.tenants directly (not
+		// chained through workflow_instances the way queue_holders is -- see
+		// migration 097's header), so like queues above it reaches the
+		// tenant by a foreign key no DELETE in admin.drop_tenant names.
+		{"public.queue_rate_tokens",
+			`INSERT INTO queue_rate_tokens (tenant_id, queue_name, workflow_id, expires_at)
+			 VALUES ($1, $2, $3, now() + interval '1 hour')`,
+			[]any{tenant, "queue-" + tag, "wf-" + tag}},
 		// cleat#1644. Neither has a foreign key to anything, so neither
 		// cascaded, and neither was named by any DELETE.
 		{"public.workflow_memory_stats",
