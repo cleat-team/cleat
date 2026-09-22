@@ -138,7 +138,7 @@ func main() {
 	case "set-secret":
 		runSetSecret(ctx, db, d, args[1:])
 	case "queue":
-		runQueue(ctx, db, d, args[1:])
+		runQueue(ctx, db, d, *dsn, args[1:])
 	case "reseal-payloads":
 		runResealPayloads(ctx, db, args[1:])
 	default:

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -106,6 +107,49 @@ func (d dialect) openStoreFactory(db *sql.DB, dsn, schemaName string) (engine.St
 		return engine.NewMSSQLStoreFactory(dsn), nil
 	}
 	return nil, fmt.Errorf("no store factory for dialect %q", d.name)
+}
+
+// tenantScopedDB returns the *sql.DB that holds tenantID's per-tenant
+// tables.
+//
+// On PostgreSQL and SQL Server that is db itself: tenant isolation there is
+// RLS / a filter predicate inside one shared database, and db already
+// carries the right role and connection state for it. On MySQL it can be a
+// DIFFERENT physical database, cleat_<tenant-id> -- MySQL has no RLS, so
+// cleat isolates SOME tables with one database per tenant instead
+// (MySQLStoreFactory.CreateTenantDatabase).
+//
+// Which database a table is authoritative in is a property of the READER,
+// not of the migration that created it: every table's schema is applied to
+// both the base database and each tenant database, so a migration header
+// cannot settle this on its own. queues/queue_holders are confirmed
+// per-tenant -- ClaimWorkflows's claim query joins them against
+// workflow_instances unqualified in one statement, which only resolves if
+// both live in the same connected database. tenant_secrets,
+// tenant_egress_allow, tenant_api_keys and tenant_settings are confirmed
+// control-plane: cleat-worker reads all four on the base db it opens at
+// startup, before it has routed to any tenant.
+//
+// Any subcommand that reads or writes a per-tenant table must call this
+// rather than use db directly, or its write lands in whatever database
+// --db happened to name and cleat-worker never sees it: that was
+// cleat#1956, found because `cleatctl queue create` reported success and
+// `cleatctl queue list` read the row straight back -- from the same wrong
+// database, so the round-trip was not a control on the question that
+// mattered. The first version of #1956 also listed tenant_secrets as
+// per-tenant by reasoning from its migration header alone; that was wrong,
+// caught by checking cleat-worker's actual read path instead, and is the
+// reason this comment states the rule as "ask the reader" rather than
+// listing tables by category.
+func (d dialect) tenantScopedDB(ctx context.Context, db *sql.DB, dsn, tenantID string) (*sql.DB, error) {
+	if d.name != "mysql" {
+		return db, nil
+	}
+	tdb, err := engine.NewMySQLStoreFactory(db, mysqlBaseDSN(dsn)).CreateTenantDatabase(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("open tenant %s's database: %w", tenantID, err)
+	}
+	return tdb, nil
 }
 
 // mysqlBaseDSN strips the database name from a MySQL DSN, which is what

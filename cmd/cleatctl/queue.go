@@ -53,7 +53,18 @@ import (
 // dialect-aware" is unrestricted. TestQueueCommandWorksOnEveryDialect is the
 // test that entry-by-absence is supposed to have behind it, the same way
 // TestEgressAllowWorksOnEveryDialect backs egress-allow's explicit one.
-func runQueue(ctx context.Context, db *sql.DB, d dialect, args []string) {
+//
+// "ALREADY DIALECT-AWARE" WAS TRUE OF RLS/FILTER-PREDICATE SCOPING AND FALSE
+// OF MYSQL'S. cleat#1956: QueueStore given the raw db cleatctl opened at
+// startup wrote a perfectly well-formed row -- right tenant, right limit --
+// into whichever database --db literally named, while ClaimWorkflows reads
+// queues from cleat_<tenant-id>, a different physical database MySQL alone
+// uses for tenant isolation. `queue create` reported success and `queue
+// list` read the row straight back, because both went through the same
+// wrong database; nothing in this command's own output or tests could have
+// told the two apart. Fixed by routing through tenantScopedDB, which is the
+// one place that now knows the difference.
+func runQueue(ctx context.Context, db *sql.DB, d dialect, dsn string, args []string) {
 	if len(args) < 2 {
 		printQueueUsage()
 		osExit(2)
@@ -66,7 +77,16 @@ func runQueue(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		osExit(2)
 		return
 	}
-	store := engine.NewQueueStore(db, d.name)
+	// queues lives in the tenant's own database on MySQL, not whatever
+	// database --db names -- see tenantScopedDB's doc comment. A no-op on
+	// PostgreSQL and SQL Server.
+	tdb, err := d.tenantScopedDB(ctx, db, dsn, tenant.String())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		osExit(1)
+		return
+	}
+	store := engine.NewQueueStore(tdb, d.name)
 
 	switch sub {
 	case "list":
