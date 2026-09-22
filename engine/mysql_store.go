@@ -865,6 +865,28 @@ func (f *MySQLStoreFactory) buildTenantDSN(dbName string) string {
 	return base[:slash+1] + dbName + base[slash+1:]
 }
 
+// MySQLTenantDatabaseName is the database a tenant's per-tenant tables live in
+// on MySQL, which has no schemas and no row-level security and so isolates
+// those tables with one database per tenant instead.
+//
+// Exported, and the ONLY definition of the rule, because the name is now needed
+// outside this package: cleatctl has to reach a tenant's database to read or
+// write a per-tenant table (cleat#1956), and a reader that only wants to LOOK
+// must be able to name the database without calling CreateTenantDatabase, which
+// creates it. A diagnostic that creates what it is checking for cannot report
+// its absence. The rule was written out twice inside this file before that, and
+// a third copy in another package is how the three come to disagree.
+//
+// It does NOT validate tenantID -- callers that go on to interpolate the result
+// into an identifier must uuid.Parse it first, as CreateTenantDatabase does.
+// Returning a name for an unvalidated string is safe; putting one in a
+// statement is not.
+func MySQLTenantDatabaseName(tenantID string) string {
+	// Hyphens are not legal unquoted in an identifier, and backtick-quoting a
+	// name with them is a trap rather than a fix.
+	return "cleat_" + strings.ReplaceAll(tenantID, "-", "_")
+}
+
 // CreateTenantDatabase creates a new database for the given tenant and
 // returns a connection pool scoped to that database. It is idempotent —
 // if the database already exists, it just opens a new pool to it.
@@ -874,8 +896,7 @@ func (f *MySQLStoreFactory) CreateTenantDatabase(ctx context.Context, tenantID s
 	if _, err := uuid.Parse(tenantID); err != nil {
 		return nil, fmt.Errorf("invalid tenant ID %q: %w", tenantID, err)
 	}
-	// Replace hyphens with underscores for use as a database name suffix.
-	dbName := "cleat_" + strings.ReplaceAll(tenantID, "-", "_")
+	dbName := MySQLTenantDatabaseName(tenantID)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -933,7 +954,7 @@ func (f *MySQLStoreFactory) CreateTenantDatabase(ctx context.Context, tenantID s
 
 // DropTenantDatabase removes a tenant database and closes its connection pool.
 func (f *MySQLStoreFactory) DropTenantDatabase(tenantID string) error {
-	dbName := "cleat_" + strings.ReplaceAll(tenantID, "-", "_")
+	dbName := MySQLTenantDatabaseName(tenantID)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()

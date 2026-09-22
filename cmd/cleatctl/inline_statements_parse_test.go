@@ -73,6 +73,22 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 	pinned := map[string]string{
 		"SELECT COUNT(*) FROM %s": "a format string: the table name is substituted at the call site, so there is no statement here to parse",
 
+		// check-db's two RUNTIME counts, assembled because the database they
+		// read is not known until the tenant is (cleat#1956's audit). On MySQL
+		// a tenant's per-tenant tables live in cleat_<tenant-id>, a different
+		// physical database from the one --db names, so the qualifier is built
+		// by dialect.tenantRuntimeQualifier and prefixed here; off MySQL it is
+		// empty and these are exactly the statements they were before.
+		//
+		// The coverage lost to the pin is bought back where it means something
+		// rather than waived: TestCheckDBCountsTheTenantsDatabaseOnMySQL issues
+		// both of these ASSEMBLED, against a real MySQL with the schema applied
+		// and a row in the tenant database, and fails if the count comes back
+		// from the base one. A PREPARE here could only have told us the
+		// PostgreSQL form parses, which is the form that never had the bug.
+		"SELECT status, COUNT(*) AS cnt FROM %sworkflow_instances GROUP BY status ORDER BY status": "a format string: the database qualifier is substituted at the call site (empty off MySQL), so there is no statement here to parse. Exercised assembled by TestCheckDBCountsTheTenantsDatabaseOnMySQL",
+		"SELECT COUNT(*) FROM %sevent_history":                                                     "a format string, as the statement above; same substitution and same assembled coverage",
+
 		// reseal-payloads (cleat#1794) builds both of its statements by
 		// concatenating engine.EncryptedEventColumns, so what is in the source
 		// is a PREFIX and not a statement. Pinned for the same reason as the

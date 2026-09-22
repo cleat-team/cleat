@@ -186,7 +186,11 @@ func runCheckDBTestNoStub(t *testing.T, script []checkDBResult, args []string) (
 	defer db.Close()
 
 	return withExitPanicOutput(t, func() {
-		runCheckDB(context.Background(), db, dialectPostgres, args)
+		// The DSN is unused on PostgreSQL: tenantRuntimeQualifier returns the
+		// empty qualifier without touching it, because there is no separate
+		// per-tenant database to find. A MySQL run is what exercises it, and
+		// TestCheckDBCountsTheTenantsDatabaseOnMySQL is where that happens.
+		runCheckDB(context.Background(), db, dialectPostgres, "", args)
 	})
 }
 

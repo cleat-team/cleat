@@ -8,6 +8,7 @@ import (
 
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // dialect is the database cleatctl is pointed at.
@@ -150,6 +151,54 @@ func (d dialect) tenantScopedDB(ctx context.Context, db *sql.DB, dsn, tenantID s
 		return nil, fmt.Errorf("open tenant %s's database: %w", tenantID, err)
 	}
 	return tdb, nil
+}
+
+// tenantRuntimeQualifier returns the SQL qualifier that names the database
+// holding tenantID's per-tenant tables, and whether that database is there.
+//
+// It is the READ-ONLY counterpart of tenantScopedDB, and the difference is the
+// whole reason it exists: tenantScopedDB routes through CreateTenantDatabase,
+// which CREATES the database when it is missing. That is right for a command
+// that is about to write. It is wrong for a diagnostic -- check-db asking
+// "does this deployment have its runtime database" must not answer by making
+// one, then reporting the database it just made as present. A check that
+// repairs what it measures cannot report the fault.
+//
+// The empty qualifier that comes back on PostgreSQL and SQL Server is not a
+// failure: those isolate tenants inside one database with RLS or a filter
+// predicate, so an unqualified name already resolves to the right rows, and
+// `found` is true because there is nothing separate to look for.
+//
+// The returned qualifier is a backtick-quoted identifier followed by a dot,
+// meant to be concatenated onto a table name. Interpolating an identifier is
+// safe here ONLY because tenantID is parsed as a UUID first; that check is not
+// decoration, it is what makes the concatenation legitimate.
+func (d dialect) tenantRuntimeQualifier(ctx context.Context, db *sql.DB, tenantID string) (string, bool, error) {
+	if d.name != "mysql" {
+		return "", true, nil
+	}
+	if _, err := uuid.Parse(tenantID); err != nil {
+		return "", false, fmt.Errorf("invalid tenant ID %q: %w", tenantID, err)
+	}
+	name := engine.MySQLTenantDatabaseName(tenantID)
+	var n int
+	// Written with a $1 placeholder and rebound rather than with MySQL's `?`,
+	// even though this branch only ever runs on MySQL. information_schema.schemata
+	// is one of the few catalogue views spelled the same on both, so the
+	// PostgreSQL form is a real statement -- which keeps it inside
+	// TestEveryInlineStatementParsesOnPostgres instead of needing a pin there.
+	// A pin would have been the easy route and it would have removed the only
+	// check that this statement can run at all.
+	if err := db.QueryRowContext(ctx,
+		d.rebind(`SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = $1`),
+		name,
+	).Scan(&n); err != nil {
+		return "", false, fmt.Errorf("look for tenant database %s: %w", name, err)
+	}
+	if n == 0 {
+		return "", false, nil
+	}
+	return "`" + name + "`.", true, nil
 }
 
 // mysqlBaseDSN strips the database name from a MySQL DSN, which is what
