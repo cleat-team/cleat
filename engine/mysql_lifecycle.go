@@ -70,11 +70,20 @@ func (s *MySQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
 		    ))
 		    OR
 		    (q.name IS NOT NULL AND (
-		      (SELECT count(*) FROM queue_holders qh
-		        WHERE qh.tenant_id = w.tenant_id
-		          AND qh.queue_name = q.name
-		          AND qh.expires_at > NOW(6)
-		          AND qh.workflow_id <> w.id) < q.concurrency_limit
+		      (
+		        (SELECT count(*) FROM queue_holders qh
+		          WHERE qh.tenant_id = w.tenant_id
+		            AND qh.queue_name = q.name
+		            AND qh.expires_at > NOW(6)
+		            AND qh.workflow_id <> w.id) < q.concurrency_limit
+		      )
+		      AND (
+		        q.rate_limit IS NULL OR
+		        (SELECT count(*) FROM queue_rate_tokens qrt
+		          WHERE qrt.tenant_id = w.tenant_id
+		            AND qrt.queue_name = q.name
+		            AND qrt.expires_at > NOW(6)) < q.rate_limit
+		      )
 		    ))
 		  )
 		  AND w.tenant_id = ?
@@ -117,11 +126,20 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		    ))
 		    OR
 		    (q.name IS NOT NULL AND (
-		      (SELECT count(*) FROM queue_holders qh
-		        WHERE qh.tenant_id = w.tenant_id
-		          AND qh.queue_name = q.name
-		          AND qh.expires_at > NOW(6)
-		          AND qh.workflow_id <> w.id) < q.concurrency_limit
+		      (
+		        (SELECT count(*) FROM queue_holders qh
+		          WHERE qh.tenant_id = w.tenant_id
+		            AND qh.queue_name = q.name
+		            AND qh.expires_at > NOW(6)
+		            AND qh.workflow_id <> w.id) < q.concurrency_limit
+		      )
+		      AND (
+		        q.rate_limit IS NULL OR
+		        (SELECT count(*) FROM queue_rate_tokens qrt
+		          WHERE qrt.tenant_id = w.tenant_id
+		            AND qrt.queue_name = q.name
+		            AND qrt.expires_at > NOW(6)) < q.rate_limit
+		      )
 		    ))
 		  )
 		  AND w.tenant_id = ?
@@ -219,8 +237,8 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
 
-func (s *MySQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, cands []claimCandidate) (map[string]int, error) {
-	limits := map[string]int{}
+func (s *MySQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, cands []claimCandidate) (map[string]registeredQueueLimits, error) {
+	limits := map[string]registeredQueueLimits{}
 	seen := map[string]bool{}
 	var keys []string
 	for _, c := range cands {
@@ -239,7 +257,7 @@ func (s *MySQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, 
 	}
 	args = append(args, s.tenantID)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT name, concurrency_limit FROM queues
+		SELECT name, concurrency_limit, rate_limit, rate_period_seconds FROM queues
 		WHERE name IN (%s) AND tenant_id = ? AND disabled_at IS NULL
 		ORDER BY name
 		FOR UPDATE
@@ -250,11 +268,13 @@ func (s *MySQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, 
 	defer rows.Close()
 	for rows.Next() {
 		var name string
-		var limit int
-		if err := rows.Scan(&name, &limit); err != nil {
+		var ql registeredQueueLimits
+		var rateLimit, ratePeriodSeconds sql.NullInt64
+		if err := rows.Scan(&name, &ql.concurrencyLimit, &rateLimit, &ratePeriodSeconds); err != nil {
 			return nil, fmt.Errorf("claim workflows: scan queue limit: %w", err)
 		}
-		limits[name] = limit
+		ql.rateLimit, ql.ratePeriodSeconds = nullInt64Pair(rateLimit, ratePeriodSeconds)
+		limits[name] = ql
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("claim workflows: queue limits rows: %w", err)
@@ -262,7 +282,7 @@ func (s *MySQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, 
 	return limits, nil
 }
 
-func (s *MySQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]int) (bool, error) {
+func (s *MySQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]registeredQueueLimits) (bool, error) {
 	if !c.registered {
 		if c.hash == nil {
 			return true, nil // no key at all
@@ -298,12 +318,14 @@ func (s *MySQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql
 	}
 
 	// Registered queue: semaphore under the queues lock.
-	limit, ok := limits[*c.key]
+	ql, ok := limits[*c.key]
 	if !ok {
 		// The candidate predicate saw it registered, but the lock step did not
 		// (disabled or deleted between the two statements). Not claimable.
 		return false, nil
 	}
+	// Re-claim: continuing an admission already granted takes no new rate
+	// token, matching the concurrency semaphore's own re-claim exemption below.
 	var selfHolds bool
 	err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS(
@@ -325,8 +347,23 @@ func (s *MySQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql
 	if err != nil {
 		return false, fmt.Errorf("claim workflows: count queue holders: %w", err)
 	}
-	if held >= limit {
+	if held >= ql.concurrencyLimit {
 		return false, nil // at capacity
+	}
+	// cleat#1918: the rate limit, if declared, is a second independent gate
+	// checked under this same queues-row lock.
+	if ql.rateLimit != nil {
+		var rateHeld int
+		err = tx.QueryRowContext(ctx, `
+			SELECT count(*) FROM queue_rate_tokens qrt
+			WHERE qrt.tenant_id = ? AND qrt.queue_name = ? AND qrt.expires_at > NOW(6)
+		`, c.tenantID, *c.key).Scan(&rateHeld)
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: count queue rate tokens: %w", err)
+		}
+		if rateHeld >= *ql.rateLimit {
+			return false, nil // rate-limited
+		}
 	}
 	res, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at)
@@ -336,7 +373,18 @@ func (s *MySQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql
 		return false, fmt.Errorf("claim workflows: acquire queue holder: %w", err)
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n == 0 {
+		return false, nil
+	}
+	if ql.rateLimit != nil {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO queue_rate_tokens (tenant_id, queue_name, workflow_id, expires_at)
+			VALUES (?, ?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND))
+		`, c.tenantID, *c.key, c.id, int64(*ql.ratePeriodSeconds)); err != nil {
+			return false, fmt.Errorf("claim workflows: record rate token: %w", err)
+		}
+	}
+	return true, nil
 }
 
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
