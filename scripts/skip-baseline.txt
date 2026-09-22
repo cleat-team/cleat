@@ -47,6 +47,7 @@ engine	MSSQLBackend.Setup	1
 engine	MSSQLBackend.SetupForTenant	1
 engine	MySQLBackend.Setup	1
 engine	MySQLBackend.SetupForTenant	1
+engine	TestAContendedMSSQLClaimNeverClaimsALockedRowThoughItMayNotSkipIt	1
 engine	TestADeferBodyCannotContinueAsNew	1
 engine	TestADeferBodyCannotRegisterAnotherDefer	1
 engine	TestAMissingDeferExportIsNotReportedAsAFailure	1
