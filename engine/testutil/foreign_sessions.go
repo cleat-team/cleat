@@ -77,6 +77,80 @@ var (
 	atStartForeign sync.Map // Dialect -> []string
 )
 
+// reservedProbeConn holds one connection per dialect, opened once as early as
+// this process can manage -- at SampleForeignSessionsAtStart, which already
+// runs at this process's first TestDB call -- and kept open for the rest of
+// the process's life instead of being closed after each ask.
+//
+// WHY THIS EXISTS. ForeignSessions used to open a fresh connection on every
+// call via openProbeConnection and close it again afterward, including the
+// call made AT THE MOMENT OF FAILURE. That is exactly the moment a suite's
+// own connections are most likely to have used up the server's connection
+// budget, so the probe's attempt to open its OWN new connection to ask "who
+// else is attached" failed the same way everything else was failing --
+// ForeignSessions correctly reported ok=false ("could not open a connection
+// to ask"), which is the honest answer and the least useful one, because
+// "could not tell" is exactly what connection exhaustion looks like whether
+// or not it is the actual cause of the test failure being investigated.
+//
+// Reserving a connection before the suite has had any chance to exhaust
+// anything removes that blind spot without needing to reserve a slot on the
+// SERVER side (no superuser_reserved_connections-style configuration): this
+// process simply claims one of its own connections for the probe's exclusive
+// use before spending the rest on tests.
+var reservedProbeConn sync.Map // Dialect -> *sql.DB
+
+// reserveProbeConnection opens and caches one connection for dialect, once.
+// A failure here is not fatal and is not retried: ForeignSessions falls back
+// to opening a fresh connection exactly as it did before this existed, so a
+// reservation that could not be made -- most plausibly because the budget was
+// ALREADY exhausted before this process's first ask -- costs nothing beyond
+// returning to the pre-fix behavior for that one dialect.
+func reserveProbeConnection(dialect Dialect) {
+	if _, exists := reservedProbeConn.Load(dialect); exists {
+		return
+	}
+	db, err := openProbeConnection(dialect)
+	if err != nil {
+		return
+	}
+	// One physical connection, held indefinitely: MaxOpenConns(1) is what
+	// guarantees database/sql never opens a second connection under this
+	// handle to serve a concurrent call, which would defeat the reservation
+	// by spending it on ordinary pool growth instead. The Max*Lifetime/IdleTime
+	// zeros mean "never recycle for age or idleness" -- the whole point is
+	// for this connection to outlive whatever exhausted the rest of the pool.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	if _, loaded := reservedProbeConn.LoadOrStore(dialect, db); loaded {
+		db.Close() // lost the race to a concurrent reservation; that one stands.
+	}
+}
+
+// probeConnection returns a connection for ForeignSessions to use for one
+// ask, preferring the dialect's reservation over opening a fresh one.
+// closeAfter reports whether the caller owns this connection and must close
+// it when done -- true for a freshly opened one, false for the shared
+// reservation, which has to outlive any single call.
+//
+// The reservation is re-pinged rather than handed out unconditionally: if it
+// has died (the server restarted, the connection was reset under it), a
+// dead handle would report "could not list ..." indistinguishably from a
+// live exhaustion failure, so falling through to a fresh attempt gives a
+// connection a chance to succeed rather than reporting a false negative on
+// the strength of a stale reservation.
+func probeConnection(dialect Dialect) (db *sql.DB, closeAfter bool, err error) {
+	if v, ok := reservedProbeConn.Load(dialect); ok {
+		if rdb := v.(*sql.DB); rdb.Ping() == nil {
+			return rdb, false, nil
+		}
+	}
+	db, err = openProbeConnection(dialect)
+	return db, true, err
+}
+
 // AllowForeignSessionsEnv names the hazard being accepted, not the check being
 // skipped: someone reading a CI file or a shell history should see WHAT was
 // waived. A name like SKIP_CHECK records only that somebody got past it.
@@ -87,6 +161,7 @@ const AllowForeignSessionsEnv = "CLEAT_TEST_ALLOW_FOREIGN_SESSIONS"
 func SampleForeignSessionsAtStart(dialect Dialect) {
 	o, _ := atStartOnce.LoadOrStore(dialect, &sync.Once{})
 	o.(*sync.Once).Do(func() {
+		reserveProbeConnection(dialect)
 		foreign, basis, ok := ForeignSessions(dialect)
 		switch {
 		case !ok:
@@ -257,12 +332,22 @@ func tagPostgresDSN(dsn string) string {
 // not be ANSWERED, which is a different thing from answering "nobody" -- and
 // they are indistinguishable in an empty slice. Callers must not render a
 // not-ok result as an all-clear.
+//
+// It PREFERS A RESERVED CONNECTION over opening a fresh one -- see
+// reserveProbeConnection and probeConnection. Cleat#982's 09-20 CI incident
+// showed a fresh connection failing for the same reason everything else in
+// the suite was failing: the server's connection budget was already spent, so
+// "opens its own connection" at the moment of failure could not answer the
+// one question that moment needed answered. A connection claimed before the
+// suite could have exhausted anything survives that.
 func ForeignSessions(dialect Dialect) (foreign []string, basis string, ok bool) {
-	db, err := openProbeConnection(dialect)
+	db, closeAfter, err := probeConnection(dialect)
 	if err != nil {
 		return nil, fmt.Sprintf("could not open a connection to ask (%v)", err), false
 	}
-	defer db.Close()
+	if closeAfter {
+		defer db.Close()
+	}
 
 	tag := testProcessTag()
 
