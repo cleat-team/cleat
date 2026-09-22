@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -106,6 +107,39 @@ func (d dialect) openStoreFactory(db *sql.DB, dsn, schemaName string) (engine.St
 		return engine.NewMSSQLStoreFactory(dsn), nil
 	}
 	return nil, fmt.Errorf("no store factory for dialect %q", d.name)
+}
+
+// tenantScopedDB returns the *sql.DB that holds tenantID's per-tenant
+// tables.
+//
+// On PostgreSQL and SQL Server that is db itself: tenant isolation there is
+// RLS / a filter predicate inside one shared database, and db already
+// carries the right role and connection state for it. On MySQL it is a
+// DIFFERENT physical database, cleat_<tenant-id> -- MySQL has no RLS, so
+// cleat isolates tenants with one database per tenant instead
+// (MySQLStoreFactory.CreateTenantDatabase), and only tables explicitly
+// documented as control-plane (tenant_egress_allow, tenant_api_keys,
+// tenant_settings -- see their migration headers) live in whatever database
+// --db literally names. Everything else migrated per-tenant -- queues,
+// queue_holders, tenant_secrets, workflow_* -- lives in cleat_<tenant-id>
+// and nowhere else.
+//
+// Any subcommand that reads or writes one of those per-tenant tables must
+// call this rather than use db directly, or its write lands in whatever
+// database --db happened to name and cleat-worker never sees it: that was
+// cleat#1956, found because `cleatctl queue create` reported success and
+// `cleatctl queue list` read the row straight back -- from the same wrong
+// database, so the round-trip was not a control on the question that
+// mattered.
+func (d dialect) tenantScopedDB(ctx context.Context, db *sql.DB, dsn, tenantID string) (*sql.DB, error) {
+	if d.name != "mysql" {
+		return db, nil
+	}
+	tdb, err := engine.NewMySQLStoreFactory(db, mysqlBaseDSN(dsn)).CreateTenantDatabase(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("open tenant %s's database: %w", tenantID, err)
+	}
+	return tdb, nil
 }
 
 // mysqlBaseDSN strips the database name from a MySQL DSN, which is what

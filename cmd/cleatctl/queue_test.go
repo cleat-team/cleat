@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +43,33 @@ func TestQueueCommandWorksOnEveryDialect(t *testing.T) {
 			// deliberate, it is what makes drop-tenant remove a tenant's
 			// queues with it -- so a test cannot invent a tenant id.
 			tenant := "00000000-0000-0000-0000-000000000000"
-			store := engine.NewQueueStore(db, tc.d.name)
+
+			// dsn is the literal --db string an operator passes; only
+			// tenantScopedDB reads it, and only for mysql (see its doc
+			// comment), so it is left empty for the other two dialects.
+			//
+			// verifyDB is where THIS TEST checks what runQueue actually did.
+			// For postgres and mssql that is db itself. For mysql it must be
+			// the same tenant-scoped database runQueue now writes to
+			// (cleat#1956) -- asserting against the raw db here would pass
+			// by construction whether or not the fix works, the same way the
+			// bug's own `queue list` readback did.
+			var dsn string
+			verifyDB := db
+			if tc.d.name == "mysql" {
+				dsn = os.Getenv("CLEAT_TEST_MYSQL")
+				var err error
+				verifyDB, err = tc.d.tenantScopedDB(ctx, db, dsn, tenant)
+				if err != nil {
+					t.Fatalf("tenantScopedDB: %v", err)
+				}
+				// A freshly opened per-tenant database has no schema of its
+				// own -- production applies migrations to it separately, at
+				// cmd/cleat-worker startup -- so this test has to do the same
+				// before QueueStore can see `queues` at all.
+				testutil.SetupMySQLFullSchema(t, verifyDB)
+			}
+			store := engine.NewQueueStore(verifyDB, tc.d.name)
 
 			// A NAME UNIQUE TO THIS RUN, AND NO CLEANUP DELETE.
 			//
@@ -69,7 +96,7 @@ func TestQueueCommandWorksOnEveryDialect(t *testing.T) {
 			// silently not-checking beats a flake or a destructive fixture.
 			if existing, err := store.ListQueues(ctx, tenant); err == nil && len(existing) == 0 {
 				out, _ := withExitPanicOutput(t, func() {
-					runQueue(ctx, db, tc.d, []string{"list", tenant})
+					runQueue(ctx, db, tc.d, dsn, []string{"list", tenant})
 				})
 				if !strings.Contains(out, "no registered queues") || !strings.Contains(out, "MUTEX") {
 					t.Errorf("the empty listing does not say that an unregistered key is still a "+
@@ -79,7 +106,7 @@ func TestQueueCommandWorksOnEveryDialect(t *testing.T) {
 
 			// Create.
 			out, errOut := withExitPanicOutput(t, func() {
-				runQueue(ctx, db, tc.d, []string{"create", tenant, name, "--concurrency", "4"})
+				runQueue(ctx, db, tc.d, dsn, []string{"create", tenant, name, "--concurrency", "4"})
 			})
 			if !strings.Contains(out, "concurrency 4") {
 				t.Fatalf("create did not confirm the limit: %s%s", out, errOut)
@@ -98,7 +125,7 @@ func TestQueueCommandWorksOnEveryDialect(t *testing.T) {
 
 			// A registered name is not silently overwritten.
 			_, errOut = withExitPanicOutput(t, func() {
-				runQueue(ctx, db, tc.d, []string{"create", tenant, name, "--concurrency", "9"})
+				runQueue(ctx, db, tc.d, dsn, []string{"create", tenant, name, "--concurrency", "9"})
 			})
 			if !strings.Contains(errOut, "already has a queue") {
 				t.Errorf("re-registering an existing name did not refuse: %q", errOut)
@@ -112,7 +139,7 @@ func TestQueueCommandWorksOnEveryDialect(t *testing.T) {
 
 			// List shows it.
 			out, _ = withExitPanicOutput(t, func() {
-				runQueue(ctx, db, tc.d, []string{"list", tenant})
+				runQueue(ctx, db, tc.d, dsn, []string{"list", tenant})
 			})
 			if !strings.Contains(out, name) || !strings.Contains(out, "concurrency=4") {
 				t.Errorf("list does not show the queue just registered:\n%s", out)
@@ -120,7 +147,7 @@ func TestQueueCommandWorksOnEveryDialect(t *testing.T) {
 
 			// Disable, and the message that matters most.
 			out, _ = withExitPanicOutput(t, func() {
-				runQueue(ctx, db, tc.d, []string{"disable", tenant, name})
+				runQueue(ctx, db, tc.d, dsn, []string{"disable", tenant, name})
 			})
 			if !strings.Contains(out, "DOES NOT STOP THE WORK") || !strings.Contains(out, "MUTEX") {
 				t.Errorf("disable does not tell the operator that the key reverts to a mutex "+
@@ -128,7 +155,7 @@ func TestQueueCommandWorksOnEveryDialect(t *testing.T) {
 					"behaviour this text describes:\n%s", out)
 			}
 			out, _ = withExitPanicOutput(t, func() {
-				runQueue(ctx, db, tc.d, []string{"list", tenant})
+				runQueue(ctx, db, tc.d, dsn, []string{"list", tenant})
 			})
 			if !strings.Contains(out, "DISABLED") {
 				t.Errorf("list does not mark the disabled queue:\n%s", out)
@@ -138,7 +165,7 @@ func TestQueueCommandWorksOnEveryDialect(t *testing.T) {
 			// (docs/reference/entity-lifecycle.md), and shipping disable
 			// without this would have made it a one-way door.
 			out, _ = withExitPanicOutput(t, func() {
-				runQueue(ctx, db, tc.d, []string{"enable", tenant, name})
+				runQueue(ctx, db, tc.d, dsn, []string{"enable", tenant, name})
 			})
 			if !strings.Contains(out, "in force again") {
 				t.Errorf("enable does not confirm the limit applies again:\n%s", out)
@@ -184,7 +211,7 @@ func TestQueueCommandRefusesBadInput(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, errOut := withExitPanicOutput(t, func() {
-				runQueue(ctx, db, dialectPostgres, tc.args)
+				runQueue(ctx, db, dialectPostgres, "", tc.args)
 			})
 			if !strings.Contains(errOut, tc.want) {
 				t.Errorf("stderr does not contain %q:\n%s", tc.want, errOut)
@@ -220,7 +247,7 @@ func TestQueueCommandRefusesBadInput(t *testing.T) {
 				args = []string{"create", tenant, "--concurrency", "2", name}
 			}
 			out, errOut := withExitPanicOutput(t, func() {
-				runQueue(ctx, db, dialectPostgres, args)
+				runQueue(ctx, db, dialectPostgres, "", args)
 			})
 			if errOut != "" {
 				t.Errorf("a valid create wrote to stderr: %s", errOut)
