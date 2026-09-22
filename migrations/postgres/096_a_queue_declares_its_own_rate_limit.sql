@@ -26,14 +26,31 @@
 -- exactly as it does today -- unlimited rate, same as unlimited was the only
 -- option before this existed.
 
+-- IF NOT EXISTS on both the columns and the constraints: cmd/cleat-worker runs
+-- several instances against one database at startup, each applying pending
+-- migrations, and nothing here serialises them beyond whatever lock
+-- migration.Runner itself takes. A plain ADD COLUMN / ADD CONSTRAINT is not
+-- idempotent under that race -- measured on this exact migration in the
+-- Cluster Integration Tests job (cleat#1918 PR #1961): four workers applied it
+-- concurrently, one won, and the other three failed permanently on "column
+-- rate_limit of relation queues already exists" and never came up. 062 and 091
+-- hit the same race earlier and this follows their pattern.
 ALTER TABLE queues
-    ADD COLUMN rate_limit          INTEGER,
-    ADD COLUMN rate_period_seconds INTEGER;
+    ADD COLUMN IF NOT EXISTS rate_limit          INTEGER,
+    ADD COLUMN IF NOT EXISTS rate_period_seconds INTEGER;
 
-ALTER TABLE queues
-    ADD CONSTRAINT ck_queues_rate_limit_paired
-        CHECK ((rate_limit IS NULL) = (rate_period_seconds IS NULL)),
-    ADD CONSTRAINT ck_queues_rate_limit_positive
-        CHECK (rate_limit IS NULL OR rate_limit >= 1),
-    ADD CONSTRAINT ck_queues_rate_period_positive
-        CHECK (rate_period_seconds IS NULL OR rate_period_seconds >= 1);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_queues_rate_limit_paired') THEN
+        ALTER TABLE queues ADD CONSTRAINT ck_queues_rate_limit_paired
+            CHECK ((rate_limit IS NULL) = (rate_period_seconds IS NULL));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_queues_rate_limit_positive') THEN
+        ALTER TABLE queues ADD CONSTRAINT ck_queues_rate_limit_positive
+            CHECK (rate_limit IS NULL OR rate_limit >= 1);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_queues_rate_period_positive') THEN
+        ALTER TABLE queues ADD CONSTRAINT ck_queues_rate_period_positive
+            CHECK (rate_period_seconds IS NULL OR rate_period_seconds >= 1);
+    END IF;
+END $$;

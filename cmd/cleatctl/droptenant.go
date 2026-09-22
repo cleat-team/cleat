@@ -114,6 +114,13 @@ var dropTenantTables = []struct {
 	// above: a dropped tenant's queue holders go with its workflow_instances,
 	// and the operator wants to see that.
 	{"queue_holders", `SELECT count(*) FROM queue_holders WHERE tenant_id = $1`},
+	// ON DELETE CASCADE from admin.tenants directly, via
+	// migrations/postgres/097 (cleat#1918's rate-limit counter). Deliberately
+	// NOT chained off workflow_instances the way queue_holders is -- a rate
+	// token's lifetime must not depend on how long completed workflows are
+	// retained, so it carries its own tenant FK. Listed for the count, as
+	// queue_holders is above.
+	{"queue_rate_tokens", `SELECT count(*) FROM queue_rate_tokens WHERE tenant_id = $1`},
 	// cleat#1644. Both carry tenant_id since 056 and neither has a foreign key
 	// to anything, so neither was deleted OR counted: a dropped tenant's memory
 	// profile -- which workflows it ran, and how much memory each used --
