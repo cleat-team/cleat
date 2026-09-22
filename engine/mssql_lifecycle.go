@@ -189,6 +189,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		if err != nil {
 			return nil, err
 		}
+		logClaimKeyDecision(s.log(), c, ok)
 		if ok {
 			ids = append(ids, c.id)
 		}

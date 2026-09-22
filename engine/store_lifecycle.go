@@ -96,6 +96,47 @@ type claimCandidate struct {
 	registered bool
 }
 
+// logClaimKeyDecision records what a claim decided about one candidate's
+// concurrency key: which key, whether that key named a registered queue, and
+// whether the candidate was admitted.
+//
+// WHY THE ENGINE LOGS THIS AND NOT THE WORKER. cleat#1955 is a nightly failure
+// whose whole subject is queue admission -- a queue declaring a limit of 2 that
+// appeared to admit 1 -- and it could not be diagnosed from the run's own
+// artifacts. The worker's "claimed workflow" line carries worker_id,
+// workflow_id, def_name and def_version; across all 38 claim lines of the
+// failing leg the concurrency key appeared ZERO times. Two workflows claimed in
+// the same millisecond were therefore equally consistent with "the semaphore
+// admitted two on one queue" and with "two unrelated keys ran at once", which
+// is precisely the distinction the failure turns on.
+//
+// The worker cannot log it: engine.WorkflowInstance has no concurrency-key
+// field, and adding one would mean every construction site that did not
+// populate it reported the empty string -- indistinguishable from "this run had
+// no key", which is the same ambiguity moved rather than removed. The claim
+// candidate holds the key already and cannot be wrong about it, so the decision
+// is logged where it is made.
+//
+// REFUSALS ARE LOGGED, NOT JUST ADMISSIONS, and the refusal is the more
+// informative half: "admitted 1 of 3" and "refused 2 of 3 at capacity" answer
+// different questions, and only the second distinguishes a semaphore at its
+// limit from three runs that never overlapped.
+//
+// Unkeyed candidates log nothing. Most workflows carry no key, so logging them
+// would make the volume proportional to all claims rather than to keyed ones,
+// for a line that would say only that there was nothing to decide.
+func logClaimKeyDecision(log *slog.Logger, c claimCandidate, admitted bool) {
+	if log == nil || c.key == nil {
+		return
+	}
+	log.Info("concurrency key decision",
+		"workflow_id", c.id,
+		"concurrency_key", *c.key,
+		"registered", c.registered,
+		"admitted", admitted,
+	)
+}
+
 func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -193,6 +234,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		if err != nil {
 			return nil, err
 		}
+		logClaimKeyDecision(s.log(), c, ok)
 		if ok {
 			ids = append(ids, c.id)
 		}

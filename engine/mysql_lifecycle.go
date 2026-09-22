@@ -160,6 +160,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		if err != nil {
 			return nil, err
 		}
+		logClaimKeyDecision(s.log(), c, ok)
 		if ok {
 			ids = append(ids, c.id)
 		}
