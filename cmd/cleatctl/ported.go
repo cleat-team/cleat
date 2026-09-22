@@ -34,6 +34,14 @@ import (
 // A subcommand absent from this map is unrestricted -- it issues no SQL of its
 // own, or goes entirely through engine's store interface, which is already
 // dialect-aware.
+// THE OTHER HALF OF THIS DECLARATION IS IN THE TEST FILE. Absence from this
+// map means "runs on every dialect", so the default for a new subcommand is the
+// least conservative behaviour available and it is reached by not typing
+// anything -- which is cleat#1956: `queue` was added on 2026-09-20, never
+// listed here, and wrote to the wrong physical database on MySQL for two days.
+// TestEverySubcommandDeclaresItsDialects now requires every command in
+// main.go's dispatch switch to appear either here or in that test's
+// unrestrictedSubcommands, with a reason. An absence is no longer a default.
 var portedOn = map[string][]string{
 	// Ported: the post-incident tools cleat#1316 is about.
 	//
@@ -73,8 +81,32 @@ var portedOn = map[string][]string{
 	// migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql defining
 	// admin.drop_tenant there and TestATenantCanBeDroppedOnSQLServer behind it.
 	// MySQL still has no `admin` schema, which is the reason this map exists.
-	"drop-tenant":        {"postgres", "mssql"},
-	"revoke-api-key":     {"postgres"},
+	"drop-tenant":    {"postgres", "mssql"},
+	"revoke-api-key": {"postgres"},
+
+	// suspend-tenant / resume-tenant, cleat#1956's audit. These were absent
+	// from this map -- so unrestricted -- and on MySQL they do not fail
+	// halfway, they fail at the first statement with
+	//
+	//	error: Error 1049 (42000): Unknown database 'admin'
+	//
+	// which is the SAME error this file's test already cites as the reason
+	// drop-tenant is refused on MySQL. The error is loud, so nothing was
+	// silently wrong; what was missing is the refusal that names what does
+	// work, which is the whole point of listing a command here.
+	//
+	// mssql is claimed rather than dropped, and the distinction matters: this
+	// change must REFUSE MySQL, not retire a dialect that works. Both
+	// statements go through d.rebind, so placeholders are not the problem, and
+	// admin.tenants carries `suspended` on SQL Server since
+	// migrations/mssql/001_schema.sql:92. Stated as the evidence it is: there
+	// is no SQL Server integration test for this command, here or anywhere, so
+	// this entry preserves today's behaviour on mssql rather than certifying
+	// it. Narrowing it to {"postgres"} would have been the cautious-looking
+	// move and would have removed a working path on the strength of not having
+	// looked.
+	"suspend-tenant":     {"postgres", "mssql"},
+	"resume-tenant":      {"postgres", "mssql"},
 	"set-tenant-setting": {"postgres"},
 	"deploy":             {"postgres"},
 	"versions":           {"postgres"},
