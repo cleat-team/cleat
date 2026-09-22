@@ -77,7 +77,7 @@ func TestARegisteredQueueAdmitsAtMostItsLimit(t *testing.T) {
 			const limit = 3
 			name := queueTestName("sem")
 			db := queueClaimTestDB(t, store)
-			if err := NewQueueStore(db, backend.Name()).CreateQueue(ctx, DefaultTenantUUID, name, limit); err != nil {
+			if err := NewQueueStore(db, backend.Name()).CreateQueue(ctx, DefaultTenantUUID, name, limit, nil, nil); err != nil {
 				t.Fatalf("CreateQueue: %v", err)
 			}
 
@@ -133,7 +133,7 @@ func TestARegisteredQueueLimitHoldsUnderConcurrentClaims(t *testing.T) {
 			const limit = 2
 			name := queueTestName("sem-race")
 			db := queueClaimTestDB(t, store)
-			if err := NewQueueStore(db, backend.Name()).CreateQueue(ctx, DefaultTenantUUID, name, limit); err != nil {
+			if err := NewQueueStore(db, backend.Name()).CreateQueue(ctx, DefaultTenantUUID, name, limit, nil, nil); err != nil {
 				t.Fatalf("CreateQueue: %v", err)
 			}
 

@@ -175,6 +175,41 @@ func TestQueueCommandWorksOnEveryDialect(t *testing.T) {
 			} else if q.DisabledAt != nil {
 				t.Errorf("enable left disabled_at set to %v", q.DisabledAt)
 			}
+
+			// queue update sets a rate limit on the queue create above left
+			// unlimited -- cleat#1918.
+			out, _ = withExitPanicOutput(t, func() {
+				runQueue(ctx, db, tc.d, dsn, []string{"update", tenant, name, "--rate-limit", "7", "--rate-period", "60"})
+			})
+			if !strings.Contains(out, "rate-limited to 7") {
+				t.Errorf("update does not confirm the rate limit it just set:\n%s", out)
+			}
+			if q, err := store.GetQueue(ctx, tenant, name); err != nil {
+				t.Fatalf("GetQueue after rate limit update: %v", err)
+			} else if q.RateLimit == nil || *q.RateLimit != 7 || q.RatePeriodSeconds == nil || *q.RatePeriodSeconds != 60 {
+				t.Errorf("GetQueue after update = RateLimit=%v RatePeriodSeconds=%v, want 7, 60", q.RateLimit, q.RatePeriodSeconds)
+			}
+
+			// list reflects it.
+			out, _ = withExitPanicOutput(t, func() {
+				runQueue(ctx, db, tc.d, dsn, []string{"list", tenant})
+			})
+			if !strings.Contains(out, "rate<=7/60s") {
+				t.Errorf("list does not show the rate limit just set:\n%s", out)
+			}
+
+			// --clear-rate-limit removes it again.
+			out, _ = withExitPanicOutput(t, func() {
+				runQueue(ctx, db, tc.d, dsn, []string{"update", tenant, name, "--clear-rate-limit"})
+			})
+			if !strings.Contains(out, "has no rate limit") {
+				t.Errorf("update --clear-rate-limit does not confirm the clear:\n%s", out)
+			}
+			if q, err := store.GetQueue(ctx, tenant, name); err != nil {
+				t.Fatalf("GetQueue after clearing rate limit: %v", err)
+			} else if q.RateLimit != nil || q.RatePeriodSeconds != nil {
+				t.Errorf("GetQueue after --clear-rate-limit = RateLimit=%v RatePeriodSeconds=%v, want nil, nil", q.RateLimit, q.RatePeriodSeconds)
+			}
 		})
 	}
 }
@@ -208,6 +243,26 @@ func TestQueueCommandRefusesBadInput(t *testing.T) {
 		{"enable an unregistered name", []string{"enable", tenant, "no-such-queue-here"}, "has no queue named"},
 		{"create with two names", []string{"create", tenant, "a", "b", "--concurrency", "2"}, "exactly one queue name"},
 		{"create with no name at all", []string{"create", tenant, "--concurrency", "2"}, "exactly one queue name"},
+		{
+			// cleat#1918: a rate limit needs both a count and a window, and
+			// the refusal has to name which flag is missing rather than
+			// surface ck_queues_rate_limit_paired's opaque constraint error.
+			"create with rate-limit but no rate-period",
+			[]string{"create", tenant, "q-unpaired-rate", "--concurrency", "2", "--rate-limit", "5"},
+			"--rate-limit and --rate-period must both be given",
+		},
+		{
+			"create with rate-period but no rate-limit",
+			[]string{"create", tenant, "q-unpaired-period", "--concurrency", "2", "--rate-period", "60"},
+			"--rate-limit and --rate-period must both be given",
+		},
+		{"update an unregistered name", []string{"update", tenant, "no-such-queue-here", "--rate-limit", "5", "--rate-period", "60"}, "has no queue named"},
+		{"update with neither a rate limit nor --clear-rate-limit", []string{"update", tenant, "q-update-nothing"}, "needs --rate-limit and --rate-period, or --clear-rate-limit"},
+		{
+			"update with --clear-rate-limit and --rate-limit together",
+			[]string{"update", tenant, "q-update-both", "--clear-rate-limit", "--rate-limit", "5", "--rate-period", "60"},
+			"mutually exclusive",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, errOut := withExitPanicOutput(t, func() {
