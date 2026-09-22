@@ -124,6 +124,14 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// reason cleat#1646 exists. The PostgreSQL arm answers the same
 		// question with pg_roles and is checked by this test as before.
 		"SELECT IS_ROLEMEMBER('cleat_admin')": "SQL Server built-in: reached only on the mssql arm of rlsPostureOf, and there is no PostgreSQL equivalent to write instead (cleat#1646)",
+
+		// cleat#1918. queue.go:100 is `case "update":` in runQueue's dispatch
+		// switch, naming the new `queue update` subcommand. The verb regex
+		// matches on content, not on syntactic position, so a bare case label
+		// that happens to start with a SQL verb word is indistinguishable from
+		// a statement to the AST walk -- there is no SQL here at all, just a
+		// five-letter subcommand name that collides with the UPDATE keyword.
+		"update": "cmd/cleatctl/queue.go's `case \"update\":` switch label for the `queue update` subcommand; matches the verb regex by coincidence of spelling, not because it is SQL",
 	}
 
 	// A template is not checkable as written, and saying so out loud is the

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,7 +60,7 @@ func TestAQueueRoundTripsThroughItsStore(t *testing.T) {
 			nameA := queueTestName("aaa-payments")
 			nameB := queueTestName("zzz-emails")
 
-			if err := store.CreateQueue(ctx, tenantID, nameA, 3); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, nameA, 3, nil, nil); err != nil {
 				t.Fatalf("CreateQueue: %v", err)
 			}
 
@@ -77,7 +78,7 @@ func TestAQueueRoundTripsThroughItsStore(t *testing.T) {
 				t.Errorf("CreatedAt/UpdatedAt were not populated: %+v", got)
 			}
 
-			if err := store.CreateQueue(ctx, tenantID, nameB, 1); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, nameB, 1, nil, nil); err != nil {
 				t.Fatalf("CreateQueue (second queue): %v", err)
 			}
 
@@ -119,10 +120,10 @@ func TestARegisteredQueueCannotBeRegisteredTwice(t *testing.T) {
 			store := NewQueueStore(db, string(dialect))
 			name := queueTestName("payments")
 
-			if err := store.CreateQueue(ctx, tenantID, name, 3); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, name, 3, nil, nil); err != nil {
 				t.Fatalf("first CreateQueue: %v", err)
 			}
-			err := store.CreateQueue(ctx, tenantID, name, 5)
+			err := store.CreateQueue(ctx, tenantID, name, 5, nil, nil)
 			if !errors.Is(err, ErrQueueAlreadyExists) {
 				t.Fatalf("second CreateQueue for the same name: got %v, want ErrQueueAlreadyExists", err)
 			}
@@ -169,7 +170,7 @@ func TestDisablingAQueueIsIdempotent(t *testing.T) {
 			store := NewQueueStore(db, string(dialect))
 			name := queueTestName("payments")
 
-			if err := store.CreateQueue(ctx, tenantID, name, 3); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, name, 3, nil, nil); err != nil {
 				t.Fatalf("CreateQueue: %v", err)
 			}
 
@@ -201,6 +202,188 @@ func TestDisablingAQueueIsIdempotent(t *testing.T) {
 			}
 			if got2.DisabledAt == nil || !got2.DisabledAt.Equal(firstDisabledAt) {
 				t.Errorf("DisabledAt moved on a repeat disable: first=%v second=%v", firstDisabledAt, got2.DisabledAt)
+			}
+		})
+	}
+}
+
+func TestAQueueRateLimitRoundTripsThroughItsStore(t *testing.T) {
+	for _, dialect := range []testutil.Dialect{testutil.DialectPostgres, testutil.DialectMySQL, testutil.DialectMSSQL} {
+		t.Run(string(dialect), func(t *testing.T) {
+			db := testutil.TestDB(t, dialect)
+			testutil.SetupFullSchema(t, db, dialect)
+			ctx := context.Background()
+
+			tenantID := createQueueTestTenant(t, ctx, db, dialect, "qs-ratelimit")
+			store := NewQueueStore(db, string(dialect))
+			name := queueTestName("rate-payments")
+
+			limit, period := 5, 60
+			if err := store.CreateQueue(ctx, tenantID, name, 3, &limit, &period); err != nil {
+				t.Fatalf("CreateQueue with a rate limit: %v", err)
+			}
+
+			got, err := store.GetQueue(ctx, tenantID, name)
+			if err != nil {
+				t.Fatalf("GetQueue: %v", err)
+			}
+			if got.RateLimit == nil || *got.RateLimit != limit {
+				t.Errorf("RateLimit = %v, want %d", got.RateLimit, limit)
+			}
+			if got.RatePeriodSeconds == nil || *got.RatePeriodSeconds != period {
+				t.Errorf("RatePeriodSeconds = %v, want %d", got.RatePeriodSeconds, period)
+			}
+
+			list, err := store.ListQueues(ctx, tenantID)
+			if err != nil {
+				t.Fatalf("ListQueues: %v", err)
+			}
+			var found bool
+			for _, q := range list {
+				if q.Name != name {
+					continue
+				}
+				found = true
+				if q.RateLimit == nil || *q.RateLimit != limit || q.RatePeriodSeconds == nil || *q.RatePeriodSeconds != period {
+					t.Errorf("ListQueues rate limit for %s = (%v, %v), want (%d, %d)",
+						name, q.RateLimit, q.RatePeriodSeconds, limit, period)
+				}
+			}
+			if !found {
+				t.Fatalf("ListQueues did not return %s", name)
+			}
+		})
+	}
+}
+
+func TestAQueueWithNoRateLimitIsUnlimited(t *testing.T) {
+	for _, dialect := range []testutil.Dialect{testutil.DialectPostgres, testutil.DialectMySQL, testutil.DialectMSSQL} {
+		t.Run(string(dialect), func(t *testing.T) {
+			db := testutil.TestDB(t, dialect)
+			testutil.SetupFullSchema(t, db, dialect)
+			ctx := context.Background()
+
+			tenantID := createQueueTestTenant(t, ctx, db, dialect, "qs-norate")
+			store := NewQueueStore(db, string(dialect))
+			name := queueTestName("no-rate-payments")
+
+			if err := store.CreateQueue(ctx, tenantID, name, 3, nil, nil); err != nil {
+				t.Fatalf("CreateQueue: %v", err)
+			}
+			got, err := store.GetQueue(ctx, tenantID, name)
+			if err != nil {
+				t.Fatalf("GetQueue: %v", err)
+			}
+			if got.RateLimit != nil || got.RatePeriodSeconds != nil {
+				t.Errorf("a queue created with no rate limit has RateLimit=%v RatePeriodSeconds=%v, want nil, nil",
+					got.RateLimit, got.RatePeriodSeconds)
+			}
+		})
+	}
+}
+
+// TestCreateQueueRefusesAnUnpairedRateLimit is the falsifiable half of
+// validateRateLimitPair: giving one of rate_limit/rate_period_seconds
+// without the other must be refused before any statement runs, not left to
+// ck_queues_rate_limit_paired to catch as an opaque constraint violation.
+//
+// Asserts the ERROR TEXT, not just that an error occurred. A first version of
+// this test checked only err != nil and stayed green with validateRateLimitPair's
+// body replaced by `if false`, because ck_queues_rate_limit_paired still
+// refused the write one layer down -- any error satisfies "got nil error,
+// want a validation error". The whole point of validating in Go before the
+// statement runs is a message that names which flag is missing (see
+// CreateQueue's own doc comment); a test that cannot tell that message apart
+// from the constraint's opaque one is not testing the thing it is named for.
+func TestCreateQueueRefusesAnUnpairedRateLimit(t *testing.T) {
+	const wantSubstr = "must both be set, or neither"
+	for _, dialect := range []testutil.Dialect{testutil.DialectPostgres, testutil.DialectMySQL, testutil.DialectMSSQL} {
+		t.Run(string(dialect), func(t *testing.T) {
+			db := testutil.TestDB(t, dialect)
+			testutil.SetupFullSchema(t, db, dialect)
+			ctx := context.Background()
+
+			tenantID := createQueueTestTenant(t, ctx, db, dialect, "qs-unpaired")
+			store := NewQueueStore(db, string(dialect))
+
+			limit := 5
+			err := store.CreateQueue(ctx, tenantID, queueTestName("unpaired-a"), 1, &limit, nil)
+			if err == nil || !strings.Contains(err.Error(), wantSubstr) {
+				t.Errorf("CreateQueue with rate_limit set and rate_period_seconds nil: got %v, want an error containing %q", err, wantSubstr)
+			}
+
+			period := 60
+			err = store.CreateQueue(ctx, tenantID, queueTestName("unpaired-b"), 1, nil, &period)
+			if err == nil || !strings.Contains(err.Error(), wantSubstr) {
+				t.Errorf("CreateQueue with rate_period_seconds set and rate_limit nil: got %v, want an error containing %q", err, wantSubstr)
+			}
+		})
+	}
+}
+
+func TestSetQueueRateLimitSetsAndClears(t *testing.T) {
+	for _, dialect := range []testutil.Dialect{testutil.DialectPostgres, testutil.DialectMySQL, testutil.DialectMSSQL} {
+		t.Run(string(dialect), func(t *testing.T) {
+			db := testutil.TestDB(t, dialect)
+			testutil.SetupFullSchema(t, db, dialect)
+			ctx := context.Background()
+
+			tenantID := createQueueTestTenant(t, ctx, db, dialect, "qs-setratelimit")
+			store := NewQueueStore(db, string(dialect))
+			name := queueTestName("set-rate-payments")
+
+			// Created with no rate limit, then set, then cleared -- the full
+			// round trip an operator's `queue create` then `queue update`
+			// then `queue update --clear-rate-limit` goes through.
+			if err := store.CreateQueue(ctx, tenantID, name, 2, nil, nil); err != nil {
+				t.Fatalf("CreateQueue: %v", err)
+			}
+
+			limit, period := 10, 30
+			if err := store.SetQueueRateLimit(ctx, tenantID, name, &limit, &period); err != nil {
+				t.Fatalf("SetQueueRateLimit: %v", err)
+			}
+			got, err := store.GetQueue(ctx, tenantID, name)
+			if err != nil {
+				t.Fatalf("GetQueue after set: %v", err)
+			}
+			if got.RateLimit == nil || *got.RateLimit != limit || got.RatePeriodSeconds == nil || *got.RatePeriodSeconds != period {
+				t.Fatalf("after SetQueueRateLimit(%d, %d): got (%v, %v)", limit, period, got.RateLimit, got.RatePeriodSeconds)
+			}
+			// The concurrency limit must be untouched by a rate-limit-only
+			// update -- SetQueueRateLimit has no business changing it.
+			if got.ConcurrencyLimit != 2 {
+				t.Errorf("ConcurrencyLimit changed by SetQueueRateLimit: got %d, want 2", got.ConcurrencyLimit)
+			}
+
+			if err := store.SetQueueRateLimit(ctx, tenantID, name, nil, nil); err != nil {
+				t.Fatalf("SetQueueRateLimit (clear): %v", err)
+			}
+			got2, err := store.GetQueue(ctx, tenantID, name)
+			if err != nil {
+				t.Fatalf("GetQueue after clear: %v", err)
+			}
+			if got2.RateLimit != nil || got2.RatePeriodSeconds != nil {
+				t.Errorf("after clearing: RateLimit=%v RatePeriodSeconds=%v, want nil, nil", got2.RateLimit, got2.RatePeriodSeconds)
+			}
+		})
+	}
+}
+
+func TestSetQueueRateLimitOnAnUnregisteredQueueIsNotFound(t *testing.T) {
+	for _, dialect := range []testutil.Dialect{testutil.DialectPostgres, testutil.DialectMySQL, testutil.DialectMSSQL} {
+		t.Run(string(dialect), func(t *testing.T) {
+			db := testutil.TestDB(t, dialect)
+			testutil.SetupFullSchema(t, db, dialect)
+			ctx := context.Background()
+
+			tenantID := createQueueTestTenant(t, ctx, db, dialect, "qs-setratelimit-missing")
+			store := NewQueueStore(db, string(dialect))
+
+			limit, period := 5, 60
+			err := store.SetQueueRateLimit(ctx, tenantID, queueTestName("never-registered"), &limit, &period)
+			if !errors.Is(err, ErrQueueNotFound) {
+				t.Fatalf("SetQueueRateLimit for an unregistered name: got %v, want ErrQueueNotFound", err)
 			}
 		})
 	}

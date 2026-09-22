@@ -49,6 +49,7 @@ public.workflow_signals	not-an-entity	run-scoped
 public.workflow_update_requests	not-an-entity	run-scoped
 public.concurrency_keys	not-an-entity	holder-scoped, TTL-reclaimed (workflow_id + expires_at)
 public.queue_holders	not-an-entity	holder-scoped, TTL-reclaimed (workflow_id + expires_at); cleat#1116's semaphore holder beside concurrency_keys
+public.queue_rate_tokens	not-an-entity	TTL-reclaimed (expires_at), no created_at/updated_at/disabled_at; cleat#1918's rate-limit counter beside queue_holders
 public.idempotency_keys	not-an-entity	holder-scoped, TTL-reclaimed (workflow_id + expires_at)
 public.workflow_memory_samples	not-an-entity	stats
 public.workflow_memory_stats	not-an-entity	stats

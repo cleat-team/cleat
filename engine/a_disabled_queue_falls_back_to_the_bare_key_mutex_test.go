@@ -47,7 +47,7 @@ func TestADisabledQueueFallsBackToTheBareKeyMutex(t *testing.T) {
 			name := queueTestName("disabled")
 			db := queueClaimTestDB(t, store)
 			qs := NewQueueStore(db, backend.Name())
-			if err := qs.CreateQueue(ctx, DefaultTenantUUID, name, limit); err != nil {
+			if err := qs.CreateQueue(ctx, DefaultTenantUUID, name, limit, nil, nil); err != nil {
 				t.Fatalf("CreateQueue: %v", err)
 			}
 			if err := qs.DisableQueue(ctx, DefaultTenantUUID, name); err != nil {

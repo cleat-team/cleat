@@ -27,6 +27,7 @@ var coreTables = []string{
 	"plugin_defs",
 	"queues",
 	"queue_holders",
+	"queue_rate_tokens",
 	"tenant_domains",
 	"tenant_secrets",
 	"tenant_settings",

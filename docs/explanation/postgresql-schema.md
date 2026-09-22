@@ -440,12 +440,14 @@ against it, so capacity is never conjured by whichever run happened to start fir
 
 ```sql
 CREATE TABLE queues (
-    tenant_id          UUID NOT NULL REFERENCES admin.tenants(tenant_id) ON DELETE CASCADE,
-    name               TEXT NOT NULL,
-    concurrency_limit  INTEGER NOT NULL,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    disabled_at        TIMESTAMPTZ,
+    tenant_id            UUID NOT NULL REFERENCES admin.tenants(tenant_id) ON DELETE CASCADE,
+    name                 TEXT NOT NULL,
+    concurrency_limit    INTEGER NOT NULL,
+    rate_limit           INTEGER,
+    rate_period_seconds  INTEGER,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    disabled_at          TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, name)
 );
 ```
@@ -455,6 +457,10 @@ queue **does not stop its work** — every claim joins this table with
 `AND q.disabled_at IS NULL`, so a disabled queue reads as unregistered and its key falls back
 to the `concurrency_keys` mutex, N=1 rather than 0. That page explains why that is the right
 direction.
+
+`rate_limit` / `rate_period_seconds` are an independent admission control, set together or left
+both NULL (unlimited) — a queue can be concurrency-limited, rate-limited, both, or neither. See
+`queue_rate_tokens` below for the counter this pair drives.
 
 #### queue_holders
 
@@ -476,6 +482,28 @@ CREATE TABLE queue_holders (
 Counting holders cannot be decided by one statement's snapshot — two concurrent claims would
 each read one slot free and both insert — so the claim locks the `queues` row for the key
 (in sorted name order, against deadlock across multi-key claims) and counts under that lock.
+
+#### queue_rate_tokens
+
+One row per admission through a rate-limited queue, holding `expires_at` rather than an
+admission timestamp: "how many admissions fall inside the trailing window right now" and
+"which rows have aged out and can be reaped" are the same question asked twice, and
+`expires_at` answers both with one comparison against `now()`.
+
+```sql
+CREATE TABLE queue_rate_tokens (
+    tenant_id    UUID NOT NULL REFERENCES admin.tenants(tenant_id) ON DELETE CASCADE,
+    queue_name   TEXT NOT NULL,
+    workflow_id  TEXT NOT NULL,
+    expires_at   TIMESTAMPTZ NOT NULL
+);
+```
+
+Unlike `queue_holders`, `workflow_id` carries no foreign key here: a rate token's relevance ends
+`rate_period_seconds` after admission, which is unrelated to how long completed workflow rows are
+retained. A foreign key to `workflow_instances` would let a short retention window silently delete
+rate-limiting evidence out from under an in-progress window, undercounting admissions and letting
+a burst through the limiter should have caught. `workflow_id` is carried for diagnostics only.
 
 #### workflow_update_requests
 

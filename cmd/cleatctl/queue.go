@@ -97,8 +97,10 @@ func runQueue(ctx context.Context, db *sql.DB, d dialect, dsn string, args []str
 		queueSetRetired(ctx, store, tenant.String(), args[2:], true)
 	case "enable":
 		queueSetRetired(ctx, store, tenant.String(), args[2:], false)
+	case "update":
+		queueUpdate(ctx, store, tenant.String(), args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q; want list, create, disable or enable\n\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q; want list, create, disable, enable or update\n\n", sub)
 		printQueueUsage()
 		osExit(2)
 	}
@@ -134,7 +136,11 @@ func queueList(ctx context.Context, store *engine.QueueStore, tenant string) {
 			state = fmt.Sprintf("DISABLED %s (limit not in force; this key is a mutex, N=1)",
 				q.DisabledAt.UTC().Format("2006-01-02T15:04:05Z"))
 		}
-		fmt.Printf("  %-32s concurrency=%-4d %s\n", q.Name, q.ConcurrencyLimit, state)
+		rate := "no rate limit"
+		if q.RateLimit != nil {
+			rate = fmt.Sprintf("rate<=%d/%ds", *q.RateLimit, *q.RatePeriodSeconds)
+		}
+		fmt.Printf("  %-32s concurrency=%-4d %-16s %s\n", q.Name, q.ConcurrencyLimit, rate, state)
 	}
 }
 
@@ -143,6 +149,8 @@ func queueCreate(ctx context.Context, store *engine.QueueStore, tenant string, a
 	fs.SetOutput(os.Stderr)
 	fs.Usage = printQueueUsage
 	limit := fs.Int("concurrency", 0, "how many of this queue's runs may be claimed at once (>= 1)")
+	rateLimit := fs.Int("rate-limit", 0, "cap on admissions per --rate-period (>= 1; requires --rate-period)")
+	ratePeriod := fs.Int("rate-period", 0, "the rolling window --rate-limit applies over, in seconds (>= 1; requires --rate-limit)")
 
 	operands, err := parseFlagsAnywhere(fs, args)
 	if err != nil {
@@ -165,8 +173,14 @@ func queueCreate(ctx context.Context, store *engine.QueueStore, tenant string, a
 		osExit(2)
 		return
 	}
+	rl, rp, err := parseRateLimitFlags(*rateLimit, *ratePeriod)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		osExit(2)
+		return
+	}
 
-	err = store.CreateQueue(ctx, tenant, name, *limit)
+	err = store.CreateQueue(ctx, tenant, name, *limit, rl, rp)
 	if errors.Is(err, engine.ErrQueueAlreadyExists) {
 		// Not an upsert, and this says why rather than reporting a bare
 		// conflict: silently raising a limit an operator did not intend to
@@ -184,6 +198,9 @@ func queueCreate(ctx context.Context, store *engine.QueueStore, tenant string, a
 	}
 
 	fmt.Printf("registered queue %q for tenant %s with concurrency %d\n", name, tenant, *limit)
+	if rl != nil {
+		fmt.Printf("Rate-limited to %d admission(s) per %d second(s).\n", *rl, *rp)
+	}
 	fmt.Printf("Start a workflow against it by setting its concurrency_key to %q.\n", name)
 	fmt.Printf("At most %d of them are claimed at once; the rest WAIT and are claimed as slots\n", *limit)
 	fmt.Printf("free. They are deferred, not rejected -- no start returns 409 because of this.\n")
@@ -245,15 +262,108 @@ func queueSetRetired(ctx context.Context, store *engine.QueueStore, tenant strin
 	fmt.Printf("Workers apply it on their next claim -- there is no cache in front of it.\n")
 }
 
+// parseRateLimitFlags turns queueCreate/queueUpdate's --rate-limit and
+// --rate-period ints into the *int pair QueueStore takes. 0/0 (both flags
+// left at their default) means "no rate limit" -- the same "0 means not
+// passed" convention --concurrency already uses above, valid here for the
+// same reason: a real rate limit or period of 0 is refused anyway, so 0 is
+// never a value a caller means to set.
+func parseRateLimitFlags(rateLimit, ratePeriod int) (rl, rp *int, err error) {
+	if rateLimit == 0 && ratePeriod == 0 {
+		return nil, nil, nil
+	}
+	if rateLimit == 0 || ratePeriod == 0 {
+		return nil, nil, fmt.Errorf(
+			"--rate-limit and --rate-period must both be given, or neither (got --rate-limit=%d --rate-period=%d)",
+			rateLimit, ratePeriod)
+	}
+	if rateLimit < 1 || ratePeriod < 1 {
+		return nil, nil, fmt.Errorf("--rate-limit and --rate-period must both be >= 1 (got %d, %d)", rateLimit, ratePeriod)
+	}
+	return &rateLimit, &ratePeriod, nil
+}
+
+// queueUpdate sets or clears a registered queue's rate limit. It does not
+// touch --concurrency -- cleat#1918's own scope, and there is no operational
+// need to change a semaphore's ceiling here that queue disable/enable's
+// mutex fallback does not already cover for the "I want fewer running at
+// once, right now" case.
+func queueUpdate(ctx context.Context, store *engine.QueueStore, tenant string, args []string) {
+	fs := flag.NewFlagSet("queue update", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = printQueueUsage
+	rateLimit := fs.Int("rate-limit", 0, "cap on admissions per --rate-period (>= 1; requires --rate-period)")
+	ratePeriod := fs.Int("rate-period", 0, "the rolling window --rate-limit applies over, in seconds (>= 1; requires --rate-limit)")
+	clear := fs.Bool("clear-rate-limit", false, "remove the queue's rate limit (mutually exclusive with --rate-limit/--rate-period)")
+
+	operands, err := parseFlagsAnywhere(fs, args)
+	if err != nil {
+		osExit(2)
+		return
+	}
+	if len(operands) != 1 {
+		fmt.Fprintf(os.Stderr, "error: update takes exactly one queue name (got %d)\n\n", len(operands))
+		printQueueUsage()
+		osExit(2)
+		return
+	}
+	name := operands[0]
+
+	if *clear && (*rateLimit != 0 || *ratePeriod != 0) {
+		fmt.Fprintf(os.Stderr, "error: --clear-rate-limit and --rate-limit/--rate-period are mutually exclusive\n")
+		osExit(2)
+		return
+	}
+	var rl, rp *int
+	if !*clear {
+		rl, rp, err = parseRateLimitFlags(*rateLimit, *ratePeriod)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			osExit(2)
+			return
+		}
+		if rl == nil {
+			fmt.Fprintf(os.Stderr, "error: update needs --rate-limit and --rate-period, or --clear-rate-limit\n\n")
+			printQueueUsage()
+			osExit(2)
+			return
+		}
+	}
+
+	err = store.SetQueueRateLimit(ctx, tenant, name, rl, rp)
+	if errors.Is(err, engine.ErrQueueNotFound) {
+		fmt.Fprintf(os.Stderr, "error: tenant %s has no queue named %q\n", tenant, name)
+		osExit(1)
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error updating queue %q: %v\n", name, err)
+		osExit(1)
+		return
+	}
+
+	if rl != nil {
+		fmt.Printf("queue %q for tenant %s is now rate-limited to %d admission(s) per %d second(s).\n",
+			name, tenant, *rl, *rp)
+	} else {
+		fmt.Printf("queue %q for tenant %s has no rate limit.\n", name, tenant)
+	}
+	fmt.Printf("Workers apply it on their next claim -- there is no cache in front of it.\n")
+}
+
 func printQueueUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: cleatctl --db <dsn> queue <list|create|disable|enable> <tenant-uuid> [args]
+	fmt.Fprintf(os.Stderr, `Usage: cleatctl --db <dsn> queue <list|create|disable|enable|update> <tenant-uuid> [args]
 
 NOTE: --db is a GLOBAL flag and goes BEFORE the command name.
 
   queue list    <tenant>                        show a tenant's declared queues
   queue create  <tenant> <name> --concurrency N register one, admitting N at a time
+                [--rate-limit N --rate-period S]  and optionally cap admissions to
+                                                   N per S seconds (both or neither)
   queue disable <tenant> <name>                 retire it (see below -- NOT a stop)
   queue enable  <tenant> <name>                 put a retired queue back
+  queue update  <tenant> <name> --rate-limit N --rate-period S  set the rate limit
+                <tenant> <name> --clear-rate-limit              or remove it
 
 A queue is a DECLARED concurrency limit. A workflow joins it by setting its
 concurrency_key to the queue's name; at most N of them run at once and the rest
@@ -262,6 +372,11 @@ wait, then are claimed as slots free. Work is DEFERRED, never rejected.
 A concurrency_key with no registered queue behind it is cleat's original
 behaviour: a mutex, one run at a time. Disabling a queue returns its key to
 exactly that -- one at a time, not zero. It does not stop the work.
+
+A queue's RATE LIMIT is separate from its concurrency limit: it caps how many
+runs are ADMITTED per rolling window, independent of how many run at once. A
+queue with no rate limit admits as fast as its concurrency limit allows, same
+as before this existed.
 
 Queue names match [A-Za-z0-9_.-]{1,128}.
 `)
