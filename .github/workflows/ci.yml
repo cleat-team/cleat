@@ -1269,6 +1269,20 @@ jobs:
             path: ./internal/...
           - name: plugins
             path: ./plugins/...
+            # -p 1 for the same reason the engine and support entries above
+            # carry it (cleat#2063). At least 13 of the packages under
+            # plugins/ are database-backed (auditlog, blobstore,
+            # datadogexport, eventstore, eventtriggers, featureflags,
+            # jobqueue, kafkaconnect, kvstore, notifications, ratelimiter,
+            # scheduler, webhookingest), all pointed at the one PostgreSQL
+            # service this job provides, and `go test` runs packages in
+            # parallel by default. Measured 2026-09-23 on a merge_group run
+            # (35878274795, job 107239811455): plugins/featureflags failed
+            # cleat#982's foreign-session guard 1.8ms after plugins/eventtriggers
+            # finished, with its still-open pool as the foreign session --
+            # exactly the overlap CLAUDE.md's "-p 1" rule exists to prevent.
+            # That failure dropped a CLEAN PR from the merge queue.
+            flags: -p 1
           # packaging/ holds no production code -- only the Homebrew formula and
           # the guards that keep it internally consistent (that url names a tag,
           # that CGO_ENABLED=1 wraps the cleat-worker build, that the test block
@@ -1297,6 +1311,11 @@ jobs:
             flags: -p 1
           - name: commands
             path: ./cmd/...
+            # -p 1 for the same reason as the plugins entry above (cleat#2063).
+            # Three of the nine packages under cmd/ are database-backed --
+            # cleat, cleat-worker and cleatctl -- and this job provides one
+            # PostgreSQL service they'd all share in parallel otherwise.
+            flags: -p 1
           # tests/ is otherwise not in this matrix -- cluster/scale/soak need
           # infrastructure and plugin-harness and cross-language have their own
           # workflows. manifests needs nothing but a Go toolchain, and it is the
