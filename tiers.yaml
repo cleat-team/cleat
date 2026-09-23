@@ -1341,7 +1341,7 @@ required_contexts:
   # protection itself, not the date this file was last edited. Only --check-live and the
   # default run's live attempt can move it; an entry added from a PR description cannot.
   measured: 2026-09-23
-  total: 32
+  total: 33
 
   # `covers` is one of:
   #   tier1        the context runs only tier-1 packages/modules
@@ -1576,6 +1576,10 @@ required_contexts:
     - context: Contributor License Agreement
       workflow: cla-assistant.yml
       job: cla
+      covers: infra
+    - context: Closing References
+      workflow: closing-reference-check.yml
+      job: closing-references
       covers: infra
 
 
