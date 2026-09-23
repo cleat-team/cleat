@@ -690,11 +690,17 @@ is set.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `30` | Days to retain completed/failed workflow event history (0 disables) |
+| int | `30` | Days after which a **failed** workflow's event history is deleted (0 disables) -- a **done** workflow's is already gone at finalize, so this flag only does first-hand work for `failed` |
 
-Deletes `event_history` rows for terminal workflows. The `workflow_instances`
-row itself (status, result, error, def_name) is untouched by this flag --
-see `--completed-workflow-retention-days` below to also reclaim that.
+Deletes `event_history` rows for terminal workflows, but in practice that
+means `failed` ones: a `done` workflow's history is purged immediately at
+finalize (`finalize_workflow_status`'s `done` branch), before this sweep ever
+runs, while a `failed` workflow's history is untouched until this flag's
+window elapses -- `store.FailWorkflow` never purges it (cleat#1973). The
+`workflow_instances` row itself (status, result, error, def_name) is
+untouched by this flag either way -- see `--completed-workflow-retention-days`
+below to also reclaim that. See `docs/operations/workflow-retention.md` for
+the full story, including `terminated` and `dead_lettered`.
 
 ---
 

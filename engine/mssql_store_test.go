@@ -1728,10 +1728,17 @@ func TestMSSQLStore_FinalizeWorkflowSegment_Done(t *testing.T) {
 	}
 }
 
+// TestMSSQLStore_FinalizeWorkflowSegment_Failed used to assert that "failed"
+// succeeds here, mocking finalize_workflow_status's now-removed 'failed' arm.
+// cleat#1973 removed that arm -- nothing in production ever called it that
+// way, and a real failure goes through FailWorkflow instead -- so this must
+// now assert the opposite: "failed" is refused, in Go, before any query
+// reaches the mock. No mockRowsResult/mockExecResult beyond
+// sp_set_session_context is wired up, deliberately: a query the store issues
+// here is itself a failure, since validFinalStatus must reject "failed"
+// before finalizeWorkflowSegmentInner ever opens a transaction.
 func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "finalize_workflow_status", data: [][]driver.Value{{true}}},
-	}, []mockExecResult{
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
 	})
 	defer db.Close()
@@ -1739,8 +1746,9 @@ func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
 	store := NewMSSQLStore(db)
 	err := store.FinalizeWorkflowSegment(context.Background(), "wf-1", "worker-1", 1,
 		[]EventRecord{}, "failed", "error occurred", "ERR_01", "my-op", nil, time.Time{})
-	if err != nil {
-		t.Fatalf("FinalizeWorkflowSegment(failed): %v", err)
+	if err == nil {
+		t.Fatal(`FinalizeWorkflowSegment(finalStatus="failed") returned nil -- cleat#1973 ` +
+			"removed the procedure's 'failed' arm; this must be refused")
 	}
 }
 

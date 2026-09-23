@@ -76,12 +76,20 @@ func (c *costCommand) Estimate() *CostEstimate {
 	// develop, and the errors run in BOTH directions:
 	//
 	//   finalize_workflow_status deletes a workflow's event_history at a
-	//   terminal state, but only for 'done' or 'failed' --
-	//   migrations/postgres/053_the_finalize_procedure_stops_writing_the_
-	//   result_column.sql: `IF v_rows_updated > 0 AND (p_final_status = 'done'
-	//   OR p_final_status = 'failed')`. So for the overwhelming majority of
-	//   runs those rows live for the WORKFLOW'S DURATION, and this term
+	//   terminal state, but only for 'done' --
+	//   migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_
+	//   history.sql: `IF v_rows_updated > 0 AND p_final_status = 'done'`. So
+	//   for the overwhelming majority of runs -- the ones that complete --
+	//   those rows live for the WORKFLOW'S DURATION, and this term
 	//   over-estimates by roughly retentionDays / average duration.
+	//
+	//   'failed' used to be grouped with 'done' in this comment, and never
+	//   should have been: nothing calls finalize_workflow_status with
+	//   'failed' in production (FailWorkflow bypasses it entirely, a plain
+	//   UPDATE), so a failed run's history was already retained until the
+	//   retention sweep, same as 'terminated' and 'dead_lettered' below --
+	//   migration 101 (cleat#1973) removed the procedure's dead 'failed' arm
+	//   to match what was already true in practice.
 	//
 	//   'terminated' and 'dead_lettered' go the other way. Neither
 	//   TerminateWorkflow nor MoveToDeadLetterQueue calls finalize, and

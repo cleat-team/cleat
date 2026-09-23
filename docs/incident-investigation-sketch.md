@@ -130,7 +130,7 @@ More than a sketch of this usually assumes.
 | Replay of a run from its history | `cleatctl replay` (`cmd/cleatctl/replay.go:13-60`) |
 | Divergence detection during replay | the stub caller that errors if replay diverges into fresh execution |
 | Interactive inspection | `cleatctl debug` |
-| Failed runs with full history retained | the dead-letter queue |
+| Failed runs with full history retained | any `failed` workflow, not only dead-lettered ones -- `store.FailWorkflow` (`engine/store_lifecycle.go`) never purges `event_history`; it survives until `--retention-days` sweeps it, default 30 days (cleat#1973) |
 | W3C trace correlation | `trace_id` column, from the `traceparent` header (`cmd/cleat-worker/server.go:970`, generated at `setup.go:1786-1791`, carried by `engine.WithTraceID`) |
 | Metrics export | `monitoring/prometheus`, and the `datadogexport` plugin |
 | Audit of actions | `auditlog` |

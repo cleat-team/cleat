@@ -83,8 +83,16 @@ cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20 --new-flag value
 
 ### Automatic migration (recommended)
 
-Starting from cleat v0.7.0, the worker checks the schema version at startup
-and applies pending migrations automatically before entering the dispatch loop.
+**0.3.0 requires a fresh database. There is no upgrade path from v0.2.0** --
+the schema rebaseline (`event_history` partitioning plus migration
+compaction, cleat#2059) breaks compatibility with any pre-0.3.0 database on
+purpose, and is the last change before the 0.3.0 tag. Provision a fresh
+database for 0.3.0; there is no cleat v0.7.0, and no version of cleat before
+0.3.0 to migrate from.
+
+The guidance below describes ordinary migrations between later releases,
+once those exist: the worker checks the schema version at startup and
+applies pending migrations automatically before entering the dispatch loop.
 No manual steps are needed:
 
 ```bash
