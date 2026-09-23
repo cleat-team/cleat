@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Structural guards over .github/workflows/, run by the Lint job.
 
-Five checks, each catching a *class* of defect that has already cost this repo
+Six checks, each catching a *class* of defect that has already cost this repo
 a session to find one instance of by hand:
 
   1. Every context in .github/required-checks.txt resolves to a job that
@@ -19,6 +19,13 @@ a session to find one instance of by hand:
      later without the clause runs unconditionally on a docs-only PR,
      silently spending the minutes cleat#2118 exists to save while the job
      still reports success -- and no other guard here would notice.
+  6. No `*_test.go` path literal falls inside the docs_only skip pattern
+     (cleat#2118).  A docs-only PR skips every real step in the jobs gated on
+     `changes` -- so a path the pattern lets through AND a test reads is
+     invisible to that test on exactly the PR that changed it. Caught in
+     review before merge: the pattern originally included `\.md$|^docs/`, and
+     at least 15 tests across 5 packages read Markdown/docs content to hold
+     documentation to the code.
 
 Design note, since it is the whole point of the exercise: this script FAILS on
 anything it cannot analyse rather than passing.  A matrix it cannot expand, an
@@ -27,7 +34,7 @@ guard that quietly skips the case it does not understand is the thing it was
 written to prevent.
 
 Usage:
-    scripts/check-workflow-guards.py                     # the four guards
+    scripts/check-workflow-guards.py                     # the six guards
     scripts/check-workflow-guards.py --verify-against-api  # needs an admin token
 """
 
@@ -372,6 +379,121 @@ def guard_changes_gated_steps_are_skippable(errors) -> None:
                 )
 
 
+CLASSIFY_PATTERN = re.compile(r"grep -vqE '([^']*)'")
+
+
+def parse_skip_pattern(pattern: str) -> list[tuple[str, str]]:
+    """`^specs/|^\\.claude/` -> [("prefix", "specs/"), ("prefix", ".claude/")].
+
+    Each alternative in the classify step's grep pattern is either `^text/`
+    (a path-prefix match) or `text$` (a path-suffix match, e.g. `\\.md$`).
+    Backslash-escapes on regex metacharacters (`\\.`) are unescaped back to
+    the literal character a real path would contain.
+    """
+    branches: list[tuple[str, str]] = []
+    for alt in pattern.split("|"):
+        alt = alt.strip()
+        literal = alt.replace("\\.", ".")
+        if literal.startswith("^"):
+            branches.append(("prefix", literal[1:]))
+        elif literal.endswith("$"):
+            branches.append(("suffix", literal[:-1]))
+        else:
+            raise Unexpandable(
+                f"classify pattern alternative {alt!r} is neither ^prefix/ "
+                f"nor suffix$ -- guard_docs_only_skip_pattern_is_test_blind "
+                f"does not know how to check it"
+            )
+    return branches
+
+
+GO_STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def guard_docs_only_skip_pattern_is_test_blind(errors) -> None:
+    """No `*_test.go` path literal falls inside the docs_only skip pattern.
+
+    cleat#2118's classify step skips every real step in a gated job for a
+    pull_request whose files all match a pattern -- so any path that pattern
+    matches AND a test reads is invisible to that test on exactly the PR that
+    changed it. Caught in review before merge: cmd/cleat's
+    documented_flags_and_codes_test.go and
+    documented_invocations_clear_flag_parsing_test.go each glob over EVERY
+    tracked `*.md` file, so `\\.md$|^docs/` (the pattern's original form) was
+    unsafe everywhere it appeared, not just for the specific docs paths named
+    in this file -- at least 15 tests across 5 packages read Markdown or
+    `docs/` content to hold documentation to the code. The pattern was
+    narrowed to `^specs/|^\\.claude/`, neither of which any tracked
+    `*_test.go` reads (`.claude/worktrees/` is additionally `.gitignore`d, so
+    it can never appear in a diff regardless).
+
+    This guard is what keeps that true. It does not hardcode "no docs/.md" --
+    it re-parses whatever the checked-in pattern currently is and fails if
+    ANY test reads a path the pattern would let through. Widen the pattern
+    back to include a path a test reads, and this fails naming the test; that
+    is the falsification cleat#2118's PR ran to prove it.
+    """
+    try:
+        test_files = subprocess.run(
+            ["git", "ls-files", "*_test.go"],
+            capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        errors.append(f"guard_docs_only_skip_pattern_is_test_blind: could not list *_test.go: {exc}")
+        return
+
+    patterns_by_file: dict[str, str] = {}
+    for path in workflow_files():
+        try:
+            src = open(path).read()
+        except OSError:
+            continue
+        match = CLASSIFY_PATTERN.search(src)
+        if match and "changes:" in src:
+            patterns_by_file[path] = match.group(1)
+
+    if not patterns_by_file:
+        return  # no workflow currently defines a `changes` classifier
+
+    distinct = set(patterns_by_file.values())
+    if len(distinct) > 1:
+        errors.append(
+            "guard_docs_only_skip_pattern_is_test_blind: the classify "
+            f"pattern is not identical across workflows: {patterns_by_file}"
+        )
+        return
+
+    pattern = next(iter(distinct))
+    try:
+        branches = parse_skip_pattern(pattern)
+    except Unexpandable as exc:
+        errors.append(f"guard_docs_only_skip_pattern_is_test_blind: {exc}")
+        return
+
+    for test_path in test_files:
+        if not test_path:
+            continue
+        try:
+            src = open(test_path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for match in GO_STRING_LITERAL.finditer(src):
+            literal = match.group(1)
+            for kind, frag in branches:
+                hit = (
+                    kind == "prefix"
+                    and (literal == frag.rstrip("/") or literal.startswith(frag))
+                ) or (kind == "suffix" and literal.endswith(frag))
+                if hit:
+                    line = src.count("\n", 0, match.start()) + 1
+                    errors.append(
+                        f"{test_path}:{line}: string literal {literal!r} falls "
+                        f"inside the docs_only skip pattern ({kind} {frag!r}) "
+                        f"-- this test would be silently skipped by cleat#2118 "
+                        f"on a pull request that only changes such a path"
+                    )
+
+
 def verify_against_api() -> int:
     """Compare the checked-in list to branch protection. Needs an admin token."""
     try:
@@ -431,6 +553,7 @@ def main() -> int:
     guard_no_floating_service_images(errors)
     guard_ancestor_filters_match_images(errors)
     guard_changes_gated_steps_are_skippable(errors)
+    guard_docs_only_skip_pattern_is_test_blind(errors)
 
     for error in errors:
         print(f"::error title=Workflow integrity::{error}")

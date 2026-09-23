@@ -175,7 +175,26 @@ jobs:
             exit 0
           fi
           echo "$files"
-          if echo "$files" | grep -vqE '\.md$|^docs/|^specs/|^\.claude/'; then
+          # `.md$|^docs/` is DELIBERATELY NOT in this pattern. At least 15
+          # tests on develop read Markdown/docs content to hold documentation
+          # to the code (cmd/cleat's documented_flags_and_codes_test.go and
+          # documented_invocations_clear_flag_parsing_test.go each glob over
+          # EVERY tracked *.md file, so no single .md path is provably safe to
+          # skip); a docs-only PR that broke one of those would sail through as
+          # green. `^\.claude/` isn't here either, for the same reason and by
+          # the same discovery: 3 tests reference the literal `.claude/` --
+          # not to assert anything about its content, but to EXCLUDE it while
+          # walking the repo (it holds scratch agent worktrees, whole extra
+          # copies of the tree). .claude/settings.local.json is tracked, so a
+          # PR touching only it is real, and the guard below cannot tell
+          # "excluded defensively" from "read for correctness" from a string
+          # literal alone -- so it treats both as unsafe, which is the
+          # conservative direction to be wrong in. specs/ has no reader of any
+          # kind. scripts/check-workflow-guards.py's
+          # guard_docs_only_skip_pattern_is_test_blind keeps this true: it fails
+          # if any *_test.go path literal ever falls inside whatever this
+          # pattern currently matches.
+          if echo "$files" | grep -vqE '^specs/'; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
           else
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
@@ -192,7 +211,7 @@ jobs:
       - name: No relevant changes in this pull request
         if: needs.changes.outputs.docs_only == 'true'
         run: |
-          echo "cross-language wasm e2e -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+          echo "cross-language wasm e2e -- skipped: this pull request touches only paths no Go test reads (specs/) -- cleat#2118"
 
       - uses: actions/checkout@v7
         if: needs.changes.outputs.docs_only != 'true'
