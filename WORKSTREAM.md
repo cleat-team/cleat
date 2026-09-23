@@ -329,6 +329,23 @@ and were respected: WS-1 declined `#1410` while mid-task, and declined `#1688` o
 measured the one open question on it anyway and posted the result. Context-switch cost is real and
 the holder is the one who can price it.
 
+**R10 — A red develop is stop-the-line: revert first, investigate second** (owner-approved
+2026-09-23 with #2080). From #2080 on, the merge queue no longer re-runs Tier 1 Gate's test
+shards on the batch: they report "already checked on the pull request". A semantic conflict
+between two PRs that were each green on their own is therefore caught *after* the merge, by
+develop's own `push` run or the 4-hourly `engine-race.yml` run (#2082), not before it. That trade
+was taken on evidence: in the 57 queue batches measured over 09-21 to 09-23, those jobs failed 0
+times, and every failure they caught was on the PR (#2080 has the table). It is acceptable only if
+a red develop is fixed at once:
+
+- Whoever sees develop go red says so to the coordinator. The author of the most recent merge,
+  or the coordinator if that author is busy, **reverts that merge first** (`gh pr revert`, a
+  normal PR through the queue) and investigates afterwards, on the reverted branch.
+- No stream enqueues anything else until develop is green again, because everything queued
+  behind a red develop is tested against a broken base.
+- A red `engine-race.yml` run opens a tracking issue on its own. A real `WARNING: DATA RACE` is
+  treated the same way as a red develop.
+
 ---
 
 ## Verification protocol
