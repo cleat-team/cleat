@@ -315,6 +315,13 @@ jobs:
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
+          # SQL Server on Linux sizes its buffer pool to 80% of VISIBLE host
+          # memory by default, with no awareness it shares a runner with
+          # Postgres, MySQL and everything else in this job (cleat#2101).
+          # 2048 is comfortably above what the tier1/multi-db fixtures need
+          # and caps the worst case where several mssql services land on one
+          # runner at once. Bump all six sites together, per the note above.
+          MSSQL_MEMORY_LIMIT_MB: "2048"
         options: >-
           --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
           --health-interval 10s
@@ -444,6 +451,13 @@ jobs:
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
+          # SQL Server on Linux sizes its buffer pool to 80% of VISIBLE host
+          # memory by default, with no awareness it shares a runner with
+          # Postgres, MySQL and everything else in this job (cleat#2101).
+          # 2048 is comfortably above what the tier1/multi-db fixtures need
+          # and caps the worst case where several mssql services land on one
+          # runner at once. Bump all six sites together, per the note above.
+          MSSQL_MEMORY_LIMIT_MB: "2048"
         options: >-
           --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
           --health-interval 10s
