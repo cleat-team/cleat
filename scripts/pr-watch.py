@@ -29,8 +29,9 @@ WHAT IT CHECKS, in the order WORKSTREAM.md R9 states them:
     jobs are read from the batch's merge_group runs (head branch
     gh-readonly-queue/develop/pr-<N>-<sha>), never from the PR head.
   - otherwise the PR's own checks: anything red, a conflict, or a cancelled
-    check run on the head SHA (R9's twin clause; needs a new SHA, not a
-    re-run) is NEEDS-AUTHOR; anything still running is WAITING.
+    check run is NEEDS-AUTHOR -- told apart as R9's twin (needs a new SHA)
+    or a lone cancellation (a re-run clears it); anything still running is
+    WAITING.
   - CLEAN, all green, and not queued is NEEDS-AUTHOR too: nothing merges it
     until someone enqueues it.
 
@@ -101,13 +102,26 @@ def open_prs() -> list[int]:
     return [p["number"] for p in prs if "dependabot" not in p["author"]["login"]]
 
 
-def cancelled_on(sha: str) -> list[str]:
+def cancelled_on(sha: str) -> dict[str, list[str]]:
+    """Check names whose LATEST run on sha was cancelled, split in two.
+
+    The endpoint's default filter is `latest`: a re-run replaces the cancelled
+    run in the listing (measured on #2073, 2026-09-23: one cancelled Tier 1
+    Gate, gone from the default listing once re-run, still in `filter=all`).
+    So a name that is ONLY cancelled here is a lone cancellation -- a runner
+    lost mid-job -- and a re-run clears it. A name that is cancelled AND has a
+    completed run of the same name here is R9's twin (cleat#1688): two run
+    sets, and it needs a new SHA.
+    """
     # --paginate: R9 records per_page=100 alone truncating 121 check runs to
     # 100, which cost 17 of the cancelled ones. headRefOid is the full SHA.
     pages = gh_json(["api", "--paginate", "--slurp",
                      f"repos/{REPO}/commits/{sha}/check-runs?per_page=100"])
-    return [r["name"] for page in pages for r in page["check_runs"]
-            if r.get("conclusion") == "cancelled"]
+    runs = [r for page in pages for r in page["check_runs"]]
+    cancelled = {r["name"] for r in runs if r.get("conclusion") == "cancelled"}
+    finished = {r["name"] for r in runs
+                if r.get("conclusion") not in (None, "cancelled")}
+    return {"twin": sorted(cancelled & finished), "lone": sorted(cancelled - finished)}
 
 
 def batch_failures(n: int) -> dict:
@@ -134,7 +148,7 @@ def measure(n: int) -> dict:
     pr = data["data"]["repository"]["pullRequest"]
     if pr is None:
         raise Unmeasured(f"#{n}: no such pull request")
-    state = {"pr": pr, "cancelled": [], "batch": None}
+    state = {"pr": pr, "cancelled": {"twin": [], "lone": []}, "batch": None}
     if pr["state"] == "OPEN":
         state["cancelled"] = cancelled_on(pr["headRefOid"])
         last = pr["timelineItems"]["nodes"]
@@ -192,9 +206,13 @@ def classify(state: dict) -> tuple[str, str]:
         return "NEEDS-AUTHOR", "failing: " + ", ".join(sorted(set(red)))
     if pr["mergeStateStatus"] == "DIRTY":
         return "NEEDS-AUTHOR", "merge conflict"
-    if state["cancelled"]:
-        return "NEEDS-AUTHOR", ("cancelled check run(s) on the head SHA, which needs a new "
-                                "SHA rather than a re-run: " + ", ".join(sorted(set(state["cancelled"]))))
+    cancelled = state["cancelled"]
+    if cancelled["twin"]:
+        return "NEEDS-AUTHOR", ("cancelled TWIN check run(s) on the head SHA -- push a new SHA, "
+                                "a re-run does not clear it (R9): " + ", ".join(cancelled["twin"]))
+    if cancelled["lone"]:
+        return "NEEDS-AUTHOR", ("cancelled check run(s), the latest of their name -- re-run: "
+                                "gh run rerun <run> --failed; " + ", ".join(cancelled["lone"]))
     if running:
         return "WAITING", f"{running} check(s) running, not yet queued"
     if pr["mergeStateStatus"] == "CLEAN":
