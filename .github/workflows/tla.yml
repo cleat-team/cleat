@@ -19,6 +19,11 @@ on:
       - "engine/sharded_store.go"
       - "engine/db.go"
       - "cmd/cleat-worker/setup.go"
+      - "engine/status_vocabulary.go"
+      - "engine/defer_phase.go"
+      - "engine/store_defer_phase.go"
+      - "engine/store_admin.go"
+      - "engine/store_admin_rereplay.go"
     # `edited` is required, not decorative -- see ecosystem-ci.yml's comment
     # on the same line for why (a retargeted PR would otherwise never trigger
     # this workflow at all). scripts/check-workflow-pr-triggers.sh guards it.
