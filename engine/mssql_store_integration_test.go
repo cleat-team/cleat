@@ -449,51 +449,6 @@ func TestMSSQLIntegration_Heartbeat(t *testing.T) {
 	}
 }
 
-func TestMSSQLIntegration_BatchHeartbeat(t *testing.T) {
-	store, db := setupMSSQLIntegrationTest(t)
-	ctx := context.Background()
-	deployWorkflowDef(t, store, "bhb-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
-
-	// Insert two ready workflows and claim them.
-	ids := []string{uuid.New().String(), uuid.New().String()}
-	for _, id := range ids {
-		_, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue)
-			VALUES (@p1, 'bhb-wf', 1, 'ready', DATEADD(DAY, -1, SYSUTCDATETIME()), '{}', 'default')
-		`, id)
-		if err != nil {
-			t.Fatalf("insert workflow_instance: %v", err)
-		}
-	}
-
-	// Claim them all.
-	claimed, err := store.ClaimWorkflows(ctx, "batch-hb-worker", 10)
-	if err != nil {
-		t.Fatalf("ClaimWorkflows: %v", err)
-	}
-	if len(claimed) != 2 {
-		t.Fatalf("expected 2 claimed, got %d", len(claimed))
-	}
-
-	// Batch heartbeat.
-	n, err := store.BatchHeartbeat(ctx, "batch-hb-worker")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 2 {
-		t.Errorf("BatchHeartbeat affected %d rows, want 2", n)
-	}
-
-	// Unknown worker has no running workflows.
-	n, err = store.BatchHeartbeat(ctx, "unknown-worker")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat unknown: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("BatchHeartbeat for unknown worker affected %d rows, want 0", n)
-	}
-}
-
 func TestMSSQLIntegration_ReleaseWorkflow(t *testing.T) {
 	store, db := setupMSSQLIntegrationTest(t)
 	ctx := context.Background()

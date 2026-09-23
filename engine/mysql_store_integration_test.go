@@ -765,36 +765,6 @@ func TestMySQLIntegration_Heartbeat(t *testing.T) {
 	}
 }
 
-// 16.
-func TestMySQLIntegration_BatchHeartbeat(t *testing.T) {
-	s, teardown := mysqlIntegrationStore(t)
-	defer teardown()
-	ctx := context.Background()
-
-	// Create 3 workflows and claim them all with the same worker.
-	for i := 0; i < 3; i++ {
-		key := fmt.Sprintf("integ-batch-hb-%d", i)
-		createReadyWorkflow(t, s, key)
-	}
-
-	wfs, err := s.ClaimWorkflows(ctx, "batch-worker", 10)
-	if err != nil {
-		t.Fatalf("ClaimWorkflows: %v", err)
-	}
-	if len(wfs) < 3 {
-		t.Fatalf("ClaimWorkflows returned %d, want at least 3", len(wfs))
-	}
-
-	// BatchHeartbeat should update all running workflows assigned to this worker.
-	count, err := s.BatchHeartbeat(ctx, "batch-worker")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if count < 3 {
-		t.Errorf("BatchHeartbeat returned %d, want >= 3", count)
-	}
-}
-
 // 17.
 func TestMySQLIntegration_ReapStaleInstances(t *testing.T) {
 	s, teardown := mysqlIntegrationStore(t)

@@ -1097,38 +1097,6 @@ func TestMSSQLStore_Heartbeat_BeginError(t *testing.T) {
 	}
 }
 
-func TestMSSQLStore_BatchHeartbeat_Success(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "status = 'running'", affected: 5},
-	})
-	defer db.Close()
-
-	store := NewMSSQLStore(db)
-	n, err := store.BatchHeartbeat(context.Background(), "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 5 {
-		t.Errorf("expected 5 rows, got %d", n)
-	}
-}
-
-func TestMSSQLStore_BatchHeartbeat_Zero(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "status = 'running'", affected: 0},
-	})
-	defer db.Close()
-
-	store := NewMSSQLStore(db)
-	n, err := store.BatchHeartbeat(context.Background(), "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("expected 0 rows, got %d", n)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Workflow lifecycle: CompleteWorkflow, FailWorkflow, ReleaseWorkflow
 // ---------------------------------------------------------------------------

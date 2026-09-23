@@ -12,35 +12,6 @@ import (
 // Covers 14 uncovered methods with 33 test functions.
 
 // ---------------------------------------------------------------------------
-// BatchHeartbeat
-// ---------------------------------------------------------------------------
-
-func TestGap_BatchHeartbeat(t *testing.T) {
-	db := newNoopDB(t)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	n, err := store.BatchHeartbeat(testCtx, "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 0 {
-		t.Logf("BatchHeartbeat returned %d rows (expected 0 with noop driver)", n)
-	}
-}
-
-func TestGap_BatchHeartbeat_BeginError(t *testing.T) {
-	db := newMockDBWithErrors(t, nil, nil, fmt.Errorf("tx begin failed"), nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	_, err := store.BatchHeartbeat(testCtx, "worker-1")
-	if err == nil {
-		t.Fatal("expected error from BatchHeartbeat when BeginTx fails")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // CountEventHistory
 // ---------------------------------------------------------------------------
 

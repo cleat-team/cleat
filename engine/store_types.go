@@ -266,6 +266,19 @@ type WorkflowInstance struct {
 	ReclaimCount int64 `json:"reclaim_count"`
 }
 
+// GenerationKey identifies one execution's claim on a run: the run it is
+// executing and the generation it was claimed at. cleat#2008.
+//
+// A worker's in-flight executions are not interchangeable with the run IDs
+// alone -- a run can be reclaimed and re-claimed by the SAME worker (the
+// probe in cleat#2008 is exactly that), and the two executions share a
+// WorkflowID but not a Generation. HeartbeatBatchFenced is keyed on the
+// pair for that reason: it must tell the two apart.
+type GenerationKey struct {
+	WorkflowID string
+	Generation int64
+}
+
 // Disabled reports whether this schedule has been retired.
 //
 // Exists for the same reason WorkflowDef.Disabled() does: the question callers

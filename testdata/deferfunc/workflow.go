@@ -253,3 +253,17 @@ func DeferOnLongRetryPolicy(h cleat.HostCalls, input string) (string, error) {
 	}, "always-fails", "op", `{}`)
 	return "", err
 }
+
+// TwoSequentialCalls has no defer at all -- it is cleat#2008's fixture, not
+// 3.112's. It makes two plain DurableCalls back to back, so a test can put an
+// external side effect (the first call reaching the service) between them and
+// check whether the second one ever arrives.
+func TwoSequentialCalls(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableCall("work", "first", `{}`); err != nil {
+		return "", err
+	}
+	if _, err := h.DurableCall("work", "second", `{}`); err != nil {
+		return "", err
+	}
+	return `{"status":"ok"}`, nil
+}

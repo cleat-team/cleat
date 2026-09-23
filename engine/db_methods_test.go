@@ -3627,39 +3627,6 @@ func TestPostgresStore_MoveToDeadLetterQueue_BeginError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BatchHeartbeat (Postgres variant) — error paths
-// ---------------------------------------------------------------------------
-
-func TestPostgresStore_BatchHeartbeat_Success(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 3},
-	})
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	n, err := store.BatchHeartbeat(testCtx, "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 3 {
-		t.Errorf("expected 3, got %d", n)
-	}
-}
-
-func TestPostgresStore_BatchHeartbeat_ExecError(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET heartbeat_at", err: errors.New("update failed")},
-	})
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	_, err := store.BatchHeartbeat(testCtx, "worker-1")
-	if err == nil {
-		t.Fatal("expected error from update failure")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Heartbeat (Postgres variant) — error path
 // ---------------------------------------------------------------------------
 

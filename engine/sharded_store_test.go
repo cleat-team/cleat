@@ -45,7 +45,7 @@ type mockShardStore struct {
 	getWorkflowByIDFn            func(ctx context.Context, id string) (*WorkflowInstance, error)
 	getTerminalRunFn             func(ctx context.Context, id string) (*WorkflowInstance, error)
 	successorOfRunFn             func(ctx context.Context, id string) (string, error)
-	batchHeartbeatFn             func(ctx context.Context, workerID string) (int64, error)
+	heartbeatBatchFencedFn       func(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error)
 	reapStaleInstancesFn         func(ctx context.Context, timeout time.Duration) (int, error)
 	reapExpiredConcurrencyKeysFn func(ctx context.Context) (int64, error)
 	queueDepthFn                 func(ctx context.Context) (int64, error)
@@ -227,15 +227,15 @@ func (m *mockShardStore) Heartbeat(ctx context.Context, workflowID, workerID str
 	return true, nil
 }
 
-func (m *mockShardStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	m.recordCall("BatchHeartbeat")
-	if m.batchHeartbeatFn != nil {
-		return m.batchHeartbeatFn(ctx, workerID)
+func (m *mockShardStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	m.recordCall("HeartbeatBatchFenced")
+	if m.heartbeatBatchFencedFn != nil {
+		return m.heartbeatBatchFencedFn(ctx, workerID, runs)
 	}
 	if m.err != nil {
-		return 0, m.err
+		return nil, m.err
 	}
-	return 0, nil
+	return nil, nil
 }
 
 func (m *mockShardStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
@@ -2274,27 +2274,56 @@ func TestTerminateWorkflow_Success(t *testing.T) {
 // Fan-out method tests
 // ---------------------------------------------------------------------------
 
-func TestBatchHeartbeat_Success(t *testing.T) {
+// cleat#2008: ShardedStore.HeartbeatBatchFenced replaced BatchHeartbeat's
+// fan-out (deleted with it) as the shard-routing layer over the new fenced
+// mechanism. Every mock shard echoes back whatever runs it received as
+// "lost" -- which shard each id actually routes to is an implementation
+// detail (getShard hashes the id), so the assertion is on the aggregated
+// SET across all shards, not on a specific shard's call.
+func TestHeartbeatBatchFenced_FansOutAndAggregatesLost(t *testing.T) {
 	ss, mocks := makeShardedStore(t, 3)
-	mocks[0].batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) { return 5, nil }
-	mocks[1].batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) { return 3, nil }
-	mocks[2].batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) { return 2, nil }
-
-	total, err := ss.BatchHeartbeat(context.Background(), "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat failed: %v", err)
+	for _, m := range mocks {
+		m.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+			lost := make([]string, len(runs))
+			for i, r := range runs {
+				lost[i] = r.WorkflowID
+			}
+			return lost, nil
+		}
 	}
-	if total != 10 {
-		t.Errorf("total = %d, want 10", total)
+	runs := []GenerationKey{
+		{WorkflowID: "wf-a", Generation: 1},
+		{WorkflowID: "wf-b", Generation: 2},
+		{WorkflowID: "wf-c", Generation: 3},
+		{WorkflowID: "wf-d", Generation: 4},
+	}
+
+	lost, err := ss.HeartbeatBatchFenced(context.Background(), "worker-1", runs)
+	if err != nil {
+		t.Fatalf("HeartbeatBatchFenced failed: %v", err)
+	}
+	if len(lost) != len(runs) {
+		t.Fatalf("lost = %v (%d ids), want %d", lost, len(lost), len(runs))
+	}
+	gotSet := map[string]bool{}
+	for _, id := range lost {
+		gotSet[id] = true
+	}
+	for _, r := range runs {
+		if !gotSet[r.WorkflowID] {
+			t.Errorf("expected %s in lost (every mock shard echoes every run it receives), got lost=%v", r.WorkflowID, lost)
+		}
 	}
 }
 
-func TestBatchHeartbeat_ShardError(t *testing.T) {
+func TestHeartbeatBatchFenced_ShardError(t *testing.T) {
 	ss, mocks := makeShardedStore(t, 2)
-	mocks[0].batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) { return 1, nil }
-	mocks[1].err = errors.New("shard down")
+	for _, m := range mocks {
+		m.err = errors.New("shard down")
+	}
+	runs := []GenerationKey{{WorkflowID: "wf-a", Generation: 1}, {WorkflowID: "wf-b", Generation: 1}}
 
-	_, err := ss.BatchHeartbeat(context.Background(), "worker-1")
+	_, err := ss.HeartbeatBatchFenced(context.Background(), "worker-1", runs)
 	if err == nil {
 		t.Fatal("expected error")
 	}

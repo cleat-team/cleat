@@ -12,8 +12,9 @@ import (
 //
 // cleat#1487 wants a cluster-global connection budget and records why one could
 // not be built: a worker exists in the database only as a value on rows it
-// currently holds -- `assigned_to`, refreshed by BatchHeartbeat, which is a
-// per-WORKFLOW heartbeat rather than a per-WORKER one. A worker holding no
+// currently holds -- `assigned_to`, refreshed by the heartbeat loop's
+// HeartbeatBatchFenced call, which is a per-WORKFLOW heartbeat rather than a
+// per-WORKER one. A worker holding no
 // claims is invisible, so the workers hardest to see are the freshly started
 // and idle ones, which have already opened their fixed pools and are consuming
 // connections without doing work.

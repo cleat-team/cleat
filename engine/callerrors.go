@@ -144,6 +144,19 @@ const cancelledCallError = "workflow cancelled"
 // makes this call for real.
 const eventCapCallError = "event cap reached; workflow continuing as new"
 
+// heartbeatPresumedLostCallError is the message a durable call reports when
+// the worker's own heartbeats have been failing (or timing out) longer than
+// the reclaim window, so it can no longer vouch that it still holds this
+// run's fence. cleat#2008 decision 2.
+//
+// Retryable, unlike cancelledCallError and eventCapCallError: nothing about
+// THIS run is known to be wrong, only that the worker cannot currently
+// confirm it. packed with callFailureCode, the same classification an
+// ordinary transient service failure gets, so a workflow's existing retry
+// policy handles it with no new branch. The call is never dispatched, so
+// there is no side effect to worry about repeating.
+const heartbeatPresumedLostCallError = "worker heartbeat presumed lost; refusing to start new work until it recovers"
+
 // recordedFailureCode maps a recorded call failure to the code the guest sees.
 //
 // Both the fresh path and the replay path must go through this function. A

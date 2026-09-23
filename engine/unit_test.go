@@ -2500,20 +2500,20 @@ func TestWithOptionsViaNewEngine(t *testing.T) {
 		t.Error("WithPluginStreamRegistry not applied via NewEngine")
 	}
 }
-func (s *stubWorkflowStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (s *stubWorkflowStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
-func (m *mockCollectMetricsStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (m *mockCollectMetricsStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
-func (m *mockCheckStaleStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (m *mockCheckStaleStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
-func (m *mockGCStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (m *mockGCStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
-func (m *mockPurgeStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (m *mockPurgeStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
 
 func (s *stubWorkflowStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) {

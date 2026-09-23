@@ -124,14 +124,15 @@ func TestDispatchLoop_StickyErrorContinuesLoop(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHeartbeatLoop_ConnectionErrorPreservesInflight(t *testing.T) {
-	// When BatchHeartbeat returns a connection error, the loop
-	// logs the event but does NOT touch the inflight map.
-	// Ownership recovery is handled by the reaper loop.
+	// cleat#2008: HeartbeatBatchFenced, not BatchHeartbeat. On error the
+	// loop logs the event but touches neither the inflight map nor any
+	// execCancel entry -- see the identical assertion in
+	// TestHeartbeatAndFenceInFlightCancelsNothingWhenTheStoreCallErrors.
 	ms := &mockStore{}
 	calls := 0
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 		calls++
-		return 0, errors.New("connection refused")
+		return nil, errors.New("connection refused")
 	}
 
 	w := newTestWorker(ms)
@@ -159,14 +160,12 @@ func TestHeartbeatLoop_ConnectionErrorPreservesInflight(t *testing.T) {
 }
 
 func TestHeartbeatLoop_NonConnectionErrorPreservesInflight(t *testing.T) {
-	// When BatchHeartbeat returns a non-connection error, the loop
-	// logs the event but does NOT remove workflows from inflight.
-	// Ownership recovery is handled by the reaper loop.
+	// cleat#2008: HeartbeatBatchFenced, not BatchHeartbeat.
 	ms := &mockStore{}
 	calls := 0
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 		calls++
-		return 0, errors.New("unexpected error: operation failed")
+		return nil, errors.New("unexpected error: operation failed")
 	}
 
 	w := newTestWorker(ms)

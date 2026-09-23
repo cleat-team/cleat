@@ -97,6 +97,16 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		}
 	}
 
+	// cleat#2008 decision 2: refuse to start new work while the worker's own
+	// heartbeat is presumed lost. Checked after cancellation (a cancelled
+	// workflow should report cancelled, not unavailable) and before the event
+	// cap (which itself starts new work -- a fresh run via ContinueAsNew --
+	// that a fenced-out worker has no business kicking off either).
+	if s.engine.canStartNewWork != nil && !s.engine.canStartNewWork() {
+		written, _ := s.writeResult(ctx, m, responsePtr, heartbeatPresumedLostCallError, responseMaxLen)
+		return packDurableCallResult(int(written), callFailureCode, 1)
+	}
+
 	// Check event cap: if the number of events has reached the limit, auto-trigger
 	// ContinueAsNew to start a fresh run with reset event_count. Events are
 	// tracked locally in the session (no DB query per call).

@@ -291,7 +291,7 @@ func newRealDeferPhaseWorker(t *testing.T, db *sql.DB, store engine.WorkflowStor
 	t.Cleanup(func() { backend.Close(ctx) })
 
 	monitor := NewMemoryMonitor(5 * time.Second)
-	return &Worker{
+	w := &Worker{
 		Metrics:              newTestPrometheus(),
 		id:                   "defer-phase-worker",
 		store:                store,
@@ -315,6 +315,11 @@ func newRealDeferPhaseWorker(t *testing.T, db *sql.DB, store engine.WorkflowStor
 		wasmWallClockCeiling: *wasmWallClockCeiling,
 		hostRetryBudget:      *hostRetryBudget,
 	}
+	// Seeded so heartbeatPresumedLost() does not read the atomic zero value
+	// (Unix epoch) as an unrecovered fence loss -- this worker never runs a
+	// heartbeat loop, so nothing else would ever advance it. cleat#2008.
+	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	return w
 }
 
 // claimOne claims through the ordinary dispatch path -- which is the point,
