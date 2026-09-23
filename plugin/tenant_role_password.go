@@ -37,8 +37,10 @@ package plugin
 //     and is idempotent, so a worker boot after a key change repairs the set.
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -93,4 +95,81 @@ func TenantRolePassword(secret []byte, tenantID string) (string, error) {
 func TenantRoleName(tenantID string) string {
 	return "cleat_tenant_" + strings.ReplaceAll(
 		strings.ToLower(strings.TrimSpace(tenantID)), "-", "_")
+}
+
+// ReconcileTenantRolePasswords re-derives every already-provisioned tenant's
+// role password under secret and re-ALTERs it via admin.create_tenant_role,
+// which is idempotent for an existing role -- migrations/postgres/064 ALTERs
+// rather than CREATEs once pg_roles already has the role name. cleat#1990.
+//
+// Measured before this existed: after --tenant-role-secret-file's key
+// changes, EVERY existing tenant's pool fails to authenticate --
+// TenantPools.open derives a password under the new key while the role's
+// actual PostgreSQL password is still the old one. Provisioning a NEW tenant
+// (--create-tenant) was unaffected, because it derives and ALTERs under
+// whichever key that run has; nothing revisited a tenant provisioned
+// earlier. Calling this once at boot, for every row in admin.tenant_roles,
+// closes that gap.
+//
+// UNCONDITIONAL ON PURPOSE: this runs every boot under --tenant-isolation=role,
+// whether or not the key actually changed. An ALTER ROLE to the password a
+// role already has is a cheap no-op query, and running it regardless means a
+// rotation's correctness does not depend on an operator remembering a
+// separate reconciliation step -- the same "boot repairs the set" property
+// the doc comment on this file already promised. ALTER ROLE does not
+// terminate sessions connected under the old password; only a connection
+// attempt made AFTER this call needs the new one, so the outage window a
+// rotation costs is bounded by how long this call takes, not by how long a
+// previously-opened pool happens to stay idle.
+//
+// Returns the number of roles reconciled. Every failure here is returned
+// rather than logged and continued past: a worker that could not confirm a
+// tenant's password matches its own key must not start believing it does,
+// matching resolveTenantIsolation's refuse-to-boot stance
+// (cmd/cleat-worker/tenant_isolation.go) for the same flag.
+func ReconcileTenantRolePasswords(ctx context.Context, db *sql.DB, secret []byte) (int, error) {
+	rows, err := db.QueryContext(ctx, `SELECT tenant_id, role_name FROM admin.tenant_roles`)
+	if err != nil {
+		return 0, fmt.Errorf("reconcile tenant role passwords: list roles: %w", err)
+	}
+	type provisioned struct{ tenantID, roleName string }
+	var all []provisioned
+	for rows.Next() {
+		var p provisioned
+		if err := rows.Scan(&p.tenantID, &p.roleName); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("reconcile tenant role passwords: scan: %w", err)
+		}
+		all = append(all, p)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("reconcile tenant role passwords: %w", err)
+	}
+	rows.Close()
+
+	for _, p := range all {
+		password, err := TenantRolePassword(secret, p.tenantID)
+		if err != nil {
+			return 0, fmt.Errorf("reconcile tenant role passwords: derive for tenant %s: %w", p.tenantID, err)
+		}
+		var roleName sql.NullString
+		if err := db.QueryRowContext(ctx,
+			`SELECT admin.create_tenant_role($1::uuid, $2)`, p.tenantID, password,
+		).Scan(&roleName); err != nil {
+			return 0, fmt.Errorf("reconcile tenant role passwords: alter role for tenant %s: %w", p.tenantID, err)
+		}
+		if !roleName.Valid {
+			// create_tenant_role RAISEs a warning and returns NULL rather than
+			// erroring when the connection cannot ALTER ROLE -- the same
+			// single-tenant-mode escape hatch --create-tenant already handles.
+			// Fatal here too: a worker configured for role isolation that
+			// cannot confirm the password it just derived is what its tenant's
+			// role actually holds must not start.
+			return 0, fmt.Errorf(
+				"reconcile tenant role passwords: tenant %s's role %q was not altered: "+
+					"this connection cannot ALTER ROLE (needs a superuser or CREATEROLE connection)",
+				p.tenantID, p.roleName)
+		}
+	}
+	return len(all), nil
 }
