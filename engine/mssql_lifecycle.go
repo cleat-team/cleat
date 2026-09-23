@@ -62,10 +62,12 @@ func (s *MSSQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
 		    (q.name IS NULL AND (
 		      w.concurrency_key_hash IS NULL
 		      OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-		                      WHERE ck.key_hash = w.concurrency_key_hash
+		                      WHERE (ck.key_hash = w.concurrency_key_hash
 		                        AND ck.tenant_id = w.tenant_id
-		                        AND ck.expires_at > SYSUTCDATETIME()
 		                        AND ck.workflow_id <> w.id)
+		                        AND EXISTS (SELECT 1 FROM workflow_instances wi
+		                                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+		                                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')))
 		    ))
 		    OR
 		    (q.name IS NOT NULL AND (
@@ -73,8 +75,10 @@ func (s *MSSQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
 		        (SELECT count(*) FROM queue_holders qh
 		          WHERE qh.tenant_id = w.tenant_id
 		            AND qh.queue_name = q.name
-		            AND qh.expires_at > SYSUTCDATETIME()
-		            AND qh.workflow_id <> w.id) < q.concurrency_limit
+		            AND qh.workflow_id <> w.id
+		            AND EXISTS (SELECT 1 FROM workflow_instances wi
+		                         WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+		                           AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))) < q.concurrency_limit
 		      )
 		      AND (
 		        q.rate_limit IS NULL OR
@@ -147,10 +151,12 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		    (q.name IS NULL AND (
 		      w.concurrency_key_hash IS NULL
 		      OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-		                      WHERE ck.key_hash = w.concurrency_key_hash
+		                      WHERE (ck.key_hash = w.concurrency_key_hash
 		                        AND ck.tenant_id = w.tenant_id
-		                        AND ck.expires_at > SYSUTCDATETIME()
 		                        AND ck.workflow_id <> w.id)
+		                        AND EXISTS (SELECT 1 FROM workflow_instances wi
+		                                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+		                                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')))
 		    ))
 		    OR
 		    (q.name IS NOT NULL AND (
@@ -158,8 +164,10 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		        (SELECT count(*) FROM queue_holders qh
 		          WHERE qh.tenant_id = w.tenant_id
 		            AND qh.queue_name = q.name
-		            AND qh.expires_at > SYSUTCDATETIME()
-		            AND qh.workflow_id <> w.id) < q.concurrency_limit
+		            AND qh.workflow_id <> w.id
+		            AND EXISTS (SELECT 1 FROM workflow_instances wi
+		                         WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+		                           AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))) < q.concurrency_limit
 		      )
 		      AND (
 		        q.rate_limit IS NULL OR
@@ -336,12 +344,23 @@ func (s *MSSQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql
 		}
 		// Bare key: mutex via INSERT ... WHERE NOT EXISTS, the shape AcquireConcurrencyKey
 		// already uses -- SQL Server has no INSERT IGNORE.
+		//
+		// cleat#1965: this pre-check tests PHYSICAL row existence, not expiry --
+		// dropped the `AND expires_at > SYSUTCDATETIME()` it carried before,
+		// because it was making this INSERT report 0 rows affected in exactly
+		// the case it should have conflicted: a still-live holder's row read as
+		// "gone" once its expires_at passed, this WHERE NOT EXISTS then let the
+		// INSERT proceed, and the real pk_concurrency_keys constraint threw
+		// instead of the graceful "not admitted" every other candidate gets.
+		// Postgres and MySQL never had this problem -- ON CONFLICT DO NOTHING
+		// and INSERT IGNORE test the same physical constraint the database
+		// itself enforces, not a hand-written copy of it.
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
 			SELECT @p1, @p2, @p3, DATEADD(second, @p4, SYSUTCDATETIME()), @p5
 			WHERE NOT EXISTS (
 				SELECT 1 FROM concurrency_keys
-				WHERE key_hash = @p1 AND tenant_id = @p5 AND expires_at > SYSUTCDATETIME()
+				WHERE key_hash = @p1 AND tenant_id = @p5
 			)
 		`, c.hash, c.key, c.id, int64(claimedKeyTTL.Seconds()), c.tenantID)
 		if err != nil {
@@ -382,7 +401,7 @@ func (s *MSSQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql
 	holderExists := true
 	err := tx.QueryRowContext(ctx, `
 		SELECT worker_id FROM queue_holders
-		WHERE tenant_id = @p1 AND queue_name = @p2 AND workflow_id = @p3 AND expires_at > SYSUTCDATETIME()
+		WHERE tenant_id = @p1 AND queue_name = @p2 AND workflow_id = @p3
 	`, c.tenantID, *c.key, c.id).Scan(&existingWorker)
 	if errors.Is(err, sql.ErrNoRows) {
 		holderExists = false
@@ -395,8 +414,10 @@ func (s *MSSQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql
 	var held int
 	err = tx.QueryRowContext(ctx, `
 		SELECT count(*) FROM queue_holders qh
-		WHERE qh.tenant_id = @p1 AND qh.queue_name = @p2 AND qh.expires_at > SYSUTCDATETIME()
-		  AND qh.workflow_id <> @p3
+		WHERE qh.tenant_id = @p1 AND qh.queue_name = @p2 AND qh.workflow_id <> @p3
+		  AND EXISTS (SELECT 1 FROM workflow_instances wi
+		               WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+		                 AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
 	`, c.tenantID, *c.key, c.id).Scan(&held)
 	if err != nil {
 		return false, fmt.Errorf("claim workflows: count queue holders: %w", err)
@@ -410,7 +431,9 @@ func (s *MSSQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql
 		err = tx.QueryRowContext(ctx, `
 			SELECT count(*) FROM queue_holders qh
 			WHERE qh.tenant_id = @p1 AND qh.queue_name = @p2 AND qh.worker_id = @p3
-			  AND qh.expires_at > SYSUTCDATETIME()
+			  AND EXISTS (SELECT 1 FROM workflow_instances wi
+			               WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+			                 AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
 		`, c.tenantID, *c.key, workerID).Scan(&workerHeld)
 		if err != nil {
 			return false, fmt.Errorf("claim workflows: count worker queue holders: %w", err)
@@ -549,10 +572,12 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
   AND (workflow_instances.concurrency_key_hash IS NULL
        OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                       WHERE (ck.key_hash = workflow_instances.concurrency_key_hash
                          AND ck.tenant_id = workflow_instances.tenant_id
-                         AND ck.expires_at > SYSUTCDATETIME()
-                         AND ck.workflow_id <> workflow_instances.id))
+                         AND ck.workflow_id <> workflow_instances.id)
+                         AND EXISTS (SELECT 1 FROM workflow_instances wi
+                                      WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+                                        AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))))
 			  AND tenant_id = @p4
 			ORDER BY priority ASC, created_at
 			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY

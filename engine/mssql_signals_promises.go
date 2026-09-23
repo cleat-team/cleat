@@ -664,6 +664,16 @@ func (s *MSSQLStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID 
 	return n > 0, tx.Commit()
 }
 
+// ReapExpiredConcurrencyKeys deletes every concurrency key and queue holder
+// whose run is no longer live for the current tenant, plus every expired
+// queue rate token. Returns the number of rows deleted (keys plus queue
+// holders plus queue rate tokens).
+//
+// cleat#1965: a row is freed the moment its run goes terminal -- or is
+// missing outright, e.g. pruned by retention after a failed release -- not
+// on a fixed clock. `expires_at <= SYSUTCDATETIME()` is kept as a backstop
+// alongside the run-state check, for whatever that join misses; see
+// claimedKeyTTL's own comment for why it no longer decides validity alone.
 func (s *MSSQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
@@ -671,15 +681,36 @@ func (s *MSSQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, err
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE expires_at <= SYSUTCDATETIME() AND tenant_id = @p1`, s.tenantID)
+	result, err := tx.ExecContext(ctx, `
+		DELETE ck
+		FROM concurrency_keys ck
+		WHERE ck.tenant_id = @p1
+		  AND (
+		    ck.expires_at <= SYSUTCDATETIME()
+		    OR NOT EXISTS (SELECT 1 FROM workflow_instances wi
+		                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+		                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
+		  )
+	`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("reap expired concurrency keys: %w", err)
 	}
 	n, _ := result.RowsAffected()
 
-	// A worker that dies holding a registered-queue claim leaves a queue_holders
-	// row behind; it ages out on the same backstop TTL as a bare key.
-	hresult, err := tx.ExecContext(ctx, `DELETE FROM queue_holders WHERE expires_at <= SYSUTCDATETIME() AND tenant_id = @p1`, s.tenantID)
+	// A worker that dies holding a registered-queue claim, or whose release
+	// failed, leaves a queue_holders row behind; the same run-state rule frees
+	// it, with the same time-based backstop.
+	hresult, err := tx.ExecContext(ctx, `
+		DELETE qh
+		FROM queue_holders qh
+		WHERE qh.tenant_id = @p1
+		  AND (
+		    qh.expires_at <= SYSUTCDATETIME()
+		    OR NOT EXISTS (SELECT 1 FROM workflow_instances wi
+		                     WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+		                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
+		  )
+	`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("reap expired concurrency keys: queue holders: %w", err)
 	}

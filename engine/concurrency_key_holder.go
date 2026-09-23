@@ -120,17 +120,24 @@ func (s *MSSQLStore) GetConcurrencyKeyHolder(ctx context.Context, key string) (C
 	return h, nil
 }
 
-// claimedKeyTTL is how long a key acquired BY THE CLAIM is held before it
-// expires on its own.
+// claimedKeyTTL is a long safety bound on a concurrency key or queue holder,
+// not what decides whether it is still held (cleat#1965).
 //
-// A backstop, not the release path. releaseWorkflowResources calls
-// ReleaseWorkflowConcurrencyKeys from every terminal commit on all three
-// dialects -- completion, failure, termination, the defer phases, the admin
-// paths and the terminated-children loop -- so in the ordinary case the key is
-// gone the moment the run ends, whatever this value is.
+// A slot or key is held for as long as its run is non-terminal --
+// acquireCandidateConcurrencyKey's held-count queries and the candidate
+// predicate (store_lifecycle.go and its MySQL/SQL Server twins) all join to
+// workflow_instances and test its status, not this value. A run that parks
+// (sleeps, or waits on a signal with no deadline) sends no heartbeat and has
+// no wake time to renew from, so tying validity to elapsed time at all makes
+// every long-lived run eventually stop counting against its own limit --
+// that was this issue. See the design on cleat#1965 for why renewal was
+// rejected too.
 //
-// It matters only when a worker dies holding a claim. Thirty minutes matches
-// what the HTTP layer used when IT acquired the key (cleat#1186 moved the
-// acquisition into the claim), so a deployment's worst-case wait for a key
-// stranded by a crash is unchanged by that move.
-const claimedKeyTTL = 30 * time.Minute
+// What this value still bounds: ReapExpiredConcurrencyKeys deletes a row
+// once its run goes terminal (or the row is orphaned -- its run's own
+// workflow_instances row is gone, e.g. to retention), with no wait. This is
+// the backstop for whatever that join misses -- a bug in the join, a bulk
+// admin write that bypasses ReleaseWorkflowConcurrencyKeys, anything not yet
+// found. Seven days costs nothing to carry and is long enough that hitting
+// it at all is itself a signal something upstream is wrong.
+const claimedKeyTTL = 7 * 24 * time.Hour

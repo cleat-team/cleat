@@ -292,7 +292,7 @@ var statementsWithoutATenantByDesign = map[string]string{
 // Keep the two labelled, so the second class is visibly zero rather than
 // buried among the first.
 var knownUnreadableStatements = map[string]string{
-	"db.go:2011": "built at runtime: `CREATE SCHEMA IF NOT EXISTS ` + pq.QuoteIdentifier(" +
+	"db.go:2037": "built at runtime: `CREATE SCHEMA IF NOT EXISTS ` + pq.QuoteIdentifier(" +
 		"f.schemaName), where the schema name is a field. The literal half is DDL naming no " +
 		"table, but the guard reports the statement rather than the half it can read -- a " +
 		"partial resolution could be dropping a FROM clause, which is the failure this whole " +
