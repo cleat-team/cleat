@@ -195,11 +195,17 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 		// hold Run's own goroutine hostage -- Run must return promptly on
 		// cancel even while a backup is running (cleat#2055). bgBackups lets
 		// a test wait for it to actually finish instead of sleeping.
+		//
+		// plugin.RecoverGoroutine, not a bare go func: an unrecovered panic
+		// here kills the worker PROCESS and every in-flight workflow with it
+		// (cleat#1769), not just this one backup.
 		p.bgBackups.Add(1)
 		go func() {
 			defer p.bgBackups.Done()
-			p.executeScheduledBackup(plugin.ForTenant(context.Background(), b.tenantID),
-				b.id, b.tenantID, b.name, b.cronExpr)
+			plugin.RecoverGoroutine("scheduled-backup", nil, func() {
+				p.executeScheduledBackup(plugin.ForTenant(context.Background(), b.tenantID),
+					b.id, b.tenantID, b.name, b.cronExpr)
+			})
 		}()
 	}
 }
