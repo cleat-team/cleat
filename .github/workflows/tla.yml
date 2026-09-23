@@ -3,36 +3,40 @@ on:
   pull_request:
     branches: [main, develop]
     # cleat#1996: run on a PR that touches specs/ itself, OR any file named in
-    # a checked spec's "Implemented by" header -- CleatClaim.tla's, currently.
-    # This list is NOT auto-derived from the header; scripts/check-tla-ci-paths.py
-    # (run in the job below) fails if the two ever disagree, so a spec's
+    # a checked spec's "Implemented by" header -- currently the union across
+    # all four checked specs (cleat#2044). GitHub Actions requires this list
+    # to be static YAML at trigger-evaluation time, so it can't be computed
+    # at CI-run time; it is instead GENERATED from the headers by
+    # `python3 scripts/check-tla-ci-paths.py --write` (see specs/README.md's
+    # "Adding a model") and the job below re-runs the same script with no
+    # flag to fail if this list and the headers ever disagree, so a spec's
     # implementers list growing without this list growing is caught rather
     # than silently making the job stop watching a file it names.
     paths:
       - "specs/**"
       - "Makefile"
       - ".github/workflows/tla.yml"
-      - "engine/store_lifecycle.go"
-      - "engine/mysql_lifecycle.go"
+      - "cmd/cleat-worker/config.go"
+      - "cmd/cleat-worker/rotating_claim.go"
+      - "cmd/cleat-worker/setup.go"
+      - "engine/admin_ops.go"
+      - "engine/callintent.go"
+      - "engine/db.go"
+      - "engine/defer_phase.go"
       - "engine/mssql_lifecycle.go"
       - "engine/mssql_operations.go"
       - "engine/mssql_signals_promises.go"
+      - "engine/mysql_lifecycle.go"
       - "engine/mysql_ops.go"
       - "engine/mysql_store.go"
-      - "engine/sharded_store.go"
-      - "engine/db.go"
       - "engine/queue_store.go"
-      - "cmd/cleat-worker/setup.go"
+      - "engine/sharded_store.go"
       - "engine/status_vocabulary.go"
-      - "engine/defer_phase.go"
-      - "engine/store_defer_phase.go"
       - "engine/store_admin.go"
       - "engine/store_admin_rereplay.go"
-      - "cmd/cleat-worker/rotating_claim.go"
-      - "engine/callintent.go"
+      - "engine/store_defer_phase.go"
       - "engine/store_intent.go"
-      - "engine/admin_ops.go"
-      - "cmd/cleat-worker/config.go"
+      - "engine/store_lifecycle.go"
     # `edited` is required, not decorative -- see ecosystem-ci.yml's comment
     # on the same line for why (a retargeted PR would otherwise never trigger
     # this workflow at all). scripts/check-workflow-pr-triggers.sh guards it.
