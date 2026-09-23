@@ -35,14 +35,6 @@ var flagBaseline = map[string]string{
 	// "Bad: mismatched binary and config" -- the flag is fictional on purpose,
 	// which is the one case where documenting a nonexistent flag is correct.
 	"docs/operations/upgrading.md|--new-flag": "illustrative placeholder in a flag-compatibility example",
-
-	// Real defects with no knowable replacement. `cleat-worker` has no
-	// namespace concept at all (the nearest is tenants: --create-tenant,
-	// --tenant-resolver), and the line above it passes --namespace to
-	// `cleat deploy`, which has only name/task-queue/default/max-history-length.
-	// Rewriting a production-deployment example on a guess would replace a
-	// visible error with an invisible one.
-	"docs/operations/deploying-to-production.md|--namespace": "no namespace concept on the worker; cleat#1311",
 }
 
 var codeBaseline = map[string]string{

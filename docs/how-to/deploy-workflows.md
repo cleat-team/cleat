@@ -48,8 +48,8 @@ $ cleat build -o ./out ./examples/order/
 Use `cleat deploy` to insert the built WASM binary into the `workflow_defs` database table:
 
 ```bash
-# Deploy with a specific name and namespace.
-cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order --namespace staging ./out/place_order.wasm
+# Deploy with a specific name.
+cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order ./out/place_order.wasm
 
 # Deploy to a specific task queue.
 cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order --task-queue high-memory ./out/place_order.wasm
@@ -80,7 +80,7 @@ cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order ./out/place_order.was
 ### Listing versions
 
 ```bash
-cleat versions --db "$CLEAT_DATABASE_URL" place_order
+cleat --db "$CLEAT_DATABASE_URL" versions place_order
 # 2
 # 1
 ```
@@ -88,7 +88,7 @@ cleat versions --db "$CLEAT_DATABASE_URL" place_order
 ### Rollback
 
 ```bash
-cleat rollback --db "$CLEAT_DATABASE_URL" place_order 1
+cleat --db "$CLEAT_DATABASE_URL" rollback place_order 1
 # Rolled back "place_order" to version 1.
 # New instances will use version 1.
 ```
@@ -131,7 +131,7 @@ If your workflow calls child workflows, pin their versions at build time for rep
 
 ```bash
 # Resolve child versions from the database and write a lock file.
-cleat build -o ./out --db "$CLEAT_DATABASE_URL" ./path/to/workflow/
+cleat --db "$CLEAT_DATABASE_URL" build -o ./out ./path/to/workflow/
 
 # Or manually create/update the lock file.
 cleat lock --db "$CLEAT_DATABASE_URL" ./path/to/workflow/
@@ -143,7 +143,6 @@ This generates a `cleat.lock` file that pins each child workflow to a specific v
 
 Before deploying to production:
 
-- [ ] Specify a namespace for environment isolation (`--namespace production`)
 - [ ] Use a database connection string with `sslmode=require`
 - [ ] Verify the WASM binary size is reasonable (monitor with `ls -lh`)
 - [ ] Test the workflow with `cleat run --input <json> <package>` before deploying

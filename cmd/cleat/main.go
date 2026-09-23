@@ -60,7 +60,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init|version> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] <package>\n")
-		fmt.Fprintf(os.Stderr, "  cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "  cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  cleat versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat rollback <workflow-name> <version>\n")
 		fmt.Fprintf(os.Stderr, "  cleat dev [--input <json>] [--entry-point <name>] [--concurrency-key <key>] [--watch] <package>\n")
@@ -1044,9 +1044,19 @@ func runVetAS(dir string) int {
 }
 
 // runDeploy deploys a compiled WASM workflow to the database.
-// Usage: cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>
+// Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] <wasm-file>
 func runDeploy(args []string) {
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
+	// deploy's own --db, mirroring `cleat lock` (cmd/cleat/main.go's runLock):
+	// the global --db (registered on the top-level FlagSet in main) must
+	// precede the subcommand -- `cleat --db X deploy` -- because flag.Parse()
+	// stops at the first non-flag argument. Every doc that showed
+	// `cleat deploy --db X` (README.md, docs/reference/cli.md, and others;
+	// cleat#1970) was demonstrating a form that exited 2 with "flag provided
+	// but not defined: -db", because this FlagSet never declared it. Declare
+	// it here and let getDBConnStr's own fallback (global --db, then a
+	// credential provider that checks CLEAT_DATABASE_URL) supply the rest.
+	dbFlag := fs.String("db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
 	nameFlag := fs.String("name", "", "workflow name (derived from filename if not set)")
 	taskQueueFlag := fs.String("task-queue", "default", "task queue for this workflow (e.g. default, gpu, high-memory)")
 	// 0 keeps the column default, which means "use the global threshold". Set
@@ -1057,7 +1067,7 @@ func runDeploy(args []string) {
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--name <name>] [--task-queue <queue>] [--max-history-length <n>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] [--max-history-length <n>] <wasm-file>\n")
 		os.Exit(1)
 	}
 	wasmPath := remainder[0]
@@ -1095,7 +1105,10 @@ func runDeploy(args []string) {
 		}
 	}
 
-	connStr := getDBConnStr()
+	connStr := *dbFlag
+	if connStr == "" {
+		connStr = getDBConnStr()
+	}
 
 	if connStr == "" {
 		version := 1
