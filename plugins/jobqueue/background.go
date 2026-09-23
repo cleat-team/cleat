@@ -63,9 +63,17 @@ func (p *Plugin) runReaper(ctx context.Context) int {
 // 073) on PostgreSQL, because workflow_instances there carries RLS that a
 // tenant-less background sweep cannot satisfy directly and that function is
 // the SECURITY DEFINER, no-argument, RLS-exempt escape hatch built for
-// exactly this. MySQL and SQL Server read workflow_instances directly --
-// neither has RLS on that table, so neither needed the function in the first
-// place.
+// exactly this. MySQL reads workflow_instances directly -- it has no RLS on
+// that table, so it never needed the function.
+//
+// SQL SERVER READ workflow_instances DIRECTLY TOO, and that was cleat#2125:
+// dbo.fn_tenant_filter applies there since 001_schema.sql, AcrossAllTenants's
+// SESSION_CONTEXT marker is not one it reads, and on a default deployment the
+// direct subquery saw zero rows -- so this UPDATE marked every dispatched
+// job's run abandoned, on every tick, whether or not the run was still ready
+// or running. Fixed by migration 102's admin.fn_in_flight_workflow_ids(),
+// the same EXECUTE AS-impersonation shape as PostgreSQL's function --
+// see that migration and staleWorkflowRefs above for the reasoning.
 //
 // Marked ABANDONED, not "failed" and not "completed" -- see plugin.go's
 // design note (cleat#1715's design decision) for why: this sweep has no
@@ -84,7 +92,7 @@ WHERE status = 'dispatched'
 	MSSQL: `UPDATE task_queue
 SET status = 'abandoned', completed_at = now()
 WHERE status = 'dispatched'
-  AND run_id NOT IN (SELECT id FROM workflow_instances WHERE status IN ('ready', 'running'))`,
+  AND run_id NOT IN (SELECT id FROM admin.fn_in_flight_workflow_ids())`,
 }
 
 // sweepAbandonedJobs marks abandoned jobs whose run vanished with no recorded

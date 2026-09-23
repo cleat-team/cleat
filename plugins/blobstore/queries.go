@@ -116,9 +116,21 @@ var jsonbContains = plugin.Query{
 // no arguments and returns ids, so the exemption is bounded by the body rather
 // than by what a caller asks for.
 //
-// MySQL and SQL Server keep the direct subquery: neither has row-level security
-// on workflow_instances, so neither ever had the problem, and mirroring the
-// function would mean maintaining it in three dialects to fix one.
+// MySQL keeps the direct subquery: it has no row-level security, so it never
+// had the problem.
+//
+// SQL SERVER IS NOT EXEMPT EITHER, cleat#2125. "Neither has row-level
+// security on workflow_instances" was wrong for this dialect from
+// 001_schema.sql on -- dbo.fn_tenant_filter applies to every principal,
+// AcrossAllTenants sets a SESSION_CONTEXT key that predicate does not read,
+// and on a default deployment (migration 075's plain form) the direct
+// subquery below saw zero rows, so this DELETE removed the in-flight
+// workflow's own reference on every tick. Fixed by migration 102 the same
+// way PostgreSQL's 073 does it: admin.fn_in_flight_workflow_ids() is a
+// multi-statement table-valued function WITH EXECUTE AS 'cleat_dispatcher',
+// a NOLOGIN principal fn_tenant_filter admits by name, so the impersonated
+// read sees every tenant's rows and a plain caller of this query still sees
+// only its own.
 var staleWorkflowRefs = plugin.Query{
 	Default: `DELETE FROM workflow_blob_refs
 WHERE workflow_id NOT IN (SELECT id FROM admin.in_flight_workflow_ids())`,
@@ -128,7 +140,7 @@ WHERE workflow_id NOT IN (
 )`,
 	MSSQL: `DELETE FROM workflow_blob_refs
 WHERE workflow_id NOT IN (
-	SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
+	SELECT id FROM admin.fn_in_flight_workflow_ids()
 )`,
 }
 

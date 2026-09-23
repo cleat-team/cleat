@@ -4,9 +4,12 @@
 // abandonedJobsQuery is exactly the shape cleat#1133/#1134/#1141 already
 // burned this plugin on twice: a per-dialect statement (LIMIT and subquery
 // syntax differ enough that plugin.Rebind cannot paper over them) that
-// nothing had ever executed against a real server. Both PostgreSQL's arm
-// (through admin.in_flight_workflow_ids(), migration 073) and the MySQL/MSSQL
-// arms (a direct subquery against workflow_instances) are new text -- the
+// nothing had ever executed against a real server. PostgreSQL's arm (through
+// admin.in_flight_workflow_ids(), migration 073) and SQL Server's (through
+// admin.fn_in_flight_workflow_ids(), migration 102) both run as an
+// EXECUTE-AS/SECURITY-DEFINER-impersonated principal RLS admits by name;
+// MySQL's is a direct subquery against workflow_instances, since it has no
+// row-level security to work around. All three are new text -- the
 // fake-driver suite proves the GUARD LOGIC (see
 // TestSweepAbandonedJobs/execSweepAbandoned in jobqueue_behavioral_test.go),
 // but it pattern-matches the query string and would accept SQL no database
@@ -29,9 +32,9 @@ import (
 // TestSweepAbandonedJobs_MultiBackend covers the case that needs no
 // workflow_instances fixture at all: a dispatched job whose run_id names no
 // row anywhere is the plainest "gone" case the sweep exists for, and an
-// empty table is enough to prove admin.in_flight_workflow_ids() (Postgres)
-// and the direct workflow_instances subquery (MySQL, MSSQL) both resolve
-// without error.
+// empty table is enough to prove admin.in_flight_workflow_ids() (Postgres),
+// admin.fn_in_flight_workflow_ids() (SQL Server) and the direct
+// workflow_instances subquery (MySQL) all resolve without error.
 func TestSweepAbandonedJobs_MultiBackend(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		t.Run(be.Name, func(t *testing.T) {
@@ -57,25 +60,15 @@ func TestSweepAbandonedJobs_MultiBackend(t *testing.T) {
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("jobqueue migrations on %s: %v", be.Name, err)
 			}
-			// ON SQL SERVER, THE SWEEP NEEDS A dbo.cleat_admin LOGIN.
-			// workflow_instances carries a FILTER PREDICATE keyed on
-			// SESSION_CONTEXT('tenant_id'), which a tenant-less background sweep
-			// never sets -- same reasoning as admin.in_flight_workflow_ids() on
-			// PostgreSQL (cleat#1528), except SQL Server's exemption lives on the
-			// LOGIN, not in a callable function. Every other cross-tenant SQL
-			// Server statement in this codebase already depends on this
-			// (mssql_schedules.go's ClaimDueSchedule, mssql_store.go's
-			// SetWorkflowTag), so this is the query joining that list rather than
-			// a new requirement. testutil.MSSQLAdminDB provisions exactly that
-			// login and opts into the predicate form it needs
-			// (migrations/mssql/optional/cross_tenant_claim.sql) -- see
-			// engine/mssql_admin_login_schedule_tenant_test.go's adminLoginStores
-			// for the same pattern read against the engine's own claim path.
-			execDB := be.DB
-			if be.Dialect == testutil.DialectMSSQL {
-				execDB = testutil.MSSQLAdminDB(t, be.DB)
-			}
-			p.db = &engine.SQLDBAdapter{DB: execDB, Dialect: plugin.Dialect(be.Dialect)}
+			// SQL SERVER NO LONGER NEEDS A dbo.cleat_admin LOGIN HERE either
+			// -- see the comment on the same subject in
+			// TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend below.
+			// This test never writes workflow_instances at all (a dispatched
+			// job whose run_id names no row anywhere), so it was never really
+			// exercising the admin bypass's READ of workflow_instances -- only
+			// the empty-subquery case, which needed no bypass to resolve
+			// either way.
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 			tenant := uuid.New()
@@ -158,25 +151,21 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("jobqueue migrations on %s: %v", be.Name, err)
 			}
-			// ON SQL SERVER, THE SWEEP NEEDS A dbo.cleat_admin LOGIN.
-			// workflow_instances carries a FILTER PREDICATE keyed on
-			// SESSION_CONTEXT('tenant_id'), which a tenant-less background sweep
-			// never sets -- same reasoning as admin.in_flight_workflow_ids() on
-			// PostgreSQL (cleat#1528), except SQL Server's exemption lives on the
-			// LOGIN, not in a callable function. Every other cross-tenant SQL
-			// Server statement in this codebase already depends on this
-			// (mssql_schedules.go's ClaimDueSchedule, mssql_store.go's
-			// SetWorkflowTag), so this is the query joining that list rather than
-			// a new requirement. testutil.MSSQLAdminDB provisions exactly that
-			// login and opts into the predicate form it needs
-			// (migrations/mssql/optional/cross_tenant_claim.sql) -- see
-			// engine/mssql_admin_login_schedule_tenant_test.go's adminLoginStores
-			// for the same pattern read against the engine's own claim path.
-			execDB := be.DB
-			if be.Dialect == testutil.DialectMSSQL {
-				execDB = testutil.MSSQLAdminDB(t, be.DB)
-			}
-			p.db = &engine.SQLDBAdapter{DB: execDB, Dialect: plugin.Dialect(be.Dialect)}
+			// SQL SERVER NO LONGER NEEDS A dbo.cleat_admin LOGIN HERE, since
+			// cleat#2125 / migration 102: the MSSQL arm of abandonedJobsQuery
+			// calls admin.fn_in_flight_workflow_ids(), a multi-statement
+			// table-valued function that runs WITH EXECUTE AS
+			// 'cleat_dispatcher' -- a NOLOGIN principal dbo.fn_tenant_filter
+			// admits by name -- so any caller of the function sees every
+			// tenant's in-flight rows regardless of its own session context.
+			// The exemption this comment used to describe (a dbo.cleat_admin
+			// LOGIN bypassing workflow_instances' own FILTER PREDICATE) is
+			// what #2125 exists because relying on was wrong: that predicate
+			// applies to READS, and a caller with no matching tenant_id
+			// context saw zero rows on a database that had never opted into
+			// the admin bypass form (migrations/mssql/optional/cross_tenant_claim.sql)
+			// -- which is what a default deployment is, since 075.
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 			tenant := uuid.New()
@@ -199,16 +188,26 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 				}
 			}()
 
+			// tenant_id here must equal the value the workflow_instances row
+			// below carries: workflow_instances_def_fkey / fk_instances_def is
+			// a composite (tenant_id, def_name, def_version) FK since migration
+			// 035/038 (workflow_defs_tenant_in_key) folded tenant_id into it, so
+			// a workflow_defs row at its OWN tenant_id default while the
+			// instance carries a different one is not a visibility question at
+			// all -- it is a row the constraint genuinely does not consider a
+			// match, on every dialect, and the earlier version of this fixture
+			// only got away with leaving both at the default because neither
+			// side ever set tenant_id to anything else.
 			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
-				`INSERT INTO workflow_defs (name, version, wasm_bytes) VALUES ($1, $2, $3)`,
-				dialect), defName, 1, []byte{0}); err != nil {
+				`INSERT INTO workflow_defs (name, version, wasm_bytes, tenant_id) VALUES ($1, $2, $3, $4)`,
+				dialect), defName, 1, []byte{0}, tenant); err != nil {
 				t.Fatalf("insert workflow_defs on %s: %v", be.Name, err)
 			}
 			// status is left to its column default, which is 'ready' on every
 			// dialect -- one of the two values the sweep treats as in flight.
 			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
-				`INSERT INTO workflow_instances (id, def_name, def_version) VALUES ($1, $2, $3)`,
-				dialect), runID, defName, 1); err != nil {
+				`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id) VALUES ($1, $2, $3, $4)`,
+				dialect), runID, defName, 1, tenant); err != nil {
 				t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
 			}
 			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
