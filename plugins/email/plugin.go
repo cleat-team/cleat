@@ -86,6 +86,13 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	}
 
 	if p.apiKey == "" {
+		if len(env.Config) == 0 {
+			// No config section at all -- most deployments never touch this
+			// plugin. Disable it quietly rather than logging ERROR on every
+			// stock worker start. A config section that IS present but omits
+			// the key falls through to the line below, and stays ERROR.
+			return fmt.Errorf("email: %w", plugin.ErrNotConfigured)
+		}
 		return fmt.Errorf("email: sendgrid_api_key is required in plugin config")
 	}
 

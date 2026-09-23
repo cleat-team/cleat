@@ -205,6 +205,17 @@ jobs:
           scripts/check-go-work-floor.sh --self-test
           scripts/check-go-work-floor.sh
 
+      # go.mod's `go` directive is the project's real Go minimum. Two
+      # onboarding files restate it in prose instead of reading it --
+      # docs/tutorials/quick-start.md's "Go X+" line and
+      # .devcontainer/devcontainer.json's image tag -- and both had drifted
+      # a minor version behind go.mod before anyone noticed (cleat#2070).
+      # Neither drift breaks a build, so nothing else catches it.
+      - name: Onboarding Go version guard
+        run: |
+          scripts/check-onboarding-go-version.sh --self-test
+          scripts/check-onboarding-go-version.sh
+
       # Secret scanning. Nothing in this repo looked for credentials until
       # 2026-09-05: gosec's G101 is not that tool (it fired 3 times here and was
       # wrong all 3), and #731 excluded G306 and every _test.go from gosec, both

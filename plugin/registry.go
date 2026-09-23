@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -109,7 +110,11 @@ func InitAll(ctx context.Context, env *Environment, plugins []*LoadedPlugin) {
 				lp.Healthy = false
 				lp.Error = err
 				if env != nil && env.Logger != nil {
-					env.Logger.Error("plugin init failed", "plugin", lp.Plugin.Info().Name, "error", err)
+					if errors.Is(err, ErrNotConfigured) {
+						env.Logger.Info("plugin not configured, disabled", "plugin", lp.Plugin.Info().Name)
+					} else {
+						env.Logger.Error("plugin init failed", "plugin", lp.Plugin.Info().Name, "error", err)
+					}
 				}
 			}
 		}()

@@ -17,6 +17,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -1194,7 +1195,11 @@ func main() {
 			if err := lp.Plugin.Init(ctx, &envCopy); err != nil {
 				lp.Healthy = false
 				lp.Error = err
-				logger.ErrorContext(context.Background(), "plugin init failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", err)
+				if errors.Is(err, plugin.ErrNotConfigured) {
+					logger.InfoContext(context.Background(), "plugin not configured, disabled", "worker_id", workerID, "plugin", lp.Plugin.Info().Name)
+				} else {
+					logger.ErrorContext(context.Background(), "plugin init failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", err)
+				}
 			}
 		}()
 	}
