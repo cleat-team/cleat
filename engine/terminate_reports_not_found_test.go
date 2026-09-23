@@ -98,12 +98,24 @@ func TestTerminateReportsNotFoundForAWorkflowItDidNotTerminate(t *testing.T) {
 					"want \"failed\" -- the close policy is no longer being enforced at all", got)
 			}
 
-			// And a terminate of an ALREADY terminated workflow still succeeds:
-			// the UPDATE carries no status filter, so this stays idempotent and
-			// only a genuinely absent row reports not-found.
-			if err := store.TerminateWorkflow(ctx, parentID, "again"); err != nil {
-				t.Errorf("re-terminating an already terminated workflow returned %v, want nil -- "+
-					"terminate is idempotent and this change must not have made it a one-shot", err)
+			// SUPERSEDED 2026-09-22 (cleat#1975, D3): this used to terminate the
+			// parent a second time and require nil -- "terminate is idempotent".
+			// Settled is final now: 'terminated' is a settled status, and a second
+			// terminate refuses with ErrAdminStateConflict instead of silently
+			// re-applying. error_msg must stay "for real" on the row.
+			if err := store.TerminateWorkflow(ctx, parentID, "again"); !errors.Is(err, ErrAdminStateConflict) {
+				t.Errorf("re-terminating an already terminated workflow returned %v, want ErrAdminStateConflict", err)
+			}
+			after, err := store.GetWorkflowByID(ctx, parentID)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID(parent, after refused re-terminate): %v", err)
+			}
+			if after == nil || after.Error != "for real" {
+				var got string
+				if after != nil {
+					got = after.Error
+				}
+				t.Errorf("the refused re-terminate altered the row: error_msg=%q, want \"for real\" (unchanged)", got)
 			}
 		})
 	}

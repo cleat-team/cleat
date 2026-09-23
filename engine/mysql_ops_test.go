@@ -1397,7 +1397,6 @@ func TestMySQLStore_TerminateWorkflow(t *testing.T) {
 		{"no defers terminates in one step", "running", false, false},
 		{"registered defers enter the defer phase", "running", true, false},
 		{"compacted history is treated as owing defers", "running", false, true},
-		{"already terminal stays one-step", "done", true, false},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -1410,6 +1409,24 @@ func TestMySQLStore_TerminateWorkflow(t *testing.T) {
 				t.Fatalf("TerminateWorkflow: %v", err)
 			}
 		})
+	}
+}
+
+// TestMySQLStore_TerminateWorkflow_RefusesASettledWorkflow used to be the
+// "already terminal stays one-step" case in the table above -- cleat#1975
+// (D3) retires that: 'done' is a settled status, and a terminate on it now
+// refuses before reaching any UPDATE. No exec result is configured, so if the
+// settled check is ever removed, mockStmt.Exec's unmatched-query fallback (a
+// silent zero-rows result) would route this through the RowsAffected==0 arm
+// instead and return ErrWorkflowNotFound, not ErrAdminStateConflict -- the
+// assertion below is falsifiable against exactly that regression.
+func TestMySQLStore_TerminateWorkflow_RefusesASettledWorkflow(t *testing.T) {
+	store := newMySQLStoreForTest(t, []mockRowsResult{
+		queryRowOk("SELECT w.status", "done", true, false),
+	}, nil)
+	err := store.TerminateWorkflow(testCtx, "wf-1", "manual termination")
+	if !errors.Is(err, ErrAdminStateConflict) {
+		t.Fatalf("TerminateWorkflow on a done workflow: err = %v, want ErrAdminStateConflict", err)
 	}
 }
 

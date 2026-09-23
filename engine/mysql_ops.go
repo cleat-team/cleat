@@ -1330,9 +1330,9 @@ func (s *MySQLStore) ClearExpiredCompactionState(ctx context.Context, olderThan 
 // "another tenant's" -- see its doc comment. That is the same boundary 3.101
 // draws at the HTTP layer, and it is why this returns one error rather than two.
 //
-// Note that an ALREADY-terminated workflow still matches: the UPDATE carries no
-// status filter, so terminate stays idempotent and only a genuinely absent (or
-// other-tenant) row returns not-found.
+// SUPERSEDED 2026-09-22 (cleat#1975, D3): this used to say an already-terminated
+// workflow "still matches" and terminate "stays idempotent". It no longer does
+// -- see PostgresStore.TerminateWorkflow's doc comment.
 //
 // TERMINATE IS ASYNCHRONOUS WHEN THE WORKFLOW OWES CLEANUP (D6, and
 // IMPROVEMENT-PLAN 3.75 step 2) -- see PostgresStore.TerminateWorkflow for the
@@ -1377,6 +1377,14 @@ func (s *MySQLStore) preemptivelySettle(ctx context.Context, workflowID, reason,
 	}
 	if err != nil {
 		return fmt.Errorf("%s workflow: read: %w", finalStatus, err)
+	}
+
+	// cleat#1975 (D3): settled is final. See PostgresStore's twin for the
+	// dead-letter exception.
+	if isSettledStatus(curStatus) && !(finalStatus == statusTerminated && curStatus == statusDeadLettered) {
+		return adminErrorf(ErrAdminStateConflict,
+			"workflow %s: already settled (status=%s); refusing to write %s over it",
+			workflowID, curStatus, finalStatus)
 	}
 
 	if deferPhaseOwed(curStatus, hasDefers, compacted) {

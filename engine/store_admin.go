@@ -34,13 +34,20 @@ package engine
 //  4. The same post-commit cleanup a normal terminal write does: sticky
 //     worker, concurrency keys, parent close policy.
 //
-// force-complete also clears error_msg / error_code / error_op. A workflow
-// that has already failed can be force-completed -- that is a repair an
-// operator is entitled to make -- and leaving the old failure on a row now
-// marked done produces a state nothing else in the engine can create, which
-// every reader of those columns would have to know to ignore. The reverse is
-// not symmetric: force-fail leaves result alone, because a result that was
-// genuinely produced is still a fact about the run.
+// force-complete also clears error_msg / error_code / error_op, so a row it
+// marks done never carries a stale failure from a prior segment -- a state
+// nothing else in the engine can create, which every reader of those columns
+// would have to know to ignore. The reverse is not symmetric: force-fail
+// leaves result alone, because a result that was genuinely produced is still
+// a fact about the run.
+//
+// SUPERSEDED 2026-09-22 (cleat#1975, D3): this used to go on to say a workflow
+// that has already failed can be force-completed as a repair "an operator is
+// entitled to make". Settled is final now -- adminForceResolve refuses with
+// ErrAdminStateConflict on a workflow that is already 'failed' (or any other
+// settled status), so that repair path no longer exists. The clearing above
+// still runs on every force-complete; it is just no longer reachable from a
+// row that was already terminal.
 //
 // # Tenant scoping
 //
@@ -307,6 +314,18 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		return fmt.Errorf("admin %s: read: %w", a.action, err)
 	}
 
+	// cleat#1975 (D3): settled is final. Unlike preemptivelySettle, a
+	// force-resolve has no dead-letter exception -- force-complete and
+	// force-fail refuse on every settled status, with none of terminate's
+	// carve-outs. This also retires the "force-complete repairs an earlier
+	// force-fail" case TestAdminForceComplete_ClearsAnEarlierFailure asserted:
+	// that repair went through a settled row exactly like the bug this refuses.
+	if isSettledStatus(curStatus) {
+		return adminErrorf(ErrAdminStateConflict,
+			"admin %s: workflow %s is already settled (status=%s); refusing to overwrite a finished run",
+			a.action, workflowID, curStatus)
+	}
+
 	if deferPhaseOwed(curStatus, hasDefers, compacted) {
 		return s.adminForceMark(ctx, tx, workflowID, generation, a)
 	}
@@ -517,6 +536,14 @@ func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, g
 		return fmt.Errorf("admin %s: read: %w", a.action, err)
 	}
 
+	// cleat#1975 (D3): settled is final. See the PostgreSQL sibling for why
+	// there is no dead-letter exception here.
+	if isSettledStatus(curStatus) {
+		return adminErrorf(ErrAdminStateConflict,
+			"admin %s: workflow %s is already settled (status=%s); refusing to overwrite a finished run",
+			a.action, workflowID, curStatus)
+	}
+
 	if deferPhaseOwed(curStatus, hasDefers, compacted) {
 		return s.adminForceMark(ctx, tx, workflowID, generation, a)
 	}
@@ -711,6 +738,15 @@ func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID strin
 	}
 	if err != nil {
 		return fmt.Errorf("admin %s: read: %w", a.action, err)
+	}
+
+	// cleat#1975 (D3): settled is final. See the PostgreSQL sibling for why
+	// there is no dead-letter exception here. Not a rollback-guaranteed class,
+	// so the retry wrapper returns it on the first attempt.
+	if isSettledStatus(curStatus) {
+		return adminErrorf(ErrAdminStateConflict,
+			"admin %s: workflow %s is already settled (status=%s); refusing to overwrite a finished run",
+			a.action, workflowID, curStatus)
 	}
 
 	if deferPhaseOwed(curStatus, hasDefers, compacted) {
