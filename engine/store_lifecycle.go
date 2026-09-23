@@ -714,7 +714,8 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	}
 
 	releaseWorkflowResources(s.log(), s, currentRunID)
-	s.enforceParentClosePolicy(context.Background(), currentRunID)
+	s.enforceParentClosePolicy(context.Background(), currentRunID,
+		fmt.Sprintf("parent continued as new (run %s)", newRunID))
 
 	return newRunID, nil
 }
@@ -780,7 +781,7 @@ func (s *PostgresStore) finalizeWorkflowSegmentInner(ctx context.Context, runID,
 	// Best-effort cleanup for terminal statuses (post-commit).
 	if finalStatus == "done" || finalStatus == "failed" {
 		releaseWorkflowResources(s.log(), s, runID)
-		s.enforceParentClosePolicy(context.Background(), runID)
+		s.enforceParentClosePolicy(context.Background(), runID, parentOutcomeMessage(finalStatus))
 	}
 
 	return nil
@@ -868,7 +869,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(statusDone))
 
 	return nil
 }
@@ -926,7 +927,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(statusFailed))
 
 	return nil
 }
@@ -946,16 +947,45 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 //
 // It stays void: the contract with callers has not changed, only whether a
 // failure is observable.
-func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
-	s.enforceParentClosePolicyAt(ctx, parentWorkflowID, 0)
+//
+// outcomeMsg names what happened to the closing parent -- cleat#1978. It
+// becomes the TERMINATE child's error_msg, replacing the hardcoded "parent
+// workflow terminated" that used to run regardless of why the parent
+// actually closed (completion, failure, dead-lettering, an operator's
+// TerminateWorkflow call, or continue-as-new all reach here). Build it with
+// parentOutcomeMessage.
+func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID, outcomeMsg string) {
+	s.enforceParentClosePolicyAt(ctx, parentWorkflowID, 0, outcomeMsg)
+}
+
+// parentOutcomeMessage describes, for a TERMINATE child's error_msg, what
+// happened to the parent that closed it -- cleat#1978. Must stay in sync with
+// the five terminal values workflow_instances.status actually takes; see
+// enforceParentClosePolicyAt's own census of them, a few lines below.
+func parentOutcomeMessage(parentStatus string) string {
+	switch parentStatus {
+	case statusDone:
+		return "parent workflow completed"
+	case statusFailed:
+		return "parent workflow failed"
+	case statusDeadLettered:
+		return "parent workflow was dead-lettered"
+	case statusTerminated:
+		return "parent workflow was terminated"
+	case statusCancelled:
+		return "parent workflow was cancelled"
+	default:
+		return "parent workflow closed (status " + parentStatus + ")"
+	}
 }
 
 // enforceParentClosePolicyAt is enforceParentClosePolicy with the recursion
 // depth carried explicitly. See cascadeIntoClosedChildren.
-func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkflowID string, depth int) {
+func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkflowID string, depth int, outcomeMsg string) {
 	steps := []struct {
 		policy string
 		query  string
+		args   []any
 	}{
 		// Both arms fence the child out. `generation = generation + 1` and
 		// `assigned_to = NULL` are not bookkeeping: without them a child that a
@@ -1030,7 +1060,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		// is what stops the four-way split cleat#1227 is really about.
 		{"TERMINATE", `
 		UPDATE workflow_instances
-		SET status = 'failed', error_msg = 'parent workflow terminated',
+		SET status = 'terminated', error_msg = $2, error_op = 'parent_close', error_code = NULL,
 		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
 		    completed_at = now(),
 		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
@@ -1038,13 +1068,13 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND NOT ` + deferPhaseOwedSQL + `
-	`},
+	`, []any{parentWorkflowID, outcomeMsg}},
 		{"TERMINATE (defer phase)", `
 		UPDATE workflow_instances
 		SET status = '` + statusTerminating + `',
-		    pending_terminal_status = 'failed',
+		    pending_terminal_status = 'terminated',
 		    defer_phase_deadline = ` + deferPhaseDeadlinePostgres + `,
-		    error_msg = 'parent workflow terminated',
+		    error_msg = $2, error_op = 'parent_close', error_code = NULL,
 		    next_wake_at = now(),
 		    assigned_to = NULL,
 		    generation = generation + 1
@@ -1052,14 +1082,14 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND ` + deferPhaseOwedSQL + `
-	`},
+	`, []any{parentWorkflowID, outcomeMsg}},
 		{"REQUEST_CANCEL", `
 		UPDATE workflow_instances
 		SET cancellation_requested = true
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-	`},
+	`, []any{parentWorkflowID}},
 	}
 
 	// Collected before the UPDATE: see releaseTerminatedChildren for why not
@@ -1071,7 +1101,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 	}
 
 	for _, step := range steps {
-		if err := s.runParentClosePolicyStep(ctx, step.query, parentWorkflowID); err != nil {
+		if err := s.runParentClosePolicyStep(ctx, step.query, step.args...); err != nil {
 			s.log().WarnContext(ctx, "enforceParentClosePolicy failed; children of a closed parent are unaffected by its close policy",
 				"policy", step.policy, "parent_workflow_id", parentWorkflowID, "error", err)
 			if step.policy == "TERMINATE" {
@@ -1081,8 +1111,15 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 	}
 
 	releaseTerminatedChildren(s.log(), s, terminated)
+	// A child this cascade just closed was, by construction, TERMINATEd --
+	// the plain TERMINATE arm's children are the only ones passed here (see
+	// this function's own doc comment on cascadeIntoClosedChildren's caller).
+	// So its own outcome, for ITS children's error_msg, is always "parent
+	// workflow was terminated" -- not outcomeMsg, which describes the ROOT
+	// parent's outcome and would be wrong for every level below it.
+	childOutcomeMsg := parentOutcomeMessage(statusTerminated)
 	cascadeIntoClosedChildren(s.log(), depth, terminated, func(id string, d int) {
-		s.enforceParentClosePolicyAt(ctx, id, d)
+		s.enforceParentClosePolicyAt(ctx, id, d, childOutcomeMsg)
 	})
 }
 
@@ -1116,14 +1153,14 @@ func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWor
 	return scanWorkflowIDs(rows)
 }
 
-func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, parentWorkflowID string) error {
+func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query string, args ...any) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, query, parentWorkflowID); err != nil {
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1176,7 +1213,7 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(statusDeadLettered))
 
 	return nil
 }

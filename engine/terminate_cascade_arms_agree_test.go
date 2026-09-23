@@ -65,8 +65,8 @@ func TestBothCloseArmsReachTheSameDepth(t *testing.T) {
 			// CONTROL: the two arms really were taken, one each. Without this,
 			// two subtrees that both took the plain arm would agree trivially
 			// and the test would assert nothing about the defer arm.
-			if wf := mustGetWorkflow(t, ctx, store, mid["plain"]); wf.Status != "failed" {
-				t.Fatalf("the plain middle child is %q, want \"failed\" -- it owes no defers, "+
+			if wf := mustGetWorkflow(t, ctx, store, mid["plain"]); wf.Status != "terminated" {
+				t.Fatalf("the plain middle child is %q, want \"terminated\" -- it owes no defers, "+
 					"so the plain arm must have taken it", wf.Status)
 			}
 			if wf := mustGetWorkflow(t, ctx, store, mid["defer"]); wf.Status != statusTerminating {
@@ -95,7 +95,7 @@ func TestBothCloseArmsReachTheSameDepth(t *testing.T) {
 					t.Fatalf("PollCancellation(%s grandchild): %v", arm, err)
 				}
 				status[arm] = wf.Status
-				reached[arm] = wf.Status == "failed" || wf.Status == statusTerminating || flagged
+				reached[arm] = wf.Status == "terminated" || wf.Status == statusTerminating || flagged
 			}
 
 			if reached["plain"] != reached["defer"] {

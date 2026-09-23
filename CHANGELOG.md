@@ -12,6 +12,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **A `TERMINATE` close-policy child is now recorded `status='terminated'`, not
+  `status='failed'`.** (cleat#1978)
+
+  When a closing parent's `TERMINATE`-policy child is closed by
+  `enforceParentClosePolicy`, its row now gets `status='terminated'`,
+  `error_op='parent_close'`, `error_code=NULL`, and an `error_msg` naming the
+  **parent's actual outcome** — "parent workflow completed", "parent workflow
+  failed", "parent workflow was dead-lettered", "parent workflow was
+  terminated", "parent workflow was cancelled", or, for `ContinueAsNew`,
+  "parent continued as new (run \<id\>)" (`parentOutcomeMessage`,
+  `engine/store_lifecycle.go`).
+
+  Previously it wrote `status='failed'` with a fixed `error_msg` of "parent
+  workflow terminated" **regardless of why the parent actually closed** — a
+  parent that completed successfully still left its TERMINATE children
+  reading "terminated" in their error text.
+
+  **Consequences for callers.**
+  - A parent or grandparent awaiting such a child via `GetChildResult`/
+    `AwaitChild` now sees `Error` prefixed `"[TERMINATED] "` (per cleat#1974's
+    existing convention for a directly-terminated child) rather than the
+    ordinary failure shape. The child still reports `Completed=true,
+    Failed=true` either way, so nothing that only checks those two fields
+    needs to change.
+  - Any code, dashboard, or alert that filters `workflow_instances` on
+    `status='failed'` and expected TERMINATE-policy children to be included
+    must now also check `status='terminated'`.
+  - `docs/reference/workflow-lifecycle.md`'s status table is updated to
+    match.
+
 - **`--max-quota-events` now defaults to 50,000 instead of unlimited.** (cleat#1829)
 
   A workflow run that writes more than 50,000 events is now **continued as

@@ -368,7 +368,11 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 	}
 
 	releaseWorkflowResources(s.log(), s, workflowID)
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	forcedStatus := statusFailed
+	if a.action == adminActionForceComplete {
+		forcedStatus = statusDone
+	}
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(forcedStatus))
 	return nil
 }
 
@@ -586,7 +590,11 @@ func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, g
 	}
 
 	releaseWorkflowResources(s.log(), s, workflowID)
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	forcedStatus := statusFailed
+	if a.action == adminActionForceComplete {
+		forcedStatus = statusDone
+	}
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(forcedStatus))
 	return nil
 }
 
@@ -791,7 +799,11 @@ func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID strin
 	}
 
 	releaseWorkflowResources(s.log(), s, workflowID)
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	forcedStatus := statusFailed
+	if a.action == adminActionForceComplete {
+		forcedStatus = statusDone
+	}
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(forcedStatus))
 	return nil
 }
 

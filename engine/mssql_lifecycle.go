@@ -817,7 +817,7 @@ func (s *MSSQLStore) completeWorkflowOnce(ctx context.Context, workflowID, worke
 	}
 
 	releaseWorkflowResources(s.log(), s, workflowID)
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(statusDone))
 
 	return nil
 }
@@ -878,7 +878,7 @@ func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID 
 	}
 
 	releaseWorkflowResources(s.log(), s, workflowID)
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(statusFailed))
 
 	return nil
 }
@@ -936,7 +936,7 @@ func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, 
 	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(statusDeadLettered))
 
 	return nil
 }
@@ -1102,7 +1102,8 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 	}
 
 	releaseWorkflowResources(s.log(), s, currentRunID)
-	s.enforceParentClosePolicy(context.Background(), currentRunID)
+	s.enforceParentClosePolicy(context.Background(), currentRunID,
+		fmt.Sprintf("parent continued as new (run %s)", newRunID))
 
 	return newRunID, nil
 }
@@ -1177,7 +1178,7 @@ func (s *MSSQLStore) finalizeWorkflowSegmentOnce(ctx context.Context, runID, wor
 	// Best-effort cleanup for terminal statuses (post-commit).
 	if finalStatus == "done" || finalStatus == "failed" {
 		releaseWorkflowResources(s.log(), s, runID)
-		s.enforceParentClosePolicy(context.Background(), runID)
+		s.enforceParentClosePolicy(context.Background(), runID, parentOutcomeMessage(finalStatus))
 	}
 
 	return nil
@@ -1561,9 +1562,9 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 var mssqlParentCloseDeferPhase = fmt.Sprintf(`
 		UPDATE workflow_instances
 		SET status = 'terminating',
-		    pending_terminal_status = 'failed',
+		    pending_terminal_status = 'terminated',
 		    defer_phase_deadline = %s,
-		    error_msg = 'parent workflow terminated',
+		    error_msg = @p3, error_op = 'parent_close', error_code = NULL,
 		    next_wake_at = SYSUTCDATETIME(),
 		    assigned_to = NULL,
 		    generation = generation + 1
@@ -1574,22 +1575,26 @@ var mssqlParentCloseDeferPhase = fmt.Sprintf(`
 		  AND %s
 	`, deferPhaseDeadlineMSSQL, deferPhaseOwedSQL)
 
-func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
-	s.enforceParentClosePolicyAt(ctx, parentWorkflowID, 0)
+// outcomeMsg names what happened to the closing parent -- cleat#1978. See
+// parentOutcomeMessage (engine/store_lifecycle.go, dialect-independent) and
+// PostgresStore.enforceParentClosePolicy's doc comment for the full story.
+func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID, outcomeMsg string) {
+	s.enforceParentClosePolicyAt(ctx, parentWorkflowID, 0, outcomeMsg)
 }
 
 // enforceParentClosePolicyAt is enforceParentClosePolicy with the recursion
 // depth carried explicitly. See cascadeIntoClosedChildren.
-func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkflowID string, depth int) {
+func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkflowID string, depth int, outcomeMsg string) {
 	steps := []struct {
 		policy string
 		query  string
+		args   []any
 	}{
 		// Two TERMINATE arms, split by whether the child owes cleanup. See
 		// PostgresStore's enforceParentClosePolicy. IMPROVEMENT-PLAN 3.114.
 		{"TERMINATE", `
 		UPDATE workflow_instances
-		SET status = 'failed', error_msg = 'parent workflow terminated',
+		SET status = 'terminated', error_msg = @p3, error_op = 'parent_close', error_code = NULL,
 		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
 		    completed_at = SYSUTCDATETIME(),
 		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
@@ -1598,8 +1603,8 @@ func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = @p2
 		  AND NOT ` + deferPhaseOwedSQL + `
-	`},
-		{"TERMINATE (defer phase)", mssqlParentCloseDeferPhase},
+	`, []any{parentWorkflowID, s.tenantID, outcomeMsg}},
+		{"TERMINATE (defer phase)", mssqlParentCloseDeferPhase, []any{parentWorkflowID, s.tenantID, outcomeMsg}},
 		{"REQUEST_CANCEL", `
 		UPDATE workflow_instances
 		SET cancellation_requested = 1
@@ -1607,7 +1612,7 @@ func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = @p2
-	`},
+	`, []any{parentWorkflowID, s.tenantID}},
 	}
 
 	// Collected before the UPDATE: see releaseTerminatedChildren.
@@ -1625,7 +1630,7 @@ func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 					return err
 				}
 				defer tx.Rollback()
-				if _, err := tx.ExecContext(ctx, step.query, parentWorkflowID, s.tenantID); err != nil {
+				if _, err := tx.ExecContext(ctx, step.query, step.args...); err != nil {
 					return err
 				}
 				return tx.Commit()
@@ -1640,8 +1645,12 @@ func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 	}
 
 	releaseTerminatedChildren(s.log(), s, terminated)
+	// Every child this cascade closed was just TERMINATEd, so its own
+	// children hear "parent workflow was terminated" regardless of what
+	// closed the root parent -- see PostgresStore's identical comment.
+	childOutcomeMsg := parentOutcomeMessage(statusTerminated)
 	cascadeIntoClosedChildren(s.log(), depth, terminated, func(id string, d int) {
-		s.enforceParentClosePolicyAt(ctx, id, d)
+		s.enforceParentClosePolicyAt(ctx, id, d, childOutcomeMsg)
 	})
 }
 

@@ -200,8 +200,8 @@ func TestParentCloseGivesAChildWithDefersItsPhase(t *testing.T) {
 			}
 
 			// The two arms partitioned the children.
-			if wf := mustGetWorkflow(t, ctx, store, plain); wf.Status != "failed" {
-				t.Fatalf("the child with no defers is %q, want \"failed\": the plain arm "+
+			if wf := mustGetWorkflow(t, ctx, store, plain); wf.Status != "terminated" {
+				t.Fatalf("the child with no defers is %q, want \"terminated\": the plain arm "+
 					"must be unchanged for a child that owes no cleanup", wf.Status)
 			}
 			if wf := mustGetWorkflow(t, ctx, store, withDefers); wf.Status != statusTerminating {
@@ -219,10 +219,10 @@ func TestParentCloseGivesAChildWithDefersItsPhase(t *testing.T) {
 
 			// The phase completes like any other.
 			claimed := claimByID(t, ctx, store, "worker-parent-close", withDefers)
-			if claimed.PendingTerminalStatus != "failed" {
+			if claimed.PendingTerminalStatus != "terminated" {
 				t.Fatalf("claim carried PendingTerminalStatus %q, want %q -- the outcome the "+
 					"close policy recorded, not the one terminate records",
-					claimed.PendingTerminalStatus, "failed")
+					claimed.PendingTerminalStatus, "terminated")
 			}
 			dps, ok := store.(DeferPhaseStore)
 			if !ok {
@@ -231,8 +231,8 @@ func TestParentCloseGivesAChildWithDefersItsPhase(t *testing.T) {
 			if err := dps.FinalizeDeferPhase(ctx, withDefers, "worker-parent-close", claimed.Generation, nil); err != nil {
 				t.Fatalf("FinalizeDeferPhase: %v", err)
 			}
-			if wf := mustGetWorkflow(t, ctx, store, withDefers); wf.Status != "failed" {
-				t.Fatalf("status = %q after the defer phase, want \"failed\": the close "+
+			if wf := mustGetWorkflow(t, ctx, store, withDefers); wf.Status != "terminated" {
+				t.Fatalf("status = %q after the defer phase, want \"terminated\": the close "+
 					"policy's outcome is the one that has to be applied", wf.Status)
 			}
 			if taken, err := store.AcquireConcurrencyKey(ctx, "key-child-dp", "wf-heir-dp", time.Hour); err != nil {
