@@ -932,12 +932,10 @@ func main() {
 			"worker_id", workerID, "error", ssErr)
 		os.Exit(1)
 	}
-	if err := checkSecretsUsable(ctx, secretStore); err != nil {
-		logger.ErrorContext(context.Background(),
-			"this deployment holds secrets but no master key is configured",
-			"worker_id", workerID, "error", err)
-		os.Exit(1)
-	}
+	// checkSecretsUsable runs AFTER the migrations below, not here: it reads
+	// tenant_secrets, which does not exist until migration 080 has applied, and a
+	// check that has to tolerate a missing table is a check that tolerates every
+	// other read failure too (cleat#2123).
 
 	var rawPluginConfig []byte
 	if *pluginConfigFile != "" {
@@ -1083,6 +1081,16 @@ func main() {
 	if err := plugin.RunMigrations(ctx, migrateDB, plugin.Dialect(factory.Dialect()), nil, plugList,
 		plugin.WithSchema(*schemaName)); err != nil {
 		logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
+		os.Exit(1)
+	}
+
+	// The secrets startup check, now that the schema is current. See the comment
+	// where the store is built for why it is not there, and checkSecretsUsable
+	// for why an unreadable table refuses to start rather than passing.
+	if err := checkSecretsUsable(ctx, secretStore); err != nil {
+		logger.ErrorContext(context.Background(),
+			"the secrets startup check refused to start this worker",
+			"worker_id", workerID, "error", err)
 		os.Exit(1)
 	}
 

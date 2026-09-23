@@ -5578,6 +5578,14 @@ func checkHostBindingConfigured(ctx context.Context, store *auth.TenantStore) er
 	return nil
 }
 
+// secretCounter is the part of *engine.SecretStore that checkSecretsUsable
+// reads, named so a test can make the read fail. That is not hypothetical: the
+// failure this check must not swallow is a read that errors (cleat#2123).
+type secretCounter interface {
+	HasMasterKey() bool
+	CountSecrets(ctx context.Context) (int, error)
+}
+
 // checkSecretsUsable refuses a worker that would fail on first use.
 //
 // A deployment holding secrets and started without CLEAT_SECRET_MASTER_KEY can
@@ -5592,16 +5600,34 @@ func checkHostBindingConfigured(ctx context.Context, store *auth.TenantStore) er
 // should be reported when it is made, not when it is exercised.
 //
 // The check is skipped entirely when a master key IS present -- reading the
-// count then answers nothing useful -- and a count that errors is not fatal,
-// because the table arrives in migration 080 and a worker started against an
-// older schema should say so through the migration runner rather than here.
-func checkSecretsUsable(ctx context.Context, store *engine.SecretStore) error {
+// count then answers nothing useful.
+//
+// A COUNT THAT ERRORS REFUSES TOO, and until cleat#2123 it did the opposite.
+// The rule here used to be "a count that errors is not fatal, because the table
+// arrives in migration 080 and a worker started against an older schema should
+// say so through the migration runner rather than here". That was true of the
+// place the check ran -- BEFORE the migrations -- and it is why the check never
+// noticed that its read could not see the rows on PostgreSQL (it raised) or SQL
+// Server (it returned 0): the error was read as "cannot tell" and the caller
+// went on as though there were nothing to protect. A check that swallows the
+// failure of its own measurement reports the same thing as a check that ran and
+// found nothing, which is this repository's whole "Is this result real?"
+// section.
+//
+// So the call now sits AFTER the migrations (cmd/cleat-worker/main.go), where
+// the table exists by construction, and an error here is a real inability to
+// establish the answer. There is no override: with no master key and a database
+// that cannot be read, this worker has no way to tell whether it would fail on
+// its first plugin call, and starting anyway is the behaviour being removed.
+func checkSecretsUsable(ctx context.Context, store secretCounter) error {
 	if store == nil || store.HasMasterKey() {
 		return nil
 	}
 	n, err := store.CountSecrets(ctx)
 	if err != nil {
-		return nil
+		return fmt.Errorf("CLEAT_SECRET_MASTER_KEY is not set and this worker could not "+
+			"establish whether the database holds secrets: %w; refusing to start rather "+
+			"than assume it holds none. Set the key, or fix the database access this read needs", err)
 	}
 	if n > 0 {
 		return fmt.Errorf("%d secret(s) are stored and CLEAT_SECRET_MASTER_KEY is not set, "+

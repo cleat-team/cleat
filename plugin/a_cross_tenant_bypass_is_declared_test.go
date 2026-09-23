@@ -116,8 +116,7 @@ func (k bypassKind) String() string {
 // worth stopping at.
 var crossTenantLedger = map[string]bypassKind{
 	// Deployment-level questions, asked before any request exists.
-	"engine/tenant_secrets.go:(*SecretStore).CountSecrets": kindDeploymentQuestion,
-	"plugins/pagerdutyalert/plugin.go:(*Plugin).Health":    kindDeploymentQuestion,
+	"plugins/pagerdutyalert/plugin.go:(*Plugin).Health": kindDeploymentQuestion,
 
 	// Cutoffs that belong to no tenant.
 	"plugins/auditlog/background.go:(*Plugin).cleanupRetention":     kindGlobalSweep,

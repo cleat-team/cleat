@@ -25,7 +25,13 @@ losing every stored value. There is no recovery path, deliberately.
 A worker started without it, on a deployment that holds secrets, **refuses to
 start**. The alternative is a worker that runs fine until the first workflow
 needing a credential, then fails from inside a plugin call with an error that
-does not mention keys.
+does not mention keys. This holds on all three databases, and it includes
+secrets belonging to a suspended tenant and secrets that have been retired,
+since either can be revived and needs the key to be read again.
+
+If the worker cannot read the secrets table at all, it also refuses, and says
+so. Without a key it cannot tell whether it would fail on its first plugin
+call, so it does not assume it would not.
 
 ## Write a secret
 
