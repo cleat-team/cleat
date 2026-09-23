@@ -133,7 +133,7 @@ jobs:
       # as part of the build for EACH platform, so this step verifies both
       # architectures by construction, with no separate verify step.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Only reachable on a v* tag push (this whole workflow's trigger), so
       # the actual push cannot fire from a PR. Kept as its own explicit
