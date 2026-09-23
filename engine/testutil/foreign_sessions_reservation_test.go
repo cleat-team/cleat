@@ -21,8 +21,18 @@ import (
 //
 // Postgres only. It is the dialect the 09-20 incident actually hit, and it
 // is the tractable one to exhaust deliberately: max_connections is a single
-// server-wide setting readable and (here, in an isolated sandbox database
-// nobody else is sharing) safely approachable from a test.
+// server-wide setting, so exhausting it deterministically requires the whole
+// SERVER to be this test's own -- a separate database on a shared server is
+// not enough. cleat#2012: the merge queue's Cluster Integration Tests job
+// used to give this test its own database on the same Postgres server as a
+// live 4-worker cluster, and the cluster's own connections -- recycled in
+// the background every 5 minutes by database/sql's ConnMaxLifetime,
+// independent of load -- could free a slot in that shared, server-wide
+// ceiling at exactly the moment this test relied on it staying occupied.
+// That job now starts a dedicated, throwaway Postgres container for
+// ./engine/... (see .github/workflows/ci.yml, "Start a dedicated Postgres
+// for ./engine/..."), restoring the exclusivity this comment used to assert
+// without CI actually providing it.
 func TestForeignSessionsAnswersUnderPostgresConnectionExhaustion(t *testing.T) {
 	// Establishes a reservation the same way a real suite does -- at the
 	// first TestDB call -- rather than calling reserveProbeConnection

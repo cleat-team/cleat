@@ -2000,8 +2000,8 @@ jobs:
     name: Cluster Integration Tests
     runs-on: ubuntu-latest
     env:
-      # A database of the tests' own, on the same server as the cluster but
-      # not the one the workers use.
+      # A database of the tests' own -- and, as of cleat#2012, a SERVER of its
+      # own too.
       #
       # This job's purpose is to prove the cluster comes up and stays up. It
       # was also pointing `go test ./engine/...` at the cluster's own
@@ -2012,7 +2012,26 @@ jobs:
       # asked for 3 and got 10. Those tests are correct and the setup was not:
       # they assume exclusive ownership of the table, which no test sharing a
       # database with a running cluster can have.
-      CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat_tests?sslmode=disable
+      #
+      # Giving it a separate DATABASE on cleat-postgres (below, historically)
+      # fixed that, but not a sibling bug of the same shape one level up:
+      # PostgreSQL's max_connections is a SERVER-wide ceiling, not a
+      # per-database one, so TestForeignSessionsAnswersUnderPostgresConnectionExhaustion
+      # -- which deliberately exhausts that ceiling to test a connection-
+      # reservation fallback -- was exhausting a budget the live cluster's own
+      # workers were also drawing from. cleat#2012: the cluster's pools set
+      # SetConnMaxLifetime(5*time.Minute), so database/sql closes and reopens
+      # worker connections in the background throughout a run this long,
+      # independent of load; whenever that happened to land inside this
+      # test's exhaust-then-probe window, a slot the test was relying on
+      # staying occupied came free and its assertion that a fresh connection
+      # must fail went straight through instead. The dedicated "Test Go"
+      # matrix job never sees this: it gets its own service container with no
+      # cluster anywhere near it. This job needs the same exclusivity, and a
+      # second database on a shared server cannot give it that -- only a
+      # second server can. See the "Start a dedicated Postgres for
+      # ./engine/..." step below.
+      CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5433/cleat_tests?sslmode=disable
     steps:
       - uses: actions/checkout@v7
 
@@ -2049,6 +2068,43 @@ jobs:
 
       - name: Start Postgres and apply the schema
         run: docker compose -f docker-compose.cluster.yml up -d postgres
+
+      # cleat#2012. A plain, throwaway server -- not a service on
+      # docker-compose.cluster.yml, and not a second database on
+      # cleat-postgres -- solely so `go test ./engine/...` (the "Run
+      # integration tests" step below) has a max_connections ceiling nothing
+      # else on this runner can move. schema and rows are handled by
+      # engine/testutil itself on first use, so this needs no volume mount and
+      # no migrations.
+      - name: Start a dedicated Postgres for ./engine/... (isolated from the cluster's connection budget)
+        run: |
+          docker run -d --name cleat-test-postgres \
+            -e POSTGRES_USER=cleat \
+            -e POSTGRES_PASSWORD=cleat \
+            -e POSTGRES_DB=cleat_tests \
+            -p 5433:5432 \
+            postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+
+      - name: Wait for the dedicated Postgres to be ready
+        shell: bash
+        run: |
+          # The official postgres image starts twice (initdb, then the real
+          # server); pg_isready can answer success during the first instance.
+          # Measured and fixed the same way for the fullstack-template sandbox
+          # in cleat#1969 -- wait for the "ready" log line twice, not once.
+          deadline=$((SECONDS + 60))
+          ready_count=0
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            ready_count=$(docker logs cleat-test-postgres 2>&1 | grep -c "database system is ready to accept connections" || true)
+            if [ "$ready_count" -ge 2 ] && docker exec cleat-test-postgres pg_isready -U cleat >/dev/null 2>&1; then
+              echo "Dedicated test Postgres is ready."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error title=Dedicated test Postgres not ready::cleat-test-postgres did not become ready within 60s (ready_count=$ready_count)."
+          docker logs --tail=80 cleat-test-postgres 2>&1 || true
+          exit 1
 
       - name: Wait for cluster readiness
         shell: bash
@@ -2136,17 +2192,13 @@ jobs:
           # Each service has a healthcheck in docker-compose.cluster.yml; wait
           # for every one of them to reach "healthy" rather than assuming a
           # fixed delay is enough.
-          # The test database, separate from the cluster's own (see
-          # CLEAT_TEST_DB above). Left empty: engine/testutil builds the
-          # schema from migrations/postgres/ on first use.
           #
-          # Checked before creating rather than `|| true`, so that a genuine
-          # failure to create it is not swallowed along with "already exists".
-          if ! docker exec cleat-postgres psql -U cleat -d cleat -tAc \
-                 "SELECT 1 FROM pg_database WHERE datname = 'cleat_tests'" | grep -q 1; then
-            docker exec cleat-postgres psql -v ON_ERROR_STOP=1 -U cleat -d cleat \
-              -c "CREATE DATABASE cleat_tests"
-          fi
+          # No cleat_tests creation step here any more (cleat#2012): the test
+          # database now lives on its own dedicated server (see CLEAT_TEST_DB
+          # and "Start a dedicated Postgres for ./engine/..." above), created
+          # there via POSTGRES_DB at container start. Left empty otherwise:
+          # engine/testutil builds the schema from migrations/postgres/ on
+          # first use.
 
           echo "Waiting for workers to become healthy..."
           SERVICES="cleat-worker-1 cleat-worker-2 cleat-worker-3 cleat-dashboard"
@@ -2380,8 +2432,13 @@ jobs:
 
       - name: Cluster logs (on failure)
         if: failure()
-        run: docker compose -f docker-compose.cluster.yml logs --tail=100
+        run: |
+          docker compose -f docker-compose.cluster.yml logs --tail=100
+          echo "--- cleat-test-postgres ---"
+          docker logs --tail=100 cleat-test-postgres 2>&1 || true
 
       - name: Tear down cluster
         if: always()
-        run: docker compose -f docker-compose.cluster.yml down -v
+        run: |
+          docker compose -f docker-compose.cluster.yml down -v
+          docker rm -f cleat-test-postgres 2>/dev/null || true
