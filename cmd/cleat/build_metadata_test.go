@@ -23,7 +23,7 @@ import (
 func TestNonGoMetadataPassesValidate(t *testing.T) {
 	for _, lang := range []string{"rust", "java", "assemblyscript"} {
 		t.Run(lang, func(t *testing.T) {
-			m := nonGoMetadata(lang, "my_workflow", 3)
+			m := nonGoMetadata(lang, "my_workflow", 3, []string{"place_order"})
 			if err := m.Validate(); err != nil {
 				t.Fatalf("metadata for %s does not validate: %v\n\n"+
 					"`cleat deploy` runs exactly this check and exits 1 on failure, "+
@@ -55,7 +55,7 @@ func TestNonGoMetadataPassesValidate(t *testing.T) {
 // that was wrong at build time and only rejected by a later command.
 func TestNonGoMetadataRejectsNonPositiveVersion(t *testing.T) {
 	for _, v := range []int{0, -1} {
-		m := nonGoMetadata("rust", "wf", v)
+		m := nonGoMetadata("rust", "wf", v, nil)
 		if err := m.Validate(); err != nil {
 			t.Errorf("version %d produced metadata that fails Validate(): %v", v, err)
 		}

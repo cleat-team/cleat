@@ -111,7 +111,7 @@ func runBuildAssemblyScript(pattern, outDir, channel string, workflowVersion int
 	// Inject cleat.metadata. Must pass wasm.Metadata.Validate(), which
 	// `cleat deploy` runs and exits 1 on; see cleat#1077.
 	if enriched, metaErr := wasm.WriteMetadata(input,
-		nonGoMetadata("assemblyscript", name, workflowVersion)); metaErr == nil {
+		nonGoMetadata("assemblyscript", name, workflowVersion, asEntryPointNames(asDir))); metaErr == nil {
 		input = enriched
 	}
 	dstWasm := filepath.Join(outDir, name+".wasm")

@@ -142,7 +142,7 @@ func runBuildJava(pattern, outDir, channel string, workflowVersion int) {
 	// Inject cleat.metadata. Must pass wasm.Metadata.Validate(), which
 	// `cleat deploy` runs and exits 1 on; see cleat#1077.
 	if enriched, metaErr := wasm.WriteMetadata(input,
-		nonGoMetadata("java", name, workflowVersion)); metaErr == nil {
+		nonGoMetadata("java", name, workflowVersion, javaEntryPointNames(javaDir))); metaErr == nil {
 		input = enriched
 	}
 

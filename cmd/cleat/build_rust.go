@@ -100,7 +100,7 @@ func runBuildRust(pattern, outDir, channel string, workflowVersion int) {
 	// Inject cleat.metadata. Must pass wasm.Metadata.Validate(), which
 	// `cleat deploy` runs and exits 1 on; see cleat#1077.
 	if enriched, metaErr := wasm.WriteMetadata(input,
-		nonGoMetadata("rust", crateName, workflowVersion)); metaErr == nil {
+		nonGoMetadata("rust", crateName, workflowVersion, rustEntryPointNames(cargoDir))); metaErr == nil {
 		input = enriched
 	}
 
