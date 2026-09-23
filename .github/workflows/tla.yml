@@ -29,6 +29,10 @@ on:
       - "engine/store_admin.go"
       - "engine/store_admin_rereplay.go"
       - "cmd/cleat-worker/rotating_claim.go"
+      - "engine/callintent.go"
+      - "engine/store_intent.go"
+      - "engine/admin_ops.go"
+      - "cmd/cleat-worker/config.go"
     # `edited` is required, not decorative -- see ecosystem-ci.yml's comment
     # on the same line for why (a retargeted PR would otherwise never trigger
     # this workflow at all). scripts/check-workflow-pr-triggers.sh guards it.
