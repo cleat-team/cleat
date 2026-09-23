@@ -164,7 +164,7 @@ through using the child versions it was tested with.
 
 ```
 # Deploy new child version
-cleat deploy Payment --wasm payment-v5.wasm
+cleat deploy --name Payment payment-v5.wasm
 
 # Test it as canary first
 cleatctl versions tag Payment 5 canary

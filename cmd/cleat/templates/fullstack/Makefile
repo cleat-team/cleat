@@ -15,8 +15,17 @@ logs:
 
 # Deploy the compiled workflow. Needs an API key; the worker prints one on
 # first start when no keys exist (see README).
+#
+# --db points at postgres's HOST-exposed port (docker-compose.yml maps
+# 5432:5432). The worker's own --db uses the docker-network hostname
+# "postgres" instead, which only resolves inside the compose network -- this
+# make target runs on the host, so it needs the host-reachable form. cleat
+# deploy requires a database (or --dry-run) as of cleat#2065; without --db
+# here this now fails with "no database configured" rather than silently
+# no-op'ing.
 deploy: build
-	cleat deploy --name my-fullstack-app ./out/submit_order.wasm
+	cleat deploy --db "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
+	  --name my-fullstack-app ./out/submit_order.wasm
 
 # Start one run. Idempotency-Key makes a retry of THIS request return the
 # original run instead of creating a second one.

@@ -18,7 +18,8 @@ any topic using an LLM with web search and calculator tools.
 3. Run the agent:
    ```bash
    cleat build --target python --entry agent.py:research_agent
-   cleat run research_agent '{"topic": "Latest developments in fusion energy"}'
+   cleat run --wasm research_agent.wasm --entry-point ResearchAgent \
+     --input '{"topic": "Latest developments in fusion energy"}'
    ```
 
 ## How It Works

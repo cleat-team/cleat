@@ -62,6 +62,30 @@ The deploy command:
 3. Auto-assigns the next version number (`SELECT COALESCE(MAX(version), 0) + 1`)
 4. Inserts a row into `workflow_defs` with the WASM bytes, version, ABI compatibility info, and plugin dependencies
 
+### Dry-run preview
+
+`cleat deploy` needs a database -- either `--db` or `CLEAT_DATABASE_URL` -- to
+actually deploy. Without one, it refuses rather than silently doing nothing:
+
+```bash
+$ cleat deploy --name place_order ./out/place_order.wasm
+Error: no database configured. Set CLEAT_DATABASE_URL or --db to deploy, or pass --dry-run to preview without one.
+$ echo $?
+1
+```
+
+Pass `--dry-run` to preview what would be deployed without connecting to a
+database at all -- the same name and behavior as `cleat plugin install
+--dry-run`. It exits 0 whether or not a database is configured, so it is safe
+to run in a script that has neither:
+
+```bash
+$ cleat deploy --dry-run --name place_order ./out/place_order.wasm
+Would deploy workflow "place_order" (version 1) from ./out/place_order.wasm (2.3 MB) to queue "default"
+  Metadata: place_order v1 (ABI: 1, min ver: 1)
+Dry run: no changes were made.
+```
+
 ### Database role and tenant
 
 `workflow_defs` carries row-level security, so `deploy` needs a connection
