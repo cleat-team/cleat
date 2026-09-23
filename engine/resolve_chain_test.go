@@ -45,7 +45,7 @@ func TestAdminResolveStep_LeavesHistoryVerifiableWithEventsAboveIt(t *testing.T)
 		if err != nil {
 			t.Fatalf("GetWorkflowByID: %v", err)
 		}
-		if err := ForceFail(ctx, store, wfID, wf.Generation, "ops@example.com", "stuck on an ambiguous call", "admin_force_fail"); err != nil {
+		if err := ForceFail(ctx, store, wfID, wf.Generation, "ops@example.com", "stuck on an ambiguous call", "timeout"); err != nil {
 			t.Fatalf("ForceFail: %v", err)
 		}
 
@@ -117,7 +117,7 @@ func TestAdminResolveStep_RepairedChecksumsMatchTheChainRule(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetWorkflowByID: %v", err)
 		}
-		if err := ForceFail(ctx, store, wfID, wf.Generation, "ops@example.com", "stuck", "admin_force_fail"); err != nil {
+		if err := ForceFail(ctx, store, wfID, wf.Generation, "ops@example.com", "stuck", "timeout"); err != nil {
 			t.Fatalf("ForceFail: %v", err)
 		}
 		if err := ResolveStep(ctx, store, wfID, 0, `{"charged":true}`, "ops@example.com"); err != nil {
@@ -188,7 +188,7 @@ func TestVerifyWorkflowEventsReportsTheStepItBrokeAt(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetWorkflowByID: %v", err)
 		}
-		if err := ForceFail(ctx, store, wfID, wf.Generation, "ops@example.com", "stuck", "admin_force_fail"); err != nil {
+		if err := ForceFail(ctx, store, wfID, wf.Generation, "ops@example.com", "stuck", "timeout"); err != nil {
 			t.Fatalf("ForceFail: %v", err)
 		}
 

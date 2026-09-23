@@ -30,7 +30,36 @@ const (
 	ErrAmbiguous                  // call outcome unknown after crash (replay found pending intent)
 	ErrRetriesExhausted           // retries exhausted
 	ErrResultRejected             // the store refused the workflow result as it was written
+	ErrOperator                   // an operator's manual force-fail, not a classification the engine derived (cleat#1977, D5)
 )
+
+// namedErrorCodes is every ErrorCode with a String() case below, i.e. every
+// code an operator-supplied error_code is allowed to name (cleat#1977, D5).
+// This is a second, hand-written list beside the switch in String() --
+// ErrorCode has no iota range to range over safely, since String()'s default
+// case exists precisely because ErrorCode(99) is a legal, if unclassified,
+// value, so there is no way to derive one list from the other the way
+// isSettledStatus derives from settledStatusList. TestErrorCode_String pins
+// every case in the switch by name; keep this list in step with it by hand
+// when either changes.
+var namedErrorCodes = []ErrorCode{
+	ErrUnknown, ErrTransient, ErrPermanent, ErrCancelled, ErrTimeout,
+	ErrAmbiguous, ErrRetriesExhausted, ErrResultRejected, ErrOperator,
+}
+
+// IsRecognizedErrorCodeString reports whether s is the String() form of a
+// named ErrorCode -- the set an operator-supplied force-fail error_code must
+// belong to (cleat#1977, D5). Empty string is not recognized; ForceFail
+// substitutes ErrOperator.String() for an empty code before this is ever
+// asked.
+func IsRecognizedErrorCodeString(s string) bool {
+	for _, c := range namedErrorCodes {
+		if c.String() == s {
+			return true
+		}
+	}
+	return false
+}
 
 // String returns a human-readable representation of the error code
 // suitable for storage in the error_code column.
@@ -50,6 +79,8 @@ func (c ErrorCode) String() string {
 		return "retries_exhausted"
 	case ErrResultRejected:
 		return "result_rejected_by_store"
+	case ErrOperator:
+		return "operator"
 	default:
 		return "unknown"
 	}
