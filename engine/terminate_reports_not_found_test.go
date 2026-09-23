@@ -89,13 +89,13 @@ func TestTerminateReportsNotFoundForAWorkflowItDidNotTerminate(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetWorkflowByID(child, after): %v", err)
 			}
-			if wf == nil || wf.Status != "failed" {
+			if wf == nil || wf.Status != "terminated" {
 				var got string
 				if wf != nil {
 					got = wf.Status
 				}
 				t.Errorf("terminating the parent did NOT close its TERMINATE child: status=%q, "+
-					"want \"failed\" -- the close policy is no longer being enforced at all", got)
+					"want \"terminated\" -- the close policy is no longer being enforced at all", got)
 			}
 
 			// SUPERSEDED 2026-09-22 (cleat#1975, D3): this used to terminate the

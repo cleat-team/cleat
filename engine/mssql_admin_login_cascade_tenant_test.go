@@ -97,7 +97,7 @@ func TestAdminLoginTerminateCascadeReachesOnlyTheCallersOwnChildren(t *testing.T
 		if err := storeB.TerminateWorkflow(ctx, "casc-parent-a", "not yours"); !errors.Is(err, ErrWorkflowNotFound) {
 			t.Fatalf("cross-tenant TerminateWorkflow returned %v, want ErrWorkflowNotFound", err)
 		}
-		if status, msg := instanceStatus(t, storeA, childA, unscopedTenantA); status == "failed" {
+		if status, msg := instanceStatus(t, storeA, childA, unscopedTenantA); status == "terminated" {
 			t.Errorf("tenant B terminated a parent it does not own and tenant A's CHILD was "+
 				"closed: status=%q error_msg=%q -- and A's parent is untouched, so that "+
 				"message names a cause that did not happen", status, msg)
@@ -110,7 +110,7 @@ func TestAdminLoginTerminateCascadeReachesOnlyTheCallersOwnChildren(t *testing.T
 		if err := storeB.TerminateWorkflow(ctx, "casc-parent-b", "mine"); err != nil {
 			t.Fatalf("own TerminateWorkflow: %v", err)
 		}
-		if status, msg := instanceStatus(t, storeB, childB, unscopedTenantB); status != "failed" {
+		if status, msg := instanceStatus(t, storeB, childB, unscopedTenantB); status != "terminated" {
 			t.Errorf("tenant B's own TERMINATE child was NOT closed by its parent's terminate: "+
 				"status=%q error_msg=%q -- the close policy is not being enforced at all",
 				status, msg)

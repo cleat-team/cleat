@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -45,7 +47,8 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 		return fmt.Errorf("finalize defer phase: append events: %w", err)
 	}
 
-	res, err := tx.ExecContext(ctx, `
+	var appliedStatus string
+	err = tx.QueryRowContext(ctx, `
 		UPDATE workflow_instances
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
@@ -56,16 +59,13 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 		  AND assigned_to = $2
 		  AND generation = $3
 		  AND pending_terminal_status IS NOT NULL
-	`, runID, workerID, generation)
+		RETURNING status
+	`, runID, workerID, generation).Scan(&appliedStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrFenceLost
+	}
 	if err != nil {
 		return fmt.Errorf("finalize defer phase: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("finalize defer phase: rows affected: %w", err)
-	}
-	if n == 0 {
-		return ErrFenceLost
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("finalize defer phase commit: %w", err)
@@ -75,7 +75,12 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 	// two-phase transition: after the defers that may have released these
 	// same resources themselves, not before them.
 	releaseWorkflowResources(s.log(), s, runID)
-	s.enforceParentClosePolicy(context.Background(), runID)
+	// appliedStatus is the outcome THIS workflow just settled to -- what was
+	// recorded at mark time (TerminateWorkflow, CancelWorkflow, or a
+	// TERMINATE close-policy arm), applied verbatim by the UPDATE above. Its
+	// own children, if any, need to hear that outcome, not the one that
+	// closed this workflow's own parent.
+	s.enforceParentClosePolicy(context.Background(), runID, parentOutcomeMessage(appliedStatus))
 	return nil
 }
 
@@ -122,12 +127,12 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 		    generation = generation + 1
 		WHERE pending_terminal_status IS NOT NULL
 		  AND defer_phase_deadline < now()
-		RETURNING id
+		RETURNING id, status
 	`)
 	if err != nil {
 		return 0, fmt.Errorf("expire defer phases: %w", err)
 	}
-	ids, err := scanWorkflowIDs(rows)
+	expired, err := scanExpiredDeferPhases(rows)
 	if err != nil {
 		return 0, fmt.Errorf("expire defer phases: scan: %w", err)
 	}
@@ -135,11 +140,11 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("expire defer phases commit: %w", err)
 	}
 
-	for _, id := range ids {
+	for _, wf := range expired {
 		s.log().WarnContext(ctx, "defer phase outran its deadline; applying the recorded outcome without the cleanup",
-			"workflow_id", id, "timeout", deferPhaseTimeout)
-		releaseWorkflowResources(s.log(), s, id)
-		s.enforceParentClosePolicy(context.Background(), id)
+			"workflow_id", wf.id, "timeout", deferPhaseTimeout)
+		releaseWorkflowResources(s.log(), s, wf.id)
+		s.enforceParentClosePolicy(context.Background(), wf.id, parentOutcomeMessage(wf.status))
 	}
-	return len(ids), nil
+	return len(expired), nil
 }

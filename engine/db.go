@@ -1672,7 +1672,7 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	// exactly like this one. This path did not, so terminating a parent left
 	// its TERMINATE children running while force-completing the same parent
 	// failed them, with nothing recording why the two differed.
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(finalStatus))
 	return nil
 }
 

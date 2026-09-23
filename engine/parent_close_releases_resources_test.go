@@ -76,8 +76,8 @@ func TestParentCloseTerminateReleasesChildConcurrencyKeys(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetWorkflowByID(child): %v", err)
 			}
-			if child.Status != "failed" {
-				t.Fatalf("the close policy did not fire: child status = %q, want \"failed\"; "+
+			if child.Status != "terminated" {
+				t.Fatalf("the close policy did not fire: child status = %q, want \"terminated\"; "+
 					"the key assertion below would be vacuous", child.Status)
 			}
 

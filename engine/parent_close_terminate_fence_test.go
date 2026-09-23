@@ -80,8 +80,8 @@ func TestTerminateClosePolicyFencesOutTheChildsWorker(t *testing.T) {
 			if err != nil || after == nil {
 				t.Fatalf("GetWorkflowByID (child): %v (wf=%v)", err, after)
 			}
-			if after.Status != "failed" {
-				t.Fatalf("child status = %q after the parent closed, want \"failed\"", after.Status)
+			if after.Status != "terminated" {
+				t.Fatalf("child status = %q after the parent closed, want \"terminated\"", after.Status)
 			}
 
 			// The half that was actually broken: the holding worker must no
@@ -101,8 +101,8 @@ func TestTerminateClosePolicyFencesOutTheChildsWorker(t *testing.T) {
 			if err != nil || final == nil {
 				t.Fatalf("GetWorkflowByID (child, final): %v", err)
 			}
-			if final.Status != "failed" {
-				t.Errorf("child status = %q after its old worker tried to finalize, want \"failed\"", final.Status)
+			if final.Status != "terminated" {
+				t.Errorf("child status = %q after its old worker tried to finalize, want \"terminated\"", final.Status)
 			}
 		})
 	}

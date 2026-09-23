@@ -83,14 +83,23 @@ func TestTerminateWorkflowEnforcesParentClosePolicy(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetWorkflowByID(TERMINATE child): %v", err)
 			}
-			if terminated.Status != "failed" {
-				t.Errorf("TERMINATE child status = %q, want \"failed\".\n\n"+
+			if terminated.Status != "terminated" {
+				t.Errorf("TERMINATE child status = %q, want \"terminated\".\n\n"+
 					"Terminating a parent left its child running. Every other terminal "+
 					"path enforces the close policy -- FinalizeWorkflowSegment for "+
 					"done/failed, and adminForceResolve, which is an operator verb on an "+
 					"unclaimed workflow exactly like terminate. A child outliving the "+
 					"parent that owns it is the orphan the policy exists to prevent.",
 					terminated.Status)
+			}
+			// cleat#1978: the parent here was itself force-terminated, so the
+			// child's error_msg must say so specifically -- not the old
+			// hardcoded string that ran unconditionally.
+			if terminated.ErrorOp != "parent_close" {
+				t.Errorf("TERMINATE child error_op = %q, want %q", terminated.ErrorOp, "parent_close")
+			}
+			if terminated.Error != "parent workflow was terminated" {
+				t.Errorf("TERMINATE child error_msg = %q, want %q", terminated.Error, "parent workflow was terminated")
 			}
 
 			flagged, reason, err := store.PollCancellation(ctx, children["REQUEST_CANCEL"])

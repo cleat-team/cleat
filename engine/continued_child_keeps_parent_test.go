@@ -114,7 +114,7 @@ func TestAContinuedChildStaysItsParentsChild(t *testing.T) {
 
 			// --- HALF TWO: the close policy ---
 			ps, ok := store.(interface {
-				enforceParentClosePolicy(ctx context.Context, parentWorkflowID string)
+				enforceParentClosePolicy(ctx context.Context, parentWorkflowID, outcomeMsg string)
 			})
 			if !ok {
 				// Fatal, not Skip. Every registered backend is a concrete
@@ -126,7 +126,7 @@ func TestAContinuedChildStaysItsParentsChild(t *testing.T) {
 				t.Fatalf("%T does not expose enforceParentClosePolicy, so the close-policy "+
 					"half of cleat#955 cannot be checked on this backend", store)
 			}
-			ps.enforceParentClosePolicy(ctx, parent)
+			ps.enforceParentClosePolicy(ctx, parent, "parent workflow completed")
 
 			// The control first: if this was not stopped, the call did nothing
 			// and the assertion below would pass for the wrong reason.
@@ -134,10 +134,10 @@ func TestAContinuedChildStaysItsParentsChild(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetWorkflowByID (sibling): %v", err)
 			}
-			if sibWf == nil || sibWf.Status != "failed" {
+			if sibWf == nil || sibWf.Status != "terminated" {
 				t.Fatalf("CONTROL FAILED: a plain child of the same parent, with the same "+
 					"TERMINATE policy, is %v after enforceParentClosePolicy -- want status "+
-					"'failed'. The policy call did nothing, so nothing below is measuring the "+
+					"'terminated'. The policy call did nothing, so nothing below is measuring the "+
 					"continued child.", sibWf)
 			}
 

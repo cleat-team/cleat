@@ -90,8 +90,8 @@ func TestAPolicyTerminatedChildRecordsWhenItCompleted(t *testing.T) {
 			}
 
 			childStatus, childCompletedAt := statusAndCompletedAt(t, store, childID)
-			if childStatus != "failed" {
-				t.Fatalf("child status = %q after the parent closed, want \"failed\" -- "+
+			if childStatus != "terminated" {
+				t.Fatalf("child status = %q after the parent closed, want \"terminated\" -- "+
 					"this test asserts nothing unless the child actually took the TERMINATE arm",
 					childStatus)
 			}

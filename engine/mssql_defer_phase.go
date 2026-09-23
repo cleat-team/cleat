@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -26,38 +27,36 @@ func (s *MSSQLStore) finalizeDeferPhaseOnce(ctx context.Context, runID, workerID
 		return fmt.Errorf("finalize defer phase: append events: %w", err)
 	}
 
-	res, err := tx.ExecContext(ctx, `
+	var appliedStatus string
+	err = tx.QueryRowContext(ctx, `
 		UPDATE workflow_instances
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL,
 		    completed_at = SYSUTCDATETIME(),
 		    assigned_to = NULL
+		OUTPUT INSERTED.status
 		WHERE id = @p1
 		  AND assigned_to = @p2
 		  AND generation = @p3
 		  AND pending_terminal_status IS NOT NULL
 		  AND tenant_id = @p4
 	`, sql.Named("p1", runID), sql.Named("p2", workerID),
-		sql.Named("p3", generation), sql.Named("p4", s.tenantID))
-	if err != nil {
-		return fmt.Errorf("finalize defer phase: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("finalize defer phase: rows affected: %w", err)
-	}
-	if n == 0 {
+		sql.Named("p3", generation), sql.Named("p4", s.tenantID)).Scan(&appliedStatus)
+	if errors.Is(err, sql.ErrNoRows) {
 		// Not wrapped: withRollbackGuaranteedRetry must see it plainly rather
 		// than retry a fence that has already moved on.
 		return ErrFenceLost
+	}
+	if err != nil {
+		return fmt.Errorf("finalize defer phase: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("finalize defer phase commit: %w", err)
 	}
 
 	releaseWorkflowResources(s.log(), s, runID)
-	s.enforceParentClosePolicy(context.Background(), runID)
+	s.enforceParentClosePolicy(context.Background(), runID, parentOutcomeMessage(appliedStatus))
 	return nil
 }
 
@@ -90,7 +89,7 @@ func (s *MSSQLStore) expireDeferPhasesOnce(ctx context.Context) (int, error) {
 		    completed_at = SYSUTCDATETIME(),
 		    assigned_to = NULL,
 		    generation = generation + 1
-		OUTPUT INSERTED.id
+		OUTPUT INSERTED.id, INSERTED.status
 		WHERE pending_terminal_status IS NOT NULL
 		  AND defer_phase_deadline < SYSUTCDATETIME()
 		  AND tenant_id = @p1
@@ -98,7 +97,7 @@ func (s *MSSQLStore) expireDeferPhasesOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("expire defer phases: %w", err)
 	}
-	ids, err := scanWorkflowIDs(rows)
+	expired, err := scanExpiredDeferPhases(rows)
 	if err != nil {
 		return 0, fmt.Errorf("expire defer phases: scan: %w", err)
 	}
@@ -106,11 +105,11 @@ func (s *MSSQLStore) expireDeferPhasesOnce(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("expire defer phases commit: %w", err)
 	}
 
-	for _, id := range ids {
+	for _, wf := range expired {
 		s.log().WarnContext(ctx, "defer phase outran its deadline; applying the recorded outcome without the cleanup",
-			"workflow_id", id, "timeout", deferPhaseTimeout)
-		releaseWorkflowResources(s.log(), s, id)
-		s.enforceParentClosePolicy(context.Background(), id)
+			"workflow_id", wf.id, "timeout", deferPhaseTimeout)
+		releaseWorkflowResources(s.log(), s, wf.id)
+		s.enforceParentClosePolicy(context.Background(), wf.id, parentOutcomeMessage(wf.status))
 	}
-	return len(ids), nil
+	return len(expired), nil
 }

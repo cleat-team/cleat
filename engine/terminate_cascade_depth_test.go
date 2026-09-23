@@ -131,7 +131,7 @@ func TestTerminateCascadeReachesEveryDescendant(t *testing.T) {
 			// anything. If the cascade did not fire AT ALL, the grandchild would
 			// also be untouched and this test would report "one level" while
 			// measuring zero.
-			if child.Status != "failed" && child.Status != statusTerminating {
+			if child.Status != "terminated" && child.Status != statusTerminating {
 				t.Fatalf("the level-1 child is %q, so the cascade did not fire at all "+
 					"and this test cannot say anything about depth. See "+
 					"TestTerminateWorkflowEnforcesParentClosePolicy, which owns that case.",
@@ -145,7 +145,7 @@ func TestTerminateCascadeReachesEveryDescendant(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PollCancellation(grandchild): %v", err)
 			}
-			if grand.Status != "failed" && grand.Status != statusTerminating && !grandFlagged {
+			if grand.Status != "terminated" && grand.Status != statusTerminating && !grandFlagged {
 				t.Errorf("the grandchild is %q and unflagged: the cascade stopped at one "+
 					"level and it is running with no parent.\n\n"+
 					"Closing a workflow has to do what FailWorkflow does after its commit -- "+

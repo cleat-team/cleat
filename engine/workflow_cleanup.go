@@ -167,3 +167,28 @@ func scanWorkflowIDs(rows *sql.Rows) ([]string, error) {
 	}
 	return ids, rows.Err()
 }
+
+// expiredDeferPhase is one row ExpireDeferPhases applied: the workflow id and
+// the terminal status that was just written (the value pending_terminal_status
+// held, read back via the same UPDATE that consumed it -- cleat#1978 needs it
+// to tell that workflow's own children what happened, via
+// parentOutcomeMessage).
+type expiredDeferPhase struct {
+	id     string
+	status string
+}
+
+// scanExpiredDeferPhases collects an (id, status) result set. One copy so the
+// three dialects' ExpireDeferPhases queries differ only in their placeholders.
+func scanExpiredDeferPhases(rows *sql.Rows) ([]expiredDeferPhase, error) {
+	defer rows.Close()
+	var out []expiredDeferPhase
+	for rows.Next() {
+		var wf expiredDeferPhase
+		if err := rows.Scan(&wf.id, &wf.status); err != nil {
+			return nil, err
+		}
+		out = append(out, wf)
+	}
+	return out, rows.Err()
+}

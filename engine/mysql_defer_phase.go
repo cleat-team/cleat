@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -19,7 +21,29 @@ func (s *MySQLStore) FinalizeDeferPhase(ctx context.Context, runID, workerID str
 		return fmt.Errorf("finalize defer phase: append events: %w", err)
 	}
 
-	res, err := tx.ExecContext(ctx, `
+	// Read the outcome under the same fence the UPDATE below applies, so what
+	// is read is guaranteed to be what gets written -- MySQL has no RETURNING,
+	// so this is the only way to learn the applied status without a second,
+	// unfenced round trip. cleat#1978: this workflow's own children, if any,
+	// need to hear what happened to IT, via parentOutcomeMessage.
+	var appliedStatus string
+	err = tx.QueryRowContext(ctx, `
+		SELECT pending_terminal_status FROM workflow_instances
+		WHERE id = ?
+		  AND assigned_to = ?
+		  AND generation = ?
+		  AND pending_terminal_status IS NOT NULL
+		  AND tenant_id = ?
+		FOR UPDATE
+	`, runID, workerID, generation, s.tenantID).Scan(&appliedStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrFenceLost
+	}
+	if err != nil {
+		return fmt.Errorf("finalize defer phase: read: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
@@ -31,23 +55,15 @@ func (s *MySQLStore) FinalizeDeferPhase(ctx context.Context, runID, workerID str
 		  AND generation = ?
 		  AND pending_terminal_status IS NOT NULL
 		  AND tenant_id = ?
-	`, runID, workerID, generation, s.tenantID)
-	if err != nil {
+	`, runID, workerID, generation, s.tenantID); err != nil {
 		return fmt.Errorf("finalize defer phase: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("finalize defer phase: rows affected: %w", err)
-	}
-	if n == 0 {
-		return ErrFenceLost
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("finalize defer phase commit: %w", err)
 	}
 
 	releaseWorkflowResources(s.log(), s, runID)
-	s.enforceParentClosePolicy(context.Background(), runID)
+	s.enforceParentClosePolicy(context.Background(), runID, parentOutcomeMessage(appliedStatus))
 	return nil
 }
 
@@ -65,7 +81,7 @@ func (s *MySQLStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id FROM workflow_instances
+		SELECT id, pending_terminal_status FROM workflow_instances
 		WHERE pending_terminal_status IS NOT NULL
 		  AND defer_phase_deadline < NOW(6)
 		  AND tenant_id = ?
@@ -74,18 +90,18 @@ func (s *MySQLStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("expire defer phases: select: %w", err)
 	}
-	ids, err := scanWorkflowIDs(rows)
+	expired, err := scanExpiredDeferPhases(rows)
 	if err != nil {
 		return 0, fmt.Errorf("expire defer phases: scan: %w", err)
 	}
-	if len(ids) == 0 {
+	if len(expired) == 0 {
 		return 0, tx.Rollback()
 	}
 
-	idClause := inClausePlaceholders(len(ids))
-	args := make([]any, 0, len(ids)+1)
-	for _, id := range ids {
-		args = append(args, id)
+	idClause := inClausePlaceholders(len(expired))
+	args := make([]any, 0, len(expired)+1)
+	for _, wf := range expired {
+		args = append(args, wf.id)
 	}
 	args = append(args, s.tenantID)
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
@@ -104,11 +120,11 @@ func (s *MySQLStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("expire defer phases commit: %w", err)
 	}
 
-	for _, id := range ids {
+	for _, wf := range expired {
 		s.log().WarnContext(ctx, "defer phase outran its deadline; applying the recorded outcome without the cleanup",
-			"workflow_id", id, "timeout", deferPhaseTimeout)
-		releaseWorkflowResources(s.log(), s, id)
-		s.enforceParentClosePolicy(context.Background(), id)
+			"workflow_id", wf.id, "timeout", deferPhaseTimeout)
+		releaseWorkflowResources(s.log(), s, wf.id)
+		s.enforceParentClosePolicy(context.Background(), wf.id, parentOutcomeMessage(wf.status))
 	}
-	return len(ids), nil
+	return len(expired), nil
 }
