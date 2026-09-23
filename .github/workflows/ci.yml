@@ -1839,7 +1839,10 @@ jobs:
   # doc that lies. Making this blocking is a settings change for a maintainer.
   release-dryrun:
     name: Release Dry Run
-    runs-on: ubuntu-latest
+    # ubuntu-26.04, matching release.yml (cleat#2069) -- the .deb-install
+    # step below needs to run on the same base the real release job pins to,
+    # not whatever ubuntu-latest happens to mean this week.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -1933,6 +1936,67 @@ jobs:
           context: .
           platforms: linux/amd64
           push: false
+
+      # cleat#2069: install the .deb goreleaser just built and prove the
+      # unit systemd sees is the one this PR shipped -- on a hosted runner,
+      # not a container, so systemctl is the real thing rather than a
+      # container-PID-1 workaround.
+      - name: Install the cleat-worker .deb
+        run: |
+          set -euo pipefail
+          deb=$(find dist -maxdepth 1 -name 'cleat-worker_*_linux_amd64.deb')
+          if [ -z "$deb" ]; then
+            echo "::error::no linux_amd64 .deb in dist/ -- nfpms didn't produce one"
+            exit 1
+          fi
+          echo "installing $deb"
+          sudo dpkg -i "$deb"
+
+      - name: The package creates its own user, group and config, and the binary proves its backend
+        run: |
+          set -euo pipefail
+          getent passwd cleat
+          getent group cleat
+          test -x /usr/bin/cleat-worker
+          /usr/bin/cleat-worker --verify-backend
+
+          stat -c '%U:%G %a' /etc/cleat/cleat-worker.env
+          [ "$(stat -c '%U:%G %a' /etc/cleat/cleat-worker.env)" = "root:cleat 640" ] || {
+            echo "::error::/etc/cleat/cleat-worker.env has unexpected owner/perms"
+            exit 1
+          }
+
+      # Disabled by default is the acceptance criterion (cleat#2069) -- a
+      # bare install must not leave a worker pointed at nothing running.
+      - name: The unit is installed and disabled, not running
+        run: |
+          set -euo pipefail
+          systemctl cat cleat-worker.service >/dev/null
+          state=$(systemctl is-enabled cleat-worker.service || true)
+          echo "is-enabled: $state"
+          [ "$state" = "disabled" ] || { echo "::error::expected disabled, got $state"; exit 1; }
+          systemctl is-active --quiet cleat-worker.service && {
+            echo "::error::unit is active immediately after install"; exit 1;
+          } || true
+
+      # Proves systemd can actually invoke the binary end to end -- User=cleat,
+      # EnvironmentFile parsing, the works -- not just that the unit file
+      # parses. No real database is configured, so the worker is expected to
+      # exit non-zero shortly after start; what this checks is that it GOT
+      # to run (a log line from the worker itself, not a systemd unit error
+      # like "bad configuration" or "permission denied").
+      - name: Enabling and starting the unit actually invokes the binary
+        run: |
+          set -euo pipefail
+          echo 'CLEAT_DATABASE_URL=postgres://cleat:cleat@127.0.0.1:1/nonexistent?connect_timeout=1'             | sudo tee /etc/cleat/cleat-worker.env >/dev/null
+          sudo systemctl enable --now cleat-worker.service
+          sleep 3
+          sudo journalctl -u cleat-worker.service --no-pager | tail -40
+          sudo journalctl -u cleat-worker.service --no-pager | grep -qi 'cleat' || {
+            echo "::error::no cleat-worker output in the journal -- systemd never ran the binary"
+            exit 1
+          }
+          sudo systemctl disable --now cleat-worker.service
 
   build:
     name: Build

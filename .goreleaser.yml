@@ -119,6 +119,50 @@ archives:
         dst: web/dist/
         strip_parent: true
 
+nfpms:
+  # .deb only for 0.3.0 (cleat#2069, owner decision 2026-09-23) -- no RPM
+  # distro in the supported set ships a glibc new enough for this build; RHEL
+  # users get the container image (cleat#2064), go install, or Homebrew on
+  # Linux (cleat#2068).
+  #
+  # Only the cleat-worker binary is packaged. `cleat` and `cleat-gen` have no
+  # daemon to manage and no systemd unit to own; they are covered by the
+  # existing tarball archives and by Homebrew (cleat#2068).
+  - id: cleat-worker-deb
+    package_name: cleat-worker
+    ids:
+      - cleat-worker
+    formats:
+      - deb
+    vendor: cleat-team
+    homepage: https://github.com/cleat-team/cleat
+    maintainer: cleat-team <noreply@cleat.dev>
+    description: |-
+      cleat-worker: the durable workflow execution worker for cleat.
+      Requires a glibc build matching the one this package was built against
+      -- see the release notes for the measured minimum.
+    license: Apache-2.0
+    section: misc
+    priority: optional
+    bindir: /usr/bin
+    contents:
+      - src: packaging/systemd/cleat-worker.service
+        dst: /lib/systemd/system/cleat-worker.service
+        file_info:
+          mode: 0644
+      - src: packaging/cleat-worker.env.example
+        dst: /usr/share/cleat/cleat-worker.env.example
+        file_info:
+          mode: 0644
+      - dst: /etc/cleat
+        type: dir
+        file_info:
+          mode: 0750
+    scripts:
+      postinstall: packaging/deb/postinstall.sh
+      preremove: packaging/deb/preremove.sh
+      postremove: packaging/deb/postremove.sh
+
 checksum:
   name_template: "checksums.txt"
   algorithm: sha256
