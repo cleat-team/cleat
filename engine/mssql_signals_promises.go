@@ -630,12 +630,35 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	}
 
 	// Try to insert with a unique constraint.
+	//
+	// acquired_at and expires_at are both stamped from the SAME clock read --
+	// n.now_val below -- rather than acquired_at falling back to its column
+	// DEFAULT SYSUTCDATETIME(). The column default is a separate expression,
+	// evaluated in a different context than the SELECT list -- SQL Server
+	// does not guarantee the two see the same instant the way Postgres's
+	// now() (transaction-constant) or MySQL's NOW() (statement-constant) do.
+	// cleat#2119: that gap showed up as expires_at - acquired_at landing
+	// ~4ms short of the requested TTL, intermittently, independent of TTL
+	// magnitude.
+	//
+	// n is a derived table computing SYSUTCDATETIME() ONCE, not a preceding
+	// DECLARE statement -- a DECLARE ... = assignment sets @@ROWCOUNT to 1
+	// (confirmed directly: `DECLARE @x = ...; SELECT @@ROWCOUNT` returns 1),
+	// which made go-mssqldb's Result.RowsAffected() below report 1 even when
+	// the WHERE NOT EXISTS excluded the row, so a second acquire of an
+	// already-held key returned "acquired" -- verified this broke
+	// TestAcquireConcurrencyKeyIsNeverReentrant and
+	// TestTwoTenantsCanHoldTheSameConcurrencyKey before being caught. A
+	// derived table has no such side effect: it is part of the single INSERT
+	// statement, so @@ROWCOUNT (and RowsAffected()) reports only the INSERT's
+	// own row count, exactly as before this change.
 	result, err := tx.ExecContext(ctx, `
-		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
-		SELECT @p1, @p2, @p3, DATEADD(MICROSECOND, @p6, DATEADD(SECOND, @p4, SYSUTCDATETIME())), @p5
+		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, acquired_at, expires_at, tenant_id)
+		SELECT @p1, @p2, @p3, n.now_val, DATEADD(MICROSECOND, @p6, DATEADD(SECOND, @p4, n.now_val)), @p5
+		FROM (SELECT SYSUTCDATETIME() AS now_val) AS n
 		WHERE NOT EXISTS (
 			SELECT 1 FROM concurrency_keys
-			 WHERE key_hash = @p1 AND tenant_id = @p5 AND expires_at > SYSUTCDATETIME()
+			 WHERE key_hash = @p1 AND tenant_id = @p5 AND expires_at > n.now_val
 		)
 	`, keyHash[:], key, workflowID, int(ttl/time.Second), s.tenantID,
 		int((ttl % time.Second).Microseconds()))

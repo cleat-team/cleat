@@ -45,16 +45,31 @@ package engine
 //
 // concurrency_keys carries both acquired_at and expires_at, and every
 // production INSERT computes both from the SAME database-side clock reading
-// within one statement -- acquired_at via its column DEFAULT, expires_at via
-// `now() + make_interval(...)` / `NOW(6) + INTERVAL ...` /
-// `SYSUTCDATETIME() + DATEADD(...)`, all evaluated once per statement (Postgres:
-// transaction-stable now(); MySQL: statement-stable NOW(6); SQL Server:
-// SYSUTCDATETIME() is a documented runtime constant within one statement). So
-// `expires_at - acquired_at` is exactly the TTL the caller asked for,
-// independent of how long the INSERT took to run or how long it sat in a
-// connection queue first -- there is no round trip inside that quantity at all.
-// Verified directly: 40 concurrent inserts against a real (loaded) SQL Server
-// container gave 40-for-40 exact matches, no tolerance needed.
+// within one statement -- `now() + make_interval(...)` on Postgres (both
+// columns read the transaction-stable now()), `NOW(6) + INTERVAL ...` on
+// MySQL (both read the statement-stable NOW(6)). So `expires_at - acquired_at`
+// is exactly the TTL the caller asked for, independent of how long the INSERT
+// took to run or how long it sat in a connection queue first -- there is no
+// round trip inside that quantity at all.
+//
+// SQL Server (cleat#2119) used to rely on the same "runtime constant within
+// one statement" property applied across TWO separate call sites --
+// acquired_at via the column's own DEFAULT SYSUTCDATETIME(), expires_at via
+// an inline SYSUTCDATETIME() in the INSERT...SELECT. Verifying that with 40
+// concurrent inserts against a loaded container gave 40-for-40 exact matches
+// at the time, and extensive later stress testing (hundreds of concurrent
+// acquires, a CPU-throttled container, a concurrent noise writer) still could
+// not force the two to disagree -- but a live CI run did, once, by ~4.07ms on
+// a 30s TTL, outside this test's own tolerance. Whatever the exact trigger
+// (never reproduced locally), relying on a DEFAULT constraint and an inline
+// expression seeing the same instant is relying on two separate evaluations
+// of a nondeterministic function agreeing, which is the class of thing this
+// file's own history says to stop measuring rather than widen the tolerance
+// around. AcquireConcurrencyKey now computes SYSUTCDATETIME() into one local
+// @now and uses it explicitly for both columns, so there is exactly one clock
+// read in the statement and `expires_at - acquired_at` is a pure arithmetic
+// identity -- not dependent on same-statement constancy holding across a
+// DEFAULT constraint boundary, however reliable that usually is.
 //
 // That is what the tests below read, in one query, instead of bracketing an
 // acquire-then-readback round trip with the database's clock and hoping the
