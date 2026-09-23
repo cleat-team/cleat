@@ -173,6 +173,19 @@ Start at the [Documentation Home](docs/index.md) to find the right page for your
 
 ## Installation
 
+macOS and Linux (with [Homebrew](https://brew.sh)):
+
+```bash
+brew install cleat-team/tap/cleat
+```
+
+Installs `cleat`, `cleat-worker` and `cleat-gen` from source -- see
+"macOS: `cleat-worker` needs a from-source install" below for why -- and the
+tap is bumped automatically on every release (cleat#2068), so there is no
+version to track by hand.
+
+Anywhere with Go, or if you'd rather not add a tap:
+
 ```bash
 # Install all CLI tools
 go install github.com/cleat-team/cleat/cmd/cleat@latest
@@ -221,7 +234,7 @@ No `.rpm` for 0.3.0. Users on an untested or unsupported distro: the
 container image (`ghcr.io/cleat-team/cleat-worker`), `go install` above, or
 the Homebrew formula below.
 
-### macOS: use Homebrew or `go install`, not the release archives
+### macOS: `cleat-worker` needs a from-source install
 
 The release archives contain **no macOS `cleat-worker`**. The worker needs CGO
 for the wasmtime runtime — wasmtime is the only WASM backend cleat has, and a
@@ -229,20 +242,18 @@ CGO-less build exits 1 at startup — and the release job runs on Linux, which
 cannot link a CGO macOS binary. `cleat` and `cleat-gen` are unaffected and ship
 for macOS as usual.
 
-Either of the two commands above works, or build the Homebrew formula from
-source:
+`brew install cleat-team/tap/cleat` (above) and `go install
+.../cmd/cleat-worker@latest` both close that gap the same way: they compile
+the worker with CGO on your own machine, where the Xcode Command Line Tools
+that Homebrew and `go install` both already require guarantee a C toolchain.
+The formula's test block additionally runs `cleat-worker --verify-backend`, so
+a worker that cannot construct the backend fails the `brew install` rather
+than being discovered later.
 
-```bash
-brew install --build-from-source packaging/homebrew/Formula/cleat.rb
-```
-
-It compiles the worker with CGO on your machine, where the Xcode Command Line
-Tools that Homebrew already requires guarantee a C toolchain. Its test block
-runs `cleat-worker --verify-backend`, so a worker that cannot construct the
-backend fails the install rather than being discovered later.
-
-There is no published tap yet, so the formula is installed from a path in a
-clone rather than with `brew tap`.
+Working on the formula itself (`packaging/homebrew/Formula/cleat.rb.tmpl`)
+rather than installing it: see "Releasing a Homebrew formula bump" in
+`docs/project/release-process.md` for the `--HEAD --build-from-source` path
+that builds it from `develop` without needing a release tag at all.
 
 To check any `cleat-worker`, however you installed it:
 

@@ -184,3 +184,74 @@ jobs:
             ${{ steps.worker_image.outputs.full }}
             ${{ steps.worker_image.outputs.minor }}
             ${{ steps.worker_image.outputs.latest }}
+
+  # cleat#2068: publish a Homebrew tap so `brew install cleat-team/tap/cleat`
+  # works, kept in sync automatically instead of the hand-maintained bump
+  # docs/project/release-process.md described until this job existed.
+  #
+  # needs: goreleaser -- the GitHub Release this job's tarball URL depends on
+  # is created by GoReleaser (release: github: in .goreleaser.yml), so this
+  # must run after it. It does NOT depend on goreleaser succeeding at
+  # anything past that: the url below is GitHub's own auto-generated source
+  # archive for the tag, not one of goreleaser's build artifacts, so this job
+  # only needs the tag (and the Release it implies) to exist.
+  homebrew-bump:
+    name: Bump the Homebrew tap
+    needs: goreleaser
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compute the tag tarball's sha256
+        id: tarball
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$VERSION' is not vX.Y.Z -- refusing to bump the tap from it"
+            exit 1
+          fi
+          URL="https://github.com/cleat-team/cleat/archive/refs/tags/${VERSION}.tar.gz"
+          curl -sSL --fail -o tarball.tar.gz "$URL"
+          SHA="$(sha256sum tarball.tar.gz | awk '{print $1}')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Render the bumped formula
+        env:
+          VERSION: ${{ steps.tarball.outputs.version }}
+          SHA256: ${{ steps.tarball.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          scripts/render-homebrew-formula.sh \
+            "$VERSION" "$SHA256" \
+            packaging/homebrew/Formula/cleat.rb.tmpl \
+            rendered-cleat.rb
+
+      # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to Contents:
+      # read-and-write on cleat-team/homebrew-tap ONLY (owner-provisioned,
+      # cleat#2068). It expires; see docs/project/release-process.md for
+      # rotation. Deploy keys are disabled by org policy, so this pushes over
+      # HTTPS with the token rather than SSH.
+      - name: Push the bump to cleat-team/homebrew-tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.tarball.outputs.version }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/cleat-team/homebrew-tap.git" \
+            tap
+          mkdir -p tap/Formula
+          cp rendered-cleat.rb tap/Formula/cleat.rb
+          cd tap
+          if git diff --quiet -- Formula/cleat.rb; then
+            echo "Formula/cleat.rb is already at $VERSION -- nothing to push."
+            exit 0
+          fi
+          git config user.name "cleat-release-bot"
+          git config user.email "noreply@cleat.dev"
+          git add Formula/cleat.rb
+          git commit -m "cleat $VERSION"
+          git push origin main
