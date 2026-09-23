@@ -1114,9 +1114,11 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 // FailWorkflow / ReleaseWorkflow call.
 //
 // finalStatus must be one of:
-//   - "done"   — marks the workflow as completed with the given result
-//   - "failed" — marks the workflow as failed with the given error info
-//   - "ready"  — returns the workflow to the ready queue (suspend)
+//   - "done"  — marks the workflow as completed with the given result
+//   - "ready" — returns the workflow to the ready queue (suspend)
+//
+// There is no "failed" here. A real failure goes through FailWorkflow, not
+// this method or the finalize_workflow_status procedure it calls -- cleat#1973.
 //
 // Fields not relevant to the chosen status are ignored.
 // FinalizeWorkflowSegment retries only on errors SQL Server guarantees it rolled

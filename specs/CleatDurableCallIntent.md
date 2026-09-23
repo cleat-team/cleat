@@ -74,6 +74,16 @@ on by default), `DeleteExpiredEvents`' first arm **does** delete a failed workfl
 the concrete, default-reachable mechanism `RetentionSweep` models above, not a hypothetical
 worst case gated behind a non-default flag.
 
+**Both doc comments named above were corrected in cleat#2038** (the fix this paragraph is
+describing the discovery of), and cleat#1973 has since gone one step further: the
+`finalize_workflow_status` procedure's `'failed'` arm — dead code even before this
+paragraph's finding, since nothing ever called the procedure that way — was removed outright
+in `migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_history.sql` and its
+MySQL/SQL Server equivalents. It is no longer merely unreachable in practice; the procedure
+now raises "unknown final status" if a future caller tries. This paragraph is left as-is
+otherwise because it documents how the model's premise was found, not the current state of
+either comment — re-read the comments themselves for that.
+
 **Not modeled, and worse than what is: `RetryWorkflow`** (`cmd/cleat-worker/app.go`'s
 `st.RetryWorkflow` call, `dead_lettered` → `ready`) **has no equivalent guard at all** —
 confirmed by reading its one call site and finding no wrapper analogous to `ReReplay`'s

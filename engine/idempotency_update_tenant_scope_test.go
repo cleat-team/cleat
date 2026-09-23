@@ -245,26 +245,30 @@ func idempotencyScopeDialects() []idempotencyScopeDialect {
 	}
 }
 
-// TestFinalizeDoesNotWriteIdempotencyAcrossTenants is the same property as
-// TestIdempotencyOutcomeUpdatesAreScopedToTenant, on the path production takes.
+// TestFinalizeWorkflowSegmentRejectsFailed replaces
+// TestFinalizeDoesNotWriteIdempotencyAcrossTenants, which used to live under
+// this name. That test proved a cross-tenant write here was correctly
+// scoped -- the write finalize_workflow_status's 'failed' arm made, reached
+// by calling FinalizeWorkflowSegment with finalStatus = "failed". Migration
+// .../101_the_finalize_procedure_stops_deleting_failed_history.sql
+// (cleat#1973) removed that arm: nothing calls the procedure that way in
+// production (FinalizeWorkflowSegment's one call site,
+// cmd/cleat-worker/setup.go, only ever passes "done" or "ready"; a real
+// failure goes through FailWorkflow instead, whose own tenant-scoped
+// idempotency_keys write is what TestIdempotencyOutcomeUpdatesAreScopedToTenant,
+// above, already covers). So the write this test proved was correctly scoped
+// no longer exists to scope.
 //
-// WHY BOTH EXIST. The first drives CompleteWorkflow, a store method whose only
-// non-test callers are in cmd/cleat-bench. The worker finalizes through
-// FinalizeWorkflowSegment (cmd/cleat-worker/setup.go:1935), which delegates the
-// terminal writes to the finalize_workflow_status stored procedure -- a
-// different implementation of the same rule, in SQL, in a migration.
-//
-// cleat#1012 fixed the Go methods and left the procedure untouched, and the
-// first test passed on all three dialects throughout, including its
-// falsifications. An exhaustive check of the wrong set: three dialects felt
-// like completeness, and the axis that mattered was the call graph. Nothing in
-// a Go-level search can see the procedure's statement at all.
-//
-// So this is not redundant coverage. It is the only arm that binds the code the
-// worker runs, and it is table-driven for the same reason as its sibling: the
-// procedure is defined separately per dialect, so no dialect stands in for
-// another.
-func TestFinalizeDoesNotWriteIdempotencyAcrossTenants(t *testing.T) {
+// What replaces it: FinalizeWorkflowSegment must now refuse "failed"
+// outright, loudly -- caught in Go by validFinalStatus before a transaction
+// ever opens, not left to fall into whatever the procedure's ELSE branch
+// does. A caller that tries it gets a clear, immediate error, and
+// idempotency_keys is left untouched. Table-driven across all three dialects
+// for the same reason as its predecessor: validFinalStatus is one shared
+// function, but the call path through each dialect's
+// finalizeWorkflowSegmentInner is still separate code, so no single dialect
+// stands in for the other two.
+func TestFinalizeWorkflowSegmentRejectsFailed(t *testing.T) {
 	for _, d := range idempotencyScopeDialects() {
 		t.Run(d.name, func(t *testing.T) {
 			db := testutil.TestDB(t, d.dialect)
@@ -274,35 +278,24 @@ func TestFinalizeDoesNotWriteIdempotencyAcrossTenants(t *testing.T) {
 			defer testutil.CleanupAllTestData(t, db, d.dialect)
 
 			ctx := context.Background()
-			const tenantB = "d4d4d4d4-d4d4-4d4d-9d4d-d4d4d4d4d4d4"
-			const decoyTenant = "d5d5d5d5-d5d5-4d5d-9d5d-d5d5d5d5d5d5"
+			const tenant = "d6d6d6d6-d6d6-4d6d-9d6d-d6d6d6d6d6d6"
 
-			defName := fmt.Sprintf("idem-finalize-def-%s", d.name)
-			for _, tn := range []string{tenantB, decoyTenant} {
-				if err := d.newStore(db, tn).DeployWorkflowDef(ctx, &WorkflowDef{
-					Name: defName, Version: 1,
-					WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
-					ABIVersion: 1, MinVersion: 1,
-				}); err != nil {
-					t.Fatalf("deploy %q for tenant %s: %v", defName, tn, err)
-				}
+			defName := fmt.Sprintf("idem-finalize-rejects-failed-def-%s", d.name)
+			store := d.newStore(db, tenant)
+			if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
+				Name: defName, Version: 1,
+				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				ABIVersion: 1, MinVersion: 1,
+			}); err != nil {
+				t.Fatalf("deploy %q: %v", defName, err)
 			}
 
-			storeB := d.newStore(db, tenantB)
-			wfID := fmt.Sprintf("idem-finalize-wf-%s-%d", d.name, time.Now().UnixNano())
-			if _, _, err := storeB.StartNewRun(ctx, wfID, defName, 1, json.RawMessage(`{}`), "finalize-tenant-b-key", tenantB, 0); err != nil {
+			wfID := fmt.Sprintf("idem-finalize-rejects-failed-wf-%s-%d", d.name, time.Now().UnixNano())
+			if _, _, err := store.StartNewRun(ctx, wfID, defName, 1, json.RawMessage(`{}`), "finalize-rejects-failed-key", tenant, 0); err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
 
-			// The decoy: another tenant's idempotency row naming the SAME
-			// workflow_id. Legitimate on the real schema, where the primary key
-			// is (key_hash, tenant_id).
-			decoyHash := sha256.Sum256([]byte("finalize-decoy-key"))
-			if _, err := db.ExecContext(ctx, d.insertDecoy, decoyHash[:], wfID, decoyTenant); err != nil {
-				t.Fatalf("insert decoy idempotency_keys row: %v", err)
-			}
-
-			claimed, err := storeB.ClaimWorkflows(ctx, "worker-finalize-test", 1)
+			claimed, err := store.ClaimWorkflows(ctx, "worker-finalize-rejects-failed", 1)
 			if err != nil {
 				t.Fatalf("ClaimWorkflows: %v", err)
 			}
@@ -311,40 +304,27 @@ func TestFinalizeDoesNotWriteIdempotencyAcrossTenants(t *testing.T) {
 			}
 			wf := claimed[0]
 
-			// The production call. Terminal status 'failed' takes the
-			// procedure's idempotency arm -- since #1049 the 'done' arm
-			// writes no idempotency row at all.
-			//
-			// A JSON object, not a bare sentence, because FinalizeWorkflowSegment
-			// runs `result` through coerceResultJSON regardless of finalStatus
-			// and a non-JSON value is replaced by `{}` before the procedure sees
-			// it. Production passes a JSON error payload here, so this matches
-			// what the worker sends; a plain string would still exercise the
-			// scoping but every assertion message would read `error_msg = {}`.
-			if err := storeB.FinalizeWorkflowSegment(ctx, wfID, wf.AssignedTo, wf.Generation,
-				nil, "failed", `{"error":"tenant B's own failure"}`, "", "", nil, time.Time{}); err != nil {
-				t.Fatalf("FinalizeWorkflowSegment: %v", err)
+			err = store.FinalizeWorkflowSegment(ctx, wfID, wf.AssignedTo, wf.Generation,
+				nil, "failed", `{"error":"should never reach the procedure"}`, "", "", nil, time.Time{})
+			if err == nil {
+				t.Fatal(`FinalizeWorkflowSegment(finalStatus="failed") returned nil -- ` +
+					"cleat#1973 removed the procedure's 'failed' arm; this must be refused, " +
+					"not silently accepted")
 			}
 
-			// Control: tenant B's own row must have been written, or the
-			// cross-tenant assertion below passes for the wrong reason.
-			var bErrMsg []byte
-			if err := db.QueryRowContext(ctx, d.selectOutcome, wfID, tenantB).Scan(&bErrMsg); err != nil {
-				t.Fatalf("read tenant B's idempotency_keys row: %v", err)
+			// StartNewRun already created this row (that is what an
+			// idempotency key is), so its mere existence proves nothing.
+			// What must be untouched is error_msg: still NULL, because no
+			// attempt reached the procedure -- validFinalStatus rejects
+			// "failed" before finalizeWorkflowSegmentInner ever opens a
+			// transaction.
+			var errMsg []byte
+			if err := db.QueryRowContext(ctx, d.selectOutcome, wfID, tenant).Scan(&errMsg); err != nil {
+				t.Fatalf("read idempotency_keys row: %v", err)
 			}
-			if bErrMsg == nil {
-				t.Errorf("tenant B's own idempotency_keys row was not written by its own " +
-					"FinalizeWorkflowSegment -- the decoy assertion below would pass vacuously")
-			}
-
-			var decoyErrMsg []byte
-			if err := db.QueryRowContext(ctx, d.selectOutcome, wfID, decoyTenant).Scan(&decoyErrMsg); err != nil {
-				t.Fatalf("read decoy idempotency_keys row: %v", err)
-			}
-			if decoyErrMsg != nil {
-				t.Errorf("a different tenant's idempotency_keys row (same workflow_id) was "+
-					"overwritten by tenant B's FinalizeWorkflowSegment: error_msg = %s -- "+
-					"finalize_workflow_status's UPDATE is not scoped to tenant_id", decoyErrMsg)
+			if errMsg != nil {
+				t.Errorf("idempotency_keys.error_msg = %q for a FinalizeWorkflowSegment call "+
+					"that should have been refused before touching the database", errMsg)
 			}
 		})
 	}

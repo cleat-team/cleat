@@ -726,9 +726,11 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 // FailWorkflow / ReleaseWorkflow call.
 //
 // finalStatus must be one of:
-//   - "done"   — marks the workflow as completed with the given result
-//   - "failed" — marks the workflow as failed with the given error info
-//   - "ready"  — returns the workflow to the ready queue (suspend)
+//   - "done"  — marks the workflow as completed with the given result
+//   - "ready" — returns the workflow to the ready queue (suspend)
+//
+// There is no "failed" here. A real failure goes through FailWorkflow, not
+// this method or the finalize_workflow_status procedure it calls -- cleat#1973.
 //
 // Fields not relevant to the chosen status are ignored.
 
@@ -788,9 +790,14 @@ func (s *PostgresStore) finalizeWorkflowSegmentInner(ctx context.Context, runID,
 }
 
 // validFinalStatus returns true for status values accepted by finalize_workflow_status.
+//
+// No "failed" here: the procedure's 'failed' arm was dead code -- nothing
+// ever called it that way -- and was removed in migration
+// .../101_the_finalize_procedure_stops_deleting_failed_history.sql
+// (cleat#1973). A real failure goes through FailWorkflow instead.
 func validFinalStatus(status string) bool {
 	switch status {
-	case "done", "failed", "ready", "suspended":
+	case "done", "ready", "suspended":
 		return true
 	}
 	return false

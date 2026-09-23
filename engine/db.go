@@ -1383,10 +1383,8 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 //
 // THIS COMMENT USED TO SAY THE FIRST LOOP "CANNOT MATCH" FOR 'failed'
 // WORKFLOWS, CITING migrations/postgres/049. That was wrong, and it was
-// wrong about the CODE PATH, not the SQL: finalize_workflow_status (last
-// defined in migrations/postgres/075_the_finalize_procedure_records_the_worker.sql --
-// re-derive the highest-numbered CREATE OR REPLACE before trusting a
-// migration number, per CLAUDE.md) genuinely does delete event_history
+// wrong about the CODE PATH, not the SQL: finalize_workflow_status, as
+// defined between migrations 075 and 100, genuinely did delete event_history
 // unconditionally when called with finalStatus IN ('done','failed'). The
 // error was believing the worker calls it that way for 'failed'. It does
 // not: cmd/cleat-worker/setup.go's own comment on FinalizeWorkflowSegment's
@@ -1399,6 +1397,21 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 // claimed workflow through store.FailWorkflow and asserts a preserved call
 // event survives. Found via cleat#2038, while grounding cleat#1999's TLA+
 // model in source.
+//
+// AS OF MIGRATION 101 (cleat#1973), the 'failed' arm described in the
+// paragraph above no longer exists at all -- it was dead code, since nothing
+// ever reached it, and was removed rather than left as a landmine one
+// call-site change could reactivate. finalize_workflow_status (last defined
+// in migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_
+// history.sql -- re-derive the highest-numbered CREATE OR REPLACE before
+// trusting a migration number, per CLAUDE.md) now accepts only 'done' and
+// 'ready', raising "unknown final status" on 'failed' the same as any other
+// unrecognized value; validFinalStatus (engine/store_lifecycle.go) was
+// updated to match, so FinalizeWorkflowSegment now refuses 'failed' in Go,
+// before a transaction ever opens. The conclusion below is unchanged either
+// way -- a 'failed' workflow's events were not purged at finalize before
+// 101 (nothing called the procedure that way), and are not purged at
+// finalize now (the procedure cannot be called that way at all).
 //
 // So: a 'done' workflow's events ARE purged at finalize (CompleteWorkflow
 // calls finalize_workflow_status with finalStatus='done' -- distinct from
@@ -1536,9 +1549,17 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 // SPLIT OUT OF DeleteExpiredEvents, and the reason is a metric rather than
 // tidiness. It used to be a second loop inside that function whose RowsAffected
 // was discarded, so the sweep reported "deleted 0 rows" on runs where it had
-// done real work: the first loop can never match (finalize_workflow_status
-// already purged those events, cleat#1016) while this one clears up to 10000
-// workflow_instances rows a batch.
+// done real work: the first loop rarely matches for a 'done' workflow
+// (finalize_workflow_status already purged those events, cleat#1016) while
+// this one clears up to 10000 workflow_instances rows a batch.
+//
+// "RARELY", NOT "NEVER" -- cleat#1016's original wording said "can never
+// match" for either terminal status, which was wrong about 'failed'
+// (DeleteExpiredEvents's own doc comment above has the full correction,
+// cleat#2038/cleat#1973): a 'failed' workflow's event_history is NOT purged
+// at finalize, so the first loop is exactly what removes it, --retention-days
+// days later. Do not cite this paragraph for what the first loop matches;
+// cite that one.
 //
 // Summing the two into one return was the obvious fix and the wrong one. They
 // are different tables, different operations and different units -- deleted
@@ -1786,7 +1807,13 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 //     migrations/postgres/003_procedures.sql deliberately DROPs the FK from
 //     event_history to workflow_instances ("no longer needed; events are
 //     deleted on terminal") because finalize_workflow_status() deletes a
-//     workflow's events itself when it reaches 'done' or 'failed'.
+//     workflow's events itself when it reaches 'done'. (At the time 003
+//     shipped this ran for 'failed' too, in principle -- the procedure had a
+//     'failed' arm that did the same DELETE. It was dead code even then,
+//     since nothing ever called the procedure with finalStatus='failed'
+//     (see DeleteExpiredEvents's doc comment above), and migration 101
+//     removed it, cleat#1973. So this has always meant 'done' alone in
+//     practice; it is now true of the SQL as well.)
 //     MoveToDeadLetterQueue does not call finalize_workflow_status -- it
 //     does a plain UPDATE ... SET status = 'dead_lettered' -- so a
 //     dead-lettered workflow's event_history rows are never deleted there
@@ -1895,9 +1922,12 @@ func (s *PostgresStore) deleteDeadLetteredWorkflowsBatch(ctx context.Context, ol
 // Follows deleteDeadLetteredWorkflowsBatch's pattern exactly, including the
 // same FK-graph fix: event_history has no FK back to workflow_instances on
 // PostgreSQL (dropped deliberately by migrations/postgres/003_procedures.sql
-// because finalize_workflow_status deletes a 'done'/'failed' workflow's
-// events itself) so it must be deleted explicitly here rather than assumed
-// to cascade. That assumption is also wrong for 'terminated' workflows on
+// because finalize_workflow_status deletes a 'done' workflow's events itself
+// -- see deleteDeadLetteredWorkflowsBatch's own doc comment, above, for why
+// this no longer says 'done'/'failed': migration 101 removed the
+// procedure's dead 'failed' arm, cleat#1973) so it must be deleted
+// explicitly here rather than assumed to cascade. That assumption is also
+// wrong for 'terminated' workflows on
 // this dialect specifically: TerminateWorkflow does not call
 // finalize_workflow_status, so a force-terminated workflow's events are
 // never deleted by any other path either.

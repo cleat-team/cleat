@@ -19,8 +19,7 @@ See `docs/reference/worker-config.md` for the flag reference entries.
 reaches `done` or `failed`. That is true for `done` and WRONG for `failed`,
 and the error was about which code path a real failure takes, not about what
 the stored procedure does.** `finalize_workflow_status` -- the stored
-procedure `FinalizeWorkflowSegment` calls -- does end its `done`/`failed`
-branch with
+procedure `FinalizeWorkflowSegment` calls -- ends its `done` branch with
 
 ```sql
 -- Delete this workflow's events -- they are no longer needed
@@ -30,9 +29,7 @@ branch with
 DELETE FROM event_history WHERE workflow_id = p_workflow_id;
 ```
 
-and calling it directly with `finalStatus = 'failed'` does purge the events,
-which is where the old "measured: `1 -> 0` both times" claim came from. **A
-production failure never calls it that way.** `cmd/cleat-worker/setup.go`'s
+**A production failure never calls it that way.** `cmd/cleat-worker/setup.go`'s
 own comment on `FinalizeWorkflowSegment`'s one production call site says
 `finalStatus` there is "only ever 'done' or 'ready' ... never 'failed'" --
 the real failure path is `store.FailWorkflow`
@@ -43,6 +40,18 @@ empirically by `engine/store_admin_rereplay_test.go`'s
 `TestAdminReReplay_ResetsAStoppedWorkflowAndKeepsItsHistory`, which fails a
 claimed workflow through `store.FailWorkflow` and asserts a preserved call
 event survives.
+
+**cleat#1973: the procedure no longer has a `finalStatus = 'failed'` branch
+at all, as of `migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_history.sql`
+and its MySQL/SQL Server equivalents.** It was dead code -- the paragraph
+above already establishes nothing ever called it that way -- and was removed
+rather than left as a landmine one call-site change could silently
+reactivate. Calling `FinalizeWorkflowSegment` with `finalStatus = "failed"`
+now returns an error ("unknown final status") instead of purging anything;
+`validFinalStatus` (`engine/store_lifecycle.go`) refuses it in Go before a
+transaction ever opens. The old "measured: `1 -> 0` both times" claim, which
+this section used to cite, came from calling the procedure directly that
+way -- a call production never makes and the procedure itself now refuses.
 
 So: a `done` workflow's replay log is purged at finalize, and
 `--retention-days` never sees it. A **`failed` workflow's replay log is not**

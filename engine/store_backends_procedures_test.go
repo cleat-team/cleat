@@ -55,6 +55,7 @@ var postgresProcedureMigrations = []string{
 	"050_the_idempotency_write_needs_the_tenant.sql",
 	"053_the_finalize_procedure_stops_writing_the_result_column.sql",
 	"075_the_finalize_procedure_records_the_worker.sql",
+	"101_the_finalize_procedure_stops_deleting_failed_history.sql",
 }
 
 var mysqlProcedureMigrations = []string{
@@ -67,6 +68,7 @@ var mysqlProcedureMigrations = []string{
 	"049_the_idempotency_write_needs_the_tenant.sql",
 	"053_the_finalize_procedure_stops_writing_the_result_column.sql",
 	"071_the_finalize_procedure_stops_casting_the_result.sql",
+	"100_the_finalize_procedure_stops_deleting_failed_history.sql",
 }
 
 var mssqlProcedureMigrations = []string{
@@ -78,6 +80,7 @@ var mssqlProcedureMigrations = []string{
 	"052_a_burst_wakes_finalize_on_progress.sql",
 	"053_the_idempotency_write_needs_the_tenant.sql",
 	"056_the_finalize_procedure_stops_writing_the_result_column.sql",
+	"100_the_finalize_procedure_stops_deleting_failed_history.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup

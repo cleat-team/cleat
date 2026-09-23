@@ -194,7 +194,8 @@ type WorkflowStore interface {
 
 	// FinalizeWorkflowSegment atomically appends new events and updates the
 	// workflow status in a single database transaction.  finalStatus is one of
-	// "done", "failed" or "ready" (suspend).  Fields not relevant to the chosen
+	// "done" or "ready" (suspend) -- not "failed": a real failure goes through
+	// FailWorkflow instead (cleat#1973).  Fields not relevant to the chosen
 	// status are ignored.  If the transaction fails neither events nor status
 	// are written.
 	FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error

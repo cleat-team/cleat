@@ -86,6 +86,13 @@ from the published command got six and had no way to know what was missing.
 The SQL command returns `done`, `failed`, `ready` and `running` only: `terminated`,
 `cancelled` and `dead_lettered` are never set from a procedure.
 
+**Read that command's output with the migration-004 caveat above already applied, not naively.**
+It greps every file in `migrations/postgres/`, so `failed` in that list includes text from
+004's and 075's now-superseded bodies — `finalize_workflow_status` has not set `status = 'failed'`
+since migration 101 (cleat#1973). The live procedure sets only `done` and `ready`; `failed` is
+still one of the eight statuses, but as of 101 it reaches `workflow_instances` exclusively through
+`FailWorkflow`'s own Go `UPDATE`, never through this procedure.
+
 **Scope the grep to `UPDATE workflow_instances`.** An unscoped
 `grep -rhoE "SET status = '[a-z_]+'"` also sweeps `promises` and `signals`, which have their own
 `status` columns with their own vocabularies (`completed`, `resolved`, `rejected`, `pending`) —
@@ -101,8 +108,8 @@ This is the first place the obvious model is wrong. **A sleeping workflow is `re
 The name survives in three places, and none of them make it a status:
 
 - `validFinalStatus` (`validFinalStatus`, `engine/store_lifecycle.go`) accepts `"suspended"` — but the Postgres
-  `finalize_workflow_status` function has `WHEN 'done' / 'failed' / 'ready'` and `RAISE
-  EXCEPTION` on anything else (`migrations/postgres/004_fix_finalize_workflow_status_fence.sql`).
+  `finalize_workflow_status` function has `WHEN 'done' / 'ready'` and `RAISE
+  EXCEPTION` on anything else (`migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_history.sql`).
   Passing `"suspended"` would pass the Go check and raise in the database. No caller does: the
   worker passes only `"done"` or `"ready"`.
 - Read predicates of the form `WHERE id = $1 AND status IN ('ready', 'suspended')`
@@ -111,10 +118,14 @@ The name survives in three places, and none of them make it a status:
 - Suspension *is* a real concept — it is what the guest does, and the host reports it through
   `SuspendResult`. It is simply not represented in this column.
 
-> Note for migration 004: it is the highest-numbered migration that **defines**
-> `finalize_workflow_status`. Later migrations reference it. For anything created with
-> `CREATE OR REPLACE`, find the highest-numbered definition before concluding what the procedure
-> does — 003 still contains an earlier body.
+> Note for migration 101: it is the highest-numbered migration that **defines**
+> `finalize_workflow_status`, superseding 004. Later migrations reference it. For anything created
+> with `CREATE OR REPLACE`, find the highest-numbered definition before concluding what the
+> procedure does — 004 and 003 both still contain earlier bodies, and 004's had a `WHEN 'failed'`
+> arm that 101 removed (cleat#1973: nothing ever called the procedure with `finalStatus = "failed"`
+> — a real failure goes through `FailWorkflow`, a plain Go `UPDATE`, not this procedure — so as of
+> 101 `validFinalStatus` no longer accepts `"failed"` either; it now raises in Go before reaching
+> the database, the same way `"suspended"` already did).
 
 ### There are no EXPORTED status constants, and the unexported ones do not cover everything
 
