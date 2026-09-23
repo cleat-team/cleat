@@ -195,8 +195,8 @@ func TestAdminReReplay_RefusesAfterTheRetentionSweepHasSweptAPendingCall(t *test
 			t.Fatalf("IsHistorySwept: %v", err)
 		}
 		if !swept {
-			t.Fatalf("IsHistorySwept = false after DeleteExpiredEvents swept this workflow's "+
-				"only event row; history_swept_at was not set, so ReReplay's guard has nothing "+
+			t.Fatalf("IsHistorySwept = false after DeleteExpiredEvents swept this workflow's " +
+				"only event row; history_swept_at was not set, so ReReplay's guard has nothing " +
 				"to read and cannot tell this apart from a workflow that never made a call")
 		}
 
