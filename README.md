@@ -10,10 +10,9 @@
 > **Durable workflow engine -- runs on PostgreSQL, MySQL, or SQL Server. Write in Go, compile to WASM, deploy via INSERT.**
 
 ```bash
+git clone https://github.com/cleat-team/cleat && cd cleat
 go install github.com/cleat-team/cleat/cmd/cleat@latest
-cleat dev --entry-point PlaceOrder \
-    --input '{"userID":"u1","cart":[{"sku":"widget","quantity":2}]}' \
-    ./testdata/basic/
+cleat dev --entry-point Greet --input '{"name":"Ada"}' ./testdata/hello/
 ```
 
 <!-- Corrected 2026-08-09: this previously read
@@ -26,7 +25,24 @@ cleat dev --entry-point PlaceOrder \
      dev` also runs entirely locally, without a database, so the compose
      line was never needed for it in the first place; that's the point of
      `dev` mode -- see the full Quick Start below for the build/deploy/worker
-     path that does need Postgres. -->
+     path that does need Postgres.
+
+     Corrected again 2026-09-23 (cleat#1967): this then pointed `--entry-point
+     PlaceOrder` at testdata/basic, which makes a DurableCall to a "catalog"
+     service nothing in this repo provides -- the very first command a reader
+     ran failed unconditionally with a connection-refused error. It also gave
+     `./testdata/basic/` as a bare relative path after a `go install ...@latest`
+     line, which reads as "no clone needed" and isn't: run from outside a
+     clone, that path does not exist, and even run from inside one at the
+     wrong working directory, `testdata/basic` fails to build at all ("could
+     not import github.com/cleat-team/cleat/cleat ... no required module
+     provides package") because it depends on this repo's go.work to supply
+     the SDK. testdata/hello's Greet makes no DurableCall, so it is the whole
+     workflow -- nothing else has to run for the command to complete -- and
+     the `git clone && cd` above makes the relative path resolve and puts the
+     working directory where go.work is. Run in CI from a fresh clone,
+     asserting completion rather than merely that the process started:
+     cmd/cleat/readme_first_command_completes_test.go. -->
 
 ## What is Cleat
 
