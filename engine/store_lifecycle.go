@@ -1013,37 +1013,46 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		// partition the children exactly. deferPhaseOwedSQL is never NULL --
 		// it is an IN over a NOT NULL column ANDed with an IS NOT NULL and an
 		// EXISTS -- so NOT is total and no child falls between them.
-		// WHAT COUNTS AS ALREADY-TERMINAL HERE, and why the list is four values
+		// WHAT COUNTS AS ALREADY-TERMINAL HERE, and why the list is five values
 		// rather than two.
 		//
-		// It was `NOT IN ('done', 'failed')`, and the engine writes two more
-		// terminal statuses than that: 'dead_lettered' and 'terminated'. So a
-		// dead-lettered child MATCHED, and a parent closing with TERMINATE
-		// overwrote it (cleat#1227, measured on all three dialects):
+		// It was `NOT IN ('done', 'failed')`, and the engine writes three more
+		// terminal statuses than that: 'dead_lettered', 'terminated' and
+		// 'cancelled'. So a dead-lettered child MATCHED, and a parent closing with
+		// TERMINATE overwrote it (cleat#1227, measured on all three dialects):
 		//
 		//	BEFORE  status=dead_lettered  error_msg="retries exhausted"           error_code=E_RETRY
 		//	AFTER   status=failed         error_msg="parent workflow terminated"  error_code=E_RETRY
 		//
-		// Three losses in one UPDATE. The run leaves the dead-letter queue; its
-		// original failure reason is replaced; and error_code is NOT in the SET
-		// list, so the surviving row reports TWO DIFFERENT CAUSES at once. That
-		// last part is what makes it worse than a plain overwrite -- nothing about
-		// the result looks wrong.
+		// (That AFTER line is what this arm wrote before cleat#1978; TERMINATE
+		// writes 'terminated' now, not 'failed' -- see the SET clause below. The
+		// lesson the example carries is unchanged: an incomplete exclusion list
+		// lets a settled child's status get overwritten at all.)
+		//
+		// Three losses in one UPDATE, as it stood then. The run left the
+		// dead-letter queue; its original failure reason was replaced; and
+		// error_code was not in the SET list, so the surviving row reported TWO
+		// DIFFERENT CAUSES at once. That last part is what made it worse than a
+		// plain overwrite -- nothing about the result looked wrong.
 		//
 		// 'terminating' is deliberately NOT here. A child mid-shutdown is not
 		// terminal, and the two arms below split on deferPhaseOwedSQL precisely to
 		// give it a defer phase rather than a terminal write.
 		//
-		// 'cancelled' is deliberately NOT here either: nothing writes it to
-		// workflow_instances.status. It exists elsewhere in the codebase, which is
-		// exactly the trap -- a status list assembled by grepping the tree for
-		// status-shaped strings picks it up. There is no CHECK constraint to
-		// consult, so the vocabulary has to come from what production actually
-		// WRITES, and the whole of it is seven values:
+		// 'cancelled' IS one of the five values in the NOT IN list two lines below
+		// -- CancelWorkflow (preemptivelySettle) writes it to
+		// workflow_instances.status, exactly as TerminateWorkflow writes
+		// 'terminated'. This comment claimed the opposite ("nothing writes it") for
+		// months, directly contradicted by the SQL it sat above and by
+		// CancelWorkflow's own doc comment in db.go -- found stale while building
+		// cleat#1997's model of every status writer, and by cleat-review's
+		// independent read of the same code the same day. There is no CHECK
+		// constraint to consult, so the vocabulary has to come from what
+		// production actually WRITES, and the whole of it is eight values:
 		//
-		//	dead_lettered  done  failed  ready  running  terminated  terminating
+		//	cancelled  dead_lettered  done  failed  ready  running  terminated  terminating
 		//
-		// 'suspended' is the sharpest illustration and is NOT one of them.
+		// 'suspended' is the sharpest illustration of a name that is NOT one of them.
 		// Thirty-five predicates read `status IN ('ready', 'suspended')` and no
 		// statement anywhere sets it -- a suspension is written as 'ready' with a
 		// next_wake_at, so those predicates are correct and merely carry a dead
