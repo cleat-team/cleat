@@ -78,11 +78,26 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 	// keyed this allowlist on the statement digest and #1094 edited the
 	// statement; each was green against its own base, and the pair was red the
 	// moment both were on develop. Neither PR's checks could have caught it.
-	"mysql_lifecycle.go:ClaimWorkflows#e468197bcf08": {
+	//
+	// ClaimWorkflows's two entries moved again, from e468197bcf08/df24f728e6ed
+	// to 49bd2f4a5509/6b3e9b9eba74, when cleat#1963's Step 4 recheck (AND
+	// status IN ('ready', 'terminating') on the UPDATE) and Step 5's own
+	// narrowed fetch (AND status = 'running' AND assigned_to = ?) were added.
+	// ClaimStickyWorkflows was not touched by that change, so its two entries
+	// below keep the old digests.
+	//
+	// RE-MAKING THE CLAIM: both additions are appended after the existing
+	// WHERE clause, which still carries `id IN (...)` sourced from Step 1's
+	// candidate query -- the same query that scopes by tenant_id. Neither
+	// addition references another table or widens which rows the statement
+	// can touch; both narrow it further (a row must also match status/
+	// assigned_to to be affected or fetched). So the reason is unchanged and
+	// still describes why the statement is safe.
+	"mysql_lifecycle.go:ClaimWorkflows#49bd2f4a5509": {
 		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
 		Reason: mysqlScopedByCandidateQuery,
 	},
-	"mysql_lifecycle.go:ClaimWorkflows#df24f728e6ed": {
+	"mysql_lifecycle.go:ClaimWorkflows#6b3e9b9eba74": {
 		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
 		Reason: mysqlScopedByCandidateQuery,
 	},
