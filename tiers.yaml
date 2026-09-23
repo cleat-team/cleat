@@ -183,6 +183,14 @@ tier1:
     # which is exactly what made me check. The coverage half of this needs no toolchain and
     # is not excluded: scripts/sdk-host-call-coverage.py runs in Lint.
     - "^TestRustAllHostCallsCompiles$"
+    # tier 2 -- rust. cmd/cleat/rust_entry_point_resolution_live_test.go (cleat#2097);
+    # needs cargo + wasm32-unknown-unknown (not wasip1: `cleat build --target rust`
+    # targets wasm32-unknown-unknown, see build_rust.go). The tier-1 gate caught this
+    # on #2109's first push: `cmd/cleat` is a tier-1 package (tiers.yaml's own
+    # tier1.packages list), but Rust is not a tier-1 LANGUAGE (tier1.languages is
+    # [go, python]), and this gate's own setup deliberately does not provision it --
+    # same reasoning as the rust/java/assemblyscript entries above, one package over.
+    - "^TestRustExampleEntryPointResolutionLive$"
     # tier 2 -- java. engine/java_workflow_e2e_test.go; needs a JDK and Gradle.
     - "^TestJavaWorkflowExecute$"
     # tier 2 -- java. engine/java_defer_segment_e2e_test.go (3.105); needs a JDK and Gradle.
