@@ -3966,12 +3966,14 @@ func (w *Worker) memoryReloadLoop() {
 // (status, result, error, def_name) untouched in workflow_instances. That is
 // a safe thing to default on, which is why it is on.
 //
-// It no longer does that, and the default is now on for a much smaller reason
-// (cleat#1016). finalize_workflow_status deletes a workflow's events when it
-// reaches 'done' or 'failed', so by the time this sweep looks there is nothing
-// to find; what the sweep still does is clear compaction state. The reasoning
-// below is preserved because it is why the default was CHOSEN, not because it
-// still describes what happens.
+// THIS COMMENT USED TO SAY IT "NO LONGER DOES THAT" (cleat#1016), reasoning
+// that finalize_workflow_status purges events at 'done' or 'failed' before
+// this sweep ever looks. That was wrong about 'failed': finalize_workflow_status
+// purges a 'done' workflow's events, but a 'failed' workflow's events go
+// through store.FailWorkflow instead, which purges nothing -- so this sweep is
+// what removes them, and it still does real, first-hand work on any deployment
+// that fails workflows. See PostgresStore.DeleteExpiredEvents's doc comment in
+// engine/db.go for the full correction (cleat#2038).
 // --completed-workflow-retention-days deletes the workflow_instances row
 // itself: the record that the workflow ever ran, what it returned, and why
 // it failed, gone from ListWorkflows and the admin dashboard permanently.
@@ -4293,10 +4295,15 @@ func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays
 	//
 	// It used to live inside DeleteExpiredEvents and its row count was thrown
 	// away, so the sweep logged "deleted 0" on runs where it had cleared
-	// thousands of workflow_instances rows -- the event half can never match
-	// (cleat#1016) and this half does the work. They are counted apart rather
-	// than summed because they are different tables and different operations;
-	// one counter reporting both would be a number that means two things.
+	// thousands of workflow_instances rows -- and on a deployment where every
+	// terminal workflow is 'done', that "0" was structurally guaranteed,
+	// because finalize_workflow_status already purged those events. THIS IS
+	// NOT TRUE OF 'failed' WORKFLOWS (cleat#1016's claim that the event half
+	// "can never match" was wrong there -- see cleat#2038 and
+	// engine/db.go's DeleteExpiredEvents doc comment). They are counted apart
+	// rather than summed because they are different tables and different
+	// operations; one counter reporting both would be a number that means two
+	// things.
 	if retentionDays > 0 {
 		cutoff := sweptAt.Add(-time.Duration(retentionDays) * 24 * time.Hour)
 		cleared, err := w.store.ClearExpiredCompactionState(w.ctx, cutoff)

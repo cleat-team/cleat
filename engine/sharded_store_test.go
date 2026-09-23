@@ -149,6 +149,14 @@ func (m *mockShardStore) LoadEventHistory(ctx context.Context, workflowID string
 	return nil, nil
 }
 
+func (m *mockShardStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	m.recordCall("IsHistorySwept")
+	if m.err != nil {
+		return false, m.err
+	}
+	return false, nil
+}
+
 func (m *mockShardStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) {
 	m.recordCall("LoadEventHistoryPaginated")
 	if m.err != nil {

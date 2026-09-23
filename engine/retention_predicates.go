@@ -53,26 +53,50 @@ package engine
 
 // ---- expired event history -------------------------------------------------
 //
-// NOTE FOR ANYONE READING A ZERO HERE: on PostgreSQL this arm can never match.
-// finalize_workflow_status already purges those events (cleat#1016), which
-// DeleteExpiredEvents' own comment records. A preview reporting 0 for events is
-// therefore correct rather than broken, and a test that asserts "preview equals
-// sweep" on this arm passes without measuring anything.
+// THIS ARM DOES MATCH, ON EVERY DIALECT, ON A DEFAULT DEPLOYMENT. This
+// comment used to say the opposite -- "on PostgreSQL this arm can never
+// match, finalize_workflow_status already purges those events" -- and that
+// was wrong: it described CompleteWorkflow's terminal path, which is not the
+// one 'failed' workflows take. cmd/cleat-worker/setup.go's own comment on
+// FinalizeWorkflowSegment's one production call site is explicit that
+// finalStatus there is "only ever 'done' or 'ready' ... never 'failed'"; the
+// real 'failed' path is store.FailWorkflow (engine/store_lifecycle.go), which
+// deletes no event_history at all. cleat#2038, found while grounding
+// cleat#1999's TLA+ model in source rather than trusting this comment.
+//
+// So a 'done' workflow's events are purged at finalize and this arm sees
+// them already gone; a 'failed' workflow's events are NOT, and this arm is
+// what removes them, --retention-days days later (default 30, on by
+// default). A preview reporting a nonzero count for 'failed' rows is
+// therefore measuring something real, not noise.
+//
+// AND history_swept_at IS NULL is cleat#2038's fix for the consequence of
+// that: this arm's own DELETE has no per-row guard against a call whose
+// intent (engine/callintent.go's WriteAheadIntent) was written but never
+// resolved, so sweeping it left ReReplay's pending-intent guard
+// (engine/admin_ops.go) unable to tell "never attempted" from "swept,
+// outcome unknown" -- both read as empty history. DeleteExpiredEvents now
+// sets history_swept_at on every workflow whose event_history it deletes,
+// and this clause keeps an already-swept workflow from being re-selected on
+// the next sweep, matching this arm's own batch-termination loop.
 const (
 	pgExpiredEventsWorkflows = ` FROM workflow_instances
 				WHERE status IN ('done', 'failed')
 				  AND completed_at IS NOT NULL
-				  AND completed_at < $1`
+				  AND completed_at < $1
+				  AND history_swept_at IS NULL`
 
 	msExpiredEventsWorkflows = ` FROM workflow_instances
 				WHERE status IN ('done', 'failed')
 				  AND completed_at IS NOT NULL
-				  AND completed_at < @p1`
+				  AND completed_at < @p1
+				  AND history_swept_at IS NULL`
 
 	myExpiredEventsWorkflows = ` FROM workflow_instances
 				WHERE status IN ('done', 'failed')
 				  AND completed_at IS NOT NULL
-				  AND completed_at < ?`
+				  AND completed_at < ?
+				  AND history_swept_at IS NULL`
 )
 
 // ---- compaction bookkeeping on terminal workflows ---------------------------

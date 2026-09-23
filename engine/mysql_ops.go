@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/big"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -1264,25 +1265,117 @@ func (s *MySQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef 
 
 // DeleteExpiredEvents deletes event history rows for workflows that are in a
 // terminal state (completed/failed) and whose last update is older than the
-// cutoff time. It also cleans up associated compaction states.
+// cutoff time. It also marks history_swept_at on every workflow it actually
+// swept, so ReReplay's pending-intent guard (engine/admin_ops.go) can tell
+// "never attempted" from "swept, outcome unknown" -- see
+// PostgresStore.DeleteExpiredEvents in engine/db.go for the full cleat#2038
+// reasoning; this is the MySQL implementation of the same fix.
 // Returns the number of event rows deleted.
+//
+// MySQL's multi-table DELETE has no RETURNING, so the batch's workflow ids
+// are read first, in their own SELECT, rather than derived from the delete
+// itself -- unlike engine/db.go's RETURNING-based version, this is two
+// statements rather than one, matching this function's pre-existing choice
+// (like ClearExpiredCompactionState below) to run un-transacted rather than
+// wrap every batch in a BEGIN/COMMIT.
 func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		result, err := s.db.ExecContext(ctx, `
-			DELETE e FROM event_history e
-			INNER JOIN (
-				SELECT id`+myExpiredEventsWorkflows+`
-				  AND tenant_id = ?
-				ORDER BY completed_at
-				LIMIT 10000
-			) AS w ON e.workflow_id = w.id
+		idRows, err := s.db.QueryContext(ctx, `
+			SELECT id`+myExpiredEventsWorkflows+`
+			  AND tenant_id = ?
+			ORDER BY completed_at
+			LIMIT 10000
 		`, olderThan, s.tenantID)
 		if err != nil {
-			return totalDeleted, fmt.Errorf("DeleteExpiredEvents: %w", err)
+			return totalDeleted, fmt.Errorf("delete expired events: select batch: %w", err)
+		}
+		var ids []string
+		for idRows.Next() {
+			var id string
+			if err := idRows.Scan(&id); err != nil {
+				idRows.Close()
+				return totalDeleted, fmt.Errorf("delete expired events: scan: %w", err)
+			}
+			ids = append(ids, id)
+		}
+		if err := idRows.Err(); err != nil {
+			idRows.Close()
+			return totalDeleted, fmt.Errorf("delete expired events: rows: %w", err)
+		}
+		idRows.Close()
+		if len(ids) == 0 {
+			break
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+
+		// cleat#2038: which of this batch's workflows actually have a
+		// residual event_history row, BEFORE deleting -- history_swept_at
+		// marks only those. A workflow the predicate matched but that
+		// already has empty history (nothing to sweep, e.g. a 'failed'
+		// workflow that never made a call) was never ambiguous, and
+		// marking it would refuse a re-replay that has no pending intent
+		// to refuse.
+		//nolint:gosec // G202: the only concatenated fragment is placeholders, built above from
+		// strings.Repeat("?,", len(ids)) -- it emits only "?" and nothing else. The ids
+		// themselves are bound as arguments, never interpolated.
+		sweptRows, err := s.db.QueryContext(ctx, `
+			SELECT DISTINCT workflow_id FROM event_history
+			WHERE workflow_id IN (`+placeholders+`)
+			AND tenant_id = ?
+		`, append(args, s.tenantID)...)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: select swept: %w", err)
+		}
+		var swept []string
+		for sweptRows.Next() {
+			var id string
+			if err := sweptRows.Scan(&id); err != nil {
+				sweptRows.Close()
+				return totalDeleted, fmt.Errorf("delete expired events: scan swept: %w", err)
+			}
+			swept = append(swept, id)
+		}
+		if err := sweptRows.Err(); err != nil {
+			sweptRows.Close()
+			return totalDeleted, fmt.Errorf("delete expired events: swept rows: %w", err)
+		}
+		sweptRows.Close()
+
+		//nolint:gosec // G202: as above -- placeholders only, ids bound as arguments.
+		result, err := s.db.ExecContext(ctx, `
+			DELETE FROM event_history
+			WHERE workflow_id IN (`+placeholders+`)
+			AND tenant_id = ?
+		`, append(args, s.tenantID)...)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: %w", err)
 		}
 		n, _ := result.RowsAffected()
 		totalDeleted += n
+
+		if len(swept) > 0 {
+			sweptPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(swept)), ",")
+			sweptArgs := make([]any, len(swept))
+			for i, id := range swept {
+				sweptArgs[i] = id
+			}
+			//nolint:gosec // G202: the only concatenated fragment is sweptPlaceholders, built
+			// above from strings.Repeat("?,", len(swept)) -- "?" only, ids bound as arguments.
+			if _, err := s.db.ExecContext(ctx, `
+				UPDATE workflow_instances
+				SET history_swept_at = NOW(6)
+				WHERE id IN (`+sweptPlaceholders+`)
+				AND tenant_id = ?
+			`, append(sweptArgs, s.tenantID)...); err != nil {
+				return totalDeleted, fmt.Errorf("delete expired events: mark swept: %w", err)
+			}
+		}
+
 		if n == 0 {
 			break
 		}
@@ -1298,9 +1391,16 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 // SPLIT OUT OF DeleteExpiredEvents, and the reason is a metric rather than
 // tidiness. It used to be a second loop inside that function whose RowsAffected
 // was discarded, so the sweep reported "deleted 0 rows" on runs where it had
-// done real work: the first loop can never match (finalize_workflow_status
-// already purged those events, cleat#1016) while this one clears up to 10000
-// workflow_instances rows a batch.
+// done real work.
+//
+// THIS COMMENT USED TO SAY THE FIRST LOOP "CAN NEVER MATCH" -- that finalize
+// already purges those events -- citing cleat#1016. That was wrong about which
+// code path a 'failed' workflow takes: finalize_workflow_status purges a
+// 'done' workflow's events, not a 'failed' one's, and DeleteExpiredEvents is
+// what removes a 'failed' workflow's events, --retention-days days later.
+// See engine/db.go's PostgresStore.DeleteExpiredEvents doc comment and
+// engine/retention_predicates.go for the full correction, found via cleat#2038
+// while grounding cleat#1999's TLA+ model in source.
 //
 // Summing the two into one return was the obvious fix and the wrong one. They
 // are different tables, different operations and different units -- deleted

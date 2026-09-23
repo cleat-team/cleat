@@ -1379,29 +1379,63 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 // DeleteExpiredEvents deletes event history rows for completed/failed workflows
 // whose completed_at is older than the cutoff. It uses batching to avoid
 // locking the event_history table when there are millions of rows to delete.
-// DeleteExpiredEvents runs the --retention-days sweep. It does two things,
-// and only the second one can still find work.
+// DeleteExpiredEvents runs the --retention-days sweep. It does three things.
 //
-// The first loop deletes event_history for done/failed workflows past the
-// cutoff. **It cannot match.** finalize_workflow_status already deleted those
-// rows when the workflow reached its terminal status -- see
-// migrations/postgres/049_a_burst_wakes_finalize_on_progress.sql, which ends
-// its done/failed branch with
+// THIS COMMENT USED TO SAY THE FIRST LOOP "CANNOT MATCH" FOR 'failed'
+// WORKFLOWS, CITING migrations/postgres/049. That was wrong, and it was
+// wrong about the CODE PATH, not the SQL: finalize_workflow_status (last
+// defined in migrations/postgres/075_the_finalize_procedure_records_the_worker.sql --
+// re-derive the highest-numbered CREATE OR REPLACE before trusting a
+// migration number, per CLAUDE.md) genuinely does delete event_history
+// unconditionally when called with finalStatus IN ('done','failed'). The
+// error was believing the worker calls it that way for 'failed'. It does
+// not: cmd/cleat-worker/setup.go's own comment on FinalizeWorkflowSegment's
+// one production call site says finalStatus there is "only ever 'done' or
+// 'ready' ... never 'failed'". The real 'failed' path is store.FailWorkflow
+// (engine/store_lifecycle.go), which deletes no event_history at all --
+// confirmed by reading it, and empirically by
+// engine/store_admin_rereplay_test.go's
+// TestAdminReReplay_ResetsAStoppedWorkflowAndKeepsItsHistory, which fails a
+// claimed workflow through store.FailWorkflow and asserts a preserved call
+// event survives. Found via cleat#2038, while grounding cleat#1999's TLA+
+// model in source.
 //
-//	DELETE FROM event_history WHERE workflow_id = p_workflow_id;
+// So: a 'done' workflow's events ARE purged at finalize (CompleteWorkflow
+// calls finalize_workflow_status with finalStatus='done' -- distinct from
+// FinalizeWorkflowSegment, and this loop does not see them). A 'failed'
+// workflow's events are NOT purged at finalize, and this loop is what
+// removes them, --retention-days days later (default 30, on by default).
+// The returned count is therefore NOT structurally zero, and an operator
+// watching cleat_compaction_events_deleted_total is watching something real
+// move whenever a failed workflow ages past the cutoff. cleat#1016's
+// original observation about the metric's denominator no longer holds as
+// stated; re-derive rather than trusting this paragraph, the same rule that
+// caught the previous version of it wrong.
 //
-// under a comment giving the reason: replay does not need them once terminal,
-// and an unbounded event_history slows the per-step INSERTs of every running
-// workflow. That is deliberate, and the worker takes that path in production
-// (FinalizeWorkflowSegment, not CompleteWorkflow -- which purges nothing and
-// has no caller outside cmd/cleat-bench). Measured on PostgreSQL: a run with
-// one event finalized to done, and to failed, goes 1 -> 0 both times.
+// THE FIRST LOOP HAD NO PER-ROW GUARD AGAINST AN UNRESOLVED CALL INTENT,
+// AND THAT WAS CLEAT#2038: engine/callintent.go's WriteAheadIntent semantics
+// durably record a call before dispatching it, so a crash before the
+// response is recorded leaves a "pending" event_history row that replay
+// reports as [AMBIGUOUS] rather than silently redispatching. This loop
+// deleted that row unconditionally, same as any other, which left
+// ReReplay's pending-intent guard (engine/admin_ops.go) unable to tell
+// "this call was never attempted" from "this call's outcome was swept
+// before it could be recorded" -- both read as empty history, and the
+// guard allowed resume either way. cleat#1999's TLA+ model
+// (specs/CleatDurableCallIntent.tla) traced this as a real S1 violation.
+// The fix is the second loop below: mark, don't just delete.
 //
-// So the returned count is structurally zero, and the caller feeds it to
-// cleat_compaction_events_deleted_total. An operator watching that counter is
-// watching something that cannot move. cleat#1016.
+// The second loop sets history_swept_at on every workflow whose
+// event_history the first loop deleted, in a separate statement -- the
+// same shape the THIRD loop (compaction bookkeeping, below) already is,
+// not a new pattern. ReReplay reads this column alongside history: empty
+// history AND history_swept_at IS NULL still reads as "never attempted"
+// (unchanged); empty history AND history_swept_at IS NOT NULL now reads as
+// "swept, cannot tell if a call was left pending" and refuses. This does
+// NOT change what --retention-days deletes -- same predicate, same rows --
+// it adds bookkeeping alongside the delete.
 //
-// The second loop clears compaction_state/compaction_step/compacted_at for the
+// The third loop clears compaction_state/compaction_step/compacted_at for the
 // same workflows. Those columns are on workflow_instances, which finalize does
 // not touch, so this half is live -- and its RowsAffected is deliberately NOT
 // added to the return value. Summing them would make the metric count two
@@ -1409,9 +1443,12 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 // workflow_instances rows. Reporting that work needs its own counter, which is
 // a change to an operator-facing metric rather than an arithmetic fix.
 //
-// dead_lettered is in neither loop, and finalize does not purge it either --
-// those events survive until deleteDeadLetteredWorkflowsBatch removes the
-// workflow row and fk_event_history_workflow's ON DELETE CASCADE takes them.
+// dead_lettered is in none of the three loops, and finalize does not purge it
+// either -- those events survive until deleteDeadLetteredWorkflowsBatch removes
+// the workflow row and fk_event_history_workflow's ON DELETE CASCADE takes
+// them. RetryWorkflow (dead_lettered -> ready) has no equivalent guard to
+// history_swept_at at all yet -- tracked separately as cleat#2039, since a
+// missing guard and a guard defeated by retention are different defects.
 // Source-level; unmeasured.
 func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
@@ -1420,23 +1457,71 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete expired events: begin: %w", err)
 		}
-		result, err := tx.ExecContext(ctx, `
+		// RETURNING workflow_id, not a separate re-run of the same predicate:
+		// ties history_swept_at to the workflows this statement actually
+		// removed rows for, and is immune to a concurrent write changing what
+		// the predicate matches between two separate statements. A workflow_id
+		// can repeat (multiple event_history rows); deduplicated below before
+		// the UPDATE.
+		rows, err := tx.QueryContext(ctx, `
 			DELETE FROM event_history
 			WHERE workflow_id IN (
 				SELECT id`+pgExpiredEventsWorkflows+`
 				LIMIT 10000
 			)
+			RETURNING workflow_id
 		`, olderThan)
 		if err != nil {
 			_ = tx.Rollback()
 			return totalDeleted, fmt.Errorf("delete expired events: %w", err)
 		}
+		// rowsDeleted counts EVENT ROWS (what totalDeleted and the
+		// cleat_compaction_events_deleted_total metric have always counted);
+		// swept collects the DISTINCT workflow ids, for the UPDATE below --
+		// two different units from one result set, kept separate rather than
+		// conflated, the same discipline this function's own doc comment
+		// already states for why the compaction loop's RowsAffected is not
+		// summed into this return value.
+		var rowsDeleted int64
+		seen := make(map[string]struct{})
+		var swept []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				_ = tx.Rollback()
+				return totalDeleted, fmt.Errorf("delete expired events: scan: %w", err)
+			}
+			rowsDeleted++
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				swept = append(swept, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			_ = tx.Rollback()
+			return totalDeleted, fmt.Errorf("delete expired events: rows: %w", err)
+		}
+		rows.Close()
+		if len(swept) > 0 {
+			// cleat#2038: mark, don't just delete -- ReReplay's pending-intent
+			// guard needs to tell "never attempted" from "swept, outcome
+			// unknown" apart, and both currently read as empty history.
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE workflow_instances
+				SET history_swept_at = now()
+				WHERE id = ANY($1)
+			`, pq.Array(swept)); err != nil {
+				_ = tx.Rollback()
+				return totalDeleted, fmt.Errorf("delete expired events: mark swept: %w", err)
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return totalDeleted, fmt.Errorf("delete expired events: commit: %w", err)
 		}
-		n, _ := result.RowsAffected()
-		totalDeleted += n
-		if n == 0 {
+		totalDeleted += rowsDeleted
+		if rowsDeleted == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)

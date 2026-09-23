@@ -1401,6 +1401,9 @@ func (s *stubWorkflowStore) ClaimStickyWorkflows(ctx context.Context, workerID s
 func (s *stubWorkflowStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
 	return nil, nil
 }
+func (s *stubWorkflowStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	return false, nil
+}
 func (s *stubWorkflowStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error {
 	return nil
 }

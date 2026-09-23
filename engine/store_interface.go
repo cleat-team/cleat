@@ -91,6 +91,16 @@ type WorkflowStore interface {
 	// CountEventHistory returns the total number of events for a workflow.
 	CountEventHistory(ctx context.Context, workflowID string) (int, error)
 
+	// IsHistorySwept reports whether the retention sweep (DeleteExpiredEvents)
+	// has ever removed this workflow's event_history. cleat#2038: an empty
+	// history is ambiguous between "no call was ever made" and "a call's
+	// outcome was swept before it could be recorded", and ReReplay's
+	// pending-intent guard needs to tell them apart. Returns false, nil for a
+	// workflow that does not exist -- the caller (ReReplay) already treats a
+	// failed lookup as non-fatal for the same reason a failed
+	// LoadEventHistory is.
+	IsHistorySwept(ctx context.Context, workflowID string) (bool, error)
+
 	// AppendEventHistory appends a single event to the history.
 	// Uses ON CONFLICT (workflow_id, step) DO NOTHING for idempotency.
 	AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error
@@ -554,7 +564,10 @@ type WorkflowStore interface {
 
 	// DeleteExpiredEvents deletes event history rows for workflows that are in a
 	// terminal state (completed/failed) and whose last update is older than the
-	// cutoff time.  It also deletes associated compaction states.
+	// cutoff time. It also marks history_swept_at on every workflow it actually
+	// swept (cleat#2038) so ReReplay's pending-intent guard can tell "never
+	// attempted" from "swept, outcome unknown". See
+	// PostgresStore.DeleteExpiredEvents in engine/db.go for the full reasoning.
 	// Returns the number of event rows deleted.
 	DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error)
 
@@ -563,12 +576,16 @@ type WorkflowStore interface {
 	// older than the cutoff, and returns how many rows it cleared.
 	//
 	// Separate from DeleteExpiredEvents on purpose, though the two run
-	// together. That function deletes event_history rows and can never match
-	// (finalize_workflow_status purges them first, cleat#1016); this one
-	// updates workflow_instances and does real work. Returning both through one
-	// int64 would put deleted rows and updated rows, on different tables, under
-	// a single counter documented as "expired event history rows deleted" --
-	// so each half reports its own number under its own metric. cleat#1024.
+	// together. THIS COMMENT USED TO SAY THAT FUNCTION "CAN NEVER MATCH"
+	// because finalize_workflow_status purges those events first, citing
+	// cleat#1016 -- wrong about which code path a 'failed' workflow takes; see
+	// PostgresStore.DeleteExpiredEvents's doc comment in engine/db.go for the
+	// correction (cleat#2038). What is still true: this updates
+	// workflow_instances rather than event_history, a different table.
+	// Returning both through one int64 would put deleted rows and updated
+	// rows, on different tables, under a single counter documented as
+	// "expired event history rows deleted" -- so each half reports its own
+	// number under its own metric. cleat#1024.
 	ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error)
 
 	// ResolveTenantFromAPIKey looks up a tenant UUID by API key hash.

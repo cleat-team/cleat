@@ -426,6 +426,10 @@ func (m *mockCompactStore) LoadEventHistory(ctx context.Context, workflowID stri
 	return m.events, nil
 }
 
+func (m *mockCompactStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	return false, nil
+}
+
 func (m *mockCompactStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
 	m.compactCount++
 	m.compactWorkflowID = workflowID

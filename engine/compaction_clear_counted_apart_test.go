@@ -11,9 +11,15 @@ import (
 //
 // DeleteExpiredEvents deleted event_history rows and, in a second loop, cleared
 // compaction bookkeeping on workflow_instances -- discarding that loop's
-// RowsAffected. The first loop can never match (finalize_workflow_status purges
-// those events first, cleat#1016), so the sweep reported zero on runs where it
-// had cleared real rows.
+// RowsAffected. THIS TEST'S WORKFLOW GOES THROUGH FinalizeWorkflowSegment TO
+// 'done' BELOW, so its events are already purged by the time either loop
+// runs and the first loop matches nothing FOR IT -- that is specific to
+// 'done' via finalize, not a blanket property of the first loop. A 'failed'
+// workflow's events are not purged at finalize (store.FailWorkflow takes a
+// different path) and the first loop is what removes them; see cleat#1016,
+// cleat#2038, and PostgresStore.DeleteExpiredEvents's doc comment in
+// engine/db.go. So the sweep reported zero on runs where it had cleared real
+// compaction rows.
 //
 // The obvious fix was to sum them. This is the test that refuses it: the two
 // numbers count different tables and different operations, and the counter the
@@ -63,9 +69,11 @@ func TestTheCompactionClearIsCountedApartFromTheEventDelete(t *testing.T) {
 
 			if cleared < 1 {
 				t.Errorf("ClearExpiredCompactionState cleared %d rows, want at least 1.\n\n"+
-					"This half of the sweep does the real work -- the event half "+
-					"cannot match, because finalize already purged those rows. If "+
-					"it reports zero, the sweep is silent about everything it did.", cleared)
+					"This half of the sweep does the real work for THIS workflow -- "+
+					"it went through FinalizeWorkflowSegment to 'done', so finalize "+
+					"already purged its event_history and the event half cannot match "+
+					"it. If it reports zero, the sweep is silent about everything it "+
+					"did for this workflow.", cleared)
 			}
 			if deleted != 0 {
 				t.Errorf("DeleteExpiredEvents returned %d, want 0, with %d compaction "+
