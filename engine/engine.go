@@ -69,7 +69,25 @@ type Engine struct {
 	// cancellation poll uses, and for the same reason: most callers of
 	// NewEngine (cleatctl replay, cleat run_embedded, wasmtest) have no
 	// worker and no heartbeat to be presumed lost.
-	canStartNewWork        func() bool
+	canStartNewWork func() bool
+
+	// shutdownRequested signals a worker-level shutdown (SIGINT/SIGTERM, or the
+	// watchdog's poison-pill exit) to code that is WAITING inside a durable call
+	// rather than starting one. cleat#2020: every wasmtime host function's ctx is
+	// built from context.Background() (engine/wasmtime_hostfuncs.go), never
+	// derived from the caller's context, so the three ctx.Done()/ctx.Err() checks
+	// in durablecalls.go (the backoff wait and the two fire-and-forget sites)
+	// could never fire -- not a CGO limitation like cleat#2008's execCtx finding,
+	// just the wrong context source. canStartNewWork above only gates the START
+	// of a fresh call; this is checked from inside an in-progress wait.
+	//
+	// nil means "never signalled" -- the same fail-open default as
+	// canStartNewWork, for the same reason: most callers of NewEngine
+	// (cleatctl replay, cleat run_embedded, wasmtest) have no worker shutdown to
+	// observe. A nil channel blocks forever in a select, which is exactly that
+	// behaviour.
+	shutdownRequested <-chan struct{}
+
 	wasmInstanceTimeout    time.Duration
 	wasmWallClockCeiling   time.Duration
 	hostRetryBudgetCeiling time.Duration
@@ -362,6 +380,22 @@ func WithWorkerID(id string) EngineOption { return func(e *Engine) { e.workerID 
 // tell.
 func WithCanStartNewWork(fn func() bool) EngineOption {
 	return func(e *Engine) { e.canStartNewWork = fn }
+}
+
+// WithShutdownSignal wires a worker's own shutdown channel (closed on
+// SIGINT/SIGTERM, or the watchdog's poison-pill exit) into the engine so a
+// durable call WAITING in progress -- a backoff sleep, a fire-and-forget
+// send's delay -- can abort promptly instead of running out its own timeout.
+// cleat#2020: the per-host-call ctx durablecalls.go receives is always
+// context.Background()-derived, so ctx.Done() there can never fire; this is
+// the channel that replaces it at the three sites that need to observe
+// shutdown while waiting, not starting.
+//
+// ch is typically w.ctx.Done() from the worker's own context.Context. nil (or
+// never calling this option) means shutdown is never observed here, which is
+// correct for callers with no worker to shut down.
+func WithShutdownSignal(ch <-chan struct{}) EngineOption {
+	return func(e *Engine) { e.shutdownRequested = ch }
 }
 
 // WithGeneration sets the generation this workerID claimed the workflow

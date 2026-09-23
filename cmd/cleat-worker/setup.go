@@ -2718,6 +2718,15 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithCanStartNewWork(func() bool {
 			return !w.heartbeatPresumedLost() && !w.runIsFenced(wf.ID)
 		}),
+		// cleat#2020: w.ctx is cancelled on SIGINT/SIGTERM (main.go's signal
+		// handler) and on the watchdog's poison-pill exit (w.cancel() in
+		// watchdogLoop) -- a real, already-firing shutdown signal that never
+		// reached durablecalls.go before, because every wasmtime host call's
+		// own ctx is context.Background()-derived rather than descended from
+		// this one. WithCanStartNewWork above gates the START of a fresh
+		// call; this lets a call already WAITING (a backoff, a scheduled
+		// send's delay) abort instead of riding out its own timeout.
+		engine.WithShutdownSignal(w.ctx.Done()),
 		engine.WithTraceID(traceID),
 		engine.WithTenantID(wf.TenantID),
 		engine.WithBackends(wasmtimeLanguages, w.wasmtimeBackend),
