@@ -77,8 +77,8 @@ query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){
         ... on AddedToMergeQueueEvent{createdAt}}}
     commits(last:1){nodes{commit{committedDate
       statusCheckRollup{contexts(first:100){nodes{__typename
-        ... on CheckRun{name status conclusion}
-        ... on StatusContext{context state}}}}}}}
+        ... on CheckRun{name status conclusion startedAt}
+        ... on StatusContext{context state createdAt}}}}}}}
   }}}
 """
 
@@ -192,8 +192,22 @@ def classify(state: dict) -> tuple[str, str]:
         return "NEEDS-AUTHOR", detail + ". The PR page still reads " + pr["mergeStateStatus"]
 
     contexts = (commit.get("statusCheckRollup") or {}).get("contexts", {}).get("nodes", [])
-    red, running = [], 0
+    # The rollup lists EVERY run of a check on the head SHA, one per check
+    # suite, not only the latest. A re-run, or a workflow re-triggered by a PR
+    # body edit, leaves the superseded run in the list: #2087's Closing
+    # References failed on its first body at 17:56:33Z, passed on the edited
+    # body 29s later, and still read "failing" here. Only the newest run of
+    # each name speaks for that check. (A duplicate that is CANCELLED is R9's
+    # twin and is reported separately, from the check-runs endpoint.)
+    newest: dict[str, dict] = {}
     for c in contexts:
+        name = c.get("name") or c.get("context")
+        when = c.get("startedAt") or c.get("createdAt") or ""
+        if name not in newest or when >= (newest[name].get("startedAt")
+                                          or newest[name].get("createdAt") or ""):
+            newest[name] = c
+    red, running = [], 0
+    for c in newest.values():
         if c["__typename"] == "CheckRun":
             if c["status"] != "COMPLETED":
                 running += 1
@@ -216,14 +230,18 @@ def classify(state: dict) -> tuple[str, str]:
                                 "gh run rerun <run> --failed; " + ", ".join(cancelled["lone"]))
     if running:
         return "WAITING", f"{running} check(s) running, not yet queued"
-    if pr["mergeStateStatus"] == "CLEAN":
+    # UNSTABLE means only non-required checks failed; reaching here, none of the
+    # newest runs is red, so it is a superseded failure and the PR is as
+    # mergeable as a CLEAN one.
+    if pr["mergeStateStatus"] in ("CLEAN", "UNSTABLE"):
         # Auto-merge enqueues a CLEAN PR on its own, a few seconds after the last
         # required check passes. Sampled inside that window the PR reads exactly
         # like a forgotten one: #2072 did, at 16:21:15Z on 2026-09-23, and its
         # timeline shows AddedToMergeQueueEvent at that same second.
         if pr.get("autoMergeRequest"):
-            return "WAITING", "CLEAN with auto-merge set; GitHub is enqueueing it"
-        return "NEEDS-AUTHOR", f"CLEAN but not in the merge queue -- enqueue: gh pr merge {pr['number']}"
+            return "WAITING", f"{pr['mergeStateStatus']} with auto-merge set; GitHub is enqueueing it"
+        return "NEEDS-AUTHOR", (f"{pr['mergeStateStatus']} but not in the merge queue -- "
+                                f"enqueue: gh pr merge {pr['number']}")
     return "NEEDS-AUTHOR", f"{pr['mergeStateStatus']} with nothing red or running"
 
 
