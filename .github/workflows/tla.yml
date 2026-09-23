@@ -17,8 +17,10 @@ on:
       - "Makefile"
       - ".github/workflows/tla.yml"
       - "cmd/cleat-worker/config.go"
+      - "cmd/cleat-worker/main.go"
       - "cmd/cleat-worker/rotating_claim.go"
       - "cmd/cleat-worker/setup.go"
+      - "cmd/cleatctl/setsecret.go"
       - "engine/admin_ops.go"
       - "engine/callintent.go"
       - "engine/db.go"
@@ -37,6 +39,7 @@ on:
       - "engine/store_defer_phase.go"
       - "engine/store_intent.go"
       - "engine/store_lifecycle.go"
+      - "engine/tenant_secrets.go"
     # `edited` is required, not decorative -- see ecosystem-ci.yml's comment
     # on the same line for why (a retargeted PR would otherwise never trigger
     # this workflow at all). scripts/check-workflow-pr-triggers.sh guards it.

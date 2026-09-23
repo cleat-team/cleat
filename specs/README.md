@@ -38,6 +38,7 @@ added) and the index below.
 |---|---|---|---|---|
 | `CleatClaim.tla` | cleat#1996 | Yes | Yes | [`CleatClaim.md`](CleatClaim.md) |
 | `CleatDurableCallIntent.tla` | cleat#1999 | Yes | Yes | [`CleatDurableCallIntent.md`](CleatDurableCallIntent.md) |
+| `CleatKeyRotation.tla` | cleat#1991 | Yes | Yes | [`CleatKeyRotation.md`](CleatKeyRotation.md) |
 | `CleatQueueAdmission.tla` | cleat#2000 | Yes | Yes | [`CleatQueueAdmission.md`](CleatQueueAdmission.md) |
 | `CleatRunLifecycle.tla` | cleat#1997 | Yes | Yes | [`CleatRunLifecycle.md`](CleatRunLifecycle.md) |
 | `CleatSignals.tla` | — | No | **No — superseded, see above** | — |
@@ -132,6 +133,7 @@ file rather than silently shipping the fast bound.
 # BEGIN GENERATED: tlc-invocations (python3 scripts/check-tla-ci-paths.py --write)
 java -cp tla2tools.jar tlc2.TLC -config specs/CleatClaim.cfg specs/CleatClaim.tla
 java -cp tla2tools.jar tlc2.TLC -config specs/CleatDurableCallIntent.cfg specs/CleatDurableCallIntent.tla
+java -cp tla2tools.jar tlc2.TLC -config specs/CleatKeyRotation.cfg specs/CleatKeyRotation.tla
 java -cp tla2tools.jar tlc2.TLC -config specs/CleatQueueAdmission.cfg specs/CleatQueueAdmission.tla
 java -cp tla2tools.jar tlc2.TLC -config specs/CleatRunLifecycle.cfg specs/CleatRunLifecycle.tla
 # END GENERATED: tlc-invocations
