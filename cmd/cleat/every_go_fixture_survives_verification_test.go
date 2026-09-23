@@ -57,8 +57,14 @@ var goFixtureExpectations = map[string]string{
 	"noargs":            "",
 	// cleat#1065: a pointer entry-point parameter means optional. It must
 	// verify cleanly -- the mechanism is additive and breaks no existing rule.
-	"optionalparam":  "",
-	"nowms":          "",
+	"optionalparam": "",
+	"nowms":         "",
+	// cleat#2020: the AwaitPromise timeout survey fixture (see
+	// testdata/promisetimeout and engine's
+	// an_outer_context_does_not_affect_a_promise_timeout_test.go). Nothing
+	// unusual about its shape -- one entry point, one string parameter -- so
+	// it must verify cleanly like every other single-call fixture here.
+	"promisetimeout": "",
 	"rejectpromise":  "",
 	"resolvepromise": "",
 	"scheduleinvoke": "",
