@@ -10,12 +10,12 @@
 #   ./crash_demo.sh
 #
 # Prerequisites:
-#   - 'durable' CLI tool must be on PATH
+#   - 'cleat' CLI tool must be on PATH
 #   - OPENAI_API_KEY must be set (or mock endpoints configured)
 #   - python-sdk/ must be available at ../python-sdk/
 #
 # Note: This is a *narrative* demo — it prints the steps that would
-# happen in a real scenario.  The actual 'durable' CLI commands shown
+# happen in a real scenario.  The actual 'cleat' CLI commands shown
 # work when the cleat runtime and worker are set up.  To run without
 # the full runtime, use:  python research_agent.py --test
 
@@ -36,12 +36,12 @@ echo -e "${NC}"
 # ------------------------------------------------------------------
 # Check prerequisites
 # ------------------------------------------------------------------
-if ! command -v durable &> /dev/null; then
-    echo -e "${YELLOW}[INFO]${NC} 'durable' CLI not found on PATH."
+if ! command -v cleat &> /dev/null; then
+    echo -e "${YELLOW}[INFO]${NC} 'cleat' CLI not found on PATH."
     echo ""
-    echo "The 'durable' CLI is needed to build WASM components and"
+    echo "The 'cleat' CLI is needed to build WASM components and"
     echo "interact with the cleat runtime.  Install it from:"
-    echo "  https://github.com/cleat-dev/cleat/releases"
+    echo "  https://github.com/cleat-team/cleat/releases"
     echo ""
     echo "For now, run the standalone test instead:"
     echo "  python research_agent.py --test"
@@ -77,13 +77,14 @@ echo ""
 # Step 2 — Start the agent
 # ------------------------------------------------------------------
 echo -e "${GREEN}Step 2:${NC} Starting research agent..."
-echo "  $ cleat run langchain_research_agent \\"
-echo '      '"'"'{"topic": "Compare Temporal, DBOS, and Cleat"}'"'"' &'
+echo "  $ cleat run --wasm langchain_research_agent.wasm \\"
+echo "      --entry-point LangChainResearchAgent \\"
+echo '      --input '"'"'{"topic": "Compare Temporal, DBOS, and Cleat"}'"'"' &'
 echo ""
 
 # Start the agent (capture PID for later kill)
-cleat run langchain_research_agent \
-    '{"topic": "Compare Temporal, DBOS, and Cleat"}' &
+cleat run --wasm langchain_research_agent.wasm --entry-point LangChainResearchAgent \
+    --input '{"topic": "Compare Temporal, DBOS, and Cleat"}' &
 AGENT_PID=$!
 echo -e "  Agent PID: ${AGENT_PID}"
 echo ""
@@ -123,10 +124,10 @@ echo ""
 # Step 5 — Restart
 # ------------------------------------------------------------------
 echo -e "${GREEN}Step 5:${NC} Restarting worker..."
-echo "  $ durable worker start &"
+echo '  $ cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080 &'
 echo ""
 
-durable worker start &
+cleat-worker --db "${CLEAT_DATABASE_URL:-}" --api-addr :8080 &
 WORKER_PID=$!
 sleep 3
 echo -e "  Worker PID: ${WORKER_PID}"

@@ -20,8 +20,9 @@ cleat build -o /tmp/out ./examples/datapipeline/
 ## Run
 
 ```bash
-cleat deploy datapipeline /tmp/out/datapipeline.wasm
-cleat run RunPipeline '{"job_id":"job-001","items":["item1","item2","item3"],"batch_id":"batch-1"}'
+cleat deploy --name datapipeline /tmp/out/datapipeline.wasm
+cleat run --wasm /tmp/out/datapipeline.wasm --entry-point RunPipeline \
+  --input '{"job_id":"job-001","items":["item1","item2","item3"],"batch_id":"batch-1"}'
 ```
 
 ## Key files

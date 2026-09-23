@@ -7,7 +7,8 @@ or incurring duplicate API costs.
 
 Usage:
     cleat build --target python --entry agent.py:research_agent
-    cleat run research_agent '{"topic": "Compare Temporal, DBOS, and Cleat"}'
+    cleat run --wasm research_agent.wasm --entry-point ResearchAgent \
+      --input '{"topic": "Compare Temporal, DBOS, and Cleat"}'
 """
 
 from cleat_sdk import HostCalls, cleat_entry
@@ -144,12 +145,15 @@ def research_agent(h: HostCalls, topic: str) -> str:
 
 
 def execute_web_search(h: HostCalls, query: str) -> str:
-    """Execute a web search via cleat's cleat_call.
+    """Execute a web search via h.call to a registered "websearch" service.
 
-    The search result is recorded in event history for deterministic replay.
+    No such plugin ships with cleat -- this calls out to an external service
+    by name, resolved at the worker via `--service-endpoints
+    websearch=https://your-search-provider`. The result is recorded in event
+    history for deterministic replay.
     """
     try:
-        result = h.cleat_call("websearch", "search", {"query": query})
+        result = h.call("websearch", "search", {"query": query})
         return result
     except Exception as e:
         h.cleat_log(f"Web search failed: {e}")
@@ -157,12 +161,14 @@ def execute_web_search(h: HostCalls, query: str) -> str:
 
 
 def execute_calculator(h: HostCalls, expression: str) -> str:
-    """Execute a calculation via cleat's cleat_call.
+    """Execute a calculation via h.call to a registered "calculator" service.
 
-    The calculation result is recorded in event history.
+    Same mechanism as execute_web_search: resolved at the worker via
+    `--service-endpoints calculator=https://...`. The result is recorded in
+    event history.
     """
     try:
-        result = h.cleat_call("calculator", "eval", {"expression": expression})
+        result = h.call("calculator", "eval", {"expression": expression})
         return result
     except Exception as e:
         h.cleat_log(f"Calculator failed: {e}")

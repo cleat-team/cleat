@@ -9,12 +9,12 @@ Simplest Cleat Python/WASM workflow.
 cleat build --target python --entry hello_workflow.py:hello
 
 # 2. Run
-cleat run hello '{"name": "World"}'
+cleat run --wasm hello.wasm --entry-point Hello --input '{"name": "World"}'
 ```
 
 ## What This Demonstrates
 
-- `@durable_entry` marks the workflow entry point
-- `h.durable_call("greeter", "greet", ...)` makes a recorded API call
+- `@cleat_entry` marks the workflow entry point
+- `h.call("greeter", "greet", ...)` makes a recorded API call
 - The WASM binary can be loaded by the cleat worker
 - On crash recovery, the workflow replays deterministically

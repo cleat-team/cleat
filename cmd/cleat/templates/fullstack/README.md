@@ -61,9 +61,10 @@ days, it survives a worker dying, and it resumes where it stopped rather than
 restarting. None of that fits inside an HTTP response.
 
 So the shape is: **POST to start, then poll published state.** The workflow
-calls `SetQueryState`, and the browser reads it back one key at a time from
-`GET /api/workflows/{id}/state?key=status`. One key per read is deliberate —
-that endpoint cannot list keys.
+calls `SetQueryState`, and the browser reads it back from
+`GET /api/workflows/{id}/state?key=status` for one key, or
+`GET /api/workflows/{id}/state` with no `key` at all to list everything the
+run has published so far.
 
 That read path is intentionally *not* a durable run. Serving reads by starting
 workflows would write event history on every page refresh.

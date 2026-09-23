@@ -18,7 +18,7 @@ func Process(h cleat.HostCalls, input string) (string, error) {
 
 	// TODO: add your workflow logic here
 	// Examples:
-	//   result, err := h.DurableCall("llm", "chat", `{"provider":"anthropic","model":"claude-sonnet-4-6","messages":[...]}`)
+	//   result, err := h.PluginCall("llm", "chat", `{"provider":"anthropic","model":"claude-sonnet-4-6","messages":[...]}`)
 	//   signal := h.AwaitSignals([]string{"approve", "reject"}, 15*time.Minute)
 	//   h.SetQueryState("status", "completed")
 

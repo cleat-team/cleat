@@ -10,8 +10,9 @@ Demonstrates:
 
 Usage (WASM / cleat CLI)::
 
-    durable build --target python --entry research_agent.py:langchain_research_agent
-    durable run langchain_research_agent '{"topic": "Compare Temporal, DBOS, and Cleat"}'
+    cleat build --target python --entry research_agent.py:langchain_research_agent
+    cleat run --wasm langchain_research_agent.wasm --entry-point LangChainResearchAgent \
+      --input '{"topic": "Compare Temporal, DBOS, and Cleat"}'
 
 Usage (standalone test, no WASM needed)::
 
@@ -115,14 +116,17 @@ RESEARCH_TOOLS = [
 
 
 def _execute_web_search(h: HostCalls, query: str) -> str:
-    """Execute a web search via the websearch plugin.
+    """Execute a web search via h.call to a registered "websearch" service.
 
-    The search is recorded as a deterministic event — on crash recovery the
-    same result is returned without re-executing the search.
+    No such plugin ships with cleat -- this calls out to an external service
+    by name, resolved at the worker via `--service-endpoints
+    websearch=https://your-search-provider`. The call is recorded as a
+    deterministic event — on crash recovery the same result is returned
+    without re-executing the search.
     """
     h.cleat_log(f"  Web search: {query[:120]}")
     try:
-        return h.plugin_call("websearch", "search", {"query": query})
+        return h.call("websearch", "search", {"query": query})
     except Exception as e:
         h.cleat_log(f"  Web search failed: {e}")
         return json.dumps({"error": str(e), "results": []})
@@ -309,7 +313,7 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
 
 
 # ========================================================================
-# Decorated entry point — used by ``durable build`` / ``durable run``
+# Decorated entry point — used by ``cleat build`` / ``cleat run``
 # ========================================================================
 
 
@@ -324,8 +328,8 @@ def langchain_research_agent(h: HostCalls, topic: str) -> str:
 
     When the worker crashes mid-execution and restarts, the decorated
     wrapper replays the event history from the beginning, but every
-    ``plugin_call`` returns the cached result from the previous run —
-    no duplicate API calls, no lost progress.
+    ``plugin_call`` or ``call`` returns the cached result from the
+    previous run — no duplicate API calls, no lost progress.
     """
     return _research_agent_impl(h, topic)
 
@@ -376,10 +380,24 @@ def run_test() -> None:
 
             if plugin_name == "llm" and function_name == "chat":
                 return self._mock_llm(input_data)
-            if plugin_name == "websearch" and function_name == "search":
-                return self._mock_search(input_data)
             return json.dumps({
                 "error": f"No mock for {plugin_name}.{function_name}",
+            })
+
+        def call(self, service: str, operation: str, request: Any,
+                  timeout_ms: int | None = None) -> str:
+            # _execute_web_search reaches "websearch" through h.call, not
+            # h.plugin_call -- it's an external service (--service-endpoints
+            # on the real worker), not a plugin, so it is mocked here rather
+            # than in plugin_call above.
+            self.call_history.append((service, operation, request))
+            if not isinstance(request, dict):
+                request = {}
+
+            if service == "websearch" and operation == "search":
+                return self._mock_search(request)
+            return json.dumps({
+                "error": f"No mock for {service}.{operation}",
             })
 
         # -- Mock response builders ------------------------------------

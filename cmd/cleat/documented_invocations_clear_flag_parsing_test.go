@@ -30,10 +30,14 @@ package main
 // cannot know what a real deployment target or workflow file would be.
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -43,6 +47,56 @@ import (
 // surface_test.go's invocation regexp, so prose mentioning "cleat" mid
 // sentence is not mistaken for a command.
 var docInvocation = regexp.MustCompile(`(?m)^[ \t]*\$?[ \t]*cleat[ \t]+(\S.*)$`)
+
+// shellFields splits a documented invocation the way a shell would, not the
+// way strings.Fields would: every `--input` example in this tree is a JSON
+// literal wrapped in single quotes and containing spaces
+// (`--input '{"name": "World"}'`), and strings.Fields blows that apart into
+// one token per word. A caller that then re-joins fields with spaces (as
+// exec.Command effectively does one argv slot per field) never sees the
+// value a real shell would have passed as a single argument. Also drops an
+// unquoted trailing `# comment`, the same as a real shell -- DX_COMPARISON.md
+// annotates several invocations that way (`... ./order.wasm   # INSERT`), and
+// without this the comment text is mistaken for extra positional arguments.
+// Handles single and double quotes; does not handle backslash escapes or
+// nested quotes of the same kind, because nothing documented here needs them.
+func shellFields(s string) []string {
+	var fields []string
+	var cur strings.Builder
+	inField := false
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+				continue
+			}
+			cur.WriteByte(c)
+			continue
+		}
+		switch {
+		case c == '#':
+			i = len(s) // stop: the rest of the line is a comment
+		case c == '\'' || c == '"':
+			quote = c
+			inField = true
+		case c == ' ' || c == '\t':
+			if inField {
+				fields = append(fields, cur.String())
+				cur.Reset()
+				inField = false
+			}
+		default:
+			cur.WriteByte(c)
+			inField = true
+		}
+	}
+	if inField {
+		fields = append(fields, cur.String())
+	}
+	return fields
+}
 
 // docCommandBaseline records `<file>|cleat <line>` pairs this guard cannot
 // yet clear, parked rather than fixed for the same reason docBaseline in
@@ -106,7 +160,7 @@ func TestEveryDocumentedCleatInvocationClearsFlagParsing(t *testing.T) {
 					continue // depends on a shell or template variable this test cannot expand
 				}
 
-				fields := strings.Fields(rest)
+				fields := shellFields(rest)
 				sub := ""
 				for _, f := range fields {
 					// Skip GLOBAL flags -- and their values, which do not
@@ -156,6 +210,229 @@ func TestEveryDocumentedCleatInvocationClearsFlagParsing(t *testing.T) {
 	for key, why := range docCommandBaseline {
 		if !seen[key] {
 			t.Errorf("docCommandBaseline has %q (%s) but nothing in the tree matches it. "+
+				"The document was fixed or renamed: delete the entry.", key, why)
+		}
+	}
+}
+
+// cleat#2048. TestEveryDocumentedCleatInvocationClearsFlagParsing checks that
+// every documented FLAG exists. It does not check POSITIONAL arguments --
+// its own comment says so -- so `cleat deploy <name> <wasm>` and
+// `cleat run <Entry> '<json>'` both cleared it while being wrong: `deploy`
+// only ever reads remainder[0] as the wasm path (a second bare positional is
+// silently ignored, not an error), and `run` without --wasm treats
+// remainder[0] as a package DIRECTORY to build, not an entry-point name.
+// Twelve `deploy` docs and fourteen `run` docs carried the broken form
+// (cleat#2048) and none of them tripped the flag-parsing guard, because
+// nothing was wrong with their flags -- only with what came after.
+//
+// This is the positional half of that guard: for `deploy` and `run`, assert
+// the SHAPE of what is left after flags are removed matches what the
+// subcommand actually does with it.
+
+// subcommandFlagValueKinds parses the fs.String/fs.Int/fs.Bool declarations
+// inside the named function in path, returning flagName -> takesValue (true
+// for String/Int, false for Bool). AST-derived, like dispatchedCommands
+// above, so a flag added to runDeploy/runEmbedded later is picked up
+// automatically -- a hand-maintained list would silently misclassify a new
+// flag's value as a positional argument instead of failing loud.
+func subcommandFlagValueKinds(t *testing.T, path, funcName string) map[string]bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	kinds := map[string]bool{}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != funcName {
+			return true
+		}
+		found = true
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			var takesValue bool
+			switch sel.Sel.Name {
+			case "String", "Int", "Int64", "Float64", "Duration":
+				takesValue = true
+			case "Bool":
+				takesValue = false
+			default:
+				return true
+			}
+			if len(call.Args) == 0 {
+				return true
+			}
+			lit, ok := call.Args[0].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			name, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				return true
+			}
+			kinds[name] = takesValue
+			return true
+		})
+		return false
+	})
+	if !found {
+		t.Fatalf("no func %s found in %s -- it was renamed, and this test's positional "+
+			"check would silently pass every document instead of checking them", funcName, path)
+	}
+	if len(kinds) == 0 {
+		t.Fatalf("found func %s in %s but no fs.String/fs.Int/fs.Bool flag declarations -- "+
+			"it was restructured, and an empty flag set would misclassify every flag's own "+
+			"value as a positional argument", funcName, path)
+	}
+	return kinds
+}
+
+// positionalArgsAfterFlags strips this subcommand's own flags (and, for a
+// flag that takes a value, the following token) from fields, leaving only
+// the bare positional arguments. A flag not in flagTakesValue is assumed to
+// take no value -- if it were undefined entirely,
+// TestEveryDocumentedCleatInvocationClearsFlagParsing already fails it.
+func positionalArgsAfterFlags(fields []string, flagTakesValue map[string]bool) []string {
+	var positionals []string
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if !strings.HasPrefix(f, "-") {
+			positionals = append(positionals, f)
+			continue
+		}
+		name := strings.TrimLeft(f, "-")
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			name = name[:eq]
+		} else if flagTakesValue[name] && i+1 < len(fields) {
+			i++
+		}
+	}
+	return positionals
+}
+
+// deployRunPositionalBaseline is docCommandBaseline's sibling for this
+// check: a doc this test cannot yet clear, parked with a reason rather than
+// silently ignored. Same shrink-only contract, checked at the end of the
+// test below.
+var deployRunPositionalBaseline = map[string]string{}
+
+func TestDeployAndRunDocumentedPositionalsAreTheKindTheSubcommandExpects(t *testing.T) {
+	root := repoRootForCLIScan(t)
+	deployFlags := subcommandFlagValueKinds(t, filepath.Join(root, "cmd/cleat/main.go"), "runDeploy")
+	runFlags := subcommandFlagValueKinds(t, filepath.Join(root, "cmd/cleat/run_embedded.go"), "runEmbedded")
+
+	out, err := exec.Command("git", "-C", root, "ls-files", "*.md", "*.py").Output()
+	if err != nil {
+		t.Fatalf("git ls-files: %v", err)
+	}
+	docs := strings.Fields(string(out))
+	if len(docs) < 50 {
+		t.Fatalf("git ls-files matched %d files; the scan did not see the repo", len(docs))
+	}
+
+	seen := map[string]bool{}
+	checked := 0
+	for _, doc := range docs {
+		body, err := os.ReadFile(filepath.Join(root, doc))
+		if err != nil {
+			t.Fatalf("read %s: %v", doc, err)
+		}
+		blocks := fencedBlock.FindAllStringSubmatch(string(body), -1)
+		if strings.HasSuffix(doc, ".py") {
+			// research_agent.py and hello_workflow.py document their own
+			// invocation in a module docstring, not a fenced markdown block --
+			// this test's whole reason to exist is that exactly this kind of
+			// doc-comment invocation goes unchecked otherwise (cleat#2048).
+			blocks = [][]string{{string(body), string(body)}}
+		}
+		for _, block := range blocks {
+			lines := strings.Split(block[1], "\n")
+			for i := 0; i < len(lines); i++ {
+				m := docInvocation.FindStringSubmatch(lines[i])
+				if m == nil {
+					continue
+				}
+				rest := strings.TrimSpace(m[1])
+				for strings.HasSuffix(rest, `\`) && i+1 < len(lines) {
+					i++
+					rest = strings.TrimSuffix(rest, `\`) + " " + strings.TrimSpace(lines[i])
+				}
+				if strings.Contains(rest, "$(") || strings.Contains(rest, "{{") {
+					continue
+				}
+				fields := shellFields(rest)
+				if len(fields) == 0 {
+					continue
+				}
+				sub := fields[0]
+				if sub != "deploy" && sub != "run" {
+					continue
+				}
+				key := doc + "|cleat " + rest
+				seen[key] = true
+				if _, parked := deployRunPositionalBaseline[key]; parked {
+					continue
+				}
+				checked++
+
+				args := fields[1:]
+				if sub == "deploy" {
+					positionals := positionalArgsAfterFlags(args, deployFlags)
+					if len(positionals) != 1 || !strings.HasSuffix(positionals[0], ".wasm") {
+						t.Errorf("%s documents `cleat %s`: deploy only ever reads its FIRST "+
+							"positional as the wasm path (cmd/cleat/main.go's runDeploy, "+
+							"`wasmPath := remainder[0]`) -- a second bare positional (a workflow "+
+							"name, say) is silently ignored, not an error. Got %d positional(s) "+
+							"%v, want exactly one ending in \".wasm\". Use --name for the workflow "+
+							"name.", doc, rest, len(positionals), positionals)
+					}
+					continue
+				}
+
+				// run
+				usesWasmFlag := false
+				for _, f := range args {
+					if f == "--wasm" || strings.HasPrefix(f, "--wasm=") {
+						usesWasmFlag = true
+						break
+					}
+				}
+				positionals := positionalArgsAfterFlags(args, runFlags)
+				if usesWasmFlag {
+					if len(positionals) != 0 {
+						t.Errorf("%s documents `cleat %s`: --wasm was given, so run_embedded.go "+
+							"never looks at a positional at all -- %d unexpected positional(s) %v. "+
+							"Use --entry-point and --input instead of a bare entry name and JSON "+
+							"literal.", doc, rest, len(positionals), positionals)
+					}
+				} else if len(positionals) != 1 || strings.HasPrefix(positionals[0], "{") {
+					t.Errorf("%s documents `cleat %s`: without --wasm, run_embedded.go treats "+
+						"remainder[0] as a PACKAGE DIRECTORY to build (cmd/cleat/run_embedded.go's "+
+						"runEmbedded, `pkgPath := remainder[0]`), not an entry-point name -- got %d "+
+						"positional(s) %v. Either pass a real package path as the sole positional, "+
+						"or use --wasm/--entry-point/--input to run a pre-built module.",
+						doc, rest, len(positionals), positionals)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("extracted 0 `cleat deploy`/`cleat run` invocations -- the scan did not see what it exists to check")
+	}
+
+	for key, why := range deployRunPositionalBaseline {
+		if !seen[key] {
+			t.Errorf("deployRunPositionalBaseline has %q (%s) but nothing in the tree matches it. "+
 				"The document was fixed or renamed: delete the entry.", key, why)
 		}
 	}
