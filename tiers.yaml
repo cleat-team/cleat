@@ -1340,8 +1340,8 @@ required_contexts:
   # `measured` is the date the declared list below was last compared against branch
   # protection itself, not the date this file was last edited. Only --check-live and the
   # default run's live attempt can move it; an entry added from a PR description cannot.
-  measured: 2026-09-20
-  total: 33
+  measured: 2026-09-23
+  total: 32
 
   # `covers` is one of:
   #   tier1        the context runs only tier-1 packages/modules
@@ -1369,10 +1369,6 @@ required_contexts:
       workflow: ci.yml
       job: test-go
       covers: tier1          # matrix `core` is dir: cleat, path: ./... -> tier1.modules
-    - context: Test Go (engine) on 1.26
-      workflow: ci.yml
-      job: test-go
-      covers: tier1
     - context: Test Go (wasm) on 1.26
       workflow: ci.yml
       job: test-go

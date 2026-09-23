@@ -1,4 +1,4 @@
-# The status checks required to merge into `develop`, as of 2026-09-20.
+# The status checks required to merge into `develop`, as of 2026-09-23.
 #
 # WHY THIS FILE EXISTS
 #
@@ -65,7 +65,6 @@ Lint
 lint-go
 Test Go (commands) on 1.26
 Test Go (core) on 1.26
-Test Go (engine) on 1.26
 Test Go (integrity) on 1.26
 Test Go (internal) on 1.26
 Test Go (manifests) on 1.26
@@ -93,6 +92,17 @@ Web Dashboard
 #                                failure carries. Same reasoning that applied
 #                                to `Test MySQL`/`Test SQL Server` before they
 #                                were made required on 2026-08-07.
+#   Test Go (engine) on 1.26  -- removed from the test-go matrix and from
+#                                branch protection 2026-09-23 (cleat#2082).
+#                                `./engine/...` under -race caught 0 data
+#                                races in 7 PR failures since 09-21; every
+#                                catch was skip-ledger bookkeeping or a real
+#                                failure Tier 1 Gate (required, all three
+#                                dialects, no -race) also caught. -race now
+#                                runs on a schedule (`Engine Race Detector`,
+#                                every 4 hours on develop) rather than gating
+#                                every PR; a red run there opens or updates an
+#                                issue instead of blocking a merge.
 #   Coverage                  -- the only job in the repo with job-level
 #                                `continue-on-error: true`, which is exactly
 #                                why it must not be required. Guard 2 below
