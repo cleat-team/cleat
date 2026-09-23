@@ -62,6 +62,19 @@ The deploy command:
 3. Auto-assigns the next version number (`SELECT COALESCE(MAX(version), 0) + 1`)
 4. Inserts a row into `workflow_defs` with the WASM bytes, version, ABI compatibility info, and plugin dependencies
 
+### Database role and tenant
+
+`workflow_defs` carries row-level security, so `deploy` needs a connection
+that can satisfy it. Use the same `cleat_app` role the worker itself runs as
+-- the worker refuses a superuser or `BYPASSRLS` connection outright and its
+own error messages name `cleat_app` as the role to use instead, so a DSN that
+gets the worker running will also deploy.
+
+`deploy` sets the RLS tenant context for its own transaction from the global
+`--tenant` flag (default: the single-tenant default), the same way `cleat
+lock` resolves it -- flag, then `CLEAT_TENANT_ID`, then the default. Pass it
+before the subcommand: `cleat --tenant <tenant-uuid> deploy --db "$CLEAT_DATABASE_URL" ...`.
+
 ### Version management
 
 Each `cleat deploy` creates a new version. Versions are auto-incremented integer values:
