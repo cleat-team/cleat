@@ -197,3 +197,64 @@ func TestSetSecret_StillRejectsAnUnknownFlagAfterTheTenant(t *testing.T) {
 		t.Errorf("an unknown flag after the tenant was accepted silently:\n%s", stderr)
 	}
 }
+
+// retire-secret uses the same parseFlagsAnywhere as set-secret (cleat#1989),
+// so it needs the same coverage. Unlike set-secret it has no master-key gate
+// to stop at before touching the database, so these use failingConnector,
+// the same as the suspend-tenant cases above -- past argument parsing, both
+// orders hit the same failing SecretMeta query and must produce identical
+// output.
+
+func TestRetireSecret_AcceptsFlagsAfterTheTenantArgument(t *testing.T) {
+	db := sql.OpenDB(failingConnector{})
+	defer db.Close()
+
+	documented := withExitPanic(t, func() {
+		runRetireSecret(context.Background(), db, dialect{}, []string{testTenantUUID, "--name", "openai"})
+	})
+	working := withExitPanic(t, func() {
+		runRetireSecret(context.Background(), db, dialect{}, []string{"--name", "openai", testTenantUUID})
+	})
+
+	if strings.Contains(documented, "Usage: cleatctl --db <dsn> retire-secret") {
+		t.Errorf("retire-secret rejected the documented argument order as if --name were missing:\n%s", documented)
+	}
+	if documented != working {
+		t.Errorf("the two argument orders behave differently.\n--- <uuid> --name openai ---\n%s\n--- --name openai <uuid> ---\n%s",
+			documented, working)
+	}
+}
+
+func TestRetireSecret_StillRejectsAMissingTenant(t *testing.T) {
+	db := sql.OpenDB(failingConnector{})
+	defer db.Close()
+	stderr := withExitPanic(t, func() {
+		runRetireSecret(context.Background(), db, dialect{}, []string{"--name", "openai"})
+	})
+	if !strings.Contains(stderr, "Usage: cleatctl --db <dsn> retire-secret") {
+		t.Errorf("retire-secret accepted an invocation with no tenant at all:\n%s", stderr)
+	}
+}
+
+func TestRetireSecret_StillRejectsAMissingName(t *testing.T) {
+	db := sql.OpenDB(failingConnector{})
+	defer db.Close()
+	stderr := withExitPanic(t, func() {
+		runRetireSecret(context.Background(), db, dialect{}, []string{testTenantUUID})
+	})
+	if !strings.Contains(stderr, "Usage: cleatctl --db <dsn> retire-secret") {
+		t.Errorf("retire-secret accepted an invocation with no --name:\n%s", stderr)
+	}
+}
+
+func TestRetireSecret_StillRejectsAnUnknownFlagAfterTheTenant(t *testing.T) {
+	db := sql.OpenDB(failingConnector{})
+	defer db.Close()
+	stderr := withExitPanic(t, func() {
+		runRetireSecret(context.Background(), db, dialect{},
+			[]string{testTenantUUID, "--name", "openai", "--nonesuch"})
+	})
+	if !strings.Contains(stderr, "nonesuch") {
+		t.Errorf("an unknown flag after the tenant was accepted silently:\n%s", stderr)
+	}
+}

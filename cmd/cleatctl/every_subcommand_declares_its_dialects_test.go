@@ -52,6 +52,13 @@ var unrestrictedSubcommands = map[string]string{
 	// table is authoritative in is a property of the READER, not of the
 	// migration that created it.
 	"set-secret": "ported to all three; cleat-worker reads tenant_secrets from the same base connection cleatctl writes it on, measured in cleat#1956",
+
+	// All three, same table as set-secret, same reasoning: tenant_secrets is
+	// plain and per-tenant everywhere, not admin.*-schema-gated like
+	// tenant_api_keys (which is why revoke-api-key is postgres-only in
+	// portedOn instead). retireSecretStmt/secretMetaStmt in
+	// engine/tenant_secrets.go carry all three dialect arms.
+	"retire-secret": "ported to all three; tenant_secrets is a plain per-tenant table on every dialect, same as set-secret (cleat#1989)",
 }
 
 // Every subcommand main.go dispatches declares the dialects it runs on.

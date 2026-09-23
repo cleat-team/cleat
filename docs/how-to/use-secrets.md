@@ -40,6 +40,25 @@ Writes are **operator-only** — no request path in cleat writes here. Tenant
 self-service needs an ownership story this does not yet have, and would let one
 tenant probe the namespace of another.
 
+## Retire a secret
+
+```sh
+cleatctl --db "$DSN" retire-secret <tenant-uuid> --name openai
+```
+
+Stops it resolving: any `${secret:openai}` lookup after this fails with the
+same "not found" error as a name that was never set. Needs no master key —
+retiring changes only `disabled_at`, never the encrypted value, so an operator
+cutting off a leaked credential during an incident is not blocked on
+`CLEAT_SECRET_MASTER_KEY` being available.
+
+**Reversible.** Run `set-secret` again for the same name — a real rotation, not
+just a revival — and it starts resolving again. There is no separate "revive"
+command; `set-secret` already writes the value an operator would need to bring
+one back.
+
+`--dry-run` shows what would change without changing anything.
+
 ## Reference it from a workflow
 
 Inside a plugin call argument, write `${secret:NAME}`:
@@ -145,6 +164,12 @@ half-interpreted.
 **No tenant in context means no substitution.** The reference passes through
 unresolved rather than being resolved against a default tenant, which would hand
 one tenant's credential to a call made on behalf of nobody.
+
+**A retired secret fails resolution exactly like a name that was never set** —
+the same "not found" error, not a distinct "retired" one, so a workflow's error
+handling does not need to know the difference. `retire-secret` sets
+`disabled_at`; it does not delete the row or touch the ciphertext, which is
+what makes the reversal above possible.
 
 **Deleting a tenant deletes its secrets**, by `ON DELETE CASCADE`.
 `cleatctl drop-tenant` reports the count.

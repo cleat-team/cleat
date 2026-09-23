@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/google/uuid"
 )
 
@@ -23,10 +24,24 @@ import (
 // credential must not be. engine.MasterKeyFromEnv refuses the master key from a
 // flag for the same reason.
 //
-// It writes on a connection that the row-level policy does not apply to, because
-// cleatctl connects as an administrative role. That is the documented asymmetry
-// in cmd/cleatctl/rlsposture.go: cleatctl asks cluster-wide questions and needs
-// a role RLS does not constrain, while cleat-worker refuses to start on one.
+// On PostgreSQL it writes on a connection the row-level policy does not apply
+// to, because cleatctl connects as an administrative role -- the documented
+// asymmetry in cmd/cleatctl/rlsposture.go. SQL Server has no such role: a
+// security policy applies to sysadmin and dbo alike (rlsposture.go,
+// mssqlPostureOf), and since migrations/mssql/075 cleat_admin membership does
+// not bypass it either -- the disjunction that let a role bypass the filter
+// was deliberately removed for the ordinary query's sake. So on SQL Server
+// this only worked at all for the tenant the connection's SESSION_CONTEXT
+// happened to carry, which for cleatctl was none -- PutSecret's INSERT/UPDATE
+// would succeed (no BLOCK predicate stops a write) and the row would be
+// immediately invisible to every reader, including the very next GetSecret,
+// with no error anywhere (cleat#1989). tenantctx.With below puts the SAME
+// tenant this command is writing into engine's existing beginTenantTx/
+// setTenantOnTx path (engine/plugindb_tenant.go), which already knows how to
+// set SESSION_CONTEXT('tenant_id') on SQL Server -- the "other means" its own
+// comment refers to. This is not a cross-tenant bypass and needs no
+// cleat_admin membership: the command only ever touches the one tenant named
+// on the command line.
 func runSetSecret(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	fs := flag.NewFlagSet("set-secret", flag.ContinueOnError)
 	name := fs.String("name", "", "secret name, matching [A-Za-z0-9_.-]{1,128}")
@@ -56,6 +71,7 @@ func runSetSecret(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		osExit(1)
 		return
 	}
+	ctx = tenantctx.With(ctx, tenantID)
 
 	master, err := engine.MasterKeyFromEnv(os.Getenv("CLEAT_SECRET_MASTER_KEY"))
 	if err != nil {
