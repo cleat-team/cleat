@@ -398,6 +398,11 @@ jobs:
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
+          # SQL Server on Linux sizes its buffer pool to 80% of VISIBLE host
+          # memory by default, with no awareness it shares a runner with
+          # other services in this job (cleat#2101). Bump all six sites
+          # together, per the note above.
+          MSSQL_MEMORY_LIMIT_MB: "2048"
         ports:
           - 1433:1433
         options: >-

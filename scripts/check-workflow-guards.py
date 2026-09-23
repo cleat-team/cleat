@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Structural guards over .github/workflows/, run by the Lint job.
 
-Four checks, each catching a *class* of defect that has already cost this repo
+Five checks, each catching a *class* of defect that has already cost this repo
 a session to find one instance of by hand:
 
   1. Every context in .github/required-checks.txt resolves to a job that
@@ -14,6 +14,12 @@ a session to find one instance of by hand:
   4. Every `--filter ancestor=<ref>` names a reference that is also a
      `services.*.image` in the same file.  Pinning `image:` alone silently
      breaks the lookup, because the filter matches on the pull reference.
+  5. Every `mssql/server` service sets `MSSQL_MEMORY_LIMIT_MB`.  SQL Server on
+     Linux sizes its buffer pool to 80% of VISIBLE host memory by default,
+     with no awareness that it shares a runner with Postgres, MySQL and
+     whatever else the job also starts (cleat#2101).  A service missing the
+     cap does not fail loudly -- it runs fine alone and contends for memory
+     only once the runner is busy.
 
 Design note, since it is the whole point of the exercise: this script FAILS on
 anything it cannot analyse rather than passing.  A matrix it cannot expand, an
@@ -311,6 +317,43 @@ def guard_ancestor_filters_match_images(errors) -> None:
                 )
 
 
+MSSQL_IMAGE_MARKER = "mssql/server"
+
+
+def guard_mssql_services_have_memory_cap(errors) -> None:
+    """Every `mssql/server` service sets `MSSQL_MEMORY_LIMIT_MB`.
+
+    SQL Server on Linux sizes its buffer pool to 80% of VISIBLE host memory by
+    default, with no awareness that it is one of several DB containers a job
+    starts on a shared runner (cleat#2101). A service missing the cap is not
+    one that fails loudly: it runs fine alone in isolation and only contends
+    for memory once the runner is under load from everything else in the job.
+    """
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError):
+            continue  # already reported by collect_jobs
+        for job_id, job in (doc.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            for service_id, service in (job.get("services") or {}).items():
+                if not isinstance(service, dict):
+                    continue
+                image = str(service.get("image") or "")
+                if MSSQL_IMAGE_MARKER not in image:
+                    continue
+                env = service.get("env")
+                if not isinstance(env, dict) or "MSSQL_MEMORY_LIMIT_MB" not in env:
+                    errors.append(
+                        f"{path}: job {job_id!r} service {service_id!r} "
+                        f"({image}) has no MSSQL_MEMORY_LIMIT_MB. SQL Server "
+                        f"sizes its buffer pool to 80% of visible host memory "
+                        f"by default, which contends with every other "
+                        f"service on a shared runner (cleat#2101)."
+                    )
+
+
 def verify_against_api() -> int:
     """Compare the checked-in list to branch protection. Needs an admin token."""
     try:
@@ -369,6 +412,7 @@ def main() -> int:
     guard_no_continue_on_error(jobs, required, errors)
     guard_no_floating_service_images(errors)
     guard_ancestor_filters_match_images(errors)
+    guard_mssql_services_have_memory_cap(errors)
 
     for error in errors:
         print(f"::error title=Workflow integrity::{error}")
