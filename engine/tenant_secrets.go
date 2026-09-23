@@ -71,18 +71,118 @@ type SecretStore struct {
 	db      *sql.DB
 	dialect string
 
-	// master is the deployment key. Nil means secrets cannot be used, which is
-	// distinct from "there are none" -- see CountSecrets and the worker's
-	// startup check.
-	master []byte
+	// ring holds the master keys this deployment can use. Nil means secrets
+	// cannot be used, which is distinct from "there are none" -- see
+	// CountSecrets and the worker's startup check.
+	ring *KeyRing
+
+	// beforeResealWrite, when set, runs between reseal's read of a row and its
+	// conditional write. It exists so a test can land a concurrent set-secret
+	// in exactly that window, which is the interleaving the compare-and-swap is
+	// for and which a sequential test cannot otherwise reach. Nil in
+	// production.
+	beforeResealWrite func(tenantID, name string)
 }
 
-// NewSecretStore builds a store. master must be 32 bytes or nil.
+// NewSecretStore builds a store around ONE key, which it treats as key_version
+// 1. That is the shape of every deployment before rotation existed: rows carry
+// key_version 1 by column default (migrations 081 / 069 / 073), so an existing
+// deployment's single key is version 1 without anyone declaring it. master must
+// be 32 bytes or nil.
 func NewSecretStore(db *sql.DB, dialect string, master []byte) (*SecretStore, error) {
-	if master != nil && len(master) != 32 {
-		return nil, fmt.Errorf("secret master key must be 32 bytes, got %d", len(master))
+	if master == nil {
+		return &SecretStore{db: db, dialect: dialect}, nil
 	}
-	return &SecretStore{db: db, dialect: dialect, master: master}, nil
+	ring, err := NewKeyRing(VersionedKey{Version: 1, Key: master})
+	if err != nil {
+		return nil, err
+	}
+	return &SecretStore{db: db, dialect: dialect, ring: ring}, nil
+}
+
+// NewSecretStoreWithRing builds a store around a key ring. A nil ring is the
+// same as no master key.
+func NewSecretStoreWithRing(db *sql.DB, dialect string, ring *KeyRing) *SecretStore {
+	return &SecretStore{db: db, dialect: dialect, ring: ring}
+}
+
+// SecretKeyRingFromEnv reads the ring from the environment.
+//
+//	CLEAT_SECRET_MASTER_KEY                base64, 32 bytes: the current key
+//	CLEAT_SECRET_MASTER_KEY_VERSION        its key_version; default 1
+//	CLEAT_SECRET_MASTER_KEY_PREVIOUS       base64, 32 bytes: the key being retired
+//	CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION  its key_version; REQUIRED with the key
+//
+// It returns (nil, nil) when no key is configured at all, which is a legitimate
+// state (a deployment that uses no secrets) and is distinct from a
+// configuration that is present and wrong. Anything half-configured is an
+// error: a version with no key, a previous key with no current one, a previous
+// key with no version. Each of those has an obvious reading that is not the
+// operator's, and guessing would seal rows under a key the operator did not
+// pick.
+//
+// FROM THE ENVIRONMENT AND NOT A FLAG, for the reason MasterKeyFromEnv gives.
+func SecretKeyRingFromEnv(getenv func(string) string) (*KeyRing, error) {
+	const (
+		curKey  = "CLEAT_SECRET_MASTER_KEY"
+		curVer  = "CLEAT_SECRET_MASTER_KEY_VERSION"
+		prevKey = "CLEAT_SECRET_MASTER_KEY_PREVIOUS"
+		prevVer = "CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION"
+	)
+	current, err := MasterKeyFromEnv(getenv(curKey))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", curKey, err)
+	}
+	previous, err := MasterKeyFromEnv(getenv(prevKey))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", prevKey, err)
+	}
+	if current == nil {
+		for _, name := range []string{curVer, prevKey, prevVer} {
+			if strings.TrimSpace(getenv(name)) != "" {
+				return nil, fmt.Errorf("%s is set but %s is not: a key ring needs its current key", name, curKey)
+			}
+		}
+		return nil, nil
+	}
+	version, err := KeyVersionFromEnv(getenv(curVer), 1, curVer)
+	if err != nil {
+		return nil, err
+	}
+	if previous == nil {
+		if strings.TrimSpace(getenv(prevVer)) != "" {
+			return nil, fmt.Errorf("%s is set but %s is not", prevVer, prevKey)
+		}
+		return NewKeyRing(VersionedKey{Version: version, Key: current})
+	}
+	pv, err := KeyVersionFromEnv(getenv(prevVer), 0, prevVer)
+	if err != nil {
+		return nil, err
+	}
+	if pv == 0 {
+		return nil, fmt.Errorf("%s is set but %s is not: rows sealed under the previous key carry a "+
+			"version, and guessing it would mislabel them", prevKey, prevVer)
+	}
+	return NewKeyRing(VersionedKey{Version: version, Key: current}, VersionedKey{Version: pv, Key: previous})
+}
+
+// SecretKeyVersionError is returned when a stored secret is sealed under a
+// key_version this deployment holds no key for.
+//
+// It names the version and what IS configured, and nothing else: that is what
+// an operator needs to fix it (add the key that carries that version, or run
+// reseal-secrets under a ring that holds it), and neither number is secret. The
+// message it replaces -- "could not be decrypted with this deployment's master
+// key" -- was accurate and told nobody which key.
+type SecretKeyVersionError struct {
+	Version    int
+	Configured []int
+}
+
+func (e *SecretKeyVersionError) Error() string {
+	return fmt.Sprintf("secret is sealed under key_version %d, and no configured master key carries that "+
+		"version (configured: %v); add the key that has version %d as CLEAT_SECRET_MASTER_KEY or "+
+		"CLEAT_SECRET_MASTER_KEY_PREVIOUS", e.Version, e.Configured, e.Version)
 }
 
 // MasterKeyFromEnv decodes a base64 master key.
@@ -106,27 +206,36 @@ func MasterKeyFromEnv(v string) ([]byte, error) {
 	return key, nil
 }
 
-// tenantKey derives this tenant's encryption key from the master key.
+// tenantKey derives this tenant's encryption key from one master key.
 //
 // PER TENANT, so that a key recovered from one tenant's ciphertext -- by
 // cryptanalysis, by a bug, by a disclosed plaintext -- does not decrypt
 // another's. HKDF with the tenant id as salt is the standard construction for
 // exactly this, and it is cheap enough to do per call rather than cache, which
 // avoids holding derived keys in memory longer than one operation.
-func (s *SecretStore) tenantKey(tenantID string) ([]byte, error) {
-	if s.master == nil {
-		return nil, ErrNoSecretMasterKey
-	}
+//
+// The master key is a PARAMETER and not a field because a store now holds
+// several: the current one seals, and whichever key carries a row's
+// key_version opens it. The derivation is the same for every version, on
+// purpose -- the info string does not carry the version, so a row resealed
+// under a new master key is derived by exactly the code that derived it before.
+func tenantKey(master []byte, tenantID string) ([]byte, error) {
 	out := make([]byte, 32)
-	r := hkdf.New(sha256.New, s.master, []byte(tenantID), []byte("cleat-tenant-secret-v1"))
+	r := hkdf.New(sha256.New, master, []byte(tenantID), []byte("cleat-tenant-secret-v1"))
 	if _, err := io.ReadFull(r, out); err != nil {
 		return nil, fmt.Errorf("derive tenant key: %w", err)
 	}
 	return out, nil
 }
 
+// seal encrypts under the CURRENT key. The version it belongs to is
+// s.ring.Current().Version, which is immutable for the life of the store, so a
+// caller that writes the version beside the ciphertext cannot disagree with it.
 func (s *SecretStore) seal(tenantID, plaintext string) (string, error) {
-	key, err := s.tenantKey(tenantID)
+	if s.ring == nil {
+		return "", ErrNoSecretMasterKey
+	}
+	key, err := tenantKey(s.ring.current.Key, tenantID)
 	if err != nil {
 		return "", err
 	}
@@ -148,8 +257,20 @@ func (s *SecretStore) seal(tenantID, plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ct), nil
 }
 
-func (s *SecretStore) open(tenantID, stored string) (string, error) {
-	key, err := s.tenantKey(tenantID)
+// open decrypts a stored value with the key that carries the row's
+// key_version. A version this ring has no key for is a *SecretKeyVersionError,
+// which is not the same as a key that is present and wrong: the first is a
+// configuration the operator can complete, the second is corruption or a
+// mislabelled row.
+func (s *SecretStore) open(tenantID, stored string, keyVersion int) (string, error) {
+	if s.ring == nil {
+		return "", ErrNoSecretMasterKey
+	}
+	k, ok := s.ring.Key(keyVersion)
+	if !ok {
+		return "", &SecretKeyVersionError{Version: keyVersion, Configured: s.ring.Versions()}
+	}
+	key, err := tenantKey(k.Key, tenantID)
 	if err != nil {
 		return "", err
 	}
@@ -174,7 +295,7 @@ func (s *SecretStore) open(tenantID, stored string) (string, error) {
 		// Deliberately not wrapped with the underlying error: GCM failures are
 		// uniform on purpose, and the reason a value did not open is not
 		// something to report to whoever triggered the read.
-		return "", errors.New("secret could not be decrypted with this deployment's master key")
+		return "", fmt.Errorf("secret could not be decrypted with the master key for key_version %d", keyVersion)
 	}
 	return string(pt), nil
 }
@@ -196,8 +317,13 @@ func (s *SecretStore) PutSecret(ctx context.Context, tenantID, name, value strin
 	if err != nil {
 		return err
 	}
+	// The version is written WITH the ciphertext, in the same statement, on
+	// both arms below. A row whose key_version disagrees with the key that
+	// sealed it opens under the wrong key or under none, and no later read can
+	// tell which -- so the two values are never written separately.
+	version := s.ring.current.Version
 	return s.execTenantScoped(ctx, func(q querier) error {
-		_, err := q.ExecContext(ctx, putSecretUpdateStmt(s.dialect), sealed, tenantID, name)
+		_, err := q.ExecContext(ctx, putSecretUpdateStmt(s.dialect), sealed, version, tenantID, name)
 		if err != nil {
 			return err
 		}
@@ -212,7 +338,7 @@ func (s *SecretStore) PutSecret(ctx context.Context, tenantID, name, value strin
 		var exists int
 		err = q.QueryRowContext(ctx, getSecretExistsStmt(s.dialect), tenantID, name).Scan(&exists)
 		if errors.Is(err, sql.ErrNoRows) {
-			_, err = q.ExecContext(ctx, putSecretInsertStmt(s.dialect), tenantID, name, sealed)
+			_, err = q.ExecContext(ctx, putSecretInsertStmt(s.dialect), tenantID, name, sealed, version)
 			return err
 		}
 		return err
@@ -223,6 +349,7 @@ func (s *SecretStore) PutSecret(ctx context.Context, tenantID, name, value strin
 // body serves both the transaction-scoped path and the direct one.
 type querier interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
@@ -266,8 +393,9 @@ func (s *SecretStore) GetSecret(ctx context.Context, tenantID, name string) (str
 		return "", ErrSecretNotFound
 	}
 	var sealed string
+	var keyVersion int
 	err := s.execTenantScoped(ctx, func(q querier) error {
-		return q.QueryRowContext(ctx, getSecretStmt(s.dialect), tenantID, name).Scan(&sealed)
+		return q.QueryRowContext(ctx, getSecretStmt(s.dialect), tenantID, name).Scan(&sealed, &keyVersion)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrSecretNotFound
@@ -275,7 +403,7 @@ func (s *SecretStore) GetSecret(ctx context.Context, tenantID, name string) (str
 	if err != nil {
 		return "", err
 	}
-	return s.open(tenantID, sealed)
+	return s.open(tenantID, sealed, keyVersion)
 }
 
 // CountSecrets reports how many secrets exist across all tenants, retired
@@ -336,29 +464,53 @@ func (s *SecretStore) GetSecret(ctx context.Context, tenantID, name string) (str
 // A READ THAT FAILS IS AN ERROR AND NOT A ZERO. The caller must treat it as
 // "could not establish", never as "none"; see checkSecretsUsable.
 func (s *SecretStore) CountSecrets(ctx context.Context) (int, error) {
-	if s == nil || s.db == nil {
-		return 0, ErrNoSecretDB
-	}
-	tenants, err := s.allTenantIDs(ctx)
-	if err != nil {
-		return 0, err
-	}
 	total := 0
-	for _, tid := range tenants {
-		id, perr := uuid.Parse(tid)
-		if perr != nil {
-			return 0, fmt.Errorf("tenant id %q is not a UUID: %w", tid, perr)
-		}
-		tctx := tenantctx.With(ctx, id)
+	err := s.forEachTenant(ctx, func(tctx context.Context, tid string) error {
 		var n int
 		if err := s.execTenantScoped(tctx, func(q querier) error {
 			return q.QueryRowContext(tctx, countTenantSecretsStmt(s.dialect), tid).Scan(&n)
 		}); err != nil {
-			return 0, fmt.Errorf("count secrets for tenant %s: %w", tid, err)
+			return fmt.Errorf("count secrets for tenant %s: %w", tid, err)
 		}
 		total += n
+		return nil
+	})
+	return total, err
+}
+
+// forEachTenant calls fn once per tenant, suspended ones included, with a
+// context that carries that tenant. It is the one place that enumerates
+// tenants for a secrets operation (see CountSecrets for why it does not use
+// ListTenantIDs), so the boot check, the version census and reseal all agree on
+// which tenants exist. An error from fn stops the walk and is returned as is.
+func (s *SecretStore) forEachTenant(ctx context.Context, fn func(ctx context.Context, tenantID string) error) error {
+	if s == nil || s.db == nil {
+		return ErrNoSecretDB
 	}
-	return total, nil
+	tenants, err := s.allTenantIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, tid := range tenants {
+		id, perr := uuid.Parse(tid)
+		if perr != nil {
+			return fmt.Errorf("tenant id %q is not a UUID: %w", tid, perr)
+		}
+		// THE CANONICAL FORM, NOT WHAT THE DATABASE PRINTED. The tenant id is
+		// both the HKDF salt and the GCM additional data, so it is part of the
+		// key: "71AF8836-..." and "71af8836-..." are different keys. SQL Server
+		// returns a UNIQUEIDENTIFIER in upper case (CONVERT(varchar(36), ...)),
+		// while every secret was sealed with the lower-case form that
+		// uuid.UUID.String() gives -- cleatctl set-secret parses the argument, and
+		// the worker takes the tenant from its request context. Passing the raw
+		// string to open() made a suspended tenant's secret unreadable on SQL
+		// Server, in a test that had sealed it a moment earlier. A tenant id that
+		// reaches cryptography is always uuid.UUID.String().
+		if err := fn(tenantctx.With(ctx, id), id.String()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // allTenantIDs lists every tenant, suspended or not. See CountSecrets for why
@@ -413,7 +565,7 @@ func countTenantSecretsStmt(dialect string) string {
 }
 
 // HasMasterKey reports whether secrets can be used at all.
-func (s *SecretStore) HasMasterKey() bool { return s != nil && s.master != nil }
+func (s *SecretStore) HasMasterKey() bool { return s != nil && s.ring != nil }
 
 func validSecretName(name string) bool {
 	if name == "" || len(name) > 128 {
@@ -439,22 +591,22 @@ func validSecretName(name string) bool {
 func putSecretUpdateStmt(dialect string) string {
 	switch dialect {
 	case "mysql":
-		return `UPDATE tenant_secrets SET ciphertext = ?, disabled_at = NULL WHERE tenant_id = ? AND name = ?`
+		return `UPDATE tenant_secrets SET ciphertext = ?, key_version = ?, disabled_at = NULL WHERE tenant_id = ? AND name = ?`
 	case "mssql":
-		return `UPDATE tenant_secrets SET ciphertext = @p1, disabled_at = NULL WHERE tenant_id = @p2 AND name = @p3`
+		return `UPDATE tenant_secrets SET ciphertext = @p1, key_version = @p2, disabled_at = NULL WHERE tenant_id = @p3 AND name = @p4`
 	default:
-		return `UPDATE tenant_secrets SET ciphertext = $1, disabled_at = NULL, updated_at = now() WHERE tenant_id = $2 AND name = $3`
+		return `UPDATE tenant_secrets SET ciphertext = $1, key_version = $2, disabled_at = NULL, updated_at = now() WHERE tenant_id = $3 AND name = $4`
 	}
 }
 
 func putSecretInsertStmt(dialect string) string {
 	switch dialect {
 	case "mysql":
-		return `INSERT INTO tenant_secrets (tenant_id, name, ciphertext) VALUES (?, ?, ?)`
+		return `INSERT INTO tenant_secrets (tenant_id, name, ciphertext, key_version) VALUES (?, ?, ?, ?)`
 	case "mssql":
-		return `INSERT INTO tenant_secrets (tenant_id, name, ciphertext) VALUES (@p1, @p2, @p3)`
+		return `INSERT INTO tenant_secrets (tenant_id, name, ciphertext, key_version) VALUES (@p1, @p2, @p3, @p4)`
 	default:
-		return `INSERT INTO tenant_secrets (tenant_id, name, ciphertext) VALUES ($1, $2, $3)`
+		return `INSERT INTO tenant_secrets (tenant_id, name, ciphertext, key_version) VALUES ($1, $2, $3, $4)`
 	}
 }
 
@@ -479,11 +631,11 @@ func getSecretExistsStmt(dialect string) string {
 func getSecretStmt(dialect string) string {
 	switch dialect {
 	case "mysql":
-		return `SELECT ciphertext FROM tenant_secrets WHERE tenant_id = ? AND name = ? AND disabled_at IS NULL`
+		return `SELECT ciphertext, key_version FROM tenant_secrets WHERE tenant_id = ? AND name = ? AND disabled_at IS NULL`
 	case "mssql":
-		return `SELECT ciphertext FROM tenant_secrets WHERE tenant_id = @p1 AND name = @p2 AND disabled_at IS NULL`
+		return `SELECT ciphertext, key_version FROM tenant_secrets WHERE tenant_id = @p1 AND name = @p2 AND disabled_at IS NULL`
 	default:
-		return `SELECT ciphertext FROM tenant_secrets WHERE tenant_id = $1 AND name = $2 AND disabled_at IS NULL`
+		return `SELECT ciphertext, key_version FROM tenant_secrets WHERE tenant_id = $1 AND name = $2 AND disabled_at IS NULL`
 	}
 }
 

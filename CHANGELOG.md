@@ -243,6 +243,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tenant-secrets master-key rotation: a key ring and `cleatctl reseal-secrets`.** (cleat#1991)
+
+  A key is now named by an integer version. `CLEAT_SECRET_MASTER_KEY_VERSION` (default `1`, which is what every
+  existing row carries), `CLEAT_SECRET_MASTER_KEY_PREVIOUS` and `CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION` let a
+  worker open rows sealed under the key being retired while sealing new ones under the new key. `cleatctl
+  reseal-secrets [--dry-run]` re-seals every row online, verifying before it writes and writing conditionally so a
+  concurrent `set-secret` is not undone. A worker that cannot open some stored version refuses to start and names it.
+  See `docs/how-to/use-secrets.md`.
+
+  **Not yet checked by the system:** that every worker holds the new key before anything is written under it.
+  Nothing changes for a deployment that sets none of the new variables.
+
 - **`audit-log` now records who: `user_id` on every row was the empty string, always.** (cleat#1881)
 
   The identity was already available — `oauth-provider` resolves an OAuth session to an email and

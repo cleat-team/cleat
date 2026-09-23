@@ -73,13 +73,20 @@ func runSetSecret(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	}
 	ctx = tenantctx.With(ctx, tenantID)
 
-	master, err := engine.MasterKeyFromEnv(os.Getenv("CLEAT_SECRET_MASTER_KEY"))
+	// The ring, exactly as the workers read it. set-secret seals under the
+	// CURRENT key, and it records that key's version with the ciphertext, so a
+	// later rotation knows which key opens the row (cleat#1991). Run from an
+	// environment that has not yet been updated to the new ring, it would write
+	// at the OLD version -- which is why the operator procedure says to update
+	// every environment that runs this before the reseal, and why the write gate
+	// in specs/CleatKeyRotation.tla exists.
+	ring, err := engine.SecretKeyRingFromEnv(os.Getenv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		osExit(1)
 		return
 	}
-	if master == nil {
+	if ring == nil {
 		fmt.Fprintf(os.Stderr,
 			"error: CLEAT_SECRET_MASTER_KEY is not set.\n\n"+
 				"It must be the SAME key the workers use, or they will not be able to read\n"+
@@ -102,12 +109,7 @@ func runSetSecret(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		return
 	}
 
-	store, err := engine.NewSecretStore(db, d.name, master)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		osExit(1)
-		return
-	}
+	store := engine.NewSecretStoreWithRing(db, d.name, ring)
 	if err := store.PutSecret(ctx, tenantID.String(), *name, value); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing the secret: %v\n", err)
 		osExit(1)
@@ -117,7 +119,7 @@ func runSetSecret(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	// Reports the NAME and never any part of the value, not even a length --
 	// a length narrows a credential's search space and buys the operator
 	// nothing they did not already know.
-	fmt.Printf("wrote secret %q for tenant %s\n", *name, tenantID)
+	fmt.Printf("wrote secret %q for tenant %s, sealed under key_version %d\n", *name, tenantID, ring.Current().Version)
 	fmt.Printf("reference it from a workflow as ${secret:%s} inside a plugin call argument\n", *name)
 }
 
@@ -154,7 +156,9 @@ NOTE: --db is a GLOBAL flag and goes BEFORE the command name.
 Reads the secret VALUE from stdin, or from --from-file. It is never taken from a
 flag: a flag value appears in 'ps', in /proc/<pid>/cmdline, and in shell history.
 
-Requires CLEAT_SECRET_MASTER_KEY, which must match what the workers use.
+Requires CLEAT_SECRET_MASTER_KEY, which must match what the workers use, and
+CLEAT_SECRET_MASTER_KEY_VERSION if the current key is not version 1. During a key
+rotation, run this from an environment that already has the NEW key as current.
 
   head -c 32 /dev/urandom | base64          # generate a master key, once
   printf %%s "$API_KEY" | cleatctl --db "$DSN" set-secret <uuid> --name openai

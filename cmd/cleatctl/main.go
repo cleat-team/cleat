@@ -156,6 +156,8 @@ func main() {
 		runQueue(ctx, db, d, *dsn, args[1:])
 	case "reseal-payloads":
 		runResealPayloads(ctx, db, args[1:])
+	case "reseal-secrets":
+		runResealSecrets(ctx, db, d, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -193,6 +195,7 @@ Commands:
   queue enable <tenant> <name>    put a retired queue back
   reseal-payloads --encryption-key-file <path> [--dry-run]
                                   bind pre-cleat#1776 payload ciphertexts to their tenant
+  reseal-secrets [--dry-run]      re-encrypt tenant secrets under the current master key
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)

@@ -920,18 +920,26 @@ func main() {
 	// The master key comes from the ENVIRONMENT and not a flag: a flag value is
 	// visible in `ps`, in /proc/<pid>/cmdline to any local user, and in
 	// whatever records the command line. See engine.MasterKeyFromEnv.
-	masterKey, mkErr := engine.MasterKeyFromEnv(os.Getenv("CLEAT_SECRET_MASTER_KEY"))
+	//
+	// A KEY RING, not a single key (cleat#1991): the current key seals every write
+	// and an optional previous key only reads, so a rotation can be rolled out
+	// without a moment at which existing secrets stop resolving. Versions are
+	// integers the operator declares; the current key defaults to 1, which is what
+	// every existing row carries, so a deployment that has never rotated changes
+	// nothing. See engine.SecretKeyRingFromEnv for the four variables.
+	secretRing, mkErr := engine.SecretKeyRingFromEnv(os.Getenv)
 	if mkErr != nil {
-		logger.ErrorContext(context.Background(), "CLEAT_SECRET_MASTER_KEY is set but unusable",
+		logger.ErrorContext(context.Background(), "the secret master key configuration is unusable",
 			"worker_id", workerID, "error", mkErr)
 		os.Exit(1)
 	}
-	secretStore, ssErr := engine.NewSecretStore(db, string(factory.Dialect()), masterKey)
-	if ssErr != nil {
-		logger.ErrorContext(context.Background(), "cannot build the secret store",
-			"worker_id", workerID, "error", ssErr)
-		os.Exit(1)
+	if secretRing != nil {
+		// Versions only; never key material.
+		logger.InfoContext(context.Background(), "secret key ring configured",
+			"worker_id", workerID, "current_key_version", secretRing.Current().Version,
+			"key_versions", secretRing.Versions())
 	}
+	secretStore := engine.NewSecretStoreWithRing(db, string(factory.Dialect()), secretRing)
 	// checkSecretsUsable runs AFTER the migrations below, not here: it reads
 	// tenant_secrets, which does not exist until migration 080 has applied, and a
 	// check that has to tolerate a missing table is a check that tolerates every
@@ -1087,7 +1095,9 @@ func main() {
 	// The secrets startup check, now that the schema is current. See the comment
 	// where the store is built for why it is not there, and checkSecretsUsable
 	// for why an unreadable table refuses to start rather than passing.
-	if err := checkSecretsUsable(ctx, secretStore); err != nil {
+	if err := checkSecretsUsable(ctx, secretStore, func(msg string) {
+		logger.WarnContext(context.Background(), msg, "worker_id", workerID)
+	}); err != nil {
 		logger.ErrorContext(context.Background(),
 			"the secrets startup check refused to start this worker",
 			"worker_id", workerID, "error", err)

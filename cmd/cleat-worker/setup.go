@@ -5578,61 +5578,102 @@ func checkHostBindingConfigured(ctx context.Context, store *auth.TenantStore) er
 	return nil
 }
 
-// secretCounter is the part of *engine.SecretStore that checkSecretsUsable
+// secretKeyChecker is the part of *engine.SecretStore that checkSecretsUsable
 // reads, named so a test can make the read fail. That is not hypothetical: the
 // failure this check must not swallow is a read that errors (cleat#2123).
-type secretCounter interface {
+type secretKeyChecker interface {
 	HasMasterKey() bool
 	CountSecrets(ctx context.Context) (int, error)
+	CheckKeyRing(ctx context.Context) (engine.SecretKeyCheck, error)
 }
 
 // checkSecretsUsable refuses a worker that would fail on first use.
 //
-// A deployment holding secrets and started without CLEAT_SECRET_MASTER_KEY can
-// do everything except the one thing the secrets were for. The failure arrives
-// later, from inside a plugin call, as a workflow error whose text has no
-// obvious connection to a missing environment variable -- and it arrives on
-// whichever workflow happens to need a credential first, which may be hours
-// after the deploy that dropped the variable.
+// TWO WAYS A WORKER CAN FAIL ON ITS FIRST SECRET, and both are refusals at boot:
 //
-// So it is a boot-time refusal, on the same argument as checkConnectionBudget
-// and cleat#1568's host-binding check: a configuration that cannot be honoured
-// should be reported when it is made, not when it is exercised.
+//  1. NO KEY, AND SECRETS EXIST. A deployment holding secrets and started
+//     without CLEAT_SECRET_MASTER_KEY can do everything except the one thing the
+//     secrets were for. The failure arrives later, from inside a plugin call, as
+//     a workflow error with no obvious connection to a missing environment
+//     variable -- on whichever workflow needs a credential first, which may be
+//     hours after the deploy that dropped the variable.
 //
-// The check is skipped entirely when a master key IS present -- reading the
-// count then answers nothing useful.
+//  2. A KEY RING THAT LACKS A VERSION STILL IN THE TABLE (cleat#1991). This is
+//     the state specs/CleatKeyRotation.tla's S1 forbids -- a serving worker
+//     holding a row it cannot open -- and the boot check is the mechanism that
+//     keeps a NEW worker out of it: without it, retiring the old key while rows
+//     still carry its version starts a worker that fails on the first
+//     resolution. The model finds it in four states (BootCheck = FALSE). The
+//     refusal names the missing version and how many rows carry it, because
+//     those are what an operator needs to put the right key back.
 //
-// A COUNT THAT ERRORS REFUSES TOO, and until cleat#2123 it did the opposite.
+// Rows still on a PREVIOUS key that the ring can open are not a refusal, since
+// they work; they are a warning, because they are what has to be resealed
+// before that key can be removed.
+//
+// A READ THAT ERRORS REFUSES, in both cases and with no override (cleat#2123).
 // The rule here used to be "a count that errors is not fatal, because the table
-// arrives in migration 080 and a worker started against an older schema should
-// say so through the migration runner rather than here". That was true of the
-// place the check ran -- BEFORE the migrations -- and it is why the check never
-// noticed that its read could not see the rows on PostgreSQL (it raised) or SQL
-// Server (it returned 0): the error was read as "cannot tell" and the caller
-// went on as though there were nothing to protect. A check that swallows the
-// failure of its own measurement reports the same thing as a check that ran and
-// found nothing, which is this repository's whole "Is this result real?"
-// section.
+// arrives in migration 080", which was true of the place the check ran -- BEFORE
+// the migrations -- and is why the check never noticed that its read could not
+// see the rows on PostgreSQL (it raised) or SQL Server (it returned 0): the error
+// was read as "cannot tell" and the caller went on as though there were nothing
+// to protect. A check that swallows the failure of its own measurement reports
+// the same thing as a check that ran and found nothing.
 //
-// So the call now sits AFTER the migrations (cmd/cleat-worker/main.go), where
-// the table exists by construction, and an error here is a real inability to
-// establish the answer. There is no override: with no master key and a database
-// that cannot be read, this worker has no way to tell whether it would fail on
-// its first plugin call, and starting anyway is the behaviour being removed.
-func checkSecretsUsable(ctx context.Context, store secretCounter) error {
-	if store == nil || store.HasMasterKey() {
+// The call therefore sits AFTER the migrations (cmd/cleat-worker/main.go), where
+// the table exists by construction, so an error here is a real inability to
+// establish the answer.
+func checkSecretsUsable(ctx context.Context, store secretKeyChecker, warn func(string)) error {
+	if store == nil {
 		return nil
 	}
-	n, err := store.CountSecrets(ctx)
-	if err != nil {
-		return fmt.Errorf("CLEAT_SECRET_MASTER_KEY is not set and this worker could not "+
-			"establish whether the database holds secrets: %w; refusing to start rather "+
-			"than assume it holds none. Set the key, or fix the database access this read needs", err)
+	if !store.HasMasterKey() {
+		n, err := store.CountSecrets(ctx)
+		if err != nil {
+			return fmt.Errorf("CLEAT_SECRET_MASTER_KEY is not set and this worker could not "+
+				"establish whether the database holds secrets: %w; refusing to start rather "+
+				"than assume it holds none. Set the key, or fix the database access this read needs", err)
+		}
+		if n > 0 {
+			return fmt.Errorf("%d secret(s) are stored and CLEAT_SECRET_MASTER_KEY is not set, "+
+				"so every workflow that references one would fail at the plugin call; "+
+				"set it, or remove the secrets", n)
+		}
+		return nil
 	}
-	if n > 0 {
-		return fmt.Errorf("%d secret(s) are stored and CLEAT_SECRET_MASTER_KEY is not set, "+
-			"so every workflow that references one would fail at the plugin call; "+
-			"set it, or remove the secrets", n)
+
+	chk, err := store.CheckKeyRing(ctx)
+	if err != nil {
+		return fmt.Errorf("this worker could not establish whether its secret keys can open every "+
+			"stored secret: %w; refusing to start rather than assume they can", err)
+	}
+	if len(chk.Unopenable) > 0 {
+		versions := make([]int, 0, len(chk.Unopenable))
+		for v := range chk.Unopenable {
+			versions = append(versions, v)
+		}
+		sort.Ints(versions)
+		parts := make([]string, 0, len(versions))
+		for _, v := range versions {
+			parts = append(parts, fmt.Sprintf("%d secret(s) under key_version %d", chk.Unopenable[v], v))
+		}
+		return fmt.Errorf("%s, and no configured master key carries that version (configured: %v): "+
+			"every workflow that references one would fail at the plugin call. Add the key that has "+
+			"that version as CLEAT_SECRET_MASTER_KEY or CLEAT_SECRET_MASTER_KEY_PREVIOUS (with its "+
+			"_VERSION), or do not remove it until `cleatctl reseal-secrets` has moved every row off it",
+			strings.Join(parts, ", "), chk.Configured)
+	}
+	if warn != nil {
+		versions := make([]int, 0, len(chk.OnPrevious))
+		for v := range chk.OnPrevious {
+			versions = append(versions, v)
+		}
+		sort.Ints(versions)
+		for _, v := range versions {
+			warn(fmt.Sprintf("%d secret(s) are still sealed under the previous key (key_version %d); they "+
+				"resolve, but run `cleatctl reseal-secrets` before removing that key from the ring",
+				chk.OnPrevious[v], v))
+		}
 	}
 	return nil
 }
