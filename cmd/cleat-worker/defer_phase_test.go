@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // deferPhaseStore is a mockStore that can also finish a defer phase, which is
@@ -93,6 +94,40 @@ func TestFinishDeferPhaseAppendsTheSegmentsOwnEvents(t *testing.T) {
 	if len(store.finalizeEvents) != 1 || store.finalizeEvents[0].Op != "release" {
 		t.Fatalf("finalized with events %+v, want just the segment's own new event",
 			store.finalizeEvents)
+	}
+}
+
+// TestFinishDeferPhaseNotifiesTerminal is cleat#1976's regression for the
+// two-phase terminate/cancel path: before it, this was the only one of the
+// four terminal paths that woke the parent and failed stranded updates but
+// never notified a finalize observer -- so a jobqueue-dispatched job whose
+// workflow was cancelled or force-terminated (both routed through here) was
+// only ever recovered by the abandonment sweep, marked 'abandoned' rather
+// than the run's real, decided outcome.
+func TestFinishDeferPhaseNotifiesTerminal(t *testing.T) {
+	w, store := newDeferPhaseWorker(t)
+	w.parentWakeCh = make(chan struct{}, 1)
+	obs := &fakeFinalizeObserver{name: "fake"}
+	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
+
+	wf := &engine.WorkflowInstance{
+		ID: "wf-notify", DefName: "d", Generation: 7, PendingTerminalStatus: "cancelled",
+	}
+	w.finishDeferPhase(wf, store, nil, nil, time.Now())
+
+	select {
+	case <-w.parentWakeCh:
+	default:
+		t.Error("a completed defer phase did not wake the parent-wake loop")
+	}
+	if len(obs.calls) != 1 {
+		t.Fatalf("finalize observer called %d times, want 1", len(obs.calls))
+	}
+	if got := obs.calls[0]; got.runID != wf.ID || got.status != "cancelled" {
+		t.Errorf("finalize observer got (runID=%q, status=%q), want (%q, %q) -- "+
+			"the outcome the terminate/cancel call recorded before this defer phase "+
+			"was even claimed, not something this path may re-derive",
+			got.runID, got.status, wf.ID, "cancelled")
 	}
 }
 

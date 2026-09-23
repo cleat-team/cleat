@@ -14,22 +14,33 @@ import (
 // the WHERE clause matches on run_id, and nothing but a job this plugin
 // dispatched ever has this run's id in that column.
 //
-// finalStatus is "done" or "failed" -- the two terminal statuses
-// FinalizeWorkflowSegment can report; "ready" (suspend) never reaches here,
-// filtered by the caller (cmd/cleat-worker/setup.go).
+// finalStatus is one of the five terminal values workflow_instances.status
+// actually takes in production (engine/store_lifecycle.go's own census):
+// "done", "failed", "dead_lettered", "terminated", "cancelled" -- "ready"
+// (suspend) never reaches here, filtered by the caller
+// (cmd/cleat-worker/setup.go). Before cleat#1976, only "done" and "failed"
+// ever arrived; the other three terminal paths never called this at all, so
+// jobqueue's abandonment sweep -- not this write-back -- was what eventually
+// recovered a job whose run failed, cancelled or was force-terminated, and it
+// recovered it as 'abandoned' rather than the run's real outcome.
 //
-// status IN ('dispatched', 'abandoned') IN THE WHERE CLAUSE, not just
-// 'dispatched': a genuine, authoritative outcome arriving late -- after the
-// abandonment sweep already gave up and marked the row 'abandoned' on an
-// inference from absence -- is stronger evidence than that inference and is
-// allowed to overwrite it. It is NOT allowed to overwrite an existing
-// 'completed' or 'failed': ObserveFinalize is called at most once per run in
-// the ordinary path, but a crash-and-retry of the caller must not be able to
-// re-fire this and flip an already-recorded outcome.
+// jqStatus maps 1:1 for "done" and "dead_lettered" -- the latter because an
+// operator asking "did this job's run fail or is it sitting in the
+// dead-letter queue for redrive?" needs the distinction task_queue.status is
+// for, and jqStatus is a free-form TEXT column with no CHECK constraint, so
+// adding a third value costs no migration. Everything else -- "failed",
+// "terminated", "cancelled" -- buckets to "failed": a job whose run was
+// force-cancelled or force-terminated by an operator did not complete, and
+// task_queue has no separate lifecycle for those two, unlike
+// workflow_instances. That bucketing is a decision, not a gap: cleat#1976
+// left it open for the implementer to make and state.
 func (p *Plugin) ObserveFinalize(ctx context.Context, runID, finalStatus string) error {
 	jqStatus := "failed"
-	if finalStatus == "done" {
+	switch finalStatus {
+	case "done":
 		jqStatus = "completed"
+	case "dead_lettered":
+		jqStatus = "dead_lettered"
 	}
 
 	ctx = plugin.AcrossAllTenants(ctx,

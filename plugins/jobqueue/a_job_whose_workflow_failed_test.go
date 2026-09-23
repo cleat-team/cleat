@@ -95,6 +95,49 @@ func TestAJobWhoseWorkflowSucceeded(t *testing.T) {
 	}
 }
 
+// TestAJobWhoseWorkflowWasDeadLettered is cleat#1976's acceptance criterion
+// for dead-lettering: a run that exhausted its retries must be recorded
+// distinguishably from an ordinary failure, not folded into "failed" the way
+// it was before this issue (when it reached ObserveFinalize at all -- before
+// #1976 it did not, on any of the paths that can dead-letter a run).
+func TestAJobWhoseWorkflowWasDeadLettered(t *testing.T) {
+	p, handler, store, _, _ := setupTestPlugin(t)
+
+	jobID := uuid.New().String()
+	runID := dispatchOneJob(t, p, store, "wf-queue", jobID)
+
+	if err := p.ObserveFinalize(context.Background(), runID, "dead_lettered"); err != nil {
+		t.Fatalf("ObserveFinalize: %v", err)
+	}
+
+	m := getJobStatus(t, handler, "wf-queue", jobID)
+	if got := m["status"]; got != "dead_lettered" {
+		t.Errorf("status = %v, want %q -- a dead-lettered run must not read the same "+
+			"as an ordinary failure", got, "dead_lettered")
+	}
+}
+
+// TestAJobWhoseWorkflowWasCancelled covers the two operator-initiated
+// terminal outcomes (CancelWorkflow, TerminateWorkflow) that reach
+// ObserveFinalize as of cleat#1976. task_queue has no separate lifecycle for
+// them, unlike workflow_instances, so both bucket to "failed" -- a decision,
+// not a gap; see finalize_observer.go's doc comment.
+func TestAJobWhoseWorkflowWasCancelled(t *testing.T) {
+	p, handler, store, _, _ := setupTestPlugin(t)
+
+	jobID := uuid.New().String()
+	runID := dispatchOneJob(t, p, store, "wf-queue", jobID)
+
+	if err := p.ObserveFinalize(context.Background(), runID, "cancelled"); err != nil {
+		t.Fatalf("ObserveFinalize: %v", err)
+	}
+
+	m := getJobStatus(t, handler, "wf-queue", jobID)
+	if got := m["status"]; got != "failed" {
+		t.Errorf("status = %v, want %q", got, "failed")
+	}
+}
+
 // TestObserveFinalizeDoesNotOverwriteATerminalStatus guards the crash-retry
 // case the finalize observer's own doc comment calls out: a caller that
 // fires ObserveFinalize twice (worker restart between the store write and

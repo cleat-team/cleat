@@ -372,8 +372,14 @@ type HasBackground interface {
 // once the process is gone. The sweep is the actual safety net either way.
 type HasFinalizeObserver interface {
 	Plugin
-	// ObserveFinalize is called AFTER a workflow run reaches "done" or
-	// "failed" (never "ready", which is a suspend, not a terminal status).
+	// ObserveFinalize is called AFTER a workflow run reaches a terminal
+	// status: "done", "failed", "dead_lettered", "terminated" or
+	// "cancelled" -- never "ready", which is a suspend, not a terminal
+	// status. Before cleat#1976, only "done" and "failed" ever reached this
+	// call; the other three terminal outcomes reached it not at all, so an
+	// observer's own bookkeeping (jobqueue's task_queue row, for the
+	// currently-only implementer) could only be corrected later by an
+	// abandonment sweep inferring from absence rather than being told.
 	// Errors are logged and otherwise ignored: a plugin's own bookkeeping
 	// must never be able to fail a workflow's finalize.
 	ObserveFinalize(ctx context.Context, runID, finalStatus string) error

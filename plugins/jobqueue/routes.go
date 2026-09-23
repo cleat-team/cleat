@@ -58,18 +58,30 @@ type JobResponse struct {
 	JobID     uuid.UUID `json:"job_id"`
 	QueueName string    `json:"queue_name"`
 
-	// Status is one of six values, in the order a job can reach them:
+	// Status is one of seven values, in the order a job can reach them:
 	//
-	//	pending    -> enqueued, not yet claimed
-	//	running    -> claimed by a worker, being processed
-	//	dispatched -> the workflow it names was STARTED. Outcome unknown.
-	//	completed  -> the workflow finished successfully (ObserveFinalize)
-	//	failed     -> the workflow finished unsuccessfully (ObserveFinalize),
-	//	              OR StartWorkflow itself errored and no run ever existed
-	//	abandoned  -> the run is gone and no outcome was ever recorded (the
-	//	              abandonment sweep, background.go) -- not "completed" and
-	//	              not "failed", because neither is a claim this plugin can
-	//	              support once the run itself cannot be asked
+	//	pending       -> enqueued, not yet claimed
+	//	running       -> claimed by a worker, being processed
+	//	dispatched    -> the workflow it names was STARTED. Outcome unknown.
+	//	completed     -> the workflow finished successfully (ObserveFinalize)
+	//	failed        -> the workflow finished unsuccessfully (ObserveFinalize),
+	//	                 OR StartWorkflow itself errored and no run ever existed
+	//	dead_lettered -> the workflow exhausted its retries and was moved to
+	//	                 the dead-letter queue (ObserveFinalize) -- distinct
+	//	                 from "failed" because it is redrivable and "failed" is
+	//	                 not. cleat#1976; before it this bucketed into "failed"
+	//	                 indistinguishably, when it reached ObserveFinalize at
+	//	                 all (it did not, prior to the same issue).
+	//	abandoned     -> the run is gone and no outcome was ever recorded (the
+	//	                 abandonment sweep, background.go) -- not "completed",
+	//	                 "failed" or "dead_lettered", because none of those is
+	//	                 a claim this plugin can support once the run itself
+	//	                 cannot be asked
+	//
+	// A workflow that was cancelled or force-terminated (an operator action,
+	// not a workflow-authored outcome) also reaches ObserveFinalize as of
+	// cleat#1976 and is recorded here as "failed" -- task_queue has no
+	// separate lifecycle for those two, unlike workflow_instances.
 	//
 	// UNTIL cleat#1715, "dispatched" did not exist: a job whose workflow ran
 	// to completion and one whose workflow failed on its first line both read
