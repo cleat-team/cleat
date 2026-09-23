@@ -137,9 +137,11 @@ CONSTANTS
                         \* checking the declared case is the one that can fail.
     RateLimit,         \* This queue's rate_limit (cleat#1918). Always declared,
                         \* same reasoning as WorkerCap.
-    RatePeriod,        \* This queue's rate_period_seconds, in logical clock
-                        \* ticks -- a token minted at clock c expires at c + RatePeriod,
-                        \* mirroring queue_rate_tokens.expires_at.
+    RatePeriod,        \* This queue's rate_period_seconds, in ticks. A token
+                        \* mints at RatePeriod and COUNTS DOWN by one on every
+                        \* step (see rateTokenRemaining below) rather than
+                        \* being compared against a monotonic clock -- see the
+                        \* "Why there is no clock variable" note below.
     NULL               \* Sentinel "no holder" value, distinct from every
                         \* worker -- a model value bound in the .cfg, exactly
                         \* as CleatClaim.tla's NULL is (CHOOSE x : x \notin Workers
@@ -175,19 +177,51 @@ NonTerminalStatuses == {"ready", "running", "terminating"}
 \* =============================================================================
 
 VARIABLES
-    runStatus,           \* [Runs -> NonTerminalStatuses \cup TerminalStatuses]
-    queueHolder,          \* [Runs -> Workers \cup {NULL}]  -- queue_holders membership
-    rateTokenExpiresAt,   \* [Runs -> Nat]  0 means "no active token"; RatePeriod >= 1
-                          \* makes 0 unreachable as a real expiry, so it is a safe
-                          \* sentinel, the same trick nextWakeAt = 0 plays in CleatClaim.
-    clock,                \* Nat global logical clock.
-    rotCursor             \* [Workers -> Tenants \cup {0}]  -- tenantRotation.lastServed,
-                          \* WORKER-LOCAL exactly as rotating_claim.go's own comment
-                          \* insists it must be ("WORKER-LOCAL ON PURPOSE"). 0 means
-                          \* "never served", the same role NULL plays for assignedTo
-                          \* in CleatClaim, spelled differently because 0 \notin Tenants.
+    runStatus,             \* [Runs -> NonTerminalStatuses \cup TerminalStatuses]
+    queueHolder,           \* [Runs -> Workers \cup {NULL}]  -- queue_holders membership
+    rateTokenRemaining,    \* [Runs -> 0..RatePeriod]  a COUNTDOWN, not an absolute
+                           \* expiry: 0 means "no active token"; minting sets it to
+                           \* RatePeriod, and it decrements by one on every step
+                           \* until it hits 0. See "Why there is no clock variable".
+    rotCursor              \* [Workers -> Tenants \cup {0}]  -- tenantRotation.lastServed,
+                           \* WORKER-LOCAL exactly as rotating_claim.go's own comment
+                           \* insists it must be ("WORKER-LOCAL ON PURPOSE"). 0 means
+                           \* "never served", the same role NULL plays for assignedTo
+                           \* in CleatClaim, spelled differently because 0 \notin Tenants.
 
-vars == <<runStatus, queueHolder, rateTokenExpiresAt, clock, rotCursor>>
+vars == <<runStatus, queueHolder, rateTokenRemaining, rotCursor>>
+
+(*
+  Why there is no clock variable, though the first version of this spec had
+  one. cleat#2034 found CleatClaim.tla's ClaimProgress silently vacuous:
+  deleting its WF(Claim(w)) entirely left "No error found" at an IDENTICAL
+  state count. The same known-positive run against this spec's first version
+  (a monotonic `clock`, rate tokens as absolute `expiresAt` compared against
+  it, bounded by a CONSTRAINT `clock < 6`) reproduced the SAME failure on ALL
+  THREE liveness properties (S2, L1, L2) before this spec ever merged -- see
+  specs/README.md's "Known-positive" section for the measurements.
+
+  The mechanism, and it is exactly what the TLC warning printed on every run
+  says to go read (Specifying Systems section 14.3.5): every action in that
+  version incremented clock unconditionally, so at the CONSTRAINT's boundary
+  every REAL action's successor state was excluded from the graph TLC builds,
+  leaving only the always-available stuttering step. From that point on
+  nothing is ever "enabled" again in TLC's graph, so every WF_vars(...)
+  condition is vacuously satisfied by an infinite tail with no visible
+  progress -- independent of whether the fairness clause naming that action
+  was present in the spec at all. A CONSTRAINT is sound for SAFETY invariants
+  (which only need every reachable state visited) and unsound for LIVENESS
+  under exactly this shape: an unboundedly growing variable, capped
+  externally, that every action touches.
+
+  The fix is not a bigger bound -- any finite bound reproduces the same
+  boundary. It is removing the unbounded variable: rateTokenRemaining is a
+  countdown in 0..RatePeriod, which is finite BY CONSTRUCTION from the
+  CONSTANTS alone, so TLC needs no CONSTRAINT to keep the state space finite
+  and liveness checking is sound without one. Re-run the same known-positive
+  (drop a WF clause, compare the verdict AND the state count, per
+  specs/README.md) before trusting any liveness property added here later.
+*)
 
 \* =============================================================================
 \* TYPE INVARIANT
@@ -196,8 +230,7 @@ vars == <<runStatus, queueHolder, rateTokenExpiresAt, clock, rotCursor>>
 TypeOK ==
     /\ runStatus \in [Runs -> NonTerminalStatuses \cup TerminalStatuses]
     /\ queueHolder \in [Runs -> Workers \cup {NULL}]
-    /\ rateTokenExpiresAt \in [Runs -> Nat]
-    /\ clock \in Nat
+    /\ rateTokenRemaining \in [Runs -> 0..RatePeriod]
     /\ rotCursor \in [Workers -> Tenants \cup {0}]
 
 \* A run holding a slot is always non-terminal, and a terminal run's slot (if
@@ -237,7 +270,14 @@ WorkerLiveHolders(t, w) == {r \in LiveHolders(t) : queueHolder[r] = w}
 \* LiveHolders this does NOT join on run state -- migration 097's own comment
 \* is explicit that a token's relevance ends with its window, not its run,
 \* and ReapExpiredConcurrencyKeys' rate-token DELETE checks only expires_at.
-ActiveTokens(t) == {r \in Runs : r[1] = t /\ rateTokenExpiresAt[r] > clock}
+ActiveTokens(t) == {r \in Runs : r[1] = t /\ rateTokenRemaining[r] > 0}
+
+\* Every step's tick: each active countdown drops by one, floored at 0. Runs
+\* the same on every action (Claim's admit branch overrides its own claimed
+\* run to a fresh RatePeriod afterward), which is what makes one step here
+\* the same unit of time the old `clock' = clock + 1` on every action used to
+\* be -- just without an unbounded variable behind it.
+DecrementTokens == [r \in Runs |-> IF rateTokenRemaining[r] > 0 THEN rateTokenRemaining[r] - 1 ELSE 0]
 
 \* The three-conjunct gate acquireCandidateConcurrencyKey checks under the
 \* queues row lock, for a FRESH admission (see the file header for why this
@@ -275,13 +315,13 @@ Claim(w) ==
         ready == TenantReady(t)
     IN
         /\ rotCursor' = [rotCursor EXCEPT ![w] = t]
-        /\ clock' = clock + 1
         /\ IF ready /= {} /\ CanAdmit(t, w)
            THEN \E r \in ready :
                 /\ runStatus' = [runStatus EXCEPT ![r] = "running"]
                 /\ queueHolder' = [queueHolder EXCEPT ![r] = w]
-                /\ rateTokenExpiresAt' = [rateTokenExpiresAt EXCEPT ![r] = clock + RatePeriod]
-           ELSE UNCHANGED <<runStatus, queueHolder, rateTokenExpiresAt>>
+                /\ rateTokenRemaining' = [DecrementTokens EXCEPT ![r] = RatePeriod]
+           ELSE /\ UNCHANGED <<runStatus, queueHolder>>
+                /\ rateTokenRemaining' = DecrementTokens
 
 (*
   --- BEGIN DEFER PHASE: a running run enters its two-phase shutdown. Still
@@ -296,8 +336,8 @@ Claim(w) ==
 BeginDeferPhase(r) ==
     /\ runStatus[r] = "running"
     /\ runStatus' = [runStatus EXCEPT ![r] = "terminating"]
-    /\ clock' = clock + 1
-    /\ UNCHANGED <<queueHolder, rateTokenExpiresAt, rotCursor>>
+    /\ rateTokenRemaining' = DecrementTokens
+    /\ UNCHANGED <<queueHolder, rotCursor>>
 
 (*
   --- SETTLE AND RELEASE: the common shape of finalize, fail, DLQ, terminate,
@@ -314,8 +354,8 @@ SettleAndRelease(r) ==
     /\ \E s \in TerminalStatuses :
         runStatus' = [runStatus EXCEPT ![r] = s]
     /\ queueHolder' = [queueHolder EXCEPT ![r] = NULL]
-    /\ clock' = clock + 1
-    /\ UNCHANGED <<rateTokenExpiresAt, rotCursor>>
+    /\ rateTokenRemaining' = DecrementTokens
+    /\ UNCHANGED rotCursor
 
 (*
   --- SETTLE WITHOUT RELEASE: the terminal write lands but the release call
@@ -333,8 +373,8 @@ SettleWithoutRelease(r) ==
     /\ queueHolder[r] # NULL
     /\ \E s \in TerminalStatuses :
         runStatus' = [runStatus EXCEPT ![r] = s]
-    /\ clock' = clock + 1
-    /\ UNCHANGED <<queueHolder, rateTokenExpiresAt, rotCursor>>
+    /\ rateTokenRemaining' = DecrementTokens
+    /\ UNCHANGED <<queueHolder, rotCursor>>
 
 (*
   --- REAP: frees a stranded holder -- a queue_holders row whose run has
@@ -342,23 +382,25 @@ SettleWithoutRelease(r) ==
       disjunct always keeps Reap enabled so WF(Reap) can force it to run
       when nothing is stale, matching CleatClaim.tla's own Reap shape.
 
-      A rate token is NOT touched here, and that is deliberate, not an
-      omission: ReapExpiredConcurrencyKeys' rate-token DELETE checks only
-      expires_at, never run state -- migration 097's own comment is explicit
-      that a token's relevance ends with its window, unrelated to its run's
-      lifecycle. ActiveTokens already excludes an expired token by the clock
-      comparison alone, so ExecuteContext has nothing to do here that
-      CanAdmit does not already do implicitly.
+      Reap advances rateTokenRemaining the same way every other action does
+      (DecrementTokens, the countdown tick -- see "Why there is no clock
+      variable" above), but does nothing ELSE to a run's token: it never
+      resets or clears one. That mirrors ReapExpiredConcurrencyKeys, whose
+      rate-token DELETE checks only expires_at, never run state -- migration
+      097's own comment is explicit that a token's relevance ends with its
+      window, unrelated to its run's lifecycle. ActiveTokens already treats
+      a token at 0 as inactive on its own, so Reap has nothing to do here
+      that CanAdmit does not already do implicitly.
 *)
 Reap ==
     \/ (\E r \in Runs :
         /\ queueHolder[r] # NULL
         /\ runStatus[r] \in TerminalStatuses
         /\ queueHolder' = [queueHolder EXCEPT ![r] = NULL]
-        /\ clock' = clock + 1
-        /\ UNCHANGED <<runStatus, rateTokenExpiresAt, rotCursor>>)
-    \/ (/\ clock' = clock + 1
-        /\ UNCHANGED <<runStatus, queueHolder, rateTokenExpiresAt, rotCursor>>)
+        /\ rateTokenRemaining' = DecrementTokens
+        /\ UNCHANGED <<runStatus, rotCursor>>)
+    \/ (/\ rateTokenRemaining' = DecrementTokens
+        /\ UNCHANGED <<runStatus, queueHolder, rotCursor>>)
 
 \* =============================================================================
 \* NEXT-STATE RELATION
@@ -378,8 +420,7 @@ Next ==
 Init ==
     /\ runStatus = [r \in Runs |-> "ready"]
     /\ queueHolder = [r \in Runs |-> NULL]
-    /\ rateTokenExpiresAt = [r \in Runs |-> 0]
-    /\ clock = 0
+    /\ rateTokenRemaining = [r \in Runs |-> 0]
     /\ rotCursor = [w \in Workers |-> 0]
 
 \* =============================================================================
@@ -411,11 +452,6 @@ Fairness ==
 \* =============================================================================
 
 Spec == Init /\ [][Next]_vars /\ Fairness
-
-\* State constraint bounding the logical clock, referenced by name from
-\* CleatQueueAdmission.cfg's CONSTRAINT clause -- a .cfg CONSTRAINT takes an
-\* operator defined in the spec, not a raw expression, matching CleatClaim.tla.
-ClockBound == clock < 6
 
 \* =============================================================================
 \* SAFETY INVARIANTS
