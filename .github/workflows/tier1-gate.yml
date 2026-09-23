@@ -179,11 +179,89 @@ permissions:
   contents: read
 
 jobs:
+  # Classifies push/pull_request/merge_group as docs-only or not, so the
+  # DB-backed shards below can skip their setup and report success without
+  # burning DB-service and toolchain-install minutes on a change that could
+  # not have broken the engine (cleat#2118).
+  #
+  # NO top-level `if:` on this job, deliberately. A job gated on `needs: [X]`
+  # is SKIPPED, not run, when X itself is skipped by its own `if:` -- and a
+  # skipped dependency does not read as "success" to branch protection any
+  # more than a failed one does. `tier1`'s own aggregator, below, already
+  # spells out exactly this hazard under CLAUDE.md's "a condition that never
+  # decides anything cannot be observed to be wrong". This job sidesteps it by
+  # construction: it always runs, on every event, and always succeeds; only
+  # its OUTPUT varies. `needs: [changes]` therefore never itself causes a
+  # downstream job to be skipped.
+  #
+  # docs_only is computed for BOTH pull_request (diff against the PR's base)
+  # and merge_group (diff across the whole projected batch, base_sha to
+  # head_sha) -- a queue batch that is entirely docs-only should not re-pay
+  # DB/toolchain setup either, and the merge queue is this issue's own
+  # motivating bottleneck. A plain push always gets docs_only=false: develop's
+  # own push run must never be filtered, and diffing a push has no well-defined
+  # "PR" or "batch" to diff against.
+  #
+  # FAILS CLOSED. Any place the diff cannot be computed -- an empty file list,
+  # a missing base/head sha, an API error -- sets docs_only=false and falls
+  # through to running everything, rather than erroring the step. A required
+  # check whose steps are all skipped still reports success, so a classifier
+  # bug that fails OPEN would merge untested code silently; failing closed
+  # only costs the CI minutes this job exists to save.
+  #
+  # This exact job is duplicated in every workflow that gates a heavy suite on
+  # it -- see cleat#2118's PR for the full list.
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --paginate --jq '.[].filename') || files=""
+          elif [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
+            head="${{ github.event.merge_group.head_sha }}"
+            if [ -z "$base" ] || [ -z "$head" ]; then
+              echo "docs_only=false" >> "$GITHUB_OUTPUT"
+              echo "merge_group base_sha/head_sha unavailable -- failing closed as non-docs-only"
+              exit 0
+            fi
+            files=$(gh api "repos/${{ github.repository }}/compare/${base}...${head}" --paginate --jq '.files[].filename') || files=""
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "not a pull_request or merge_group event (${{ github.event_name }}) -- never filtered"
+            exit 0
+          fi
+          if [ -z "$files" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "no changed files reported (or the API call failed) -- failing closed as non-docs-only"
+            exit 0
+          fi
+          echo "$files"
+          if echo "$files" | grep -vqE '\.md$|^docs/|^specs/|^\.claude/'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
   # No DB, no Python, no wasm-tools: `go test -list` compiles the package and
   # enumerates Test funcs, it never runs one. Gates the three expensive jobs
   # below so a broken partition (a bucket that lost a test, or double-counted
   # one) fails in seconds rather than after minutes of DB-backed test runs on
-  # a shard split that was wrong from the start.
+  # a shard split that was wrong from the start. Deliberately NOT gated on
+  # `changes` -- it is cheap enough (~40s) that the coverage insurance is worth
+  # keeping unconditional, and tier1-engine/tier1-rest below are what actually
+  # skip.
   tier1-coverage:
     name: Tier 1 Shard Coverage
     runs-on: ubuntu-latest
@@ -203,7 +281,7 @@ jobs:
 
   tier1-engine:
     name: Tier 1 Engine Shard ${{ matrix.shard }}/3
-    needs: [tier1-coverage]
+    needs: [tier1-coverage, changes]
     strategy:
       fail-fast: false
       matrix:
@@ -374,18 +452,23 @@ jobs:
         if: github.event_name == 'merge_group'
         run: echo "tier 1 gate -- engine shard ${{ matrix.shard }}/3 -- validated when the pull request was opened -- cleat#2080"
 
+      - name: No relevant changes in this pull request
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "tier 1 gate -- engine shard ${{ matrix.shard }}/3 -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
 
       - name: Setup Go
         uses: actions/setup-go@v7
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         with:
           go-version: stable
 
       - name: Setup Python
         uses: actions/setup-python@v7
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         with:
           python-version: "3.12"
 
@@ -395,7 +478,7 @@ jobs:
       # skip, and the gate fails on the skip rather than letting the run go
       # quietly green.
       - name: Install componentize-py and the Python SDK
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         run: |
           pip install --upgrade pip
           pip install componentize-py
@@ -414,7 +497,7 @@ jobs:
       # installs, so the container a developer runs this gate in and the runner
       # agree. If those drift, a developer's green is not evidence about CI's.
       - name: Install wasm-tools
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         env:
           WASM_TOOLS_VERSION: "1.255.0"
         run: |
@@ -462,7 +545,7 @@ jobs:
       # one. Doing this in a step rather than in the service definition because
       # a service has no way to run SQL after it is healthy.
       - name: Create the cleat database on SQL Server
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         run: |
           docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89')" \
             /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
@@ -472,7 +555,7 @@ jobs:
       # result here. The gate's own exit status is this job's exit status; its
       # stdout already names what it excluded, what it ran, and what failed.
       - name: Tier 1 gate -- engine shard ${{ matrix.shard }}/3
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         run: scripts/tier-gate.sh --shard ${{ matrix.shard }}/3
 
       # The log on failure, because the gate deliberately keeps it rather than
@@ -481,7 +564,7 @@ jobs:
       # step above did not run, so tier-gate.log does not exist, and `always()`
       # alone would upload a missing-file failure on every queue run.
       - name: Upload the tier-1 log
-        if: always() && github.event_name != 'merge_group'
+        if: always() && github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: tier-gate-log-engine-${{ matrix.shard }}-${{ github.sha }}
@@ -490,7 +573,7 @@ jobs:
 
   tier1-rest:
     name: Tier 1 Gate -- rest
-    needs: [tier1-coverage]
+    needs: [tier1-coverage, changes]
     runs-on: ubuntu-latest
     # Same buffer as tier1-engine, over the same GO_TEST_TIMEOUT default.
     timeout-minutes: 45
@@ -575,30 +658,35 @@ jobs:
         if: github.event_name == 'merge_group'
         run: echo "tier 1 gate -- rest shard 3/3 -- validated when the pull request was opened -- cleat#2080"
 
+      - name: No relevant changes in this pull request
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "tier 1 gate -- rest shard 3/3 -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
 
       - name: Setup Go
         uses: actions/setup-go@v7
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         with:
           go-version: stable
 
       - name: Setup Python
         uses: actions/setup-python@v7
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         with:
           python-version: "3.12"
 
       - name: Install componentize-py and the Python SDK
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         run: |
           pip install --upgrade pip
           pip install componentize-py
           pip install -e python-sdk
 
       - name: Install wasm-tools
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         env:
           WASM_TOOLS_VERSION: "1.255.0"
         run: |
@@ -613,18 +701,18 @@ jobs:
           wasm-tools --version
 
       - name: Create the cleat database on SQL Server
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         run: |
           docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89')" \
             /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
             -Q "IF DB_ID('cleat') IS NULL CREATE DATABASE cleat"
 
       - name: Tier 1 gate -- rest shard 3/3
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         run: scripts/tier-gate.sh --shard 3/3
 
       - name: Upload the tier-1 log
-        if: always() && github.event_name != 'merge_group'
+        if: always() && github.event_name != 'merge_group' && needs.changes.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: tier-gate-log-rest-${{ github.sha }}

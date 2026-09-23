@@ -131,18 +131,77 @@ permissions:
   contents: read
 
 jobs:
+  # Classifies a pull_request's changed files as docs-only or not, so
+  # e2e-cross-language below can skip its (five-toolchain) setup and report
+  # success without burning those install minutes on a PR that could not have
+  # broken what it tests (cleat#2118). This exact job is duplicated in every
+  # workflow that gates a heavy suite on it -- see tier1-gate.yml's `changes`
+  # job for the full rationale, including why it deliberately carries no
+  # top-level `if:`.
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --paginate --jq '.[].filename') || files=""
+          elif [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
+            head="${{ github.event.merge_group.head_sha }}"
+            if [ -z "$base" ] || [ -z "$head" ]; then
+              echo "docs_only=false" >> "$GITHUB_OUTPUT"
+              echo "merge_group base_sha/head_sha unavailable -- failing closed as non-docs-only"
+              exit 0
+            fi
+            files=$(gh api "repos/${{ github.repository }}/compare/${base}...${head}" --paginate --jq '.files[].filename') || files=""
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "not a pull_request or merge_group event (${{ github.event_name }}) -- never filtered"
+            exit 0
+          fi
+          if [ -z "$files" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "no changed files reported (or the API call failed) -- failing closed as non-docs-only"
+            exit 0
+          fi
+          echo "$files"
+          if echo "$files" | grep -vqE '\.md$|^docs/|^specs/|^\.claude/'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
   e2e-cross-language:
     name: Cross-Language WASM E2E
+    needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
+      # cleat#2118: see the `changes` job above for the rationale.
+      - name: No relevant changes in this pull request
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "cross-language wasm e2e -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.docs_only != 'true'
 
       # ------------------------------------------------------------------
       # Language toolchains
       # ------------------------------------------------------------------
       - name: Setup Go
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -160,39 +219,46 @@ jobs:
       #
       # wasm32-wasip1 stays for the SDK crates, which still build against it.
       - name: Setup Rust + wasm targets
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1, wasm32-unknown-unknown
 
       - name: Setup Python
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Setup Node
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-node@v7
         with:
           node-version: "20"
 
       - name: Setup Java
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Setup Gradle
+        if: needs.changes.outputs.docs_only != 'true'
         uses: gradle/actions/setup-gradle@v6
 
       # ------------------------------------------------------------------
       # Python WASM toolchain
       # ------------------------------------------------------------------
       - name: Install Python WASM toolchain
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           pip install --upgrade pip
           pip install componentize-py
           cargo install wasm-tools
 
       - name: Install Python SDK
+        if: needs.changes.outputs.docs_only != 'true'
         working-directory: python-sdk
         run: pip install -e .
 
@@ -223,6 +289,7 @@ jobs:
       # 3.109).
       # ------------------------------------------------------------------
       - name: Run cross-language E2E tests
+        if: needs.changes.outputs.docs_only != 'true'
         shell: bash
         run: |
           # pipefail, for the same reason the step below it already has it:
@@ -247,6 +314,7 @@ jobs:
       # as written; this job is the only one that installs the toolchain they
       # need.
       - name: Run the cross-language suite
+        if: needs.changes.outputs.docs_only != 'true'
         shell: bash
         # tests/cross-language is its own Go module since the root<->cleat/
         # module cycle was broken (it imports cleat/wasmtest; the root module
@@ -270,11 +338,11 @@ jobs:
       # means the toolchain setup stopped working and the suite quietly went
       # back to testing nothing.
       - name: Skip budget
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         run: scripts/check-skip-budget.sh e2e-cross-language cross-language-report.json
 
       - name: Upload test report
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: e2e-test-report-${{ github.sha }}

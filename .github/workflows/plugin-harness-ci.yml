@@ -107,17 +107,79 @@ permissions:
 
 jobs:
   # --------------------------------------------------------------------------
+  # Classify changed paths
+  #
+  # So the four jobs below can skip their setup and report success without
+  # burning DB-service and toolchain-install minutes on a pull_request that
+  # could not have broken what they test (cleat#2118). This exact job is
+  # duplicated in every workflow that gates a heavy suite on it -- see
+  # tier1-gate.yml's `changes` job for the full rationale, including why it
+  # deliberately carries no top-level `if:`.
+  # --------------------------------------------------------------------------
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --paginate --jq '.[].filename') || files=""
+          elif [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
+            head="${{ github.event.merge_group.head_sha }}"
+            if [ -z "$base" ] || [ -z "$head" ]; then
+              echo "docs_only=false" >> "$GITHUB_OUTPUT"
+              echo "merge_group base_sha/head_sha unavailable -- failing closed as non-docs-only"
+              exit 0
+            fi
+            files=$(gh api "repos/${{ github.repository }}/compare/${base}...${head}" --paginate --jq '.files[].filename') || files=""
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "not a pull_request or merge_group event (${{ github.event_name }}) -- never filtered"
+            exit 0
+          fi
+          if [ -z "$files" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "no changed files reported (or the API call failed) -- failing closed as non-docs-only"
+            exit 0
+          fi
+          echo "$files"
+          if echo "$files" | grep -vqE '\.md$|^docs/|^specs/|^\.claude/'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # --------------------------------------------------------------------------
   # Layer 1 — cleattest-based SDK tests (fast, no infra needed)
   # --------------------------------------------------------------------------
   test-layer1:
     name: Layer 1 — SDK (cleattest)
+    needs: [changes]
     runs-on: ubuntu-latest
     steps:
+      - name: No relevant changes in this pull request
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "layer 1 -- sdk (cleattest) -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.docs_only != 'true'
       - uses: actions/setup-go@v7
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           go-version: stable
       - name: Check tools
+        if: needs.changes.outputs.docs_only != 'true'
         run: make tools-go
       # tests/plugin-harness is its own Go module since the
       # root<->cleat/ module cycle was broken (it imports cleat/cleattest and
@@ -150,9 +212,11 @@ jobs:
       # Runs here rather than in Lint because it needs `go test -list`, and
       # this is the cheapest job that already has Go and this module.
       - name: CI test-selection guard
+        if: needs.changes.outputs.docs_only != 'true'
         run: python3 scripts/check_ci_test_selection.py
 
       - run: go test -count=1 -timeout=120s ./... -run 'TestPluginCalls_Cleattest|TestPluginCallStreaming_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
+        if: needs.changes.outputs.docs_only != 'true'
         working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"
@@ -162,10 +226,18 @@ jobs:
   # --------------------------------------------------------------------------
   test-layer2:
     name: Layer 2 — WASM Integration
+    needs: [changes]
     runs-on: ubuntu-latest
     steps:
+      - name: No relevant changes in this pull request
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "layer 2 -- wasm integration -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.docs_only != 'true'
       - uses: actions/setup-go@v7
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           go-version: stable
       # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
@@ -173,6 +245,7 @@ jobs:
       # TestPluginCalls_Wasm_Rust skips, and it is the only test anywhere that
       # runs the Rust build path users actually invoke.
       - name: Setup Rust + wasm32-unknown-unknown
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -194,10 +267,12 @@ jobs:
       # requiring a tool for an output nothing consumes is what made this test
       # skip in the first place. Leaving it out keeps that honest.
       - name: Setup Python
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install componentize-py and the Python SDK
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           pip install --upgrade pip
           pip install componentize-py
@@ -229,11 +304,13 @@ jobs:
       # Java 17 to match the other four jobs that build this SDK, rather than
       # inheriting the runner image's default, which can change without us.
       - name: Setup Java
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
+        if: needs.changes.outputs.docs_only != 'true'
         uses: gradle/actions/setup-gradle@v6
       # Explicit, for the same reason Java 17 is pinned two steps up: the
       # AssemblyScript host-call fixture needs npx, ubuntu-latest happens to
@@ -243,6 +320,7 @@ jobs:
       # skip budget below is what would catch it, and only because this step
       # makes the toolchain this job's own promise rather than the runner's.
       - name: Setup Node
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-node@v7
         with:
           node-version: "20"
@@ -255,6 +333,7 @@ jobs:
       # The budget is the enforcement: if either regresses to skipping, this
       # fails rather than going quietly green.
       - name: Run WASM integration tests
+        if: needs.changes.outputs.docs_only != 'true'
         shell: bash
         # tests/plugin-harness is its own Go module since the root<->cleat/
         # module cycle was broken (it imports cleat/cleattest and cleat/wasmtest;
@@ -341,7 +420,7 @@ jobs:
       # The same defect in another language is the thing most worth catching,
       # and #726 already found and fixed one in the AssemblyScript fixture.
       - name: Tests did not rewrite their own fixtures
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         run: |
           if ! git diff --exit-code --stat -- tests/plugin-harness/testdata; then
             echo
@@ -354,7 +433,7 @@ jobs:
           fi
 
       - name: Skip budget
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         run: scripts/check-skip-budget.sh plugin-harness/wasm wasm-integration-report.json
 
   # --------------------------------------------------------------------------
@@ -362,6 +441,7 @@ jobs:
   # --------------------------------------------------------------------------
   test-multi-db:
     name: Layer 3 — Multi-DB
+    needs: [changes]
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -411,8 +491,15 @@ jobs:
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=master
       CLEAT_TEST_SKIP_REAL_SERVICES: '1'
     steps:
+      - name: No relevant changes in this pull request
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "layer 3 -- multi-db -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.docs_only != 'true'
       - uses: actions/setup-go@v7
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           go-version: stable
       # This job WAS vacuous, and the budget below is what said so.
@@ -457,12 +544,13 @@ jobs:
       # would run it before TestPluginCalls_MultiDB -- see IMPROVEMENT-PLAN
       # 3.236.
       - run: go test -count=1 -timeout=600s -json ./... -run 'TestPluginCalls_MultiDB|TestReapplyingTheCoreMigrations' > ../../test-report.json 2>&1
+        if: needs.changes.outputs.docs_only != 'true'
         working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"
 
       - name: Skip budget
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         run: scripts/check-skip-budget.sh plugin-harness/multi-db test-report.json
 
   # --------------------------------------------------------------------------
@@ -470,6 +558,7 @@ jobs:
   # --------------------------------------------------------------------------
   test-blobstore-s3:
     name: Blobstore S3 Round-Trip
+    needs: [changes]
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -552,8 +641,15 @@ jobs:
       CLEAT_TEST_S3_BUCKET: cleat-test-harness
       CLEAT_TEST_S3_USE_SSL: 'false'
     steps:
+      - name: No relevant changes in this pull request
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "blobstore s3 round-trip -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.docs_only != 'true'
       - uses: actions/setup-go@v7
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           go-version: stable
       # tests/plugin-harness is its own Go module since the
@@ -564,6 +660,7 @@ jobs:
       # module or its selected dependencies" -- so the pattern is ./... from
       # inside the module instead. See tests/plugin-harness/go.mod.
       - run: go test -count=1 -timeout=120s -v ./... -run 'TestBlobstore_S3'
+        if: needs.changes.outputs.docs_only != 'true'
         working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"

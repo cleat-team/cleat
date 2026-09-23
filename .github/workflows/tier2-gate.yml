@@ -125,8 +125,58 @@ permissions:
   contents: read
 
 jobs:
+  # Classifies a pull_request's changed files as docs-only or not, so `tier2`
+  # below can skip its setup and report success without burning DB-service
+  # minutes on a PR that could not have broken the Go surface it gates
+  # (cleat#2118). This exact job is duplicated in every workflow that gates a
+  # heavy suite on it -- see tier1-gate.yml's `changes` job for the full
+  # rationale, including why it deliberately carries no top-level `if:`.
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --paginate --jq '.[].filename') || files=""
+          elif [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
+            head="${{ github.event.merge_group.head_sha }}"
+            if [ -z "$base" ] || [ -z "$head" ]; then
+              echo "docs_only=false" >> "$GITHUB_OUTPUT"
+              echo "merge_group base_sha/head_sha unavailable -- failing closed as non-docs-only"
+              exit 0
+            fi
+            files=$(gh api "repos/${{ github.repository }}/compare/${base}...${head}" --paginate --jq '.files[].filename') || files=""
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "not a pull_request or merge_group event (${{ github.event_name }}) -- never filtered"
+            exit 0
+          fi
+          if [ -z "$files" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "no changed files reported (or the API call failed) -- failing closed as non-docs-only"
+            exit 0
+          fi
+          echo "$files"
+          if echo "$files" | grep -vqE '\.md$|^docs/|^specs/|^\.claude/'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
   tier2:
     name: Tier 2 Gate
+    needs: [changes]
     runs-on: ubuntu-latest
     # The gate ran 1567 tests in six patterns plus one module when this was written,
     # with -p 1, in well under two minutes of test time locally. 30 is generous; a gate
@@ -208,14 +258,23 @@ jobs:
       CLEAT_TEST_MSSQL_ROW_AUDIT: "1"
 
     steps:
+      # cleat#2118: see tier1-gate.yml's `changes` job for the rationale.
+      - name: No relevant changes in this pull request
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "tier 2 gate -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.docs_only != 'true'
 
       - name: Setup Go
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-go@v7
         with:
           go-version: stable
 
       - name: Create the cleat database on SQL Server
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89')" \
             /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
@@ -225,10 +284,11 @@ jobs:
       # tolerating known failures is expressed in tiers.yaml, where it is reviewable --
       # not here, where it would silently tolerate everything.
       - name: Tier 2 gate
+        if: needs.changes.outputs.docs_only != 'true'
         run: scripts/tier2-gate.sh
 
       - name: Upload the tier-2 log
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: tier2-gate-${{ github.sha }}

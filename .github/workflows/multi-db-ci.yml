@@ -182,11 +182,64 @@ permissions:
 # JOBS
 # ===========================================================================
 jobs:
+  # Classifies a pull_request's changed files as docs-only or not, so
+  # test-mysql and test-mssql below can skip their setup and report success
+  # without burning DB-service and toolchain-install minutes on a PR that
+  # could not have broken what they test (cleat#2118). test-plugin-migrations
+  # is deliberately NOT gated on this -- it is not a required status check
+  # (see its own header comment) and this issue's scope is required checks
+  # only. This exact job is duplicated in every workflow that gates a heavy
+  # suite on it -- see tier1-gate.yml's `changes` job for the full rationale,
+  # including why it deliberately carries no top-level `if:`.
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --paginate --jq '.[].filename') || files=""
+          elif [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
+            head="${{ github.event.merge_group.head_sha }}"
+            if [ -z "$base" ] || [ -z "$head" ]; then
+              echo "docs_only=false" >> "$GITHUB_OUTPUT"
+              echo "merge_group base_sha/head_sha unavailable -- failing closed as non-docs-only"
+              exit 0
+            fi
+            files=$(gh api "repos/${{ github.repository }}/compare/${base}...${head}" --paginate --jq '.files[].filename') || files=""
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "not a pull_request or merge_group event (${{ github.event_name }}) -- never filtered"
+            exit 0
+          fi
+          if [ -z "$files" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "no changed files reported (or the API call failed) -- failing closed as non-docs-only"
+            exit 0
+          fi
+          echo "$files"
+          if echo "$files" | grep -vqE '\.md$|^docs/|^specs/|^\.claude/'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
   # -------------------------------------------------------------------------
   # Test MySQL backend
   # -------------------------------------------------------------------------
   test-mysql:
     name: Test MySQL
+    needs: [changes]
     runs-on: ubuntu-latest
     services:
       mysql:
@@ -204,9 +257,17 @@ jobs:
     env:
       CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
     steps:
+      # cleat#2118: see the `changes` job above for the rationale.
+      - name: No relevant changes in this pull request
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "test mysql -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.docs_only != 'true'
 
       - name: Setup Go
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-go@v7
         with:
           go-version: stable
@@ -253,11 +314,13 @@ jobs:
       # Java 17 to match the five other jobs that build this SDK, rather than
       # inheriting the runner image's default, which can change without us.
       - name: Setup Java
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
+        if: needs.changes.outputs.docs_only != 'true'
         uses: gradle/actions/setup-gradle@v6
 
       # ./migration/... alongside ./engine/...: this is the only job with a
@@ -297,6 +360,7 @@ jobs:
       # condition that would make -p 1 load-bearing. Change this comment when
       # it does.
       - name: Run tests
+        if: needs.changes.outputs.docs_only != 'true'
         run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
 
   # -------------------------------------------------------------------------
@@ -304,6 +368,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-mssql:
     name: Test SQL Server
+    needs: [changes]
     runs-on: ubuntu-latest
     services:
       mssql:
@@ -330,13 +395,22 @@ jobs:
       # except SQL Server; see engine/testutil/mssql_row_disappearance.go.
       CLEAT_TEST_MSSQL_ROW_AUDIT: "1"
     steps:
+      # cleat#2118: see the `changes` job above for the rationale.
+      - name: No relevant changes in this pull request
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "test sql server -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.docs_only != 'true'
 
       - name: Create cleat database
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker exec $(docker ps -q --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89") /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
 
       - name: Setup Go
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-go@v7
         with:
           go-version: stable
@@ -346,11 +420,13 @@ jobs:
       # test-mysql above for why a SQL Server job builds a Java WASM
       # component at all.
       - name: Setup Java
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
+        if: needs.changes.outputs.docs_only != 'true'
         uses: gradle/actions/setup-gradle@v6
 
       # ./migration/... alongside ./engine/...: this is the only job with a
@@ -373,6 +449,7 @@ jobs:
       # migrations (011_json_scalar_payloads.sql needs isjson). The claim here
       # rests on the call sites plus this job, not on a local measurement.
       - name: Run tests
+        if: needs.changes.outputs.docs_only != 'true'
         run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
 
   # -------------------------------------------------------------------------

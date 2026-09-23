@@ -140,6 +140,62 @@ permissions:
 # ===========================================================================
 jobs:
   # -------------------------------------------------------------------------
+  # Classify changed paths
+  #
+  # So test-go and cluster-tests below can skip their setup and report
+  # success without burning DB-service, cluster, and toolchain-install
+  # minutes on a pull_request that could not have broken what they test
+  # (cleat#2118). This exact job is duplicated in every workflow that gates a
+  # heavy suite on it -- see tier1-gate.yml's `changes` job for the full
+  # rationale, including why it deliberately carries no top-level `if:`: a
+  # job gated on `needs: [X]` is SKIPPED, not run, when X is itself skipped
+  # by its own `if:`, and a skipped dependency does not read as "success" to
+  # branch protection any more than a failed one does.
+  # -------------------------------------------------------------------------
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --paginate --jq '.[].filename') || files=""
+          elif [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
+            head="${{ github.event.merge_group.head_sha }}"
+            if [ -z "$base" ] || [ -z "$head" ]; then
+              echo "docs_only=false" >> "$GITHUB_OUTPUT"
+              echo "merge_group base_sha/head_sha unavailable -- failing closed as non-docs-only"
+              exit 0
+            fi
+            files=$(gh api "repos/${{ github.repository }}/compare/${base}...${head}" --paginate --jq '.files[].filename') || files=""
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "not a pull_request or merge_group event (${{ github.event_name }}) -- never filtered"
+            exit 0
+          fi
+          if [ -z "$files" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "no changed files reported (or the API call failed) -- failing closed as non-docs-only"
+            exit 0
+          fi
+          echo "$files"
+          if echo "$files" | grep -vqE '\.md$|^docs/|^specs/|^\.claude/'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # -------------------------------------------------------------------------
   # Lint
   # -------------------------------------------------------------------------
   lint:
@@ -1199,6 +1255,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-go:
     name: Test Go (${{ matrix.package.name }}) on ${{ matrix.go-version }}
+    needs: [changes]
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -1384,20 +1441,29 @@ jobs:
           - name: hooks
             path: ./tests/hooks/...
     steps:
+      # cleat#2118: see the `changes` job's definition for the rationale.
+      - name: No relevant changes in this pull request
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "test go (${{ matrix.package.name }}) on ${{ matrix.go-version }} -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.docs_only != 'true'
 
       - name: Setup Go
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go-version }}
 
       - name: Setup Rust + wasm32-wasip1 (Rust WASM tests)
-        if: matrix.package.name == 'internal'
+        if: matrix.package.name == 'internal' && needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
 
       - name: Run tests
+        if: needs.changes.outputs.docs_only != 'true'
         shell: bash
         working-directory: ${{ matrix.package.dir || '.' }}
         run: |
@@ -1427,7 +1493,7 @@ jobs:
       # at all, because a test step that died before producing output has
       # skipped everything, which is the strongest form of the same bug.
       - name: Skip budget
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         working-directory: ${{ matrix.package.dir || '.' }}
         run: ${{ github.workspace }}/scripts/check-skip-budget.sh 'test-go/${{ matrix.package.name }}' test-report.json
 
@@ -2139,6 +2205,7 @@ jobs:
   # -------------------------------------------------------------------------
   cluster-tests:
     name: Cluster Integration Tests
+    needs: [changes]
     runs-on: ubuntu-latest
     env:
       # A database of the tests' own -- and, as of cleat#2012, a SERVER of its
@@ -2174,9 +2241,17 @@ jobs:
       # ./engine/..." step below.
       CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5433/cleat_tests?sslmode=disable
     steps:
+      # cleat#2118: see the `changes` job above for the rationale.
+      - name: No relevant changes in this pull request
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "cluster integration tests -- skipped: this pull request touches only documentation/spec paths -- cleat#2118"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.docs_only != 'true'
 
       - name: Setup Go
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-go@v7
         with:
           go-version: stable
@@ -2192,11 +2267,13 @@ jobs:
       # the diff. That is what makes the cache worth adding rather than
       # shrugging at.
       - name: Setup Java
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
+        if: needs.changes.outputs.docs_only != 'true'
         uses: gradle/actions/setup-gradle@v6
 
       # No host-binary build step here. It produced ./cleat-worker with
@@ -2205,9 +2282,11 @@ jobs:
       # though CGO_ENABLED=0 were the shipped configuration, which is the
       # belief that let 2.28 survive. The image build below is the real one.
       - name: Build Docker image
+        if: needs.changes.outputs.docs_only != 'true'
         run: docker build -t cleat-worker:latest .
 
       - name: Start Postgres and apply the schema
+        if: needs.changes.outputs.docs_only != 'true'
         run: docker compose -f docker-compose.cluster.yml up -d postgres
 
       # cleat#2012. A plain, throwaway server -- not a service on
@@ -2218,6 +2297,7 @@ jobs:
       # engine/testutil itself on first use, so this needs no volume mount and
       # no migrations.
       - name: Start a dedicated Postgres for ./engine/... (isolated from the cluster's connection budget)
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker run -d --name cleat-test-postgres \
             -e POSTGRES_USER=cleat \
@@ -2227,6 +2307,7 @@ jobs:
             postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
 
       - name: Wait for the dedicated Postgres to be ready
+        if: needs.changes.outputs.docs_only != 'true'
         shell: bash
         run: |
           # The official postgres image starts twice (initdb, then the real
@@ -2248,6 +2329,7 @@ jobs:
           exit 1
 
       - name: Wait for cluster readiness
+        if: needs.changes.outputs.docs_only != 'true'
         shell: bash
         run: |
           # pg_isready alone is not a readiness signal for this job. During
@@ -2448,6 +2530,7 @@ jobs:
       # database, never skip -- so the budget is 0, and a skip appearing
       # under it means the override above stopped taking effect.
       - name: Resource exhaustion — runaway workflow is terminated
+        if: needs.changes.outputs.docs_only != 'true'
         shell: bash
         env:
           CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
@@ -2456,7 +2539,7 @@ jobs:
           go test -count=1 -timeout=300s -json ./tests/exhaustion/... 2>&1 | tee exhaustion-report.json
 
       - name: Skip budget — resource exhaustion
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         run: scripts/check-skip-budget.sh cluster/exhaustion exhaustion-report.json
 
       # After the exhaustion step, not before: TestKillPostgresAndRestart stops
@@ -2468,6 +2551,7 @@ jobs:
       # docker-compose.cluster.yml serves, so it does not race the live workers
       # for the rows it inserts.
       - name: Cluster suite — claiming, failover and replay against the live cluster
+        if: needs.changes.outputs.docs_only != 'true'
         # The cluster's OWN database, overriding the job-wide CLEAT_TEST_DB.
         #
         # That variable points at cleat_tests, a separate database this job
@@ -2483,6 +2567,7 @@ jobs:
         run: go test -count=1 -timeout=300s ./tests/cluster/...
 
       - name: Run integration tests
+        if: needs.changes.outputs.docs_only != 'true'
         shell: bash
         run: |
           # pipefail is required: without it `tee` supplies the exit status and
@@ -2568,18 +2653,18 @@ jobs:
       # warning -- this job previously reported success while every worker in
       # the compose file was crash-looping.
       - name: Skip budget
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         run: scripts/check-skip-budget.sh cluster test-report.json
 
       - name: Cluster logs (on failure)
-        if: failure()
+        if: failure() && needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose -f docker-compose.cluster.yml logs --tail=100
           echo "--- cleat-test-postgres ---"
           docker logs --tail=100 cleat-test-postgres 2>&1 || true
 
       - name: Tear down cluster
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose -f docker-compose.cluster.yml down -v
           docker rm -f cleat-test-postgres 2>/dev/null || true

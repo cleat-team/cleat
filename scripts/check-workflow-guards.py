@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Structural guards over .github/workflows/, run by the Lint job.
 
-Four checks, each catching a *class* of defect that has already cost this repo
+Five checks, each catching a *class* of defect that has already cost this repo
 a session to find one instance of by hand:
 
   1. Every context in .github/required-checks.txt resolves to a job that
@@ -14,6 +14,11 @@ a session to find one instance of by hand:
   4. Every `--filter ancestor=<ref>` names a reference that is also a
      `services.*.image` in the same file.  Pinning `image:` alone silently
      breaks the lookup, because the filter matches on the pull reference.
+  5. Every step in a job that `needs: [changes]` (cleat#2118) carries the
+     docs_only `if:` gate or is the leading skip-notice step.  A step added
+     later without the clause runs unconditionally on a docs-only PR,
+     silently spending the minutes cleat#2118 exists to save while the job
+     still reports success -- and no other guard here would notice.
 
 Design note, since it is the whole point of the exercise: this script FAILS on
 anything it cannot analyse rather than passing.  A matrix it cannot expand, an
@@ -47,6 +52,19 @@ MATRIX_REF = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_.\-]+)\s*\}\}")
 ANY_EXPRESSION = re.compile(r"\$\{\{")
 # `ancestor=foo`, `ancestor=foo"`, `ancestor=foo'`, `ancestor=foo)`
 ANCESTOR_REF = re.compile(r"ancestor=([^\s\"')]+)")
+
+# cleat#2118: the docs-only skip gate, and the leading step that reports it.
+CHANGES_GATE = "needs.changes.outputs.docs_only != 'true'"
+CHANGES_SKIP_MARKER = "docs_only == 'true'"
+# cleat#2080/#2105: tier1-engine/tier1-rest's PRE-EXISTING, independently
+# justified merge_group report-only step. It fires on every merge_group run
+# regardless of content -- composing it with docs_only would be wrong, not
+# just unnecessary, since it must still fire on a docs-only merge_group batch
+# (the OTHER leading step, carrying CHANGES_SKIP_MARKER, is the one gated to
+# exclude merge_group). Exempt only this exact, unqualified condition -- a
+# real step that merely MENTIONS merge_group alongside other logic still has
+# to satisfy CHANGES_GATE like any other.
+MERGE_GROUP_ONLY_MARKER = "github.event_name == 'merge_group'"
 
 
 class Unexpandable(Exception):
@@ -311,6 +329,49 @@ def guard_ancestor_filters_match_images(errors) -> None:
                 )
 
 
+def guard_changes_gated_steps_are_skippable(errors) -> None:
+    """Every real step in a job that depends on `changes` is gated.
+
+    cleat#2118: `needs: [changes]` makes docs_only available to a job, but
+    nothing forces any INDIVIDUAL step to look at it -- a step added later
+    without the `if:` clause silently runs (and burns the minutes cleat#2118
+    exists to save) on a docs-only pull request, while the job still reports
+    success. Falsified 2026-09-23: stripping the clause from one step is
+    invisible to every other guard in this file, which is why this one
+    exists rather than trusting the pattern to hold by convention.
+    """
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError):
+            continue  # already reported by collect_jobs
+        for job_id, job in (doc.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            needs = job.get("needs")
+            needs_list = [needs] if isinstance(needs, str) else (needs or [])
+            if "changes" not in needs_list:
+                continue
+            for index, step in enumerate(job.get("steps") or []):
+                if not isinstance(step, dict):
+                    continue
+                condition = str(step.get("if") or "")
+                if CHANGES_SKIP_MARKER in condition:
+                    continue  # the leading "No relevant changes" step itself
+                if condition.strip() == MERGE_GROUP_ONLY_MARKER:
+                    continue  # cleat#2080/#2105's own report-only step
+                if CHANGES_GATE in condition:
+                    continue
+                label = step.get("name") or step.get("uses") or f"step {index}"
+                errors.append(
+                    f"{path}: job {job_id!r} depends on `changes` but step "
+                    f"{label!r} has no `if: {CHANGES_GATE}` -- cleat#2118. "
+                    f"It will run unconditionally on a docs-only pull "
+                    f"request, silently spending the minutes this gate "
+                    f"exists to save."
+                )
+
+
 def verify_against_api() -> int:
     """Compare the checked-in list to branch protection. Needs an admin token."""
     try:
@@ -369,6 +430,7 @@ def main() -> int:
     guard_no_continue_on_error(jobs, required, errors)
     guard_no_floating_service_images(errors)
     guard_ancestor_filters_match_images(errors)
+    guard_changes_gated_steps_are_skippable(errors)
 
     for error in errors:
         print(f"::error title=Workflow integrity::{error}")
