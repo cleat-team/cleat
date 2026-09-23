@@ -3030,33 +3030,15 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 	w.Metrics.RecordDBQueryLatency(context.Background(), time.Since(queryStart), "finalize")
 
-	// Signal the dispatch loop to poll immediately. The parent
-	// was woken atomically inside FinalizeWorkflowSegment.
-	if finalStatus == "done" || finalStatus == "failed" {
-		select {
-		case w.parentWakeCh <- struct{}{}:
-		default:
-		}
-	}
-
-	// A workflow that has just gone terminal can never handle an update, so
-	// anything still pending against it is stranded. IMPROVEMENT-PLAN 3.238.
-	if finalStatus == "done" || finalStatus == "failed" {
-		w.failStrandedUpdates(wf, finalStatus)
-	}
-
-	// A plugin that started this run (jobqueue, currently the only one) wants
-	// to record its actual outcome. cleat#1715. Best-effort and after the
-	// fact -- see plugin.HasFinalizeObserver's doc comment for the gap this
-	// leaves and why the abandonment sweep is what actually closes it, not
-	// this call being made "soon enough".
-	if finalStatus == "done" || finalStatus == "failed" {
-		for _, obs := range w.finalizeObservers {
-			if obsErr := obs.ObserveFinalize(context.Background(), wf.ID, finalStatus); obsErr != nil {
-				w.logger.ErrorContext(context.Background(), "finalize observer failed",
-					"worker_id", w.id, "workflow_id", wf.ID, "plugin", obs.Info().Name, "error", obsErr)
-			}
-		}
+	// finalStatus here is only ever "done" or "ready" (set a few lines up),
+	// never "failed" -- a segment that fails does not reach FinalizeWorkflowSegment
+	// at all, it goes through recordTerminalFailureWithHistory instead. "ready"
+	// is a suspend, not a terminal outcome, so it owes none of the three
+	// post-settle side effects. See notifyTerminal for what those are and why
+	// this used to gate on "done" || "failed" here, which made half of every
+	// gate below dead. cleat#1976.
+	if finalStatus == "done" {
+		w.notifyTerminal(wf, finalStatus)
 	}
 
 	// Post-finalization: logging and non-DB side effects.
@@ -4586,6 +4568,47 @@ func (w *Worker) failStrandedUpdates(wf *engine.WorkflowInstance, terminalStatus
 		"worker_id", w.id, "workflow_id", wf.ID, "terminal_status", terminalStatus, "count", len(updates))
 }
 
+// notifyTerminal performs the three side effects every settled workflow owes,
+// regardless of which of the four terminal code paths produced the outcome:
+// waking any parent awaiting this run, failing stranded update requests, and
+// telling finalize observers (jobqueue, currently the only implementer of
+// plugin.HasFinalizeObserver) the real status. cleat#1976.
+//
+// Before this, three of the four terminal paths reached only some of the
+// three: the normal finalize path did all three but gated every one of them
+// on `finalStatus == "done" || finalStatus == "failed"`, when finalStatus
+// there is never "failed" -- so that half of every gate was dead. The
+// terminal-failure path (recordTerminalFailureWithHistory) failed stranded
+// updates but never woke the parent or notified observers, which is why
+// jobqueue's abandonment sweep -- not ObserveFinalize -- was what eventually
+// marked a failed run's job row, and marked it 'abandoned' rather than
+// 'failed'. The panic path (releaseOrFail) did none of the three. Only
+// finishDeferPhase did parent-wake and stranded-updates but never observers.
+//
+// finalStatus is passed straight to observers rather than narrowed to
+// "done"/"failed": workflow_instances.status has five terminal values in
+// production (engine/store_lifecycle.go's own census -- 'done', 'failed',
+// 'dead_lettered', 'terminated', 'cancelled'), and an observer that only
+// ever saw two of them could not tell a dead-lettered run from an ordinary
+// failure, which is exactly the ambiguity jobqueue's own status column
+// exists to remove. See jobqueue's ObserveFinalize for how it maps the
+// other three.
+func (w *Worker) notifyTerminal(wf *engine.WorkflowInstance, finalStatus string) {
+	select {
+	case w.parentWakeCh <- struct{}{}:
+	default:
+	}
+
+	w.failStrandedUpdates(wf, finalStatus)
+
+	for _, obs := range w.finalizeObservers {
+		if obsErr := obs.ObserveFinalize(context.Background(), wf.ID, finalStatus); obsErr != nil {
+			w.logger.ErrorContext(context.Background(), "finalize observer failed",
+				"worker_id", w.id, "workflow_id", wf.ID, "plugin", obs.Info().Name, "error", obsErr)
+		}
+	}
+}
+
 // classifyTerminalErrorCode upgrades an unclassified terminal failure to
 // retries_exhausted when the engine's own signal says that is what happened.
 //
@@ -4881,9 +4904,15 @@ func (w *Worker) recordTerminalFailureWithHistory(wf *engine.WorkflowInstance, s
 	if !applied {
 		return
 	}
-	// See failStrandedUpdates: the workflow is terminal, so no future segment
-	// can handle an update still pending against it.
-	w.failStrandedUpdates(wf, "failed")
+	// "dead_lettered", not "failed", when the retry-exhaustion classifier
+	// said so -- notifyTerminal passes this straight to finalize observers,
+	// and jobqueue's ObserveFinalize records it as its own distinct status
+	// rather than folding it into an ordinary failure. cleat#1976.
+	status := "failed"
+	if deadLettered {
+		status = "dead_lettered"
+	}
+	w.notifyTerminal(wf, status)
 	ctx := context.Background()
 	w.Metrics.RecordWorkflowFailed(ctx, wf.DefName, "")
 	w.Metrics.RecordWorkflowDuration(ctx, time.Since(startedAt), wf.DefName, "failed", "")
@@ -4952,16 +4981,15 @@ func (w *Worker) finishDeferPhase(wf *engine.WorkflowInstance, execStore engine.
 		return
 	}
 
-	// The parent wake happens inside the finalize, like every other terminal
-	// transition; this only prods the dispatch loop to look.
-	select {
-	case w.parentWakeCh <- struct{}{}:
-	default:
-	}
-
-	// The recorded outcome is now applied, so this workflow is terminal and
-	// any update still pending against it is stranded. See failStrandedUpdates.
-	w.failStrandedUpdates(wf, wf.PendingTerminalStatus)
+	// The recorded outcome is now applied, so this workflow is terminal: wake
+	// any parent awaiting it, fail any update still pending against it, and
+	// tell finalize observers the real outcome -- previously the one thing
+	// this path never did, so a job dispatched through a workflow that was
+	// cancelled or force-terminated (both routed here, per
+	// engine.WorkflowStore's TerminateWorkflow/CancelWorkflow doc comments)
+	// never got a write-back and was only ever recovered by the abandonment
+	// sweep, marked 'abandoned' rather than its real outcome. cleat#1976.
+	w.notifyTerminal(wf, wf.PendingTerminalStatus)
 
 	w.Metrics.RecordWorkflowDuration(ctx, time.Since(startedAt), wf.DefName, wf.PendingTerminalStatus, "")
 	w.logger.InfoContext(ctx, "defer phase complete; terminal outcome applied",
@@ -4993,21 +5021,29 @@ func (w *Worker) releaseOrFail(wf *engine.WorkflowInstance, errMsg string) {
 		w.releaseWorkflow(wf)
 		return
 	}
-	// Deliberately not recordTerminalFailure: this path never recorded the
-	// failed/duration pair, and it has no start time to report a duration
-	// from. Only the dead-letter counter, as before -- now conditional on the
-	// write applying.
+	// Deliberately not recordTerminalFailure: this path has no start time to
+	// report a duration from.
 	//
 	// eligibleForDLQ is false and the code is no longer blank. The only caller
 	// is the panic recovery in executeWorkflow, so errMsg here is always
 	// "panic: <value>" -- and a panic is not a retry exhaustion. Until this
 	// argument existed the routing was decided by whether the panic VALUE
 	// happened to contain the words "retries exhausted", which is an accident
-	// either way it lands.
-	if applied, deadLettered := w.writeTerminalFailure(wf, errMsg,
-		engine.ErrUnknown.String(), "panic", false, nil); applied && deadLettered {
-		w.Metrics.RecordWorkflowsDeadLettered(context.Background())
+	// either way it lands. eligibleForDLQ=false short-circuits deadLettered to
+	// always false, so there is nothing left to distinguish here.
+	//
+	// Until cleat#1976 this was the only one of the four terminal paths that
+	// woke no parent, failed no stranded update, notified no finalize
+	// observer, and recorded no workflows_failed_total: a workflow that
+	// panicked left its parent waiting out its full timer, and its job (if
+	// jobqueue-dispatched) recoverable only by the abandonment sweep, marked
+	// 'abandoned' rather than 'failed'.
+	applied, _ := w.writeTerminalFailure(wf, errMsg, engine.ErrUnknown.String(), "panic", false, nil)
+	if !applied {
+		return
 	}
+	w.notifyTerminal(wf, "failed")
+	w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "")
 }
 
 // dbServiceCaller implements engine.ServiceCaller for the worker.

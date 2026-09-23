@@ -21,7 +21,23 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
+
+// fakeFinalizeObserver records every ObserveFinalize call it receives, so a
+// test can assert not just that notifyTerminal fired but what status it
+// actually passed. cleat#1976.
+type fakeFinalizeObserver struct {
+	name  string
+	calls []struct{ runID, status string }
+}
+
+func (f *fakeFinalizeObserver) Info() plugin.PluginInfo                         { return plugin.PluginInfo{Name: f.name} }
+func (f *fakeFinalizeObserver) Init(context.Context, *plugin.Environment) error { return nil }
+func (f *fakeFinalizeObserver) ObserveFinalize(_ context.Context, runID, finalStatus string) error {
+	f.calls = append(f.calls, struct{ runID, status string }{runID, finalStatus})
+	return nil
+}
 
 // failedTotalFor scrapes the worker's own /metrics endpoint and returns the
 // cleat_workflows_failed_total sample lines mentioning defName. Reading the
@@ -381,5 +397,131 @@ func TestReleaseWorkflow_FenceLostIsNotAnError(t *testing.T) {
 
 	if samples := failedTotalFor(t, w, defName); len(samples) > 0 {
 		t.Errorf("a lost fence on release was counted as a workflow failure:\n  %s", strings.Join(samples, "\n  "))
+	}
+}
+
+// TestRecordTerminalFailureWithHistory_NotifiesTerminal is cleat#1976's own
+// named regression: before it, this path failed stranded updates but never
+// woke the parent and never called a finalize observer, which is why a
+// jobqueue-dispatched job whose workflow failed was only ever recovered by
+// the abandonment sweep -- and marked 'abandoned', not 'failed'. See
+// plugins/jobqueue's TestAJobWhoseWorkflowFailed for the same acceptance
+// criterion from jobqueue's own side.
+func TestRecordTerminalFailureWithHistory_NotifiesTerminal(t *testing.T) {
+	ms := &mockStore{}
+	ms.failWorkflowFn = func(context.Context, string, string, int64, string, string, string, map[string]string) error {
+		return nil
+	}
+	w := newTestWorker(ms)
+	w.parentWakeCh = make(chan struct{}, 1)
+	obs := &fakeFinalizeObserver{name: "fake"}
+	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
+
+	wf := testInstance("notify-on-fail-wf")
+	w.recordTerminalFailureWithHistory(wf, time.Now(), "boom", engine.ErrUnknown.String(), "", nil)
+
+	select {
+	case <-w.parentWakeCh:
+	default:
+		t.Error("an ordinary terminal failure did not wake the parent-wake loop")
+	}
+	if len(obs.calls) != 1 {
+		t.Fatalf("finalize observer called %d times, want 1", len(obs.calls))
+	}
+	if got := obs.calls[0]; got.runID != wf.ID || got.status != "failed" {
+		t.Errorf("finalize observer got (runID=%q, status=%q), want (%q, %q)",
+			got.runID, got.status, wf.ID, "failed")
+	}
+}
+
+// TestRecordTerminalFailureWithHistory_DeadLetteredNotifiesDistinctly checks
+// that a dead-lettered run is not reported to observers as an ordinary
+// "failed" -- an operator (or jobqueue's task_queue row) asking "did this
+// fail or is it sitting in the dead-letter queue for redrive?" needs the
+// distinction, and folding both into "failed" is exactly the ambiguity
+// task_queue's own third status exists to remove. cleat#1976.
+func TestRecordTerminalFailureWithHistory_DeadLetteredNotifiesDistinctly(t *testing.T) {
+	ms := &mockStore{}
+	ms.moveToDeadLetterQueueFn = func(context.Context, string, string, int64, string, string, string) error {
+		return nil
+	}
+	w := newTestWorker(ms)
+	w.parentWakeCh = make(chan struct{}, 1)
+	obs := &fakeFinalizeObserver{name: "fake"}
+	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
+
+	history := []engine.EventRecord{{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+		Err: "retries exhausted", RetriesExhausted: true,
+	}}
+	wf := testInstance("notify-dlq-wf")
+	w.recordTerminalFailureWithHistory(wf, time.Now(), "retries exhausted", "", "", history)
+
+	if len(obs.calls) != 1 {
+		t.Fatalf("finalize observer called %d times, want 1", len(obs.calls))
+	}
+	if got := obs.calls[0].status; got != "dead_lettered" {
+		t.Errorf("finalize observer got status=%q for a dead-lettered run, want %q -- "+
+			"folding it into a plain \"failed\" loses the distinction task_queue's own "+
+			"third status exists to carry", got, "dead_lettered")
+	}
+}
+
+// TestReleaseOrFail_NotifiesTerminal is cleat#1976's regression for the panic
+// path, which before this fix was the only one of the four terminal paths
+// that woke no parent, notified no finalize observer, and recorded no
+// workflows_failed_total at all -- see TestAPanicIsNeverDeadLettered above
+// for the routing half; this is the notification half.
+func TestReleaseOrFail_NotifiesTerminal(t *testing.T) {
+	ms := &mockStore{}
+	ms.failWorkflowFn = func(context.Context, string, string, int64, string, string, string, map[string]string) error {
+		return nil
+	}
+	w := newTestWorker(ms)
+	w.parentWakeCh = make(chan struct{}, 1)
+	obs := &fakeFinalizeObserver{name: "fake"}
+	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
+
+	const defName = "panic-notify-wf"
+	wf := testInstance(defName)
+	w.releaseOrFail(wf, "panic: index out of range")
+
+	select {
+	case <-w.parentWakeCh:
+	default:
+		t.Error("a panic-terminated workflow did not wake the parent-wake loop")
+	}
+	if len(obs.calls) != 1 {
+		t.Fatalf("finalize observer called %d times, want 1", len(obs.calls))
+	}
+	if got := obs.calls[0]; got.runID != wf.ID || got.status != "failed" {
+		t.Errorf("finalize observer got (runID=%q, status=%q), want (%q, %q)",
+			got.runID, got.status, wf.ID, "failed")
+	}
+	if samples := failedTotalFor(t, w, defName); len(samples) == 0 {
+		t.Error("a panic-terminated workflow was not counted in cleat_workflows_failed_total")
+	}
+}
+
+// TestReleaseOrFail_ReleaseDoesNotNotify is the positive control for the
+// tests above: releaseOrFail's early-return branch (errMsg == "") is a
+// re-queue, not a terminal outcome, and must not fire any of the three
+// post-settle side effects.
+func TestReleaseOrFail_ReleaseDoesNotNotify(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.parentWakeCh = make(chan struct{}, 1)
+	obs := &fakeFinalizeObserver{name: "fake"}
+	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
+
+	w.releaseOrFail(testInstance("released-not-failed-wf"), "")
+
+	select {
+	case <-w.parentWakeCh:
+		t.Error("a released (non-terminal) workflow woke the parent-wake loop")
+	default:
+	}
+	if len(obs.calls) != 0 {
+		t.Errorf("a released (non-terminal) workflow notified %d finalize observer(s), want 0", len(obs.calls))
 	}
 }
