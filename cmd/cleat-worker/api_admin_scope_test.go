@@ -47,7 +47,7 @@ func TestAdminForceResolveUsesCallerTenantStore(t *testing.T) {
 			},
 		},
 		{
-			path: "force-fail", confirm: "force-fail", body: `{"generation":3,"error_message":"x","error_code":"y"}`,
+			path: "force-fail", confirm: "force-fail", body: `{"generation":3,"error_message":"x","error_code":"timeout"}`,
 			arm: func(ms *mockStore, reached *bool) {
 				ms.adminForceFailFn = func(context.Context, string, int64, string, string, string) error {
 					*reached = true

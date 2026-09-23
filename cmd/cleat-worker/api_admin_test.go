@@ -170,7 +170,7 @@ func TestAdminForceFail_Success(t *testing.T) {
 	mux := http.NewServeMux()
 	registerRoutes(mux, api)
 
-	body := `{"generation": 1, "error_message": "boom", "error_code": "ERR"}`
+	body := `{"generation": 1, "error_message": "boom", "error_code": "timeout"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/instances/wf-1/force-fail", strings.NewReader(body))
 	req.Header.Set("X-Confirm", "force-fail")
 	w := httptest.NewRecorder()
@@ -184,6 +184,42 @@ func TestAdminForceFail_Success(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp["status"] != "failed" {
 		t.Errorf("expected status 'failed', got %s", resp["status"])
+	}
+}
+
+// TestAdminForceFail_UnrecognizedErrorCodeIs400 is the HTTP half of
+// cleat#1977 (D5): engine/force_fail_error_code_test.go pins the same
+// refusal against real rows on every dialect. Here the mock's
+// adminForceFailFn is armed to flip a flag on any call, so a 400 with the
+// flag still false proves the request never reached the store -- not just
+// that the response code looked right.
+func TestAdminForceFail_UnrecognizedErrorCodeIs400(t *testing.T) {
+	enabled := true
+	old := enableAdminAPI
+	enableAdminAPI = &enabled
+	defer func() { enableAdminAPI = old }()
+
+	ms := &mockStore{}
+	reached := false
+	ms.adminForceFailFn = func(context.Context, string, int64, string, string, string) error {
+		reached = true
+		return nil
+	}
+	api := newTestAPIServer(ms)
+	mux := http.NewServeMux()
+	registerRoutes(mux, api)
+
+	body := `{"generation": 1, "error_message": "boom", "error_code": "banana"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/instances/wf-1/force-fail", strings.NewReader(body))
+	req.Header.Set("X-Confirm", "force-fail")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if reached {
+		t.Error("the store's AdminForceFail was reached for an unrecognized error_code")
 	}
 }
 
@@ -288,7 +324,7 @@ func adminActions() []adminAction {
 			},
 		},
 		{
-			path: "force-fail", confirm: "force-fail", body: `{"generation":1,"error_message":"x","error_code":"y"}`,
+			path: "force-fail", confirm: "force-fail", body: `{"generation":1,"error_message":"x","error_code":"timeout"}`,
 			arm: func(ms *mockStore, reached *bool) {
 				ms.adminForceFailFn = func(context.Context, string, int64, string, string, string) error {
 					*reached = true

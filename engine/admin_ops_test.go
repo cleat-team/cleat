@@ -61,6 +61,12 @@ type adminOpsTestStore struct {
 	forceCompleteErr error
 	forceFailErr     error
 	reReplayErr      error
+
+	// forceFailCalled and forceFailGotErrorCode record what ForceFail
+	// actually passed to the store, so a validation test can assert the
+	// store was (or, for a rejected code, was NOT) reached at all -- cleat#1977.
+	forceFailCalled       bool
+	forceFailGotErrorCode string
 }
 
 func (s *adminOpsTestStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
@@ -68,6 +74,8 @@ func (s *adminOpsTestStore) AdminForceComplete(ctx context.Context, workflowID s
 }
 
 func (s *adminOpsTestStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	s.forceFailCalled = true
+	s.forceFailGotErrorCode = errorCode
 	return s.forceFailErr
 }
 
@@ -96,6 +104,45 @@ func TestForceFail_Validation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "workflow ID is required") {
 		t.Errorf("expected 'workflow ID is required' error, got: %v", err)
 	}
+}
+
+// TestForceFail_ErrorCodeValidation is the fast, no-DB half of cleat#1977's
+// three acceptance cases; engine/force_fail_error_code_test.go covers the
+// same three against real rows on every dialect.
+func TestForceFail_ErrorCodeValidation(t *testing.T) {
+	t.Run("empty defaults to operator", func(t *testing.T) {
+		store := &adminOpsTestStore{}
+		if err := ForceFail(context.Background(), store, "wf-1", 0, "op", "msg", ""); err != nil {
+			t.Fatalf("ForceFail with empty error_code: %v", err)
+		}
+		if !store.forceFailCalled {
+			t.Fatal("AdminForceFail was never called")
+		}
+		if store.forceFailGotErrorCode != "operator" {
+			t.Errorf("error_code passed to the store = %q, want %q", store.forceFailGotErrorCode, "operator")
+		}
+	})
+
+	t.Run("unrecognized code is rejected before the store is called", func(t *testing.T) {
+		store := &adminOpsTestStore{}
+		err := ForceFail(context.Background(), store, "wf-1", 0, "op", "msg", "banana")
+		if !errors.Is(err, ErrAdminBadRequest) {
+			t.Fatalf("ForceFail with error_code=banana: err = %v, want ErrAdminBadRequest", err)
+		}
+		if store.forceFailCalled {
+			t.Error("AdminForceFail was called for a rejected error_code")
+		}
+	})
+
+	t.Run("a recognized code passes through unchanged", func(t *testing.T) {
+		store := &adminOpsTestStore{}
+		if err := ForceFail(context.Background(), store, "wf-1", 0, "op", "msg", "timeout"); err != nil {
+			t.Fatalf("ForceFail with error_code=timeout: %v", err)
+		}
+		if store.forceFailGotErrorCode != "timeout" {
+			t.Errorf("error_code passed to the store = %q, want %q", store.forceFailGotErrorCode, "timeout")
+		}
+	})
 }
 
 func TestReReplay_Validation(t *testing.T) {
@@ -135,7 +182,7 @@ func TestAdminOps_UnknownWorkflow(t *testing.T) {
 		forceFailErr: errors.New("admin force-fail: workflow wf-999 not found"),
 	}
 
-	err := ForceFail(context.Background(), store, "wf-999", 5, "op", "boom", "ERR")
+	err := ForceFail(context.Background(), store, "wf-999", 5, "op", "boom", "timeout")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

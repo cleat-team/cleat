@@ -57,6 +57,17 @@ func ForceFail(ctx context.Context, store WorkflowStore, workflowID string, gene
 	if operator == "" {
 		operator = "unknown"
 	}
+	// cleat#1977 (D5): error_code used to be free text, so the column could
+	// hold anything -- an operator typo became a permanent, unrecognized
+	// classification on the row. No code at all means this failure has no
+	// classification but an operator, not the engine, decided it: ErrOperator,
+	// not ErrUnknown, which every other write path already means "the engine
+	// could not classify this."
+	if errorCode == "" {
+		errorCode = ErrOperator.String()
+	} else if !IsRecognizedErrorCodeString(errorCode) {
+		return adminErrorf(ErrAdminBadRequest, "force-fail: error_code %q is not a recognized code", errorCode)
+	}
 
 	if err := store.AdminForceFail(ctx, workflowID, generation, errorMsg, errorCode, operator); err != nil {
 		return fmt.Errorf("force-fail: %w", err)

@@ -902,6 +902,12 @@ These codes classify runtime errors for retry decisions. They appear in the
 | `ErrTimeout` | `"timeout"` | Execution exceeded its deadline |
 | `ErrAmbiguous` | `"ambiguous"` | Call outcome unknown after crash; caller should check the external service before retrying |
 | `ErrRetriesExhausted` | `"retries_exhausted"` | All retry attempts were exhausted |
+| `ErrOperator` | `"operator"` | An operator force-failed the workflow (`POST /api/admin/instances/:id/force-fail`) without supplying an `error_code`; not derived by the engine |
+
+**Force-fail's `error_code` is restricted to this set** (cleat#1977, D5):
+`POST /api/admin/instances/:id/force-fail` with no `error_code` records
+`"operator"`; one naming a code from this table is stored as given; any other
+value is rejected with 400 before the row is touched.
 
 **Retry behaviour:**
 
