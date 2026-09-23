@@ -1085,6 +1085,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Reconcile every already-provisioned tenant's role password to the
+	// current key, unconditionally, on every boot. cleat#1990: without this, a
+	// --tenant-role-secret-file rotation broke every existing tenant's pool
+	// until an operator manually re-derived and re-ALTERed each one --
+	// --create-tenant only provisions a NEW tenant under whichever key that
+	// run has, and nothing revisited a tenant --create-tenant had already
+	// provisioned under a prior key. See plugin.ReconcileTenantRolePasswords's
+	// doc comment for why this runs every boot rather than only after a
+	// detected change, and why a failure here is fatal rather than logged and
+	// skipped.
+	if tenantMode == isolationRole {
+		n, rErr := plugin.ReconcileTenantRolePasswords(ctx, migrateDB, tenantSecret)
+		if rErr != nil {
+			logger.ErrorContext(context.Background(), "failed to reconcile tenant role passwords — an existing tenant's pool may be unable to authenticate", "worker_id", workerID, "error", rErr)
+			os.Exit(1)
+		}
+		logger.InfoContext(context.Background(), "reconciled tenant role passwords", "worker_id", workerID, "count", n)
+	}
+
 	// Now that the schema (and its policies) exist, check that the *runtime*
 	// connection is actually subject to them. See engine.CheckRLSEnforced:
 	// GetWorkflowByID and ListWorkflows have no application-level tenant
