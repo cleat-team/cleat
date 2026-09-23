@@ -56,6 +56,7 @@ SECTION_BLOCKS=(
   "WS-1:200-299"
   "WS-2:300-399"
   "WS-3:400-499"
+  "WS-4:500-599"
 )
 
 # Which sandbox is which stream. Keyed on the git COMMON directory rather than
