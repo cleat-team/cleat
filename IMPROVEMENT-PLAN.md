@@ -891,8 +891,11 @@ for attention at the seams, and it went unspent there.
   and pre-refactor paths.
 - `specs/CleatClaim.tla` — **fixed in cleat#1996.** Parses under SANY and checks clean under
   TLC (`make tla`, wired into CI on `specs/**` and its named implementers), with a real
-  `.cfg`. The other three specs are marked not-maintained in `specs/README.md` rather than
-  fixed, superseded by the model issues in cleat#1997-#2000.
+  `.cfg`. `specs/CleatQueueAdmission.tla` — **fixed in cleat#2000** the same way, and directly
+  replaces (and, since its replacement landed, deletes) `specs/CleatConcurrencyKeys.tla`,
+  which this bullet used to count among "the other three" unmaintained specs. The remaining
+  two (`CleatSignals.tla`, `CleatStateMachine.tla`) are marked not-maintained in
+  `specs/README.md` rather than fixed, superseded by the model issues in cleat#1997-#1999.
 - Head-to-head numbers still do not exist. `benchmarks/comparative/` was removed from this
   repo in favour of [cleat-bench](https://github.com/cleat-team/cleat-bench), which already
   has the runners, seven workload specs and the AWS infrastructure — **run them there.**

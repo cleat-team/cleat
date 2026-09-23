@@ -2,17 +2,26 @@
 
 Five specifications of cleat's concurrency-sensitive protocols.
 
-**`CleatClaim.tla` (cleat#1996) and `CleatRunLifecycle.tla` (cleat#1997) have been
-model-checked.** The other three — `CleatConcurrencyKeys.tla`, `CleatSignals.tla`,
-`CleatStateMachine.tla` — are **not maintained**. Per cleat#1996 they are not being brought
-up to SANY/TLC parity themselves; they are superseded by `CleatRunLifecycle.tla`, by
-cleat#1998 (parents awaiting children, parent-close cascades) and cleat#2000 (queue
-admission, rate tokens, claim fairness) — read those issues for the actual scope rather than
-assuming a 1:1 file replacement, since none of them commits to reusing a legacy file's name
-or structure. cleat#1999 (durable-call intents, re-replay, retention) is a fourth new model
-with no legacy predecessor in this directory at all. Do not cite any of the unmaintained
-three as proof a protocol is correct, and re-derive the table below rather than trusting
-it — see CLAUDE.md's own rule on why a count like this rots.
+**`CleatClaim.tla` (cleat#1996), `CleatRunLifecycle.tla` (cleat#1997) and
+`CleatQueueAdmission.tla` (cleat#2000) have been model-checked.** The other two —
+`CleatSignals.tla`, `CleatStateMachine.tla` — are **not maintained**. Per cleat#1996 they are
+not being brought up to SANY/TLC parity themselves; they are superseded by
+`CleatRunLifecycle.tla` and by cleat#1998 (parents awaiting children, parent-close cascades) —
+read that issue for the actual scope rather than assuming a 1:1 file replacement, since it
+does not commit to reusing a legacy file's name or structure. cleat#1999 (durable-call
+intents, re-replay, retention) is a fourth new model with no legacy predecessor in this
+directory at all. Do not cite either unmaintained file as proof a protocol is correct, and
+re-derive the table below rather than trusting it — see CLAUDE.md's own rule on why a count
+like this rots.
+
+**`CleatConcurrencyKeys.tla` is gone, not merely superseded.** cleat#2000's own scope was to
+replace it, and unlike Signals/StateMachine (which have no committed replacement file yet)
+`CleatQueueAdmission.tla` is a direct, landed replacement — see "What `CleatQueueAdmission.tla`
+covers, and what it deliberately doesn't" below for the boundary between what it took over and
+what it deliberately left out (the bare-key mutex case `CleatConcurrencyKeys.tla` modelled is
+argued, not re-modelled). Keeping a confirmed-superseded, never-checked file around past its
+replacement landing is a maintenance burden with no offsetting benefit, so it was deleted
+rather than left to keep saying "not maintained" beside its own replacement.
 
 **cleat#2034, filed 2026-09-23: `CleatClaim.tla`'s own `ClaimProgress` may be silently
 vacuous, not actually verified by the "No error has been found" this file used to cite
@@ -28,13 +37,13 @@ of-failing** until cleat#2034 closes.
 
 ## What is and is not true, per spec
 
-| | CleatClaim | CleatRunLifecycle | ConcurrencyKeys | Signals | StateMachine |
+| | CleatClaim | CleatRunLifecycle | QueueAdmission | Signals | StateMachine |
 |---|---|---|---|---|---|
-| Parsed by SANY | **Yes** | **Yes** | No | No | No |
-| Checked by TLC | **Yes**, but see cleat#2034 | **Yes** | No | No | No |
-| `.cfg` exists | **Yes** | **Yes** | No | No | No |
-| Run in CI | **Yes**, on touching PRs | **Yes**, on touching PRs | No | No | No |
-| Maintained | **Yes** | **Yes** | **No — superseded, see above** | **No — superseded, see above** | **No — superseded, see above** |
+| Parsed by SANY | **Yes** | **Yes** | **Yes** | No | No |
+| Checked by TLC | **Yes**, but see cleat#2034 | **Yes** | **Yes** | No | No |
+| `.cfg` exists | **Yes** | **Yes** | **Yes** | No | No |
+| Run in CI | **Yes**, on touching PRs | **Yes**, on touching PRs | **Yes**, on touching PRs | No | No |
+| Maintained | **Yes** | **Yes** | **Yes** | **No — superseded, see above** | **No — superseded, see above** |
 
 ## `CleatRunLifecycle.tla` (cleat#1997)
 
@@ -98,7 +107,33 @@ does not bound `heartbeatAt`/`nextWakeAt`, which range freely beneath it; the st
 governed by those, not by the clock bound. Keep the bounds small and prefer widening a
 specific dimension deliberately over assuming a bound "usually sufficient" without measuring.
 
-## Known drift: the spec models the claim protocol as of 2026-08-02, not as of today
+`CleatQueueAdmission.cfg`: `NumTenants = 2`, `RunsPerTenant = 2`, `Workers = {w1, w2}`,
+`ConcurrencyLimit = 2`, `WorkerCap = 1`, `RateLimit = 1`, `RatePeriod = 1`, clock bounded by
+`ClockBound == clock < 6`. Measured 2026-09-23: 62,352 distinct states, 1,088,545 states
+generated, search depth 6, finished in ~33s. `TypeOK`, `RunningRunsHoldSlots`, `S1`, `S3`,
+`S2`, `L1` and `L2` all hold at this bound — re-derive with `make tla`, not by trusting this
+paragraph.
+
+An earlier attempt at `NumTenants = 2, RunsPerTenant = 2, Workers = {w1, w2}, ConcurrencyLimit
+= 1, WorkerCap = 1, RateLimit = 1, RatePeriod = 2, clock < 8` did not finish in over four
+minutes and was killed rather than measured to completion — the same "still growing" failure
+mode `CleatClaim.cfg`'s own history records above, reached by a different set of dials
+(`RatePeriod`, not the clock bound itself, widens `rateTokenExpiresAt`'s own range the same
+way `heartbeatAt`/`nextWakeAt` do in `CleatClaim.tla`). Bounds were then found by growing from
+a much smaller, fast-measured config (`NumTenants = 2, RunsPerTenant = 1, Workers = {w1}`,
+everything else at 1: 1,657 distinct states, well under a second) one dimension at a time
+rather than by editing the killed config down.
+
+**Known-positive, not just a clean run.** Before trusting the "no error" result above, the
+`ConcurrencyLimit` conjunct was deliberately deleted from `CanAdmit` and TLC was re-run
+against a config with `RunsPerTenant = 3, ConcurrencyLimit = 2, WorkerCap = 2` (chosen so the
+per-worker cap alone could not coincidentally re-impose the same bound: 2 workers × cap 2 ==
+4 > limit 2). TLC found a counterexample at depth 5 — three live holders on one tenant's
+queue against a declared limit of two — confirming `S1` actually discriminates rather than
+passing vacuously. CLAUDE.md's own rule: a check that has never been shown capable of failing
+is a claim, not a verification.
+
+## Known drift: `CleatClaim.tla` models the claim protocol as of 2026-08-02, not as of today
 
 `CleatClaim.tla`'s `Claim`/`Heartbeat`/`Fail`/`Release` actions predate cleat#1965 (holder
 validity now follows run state, not a bare `assigned_to` match) and cleat#1917
@@ -106,49 +141,79 @@ validity now follows run state, not a bare `assigned_to` match) and cleat#1917
 "no error" above is a true statement about the model as written, not a verification of the
 current `HeartbeatBatchFenced`/claim path — see cleat#2008 (cleat/PR#2015) for a recent,
 real bug in that exact area that a stale model would not have been positioned to catch
-either way, since it never modelled per-execution fencing at all. cleat#2000 (queue
-admission, rate tokens and claim fairness, explicitly scoped "before #1917 is built") is the
-most likely home for the `worker_concurrency` half of this drift; the #1965 holder-validity
-half has no issue of its own yet and is recorded here so it is not lost. Neither is folded
-into this PR silently — this paragraph is the disclosure.
+either way, since it never modelled per-execution fencing at all.
 
-## Implementation references are stale in the three unmaintained specs
+`CleatQueueAdmission.tla` (cleat#2000) is now where the `worker_concurrency` (#1917) and
+run-state holder-validity (#1965) halves of this drift are modelled — see its own header and
+"What `CleatQueueAdmission.tla` covers" below. This closes the drift for the QUEUE path.
+**It does not touch `CleatClaim.tla` itself**, whose own `Claim`/`Heartbeat`/`Fail`/`Release`
+actions model the bare-key/no-queue claim and still predate both #1965 and #1917 exactly as
+this paragraph originally recorded — that half of the drift is not folded in here, and remains
+open.
 
-`CleatClaim.tla`'s header now names its current implementing files (no line numbers) and is
-current as of this PR. The three unmaintained specs still cite `internal/host/db.go` and
-similar paths from before commit `3eeb74e` (2026-06-01, the `internal/host` → `engine`
-move and the `durable → cleat` rename) — do not trust them, and do not spend time fixing
-them, since they are superseded rather than being brought current.
+## What `CleatQueueAdmission.tla` covers, and what it deliberately doesn't
+
+Read the spec's own header first — it is longer and more precise than this section, and this
+section will rot faster (CLAUDE.md's own rule). In short: it models a REGISTERED queue's
+admission gate (concurrency limit, cleat#1917's per-worker cap, cleat#1918's rate limiter,
+all three composed under one queues-row lock) and the per-worker rotation that spreads claims
+across tenants. It does NOT model the bare-key mutex (`concurrency_keys`, no registered
+queue) — the now-deleted `CleatConcurrencyKeys.tla` already argued that case is structurally
+trivial (a primary key gives mutual exclusion) and nothing built since changes that argument,
+which is why this file supersedes and retires it rather than extending it. It also does not
+model a holder MOVING to a different worker when a parked run wakes and is claimed elsewhere
+(cleat#1917 decision 4), the `claimedKeyTTL` time-based reap backstop (unreachable by any
+state this model can produce — see the header), or the retention-driven cascade delete of a
+settled run's row (subsumed by the run-state reap disjunct, which already fires before any
+retention sweep could run). None of these omissions are silent: each is named and argued in
+the spec's own header comment, not just here.
+
+## Implementation references are stale in the two unmaintained specs
+
+`CleatClaim.tla`'s and `CleatQueueAdmission.tla`'s headers name their current implementing
+files (no line numbers) and are current as of the PR that landed each. The two unmaintained
+specs still cite `internal/host/db.go` and similar paths from before commit `3eeb74e`
+(2026-06-01, the `internal/host` → `engine` move and the `durable → cleat` rename) — do not
+trust them, and do not spend time fixing them, since they are superseded rather than being
+brought current.
 
 ## Invariant-to-test mapping
 
-The policy going forward, for `CleatClaim.tla` and for the new models in cleat#1997-#2000:
-when TLC reports a counterexample, the fix is not to land directly. First write a
-dialect-parameterised Go test that reproduces the counterexample's trace against the real
-store (see `engine/heartbeat_batch_fenced_test.go` for the shape — a store-level test with a
-`postgres`/`mysql`/`mssql` subtest each), confirm it fails the way the model predicted, then
-land the fix with that test alongside it. A TLC counterexample without a corresponding Go
-test is a claim about the model, not yet a verified claim about the implementation; CLAUDE.md's
-"could this check have disagreed?" question applies here exactly as it does to any other guard.
-No counterexample has been found yet on `CleatClaim.tla`'s current bounds, so there is nothing
-to map today — this section exists so the next one that surfaces has a documented process to
-follow rather than an ad hoc call.
+The policy going forward, for `CleatClaim.tla`, `CleatQueueAdmission.tla`, and for the new
+models in cleat#1997-#1999: when TLC reports a counterexample, the fix is not to land
+directly. First write a dialect-parameterised Go test that reproduces the counterexample's
+trace against the real store (see `engine/heartbeat_batch_fenced_test.go` for the shape — a
+store-level test with a `postgres`/`mysql`/`mssql` subtest each), confirm it fails the way the
+model predicted, then land the fix with that test alongside it. A TLC counterexample without a
+corresponding Go test is a claim about the model, not yet a verified claim about the
+implementation; CLAUDE.md's "could this check have disagreed?" question applies here exactly
+as it does to any other guard.
 
-## Adding a model (cleat#1997-#2000)
+No counterexample has been found yet on either spec's shipped bounds, so there is nothing to
+map today — this section exists so the next one that surfaces has a documented process to
+follow rather than an ad hoc call. The one counterexample TLC has produced against either
+spec is the deliberate mutation recorded in "Bounds and state count" above (`S1`'s
+`ConcurrencyLimit` conjunct removed on purpose, to prove the invariant can fail); that is a
+known-positive control on the checker, not a defect report, and needs no Go test for the same
+reason a passing negative control never does.
 
-Per cleat#1996, the treatment is the same as `CleatClaim.tla` got, whether the result is a
-new file or eventually retires one of the three unmaintained ones: get it parsing and
-checking clean, write a `.cfg` with bounds small enough for `make tla` to stay well under a
-minute for that spec, record the bounds and state count here, and extend the CI job's path
-filter (and `make tla`'s spec discovery, which is "every `.tla` with a matching `.cfg`") to
-pick it up automatically — no per-spec CI wiring should be needed beyond adding the `.cfg`.
-Each new model's header must list its actors "from the code, not from memory" (cleat#1996's
-own rule) with the grep that found them, re-run whenever the spec is touched.
+## Adding a model (cleat#1997-#1999)
+
+Per cleat#1996, the treatment is the same `CleatClaim.tla` and `CleatQueueAdmission.tla` both
+got, whether the result is a new file or eventually retires one of the two remaining
+unmaintained ones: get it parsing and checking clean, write a `.cfg` with bounds small enough
+for `make tla` to stay well under a minute for that spec, record the bounds and state count
+here, and extend the CI job's path filter (and `make tla`'s spec discovery, which is "every
+`.tla` with a matching `.cfg`") to pick it up automatically — no per-spec CI wiring should be
+needed beyond adding the `.cfg`. Each new model's header must list its actors "from the code,
+not from memory" (cleat#1996's own rule) with the grep that found them, re-run whenever the
+spec is touched.
 
 ```sh
 # tla2tools.jar is not vendored here; fetched by checksum in CI. Locally:
 # https://github.com/tlaplus/tlaplus/releases
 java -cp tla2tools.jar tlc2.TLC -config specs/CleatClaim.cfg specs/CleatClaim.tla
+java -cp tla2tools.jar tlc2.TLC -config specs/CleatQueueAdmission.cfg specs/CleatQueueAdmission.tla
 ```
 
-Tracked in `IMPROVEMENT-PLAN.md` Phase 4, and in cleat#1997-#2000.
+Tracked in `IMPROVEMENT-PLAN.md` Phase 4, and in cleat#1997-#1999.
