@@ -1,8 +1,27 @@
 # ---------------------------------------------------------------------------
 # Publish Python SDK to PyPI
 #
-# Stream P — P2.6: Trusted publisher (OIDC) based PyPI publishing.
-# Triggered on tag push (python-sdk/v*) or when a release is published.
+# cleat#2127. Trusted publisher (OIDC) based PyPI publishing -- no API token
+# is used or stored anywhere.
+#
+# ONE trigger: push of a tag matching v* (e.g. v0.3.0). This is the SAME tag
+# .github/workflows/release.yml triggers on, and the one #2058's release
+# process actually creates -- the whole repo is released under one tag
+# (`All manifest versions become 0.3.0`), not a per-SDK python-sdk/vX.Y.Z tag.
+# A `release: published` trigger used to sit alongside this one; GoReleaser
+# (release.yml) creates a GitHub Release from that same v* push, so keeping
+# both meant the same version could be uploaded to PyPI twice from two
+# different events -- the second run failing on "file already exists", or
+# racing the first. `environment.pypi`'s deployment branch policy also allows
+# a `python-sdk/v*` tag (checked: `gh api repos/cleat-team/cleat/environments`),
+# which is a hook for a possible future per-SDK release process; nothing in
+# the repo creates that tag today, so it is not this workflow's trigger.
+#
+# `environment: pypi` is required, not decorative: the PyPI trusted publisher
+# was registered (2026-09-23, pending) for owner cleat-team, repo cleat,
+# workflow publish-pypi.yml, ENVIRONMENT pypi specifically -- the OIDC claim
+# PyPI checks is scoped to that environment, so a job running outside it
+# cannot authenticate no matter how permissions: is set.
 #
 # Requirements:
 #   - A PyPI trusted publisher must be configured for this repo.
@@ -11,10 +30,8 @@
 name: Publish Python SDK to PyPI
 
 on:
-  release:
-    types: [published]
   push:
-    tags: ["python-sdk/v*"]
+    tags: ["v*"]
 
 permissions:
   id-token: write
@@ -23,12 +40,36 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: pypi
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+
+      # cleat#2127 acceptance: a run where the tag and pyproject.toml disagree
+      # must fail HERE, before any upload -- not after PyPI has already
+      # rejected (or worse, accepted) an upload under the wrong name. There is
+      # no TestPyPI publisher configured (the owner skipped the optional
+      # rehearsal), so this is the only check standing between a bad tag and
+      # a real, unrecallable release.
+      #
+      # tomllib is stdlib since Python 3.11, so this reads pyproject.toml with
+      # no extra dependency. Deliberately does NOT rewrite the file -- #2058
+      # bumps python-sdk/pyproject.toml to 0.3.0 on the release branch, before
+      # the tag exists; this step only checks the two already agree.
+      - name: Verify the tag matches pyproject.toml's version
+        working-directory: python-sdk
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          tag_version="${tag#v}"
+          pkg_version="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          echo "tag ${tag} -> version ${tag_version}; pyproject.toml -> version ${pkg_version}"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::tag ${tag} (version ${tag_version}) does not match pyproject.toml's version ${pkg_version} -- refusing to publish. Bump python-sdk/pyproject.toml on the release branch before tagging." >&2
+            exit 1
+          fi
 
       - name: Build
         working-directory: python-sdk
