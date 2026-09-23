@@ -653,6 +653,32 @@ func (a *hostPluginRegistryAdapter) withSecrets(fn plugin.PluginFunc) plugin.Plu
 	}
 }
 
+// withSecretsStream is withSecrets for PluginStreamFunc (cleat#1987).
+//
+// RegisterStream used to hand fn straight to the stream registry with no
+// equivalent of withSecrets, so ${secret:NAME} in a streaming call's input --
+// llm.chat_stream is the one that matters today -- reached the plugin as the
+// literal reference text. Same tenant lookup, same pass-through on no tenant,
+// and the same unwrapped error on resolution failure as withSecrets above:
+// there is exactly one error-classification decision to make for this family,
+// not one per registration path.
+func (a *hostPluginRegistryAdapter) withSecretsStream(fn plugin.PluginStreamFunc) plugin.PluginStreamFunc {
+	if a.secrets == nil {
+		return fn
+	}
+	return func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		tid, ok := tenantctx.From(ctx)
+		if !ok {
+			return fn(ctx, inputJSON)
+		}
+		resolved, err := engine.ResolveSecretRefs(ctx, a.secrets, tid.String(), inputJSON)
+		if err != nil {
+			return nil, err
+		}
+		return fn(ctx, resolved)
+	}
+}
+
 func (a *hostPluginRegistryAdapter) RegisterStream(opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {
 	if opts.Name == "" {
 		return fmt.Errorf("function name must not be empty")
@@ -666,7 +692,7 @@ func (a *hostPluginRegistryAdapter) RegisterStream(opts plugin.FuncOptions, fn p
 	if a.streamRegistry.Has(a.pluginName, opts.Name) {
 		return fmt.Errorf("stream function %q already registered for plugin %q", opts.Name, a.pluginName)
 	}
-	return a.streamRegistry.RegisterStream(a.pluginName, opts, fn)
+	return a.streamRegistry.RegisterStream(a.pluginName, opts, a.withSecretsStream(fn))
 }
 
 // ---------------------------------------------------------------------------

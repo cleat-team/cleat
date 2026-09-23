@@ -110,3 +110,146 @@ func TestNoMasterKeyMeansNoWrapper(t *testing.T) {
 		t.Errorf("got %q, %v", out, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// withSecretsStream (cleat#1987) -- the streaming counterpart of every test
+// above. RegisterStream used to hand fn straight to the stream registry with
+// no equivalent wrapper at all, so a streaming call's ${secret:NAME} reached
+// the plugin as literal text. Same three properties, same reasoning, applied
+// to plugin.PluginStreamFunc instead of plugin.PluginFunc.
+// ---------------------------------------------------------------------------
+
+// TestTheStreamWrapperSubstitutesInsideTheCalleeNotBeforeIt mirrors
+// TestTheWrapperSubstitutesInsideTheCalleeNotBeforeIt above: the store has no
+// database, so the lookup fails and the wrapper must refuse before the
+// streaming function is ever reached.
+func TestTheStreamWrapperSubstitutesInsideTheCalleeNotBeforeIt(t *testing.T) {
+	master, err := engine.MasterKeyFromEnv(
+		base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	if err != nil {
+		t.Fatalf("master key: %v", err)
+	}
+	store, err := engine.NewSecretStore(nil, "postgres", master)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	a := &hostPluginRegistryAdapter{secrets: store}
+
+	var sawInner string
+	var innerCalled bool
+	inner := plugin.PluginStreamFunc(func(_ context.Context, in string) (<-chan plugin.StreamEvent, error) {
+		innerCalled = true
+		sawInner = in
+		return nil, nil
+	})
+
+	const original = `{"api_key":"${secret:openai}","model":"claude"}`
+	ctx := tenantctx.With(context.Background(),
+		uuid.MustParse("11111111-1111-1111-1111-111111111111"))
+
+	_, callErr := a.withSecretsStream(inner)(ctx, original)
+
+	if callErr == nil {
+		t.Fatalf("expected the wrapper to refuse when the lookup fails; inner called=%v saw=%q",
+			innerCalled, sawInner)
+	}
+	if innerCalled {
+		t.Errorf("the streaming plugin function was reached despite an unresolvable reference; "+
+			"it saw %q", sawInner)
+	}
+	if !strings.Contains(callErr.Error(), "openai") {
+		t.Errorf("the error does not name the reference that could not be resolved: %v", callErr)
+	}
+	if strings.Contains(callErr.Error(), "0123456789abcdef") {
+		t.Error("the error leaked master key material")
+	}
+}
+
+// TestNoTenantMeansNoResolutionForStream mirrors TestNoTenantMeansNoResolution.
+func TestNoTenantMeansNoResolutionForStream(t *testing.T) {
+	master, _ := engine.MasterKeyFromEnv(
+		base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	store, _ := engine.NewSecretStore(nil, "postgres", master)
+	a := &hostPluginRegistryAdapter{secrets: store}
+
+	var sawInner string
+	inner := plugin.PluginStreamFunc(func(_ context.Context, in string) (<-chan plugin.StreamEvent, error) {
+		sawInner = in
+		return nil, nil
+	})
+
+	const in = `{"api_key":"${secret:openai}"}`
+	if _, err := a.withSecretsStream(inner)(context.Background(), in); err != nil {
+		t.Fatalf("unexpected error with no tenant: %v", err)
+	}
+	if sawInner != in {
+		t.Errorf("the argument was altered with no tenant in context: %q", sawInner)
+	}
+}
+
+// TestNoMasterKeyMeansNoWrapperForStream mirrors TestNoMasterKeyMeansNoWrapper.
+func TestNoMasterKeyMeansNoWrapperForStream(t *testing.T) {
+	a := &hostPluginRegistryAdapter{secrets: nil}
+	inner := plugin.PluginStreamFunc(func(_ context.Context, in string) (<-chan plugin.StreamEvent, error) {
+		return nil, nil
+	})
+	if got := a.withSecretsStream(inner); got == nil {
+		t.Fatal("withSecretsStream returned nil")
+	}
+	if _, err := a.withSecretsStream(inner)(context.Background(), `{"k":"v"}`); err != nil {
+		t.Errorf("got %v", err)
+	}
+}
+
+// TestRegisterStreamActuallyResolvesSecrets is the end-to-end regression test
+// for cleat#1987: RegisterStream itself, not withSecretsStream in isolation,
+// must be the thing that wraps -- proving the wrapper exists is not the same
+// as proving it is wired in. Before the fix, RegisterStream passed fn straight
+// to the stream registry and this test's inner function saw the reference.
+func TestRegisterStreamActuallyResolvesSecrets(t *testing.T) {
+	master, err := engine.MasterKeyFromEnv(
+		base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	if err != nil {
+		t.Fatalf("master key: %v", err)
+	}
+	store, err := engine.NewSecretStore(nil, "postgres", master)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	a := &hostPluginRegistryAdapter{
+		registry:       engine.NewPluginRegistry(),
+		streamRegistry: engine.NewPluginStreamRegistry(),
+		pluginName:     "test-plugin",
+		secrets:        store,
+	}
+
+	var innerCalled bool
+	inner := plugin.PluginStreamFunc(func(_ context.Context, _ string) (<-chan plugin.StreamEvent, error) {
+		innerCalled = true
+		return nil, nil
+	})
+	if err := a.RegisterStream(plugin.FuncOptions{Name: "chat_stream"}, inner); err != nil {
+		t.Fatalf("RegisterStream: %v", err)
+	}
+
+	registered, ok := a.streamRegistry.Lookup("test-plugin", "chat_stream")
+	if !ok {
+		t.Fatalf("RegisterStream reported success but the function is not in the registry")
+	}
+
+	ctx := tenantctx.With(context.Background(),
+		uuid.MustParse("11111111-1111-1111-1111-111111111111"))
+	_, callErr := registered(ctx, `{"api_key":"${secret:openai}"}`)
+
+	// The store has no database, so a resolution attempt fails and the inner
+	// function is never reached -- the same observable proof
+	// TestTheStreamWrapperSubstitutesInsideTheCalleeNotBeforeIt uses, this
+	// time through RegisterStream's own return value rather than by calling
+	// withSecretsStream directly.
+	if callErr == nil {
+		t.Fatalf("expected resolution to be attempted and fail; inner called=%v", innerCalled)
+	}
+	if innerCalled {
+		t.Error("RegisterStream did not wrap fn: the streaming function was reached with an unresolved reference")
+	}
+}
