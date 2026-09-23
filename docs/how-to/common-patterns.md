@@ -310,6 +310,34 @@ if err != nil {
 }
 ```
 
+### Distinguishing why a child failed
+
+`AwaitChild`'s error covers every way a child can end without a result: it
+failed after exhausting retries, it was dead-lettered, or an operator
+terminated or cancelled it directly. There is no separate error type for
+each -- like `ErrAmbiguous`'s `[AMBIGUOUS]` prefix (see
+[durable-calls.md](../durable-calls.md#52-handling-errambiguous-in-workflow-code)),
+the kind travels as a stable prefix on the error message:
+
+```go
+result, err := h.AwaitChild(runID)
+if err != nil {
+    switch {
+    case strings.HasPrefix(err.Error(), "[TERMINATED]"):
+        // An operator force-terminated the child.
+    case strings.HasPrefix(err.Error(), "[CANCELLED]"):
+        // An operator cancelled the child.
+    default:
+        // The child failed on its own (retries exhausted, or dead-lettered).
+    }
+    return "", fmt.Errorf("child failed: %w", err)
+}
+```
+
+A child that failed on its own, was dead-lettered, was terminated, or was
+cancelled are all reported as a failed `AwaitChild` -- there is no separate
+"completed but not successful" state to check for.
+
 ### Typed child workflows
 
 Use `ChildWorkflowTyped` for type-safe child invocations:
