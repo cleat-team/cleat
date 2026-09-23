@@ -340,8 +340,13 @@ func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, 400, "workflow is not dead-lettered, status="+wf.Status)
 		return
 	}
-	if err := st.RetryWorkflow(r.Context(), id); err != nil {
-		s.writeError(w, 500, err.Error())
+	// cleat#2039: RetryWorkflow had no guard against retrying a workflow with
+	// an unresolved ambiguous call, unlike ReReplay's equivalent
+	// dead_lettered -> ready transition. engine.RetryWorkflow adds that check;
+	// handleAdminOpError maps its ErrAdminStateConflict to 409, the same class
+	// terminate and re-replay use above.
+	if err := engine.RetryWorkflow(r.Context(), st, id); err != nil {
+		s.handleAdminOpError(w, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"id": id, "status": "retried"})
