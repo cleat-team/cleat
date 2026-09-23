@@ -37,7 +37,6 @@ type rotationEnv struct {
 	// tenants[0] is the default tenant. A second, SUSPENDED tenant follows where
 	// the dialect can hold one (MySQL is single-tenant by constraint).
 	tenants []uuid.UUID
-	names   []string
 }
 
 func newRotationEnv(t *testing.T, dialect testutil.Dialect) *rotationEnv {

@@ -39,7 +39,7 @@ import (
 // The ring comes from the ENVIRONMENT and not a flag, for the reason
 // engine.MasterKeyFromEnv gives: a flag is visible in `ps`.
 
-const resealSecretsUsage = `usage: cleatctl --db <dsn> reseal-secrets [--dry-run]
+const resealUsage = `usage: cleatctl --db <dsn> reseal-secrets [--dry-run]
 
 Re-encrypts every tenant secret that is not sealed under the current master key,
 so the previous key can be removed. Online: secrets keep resolving throughout.
@@ -64,7 +64,7 @@ non-zero. So it can be run in a loop and its exit code trusted.
 func runResealSecrets(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	fs := flag.NewFlagSet("reseal-secrets", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.Usage = func() { fmt.Fprintf(os.Stderr, "%s", resealSecretsUsage) }
+	fs.Usage = func() { fmt.Fprintf(os.Stderr, "%s", resealUsage) }
 	dryRun := fs.Bool("dry-run", false, "read and verify everything, write nothing")
 
 	if err := fs.Parse(args); err != nil {
@@ -72,7 +72,7 @@ func runResealSecrets(ctx context.Context, db *sql.DB, d dialect, args []string)
 		return
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintf(os.Stderr, "error: reseal-secrets takes no arguments, got %q\n\n%s", fs.Args(), resealSecretsUsage)
+		fmt.Fprintf(os.Stderr, "error: reseal-secrets takes no arguments, got %q\n\n%s", fs.Args(), resealUsage)
 		osExit(2)
 		return
 	}
