@@ -27,7 +27,7 @@
 # where <name> has no slash. That is `cleat#N`, and equally `cleat-ports#N`,
 # which links nothing either. `owner/repo#N` has a slash and does link, so it
 # passes. A bare `cleat#N` in prose with no keyword in front is a mention, not
-# a claim to close anything, and passes.
+# a claim to close anything, and passes. So does anything inside code (below).
 #
 # The body arrives in PR_BODY, set by the workflow from the event payload
 # through `env:` rather than interpolated into the script: a PR body is
@@ -43,10 +43,17 @@ if [ -z "$body" ]; then
   exit 0
 fi
 
+# Code is not a claim. GitHub links nothing inside a fenced block or an inline
+# code span, so `Closes cleat#N` written as code -- a PR QUOTING the bad form,
+# as this check's own PR did, and failed its own first run for it -- is inert
+# and must pass. Both are removed before matching; unclosed fences and
+# backticks are left alone, which errs toward flagging.
+prose=$(printf '%s\n' "$body" | perl -0pe 's/^[ \t]*```.*?^[ \t]*```[^\n]*$//gms; s/`[^`\n]*`//g')
+
 # grep exits 1 on no match; under pipefail that would abort the script, so the
 # no-match case is taken explicitly rather than swallowed with `|| true` around
 # the whole pipeline (which would also hide a grep that failed to run).
-if ! bad=$(printf '%s\n' "$body" |
+if ! bad=$(printf '%s\n' "$prose" |
   grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+[^[:space:]/#]+#[0-9]+'); then
   echo "No closing keyword names an issue as <repo>#N."
   exit 0
