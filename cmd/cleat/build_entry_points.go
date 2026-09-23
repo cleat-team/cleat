@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,6 +29,41 @@ import (
 // full parse) -- but every extractor here is proven against the checked-in
 // example under examples/, not just a synthetic fixture, in
 // build_entry_points_test.go.
+//
+// WHY SOURCE-LEVEL REGEX RATHER THAN READING THE COMPILER'S OWN OUTPUT
+// (cleat#2109 review). Go's own EntryPoints (wasm/exports.go, GenerateExports)
+// has no such gap: cleat's own analyzer walks the AST to decide what to
+// generate, and the SAME computation is what gets recorded, so there is
+// nothing to drift. For Rust/Java/AssemblyScript cleat does not generate the
+// export code -- cargo, TeaVM and asc do, from the SDK's own macro,
+// annotation processor and transform -- so these extractors are a SEPARATE,
+// approximate prediction of what that external compilation will produce, not
+// a report of what it already produced. That is a materially weaker
+// guarantee, and the honest list of what it can miss: a macro-generated
+// #[cleat_entry] invocation (one that does not appear literally as
+// `#[cleat_entry]` in source), a cfg-gated function compiled out for the
+// target platform, a decorator/annotation split across lines in a shape none
+// of these regexes anticipated, or the annotation imported under a renamed
+// alias.
+//
+// The principled fix is each SDK's own codegen stating its entries in the
+// artifact it produces -- e.g. the Rust proc macro emitting a
+// `cleat.entry_points` custom WASM section at expansion, since it is the one
+// place that genuinely sees every #[cleat_entry] the way the compiler will.
+// That needs the macro to accumulate names across independent expansions
+// into one section (Rust's proc-macro model has no such state today) and an
+// equivalent per-SDK mechanism for Java/AssemblyScript -- real compiler-level
+// work in three different toolchains, not a build_entry_points.go change.
+// Out of scope for a 0.3.0 fix; tracked as a follow-up rather than folded in
+// here, so the choice is on record rather than left to be rediscovered.
+//
+// So THIS extractor is a stand-in, and it is not left unchecked: every name
+// it puts in cleat.metadata is cross-verified against the .wasm the build
+// just produced (verifyEntryPointsAreExports, below) before that binary is
+// written to disk. A name this file predicted that the compiler did not
+// actually export fails the BUILD, loudly, at the moment the drift is
+// introduced -- rather than surfacing later as a live "cannot determine
+// entry point" a caller has no way to connect back to a source change.
 
 // rustEntryPointNames returns the WASM export names crateDir's #[cleat_entry]
 // functions will compile to, in file-then-source order.
@@ -214,4 +250,102 @@ func stripCLikeCommentsKeepStrings(src []byte) []byte {
 		}
 	}
 	return out
+}
+
+// verifyEntryPointsAreExports fails the build if any name a source-level
+// extractor predicted is not actually a function export of the .wasm the
+// compiler just produced -- the check that makes the source-scanning
+// approach documented at the top of this file safe to ship: a name this
+// file's regexes got wrong (a macro-generated entry, a cfg-gated function
+// compiled out, a decorator shape none of them anticipated) fails HERE,
+// loudly, rather than later as a live "cannot determine entry point" with no
+// path back to the source change that caused it.
+//
+// Deliberately one-directional: it does not require every wasm export to be
+// a predicted entry point (a crate may export other things -- allocator
+// hooks, helper functions marked pub -- that were never meant to be entry
+// points), only that every predicted entry point is a real export.
+func verifyEntryPointsAreExports(sdk string, wasmBytes []byte, entryPoints []string) error {
+	if len(entryPoints) == 0 {
+		return nil
+	}
+	exports := wasmFuncExportNames(wasmBytes)
+	var missing []string
+	for _, name := range entryPoints {
+		if !exports[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s build: cleat.metadata would declare %d entry point(s) not actually exported "+
+		"by the compiled .wasm: %s -- the source-level extractor (build_entry_points.go) predicted a name "+
+		"the compiler did not produce. This is refused rather than deployed with metadata that lies about "+
+		"the binary's own exports; see build_entry_points.go's doc comment for why this check exists",
+		sdk, len(missing), strings.Join(missing, ", "))
+}
+
+// wasmFuncExportNames returns the names of every function export (export
+// kind 0) in a compiled WASM binary's export section. Same binary-format
+// parse cmd/cleat-worker/setup.go's firstHandleExport already uses in
+// production (magic+version header, then walk sections for id 7), just
+// collecting every func export instead of the first "handle_"-prefixed one.
+func wasmFuncExportNames(wasmBytes []byte) map[string]bool {
+	names := map[string]bool{}
+	if len(wasmBytes) < 8 {
+		return names
+	}
+	pos := 8 // skip magic + version
+	for pos < len(wasmBytes) {
+		sectionID := wasmBytes[pos]
+		pos++
+		sectionLen, n := decodeULEB128AtOffset(wasmBytes, pos)
+		pos = n
+		sectionEnd := pos + int(sectionLen)
+		if sectionID != 7 { // not the export section
+			pos = sectionEnd
+			continue
+		}
+		count, n := decodeULEB128AtOffset(wasmBytes, pos)
+		pos = n
+		for i := uint32(0); i < count; i++ {
+			nameLen, n := decodeULEB128AtOffset(wasmBytes, pos)
+			pos = n
+			if pos+int(nameLen) > len(wasmBytes) {
+				return names // malformed; report what was parsed so far
+			}
+			name := string(wasmBytes[pos : pos+int(nameLen)])
+			pos += int(nameLen)
+			if pos >= len(wasmBytes) {
+				return names
+			}
+			kind := wasmBytes[pos]
+			pos++
+			_, n = decodeULEB128AtOffset(wasmBytes, pos) // index
+			pos = n
+			if kind == 0 {
+				names[name] = true
+			}
+		}
+		return names
+	}
+	return names
+}
+
+// decodeULEB128AtOffset reads an unsigned LEB128 value from buf at offset
+// pos and returns the value and the new offset.
+func decodeULEB128AtOffset(buf []byte, pos int) (uint32, int) {
+	var result uint32
+	var shift uint
+	for pos < len(buf) {
+		b := buf[pos]
+		pos++
+		result |= uint32(b&0x7F) << shift
+		if b&0x80 == 0 {
+			break
+		}
+		shift += 7
+	}
+	return result, pos
 }

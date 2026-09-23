@@ -139,10 +139,21 @@ func runBuildJava(pattern, outDir, channel string, workflowVersion int) {
 	name := filepath.Base(javaDir)
 	name = strings.ReplaceAll(name, "-", "_")
 
+	// entryPoints is source-extracted, not read from the compiler's own
+	// output -- see build_entry_points.go's doc comment for why, and why
+	// verifyEntryPointsAreExports (immediately below) is what makes that
+	// safe: a name the extractor predicted wrong fails THIS build rather
+	// than surfacing later as a live entry-point-resolution failure.
+	entryPoints := javaEntryPointNames(javaDir)
+	if verifyErr := verifyEntryPointsAreExports("java", input, entryPoints); verifyErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", verifyErr)
+		os.Exit(1)
+	}
+
 	// Inject cleat.metadata. Must pass wasm.Metadata.Validate(), which
 	// `cleat deploy` runs and exits 1 on; see cleat#1077.
 	if enriched, metaErr := wasm.WriteMetadata(input,
-		nonGoMetadata("java", name, workflowVersion, javaEntryPointNames(javaDir))); metaErr == nil {
+		nonGoMetadata("java", name, workflowVersion, entryPoints)); metaErr == nil {
 		input = enriched
 	}
 

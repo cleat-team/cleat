@@ -44,6 +44,15 @@ func TestMain(m *testing.M) {
 	if tmpDir != "" {
 		os.RemoveAll(tmpDir)
 	}
+	// workerBinaryDir (fullstack_template_run_starts_a_workflow_test.go) is
+	// only ever set if some test actually called buildWorkerBinaryOnce --
+	// cleaned up HERE, at the true end of the process, rather than by
+	// whichever test happened to build it first. See that var's doc comment
+	// for why: t.TempDir() there deleted the binary out from under every
+	// later caller (cleat#2109).
+	if workerBinaryDir != "" {
+		os.RemoveAll(workerBinaryDir)
+	}
 	os.Exit(exitCode)
 }
 

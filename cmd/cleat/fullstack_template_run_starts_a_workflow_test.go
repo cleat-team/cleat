@@ -215,8 +215,22 @@ func pollWorkflowStatus(t *testing.T, url string) struct {
 // shared by every test in this package, and building a second binary there
 // would cost every one of them the build time even though only this test
 // needs it.
+//
+// workerBinaryDir is deliberately built with os.MkdirTemp, not t.TempDir().
+// This used to use t.TempDir(), on the reasoning (stated here until
+// cleat#2109) that per-package test serialization made that "safe" -- it
+// does the opposite: t.TempDir()'s cleanup runs via t.Cleanup on the FIRST
+// test that calls this, which fires when THAT test returns, and sequential
+// execution guarantees every LATER caller runs after that cleanup has
+// already deleted the directory. Invisible as long as there was only one
+// caller (this file, cleat#1969/#2066); the second one, cleat#2109's live
+// Rust test, hit it immediately: "fork/exec .../cleat-worker: no such file
+// or directory". Cleaned up in TestMain (vet_test.go), which is what
+// actually spans the whole process, rather than left to leak -- matching
+// how that same TestMain already handles the `cleat` CLI binary's tmpDir.
 var (
 	workerBinaryPath  string
+	workerBinaryDir   string
 	workerBinaryErr   error
 	workerBinaryBuilt bool
 )
@@ -231,19 +245,19 @@ func buildWorkerBinaryOnce(t *testing.T) string {
 	}
 	workerBinaryBuilt = true
 
-	dir := t.TempDir()
-	// TempDir ties cleanup to the FIRST test that builds this; safe because
-	// go test runs one package's tests in one process sequentially by
-	// default (no t.Parallel() in this package -- see foreign_sessions.go's
-	// note on package-level go test serialization for the general shape of
-	// this assumption).
+	dir, err := os.MkdirTemp("", "cleat-worker-build-*")
+	if err != nil {
+		workerBinaryErr = err
+		t.Fatalf("create temp dir for cleat-worker build: %v", err)
+	}
+	workerBinaryDir = dir
 	bin := filepath.Join(dir, "cleat-worker")
 	build := exec.Command("go", "build", "-o", bin, "../cleat-worker")
 	build.Dir = "."
-	out, err := build.CombinedOutput()
-	if err != nil {
-		workerBinaryErr = err
-		t.Fatalf("build cleat-worker: %v\n%s", err, out)
+	out, buildErr := build.CombinedOutput()
+	if buildErr != nil {
+		workerBinaryErr = buildErr
+		t.Fatalf("build cleat-worker: %v\n%s", buildErr, out)
 	}
 	workerBinaryPath = bin
 	return bin
