@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# Closing Reference Check -- a PR that says it closes an issue actually links it
+#
+# `Closes cleat#N` links nothing; `Closes #N` does. The measurement and the
+# exact pattern are in scripts/check-closing-references.sh.
+#
+# WHY A WORKFLOW OF ITS OWN rather than a step in stream-trailer-check.yml,
+# which already runs on every PR. Reading the PR BODY needs the `edited`
+# trigger -- the fix is a description edit, and without `edited` the check
+# stays red until the next push. That workflow cancels in progress per ref, so
+# an edit landing mid-run would leave a CANCELLED Stream Trailer run on the
+# head SHA, and WORKSTREAM.md R9 treats a cancelled twin as "needs its author".
+# Here there is no concurrency group at all: each run is a few seconds, the
+# latest one is what the PR shows, and nothing is ever cancelled.
+#
+# NOT A REQUIRED CHECK (as of 2026-09-23). A red here blocks nothing on its own;
+# it is visible on the PR and to scripts/pr-watch.py. Making it required is a
+# ruleset change plus a line in .github/required-checks.txt, and the
+# merge_group arm below already exists so that change needs nothing else.
+# ---------------------------------------------------------------------------
+name: Closing Reference Check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+  # See stream-trailer-check.yml: a required check that never starts in queue
+  # context wedges the queue with nothing red. Reports rather than re-checks,
+  # because the queue ref has no PR body.
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  closing-references:
+    name: Closing References
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Already checked on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "closing references validated on the pull request"
+
+      - if: github.event_name != 'merge_group'
+        uses: actions/checkout@v7
+
+      - name: Check closing references
+        if: github.event_name != 'merge_group'
+        env:
+          # Through env, never ${{ }} inside run: -- the body is untrusted text.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: scripts/check-closing-references.sh
