@@ -128,6 +128,51 @@ func migrationsOverrideFS() fs.FS {
 	return migrations.FS
 }
 
+// startPluginWorkflow implements plugin.Environment.StartWorkflow for the
+// worker's own store. Extracted out of the pluginEnv literal in main() so it
+// is unit-testable against a mock engine.WorkflowStore without a live
+// server -- the closure it replaced had no test coverage at all.
+//
+// REJECTED, NOT DEFAULTED. Both req.IdempotencyKey and req.TenantID used to
+// be hardcoded at this seam -- the key as `""` and the tenant as
+// engine.DefaultTenantUUID -- which is why no plugin start was retry-safe
+// (cleat#1555) or correctly attributed (cleat#1580). Substituting a default
+// for a missing value would put both failures back, silently, which is the
+// whole reason the fields are required.
+//
+// req.EntryPoint is flat-merged into req.Input via plugin.MergeEntryPoint --
+// the same helper handleStartWorkflow (server.go) uses for the public start
+// API's entry_point field (cleat#2108) -- so this is the one place that
+// shape is implemented, not a second copy. cleat#2114: before this, the
+// event-triggers plugin read a subscription's entry_point back out of
+// event_subscriptions and never used it, so every event-triggered start
+// resolved its entry point implicitly no matter what the subscription
+// named. req.EntryPoint == "" is a no-op, so a caller that never sets it
+// keeps today's implicit resolution.
+func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req plugin.StartRequest) (string, error) {
+	if req.IdempotencyKey == "" {
+		return "", fmt.Errorf("start workflow %s: idempotency key is required; "+
+			"derive one from the durable row being acted on", req.DefName)
+	}
+	if req.TenantID == "" {
+		return "", fmt.Errorf("start workflow %s: tenant id is required", req.DefName)
+	}
+	versions, err := store.ListVersions(ctx, req.DefName)
+	if err != nil {
+		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
+	}
+	if len(versions) == 0 {
+		return "", fmt.Errorf("start workflow %s: no versions deployed", req.DefName)
+	}
+	in, err := plugin.MergeEntryPoint(req.Input, req.EntryPoint)
+	if err != nil {
+		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
+	}
+	runID, _, err := store.StartNewRun(ctx, "", req.DefName, versions[0], in,
+		req.IdempotencyKey, req.TenantID, 0)
+	return runID, err
+}
+
 func main() {
 	flag.Parse()
 
@@ -1012,29 +1057,7 @@ func main() {
 		Done:          ctx.Done(),
 		Dialect:       plugin.Dialect(factory.Dialect()),
 		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
-			// REJECTED, NOT DEFAULTED. Both of these were hardcoded here --
-			// the key as `""` and the tenant as engine.DefaultTenantUUID --
-			// which is why no plugin start was retry-safe (cleat#1555) or
-			// correctly attributed (cleat#1580). Substituting a default for a
-			// missing value would put both failures back, silently, which is
-			// the whole reason the fields are required.
-			if req.IdempotencyKey == "" {
-				return "", fmt.Errorf("start workflow %s: idempotency key is required; "+
-					"derive one from the durable row being acted on", req.DefName)
-			}
-			if req.TenantID == "" {
-				return "", fmt.Errorf("start workflow %s: tenant id is required", req.DefName)
-			}
-			versions, err := store.ListVersions(ctx, req.DefName)
-			if err != nil {
-				return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
-			}
-			if len(versions) == 0 {
-				return "", fmt.Errorf("start workflow %s: no versions deployed", req.DefName)
-			}
-			runID, _, err := store.StartNewRun(ctx, "", req.DefName, versions[0], req.Input,
-				req.IdempotencyKey, req.TenantID, 0)
-			return runID, err
+			return startPluginWorkflow(ctx, store, req)
 		},
 
 		SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
