@@ -488,49 +488,6 @@ func TestMySQLHeartbeat_Error(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BatchHeartbeat
-// ---------------------------------------------------------------------------
-
-func TestMySQLBatchHeartbeat(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 5},
-	})
-	n, err := store.BatchHeartbeat(testCtxMySQL, "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 5 {
-		t.Errorf("expected 5, got %d", n)
-	}
-}
-
-func TestMySQLBatchHeartbeat_Zero(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 0},
-	})
-	n, err := store.BatchHeartbeat(testCtxMySQL, "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("expected 0, got %d", n)
-	}
-}
-
-func TestMySQLBatchHeartbeat_Error(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", err: errors.New("update failed")},
-	})
-	_, err := store.BatchHeartbeat(testCtxMySQL, "worker-1")
-	if err == nil {
-		t.Fatal("expected error from exec failure, got nil")
-	}
-	if !strings.Contains(err.Error(), "batch heartbeat") {
-		t.Errorf("expected 'batch heartbeat', got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // GetChildResult
 // ---------------------------------------------------------------------------
 

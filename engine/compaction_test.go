@@ -1753,8 +1753,8 @@ func TestLoadCompactionStateWithOpenChildren(t *testing.T) {
 		t.Errorf("expected 3 compacted events, got %d", len(cs.Events))
 	}
 }
-func (m *mockCompactStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (m *mockCompactStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
 
 func (m *mockCompactStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) {

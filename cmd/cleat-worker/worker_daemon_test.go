@@ -47,7 +47,7 @@ type mockStore struct {
 	getWASMLengthFn                    func(ctx context.Context, defName string, defVersion int) (int64, error)
 	listVersionsFn                     func(ctx context.Context, defName string) ([]int, error)
 	heartbeatFn                        func(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
-	batchHeartbeatFn                   func(ctx context.Context, workerID string) (int64, error)
+	heartbeatBatchFencedFn             func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error)
 	completeWorkflowFn                 func(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
 	failWorkflowFn                     func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error
 	releaseWorkflowFn                  func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
@@ -651,7 +651,7 @@ func newTestWorker(ms *mockStore) *Worker {
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, ms, "test-worker", 5, 1<<40, 1<<40)
 	testMetrics := newTestPrometheus()
-	return &Worker{
+	w := &Worker{
 		Metrics:             testMetrics,
 		id:                  "test-worker",
 		store:               ms,
@@ -668,6 +668,10 @@ func newTestWorker(ms *mockStore) *Worker {
 		healthTracker:       newHealthTracker(),
 		loopCtxMap:          make(map[string]*loopContext),
 	}
+	// cleat#2008: seed to now, not the atomic.Int64 zero value -- see the
+	// identical comment at the real construction site in main.go.
+	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	return w
 }
 
 // newTestWorkerWithConcurrency creates a Worker with the given concurrency,
@@ -678,7 +682,7 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, ms, "test-worker", concurrency, 1<<40, 1<<40)
 	testMetrics := newTestPrometheus()
-	return &Worker{
+	w := &Worker{
 		Metrics:             testMetrics,
 		id:                  "test-worker",
 		store:               ms,
@@ -695,6 +699,8 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 		healthTracker:       newHealthTracker(),
 		loopCtxMap:          make(map[string]*loopContext),
 	}
+	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	return w
 }
 
 // newTestPrometheus creates a Metrics instance for test use. Errors are
@@ -1075,16 +1081,18 @@ func TestDispatchLoop_ConnectionError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHeartbeatLoop_UpdatesHeartbeats(t *testing.T) {
+	// cleat#2008: the loop's store call is now HeartbeatBatchFenced, not
+	// BatchHeartbeat -- see heartbeatAndFenceInFlight.
 	ms := &mockStore{}
 	var (
 		mu        sync.Mutex
 		callCount int64
 	)
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
-		return 2, nil
+		return nil, nil
 	}
 
 	w := newTestWorker(ms)
@@ -1140,13 +1148,17 @@ func TestHeartbeatLoop_StopsOnCancel(t *testing.T) {
 }
 
 func TestHeartbeatLoop_DoesNotRemoveFromInflight(t *testing.T) {
-	// With BatchHeartbeat, the heartbeat loop does not remove workflows from
-	// inflight — ownership recovery is handled by the reaper loop.
+	// The heartbeat loop itself never removes workflows from inflight --
+	// only executeWorkflow's own deferred Delete does that, on completion.
+	// cleat#2008: HeartbeatBatchFenced reporting a run lost cancels its
+	// execCancel, which is a DIFFERENT map; neither "wf-alive" nor
+	// "wf-lost" is reported lost here (nil return), so this exercises the
+	// ordinary case rather than that path.
 	ms := &mockStore{}
 	callCount := 0
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 		callCount++
-		return 0, nil
+		return nil, nil
 	}
 
 	w := newTestWorker(ms)
@@ -1184,8 +1196,8 @@ func TestHeartbeatLoop_DoesNotRemoveFromInflight(t *testing.T) {
 
 func TestHeartbeatLoop_DBErrorNoCrash(t *testing.T) {
 	ms := &mockStore{}
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
-		return 0, errors.New("connection refused")
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
+		return nil, errors.New("connection refused")
 	}
 
 	w := newTestWorker(ms)
@@ -2211,13 +2223,19 @@ func TestDispatchLoop_BatchSizeCap(t *testing.T) {
 }
 
 func TestHeartbeatLoop_EmptyInflight(t *testing.T) {
-	// With BatchHeartbeat, the heartbeat loop always calls the store
-	// regardless of inflight state — the DB tracks ownership.
+	// cleat#2008: unlike BatchHeartbeat (which had no per-run predicate to
+	// fence and so always ran), HeartbeatBatchFenced takes a batch of
+	// (workflowID, generation) pairs -- with none in flight there is
+	// nothing to ask about, so heartbeatAndFenceInFlight short-circuits
+	// before ever calling the store. The loop must still tick without
+	// error, and lastHeartbeatOK must still advance (see
+	// heartbeat_fenced_execution_test.go for that half, at the
+	// heartbeatAndFenceInFlight level rather than through the ticker).
 	ms := &mockStore{}
 	heartbeatCalled := false
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 		heartbeatCalled = true
-		return 0, nil
+		return nil, nil
 	}
 
 	w := newTestWorker(ms)
@@ -2237,8 +2255,8 @@ func TestHeartbeatLoop_EmptyInflight(t *testing.T) {
 
 	<-done
 
-	if !heartbeatCalled {
-		t.Error("expected batch heartbeat to be called even when inflight is empty")
+	if heartbeatCalled {
+		t.Error("HeartbeatBatchFenced was called with zero in-flight runs -- heartbeatAndFenceInFlight should short-circuit before calling the store")
 	}
 }
 
@@ -3288,11 +3306,11 @@ func TestReadMemTotal(t *testing.T) {
 		t.Errorf("readMemTotal() = %d bytes, seems unreasonably large", total)
 	}
 }
-func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	if m.batchHeartbeatFn != nil {
-		return m.batchHeartbeatFn(ctx, workerID)
+func (m *mockStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
+	if m.heartbeatBatchFencedFn != nil {
+		return m.heartbeatBatchFencedFn(ctx, workerID, runs)
 	}
-	return 0, nil
+	return nil, nil
 }
 
 func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error) {

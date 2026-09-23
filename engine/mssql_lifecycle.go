@@ -670,40 +670,89 @@ func (s *MSSQLStore) heartbeatOnce(ctx context.Context, workflowID, workerID str
 	return n > 0, tx.Commit()
 }
 
-// BatchHeartbeat updates heartbeat_at for all workflows assigned to this worker
-// with status 'running'. Uses a single UPDATE instead of N calls.
-// NOTE: This intentionally does NOT check per-workflow generation because it
-// operates on ALL running workflows for a worker, and generations differ per
-// workflow. Individual generation-guarded operations (Heartbeat,
-// CompleteWorkflow, FailWorkflow, etc.) prevent double-execution even if the
-// batch heartbeat refreshes a stale workflow's heartbeat_at.
+// HeartbeatBatchFenced is PostgresStore.HeartbeatBatchFenced's SQL Server
+// twin -- see that doc comment and the interface's. cleat#2008 replaced
+// BatchHeartbeat with this at the worker's one call site rather than running
+// both.
 //
 // AND THIS ONE MUST NOT GET A TENANT PREDICATE, which is worth saying out loud
 // because every other unscoped statement in this file is a defect and an audit
 // will find this one too (3.86). It is called on the WORKER'S OWN store
-// (cmd/cleat-worker/setup.go's heartbeat loop), and under claim-across-tenants
-// a worker legitimately holds instances belonging to many tenants -- the claim
-// is deliberately cross-tenant and each instance then EXECUTES against a store
-// scoped to its own tenant, but the heartbeat is one statement covering all of
-// them. Scoping it to s.tenantID would silently stop refreshing every other
-// tenant's instances until ReapStaleInstances took them, and nothing would say
-// so.
+// (cmd/cleat-worker/setup.go's heartbeatAndFenceInFlight), and under
+// claim-across-tenants a worker legitimately holds instances belonging to
+// many tenants -- the claim is deliberately cross-tenant and each instance
+// then EXECUTES against a store scoped to its own tenant, but the heartbeat is
+// one round trip covering all of them. Scoping it to s.tenantID would
+// silently stop refreshing every other tenant's instances until
+// ReapStaleInstances took them, and nothing would say so.
 //
 // Note also that 3.77's "a generated id cannot be guessed" argument does not
 // apply here in either direction: there is no id in this predicate at all. The
 // key is the worker, and the set of rows a worker may touch is exactly the set
 // it was handed.
-func (s *MSSQLStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET heartbeat_at = SYSUTCDATETIME()
-		WHERE assigned_to = @p1 AND status = 'running'
-	`, workerID)
-	if err != nil {
-		return 0, fmt.Errorf("batch heartbeat: %w", err)
+func (s *MSSQLStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	if len(runs) == 0 {
+		return nil, nil
 	}
-	n, _ := result.RowsAffected()
-	return n, nil
+	byID := make(map[string]int64, len(runs))
+	ids := make([]string, 0, len(runs))
+	for _, r := range runs {
+		byID[r.WorkflowID] = r.Generation
+		ids = append(ids, r.WorkflowID)
+	}
+
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("heartbeat batch fenced: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// UPDLOCK/ROWLOCK is SQL Server's FOR UPDATE -- holds these rows through
+	// the UPDATE below, in the same transaction, so a reclaim landing between
+	// the check and a separate update statement cannot slip through.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, generation FROM workflow_instances WITH (UPDLOCK, ROWLOCK)
+		WHERE assigned_to = @p1 AND status = 'running'
+		  AND id IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+	`, workerID, strings.Join(ids, ","))
+	if err != nil {
+		return nil, fmt.Errorf("heartbeat batch fenced: select: %w", err)
+	}
+	eligible := make([]string, 0, len(runs))
+	eligibleSet := make(map[string]bool, len(runs))
+	for rows.Next() {
+		var id string
+		var gen int64
+		if err := rows.Scan(&id, &gen); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("heartbeat batch fenced: scan: %w", err)
+		}
+		if wantGen, ok := byID[id]; ok && wantGen == gen {
+			eligible = append(eligible, id)
+			eligibleSet[id] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("heartbeat batch fenced: rows: %w", err)
+	}
+	rows.Close()
+
+	lost := make([]string, 0, len(runs))
+	for _, id := range ids {
+		if !eligibleSet[id] {
+			lost = append(lost, id)
+		}
+	}
+
+	if len(eligible) > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances SET heartbeat_at = SYSUTCDATETIME()
+			WHERE id IN (SELECT value FROM STRING_SPLIT(@p1, ','))
+		`, strings.Join(eligible, ",")); err != nil {
+			return nil, fmt.Errorf("heartbeat batch fenced: update: %w", err)
+		}
+	}
+	return lost, tx.Commit()
 }
 
 // CompleteWorkflow marks a workflow as completed with a result.

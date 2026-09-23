@@ -145,8 +145,18 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "update workflow_instances set heartbeat_at = sysutcdatetime() where id = @p1 a",
 		Reason: scopedByCaller,
 	},
-	"mssql_lifecycle.go:BatchHeartbeat#5b436bc44f80": {
-		SQL:    "update workflow_instances set heartbeat_at = sysutcdatetime() where assigned_t",
+	// cleat#2008: HeartbeatBatchFenced replaced BatchHeartbeat at the
+	// worker's one heartbeat-loop call site, and carries the same exemption
+	// for the same reason -- see the doc comment on HeartbeatBatchFenced in
+	// mssql_lifecycle.go (mustNotScope points there rather than restating it
+	// here, since it is the reasoning that must stay in sync with the code,
+	// not this table).
+	"mssql_lifecycle.go:HeartbeatBatchFenced#076206c1c525": {
+		SQL:    "select id, generation from workflow_instances with (updlock, rowlock) where as",
+		Reason: mustNotScope,
+	},
+	"mssql_lifecycle.go:HeartbeatBatchFenced#3121b9fa6664": {
+		SQL:    "update workflow_instances set heartbeat_at = sysutcdatetime() where id in (sel",
 		Reason: mustNotScope,
 	},
 	// THE FOUR TERMINAL-WRITE DIGESTS BELOW MOVED IN cleat#1118 AND THE REASON

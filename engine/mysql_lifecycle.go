@@ -971,7 +971,7 @@ func (s *MySQLStore) finalizeWorkflowSegmentInner(ctx context.Context, runID, wo
 }
 
 // ---------------------------------------------------------------------------
-// Heartbeat / BatchHeartbeat
+// Heartbeat / HeartbeatBatchFenced
 // ---------------------------------------------------------------------------
 
 // Heartbeat updates the heartbeat timestamp to prevent timeout.
@@ -989,24 +989,81 @@ func (s *MySQLStore) Heartbeat(ctx context.Context, workflowID, workerID string,
 	return n > 0, nil
 }
 
-// BatchHeartbeat updates heartbeat_at for all workflows assigned to this
-// worker with status 'running'. Uses a single UPDATE instead of N calls.
-// NOTE: This intentionally does NOT check per-workflow generation because it
-// operates on ALL running workflows for a worker, and generations differ per
-// workflow. Individual generation-guarded operations (Heartbeat,
-// CompleteWorkflow, FailWorkflow, etc.) prevent double-execution even if the
-// batch heartbeat refreshes a stale workflow's heartbeat_at.
-func (s *MySQLStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET heartbeat_at = NOW(6)
-		WHERE assigned_to = ? AND status = 'running' AND tenant_id = ?
-	`, workerID, s.tenantID)
-	if err != nil {
-		return 0, fmt.Errorf("batch heartbeat: %w", err)
+// HeartbeatBatchFenced is PostgresStore.HeartbeatBatchFenced's MySQL twin --
+// see that doc comment and the interface's. cleat#2008 replaced
+// BatchHeartbeat with this at the worker's one call site rather than running
+// both.
+func (s *MySQLStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	if len(runs) == 0 {
+		return nil, nil
 	}
-	n, _ := result.RowsAffected()
-	return n, nil
+	byID := make(map[string]int64, len(runs))
+	ids := make([]string, 0, len(runs))
+	args := make([]any, 0, len(runs)+2)
+	for _, r := range runs {
+		byID[r.WorkflowID] = r.Generation
+		ids = append(ids, r.WorkflowID)
+		args = append(args, r.WorkflowID)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("heartbeat batch fenced: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// FOR UPDATE holds these rows through the UPDATE below, in the same
+	// transaction -- a reclaim landing between a check and a separate update
+	// statement is exactly the race this exists to close, not reopen.
+	idClause := inClausePlaceholders(len(ids))
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, generation FROM workflow_instances
+		WHERE assigned_to = ? AND status = 'running' AND tenant_id = ? AND id IN (%s)
+		FOR UPDATE
+	`, idClause), append([]any{workerID, s.tenantID}, args...)...)
+	if err != nil {
+		return nil, fmt.Errorf("heartbeat batch fenced: select: %w", err)
+	}
+	eligible := make([]string, 0, len(runs))
+	eligibleSet := make(map[string]bool, len(runs))
+	for rows.Next() {
+		var id string
+		var gen int64
+		if err := rows.Scan(&id, &gen); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("heartbeat batch fenced: scan: %w", err)
+		}
+		if wantGen, ok := byID[id]; ok && wantGen == gen {
+			eligible = append(eligible, id)
+			eligibleSet[id] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("heartbeat batch fenced: rows: %w", err)
+	}
+	rows.Close()
+
+	lost := make([]string, 0, len(runs))
+	for _, id := range ids {
+		if !eligibleSet[id] {
+			lost = append(lost, id)
+		}
+	}
+
+	if len(eligible) > 0 {
+		eligibleArgs := make([]any, 0, len(eligible)+1)
+		for _, id := range eligible {
+			eligibleArgs = append(eligibleArgs, id)
+		}
+		eligibleArgs = append(eligibleArgs, s.tenantID)
+		eligibleClause := inClausePlaceholders(len(eligible))
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+			UPDATE workflow_instances SET heartbeat_at = NOW(6) WHERE id IN (%s) AND tenant_id = ?
+		`, eligibleClause), eligibleArgs...); err != nil {
+			return nil, fmt.Errorf("heartbeat batch fenced: update: %w", err)
+		}
+	}
+	return lost, tx.Commit()
 }
 
 // ---------------------------------------------------------------------------

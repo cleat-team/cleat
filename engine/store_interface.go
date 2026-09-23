@@ -119,14 +119,28 @@ type WorkflowStore interface {
 	// or if the generation does not match (workflow was reaped).
 	Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
 
-	// BatchHeartbeat updates heartbeat_at for all workflows assigned to this
-	// worker with status 'running'. Uses a single UPDATE instead of N calls.
-	// NOTE: This intentionally does NOT check per-workflow generation because
-	// it operates on ALL workflows for a worker, and generations differ per
-	// workflow. Individual generation-guarded operations (Heartbeat,
-	// CompleteWorkflow, FailWorkflow, etc.) prevent double-execution even if
-	// the batch heartbeat refreshes a stale workflow's heartbeat_at.
-	BatchHeartbeat(ctx context.Context, workerID string) (int64, error)
+	// HeartbeatBatchFenced heartbeats every given (workflowID, generation)
+	// pair in ONE round trip, fenced individually per pair. Returns the
+	// WorkflowIDs from runs whose pair was NOT stamped: the row's generation
+	// has moved on, it is no longer assigned to this worker, or it is no
+	// longer 'running'. Every one of those has lost its fence and must not
+	// be allowed to start another durable call. cleat#2008.
+	//
+	// Replaced BatchHeartbeat at the worker's one heartbeat-loop call site
+	// (cleat#2008; see cmd/cleat-worker/setup.go's heartbeatAndFenceInFlight)
+	// rather than running alongside it: unlike BatchHeartbeat, which took no
+	// generation and so could not tell a superseded execution from a live
+	// one, this takes the (workflowID, generation) pairs w.inflight already
+	// carries and reports exactly which are stale, at the same one-round-trip
+	// cost. The individual generation-guarded operations (Heartbeat,
+	// CompleteWorkflow, FailWorkflow, etc.) still prevent double-execution
+	// independent of this.
+	//
+	// Row-locks the candidates for the duration of the call (FOR UPDATE /
+	// UPDLOCK) so the eligibility check and the stamp happen against the same
+	// snapshot -- a two-step check-then-update across separate statements
+	// would leave a window for a reclaim to land in between and be missed.
+	HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) (lost []string, err error)
 
 	// CompleteWorkflow marks a workflow as completed with a result.
 	CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error

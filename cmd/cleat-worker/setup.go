@@ -1533,6 +1533,64 @@ type Worker struct {
 	execEngines sync.Map // map[workflowID]*engine.Engine
 	wasmCache   *wasmLRUCache
 
+	// execCancel cancels one execution's own context, independent of every
+	// other execution and of w.ctx. Still done for whatever DOES respect a
+	// cancelled context between host calls -- checksum verification and
+	// other engine-side reads that take Replay's own ctx argument directly --
+	// but it is NOT what stops the next durable call; see fencedRuns below
+	// for why and what does.
+	execCancel sync.Map // map[workflowID]context.CancelFunc
+
+	// fencedRuns is set for a workflow ID the moment its fenced heartbeat
+	// reports the run lost, and is what freshCall actually refuses on via
+	// WithCanStartNewWork.
+	//
+	// NOT execCtx cancellation, despite that being the first mechanism this
+	// shipped with and despite a comment at this file's Replay call site
+	// having claimed for a time that cancelling execCtx "is what actually
+	// stops a fenced-out execution from making one more outbound call".
+	// Measured 2026-09-22 with TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow
+	// (cmd/cleat-worker/fenced_execution_acceptance_test.go): a real guest's
+	// SECOND DurableCall, issued after execCancel() had already fired for
+	// its run, still reached the service. engine/wasmtime_hostfuncs.go's
+	// registerCleatCall builds every host call's context from
+	// context.Background() (`ctxWithMem(context.Background(), buf)`), not
+	// from whatever ctx Replay was given -- wasmtime's Go bindings cannot
+	// observe a live context's cancellation mid fn.Call (see this repo's
+	// CLAUDE.md on wazero's identical limitation), so nothing durable_call's
+	// dispatch reaches was ever going to see execCtx.Done() close. A unit
+	// test that hands freshCall an already-cancelled context directly
+	// (engine/can_start_new_work_test.go) cannot catch this, because it
+	// skips exactly the layer that drops the context.
+	//
+	// canStartNewWork is a plain Go function call, not a context, so it has
+	// no such gap -- decision 2 (worker-wide presumed loss) was never
+	// affected by this. fencedRuns reuses that same proven call site for
+	// decision 1, scoped to the one run rather than every run this worker
+	// holds.
+	fencedRuns sync.Map // map[workflowID]struct{}
+
+	// lastHeartbeatOK is the UnixNano of the last heartbeatAndFenceInFlight
+	// call that could actually ask the store -- a successful
+	// HeartbeatBatchFenced, including the trivial case of zero in-flight
+	// runs. cleat#2008 decision 2: an ERROR from that call does not advance
+	// it, so heartbeatPresumedLost() below turns from false to true only
+	// after heartbeats have been failing continuously for reclaimAfter(),
+	// not on the first blip -- the same threshold ReapStaleInstances uses to
+	// decide another worker may take this run.
+	//
+	// An atomic.Int64 rather than a mutex-guarded time.Time: it is written by
+	// the single heartbeat loop goroutine and read by every execution
+	// goroutine on every fresh durable call, so a lock-free read matters more
+	// here than it does for execCancel above (Store/Load, rarely on the hot
+	// path).
+	//
+	// Initialized in newWorker (or by the test constructors) to the worker's
+	// start time -- never the zero Time -- so a worker whose heartbeat loop
+	// has not ticked even once yet is not immediately presumed lost before
+	// it has had any chance to prove otherwise.
+	lastHeartbeatOK atomic.Int64
+
 	scheduleMu       sync.Mutex
 	scheduleInterval time.Duration
 
@@ -2263,6 +2321,24 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	defer w.wg.Done()
 	defer w.execEngines.Delete(wf.ID)
 	defer w.inflight.Delete(wf.ID)
+	defer w.fencedRuns.Delete(wf.ID)
+
+	// cleat#2008: this execution's OWN context, cancelled independently of
+	// every other execution and of w.ctx, the moment its fenced heartbeat
+	// reports the fence lost. Kept for whatever engine-side code between host
+	// calls DOES take this ctx directly (checksum verification and similar --
+	// see executeWithBackend). It does NOT stop the guest from making another
+	// durable call; fencedRuns above does that, via WithCanStartNewWork below,
+	// because wasmtime's host-call dispatch never sees this context at all
+	// (see fencedRuns' doc comment for the measurement). Registered before
+	// anything else so there is no window where a freshly-claimed run is in
+	// w.inflight (and so eligible to be heartbeat) but has no cancel func for
+	// the heartbeat loop to call.
+	execCtx, execCancel := context.WithCancel(w.ctx)
+	w.execCancel.Store(wf.ID, execCancel)
+	defer w.execCancel.Delete(wf.ID)
+	defer execCancel()
+
 	defer func() {
 		if r := recover(); r != nil {
 			w.logger.ErrorContext(context.Background(), "PANIC in workflow", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", r)
@@ -2606,6 +2682,16 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// was the whole finding -- so this is not optional wiring.
 		engine.WithWorkerID(w.id),
 		engine.WithGeneration(wf.Generation),
+		// cleat#2008: refuse fresh durable calls once this worker can no
+		// longer vouch for them -- decision 1, this run's own fenced
+		// heartbeat already reporting it lost (runIsFenced), or decision 2,
+		// this worker's heartbeats failing longer than the reclaim window
+		// worker-wide (heartbeatPresumedLost). See fencedRuns' doc comment
+		// for why decision 1 has to be checked here rather than left to
+		// execCtx cancellation.
+		engine.WithCanStartNewWork(func() bool {
+			return !w.heartbeatPresumedLost() && !w.runIsFenced(wf.ID)
+		}),
 		engine.WithTraceID(traceID),
 		engine.WithTenantID(wf.TenantID),
 		engine.WithBackends(wasmtimeLanguages, w.wasmtimeBackend),
@@ -2793,7 +2879,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	inputJSON := wf.Input
 	setupElapsed := time.Since(workflowStartTime)
 	engineStart := time.Now()
-	result, resultHistory, suspended, _, queryState, err := eng.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
+	// execCtx, not w.ctx: cleat#2008, so a fenced-out run does not also stop
+	// every OTHER execution this worker holds. What actually refuses this
+	// run's next durable call is fencedRuns via WithCanStartNewWork above,
+	// not this context -- see fencedRuns' doc comment for the measurement
+	// showing wasmtime's host-call dispatch never observes it.
+	result, resultHistory, suspended, _, queryState, err := eng.Replay(execCtx, wasmBytes, entryPoint, inputJSON, history)
 	engineElapsed := time.Since(engineStart)
 	if len(history) > 0 {
 		w.Metrics.RecordReplayDuration(context.Background(), engineElapsed)
@@ -3009,19 +3100,89 @@ func (w *Worker) heartbeatLoop() {
 		case <-ticker.C:
 			w.healthTracker.recordRun("heartbeat")
 			hbStart := time.Now()
-			_, err := w.store.BatchHeartbeat(w.ctx, w.id)
-			if err != nil {
-				w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
-				if isConnectionError(err) {
-					w.logger.WarnContext(w.ctx, "BatchHeartbeat failed: DB appears down", "worker_id", w.id)
-				} else {
-					w.logger.ErrorContext(w.ctx, "BatchHeartbeat error", "worker_id", w.id, "error", err)
-				}
-			} else {
-				w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
-			}
+			w.heartbeatAndFenceInFlight()
 			w.Metrics.SetBackgroundLoopDuration(w.ctx, "heartbeat", time.Since(hbStart).Seconds())
 		}
+	}
+}
+
+// heartbeatAndFenceInFlight heartbeats every run this worker's OWN goroutines
+// are currently executing, fenced individually per (run, generation) rather
+// than in the single unfenced statement BatchHeartbeat issues. cleat#2008:
+// this replaces that call at this one site (BatchHeartbeat itself is
+// unchanged and still correct for whatever else may call it) because it does
+// everything BatchHeartbeat did here PLUS the fence check, in the same
+// number of round trips.
+//
+// w.inflight is exactly the population this needs, and exactly the
+// population BatchHeartbeat's own WHERE clause matched: a run leaves
+// w.inflight (executeWorkflow's own deferred Delete) in the same moment it
+// leaves status='running' (FinalizeWorkflowSegment always changes one when it
+// changes the other), so the two have never had a gap to close.
+func (w *Worker) heartbeatAndFenceInFlight() {
+	var runs []engine.GenerationKey
+	w.inflight.Range(func(key, value any) bool {
+		wf, ok := value.(*engine.WorkflowInstance)
+		if !ok {
+			return true
+		}
+		runs = append(runs, engine.GenerationKey{WorkflowID: wf.ID, Generation: wf.Generation})
+		return true
+	})
+	if len(runs) == 0 {
+		w.lastHeartbeatOK.Store(time.Now().UnixNano())
+		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
+		return
+	}
+
+	lost, err := w.store.HeartbeatBatchFenced(w.ctx, w.id, runs)
+	if err != nil {
+		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
+		if isConnectionError(err) {
+			w.logger.WarnContext(w.ctx, "HeartbeatBatchFenced failed: DB appears down", "worker_id", w.id)
+		} else {
+			w.logger.ErrorContext(w.ctx, "HeartbeatBatchFenced error", "worker_id", w.id, "error", err)
+		}
+		// A failed heartbeat tells us nothing about which runs are lost --
+		// only that we could not ask. Cancelling on an error here would
+		// stop every in-flight execution on a single transient DB blip.
+		// cleat#2008 decision 2 (stand down after sustained failure) is the
+		// deliberately separate, slower response to this case.
+		return
+	}
+	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
+
+	for _, id := range lost {
+		wfAny, ok := w.inflight.Load(id)
+		wf, _ := wfAny.(*engine.WorkflowInstance)
+		var defName string
+		var generation int64
+		if ok && wf != nil {
+			defName = wf.DefName
+			generation = wf.Generation
+		}
+		cancelAny, ok := w.execCancel.Load(id)
+		if !ok {
+			// Already gone -- the execution finished (and deregistered
+			// itself) between the snapshot above and this heartbeat
+			// returning. Nothing to cancel.
+			continue
+		}
+		cancel, ok := cancelAny.(context.CancelFunc)
+		if !ok {
+			continue
+		}
+		w.logger.WarnContext(w.ctx, "execution fenced out: run superseded by a later generation",
+			"worker_id", w.id, "workflow_id", id, "def_name", defName, "generation", generation)
+		w.Metrics.RecordExecutionFencedOut(w.ctx, defName)
+		// This, not cancel() below, is what stops the NEXT durable call --
+		// see fencedRuns' doc comment. Set only here, alongside the execCancel
+		// that proves the execution is still registered, so a run that has
+		// already finished (and deregistered) by the time this loop reaches
+		// it never gets an entry nothing would go on to delete.
+		w.fencedRuns.Store(id, struct{}{})
+		cancel()
 	}
 }
 
@@ -3051,6 +3212,35 @@ func (w *Worker) heartbeatLoop() {
 // exist, for shard distribution -- and still follows --heartbeat.
 func (w *Worker) reclaimAfter() time.Duration {
 	return reclaimWindow(w.reclaimTimeout, w.heartbeatInterval)
+}
+
+// heartbeatPresumedLost reports whether this worker's own heartbeats have
+// been failing (or the DB has been unreachable) for at least as long as
+// another worker is allowed to wait before reclaiming a run of ours.
+// cleat#2008 decision 2.
+//
+// It is deliberately keyed on the SAME window ReapStaleInstances uses,
+// rather than a separate knob: the question this answers -- "might another
+// worker legitimately hold what I think is still mine?" -- is the mirror of
+// the question the reaper answers, so the two must agree. A shorter window
+// here would refuse new work before any reclaim could possibly have
+// happened; a longer one would keep starting new durable calls after a
+// reclaim already could have landed.
+//
+// Passed to every execution's Engine as WithCanStartNewWork -- see setup.go
+// where execEngines are constructed.
+func (w *Worker) heartbeatPresumedLost() bool {
+	last := time.Unix(0, w.lastHeartbeatOK.Load())
+	return time.Since(last) > w.reclaimAfter()
+}
+
+// runIsFenced reports whether THIS run's own fenced heartbeat has already
+// reported it lost -- decision 1, scoped to one workflow ID rather than
+// every run this worker holds. See fencedRuns' doc comment for why this,
+// and not execCtx cancellation, is what freshCall actually refuses on.
+func (w *Worker) runIsFenced(workflowID string) bool {
+	_, ok := w.fencedRuns.Load(workflowID)
+	return ok
 }
 
 // reclaimWindow is reclaimAfter's arithmetic, as a function of its two inputs.

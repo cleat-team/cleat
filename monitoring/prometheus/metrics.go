@@ -71,6 +71,7 @@ type Metrics struct {
 	wasmFuelExhausted       metric.Int64Counter
 	workflowsDeadLettered   metric.Int64Counter
 	workflowsClaimed        metric.Int64Counter
+	executionsFencedOut     metric.Int64Counter
 	wasmCacheHits           metric.Int64Counter
 	wasmCacheMisses         metric.Int64Counter
 	eventsDeleted           metric.Int64Counter
@@ -331,6 +332,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_workflows_claimed_total: %w", err)
+	}
+
+	m.executionsFencedOut, err = meter.Int64Counter(
+		"cleat_executions_fenced_out_total",
+		metric.WithDescription("Executions stopped because their own fenced heartbeat reported the run's generation superseded -- cleat#2008"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_executions_fenced_out_total: %w", err)
 	}
 
 	m.wasmCacheHits, err = meter.Int64Counter(
@@ -1026,6 +1035,18 @@ func (m *Metrics) RecordWorkflowsClaimed(ctx context.Context, count int64, workf
 		attribute.String("workflow_name", workflowName),
 	}, extraAttrs...)...)
 	m.workflowsClaimed.Add(ctx, count, metric.WithAttributes(attrs...))
+}
+
+// RecordExecutionFencedOut increments the fenced-out-executions counter.
+// cleat#2008: one execution's own batched, generation-fenced heartbeat
+// reported its (run, generation) pair unstamped -- another execution now
+// holds the run -- so this execution's context was cancelled before it could
+// start another durable call.
+func (m *Metrics) RecordExecutionFencedOut(ctx context.Context, workflowName string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("workflow_name", workflowName),
+	}, extraAttrs...)...)
+	m.executionsFencedOut.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordWasmCacheHit increments the wasm-cache-hits counter.

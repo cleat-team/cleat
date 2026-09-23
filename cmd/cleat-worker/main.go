@@ -1622,6 +1622,12 @@ func main() {
 		flusherRegistry:                  flusherRegistry,
 		db:                               db,
 	}
+	// cleat#2008 decision 2: seed to now, not the atomic.Int64 zero value --
+	// a fresh worker has not yet proven its heartbeat is failing, and
+	// leaving this at the Unix epoch would presume every worker's heartbeat
+	// lost from the instant it starts, before heartbeatLoop has ticked even
+	// once.
+	w.lastHeartbeatOK.Store(time.Now().UnixNano())
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
@@ -1991,8 +1997,9 @@ func validateReclaimTimeout(reclaim, heartbeat time.Duration) error {
 // ADVICE RATHER THAN A REFUSAL, unlike validateReclaimTimeout, and the
 // difference is that this configuration is merely usually pointless rather than
 // always wrong. The reasoning: an outage long enough to need a long retry also
-// stops BatchHeartbeat, which writes to the same database, so every run in the
-// fleet is past its stale window the moment the database returns. The reaper
+// stops the heartbeat loop's HeartbeatBatchFenced call, which writes to the
+// same database, so every run in the fleet is past its stale window the
+// moment the database returns. The reaper
 // then reclaims them and the retry that finally succeeds loses its fence. A
 // deployment running one worker has no other reaper and can legitimately want
 // this, so it is not refused -- but nothing in the flag's own units says so, and

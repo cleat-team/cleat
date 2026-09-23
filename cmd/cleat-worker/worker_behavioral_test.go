@@ -153,15 +153,16 @@ func TestDispatchLoop_StickyReclaim(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHeartbeatLoop_SuccessPreservesInflight(t *testing.T) {
-	// When BatchHeartbeat succeeds, the workflow remains in inflight.
+	// cleat#2008: HeartbeatBatchFenced, not BatchHeartbeat. When it succeeds
+	// and reports nothing lost, the workflow remains in inflight.
 	ms := &mockStore{}
 	var mu sync.Mutex
 	heartbeatCount := 0
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 		mu.Lock()
 		heartbeatCount++
 		mu.Unlock()
-		return 1, nil
+		return nil, nil
 	}
 
 	w := newTestWorker(ms)
@@ -199,13 +200,18 @@ func TestHeartbeatLoop_SuccessPreservesInflight(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHeartbeatLoop_LostOwnership(t *testing.T) {
-	// With BatchHeartbeat, the heartbeat loop does not track per-workflow
-	// ownership. Ownership recovery is handled by the reaper loop instead.
+	// cleat#2008: HeartbeatBatchFenced, not BatchHeartbeat. Reporting
+	// nothing lost (nil return, as here) leaves w.inflight itself
+	// untouched either way -- the loop only ever removes an entry from
+	// w.execCancel (a different map) for a run reported lost; w.inflight is
+	// cleared solely by executeWorkflow's own deferred Delete on
+	// completion. See TestHeartbeatAndFenceInFlightCancelsARunHeartbeatBatchFencedReportsLost
+	// in heartbeat_fenced_execution_test.go for the reported-lost case.
 	ms := &mockStore{}
 	callCount := 0
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 		callCount++
-		return 0, nil
+		return nil, nil
 	}
 
 	w := newTestWorker(ms)

@@ -281,11 +281,14 @@ func (s *PostgresStore) beginTxWithRLS(ctx context.Context) (*sql.Tx, error) {
 // # The decision: wire it, not delete it (B4)
 //
 // This was the one per-workflow generation-checked heartbeat in the store and
-// nothing called it: cmd/cleat-worker calls only BatchHeartbeat, which by its
-// own doc comment does not check generation because it refreshes every
-// workflow this worker holds in one statement. A generation-checked function
-// nothing calls is a trap for the next reader -- it reads like a safety net
-// that is actually just dead code.
+// nothing called it: cmd/cleat-worker's heartbeat loop called only
+// BatchHeartbeat, which by its own (now-removed; see cleat#2008) doc comment
+// did not check generation because it refreshed every workflow this worker
+// held in one statement. A generation-checked function nothing calls is a
+// trap for the next reader -- it reads like a safety net that is actually
+// just dead code. cleat#2008 replaced that call with HeartbeatBatchFenced,
+// which does check generation in the same one round trip, but this method
+// stays: it is still what flush.go and store_intent.go call, below.
 //
 // # Where it is actually used now
 //
@@ -356,29 +359,72 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 	return n > 0, tx.Commit()
 }
 
-// BatchHeartbeat updates heartbeat_at for all workflows assigned to this worker.
-// NOTE: This intentionally does NOT check per-workflow generation because it
-// operates on ALL running workflows for a worker, and generations differ per
-// workflow. Individual generation-guarded operations (Heartbeat,
-// CompleteWorkflow, FailWorkflow, etc.) prevent double-execution even if the
-// batch heartbeat refreshes a stale workflow's heartbeat_at.
-func (s *PostgresStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
+// HeartbeatBatchFenced heartbeats every given (workflowID, generation) pair
+// in one round trip, fenced per pair. See the interface doc for the design;
+// cleat#2008 replaced BatchHeartbeat with this at the worker's one call site
+// rather than running both.
+func (s *PostgresStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	if len(runs) == 0 {
+		return nil, nil
+	}
+	byID := make(map[string]int64, len(runs))
+	ids := make([]string, 0, len(runs))
+	for _, r := range runs {
+		byID[r.WorkflowID] = r.Generation
+		ids = append(ids, r.WorkflowID)
+	}
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("batch heartbeat: begin: %w", err)
+		return nil, fmt.Errorf("heartbeat batch fenced: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET heartbeat_at = now()
-		WHERE assigned_to = $1 AND status = 'running'
-	`, workerID)
+	// FOR UPDATE holds these rows through the UPDATE below, in the same
+	// transaction -- a reclaim landing between a check and a separate update
+	// statement is exactly the race this exists to close, not reopen.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, generation FROM workflow_instances
+		WHERE assigned_to = $1 AND status = 'running' AND id = ANY($2)
+		FOR UPDATE
+	`, workerID, pq.Array(ids))
 	if err != nil {
-		return 0, fmt.Errorf("batch heartbeat: %w", err)
+		return nil, fmt.Errorf("heartbeat batch fenced: select: %w", err)
 	}
-	n, _ := result.RowsAffected()
-	return n, tx.Commit()
+	eligible := make([]string, 0, len(runs))
+	eligibleSet := make(map[string]bool, len(runs))
+	for rows.Next() {
+		var id string
+		var gen int64
+		if err := rows.Scan(&id, &gen); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("heartbeat batch fenced: scan: %w", err)
+		}
+		if wantGen, ok := byID[id]; ok && wantGen == gen {
+			eligible = append(eligible, id)
+			eligibleSet[id] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("heartbeat batch fenced: rows: %w", err)
+	}
+	rows.Close()
+
+	lost := make([]string, 0, len(runs))
+	for _, id := range ids {
+		if !eligibleSet[id] {
+			lost = append(lost, id)
+		}
+	}
+
+	if len(eligible) > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances SET heartbeat_at = now() WHERE id = ANY($1)
+		`, pq.Array(eligible)); err != nil {
+			return nil, fmt.Errorf("heartbeat batch fenced: update: %w", err)
+		}
+	}
+	return lost, tx.Commit()
 }
 
 // CompleteWorkflow marks a workflow as done.

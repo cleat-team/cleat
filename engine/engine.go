@@ -53,8 +53,23 @@ type Engine struct {
 	workflowEventVerifier  func(ctx context.Context, workflowID string) error
 	failOnChecksumMismatch bool
 
-	workerID               string
-	generation             int64 // generation this workerID claimed the workflow under; see WithGeneration
+	workerID   string
+	generation int64 // generation this workerID claimed the workflow under; see WithGeneration
+
+	// canStartNewWork gates every fresh durable call, in addition to (not
+	// instead of) the cancellation poll in freshCall. cleat#2008 decision 2:
+	// unlike HeartbeatBatchFenced (decision 1), which tells a SPECIFIC
+	// execution its fence is gone, this answers a question no per-run query
+	// can: "has MY OWN heartbeat been failing for so long that I can no
+	// longer vouch for ANY run I hold?" A worker cut off from the database
+	// cannot tell fenced-out from merely-unconfirmed, so it must refuse new
+	// work across the board rather than assume it is still fine.
+	//
+	// nil means "always allowed" -- the same fail-open default the
+	// cancellation poll uses, and for the same reason: most callers of
+	// NewEngine (cleatctl replay, cleat run_embedded, wasmtest) have no
+	// worker and no heartbeat to be presumed lost.
+	canStartNewWork        func() bool
 	wasmInstanceTimeout    time.Duration
 	wasmWallClockCeiling   time.Duration
 	hostRetryBudgetCeiling time.Duration
@@ -337,6 +352,17 @@ func WithWorkflowEventVerifier(fn func(ctx context.Context, workflowID string) e
 
 // WithWorkerID sets the worker instance identifier.
 func WithWorkerID(id string) EngineOption { return func(e *Engine) { e.workerID = id } }
+
+// WithCanStartNewWork gates every fresh durable call on fn, in addition to
+// the existing cancellation poll. cleat#2008 decision 2: the worker passes a
+// closure over its own heartbeat health, so an execution stops starting new
+// durable calls once its worker's heartbeats have been failing longer than
+// the reclaim window -- not because THIS run's fence is known lost (that is
+// decision 1, HeartbeatBatchFenced), but because the worker can no longer
+// tell.
+func WithCanStartNewWork(fn func() bool) EngineOption {
+	return func(e *Engine) { e.canStartNewWork = fn }
+}
 
 // WithGeneration sets the generation this workerID claimed the workflow
 // instance under (workflow_instances.generation at claim time).

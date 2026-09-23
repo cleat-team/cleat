@@ -40,7 +40,7 @@ type mockStore struct {
 	getWASMLengthFn                    func(ctx context.Context, defName string, defVersion int) (int64, error)
 	listVersionsFn                     func(ctx context.Context, defName string) ([]int, error)
 	heartbeatFn                        func(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
-	batchHeartbeatFn                   func(ctx context.Context, workerID string) (int64, error)
+	heartbeatBatchFencedFn             func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error)
 	completeWorkflowFn                 func(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
 	failWorkflowFn                     func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error
 	releaseWorkflowFn                  func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
@@ -1787,11 +1787,11 @@ func TestGCVersions_ArgsNotDryRun(t *testing.T) {
 		t.Errorf("should not have enabled dry run: %s", stderr)
 	}
 }
-func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	if m.batchHeartbeatFn != nil {
-		return m.batchHeartbeatFn(ctx, workerID)
+func (m *mockStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
+	if m.heartbeatBatchFencedFn != nil {
+		return m.heartbeatBatchFencedFn(ctx, workerID, runs)
 	}
-	return 0, nil
+	return nil, nil
 }
 
 func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error) {

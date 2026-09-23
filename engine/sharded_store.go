@@ -370,21 +370,38 @@ func (s *ShardedStore) Heartbeat(ctx context.Context, workflowID, workerID strin
 	return shard.Store.Heartbeat(ctx, workflowID, workerID, generation)
 }
 
-// BatchHeartbeat fans out to all shards, aggregating the total count.
-func (s *ShardedStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
-
-	var total int64
-	for _, shard := range shards {
-		n, err := shard.Store.BatchHeartbeat(ctx, workerID)
-		if err != nil {
-			return total, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+// HeartbeatBatchFenced groups runs by shard -- routed by WorkflowID, as every
+// per-ID method here is -- and issues one batched, fenced heartbeat call per
+// shard rather than one call per run. cleat#2008.
+func (s *ShardedStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	byShard := make(map[*Shard][]GenerationKey)
+	var unrouted []string
+	for _, r := range runs {
+		shard := s.getShard(r.WorkflowID)
+		if shard == nil {
+			unrouted = append(unrouted, r.WorkflowID)
+			continue
 		}
-		total += n
+		byShard[shard] = append(byShard[shard], r)
 	}
-	return total, nil
+
+	// A run with no shard cannot be told anything -- it counts as lost,
+	// the same as a fenced-out one, because either way this worker cannot
+	// vouch for it.
+	lost := unrouted
+	var errs []string
+	for shard, shardRuns := range byShard {
+		shardLost, err := shard.Store.HeartbeatBatchFenced(ctx, workerID, shardRuns)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("shard %q: %v", shard.Config.Name, err))
+			continue
+		}
+		lost = append(lost, shardLost...)
+	}
+	if len(errs) > 0 {
+		return lost, fmt.Errorf("HeartbeatBatchFenced errors: %s", strings.Join(errs, "; "))
+	}
+	return lost, nil
 }
 
 // LoadEventHistoryPaginated routes by workflow ID.
