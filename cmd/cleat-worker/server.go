@@ -904,14 +904,41 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Inject entry point into input if provided.
+	//
+	// FLAT-MERGED, not nested. determineEntryPoint (cmd/cleat-worker/setup.go)
+	// documents its option 1 as "an explicit __entry_point field IN THE START
+	// INPUT" -- a sibling of the entry's own fields, exactly the shape
+	// cmd/cleat-bench/main.go already uses: `{"__entry_point":"...","order_id":"..."}`.
+	// No guest -- Go's generated dispatcher included -- unwraps an "input" key
+	// or strips __entry_point; wf.Input reaches the guest verbatim
+	// (cmd/cleat-worker/setup.go: inputJSON := wf.Input). This used to wrap
+	// instead: `{"input": originalInput, "__entry_point": ...}`, which
+	// determineEntryPoint still resolved correctly (it only reads the
+	// top-level key) but corrupted the entry's own input, which arrived as
+	// the wrong shape and failed to deserialize. cleat#2108, found live while
+	// verifying cleat#2097/#2109 against examples/rust-workflow.
+	//
+	// Refused rather than silently discarded when the input isn't a JSON
+	// object: there is no field to merge __entry_point into. The prior code
+	// let json.Unmarshal's error pass silently and merged into a nil map,
+	// which regenerated as {"input":null,"__entry_point":"..."} -- the
+	// caller's actual input vanished into "null" with no indication why.
 	in := input.Input
 	if input.EntryPoint != "" {
 		var originalInput map[string]any
-		json.Unmarshal(input.Input, &originalInput)
-		in, _ = json.Marshal(map[string]any{
-			"input":         originalInput,
-			"__entry_point": input.EntryPoint,
-		})
+		if err := json.Unmarshal(input.Input, &originalInput); err != nil || originalInput == nil {
+			s.writeError(w, 400, fmt.Sprintf(
+				"entry_point requires \"input\" to be a JSON object so __entry_point can be merged into it "+
+					"(got %s): %v", string(input.Input), err))
+			return
+		}
+		originalInput["__entry_point"] = input.EntryPoint
+		merged, marshalErr := json.Marshal(originalInput)
+		if marshalErr != nil {
+			s.writeError(w, 500, "encoding input with entry_point: "+marshalErr.Error())
+			return
+		}
+		in = merged
 	}
 
 	// Support Concurrency-Key header or JSON body field (Feature 5).
