@@ -1454,9 +1454,12 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 // "another tenant's" -- see its doc comment. That is the same boundary 3.101
 // draws at the HTTP layer, and it is why this returns one error rather than two.
 //
-// Note that an ALREADY-terminated workflow still matches: the UPDATE carries no
-// status filter, so terminate stays idempotent and only a genuinely absent (or
-// other-tenant) row returns not-found.
+// SUPERSEDED 2026-09-22 (cleat#1975, D3): this used to say an already-terminated
+// workflow "still matches" and terminate "stays idempotent". It no longer does.
+// preemptivelySettle now refuses with ErrAdminStateConflict on a settled
+// workflow -- 'terminated' included -- and the double-terminate case is a 409,
+// not a silent no-op. The one carve-out is dead_lettered -> terminated, which
+// is what the dead-letter queue's own terminate route exists to do.
 // TerminateWorkflow force-terminates a workflow, recording 'terminated'.
 func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return s.preemptivelySettle(ctx, workflowID, reason, statusTerminated)
@@ -1515,6 +1518,18 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	}
 	if err != nil {
 		return fmt.Errorf("%s workflow: read: %w", finalStatus, err)
+	}
+
+	// cleat#1975 (D3): settled is final. The one documented exception is the
+	// dead-letter queue's own terminate route, which is this exact call --
+	// handleDeadLetterTerminate is the only HTTP path to TerminateWorkflow --
+	// taking a dead_lettered run off the queue. Every other settled status,
+	// and every path through CancelWorkflow (finalStatus is never
+	// statusTerminated there), is refused.
+	if isSettledStatus(curStatus) && !(finalStatus == statusTerminated && curStatus == statusDeadLettered) {
+		return adminErrorf(ErrAdminStateConflict,
+			"workflow %s: already settled (status=%s); refusing to write %s over it",
+			workflowID, curStatus, finalStatus)
 	}
 
 	if deferPhaseOwed(curStatus, hasDefers, compacted) {

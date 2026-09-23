@@ -298,6 +298,16 @@ func (s *MSSQLStore) preemptivelySettleOnce(ctx context.Context, workflowID, rea
 		return fmt.Errorf("%s workflow: read: %w", finalStatus, err)
 	}
 
+	// cleat#1975 (D3): settled is final. See PostgresStore.TerminateWorkflow's
+	// doc comment for the dead-letter exception. Not a rollback-guaranteed
+	// class (isMSSQLRollbackGuaranteed only checks deadlock/snapshot errors),
+	// so withRollbackGuaranteedRetry returns it on the first attempt.
+	if isSettledStatus(curStatus) && !(finalStatus == statusTerminated && curStatus == statusDeadLettered) {
+		return adminErrorf(ErrAdminStateConflict,
+			"workflow %s: already settled (status=%s); refusing to write %s over it",
+			workflowID, curStatus, finalStatus)
+	}
+
 	if deferPhaseOwed(curStatus, hasDefers == 1, compacted == 1) {
 		// Phase 1 of the two-phase transition: mark, do not finalize. See
 		// PostgresStore.TerminateWorkflow for why next_wake_at moves and why

@@ -1338,7 +1338,10 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 				s.writeError(w, 404, "not found")
 				return
 			}
-			s.writeError(w, 500, err.Error())
+			// cleat#1975 (D3): a pre-emptive cancel on a settled row now comes
+			// back as engine.ErrAdminStateConflict -> 409, via the same
+			// mapping re-replay and force-fail/force-complete use.
+			s.handleAdminOpError(w, err)
 			return
 		}
 		// Names the OUTCOME, not the current state, which is what terminate

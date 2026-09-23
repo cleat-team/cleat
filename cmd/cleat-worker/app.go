@@ -308,7 +308,11 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 			s.writeError(w, 404, "not found")
 			return
 		}
-		s.writeError(w, 500, err.Error())
+		// cleat#1975 (D3): a terminate on a settled row -- other than the
+		// dead_lettered -> terminated transition this route exists to do --
+		// now comes back as engine.ErrAdminStateConflict. handleAdminOpError
+		// is the one place that maps it to 409, the same class re-replay uses.
+		s.handleAdminOpError(w, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "terminated"})

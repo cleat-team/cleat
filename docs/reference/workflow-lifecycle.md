@@ -36,6 +36,27 @@ seventh, `terminating`, gained its writer on 2026-09-04 (see the defer phase bel
 | `dead_lettered` | **yes** | Retries exhausted. On the Go SDK this is reachable only through a retry policy short enough to have run on the host — see `IMPROVEMENT-PLAN.md` §3.88. |
 | `terminating` | no | The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Written by `TerminateWorkflow`, by `enforceParentClosePolicy`'s TERMINATE arm, and since 2026-09-13 by force-complete and force-fail — in each case only when the workflow has registered defers; cleared by `FinalizeDeferPhase` or by the deadline sweep. Schema in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
 
+### Settled is final
+
+**A run leaves the "terminal? yes" rows above only through a documented redrive verb** (re-replay,
+retry, reprocess — not covered by this section), never by a second call to an operator or
+pre-emptive-stop verb landing on the same row. `done`, `failed`, `dead_lettered`, `terminated` and
+`cancelled` are collectively **settled** (`settledStatusList`, `engine/status_vocabulary.go`).
+Terminate, pre-emptive cancel, force-complete and force-fail all refuse with `ErrAdminStateConflict`
+→ HTTP 409 `{"detail":"state_conflict"}` when the target is already settled, rather than silently
+overwriting it. cleat#1975 (decision D3, 2026-09-22).
+
+The one documented exception is `POST /api/dead-letters/:id/terminate` moving `dead_lettered` →
+`terminated` — that route's entire purpose is to take a dead-lettered run off the queue, and it is
+the only caller of `TerminateWorkflow` reachable over HTTP. No other transition out of a settled
+status is permitted through these four verbs; in particular, terminating or cancelling an
+already-`terminated`/`cancelled`/`done`/`failed` row is now a 409, not the idempotent no-op it used
+to be.
+
+`terminating` is **not** settled — it is the cleanup window above, and a second terminate landing
+on a `terminating` row still cuts the defer phase short rather than being refused, exactly as
+before.
+
 Re-derive the written set with:
 
 ```
@@ -314,6 +335,7 @@ stateDiagram-v2
 
     ready --> terminated: TerminateWorkflow (admin, no defers)
     running --> terminated: TerminateWorkflow (admin, no defers)
+    dead_lettered --> terminated: TerminateWorkflow (dead-letter terminate route; sole exception to "settled is final")
     ready --> cancelled: CancelWorkflow (preemptive, no defers)
     running --> cancelled: CancelWorkflow (preemptive, no defers)
     ready --> failed: parent close policy TERMINATE
@@ -350,8 +372,8 @@ exists to prevent.
 | `running` → `failed` | `FailWorkflow`, `engine/store_lifecycle.go` |
 | `*` → `failed` (parent) | `enforceParentClosePolicy` TERMINATE arm, `engine/store_lifecycle.go` |
 | `running` → `dead_lettered` | `MoveToDeadLetterQueue`, `engine/store_lifecycle.go` |
-| `*` → `terminated` | `TerminateWorkflow` → `preemptivelySettle`, `engine/db.go`, `mysql_ops.go`, `mssql_operations.go` |
-| `*` → `cancelled` | `CancelWorkflow`, `engine/db.go`, `mysql_ops.go`, `mssql_operations.go` — all three share `TerminateWorkflow`'s body (`preemptivelySettle`), parameterised on the outcome |
+| `ready`/`running`/`suspended`/`terminating` → `terminated`, or `dead_lettered` → `terminated` | `TerminateWorkflow` → `preemptivelySettle`, `engine/db.go`, `mysql_ops.go`, `mssql_operations.go` — **not** `*` since cleat#1975 (D3): a settled row other than `dead_lettered` refuses with `ErrAdminStateConflict`. See *Settled is final* above. |
+| `ready`/`running`/`suspended`/`terminating` → `cancelled` | `CancelWorkflow`, `engine/db.go`, `mysql_ops.go`, `mssql_operations.go` — all three share `TerminateWorkflow`'s body (`preemptivelySettle`), parameterised on the outcome. No dead-letter exception: every settled status is refused. |
 
 ### Which terminal transitions close the workflow's children
 

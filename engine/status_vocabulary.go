@@ -130,10 +130,17 @@ func childOutcomeForSettledStatus(status, result string, errMsg sql.NullString) 
 
 // isSettledStatus reports whether status is one of the five settledStatusList
 // spells in SQL. Kept as a plain Go switch rather than parsing
-// settledStatusList at runtime -- this is called on every GetChildResult, and
-// the SQL string is deliberately not meant to be embedded or parsed outside
-// the literal predicates it was built for (see settledStatusList's own
-// comment on why a shared helper was reverted there).
+// settledStatusList at runtime -- called on every GetChildResult, and also
+// (cleat#1975) by preemptivelySettle and adminForceResolve, which already
+// have curStatus in hand from a FOR UPDATE/UPDLOCK read and need a yes/no
+// answer rather than a SQL filter. Not a third spelling of the set: the SQL
+// string is deliberately not meant to be embedded or parsed outside the
+// literal predicates it was built for (see settledStatusList's own comment
+// on why a shared helper was reverted there), so this switch is a second,
+// independent spelling of the same five statuses rather than derived from
+// settledStatusList. engine/one_definition_of_settled_test.go's scan
+// exempts this file by name for exactly that reason -- it is the one place
+// permitted to spell the set by hand instead of matching the literal text.
 func isSettledStatus(status string) bool {
 	switch status {
 	case statusDone, statusFailed, statusDeadLettered, statusTerminated, statusCancelled:
