@@ -644,8 +644,7 @@ TerminalStableLiveness ==
     would have been a false claim, and the honest state is "found a real
     gap, tracked it, did not chase convergence within this issue's scope."
     Follow-up: cleat#2034 was filed for the vacuity; this finding is new
-    and should get its own issue before anyone attempts the per-instance-
-    fairness fix.
+    and separate, tracked as cleat#2041.
 *)
 NoStarvation ==
     []( \A i \in Instances :

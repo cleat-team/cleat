@@ -242,10 +242,10 @@ instance — whose antecedent is never revoked, since the worker never dies and 
 never stops being ready past its wake time — starves for the entire infinite trace. No escape
 clause repairs this, because there is no point where the antecedent becomes false to escape
 through; genuinely fixing it needs per-instance fairness (a real model change), which is out of
-cleat#2034's scope. `NoStarvation` is left **defined but deliberately not gated** in
-`CleatClaim.cfg`, matching `CleatRunLifecycle.tla`'s own precedent for `L1`/`L2`/`L3` — shipping
-it gated would have been a false claim. See `CleatClaim.tla`'s own comment above `NoStarvation`
-for the full trace and the follow-up-issue note.
+cleat#2034's scope — tracked separately as **cleat#2041**. `NoStarvation` is left **defined but
+deliberately not gated** in `CleatClaim.cfg`, matching `CleatRunLifecycle.tla`'s own precedent
+for `L1`/`L2`/`L3` — shipping it gated would have been a false claim. See `CleatClaim.tla`'s own
+comment above `NoStarvation` for the full trace.
 
 **Known-positive, re-run against the fixed spec — three properties, three mutations, and the
 state-count check that matters: does removing fairness change the VERDICT without changing the
