@@ -114,6 +114,18 @@ const (
 
 	scopedByCompactionSweep = "scoped by the sweep that produced the id: GetCompactionCandidates " +
 		"restricts on s.tenantID and compactionLoop compacts on the same store"
+
+	// engine/testutil, not production code, and reached only at test-failure
+	// time (cleat#982's angle 4). statsDB there is the sa connection
+	// MSSQLStatsDB returns -- see its doc comment: RLS does not apply to it,
+	// so there is no per-tenant view to restrict to. Deliberately server-wide
+	// because the report's whole purpose is to show which SESSION holds a
+	// lock on workflow_instances, whatever tenant that session belongs to; a
+	// tenant_id predicate here would hide the one case (another test's or
+	// another session's lock) the section exists to catch.
+	testDiagnosticAcrossTenants = "test-only diagnostic report on the sa connection MSSQLStatsDB " +
+		"returns, run at failure time to show every lock on the table regardless of tenant " +
+		"(cleat#982 angle 4)"
 )
 
 // tenantPredicateAllowlist is keyed by stmtKey -- "<file base>:<enclosing Go
@@ -256,6 +268,10 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	"store_admin.go:adminAppendAudit#64dbbbf6d7c3": {
 		SQL:    "select event_type, operation from event_history where workflow_id = @p1 and st",
 		Reason: scopedByCaller,
+	},
+	"mssql_row_disappearance.go:mssqlActiveLocksSection#42ab7b04581c": {
+		SQL:    "select l.request_session_id, l.resource_type, l.request_mode, l.request_status",
+		Reason: testDiagnosticAcrossTenants,
 	},
 
 	// WHAT THIS GUARD TURNED UP BEFORE IT LANDED. Note that only the first came
