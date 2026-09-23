@@ -23,17 +23,22 @@ cleat-worker
 For production, always use `sslmode=require` (or `verify-full` with a CA
 certificate). Never disable SSL in production.
 
-### Namespaces
+### Tenant isolation
 
-Namespaces isolate workflow definitions and instances. Use them to separate
-environments, teams, or tenants:
+There is no `--namespace` flag on `cleat deploy` or `cleat-worker` — a prior
+version of this doc showed one, and it exits 2 with "flag provided but not
+defined" (cleat#1970). Environment and tenant separation is via `tenant_id`,
+not a namespace: `cleat deploy` takes the tenant from the global `--tenant`
+flag (must precede the subcommand) or `CLEAT_TENANT_ID`, and `cleat-worker`
+resolves the tenant per request via `--tenant-resolver`. See
+[multi-tenancy.md](../reference/multi-tenancy.md) for the resolution modes
+and what actually enforces the boundary (row-level security, not a separate
+table set).
 
 ```bash
-cleat deploy --db "$CLEAT_DATABASE_URL" --namespace staging --name place_order ./out/order.wasm
-cleat-worker --db "$CLEAT_DATABASE_URL" --namespace staging
+cleat --tenant "$STAGING_TENANT_ID" deploy --db "$CLEAT_DATABASE_URL" --name place_order ./out/order.wasm
+cleat-worker --db "$CLEAT_DATABASE_URL" --tenant-resolver=header:X-Tenant-ID
 ```
-
-Each namespace has its own set of `workflow_defs` and `workflow_instances`.
 
 ### Worker concurrency
 

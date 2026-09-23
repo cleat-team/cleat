@@ -77,16 +77,16 @@ When creating a child workflow:
 
 ```
 # Production: pin to whatever is tagged "stable" right now
-cleat build --channel stable --tenant <tenant-uuid>
+cleat --tenant <tenant-uuid> build --channel stable
 
 # Development: always use latest at runtime
 cleat build --channel latest
 
 # Canary: follow the "canary" tag
-cleat build --channel canary --tenant <tenant-uuid>
+cleat --tenant <tenant-uuid> build --channel canary
 
 # Custom tag
-cleat build --channel experiment-b --tenant <tenant-uuid>
+cleat --tenant <tenant-uuid> build --channel experiment-b
 ```
 
 The `--channel` flag determines both:
