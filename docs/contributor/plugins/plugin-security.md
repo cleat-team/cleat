@@ -542,40 +542,68 @@ For community plugins (not reviewed by the cleat project), you should:
 
 ### The upgrade flow
 
-1. Run `cleat plugin update example/hello-world` to see available upgrades:
+There is no `cleat plugin update --show`, and `plugin update` never installs
+anything -- it only reports whether a newer version exists. The command that
+performs an upgrade is `cleat plugin install <name>@<version>`.
+
+1. Check for an update:
 
    ```
    $ cleat plugin update example/hello-world
-   
-   Current: v0.1.0 (installed 2026-05-01)
-   Available:
-     v0.2.0  ─ 2026-05-15  ─ CHANGELOG: view
-     v1.0.0  ─ 2026-06-01  ─ CHANGELOG: view
+
+   example/hello-world: v0.1.0 -> v0.2.0 (update available)
    ```
 
-2. View the details of an upgrade:
+   `checkSinglePluginUpdate` (`cmd/cleat/plugin_cmd.go`) always prints exactly one
+   line for a given name, one of: `not installed`, `error querying: <err>`,
+   `<version> (not found in index)`, `<old> -> <new> (update available)`, or
+   `<version> (latest)`. There is no per-version listing, no install date, and no
+   CHANGELOG link -- `--all` runs the same one-line check for every installed
+   plugin instead of taking a name.
+
+2. Install the new version:
 
    ```
-   $ cleat plugin update example/hello-world@0.2.0 --show
-   
+   $ cleat plugin install example/hello-world@0.2.0
+
    Plugin: example/hello-world
-   Version: 0.2.0
-   Checksum: sha256:789abc... (current: sha256:abc123...)
-   Checksum changed: YES
-   Capabilities: database=false, start_workflow=false (unchanged)
-   
-   Host functions:
-     + greet_all(names: string[]) → messages: string[]
-     greet(name: string) → message: string (unchanged)
-   
-   Proceed with upgrade? [y/N]
+     Description: Greets people by name
+     Author: Example Org
+     Version: 0.2.0
+
+     SECURITY WARNING: This is a third-party plugin.
+     Plugins have access to your database and infrastructure.
+     Only install plugins from trusted sources.
+     Review the source code and manifest before installing.
+
+   Install this plugin? [y/N] y
+   Downloading example/hello-world v0.2.0...
+     Downloaded 4821 bytes
+   Verifying checksum... OK
+   Successfully installed example/hello-world v0.2.0
    ```
 
-3. Confirm the upgrade. The CLI:
-   - Downloads the new WASM binary
-   - Verifies the checksum against the index
-   - Creates a NEW row in `plugin_defs` (it never overwrites existing versions)
-   - Displays a success message
+   There is no per-field diff against the installed version -- no checksum
+   comparison, no capability list, no host-function delta. The security warning
+   only prints for a plugin whose author is not official (`entry.IsOfficial()`);
+   `--yes` skips the confirmation prompt, and `--dry-run` prints what would be
+   downloaded/verified/deployed and stops before doing any of it.
+
+3. What `cleat plugin install` actually does, in order (`runPluginInstall`,
+   `cmd/cleat/plugin_cmd.go`):
+   - Resolves `<name>[@<constraint>]` against the index and prints the info block
+     above.
+   - Returns immediately if the resolved version is bundled with `cleat-worker` --
+     nothing to install.
+   - Prints the security warning for a non-official plugin.
+   - Prompts for confirmation, unless `--yes`.
+   - On `--dry-run`, prints what it would do and stops.
+   - Downloads the WASM binary and verifies its checksum (see below).
+   - Deploys it via `DeployPlugin` (`engine/plugin_loader.go`), which upserts on
+     `(name, version)`: a genuinely new version gets a new row and existing rows
+     are untouched, but reinstalling the same name and version overwrites that
+     row's WASM bytes in place.
+   - Prints a one-line success message.
 
 ### Important: version pinning
 
@@ -587,21 +615,23 @@ means:
 - You can safely upgrade during production without concern for in-flight
   disruption
 - Old versions remain in `plugin_defs` until all workflows referencing them
-  complete
+  complete, or until something reinstalls that exact name and version, which
+  overwrites the row instead of adding a new one
 
 ### Checksum verification
 
-On upgrade, the CLI verifies:
+On install, the CLI verifies the downloaded WASM binary against the checksum in
+the index entry (`plugin.VerifyChecksum`, `plugin/index.go`). There is no
+separate comparison against a currently-installed version's checksum, and
+reinstalling an unchanged version is not treated as a no-op.
 
-1. The downloaded WASM binary matches the checksum in the index
-2. The checksum differs from the currently installed version (a same-checksum
-   upgrade is a no-op)
-
-If checksums don't match, the upgrade is refused:
+If the checksum does not match, the install is refused inline, with no separate
+`ERROR:` banner:
 
 ```
-ERROR: checksum mismatch: expected sha256:abc123..., got sha256:def456...
-The downloaded binary does not match the index record. Upgrade refused.
+Downloading example/hello-world v0.2.0...
+  Downloaded 4821 bytes
+Verifying checksum... failed: checksum mismatch: expected sha256:abc123..., got sha256:def456...
 ```
 
 ---
