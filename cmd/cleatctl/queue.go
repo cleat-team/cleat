@@ -140,7 +140,11 @@ func queueList(ctx context.Context, store *engine.QueueStore, tenant string) {
 		if q.RateLimit != nil {
 			rate = fmt.Sprintf("rate<=%d/%ds", *q.RateLimit, *q.RatePeriodSeconds)
 		}
-		fmt.Printf("  %-32s concurrency=%-4d %-16s %s\n", q.Name, q.ConcurrencyLimit, rate, state)
+		perWorker := "no per-worker cap"
+		if q.WorkerConcurrency != nil {
+			perWorker = fmt.Sprintf("worker<=%d", *q.WorkerConcurrency)
+		}
+		fmt.Printf("  %-32s concurrency=%-4d %-16s %-20s %s\n", q.Name, q.ConcurrencyLimit, rate, perWorker, state)
 	}
 }
 
@@ -151,6 +155,7 @@ func queueCreate(ctx context.Context, store *engine.QueueStore, tenant string, a
 	limit := fs.Int("concurrency", 0, "how many of this queue's runs may be claimed at once (>= 1)")
 	rateLimit := fs.Int("rate-limit", 0, "cap on admissions per --rate-period (>= 1; requires --rate-period)")
 	ratePeriod := fs.Int("rate-period", 0, "the rolling window --rate-limit applies over, in seconds (>= 1; requires --rate-limit)")
+	workerConcurrency := fs.Int("worker-concurrency", 0, "cap on how many of this queue's holders one worker may own at once (>= 1, <= --concurrency)")
 
 	operands, err := parseFlagsAnywhere(fs, args)
 	if err != nil {
@@ -179,8 +184,9 @@ func queueCreate(ctx context.Context, store *engine.QueueStore, tenant string, a
 		osExit(2)
 		return
 	}
+	wc := parseWorkerConcurrencyFlag(*workerConcurrency)
 
-	err = store.CreateQueue(ctx, tenant, name, *limit, rl, rp)
+	err = store.CreateQueue(ctx, tenant, name, *limit, rl, rp, wc)
 	if errors.Is(err, engine.ErrQueueAlreadyExists) {
 		// Not an upsert, and this says why rather than reporting a bare
 		// conflict: silently raising a limit an operator did not intend to
@@ -201,9 +207,25 @@ func queueCreate(ctx context.Context, store *engine.QueueStore, tenant string, a
 	if rl != nil {
 		fmt.Printf("Rate-limited to %d admission(s) per %d second(s).\n", *rl, *rp)
 	}
+	if wc != nil {
+		fmt.Printf("Capped at %d holder(s) per worker.\n", *wc)
+	}
 	fmt.Printf("Start a workflow against it by setting its concurrency_key to %q.\n", name)
 	fmt.Printf("At most %d of them are claimed at once; the rest WAIT and are claimed as slots\n", *limit)
 	fmt.Printf("free. They are deferred, not rejected -- no start returns 409 because of this.\n")
+}
+
+// parseWorkerConcurrencyFlag turns queueCreate/queueUpdate's --worker-concurrency
+// int into the *int QueueStore takes. 0 (the flag's default, left unset) means
+// "no per-worker cap" -- the same "0 means not passed" convention --concurrency
+// and --rate-limit/--rate-period already use, valid here for the same reason: a
+// real cap of 0 is refused anyway (QueueStore requires >= 1), so 0 is never a
+// value a caller means to set.
+func parseWorkerConcurrencyFlag(workerConcurrency int) *int {
+	if workerConcurrency == 0 {
+		return nil
+	}
+	return &workerConcurrency
 }
 
 // queueSetRetired is disable and enable, which differ only in direction.
@@ -283,18 +305,29 @@ func parseRateLimitFlags(rateLimit, ratePeriod int) (rl, rp *int, err error) {
 	return &rateLimit, &ratePeriod, nil
 }
 
-// queueUpdate sets or clears a registered queue's rate limit. It does not
-// touch --concurrency -- cleat#1918's own scope, and there is no operational
-// need to change a semaphore's ceiling here that queue disable/enable's
-// mutex fallback does not already cover for the "I want fewer running at
-// once, right now" case.
+// queueUpdate sets or clears a registered queue's rate limit and/or its
+// worker concurrency cap (cleat#1917). It does not touch --concurrency --
+// cleat#1918's own scope, unchanged by #1917: there is no operational need to
+// change the semaphore's own ceiling here that queue disable/enable's mutex
+// fallback does not already cover for the "I want fewer running at once,
+// right now" case, and worker_concurrency is validated AGAINST that ceiling
+// (SetQueueWorkerConcurrency), so leaving it fixed here keeps that
+// validation meaningful.
+//
+// The two settings are independent (queue_store.go), and this command lets
+// an operator touch either, both, or neither's flags in one invocation --
+// but at least one operation must be given; a bare `queue update <tenant>
+// <name>` with no flags does nothing and is refused rather than silently
+// succeeding.
 func queueUpdate(ctx context.Context, store *engine.QueueStore, tenant string, args []string) {
 	fs := flag.NewFlagSet("queue update", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = printQueueUsage
 	rateLimit := fs.Int("rate-limit", 0, "cap on admissions per --rate-period (>= 1; requires --rate-period)")
 	ratePeriod := fs.Int("rate-period", 0, "the rolling window --rate-limit applies over, in seconds (>= 1; requires --rate-limit)")
-	clear := fs.Bool("clear-rate-limit", false, "remove the queue's rate limit (mutually exclusive with --rate-limit/--rate-period)")
+	clearRate := fs.Bool("clear-rate-limit", false, "remove the queue's rate limit (mutually exclusive with --rate-limit/--rate-period)")
+	workerConcurrency := fs.Int("worker-concurrency", 0, "cap on how many of this queue's holders one worker may own at once (>= 1, <= the queue's --concurrency)")
+	clearWorker := fs.Bool("clear-worker-concurrency", false, "remove the queue's per-worker cap (mutually exclusive with --worker-concurrency)")
 
 	operands, err := parseFlagsAnywhere(fs, args)
 	if err != nil {
@@ -309,13 +342,28 @@ func queueUpdate(ctx context.Context, store *engine.QueueStore, tenant string, a
 	}
 	name := operands[0]
 
-	if *clear && (*rateLimit != 0 || *ratePeriod != 0) {
+	if *clearRate && (*rateLimit != 0 || *ratePeriod != 0) {
 		fmt.Fprintf(os.Stderr, "error: --clear-rate-limit and --rate-limit/--rate-period are mutually exclusive\n")
 		osExit(2)
 		return
 	}
+	if *clearWorker && *workerConcurrency != 0 {
+		fmt.Fprintf(os.Stderr, "error: --clear-worker-concurrency and --worker-concurrency are mutually exclusive\n")
+		osExit(2)
+		return
+	}
+	rateGiven := *clearRate || *rateLimit != 0 || *ratePeriod != 0
+	workerGiven := *clearWorker || *workerConcurrency != 0
+	if !rateGiven && !workerGiven {
+		fmt.Fprintf(os.Stderr, "error: update needs at least one of --rate-limit/--rate-period, "+
+			"--clear-rate-limit, --worker-concurrency or --clear-worker-concurrency\n\n")
+		printQueueUsage()
+		osExit(2)
+		return
+	}
+
 	var rl, rp *int
-	if !*clear {
+	if rateGiven && !*clearRate {
 		rl, rp, err = parseRateLimitFlags(*rateLimit, *ratePeriod)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -329,24 +377,52 @@ func queueUpdate(ctx context.Context, store *engine.QueueStore, tenant string, a
 			return
 		}
 	}
-
-	err = store.SetQueueRateLimit(ctx, tenant, name, rl, rp)
-	if errors.Is(err, engine.ErrQueueNotFound) {
-		fmt.Fprintf(os.Stderr, "error: tenant %s has no queue named %q\n", tenant, name)
-		osExit(1)
-		return
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error updating queue %q: %v\n", name, err)
-		osExit(1)
-		return
+	var wc *int
+	if workerGiven && !*clearWorker {
+		wc = parseWorkerConcurrencyFlag(*workerConcurrency)
 	}
 
-	if rl != nil {
-		fmt.Printf("queue %q for tenant %s is now rate-limited to %d admission(s) per %d second(s).\n",
-			name, tenant, *rl, *rp)
-	} else {
-		fmt.Printf("queue %q for tenant %s has no rate limit.\n", name, tenant)
+	if rateGiven {
+		err = store.SetQueueRateLimit(ctx, tenant, name, rl, rp)
+		if errors.Is(err, engine.ErrQueueNotFound) {
+			fmt.Fprintf(os.Stderr, "error: tenant %s has no queue named %q\n", tenant, name)
+			osExit(1)
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error updating queue %q: %v\n", name, err)
+			osExit(1)
+			return
+		}
+	}
+	if workerGiven {
+		err = store.SetQueueWorkerConcurrency(ctx, tenant, name, wc)
+		if errors.Is(err, engine.ErrQueueNotFound) {
+			fmt.Fprintf(os.Stderr, "error: tenant %s has no queue named %q\n", tenant, name)
+			osExit(1)
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error updating queue %q: %v\n", name, err)
+			osExit(1)
+			return
+		}
+	}
+
+	if rateGiven {
+		if rl != nil {
+			fmt.Printf("queue %q for tenant %s is now rate-limited to %d admission(s) per %d second(s).\n",
+				name, tenant, *rl, *rp)
+		} else {
+			fmt.Printf("queue %q for tenant %s has no rate limit.\n", name, tenant)
+		}
+	}
+	if workerGiven {
+		if wc != nil {
+			fmt.Printf("queue %q for tenant %s is now capped at %d holder(s) per worker.\n", name, tenant, *wc)
+		} else {
+			fmt.Printf("queue %q for tenant %s has no per-worker cap.\n", name, tenant)
+		}
 	}
 	fmt.Printf("Workers apply it on their next claim -- there is no cache in front of it.\n")
 }
@@ -360,10 +436,16 @@ NOTE: --db is a GLOBAL flag and goes BEFORE the command name.
   queue create  <tenant> <name> --concurrency N register one, admitting N at a time
                 [--rate-limit N --rate-period S]  and optionally cap admissions to
                                                    N per S seconds (both or neither)
+                [--worker-concurrency N]           and optionally cap one worker to
+                                                   N of this queue's holders at once
   queue disable <tenant> <name>                 retire it (see below -- NOT a stop)
   queue enable  <tenant> <name>                 put a retired queue back
-  queue update  <tenant> <name> --rate-limit N --rate-period S  set the rate limit
-                <tenant> <name> --clear-rate-limit              or remove it
+  queue update  <tenant> <name> --rate-limit N --rate-period S     set the rate limit
+                <tenant> <name> --clear-rate-limit                 or remove it
+                <tenant> <name> --worker-concurrency N             set the per-worker cap
+                <tenant> <name> --clear-worker-concurrency         or remove it
+                (rate-limit and worker-concurrency flags may be combined in one call;
+                 at least one of the four must be given)
 
 A queue is a DECLARED concurrency limit. A workflow joins it by setting its
 concurrency_key to the queue's name; at most N of them run at once and the rest
@@ -377,6 +459,14 @@ A queue's RATE LIMIT is separate from its concurrency limit: it caps how many
 runs are ADMITTED per rolling window, independent of how many run at once. A
 queue with no rate limit admits as fast as its concurrency limit allows, same
 as before this existed.
+
+A queue's WORKER CONCURRENCY is a PER-WORKER cap, separate from both: how many
+of this queue's holders one worker process may own at once, including runs
+that are currently sleeping/parked (DBOS parity -- see the queue store's own
+doc comment). It must be between 1 and the queue's own --concurrency. A worker
+serving two tenants, each capped at 1 on the same queue name, may still run
+one of each at the same time -- this is a per-tenant cap, not hardware
+protection.
 
 Queue names match [A-Za-z0-9_.-]{1,128}.
 `)

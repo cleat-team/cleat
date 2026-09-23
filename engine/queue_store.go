@@ -46,11 +46,21 @@ var ErrQueueAlreadyExists = errors.New("queue already exists")
 // convention ConcurrencyLimit's own absence (no queues row at all) already
 // uses one level up. See
 // migrations/postgres/096_a_queue_declares_its_own_rate_limit.sql.
+//
+// WorkerConcurrency is cleat#1917: DBOS parity for a PER-WORKER cap -- how
+// many of this queue's holders one worker process may own at once, nil
+// meaning no such cap. It is independent of ConcurrencyLimit (the queue's
+// total, across every worker) and of RateLimit (an admission rate, not a
+// point-in-time count). A worker serving two tenants, each capped at 1 on a
+// `gpu` queue, may run one of each at the same time -- that is the intended
+// behaviour, not a gap in enforcement. See
+// migrations/postgres/098_a_queue_declares_its_own_worker_concurrency.sql.
 type Queue struct {
 	Name              string
 	ConcurrencyLimit  int
 	RateLimit         *int
 	RatePeriodSeconds *int
+	WorkerConcurrency *int
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	DisabledAt        *time.Time
@@ -92,7 +102,11 @@ func NewQueueStore(db *sql.DB, dialect string) *QueueStore {
 // gives for refusing --concurrency < 1 before the store's own check would:
 // a constraint violation does not tell an operator which of the two flags
 // they forgot.
-func (s *QueueStore) CreateQueue(ctx context.Context, tenantID, name string, concurrencyLimit int, rateLimit, ratePeriodSeconds *int) error {
+//
+// workerConcurrency, if set, must be between 1 and concurrencyLimit
+// inclusive (cleat#1917 decision 5) -- rejected here rather than left to
+// ck_queues_worker_concurrency_le_concurrency for the same reason.
+func (s *QueueStore) CreateQueue(ctx context.Context, tenantID, name string, concurrencyLimit int, rateLimit, ratePeriodSeconds, workerConcurrency *int) error {
 	if s == nil || s.db == nil {
 		return errors.New("queue store has no database handle")
 	}
@@ -103,6 +117,9 @@ func (s *QueueStore) CreateQueue(ctx context.Context, tenantID, name string, con
 		return fmt.Errorf("queue concurrency limit must be >= 1, got %d", concurrencyLimit)
 	}
 	if err := validateRateLimitPair(rateLimit, ratePeriodSeconds); err != nil {
+		return err
+	}
+	if err := validateWorkerConcurrency(workerConcurrency, concurrencyLimit); err != nil {
 		return err
 	}
 	ctx, err := withQueueTenant(ctx, tenantID)
@@ -119,9 +136,28 @@ func (s *QueueStore) CreateQueue(ctx context.Context, tenantID, name string, con
 			return err
 		}
 		_, err = q.ExecContext(ctx, createQueueStmt(s.dialect), tenantID, name, concurrencyLimit,
-			nullableInt(rateLimit), nullableInt(ratePeriodSeconds))
+			nullableInt(rateLimit), nullableInt(ratePeriodSeconds), nullableInt(workerConcurrency))
 		return err
 	})
+}
+
+// validateWorkerConcurrency enforces cleat#1917 decision 5 at the Go layer,
+// in front of ck_queues_worker_concurrency_positive and
+// ck_queues_worker_concurrency_le_concurrency: nil means no per-worker cap; a
+// cap above the queue's own concurrencyLimit can never bind, so it is
+// refused rather than silently accepted as a no-op.
+func validateWorkerConcurrency(workerConcurrency *int, concurrencyLimit int) error {
+	if workerConcurrency == nil {
+		return nil
+	}
+	if *workerConcurrency < 1 {
+		return fmt.Errorf("queue worker concurrency must be >= 1, got %d", *workerConcurrency)
+	}
+	if *workerConcurrency > concurrencyLimit {
+		return fmt.Errorf("queue worker concurrency (%d) must not exceed the queue's concurrency limit (%d)",
+			*workerConcurrency, concurrencyLimit)
+	}
+	return nil
 }
 
 // validateRateLimitPair enforces Queue's "both nil or both set" contract at
@@ -158,14 +194,14 @@ func (s *QueueStore) GetQueue(ctx context.Context, tenantID, name string) (Queue
 	var q Queue
 	q.Name = name
 	var disabledAt sql.NullTime
-	var rateLimit, ratePeriodSeconds sql.NullInt64
+	var rateLimit, ratePeriodSeconds, workerConcurrency sql.NullInt64
 	ctx, err := withQueueTenant(ctx, tenantID)
 	if err != nil {
 		return Queue{}, err
 	}
 	err = s.execTenantScoped(ctx, func(qr querier) error {
 		return qr.QueryRowContext(ctx, getQueueStmt(s.dialect), tenantID, name).
-			Scan(&q.ConcurrencyLimit, &rateLimit, &ratePeriodSeconds, &q.CreatedAt, &q.UpdatedAt, &disabledAt)
+			Scan(&q.ConcurrencyLimit, &rateLimit, &ratePeriodSeconds, &workerConcurrency, &q.CreatedAt, &q.UpdatedAt, &disabledAt)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Queue{}, ErrQueueNotFound
@@ -177,7 +213,20 @@ func (s *QueueStore) GetQueue(ctx context.Context, tenantID, name string) (Queue
 		q.DisabledAt = &disabledAt.Time
 	}
 	q.RateLimit, q.RatePeriodSeconds = nullInt64Pair(rateLimit, ratePeriodSeconds)
+	q.WorkerConcurrency = nullableIntFromSQL(workerConcurrency)
 	return q, nil
+}
+
+// nullableIntFromSQL converts a single nullable column into the *int form
+// Queue.WorkerConcurrency carries. Unlike nullInt64Pair, there is no sibling
+// column whose presence must agree -- WorkerConcurrency is a lone nullable
+// value, the same shape ConcurrencyLimit itself would be if it were optional.
+func nullableIntFromSQL(v sql.NullInt64) *int {
+	if !v.Valid {
+		return nil
+	}
+	iv := int(v.Int64)
+	return &iv
 }
 
 // nullInt64Pair converts the two nullable columns a queue's rate limit reads
@@ -213,8 +262,8 @@ func (s *QueueStore) ListQueues(ctx context.Context, tenantID string) ([]Queue, 
 		for rows.Next() {
 			var q Queue
 			var disabledAt sql.NullTime
-			var rateLimit, ratePeriodSeconds sql.NullInt64
-			if err := rows.Scan(&q.Name, &q.ConcurrencyLimit, &rateLimit, &ratePeriodSeconds,
+			var rateLimit, ratePeriodSeconds, workerConcurrency sql.NullInt64
+			if err := rows.Scan(&q.Name, &q.ConcurrencyLimit, &rateLimit, &ratePeriodSeconds, &workerConcurrency,
 				&q.CreatedAt, &q.UpdatedAt, &disabledAt); err != nil {
 				return err
 			}
@@ -222,6 +271,7 @@ func (s *QueueStore) ListQueues(ctx context.Context, tenantID string) ([]Queue, 
 				q.DisabledAt = &disabledAt.Time
 			}
 			q.RateLimit, q.RatePeriodSeconds = nullInt64Pair(rateLimit, ratePeriodSeconds)
+			q.WorkerConcurrency = nullableIntFromSQL(workerConcurrency)
 			out = append(out, q)
 		}
 		return rows.Err()
@@ -353,6 +403,53 @@ func (s *QueueStore) SetQueueRateLimit(ctx context.Context, tenantID, name strin
 	})
 }
 
+// SetQueueWorkerConcurrency sets or clears a registered queue's per-worker
+// cap (cleat#1917). nil clears it (no per-worker cap, matching a freshly
+// created queue's default); a value validates against the queue's OWN
+// concurrency_limit (decision 5: 1 <= worker_concurrency <= concurrency_limit).
+//
+// UNLIKE SetQueueRateLimit, THIS FIRST READS THE QUEUE rather than trusting
+// the caller's own concurrencyLimit, because there is no caller-supplied
+// concurrencyLimit here -- queueUpdate does not take --concurrency (see its
+// own comment) and this method's signature matches that: workerConcurrency is
+// validated against whatever limit the queue was created with. concurrency_limit
+// itself is immutable after creation (no update path touches it), so there is
+// no race between this read and the UPDATE below to reason about.
+//
+// Same idempotent-on-no-such-queue shape as SetQueueRateLimit; takes effect
+// at the next claim, same as it does.
+func (s *QueueStore) SetQueueWorkerConcurrency(ctx context.Context, tenantID, name string, workerConcurrency *int) error {
+	if s == nil || s.db == nil {
+		return errors.New("queue store has no database handle")
+	}
+	ctx, err := withQueueTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if workerConcurrency != nil {
+		current, err := s.GetQueue(ctx, tenantID, name)
+		if err != nil {
+			return err
+		}
+		if err := validateWorkerConcurrency(workerConcurrency, current.ConcurrencyLimit); err != nil {
+			return err
+		}
+	}
+	return s.execTenantScoped(ctx, func(q querier) error {
+		res, err := q.ExecContext(ctx, setQueueWorkerConcurrencyStmt(s.dialect),
+			nullableInt(workerConcurrency), tenantID, name)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			if _, getErr := s.GetQueue(ctx, tenantID, name); getErr != nil {
+				return getErr
+			}
+		}
+		return nil
+	})
+}
+
 // withQueueTenant puts tenantID into ctx the way beginTenantTx requires --
 // tenantctx.From(ctx), not a query parameter -- and returns it in a form the
 // caller can pass straight through. Every exported QueueStore method takes
@@ -438,33 +535,33 @@ func getQueueExistsStmt(dialect string) string {
 func createQueueStmt(dialect string) string {
 	switch dialect {
 	case "mysql":
-		return `INSERT INTO queues (tenant_id, name, concurrency_limit, rate_limit, rate_period_seconds) VALUES (?, ?, ?, ?, ?)`
+		return `INSERT INTO queues (tenant_id, name, concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency) VALUES (?, ?, ?, ?, ?, ?)`
 	case "mssql":
-		return `INSERT INTO queues (tenant_id, name, concurrency_limit, rate_limit, rate_period_seconds) VALUES (@p1, @p2, @p3, @p4, @p5)`
+		return `INSERT INTO queues (tenant_id, name, concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency) VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`
 	default:
-		return `INSERT INTO queues (tenant_id, name, concurrency_limit, rate_limit, rate_period_seconds) VALUES ($1, $2, $3, $4, $5)`
+		return `INSERT INTO queues (tenant_id, name, concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency) VALUES ($1, $2, $3, $4, $5, $6)`
 	}
 }
 
 func getQueueStmt(dialect string) string {
 	switch dialect {
 	case "mysql":
-		return `SELECT concurrency_limit, rate_limit, rate_period_seconds, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = ? AND name = ?`
+		return `SELECT concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = ? AND name = ?`
 	case "mssql":
-		return `SELECT concurrency_limit, rate_limit, rate_period_seconds, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = @p1 AND name = @p2`
+		return `SELECT concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = @p1 AND name = @p2`
 	default:
-		return `SELECT concurrency_limit, rate_limit, rate_period_seconds, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = $1 AND name = $2`
+		return `SELECT concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = $1 AND name = $2`
 	}
 }
 
 func listQueuesStmt(dialect string) string {
 	switch dialect {
 	case "mysql":
-		return `SELECT name, concurrency_limit, rate_limit, rate_period_seconds, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = ? ORDER BY name`
+		return `SELECT name, concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = ? ORDER BY name`
 	case "mssql":
-		return `SELECT name, concurrency_limit, rate_limit, rate_period_seconds, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = @p1 ORDER BY name`
+		return `SELECT name, concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = @p1 ORDER BY name`
 	default:
-		return `SELECT name, concurrency_limit, rate_limit, rate_period_seconds, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = $1 ORDER BY name`
+		return `SELECT name, concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency, created_at, updated_at, disabled_at FROM queues WHERE tenant_id = $1 ORDER BY name`
 	}
 }
 
@@ -481,6 +578,20 @@ func setQueueRateLimitStmt(dialect string) string {
 		return `UPDATE queues SET rate_limit = @p1, rate_period_seconds = @p2, updated_at = SYSUTCDATETIME() WHERE tenant_id = @p3 AND name = @p4`
 	default:
 		return `UPDATE queues SET rate_limit = $1, rate_period_seconds = $2, updated_at = now() WHERE tenant_id = $3 AND name = $4`
+	}
+}
+
+// setQueueWorkerConcurrencyStmt carries no disabled_at predicate, matching
+// setQueueRateLimitStmt's own reasoning: configuration, not a lifecycle
+// transition.
+func setQueueWorkerConcurrencyStmt(dialect string) string {
+	switch dialect {
+	case "mysql":
+		return `UPDATE queues SET worker_concurrency = ?, updated_at = NOW(6) WHERE tenant_id = ? AND name = ?`
+	case "mssql":
+		return `UPDATE queues SET worker_concurrency = @p1, updated_at = SYSUTCDATETIME() WHERE tenant_id = @p2 AND name = @p3`
+	default:
+		return `UPDATE queues SET worker_concurrency = $1, updated_at = now() WHERE tenant_id = $2 AND name = $3`
 	}
 }
 

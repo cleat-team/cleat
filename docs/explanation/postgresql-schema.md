@@ -445,6 +445,7 @@ CREATE TABLE queues (
     concurrency_limit    INTEGER NOT NULL,
     rate_limit           INTEGER,
     rate_period_seconds  INTEGER,
+    worker_concurrency   INTEGER,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     disabled_at          TIMESTAMPTZ,
@@ -462,6 +463,14 @@ direction.
 both NULL (unlimited) — a queue can be concurrency-limited, rate-limited, both, or neither. See
 `queue_rate_tokens` below for the counter this pair drives.
 
+`worker_concurrency` is a third, independent control (cleat#1917): a PER-WORKER cap, NULL meaning
+none. Unlike `concurrency_limit`, which bounds the queue's total across every worker,
+`worker_concurrency` bounds how many of the queue's holders ONE worker process may own at once —
+DBOS parity, and a per-tenant cap rather than hardware protection: a worker serving two tenants,
+each capped at 1 on a queue of the same name, may run one of each at the same time. When set, it
+must be between 1 and the queue's own `concurrency_limit` (a cap above the global limit could
+never bind). See `queue_holders.worker_id` below for what it counts.
+
 #### queue_holders
 
 One row per admitted holder — the semaphore `concurrency_keys` cannot be, since its primary
@@ -475,6 +484,7 @@ CREATE TABLE queue_holders (
     queue_name   TEXT NOT NULL,
     workflow_id  TEXT NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
     expires_at   TIMESTAMPTZ NOT NULL,
+    worker_id    TEXT,
     PRIMARY KEY (tenant_id, queue_name, workflow_id)
 );
 ```
@@ -482,6 +492,14 @@ CREATE TABLE queue_holders (
 Counting holders cannot be decided by one statement's snapshot — two concurrent claims would
 each read one slot free and both insert — so the claim locks the `queues` row for the key
 (in sorted name order, against deadlock across multi-key claims) and counts under that lock.
+
+`worker_id` (cleat#1917) is the claiming worker's id, nullable because a holder written before
+this column existed carries none — such a row counts toward no worker's cap until it expires or
+is released, at most `claimedKeyTTL` (30 minutes) later. A holder's count is per `worker_id`, and
+includes a PARKED run (`assigned_to = NULL, status = 'ready'`, `ReleaseWorkflow`) — a sleeping
+workflow still occupies its slot, matching DBOS's own parity fixture. When a parked run wakes and
+a different worker claims it, this column MOVES to that worker (an `UPDATE`, not a new row) and
+that worker's cap applies from then on.
 
 #### queue_rate_tokens
 

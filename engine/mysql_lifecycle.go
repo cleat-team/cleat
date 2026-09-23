@@ -174,7 +174,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	// Step 3: acquire each candidate's key.
 	var ids []string
 	for _, c := range cands {
-		ok, err := s.acquireCandidateConcurrencyKey(ctx, tx, c, limits)
+		ok, err := s.acquireCandidateConcurrencyKey(ctx, tx, c, limits, workerID)
 		if err != nil {
 			return nil, err
 		}
@@ -257,7 +257,7 @@ func (s *MySQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, 
 	}
 	args = append(args, s.tenantID)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT name, concurrency_limit, rate_limit, rate_period_seconds FROM queues
+		SELECT name, concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency FROM queues
 		WHERE name IN (%s) AND tenant_id = ? AND disabled_at IS NULL
 		ORDER BY name
 		FOR UPDATE
@@ -269,11 +269,12 @@ func (s *MySQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, 
 	for rows.Next() {
 		var name string
 		var ql registeredQueueLimits
-		var rateLimit, ratePeriodSeconds sql.NullInt64
-		if err := rows.Scan(&name, &ql.concurrencyLimit, &rateLimit, &ratePeriodSeconds); err != nil {
+		var rateLimit, ratePeriodSeconds, workerConcurrency sql.NullInt64
+		if err := rows.Scan(&name, &ql.concurrencyLimit, &rateLimit, &ratePeriodSeconds, &workerConcurrency); err != nil {
 			return nil, fmt.Errorf("claim workflows: scan queue limit: %w", err)
 		}
 		ql.rateLimit, ql.ratePeriodSeconds = nullInt64Pair(rateLimit, ratePeriodSeconds)
+		ql.workerConcurrency = nullableIntFromSQL(workerConcurrency)
 		limits[name] = ql
 	}
 	if err := rows.Err(); err != nil {
@@ -282,7 +283,7 @@ func (s *MySQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, 
 	return limits, nil
 }
 
-func (s *MySQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]registeredQueueLimits) (bool, error) {
+func (s *MySQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]registeredQueueLimits, workerID string) (bool, error) {
 	if !c.registered {
 		if c.hash == nil {
 			return true, nil // no key at all
@@ -324,35 +325,57 @@ func (s *MySQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql
 		// (disabled or deleted between the two statements). Not claimable.
 		return false, nil
 	}
-	// Re-claim: continuing an admission already granted takes no new rate
-	// token, matching the concurrency semaphore's own re-claim exemption below.
-	var selfHolds bool
+	// Does this workflow already hold a live slot on this queue, and whose
+	// worker_id does it carry? cleat#1917: same shape as the postgres claim --
+	// see its comment for the full reasoning. A holder owned by the CLAIMING
+	// worker is the original re-claim shortcut, unchanged; one that exists but
+	// belongs to nobody or to a DIFFERENT worker must pass every gate below and
+	// MOVES to this worker if admitted, rather than a second row being inserted.
+	var existingWorker sql.NullString
+	holderExists := true
 	err := tx.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM queue_holders qh
-			WHERE qh.tenant_id = ? AND qh.queue_name = ? AND qh.workflow_id = ? AND qh.expires_at > NOW(6)
-		)
-	`, c.tenantID, *c.key, c.id).Scan(&selfHolds)
-	if err != nil {
+		SELECT worker_id FROM queue_holders
+		WHERE tenant_id = ? AND queue_name = ? AND workflow_id = ? AND expires_at > NOW(6)
+	`, c.tenantID, *c.key, c.id).Scan(&existingWorker)
+	if errors.Is(err, sql.ErrNoRows) {
+		holderExists = false
+	} else if err != nil {
 		return false, fmt.Errorf("claim workflows: queue self-hold check: %w", err)
 	}
-	if selfHolds {
+	if holderExists && existingWorker.Valid && existingWorker.String == workerID {
 		return true, nil
 	}
 	var held int
 	err = tx.QueryRowContext(ctx, `
 		SELECT count(*) FROM queue_holders qh
 		WHERE qh.tenant_id = ? AND qh.queue_name = ? AND qh.expires_at > NOW(6)
-	`, c.tenantID, *c.key).Scan(&held)
+		  AND qh.workflow_id <> ?
+	`, c.tenantID, *c.key, c.id).Scan(&held)
 	if err != nil {
 		return false, fmt.Errorf("claim workflows: count queue holders: %w", err)
 	}
 	if held >= ql.concurrencyLimit {
 		return false, nil // at capacity
 	}
-	// cleat#1918: the rate limit, if declared, is a second independent gate
-	// checked under this same queues-row lock.
-	if ql.rateLimit != nil {
+	// cleat#1917: the per-worker cap, if declared, is a second independent gate.
+	if ql.workerConcurrency != nil {
+		var workerHeld int
+		err = tx.QueryRowContext(ctx, `
+			SELECT count(*) FROM queue_holders qh
+			WHERE qh.tenant_id = ? AND qh.queue_name = ? AND qh.worker_id = ?
+			  AND qh.expires_at > NOW(6)
+		`, c.tenantID, *c.key, workerID).Scan(&workerHeld)
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: count worker queue holders: %w", err)
+		}
+		if workerHeld >= *ql.workerConcurrency {
+			return false, nil // this worker is at its own cap
+		}
+	}
+	// cleat#1918: the rate limit, if declared, is a third independent gate,
+	// applying only to a genuinely fresh admission -- see the postgres claim's
+	// comment for why a moved holder takes no new token.
+	if !holderExists && ql.rateLimit != nil {
 		var rateHeld int
 		err = tx.QueryRowContext(ctx, `
 			SELECT count(*) FROM queue_rate_tokens qrt
@@ -365,10 +388,22 @@ func (s *MySQLStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql
 			return false, nil // rate-limited
 		}
 	}
+	if holderExists {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE queue_holders
+			SET worker_id = ?, expires_at = DATE_ADD(NOW(6), INTERVAL ? SECOND)
+			WHERE tenant_id = ? AND queue_name = ? AND workflow_id = ?
+		`, workerID, int64(claimedKeyTTL.Seconds()), c.tenantID, *c.key, c.id)
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: move queue holder: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		return n > 0, nil
+	}
 	res, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at)
-		VALUES (?, ?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND))
-	`, c.tenantID, *c.key, c.id, int64(claimedKeyTTL.Seconds()))
+		INSERT IGNORE INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at, worker_id)
+		VALUES (?, ?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?)
+	`, c.tenantID, *c.key, c.id, int64(claimedKeyTTL.Seconds()), workerID)
 	if err != nil {
 		return false, fmt.Errorf("claim workflows: acquire queue holder: %w", err)
 	}

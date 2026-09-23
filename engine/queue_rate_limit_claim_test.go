@@ -66,12 +66,12 @@ func TestARegisteredQueueRateLimitAdmitsAtMostItsLimit(t *testing.T) {
 
 			limitedName := queueTestName("rate-limited")
 			rl, rp := rateLimit, ratePeriodSeconds
-			if err := qs.CreateQueue(ctx, DefaultTenantUUID, limitedName, concurrencyLimit, &rl, &rp); err != nil {
+			if err := qs.CreateQueue(ctx, DefaultTenantUUID, limitedName, concurrencyLimit, &rl, &rp, nil); err != nil {
 				t.Fatalf("CreateQueue(limited): %v", err)
 			}
 
 			unlimitedName := queueTestName("rate-unlimited")
-			if err := qs.CreateQueue(ctx, DefaultTenantUUID, unlimitedName, concurrencyLimit, nil, nil); err != nil {
+			if err := qs.CreateQueue(ctx, DefaultTenantUUID, unlimitedName, concurrencyLimit, nil, nil, nil); err != nil {
 				t.Fatalf("CreateQueue(unlimited): %v", err)
 			}
 

@@ -41,7 +41,7 @@ func TestTheClaimActuallyLogsItsKeyDecision(t *testing.T) {
 
 			name := queueTestName("wired")
 			db := queueClaimTestDB(t, store)
-			if err := NewQueueStore(db, backend.Name()).CreateQueue(ctx, DefaultTenantUUID, name, 1, nil, nil); err != nil {
+			if err := NewQueueStore(db, backend.Name()).CreateQueue(ctx, DefaultTenantUUID, name, 1, nil, nil, nil); err != nil {
 				t.Fatalf("CreateQueue: %v", err)
 			}
 
