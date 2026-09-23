@@ -43,6 +43,9 @@ var goFixtureExpectations = map[string]string{
 	"durablesend":  "",
 	"fencereentry": "",
 	"generics":     "",
+	// cleat#1967: the workflow README.md's first command runs. No DurableCall,
+	// so it must verify cleanly with nothing else running.
+	"hello": "",
 	// cleat#1131. Verifies cleanly BECAUSE of analyzer.SDKDurableHelper: its
 	// saga steps are StepCall data, so the DurableCall lives in the SDK and
 	// nothing in this package writes a HostCalls method. Before that predicate
