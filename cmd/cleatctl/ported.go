@@ -70,6 +70,13 @@ var portedOn = map[string][]string{
 	// re-seal on the other two, and a port would be a sweep over nothing.
 	"reseal-payloads": {"postgres"},
 
+	// reseal-secrets, cleat#1991: all three, from the start, because tenant
+	// secrets exist on all three and a rotation that worked on one would leave the
+	// others with no way to retire a key. It reads tenant by tenant under each
+	// tenant's own context, so it needs neither a BYPASSRLS role nor a SQL Server
+	// admin login (cleat#2123 records why an unscoped read cannot see the table).
+	"reseal-secrets": {"postgres", "mysql", "mssql"},
+
 	// Not ported. These carry unqualified `admin.` SQL, which is correct on
 	// PostgreSQL and SQL Server and wrong on MySQL, plus $N placeholders that
 	// have not been routed through plugin.Rebind.

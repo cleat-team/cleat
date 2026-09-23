@@ -32,7 +32,7 @@ func TestASecretRoundTripsUnderItsOwnTenantKey(t *testing.T) {
 	if strings.Contains(sealed, "sk-live") {
 		t.Fatal("the sealed form contains the plaintext")
 	}
-	got, err := s.open(tenant, sealed)
+	got, err := s.open(tenant, sealed, 1)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestASecretDoesNotOpenUnderAnotherTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	if _, err := s.open(b, sealed); err == nil {
+	if _, err := s.open(b, sealed, 1); err == nil {
 		t.Fatal("tenant B opened tenant A's ciphertext")
 	}
 }
@@ -68,7 +68,7 @@ func TestASecretDoesNotOpenUnderAnotherMasterKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	if _, err := s2.open(tenant, sealed); err == nil {
+	if _, err := s2.open(tenant, sealed, 1); err == nil {
 		t.Fatal("a different deployment key opened the ciphertext")
 	}
 }

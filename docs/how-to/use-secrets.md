@@ -65,6 +65,49 @@ one back.
 
 `--dry-run` shows what would change without changing anything.
 
+## Rotate the master key
+
+A key is named by an integer **version** that you declare. A deployment that has
+never rotated is on version 1 without saying so: every stored secret carries
+`key_version = 1`, and `CLEAT_SECRET_MASTER_KEY` with no version means version 1.
+
+| variable | meaning |
+|---|---|
+| `CLEAT_SECRET_MASTER_KEY` | the **current** key: every write is sealed under it |
+| `CLEAT_SECRET_MASTER_KEY_VERSION` | its version; defaults to `1` |
+| `CLEAT_SECRET_MASTER_KEY_PREVIOUS` | the key being retired: **read only**, never used to write |
+| `CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION` | its version; **required** with the previous key |
+
+Half a configuration is an error, not a default: a previous key with no version,
+a version with no key, and two versions holding the same key are all refused at
+startup, because each has an obvious reading that is not yours and guessing would
+seal rows under a key you did not pick.
+
+To move from version 1 to version 2:
+
+1. Generate the new key. Give **every worker** `CLEAT_SECRET_MASTER_KEY=<new>`,
+   `CLEAT_SECRET_MASTER_KEY_VERSION=2`, `CLEAT_SECRET_MASTER_KEY_PREVIOUS=<old>`,
+   `CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION=1`, and give `cleatctl` the same.
+   Each worker logs the versions it can open (never the keys).
+2. **Wait until no worker is still on the old configuration.** Until it is, a
+   secret written at version 2 is unreadable by a worker that only holds version 1.
+   The system does not yet check this for you (see *What is not covered*).
+3. `cleatctl reseal-secrets --dry-run` reads and verifies every secret and writes
+   nothing. Then run it without `--dry-run`.
+4. When it reports nothing left on version 1, remove the `_PREVIOUS` variables.
+
+`reseal-secrets` is online and can be interrupted and re-run. It verifies the new
+ciphertext opens **before** it writes, and its write is conditional on the row
+still being what it read, so a `set-secret` that lands in the middle is kept and
+not overwritten with the older value. It covers suspended tenants and retired
+secrets, and leaves `disabled_at` and `updated_at` alone. It exits non-zero while
+anything is left, including a secret that **no configured key can open**, which
+it reports by tenant and name and never skips.
+
+A worker whose ring cannot open some stored version **refuses to start** and names
+the version and how many rows carry it. A worker still holding a `_PREVIOUS` key
+that rows no longer use starts, and says so.
+
 ## Reference it from a workflow
 
 Inside a plugin call argument, write `${secret:NAME}`:
@@ -152,9 +195,10 @@ ciphertext moved between rows fails to open rather than decrypting.
 
 ## What is not covered
 
-- **Rotation with overlapping validity.** The schema carries `key_version` so it
-  is not precluded, but nothing implements it. Rotating today means rewriting
-  every secret under a new master key.
+- **A check that a rotation is safe to begin.** `reseal-secrets` refuses nothing
+  because a worker somewhere still lacks the new key; step 2 above is yours to
+  ensure. A rolling deploy that reseals before it has finished can leave a serving
+  worker holding rows it cannot open.
 - **An external KMS.** The master key is supplied directly.
 - **References outside plugin call arguments.** Workflow input, signals and
   schedule payloads are not scanned.
