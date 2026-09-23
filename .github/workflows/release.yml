@@ -17,7 +17,11 @@ permissions:
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
+    # Pinned to ubuntu-26.04, NOT ubuntu-latest (cleat#2069). -latest's
+    # mapping moves on its own schedule and would silently change the glibc
+    # baseline every cleat-worker binary is linked against; a fixed label
+    # means that only moves when this line does.
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7

@@ -182,6 +182,45 @@ go install github.com/cleat-team/cleat/cmd/cleat-gen@latest
 
 Or build from source: `git clone https://github.com/cleat-team/cleat.git && cd cleat && go install ./cmd/...`
 
+### Linux: `.deb` package with a systemd unit
+
+Starting with 0.3.0, tagged releases attach a `cleat-worker` `.deb` for
+`amd64` and `arm64`, built and tested on Ubuntu 26.04:
+
+```bash
+curl -LO https://github.com/cleat-team/cleat/releases/download/vX.Y.Z/cleat-worker_X.Y.Z_linux_amd64.deb
+sudo dpkg -i cleat-worker_X.Y.Z_linux_amd64.deb
+```
+
+It installs the binary to `/usr/bin/cleat-worker`, a `cleat` system user and
+group, a disabled-by-default `cleat-worker.service` unit, and an env-file
+template at `/etc/cleat/cleat-worker.env`. Set `CLEAT_DATABASE_URL` there
+(and any other flags, via `CLEAT_WORKER_ARGS`), then:
+
+```bash
+sudo systemctl enable --now cleat-worker
+```
+
+**Measured glibc minimum: `GLIBC_2.34`, both `amd64` and `arm64`** (checked
+2026-09-23 against a worker built the same way the release does):
+
+```bash
+objdump -T cleat-worker | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
+```
+
+That's below Ubuntu 26.04's own glibc (2.43) despite the package being built
+there -- the CGO surface this binary actually touches (Go's runtime plus
+wasmtime's cdylib) doesn't request anything newer. Distros at or above 2.34
+(RHEL 9, Ubuntu 22.04+, Debian 12+ among them) **may** work as a result, but
+that's not tested or supported for 0.3.0 -- **Ubuntu 26.04 is the only
+tested target.** Re-run the command above against whatever's published if
+you're relying on the number for a specific release, since a future
+dependency could raise it.
+
+No `.rpm` for 0.3.0. Users on an untested or unsupported distro: the
+container image (`ghcr.io/cleat-team/cleat-worker`), `go install` above, or
+the Homebrew formula below.
+
 ### macOS: use Homebrew or `go install`, not the release archives
 
 The release archives contain **no macOS `cleat-worker`**. The worker needs CGO

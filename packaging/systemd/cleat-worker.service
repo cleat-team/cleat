@@ -1,0 +1,50 @@
+# cleat-worker systemd unit, installed by the .deb package.
+#
+# Disabled by default (cleat#2069) -- installing the package does not start a
+# worker pointed at nothing. An operator sets CLEAT_DATABASE_URL (and
+# anything else the deployment needs) in /etc/cleat/cleat-worker.env, then:
+#
+#   systemctl enable --now cleat-worker
+#
+# Every flag documented in `cleat-worker --help` can be passed via
+# CLEAT_WORKER_ARGS in the env file; --db itself is optional if
+# CLEAT_DATABASE_URL is set, since the worker reads that variable directly
+# when --db is absent (cmd/cleat-worker/config.go, resolveDBURL).
+[Unit]
+Description=cleat durable workflow worker
+Documentation=https://github.com/cleat-team/cleat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cleat
+Group=cleat
+EnvironmentFile=/etc/cleat/cleat-worker.env
+# CLEAT_WORKER_ARGS is intentionally a single free-form flag string rather
+# than one systemd Environment= per flag: the worker's flag set changes
+# release to release, and a fixed list of ExecStart tokens would need this
+# unit edited every time a new one is added. A blank CLEAT_WORKER_ARGS
+# expands to zero tokens, which is a no-op, not an error.
+ExecStart=/usr/bin/cleat-worker $CLEAT_WORKER_ARGS
+Restart=on-failure
+RestartSec=5s
+
+# The worker embeds and applies pending migrations at boot by default
+# (cleat#1968). That needs DDL rights on --db (or --migrate-db, if set to a
+# separate privileged role) -- see the migration-as-deploy-step discussion in
+# cleat#2059. A future --migrate-only step, if added, would run as a separate
+# systemd oneshot unit ordered before this one; nothing here assumes it exists
+# today.
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# No ReadWritePaths entries: the worker's state is the database, not the
+# filesystem. --shards-file, --plugin-config and --redact-patterns-file (if
+# used) are read-only, and /etc is readable under ProtectSystem=strict by
+# default without needing to be listed.
+
+[Install]
+WantedBy=multi-user.target
