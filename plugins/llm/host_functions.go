@@ -60,6 +60,9 @@ type chatRequest struct {
 	Tools       []providers.Tool    `json:"tools,omitempty"`
 	ToolChoice  string              `json:"tool_choice,omitempty"`
 	System      string              `json:"system,omitempty"`
+	// APIKey overrides the configured provider key for this call (cleat#1988).
+	// See effectiveAPIKey for what this field does and does not guarantee.
+	APIKey string `json:"api_key,omitempty"`
 }
 
 type embedRequest struct {
@@ -92,6 +95,43 @@ func normalizeOutput(out *providers.ChatOutput) {
 	}
 }
 
+// effectiveAPIKey returns the key to use for one call: the request's own
+// (cleat#1988) when the workflow supplied one, falling back to the operator's
+// configured key otherwise.
+//
+// The only case refused is a value that still contains the literal
+// "${secret:" text. withSecrets and withSecretsStream
+// (cmd/cleat-worker/setup.go) pass a call through UNCHANGED when there is no
+// tenant in context or no master key configured -- the one case that boundary
+// lets escape as a string rather than an error -- so that text reaching here
+// means resolution was never attempted. Sending it to a provider as a
+// credential is never correct; a rejected reference is at least legible,
+// where the alternative is an opaque 401 from whichever provider was asked to
+// authenticate with the literal string "${secret:openai}".
+//
+// WHAT THIS DOES NOT DO, AND CANNOT: tell a genuinely resolved secret apart
+// from a key a workflow author typed directly into the call argument. Both
+// arrive here as the same plain string. engine.ResolveSecretRefs
+// (engine/tenant_secrets.go) is a whole-document text substitution with no
+// per-field record of what it touched -- grep the tree for callers of it and
+// there are exactly three, none of which keep one -- so there is no
+// information available at this boundary to distinguish the two. The
+// property this system actually has is the one engine/tenant_secrets.go's
+// SecretStore doc comment already states: a workflow author writing
+// ${secret:NAME} keeps the reference in event history rather than the value,
+// which is a fact about what THEY write, not something enforced against a
+// workflow that chooses not to.
+func effectiveAPIKey(requestKey string, cfg ProviderConfig) (string, error) {
+	if requestKey == "" {
+		return cfg.APIKey, nil
+	}
+	if strings.Contains(requestKey, "${secret:") {
+		return "", fmt.Errorf("llm: api_key contains an unresolved secret reference " +
+			"(no tenant context, or no master key configured on the worker)")
+	}
+	return requestKey, nil
+}
+
 func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
 	if cc == nil || cc.TenantID == "" {
@@ -111,6 +151,11 @@ func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 		return "", fmt.Errorf("llm: provider %q not configured or disabled", req.Provider)
 	}
 
+	apiKey, err := effectiveAPIKey(req.APIKey, cfg)
+	if err != nil {
+		return "", err
+	}
+
 	if req.Model == "" {
 		req.Model = cfg.DefaultModel
 	}
@@ -126,21 +171,20 @@ func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 	}
 
 	var output providers.ChatOutput
-	var err error
 
 	switch req.Provider {
 	case "openai":
-		output, err = providers.OpenAIChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.OpenAIChat(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "anthropic":
-		output, err = providers.AnthropicChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.AnthropicChat(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "groq":
-		output, err = providers.GroqChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.GroqChat(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "ollama":
 		output, err = providers.OllamaChat(ctx, p.httpClient, cfg.BaseURL, input)
 	case "gemini":
-		output, err = providers.GeminiChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.GeminiChat(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "mistral":
-		output, err = providers.MistralChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.MistralChat(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	default:
 		return "", fmt.Errorf("llm: unknown provider: %s", req.Provider)
 	}
@@ -289,6 +333,11 @@ func (p *Plugin) chatStream(ctx context.Context, inputJSON string) (<-chan plugi
 		return nil, fmt.Errorf("llm: provider %q not configured or disabled", req.Provider)
 	}
 
+	apiKey, err := effectiveAPIKey(req.APIKey, cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	if req.Model == "" {
 		req.Model = cfg.DefaultModel
 	}
@@ -304,15 +353,14 @@ func (p *Plugin) chatStream(ctx context.Context, inputJSON string) (<-chan plugi
 	}
 
 	var chunkCh <-chan providers.StreamChunk
-	var err error
 
 	switch req.Provider {
 	case "openai":
-		chunkCh, err = providers.OpenAIChatStream(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		chunkCh, err = providers.OpenAIChatStream(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "anthropic":
-		chunkCh, err = providers.AnthropicChatStream(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		chunkCh, err = providers.AnthropicChatStream(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "groq":
-		chunkCh, err = providers.GroqChatStream(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		chunkCh, err = providers.GroqChatStream(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "ollama":
 		chunkCh, err = providers.OllamaChatStream(ctx, p.httpClient, cfg.BaseURL, input)
 	default:

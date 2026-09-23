@@ -65,13 +65,17 @@ Inside a plugin call argument, write `${secret:NAME}`:
 
 ```go
 h.DurableCall("llm", "chat", `{
-  "provider": "anthropic",
+  "provider": "openai",
   "api_key": "${secret:openai}",
   "messages": [...]
 }`)
 ```
 
-The host substitutes the value on the way in to the plugin.
+The host substitutes the value on the way in to the plugin. For `llm`
+specifically, `api_key` is optional and overrides the provider key from the
+worker's `--plugin-config` for that one call — a tenant with no `api_key`
+uses the operator's configured key, same as before this field existed.
+`chat_stream` takes the same field.
 
 **The same reference works in an `http.fetch` request**, which is where a
 credential is most often needed:

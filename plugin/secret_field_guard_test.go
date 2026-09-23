@@ -124,6 +124,37 @@ func TestPluginCredentialFieldsUseTheSecretType(t *testing.T) {
 		"llm.ProviderConfig.APIKey":                 {reason: "process config; never returned by an endpoint (tracked)"},
 		"slacknotify.Config.SlackSigningSecret":     {reason: "process config; never returned by an endpoint (tracked)"},
 		"oauthprovider.oauthConfigRow.ClientSecret": {reason: "internal row struct; handleListSessions never selects it (tracked)"},
+
+		// CANNOT REACH A CALLER, the same shape as llm.ProviderConfig.APIKey
+		// two lines up. chatRequest is decode-only in production -- it is
+		// unmarshaled FROM a workflow's inputJSON in p.chat/p.chatStream and
+		// never marshaled back out by any of this plugin's own code; the only
+		// call sites that marshal it are test helpers building synthetic
+		// input (per_tenant_api_key_test.go, host_functions_test.go,
+		// llm_behavioral_test.go). plugin.Secret would break every one of
+		// them the same way it was found to break llm.ProviderConfig.APIKey's
+		// own test helpers: it does not round-trip through json.Marshal by
+		// design, so `json.Marshal(chatRequest{APIKey: "k"})` would produce
+		// `"api_key":"[redacted]"`, which UnmarshalJSON then refuses to
+		// accept back.
+		//
+		// A literal key typed directly into workflow input (as opposed to a
+		// resolved ${secret:...} reference) IS recorded in the clear in event
+		// history -- cleat#1988's own PR (#2023) decided to accept this
+		// rather than guess at a field's secrecy from its JSON shape, because
+		// this plugin sees only the POST-RESOLUTION string and cannot tell a
+		// resolved secret from a literal. That is a real gap, but converting
+		// this one field's Go type does not close it: event history records
+		// the RAW inputJSON the workflow sent, not a re-marshal of this
+		// struct, so this type has no bearing on what gets stored. The actual
+		// fix needs a plugin-declared secret-only field the ENGINE can
+		// consult before recording a call's raw arguments -- tracked as
+		// cleat#2043.
+		"llm.chatRequest.APIKey": {
+			reason: "decode-only in production, never marshaled towards a caller; the real " +
+				"fix (redacting a known-secret field before the engine records raw call " +
+				"arguments) is tracked separately as cleat#2043",
+		},
 	}
 
 	root := filepath.Join("..", "plugins")
