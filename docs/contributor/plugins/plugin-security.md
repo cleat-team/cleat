@@ -599,10 +599,13 @@ performs an upgrade is `cleat plugin install <name>@<version>`.
    - Prompts for confirmation, unless `--yes`.
    - On `--dry-run`, prints what it would do and stops.
    - Downloads the WASM binary and verifies its checksum (see below).
-   - Deploys it via `DeployPlugin` (`engine/plugin_loader.go`), which upserts on
-     `(name, version)`: a genuinely new version gets a new row and existing rows
-     are untouched, but reinstalling the same name and version overwrites that
-     row's WASM bytes in place.
+   - Deploys it via `DeployPlugin` (`engine/plugin_loader.go`). Versions are
+     immutable (cleat#2135): a genuinely new version gets a new row and
+     existing rows are untouched; reinstalling the same name and version is a
+     no-op if the WASM bytes are byte-identical to what is already stored, and
+     is refused -- naming both checksums -- if they differ. There is no
+     override; publishing different code at an existing version requires a
+     new version string.
    - Prints a one-line success message.
 
 ### Important: version pinning
@@ -615,15 +618,17 @@ means:
 - You can safely upgrade during production without concern for in-flight
   disruption
 - Old versions remain in `plugin_defs` until all workflows referencing them
-  complete, or until something reinstalls that exact name and version, which
-  overwrites the row instead of adding a new one
+  complete. Versions are immutable (cleat#2135): reinstalling that exact name
+  and version is a no-op if the bytes are unchanged, and is refused if they
+  differ -- nothing can overwrite the row in place
 
 ### Checksum verification
 
 On install, the CLI verifies the downloaded WASM binary against the checksum in
-the index entry (`plugin.VerifyChecksum`, `plugin/index.go`). There is no
-separate comparison against a currently-installed version's checksum, and
-reinstalling an unchanged version is not treated as a no-op.
+the index entry (`plugin.VerifyChecksum`, `plugin/index.go`). `DeployPlugin`
+separately compares the downloaded bytes against whatever is already stored at
+that `(name, version)`: reinstalling an unchanged version is a no-op, and
+reinstalling with different bytes is refused (cleat#2135).
 
 If the checksum does not match, the install is refused inline, with no separate
 `ERROR:` banner:

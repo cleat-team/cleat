@@ -128,30 +128,85 @@ func TestDeployPluginIsResolvableAfterwards(t *testing.T) {
 			oldVersion, len(oldDef.WASMBytes), len(v1Bytes))
 	}
 
-	// REDEPLOYING a version replaces its bytes rather than adding a row.
-	v1Prime := append(append([]byte{}, v1Bytes...), 0x0c, 0x0d)
-	v1PrimePath := writeWASM(t, dir, v1Prime)
+	// cleat#2135: plugin versions are IMMUTABLE against a real database, not
+	// just against the mock driver cleatctl_command_test.go exercises.
+	// Redeploying 1.0.0 with the SAME bytes is a no-op (the known-negative);
+	// redeploying it with DIFFERENT bytes is refused (the known-positive --
+	// before this change, this second case silently replaced the stored
+	// binary, which is the exact defect the issue is about).
+
+	// Known-negative: identical bytes succeed as a no-op.
+	v1Again := writeWASM(t, dir, v1Bytes)
 	_, stderr = captureOutputs(t, func() {
-		deployPlugin(ctx, db, []string{name, "1.0.0", v1PrimePath})
+		deployPlugin(ctx, db, []string{name, "1.0.0", v1Again})
 	})
 	if stderr != "" {
-		t.Fatalf("redeploying 1.0.0 reported an error: %s", stderr)
+		t.Fatalf("redeploying 1.0.0 with identical bytes reported an error: %s", stderr)
 	}
 	if err := db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM plugin_defs WHERE name = $1`, name).Scan(&rows); err != nil {
-		t.Fatalf("count rows after redeploy: %v", err)
+		t.Fatalf("count rows after identical redeploy: %v", err)
 	}
 	if rows != 2 {
-		t.Errorf("redeploying 1.0.0 left %d rows for %s, want 2 -- an upsert on (name, version) "+
-			"must replace rather than accumulate", rows, name)
+		t.Errorf("redeploying 1.0.0 with identical bytes left %d rows for %s, want 2 -- a no-op "+
+			"must not add or remove a row", rows, name)
 	}
 	_, oldDef, err = loader.ResolvePlugin(ctx, name, "1.0.0")
 	if err != nil {
-		t.Fatalf("resolve 1.0.0 after redeploy: %v", err)
+		t.Fatalf("resolve 1.0.0 after identical redeploy: %v", err)
 	}
-	if len(oldDef.WASMBytes) != len(v1Prime) {
-		t.Errorf("1.0.0 still has %d WASM bytes after a redeploy, want %d -- the redeploy did "+
-			"not replace the binary", len(oldDef.WASMBytes), len(v1Prime))
+	if len(oldDef.WASMBytes) != len(v1Bytes) {
+		t.Errorf("1.0.0 has %d WASM bytes after an identical-bytes redeploy, want %d unchanged",
+			len(oldDef.WASMBytes), len(v1Bytes))
+	}
+
+	// Known-positive: different bytes at an existing version are refused, and
+	// the stored bytes are left exactly as they were -- not partially
+	// applied, not silently accepted.
+	v1Prime := append(append([]byte{}, v1Bytes...), 0x0c, 0x0d)
+	v1PrimePath := writeWASM(t, dir, v1Prime)
+	stderr = withExitPanic(t, func() {
+		deployPlugin(ctx, db, []string{name, "1.0.0", v1PrimePath})
+	})
+	if !contains(stderr, "refused") || !contains(stderr, "immutable") {
+		t.Fatalf("redeploying 1.0.0 with different bytes should be refused as immutable, got stderr: %s", stderr)
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM plugin_defs WHERE name = $1`, name).Scan(&rows); err != nil {
+		t.Fatalf("count rows after refused redeploy: %v", err)
+	}
+	if rows != 2 {
+		t.Errorf("a refused redeploy left %d rows for %s, want 2 -- it must not add a row", rows, name)
+	}
+	_, oldDef, err = loader.ResolvePlugin(ctx, name, "1.0.0")
+	if err != nil {
+		t.Fatalf("resolve 1.0.0 after refused redeploy: %v", err)
+	}
+	if len(oldDef.WASMBytes) != len(v1Bytes) {
+		t.Errorf("1.0.0 has %d WASM bytes after a REFUSED redeploy, want %d unchanged -- "+
+			"the refused write must not have taken partial effect", len(oldDef.WASMBytes), len(v1Bytes))
+	}
+
+	// An identical-bytes no-op redeploy of a DEPRECATED version must leave it
+	// deprecated. Before cleat#2135, DeployPlugin's unconditional upsert set
+	// `deprecated = false` on every redeploy, so reinstalling an operator's
+	// already-retired version silently un-deprecated it. The no-op path here
+	// writes nothing at all on a checksum match, so it cannot revive one --
+	// this is a real-database check of that, on 2.0.0, which no earlier block
+	// in this test has touched.
+	if err := loader.DeprecatePlugin(ctx, name, "2.0.0"); err != nil {
+		t.Fatalf("deprecate 2.0.0: %v", err)
+	}
+	v2Again := writeWASM(t, dir, v2Bytes)
+	_, stderr = captureOutputs(t, func() {
+		deployPlugin(ctx, db, []string{name, "2.0.0", v2Again})
+	})
+	if stderr != "" {
+		t.Fatalf("redeploying deprecated 2.0.0 with identical bytes reported an error: %s", stderr)
+	}
+	if _, _, err := loader.ResolvePlugin(ctx, name, "2.0.0"); err == nil {
+		t.Error("2.0.0 resolved after a no-op redeploy, but it was deprecated before the redeploy -- " +
+			"an identical-bytes redeploy must not un-deprecate a version")
 	}
 }
 

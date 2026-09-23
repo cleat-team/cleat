@@ -565,9 +565,18 @@ func (m *mockStore) ClearExpiredCompactionState(ctx context.Context, olderThan t
 // ---------------------------------------------------------------------------
 
 // mockPluginConnector implements driver.Connector for testing deployPlugin.
+//
+// cleat#2135: DeployPlugin's INSERT is now ON CONFLICT DO NOTHING, so a
+// redeploy of an existing (name, version) reports 0 rows affected (existing
+// models that) rather than always succeeding as an upsert, and DeployPlugin
+// then issues a SELECT to compare checksums -- existingBytes is what that
+// SELECT returns. This mock's Exec/Query therefore have to actually route on
+// EXISTING, not just always report success, or these tests would stop
+// exercising the immutability check the moment it was added.
 type mockPluginConnector struct {
-	existing bool
-	fail     bool
+	existing      bool
+	existingBytes []byte // wasm_bytes the mock SELECT returns when existing is true
+	fail          bool
 }
 
 type mockPluginDriver struct{}
@@ -577,7 +586,7 @@ func (d *mockPluginDriver) Open(name string) (driver.Conn, error) {
 }
 
 func (c *mockPluginConnector) Connect(_ context.Context) (driver.Conn, error) {
-	return &mockPluginConn{existing: c.existing, fail: c.fail}, nil
+	return &mockPluginConn{existing: c.existing, existingBytes: c.existingBytes, fail: c.fail}, nil
 }
 
 func (c *mockPluginConnector) Driver() driver.Driver {
@@ -585,15 +594,16 @@ func (c *mockPluginConnector) Driver() driver.Driver {
 }
 
 type mockPluginConn struct {
-	existing bool
-	fail     bool
+	existing      bool
+	existingBytes []byte
+	fail          bool
 }
 
 func (c *mockPluginConn) Prepare(query string) (driver.Stmt, error) {
 	if c.fail {
 		return nil, errors.New("mock db error")
 	}
-	return &mockPluginStmt{existing: c.existing, fail: c.fail}, nil
+	return &mockPluginStmt{existing: c.existing, existingBytes: c.existingBytes, fail: c.fail}, nil
 }
 
 func (c *mockPluginConn) Close() error { return nil }
@@ -603,51 +613,58 @@ func (c *mockPluginConn) Begin() (driver.Tx, error) {
 }
 
 type mockPluginStmt struct {
-	existing bool
-	fail     bool
+	existing      bool
+	existingBytes []byte
+	fail          bool
 }
 
 func (s *mockPluginStmt) Close() error  { return nil }
 func (s *mockPluginStmt) NumInput() int { return -1 }
 
+// Exec is only ever the INSERT ... ON CONFLICT DO NOTHING. 0 rows affected
+// when a row already exists at (name, version) is what a real
+// ON CONFLICT DO NOTHING reports on conflict; 1 when it is a genuinely new
+// version.
 func (s *mockPluginStmt) Exec(_ []driver.Value) (driver.Result, error) {
 	if s.fail {
 		return nil, errors.New("mock exec error")
 	}
-	return &mockResult{}, nil
+	if s.existing {
+		return &mockResult{rowsAffected: 0}, nil
+	}
+	return &mockResult{rowsAffected: 1}, nil
 }
 
+// Query is only ever the SELECT wasm_bytes DeployPlugin issues after a
+// conflict, so it is only reached when existing is true.
 func (s *mockPluginStmt) Query(_ []driver.Value) (driver.Rows, error) {
 	if s.fail {
 		return nil, errors.New("mock query error")
 	}
-	if s.existing {
-		return &mockSingleRow{}, nil
-	}
-	return &mockNoRows{}, nil
+	return &mockWasmBytesRow{bytes: s.existingBytes}, nil
 }
 
-type mockResult struct{}
+type mockResult struct {
+	rowsAffected int64
+}
 
 func (r *mockResult) LastInsertId() (int64, error) { return 0, nil }
-func (r *mockResult) RowsAffected() (int64, error) { return 1, nil }
+func (r *mockResult) RowsAffected() (int64, error) { return r.rowsAffected, nil }
 
-type mockNoRows struct{}
-
-func (r *mockNoRows) Columns() []string           { return []string{"id"} }
-func (r *mockNoRows) Close() error                { return nil }
-func (r *mockNoRows) Next(_ []driver.Value) error { return io.EOF }
-
-type mockSingleRow struct {
+// mockWasmBytesRow models the single-column `SELECT wasm_bytes FROM
+// plugin_defs WHERE name = $1 AND version = $2` DeployPlugin issues on
+// conflict.
+type mockWasmBytesRow struct {
+	bytes  []byte
 	called bool
 }
 
-func (r *mockSingleRow) Columns() []string { return []string{"id"} }
-func (r *mockSingleRow) Close() error      { return nil }
-func (r *mockSingleRow) Next(dest []driver.Value) error {
+func (r *mockWasmBytesRow) Columns() []string { return []string{"wasm_bytes"} }
+func (r *mockWasmBytesRow) Close() error      { return nil }
+func (r *mockWasmBytesRow) Next(dest []driver.Value) error {
 	if !r.called {
 		r.called = true
-		dest[0] = "existing-plugin-id"
+		dest[0] = r.bytes
 		return nil
 	}
 	return io.EOF
@@ -1531,11 +1548,19 @@ func TestDeployPlugin_RedeployingAVersionSaysDeployed(t *testing.T) {
 	// does not exist. plugin_defs is keyed (name, version) and DeployPlugin
 	// upserts on that key, so redeploying a version and deploying a new one are
 	// the same operation and report the same way (cleat#1226).
+	//
+	// cleat#2135: "redeploying" is now only accepted at all when the bytes are
+	// byte-identical to what's stored -- it is a no-op, not a real write, but
+	// this command reports it the same way either way (it has no way to tell
+	// the two apart, and the plugin ends up deployed at that version's bytes
+	// regardless). existingBytes is set equal to wasmBytes for exactly that
+	// reason; see TestDeployPlugin_RedeployingDifferentBytesIsRefused for the
+	// other half.
 	dir := t.TempDir()
 	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 	path := writeWASM(t, dir, wasmBytes)
 
-	connector := &mockPluginConnector{existing: true, fail: false}
+	connector := &mockPluginConnector{existing: true, existingBytes: wasmBytes, fail: false}
 	db := sql.OpenDB(connector)
 	defer db.Close()
 
@@ -1550,6 +1575,28 @@ func TestDeployPlugin_RedeployingAVersionSaysDeployed(t *testing.T) {
 	}
 	if stderr != "" {
 		t.Errorf("unexpected stderr: %s", stderr)
+	}
+}
+
+// TestDeployPlugin_RedeployingDifferentBytesIsRefused is the known-positive
+// for cleat#2135 at the cleatctl layer: before that change, this exact
+// scenario -- different bytes at an already-deployed (name, version) --
+// silently overwrote the stored WASM and printed "Deployed plugin ...".
+func TestDeployPlugin_RedeployingDifferentBytesIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	newBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x02, 0x00, 0x00, 0x00}
+	path := writeWASM(t, dir, newBytes)
+
+	oldBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	connector := &mockPluginConnector{existing: true, existingBytes: oldBytes, fail: false}
+	db := sql.OpenDB(connector)
+	defer db.Close()
+
+	stderr := withExitPanic(t, func() {
+		deployPlugin(context.Background(), db, []string{"existing-plugin", "2.1.0", path})
+	})
+	if !strings.Contains(stderr, "refused") || !strings.Contains(stderr, "immutable") {
+		t.Errorf("expected a refusal naming plugin versions as immutable, got: %s", stderr)
 	}
 }
 
