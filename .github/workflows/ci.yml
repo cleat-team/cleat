@@ -1978,8 +1978,12 @@ jobs:
           test -x /usr/bin/cleat-worker
           /usr/bin/cleat-worker --verify-backend
 
-          stat -c '%U:%G %a' /etc/cleat/cleat-worker.env
-          [ "$(stat -c '%U:%G %a' /etc/cleat/cleat-worker.env)" = "root:cleat 640" ] || {
+          # sudo, not a bare stat: /etc/cleat is 0750 root:cleat (deliberately
+          # -- the runner user is in neither), so an unprivileged stat fails
+          # to even traverse the directory with "Permission denied", not a
+          # readable "no such file". First failure mode this step hit.
+          sudo stat -c '%U:%G %a' /etc/cleat/cleat-worker.env
+          [ "$(sudo stat -c '%U:%G %a' /etc/cleat/cleat-worker.env)" = "root:cleat 640" ] || {
             echo "::error::/etc/cleat/cleat-worker.env has unexpected owner/perms"
             exit 1
           }
