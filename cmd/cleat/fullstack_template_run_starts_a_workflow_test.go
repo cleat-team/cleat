@@ -236,10 +236,24 @@ func startSandboxPostgres(t *testing.T) (dsn, containerName string) {
 
 	dsn = "postgres://cleat:cleat@localhost:" + hostPort + "/cleat?sslmode=disable"
 
+	// The official postgres image starts twice: once to run initdb, then it
+	// shuts down and restarts for real. pg_isready can answer success during
+	// the first instance -- confirmed by running both checks side by side
+	// against a fresh container, where pg_isready already reports success
+	// with only ONE "ready to accept connections" log line present. A client
+	// that connects in that window gets the second startup's shutdown, which
+	// reads back as "connection reset by peer" -- exactly what the worker
+	// logged when this test failed in CI (fast enough locally not to lose the
+	// race, slow enough on a loaded runner to lose it). Wait for the log line
+	// twice, not just once, before trusting pg_isready at all.
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := exec.Command("docker", "exec", containerName, "pg_isready", "-U", "cleat").Run(); err == nil {
-			return dsn, containerName
+		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
+		readyCount := strings.Count(string(logs), "database system is ready to accept connections")
+		if readyCount >= 2 {
+			if err := exec.Command("docker", "exec", containerName, "pg_isready", "-U", "cleat").Run(); err == nil {
+				return dsn, containerName
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
