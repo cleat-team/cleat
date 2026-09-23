@@ -1276,7 +1276,7 @@ jobs:
           # unwired it would be a test suite no job runs, which is exactly what
           # check-ci-package-coverage.sh exists to refuse.
           - name: support
-            path: ./plugin/... ./pluginapi/... ./auth/... ./migration/... ./monitoring/... ./packaging/...
+            path: ./plugin/... ./pluginapi/... ./auth/... ./migration/... ./migrations/... ./monitoring/... ./packaging/...
             # -p 1 for the same reason the engine entry above carries it, and
             # this entry did not until cleat#1666. THREE of these packages are
             # database-backed -- plugin, auth and migration -- and they point at

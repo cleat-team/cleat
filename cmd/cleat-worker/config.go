@@ -36,7 +36,6 @@ type Config struct {
 	LogFormat           string
 	OTelEndpoint        string
 	OTelDisabled        bool
-	MigrationsDir       string
 }
 
 // Package-level flag variables used across the worker.
@@ -435,6 +434,11 @@ var (
 			"restores the historical behaviour of waiting indefinitely, which is a real choice for a first migration "+
 			"onto a large busy table. PostgreSQL only: the other dialects have no pinned migration session to set it "+
 			"on, and setting it on a pooled handle would leak the bound into application traffic. See cleat#1775.")
+	migrationsDir = flag.String("migrations-dir", "",
+		"Directory to read SQL migrations from (a dialect subdirectory -- postgres, mysql or mssql -- must exist "+
+			"inside it), overriding the migrations embedded in this binary. Empty (the default) uses the embedded "+
+			"copy, which is what makes migrating work regardless of the worker's own working directory. Set this "+
+			"only to run migrations newer than the binary, or a locally modified copy. See cleat#1968.")
 
 	// DefaultMaxQuotaEvents bounds how much history one run may write.
 	// cleat#1829.

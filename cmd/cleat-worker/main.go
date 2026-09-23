@@ -49,6 +49,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/migration"
+	"github.com/cleat-team/cleat/migrations"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
@@ -105,6 +106,26 @@ import (
 	// degrade instead, which is a change to the plugin, not to this list.
 	// _ "github.com/cleat-team/cleat/plugins/pgvector"
 )
+
+// migrationsOverrideFS returns the embedded migration tree, unless
+// --migrations-dir names a disk directory to read from instead -- in which
+// case it returns nil, and Runner.WithFS(nil) is a no-op, leaving the
+// NewRunner-supplied disk directory in effect.
+//
+// A PLAIN VALUE, NOT A RUNNER-BUILDING HELPER: an earlier version of this
+// returned a *migration.Runner directly, which moved the .WithSchema(...)
+// call at each call site below into a separate function -- and
+// TestEveryMigrationRunnerGetsTheConfiguredSchema (cleat#1287) requires
+// .WithSchema to be chained onto the SAME migration.NewRunner(...)
+// expression, not merely reachable from it. Keeping NewRunner...WithSchema
+// as one unbroken chain at each site, with only the FS choice factored out,
+// keeps that guard meaningful instead of poking a hole in it.
+func migrationsOverrideFS() fs.FS {
+	if *migrationsDir != "" {
+		return nil
+	}
+	return migrations.FS
+}
 
 func main() {
 	flag.Parse()
@@ -1046,7 +1067,8 @@ func main() {
 	// public while the runtime pool -- opened through dsnWithSchema above --
 	// looks in --schema. That was cleat#1287: the migration run did not even
 	// finish, because nineteen files pinned public and twenty-five did not.
-	migrator := migration.NewRunner(migrateDB, migration.Dialect(factory.Dialect()), "migrations").
+	migrator := migration.NewRunner(migrateDB, migration.Dialect(factory.Dialect()), *migrationsDir).
+		WithFS(migrationsOverrideFS()).
 		WithLockTimeout(*migrationLockTimeout).
 		WithSchema(*schemaName)
 	if err := migrator.Run(ctx); err != nil {
@@ -1095,7 +1117,8 @@ func main() {
 				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
-			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), "migrations").
+			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), *migrationsDir).
+				WithFS(migrationsOverrideFS()).
 				WithLockTimeout(*migrationLockTimeout).
 				WithSchema(*schemaName)
 			if terr = tm.Run(ctx); terr != nil {
