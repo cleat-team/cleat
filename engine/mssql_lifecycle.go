@@ -289,6 +289,26 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCK_TIMEOUT %d", mssqlClaimLockTimeoutMS)); err != nil {
 		return nil, fmt.Errorf("claim workflows: set lock timeout: %w", err)
 	}
+	// Reset unconditionally on every return from here on, however this
+	// function exits -- a scan error, a cancelled ctx mid-drain, anything.
+	// This is session state on a pooled connection: a low LOCK_TIMEOUT left
+	// set when this connection returns to the pool would make some later,
+	// unrelated caller's own statement fail with 1222 for no reason it could
+	// see. Deferred rather than called explicitly on each error path, since
+	// an explicit call on each path is exactly the shape that missed the
+	// rows2.Scan error return below in an earlier version of this function.
+	//
+	// Ordering matters and is what defer's LIFO gives for free: this defer
+	// is registered before rows2.Close()'s (below), so it RUNS AFTER --
+	// rows2 is fully drained before the reset is issued, which is required
+	// (see the comment above the old inline placement this replaced) to
+	// avoid deadlocking the connection against its own unread response.
+	defer func() {
+		if _, resetErr := tx.ExecContext(ctx, "SET LOCK_TIMEOUT -1"); resetErr != nil {
+			s.log().Error("claim: failed to reset LOCK_TIMEOUT on a pooled connection",
+				"error", resetErr, "worker_id", workerID)
+		}
+	}()
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		UPDATE workflow_instances WITH (READPAST)
 		SET status = 'running',
@@ -311,20 +331,16 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		  AND tenant_id = @p3
 		  AND %s
 	`, mssqlClaimStep4Recheck), workerID, strings.Join(ids, ","), s.tenantID)
-	// The reset (below, after rows2 is fully drained) must not run here, on
-	// this same connection, before rows2 is consumed: this driver serializes
-	// requests per connection, and issuing SET LOCK_TIMEOUT -1 while a
-	// QueryContext's own response (even an empty OUTPUT) is still unread
-	// deadlocks the connection waiting on itself. Measured directly --
-	// TestZZScratchLockTimeoutValueDuringBlock hung 30s+ with the reset
-	// placed here, confirmed via sys.dm_exec_sessions that LOCK_TIMEOUT had
-	// in fact taken (500, correctly, on the blocked session) while the
-	// session stayed status=running the whole time: not still waiting on
-	// the holder's lock, but stuck on the driver's own next request.
+	// Measured directly why the reset above cannot run inline here instead
+	// of deferred: TestZZScratchLockTimeoutValueDuringBlock hung 30s+ with
+	// an inline reset placed at this point, confirmed via
+	// sys.dm_exec_sessions that LOCK_TIMEOUT had in fact taken (500,
+	// correctly, on the blocked session) while the session stayed
+	// status=running the whole time -- not still waiting on the holder's
+	// lock, but stuck on the driver's own next request, because this
+	// driver serializes requests per connection and rows2's own response
+	// was still unread.
 	if err != nil {
-		if _, resetErr := tx.ExecContext(ctx, "SET LOCK_TIMEOUT -1"); resetErr != nil {
-			return nil, fmt.Errorf("claim workflows: reset lock timeout: %w", resetErr)
-		}
 		if isMSSQLLockTimeout(err) {
 			// Not a failure: a genuinely held lock outlived this attempt's
 			// bound. No claim this round; ClaimWorkflows' own poll loop
@@ -370,17 +386,12 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 	}
 	// A lock-timeout can also surface here rather than at QueryContext, if
 	// this driver defers a QueryContext statement's actual execution until
-	// the first Next() call -- reset before checking rows2.Err() for the
-	// same reason as the branch above: this is still the one connection.
-	rowsErr := rows2.Err()
-	if _, resetErr := tx.ExecContext(ctx, "SET LOCK_TIMEOUT -1"); resetErr != nil {
-		return nil, fmt.Errorf("claim workflows: reset lock timeout: %w", resetErr)
-	}
-	if rowsErr != nil {
-		if isMSSQLLockTimeout(rowsErr) {
+	// the first Next() call.
+	if err := rows2.Err(); err != nil {
+		if isMSSQLLockTimeout(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("claim workflows rows: %w", rowsErr)
+		return nil, fmt.Errorf("claim workflows rows: %w", err)
 	}
 
 	// Release the concurrency key (or queue slot) of any id that Step 3
