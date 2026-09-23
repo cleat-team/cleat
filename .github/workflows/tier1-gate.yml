@@ -78,6 +78,27 @@
 # unmergeable. PyPI and the wasm-tools release are accepted here because
 # python IS tier 1; crates.io, npm and Maven Central are not, because their
 # languages are not.
+#
+# MERGE_GROUP IS REPORT-ONLY FOR tier1-engine AND tier1-rest (cleat#2080). The
+# merge queue re-tests every required check against a temporary
+# `gh-readonly-queue/...` ref, which means these two DB-backed, ~10-11 minute
+# jobs used to re-provision three databases and a Python/wasm-tools toolchain
+# to re-run test content the PR's own `pull_request` run had already proven
+# green, on the critical path of every merge. Each now runs a single
+# unconditional `echo` step on `merge_group` and skips everything else --
+# same pattern as stream-trailer-check.yml. `tier1-coverage` is deliberately
+# NOT report-only: it is cheap (~40s), needs no DB, and re-running it in the
+# queue is free insurance that the shard partition itself did not change
+# underneath the merge. The `tier1` aggregator below is unchanged; its
+# `needs.*.result` check reads "success" for a report-only run exactly as it
+# would for a real one.
+#
+# The tradeoff this accepts: a semantic conflict between two independently-
+# green PRs (each fine alone, broken together) is no longer caught IN the
+# queue for the engine/rest content -- only after merge, via develop's own
+# push run and (for ./engine/... under -race) engine-race.yml's 4-hour
+# schedule. No live branch-protection or required-check change was needed:
+# job ids, names and the "Tier 1 Gate" required context are all unchanged.
 # ---------------------------------------------------------------------------
 name: Tier 1 Gate
 
@@ -337,15 +358,34 @@ jobs:
       CLEAT_TEST_MSSQL_ROW_AUDIT: "1"
 
     steps:
+      # cleat#2080: the merge queue re-runs this job's `pull_request` content
+      # against a temporary `gh-readonly-queue/...` ref via the `merge_group`
+      # trigger below. That content was already validated when the PR's own
+      # `pull_request` run went green -- re-provisioning three databases and a
+      # Python/wasm-tools toolchain to re-run the identical test shard is
+      # ~10-11 wall-clock minutes spent re-proving something already proven.
+      # See stream-trailer-check.yml for the established pattern this copies.
+      #
+      # This trades away in-queue detection of a semantic conflict between two
+      # independently-green PRs (each fine alone, broken merged together) --
+      # accepted per the issue: that case is now caught by develop's own push
+      # run (and engine-race.yml's schedule) rather than in the queue.
+      - name: Already checked on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "tier 1 gate -- engine shard ${{ matrix.shard }}/3 -- validated when the pull request was opened -- cleat#2080"
+
       - uses: actions/checkout@v7
+        if: github.event_name != 'merge_group'
 
       - name: Setup Go
         uses: actions/setup-go@v7
+        if: github.event_name != 'merge_group'
         with:
           go-version: stable
 
       - name: Setup Python
         uses: actions/setup-python@v7
+        if: github.event_name != 'merge_group'
         with:
           python-version: "3.12"
 
@@ -355,6 +395,7 @@ jobs:
       # skip, and the gate fails on the skip rather than letting the run go
       # quietly green.
       - name: Install componentize-py and the Python SDK
+        if: github.event_name != 'merge_group'
         run: |
           pip install --upgrade pip
           pip install componentize-py
@@ -373,6 +414,7 @@ jobs:
       # installs, so the container a developer runs this gate in and the runner
       # agree. If those drift, a developer's green is not evidence about CI's.
       - name: Install wasm-tools
+        if: github.event_name != 'merge_group'
         env:
           WASM_TOOLS_VERSION: "1.255.0"
         run: |
@@ -420,6 +462,7 @@ jobs:
       # one. Doing this in a step rather than in the service definition because
       # a service has no way to run SQL after it is healthy.
       - name: Create the cleat database on SQL Server
+        if: github.event_name != 'merge_group'
         run: |
           docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89')" \
             /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
@@ -429,13 +472,16 @@ jobs:
       # result here. The gate's own exit status is this job's exit status; its
       # stdout already names what it excluded, what it ran, and what failed.
       - name: Tier 1 gate -- engine shard ${{ matrix.shard }}/3
+        if: github.event_name != 'merge_group'
         run: scripts/tier-gate.sh --shard ${{ matrix.shard }}/3
 
       # The log on failure, because the gate deliberately keeps it rather than
       # deleting its evidence -- re-running the whole shard to find out what
-      # broke is not a debugging strategy.
+      # broke is not a debugging strategy. Guarded on merge_group too: the real
+      # step above did not run, so tier-gate.log does not exist, and `always()`
+      # alone would upload a missing-file failure on every queue run.
       - name: Upload the tier-1 log
-        if: always()
+        if: always() && github.event_name != 'merge_group'
         uses: actions/upload-artifact@v7
         with:
           name: tier-gate-log-engine-${{ matrix.shard }}-${{ github.sha }}
@@ -524,25 +570,35 @@ jobs:
       CLEAT_CRASH_DB: postgres://cleat:cleat@127.0.0.1:5433/cleat?sslmode=disable
 
     steps:
+      # See tier1-engine's identical step for the full rationale (cleat#2080).
+      - name: Already checked on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "tier 1 gate -- rest shard 3/3 -- validated when the pull request was opened -- cleat#2080"
+
       - uses: actions/checkout@v7
+        if: github.event_name != 'merge_group'
 
       - name: Setup Go
         uses: actions/setup-go@v7
+        if: github.event_name != 'merge_group'
         with:
           go-version: stable
 
       - name: Setup Python
         uses: actions/setup-python@v7
+        if: github.event_name != 'merge_group'
         with:
           python-version: "3.12"
 
       - name: Install componentize-py and the Python SDK
+        if: github.event_name != 'merge_group'
         run: |
           pip install --upgrade pip
           pip install componentize-py
           pip install -e python-sdk
 
       - name: Install wasm-tools
+        if: github.event_name != 'merge_group'
         env:
           WASM_TOOLS_VERSION: "1.255.0"
         run: |
@@ -557,16 +613,18 @@ jobs:
           wasm-tools --version
 
       - name: Create the cleat database on SQL Server
+        if: github.event_name != 'merge_group'
         run: |
           docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89')" \
             /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
             -Q "IF DB_ID('cleat') IS NULL CREATE DATABASE cleat"
 
       - name: Tier 1 gate -- rest shard 3/3
+        if: github.event_name != 'merge_group'
         run: scripts/tier-gate.sh --shard 3/3
 
       - name: Upload the tier-1 log
-        if: always()
+        if: always() && github.event_name != 'merge_group'
         uses: actions/upload-artifact@v7
         with:
           name: tier-gate-log-rest-${{ github.sha }}
