@@ -227,30 +227,36 @@ brought current.
 
 ## Invariant-to-test mapping
 
-The policy going forward, for `CleatClaim.tla`, `CleatQueueAdmission.tla`, and for the new
-models in cleat#1997-#1999: when TLC reports a counterexample, the fix is not to land
-directly. First write a dialect-parameterised Go test that reproduces the counterexample's
-trace against the real store (see `engine/heartbeat_batch_fenced_test.go` for the shape — a
-store-level test with a `postgres`/`mysql`/`mssql` subtest each), confirm it fails the way the
-model predicted, then land the fix with that test alongside it. A TLC counterexample without a
-corresponding Go test is a claim about the model, not yet a verified claim about the
-implementation; CLAUDE.md's "could this check have disagreed?" question applies here exactly
-as it does to any other guard.
+The policy going forward, for `CleatClaim.tla`, `CleatRunLifecycle.tla`,
+`CleatQueueAdmission.tla`, and for the new models in cleat#1998-#1999: when TLC reports a
+counterexample on a GATED invariant or property, the fix is not to land directly. First write
+a dialect-parameterised Go test that reproduces the counterexample's trace against the real
+store (see `engine/heartbeat_batch_fenced_test.go` for the shape — a store-level test with a
+`postgres`/`mysql`/`mssql` subtest each), confirm it fails the way the model predicted, then
+land the fix with that test alongside it. A TLC counterexample without a corresponding Go test
+is a claim about the model, not yet a verified claim about the implementation; CLAUDE.md's
+"could this check have disagreed?" question applies here exactly as it does to any other
+guard.
 
-No counterexample has been found yet on either spec's shipped bounds, so there is nothing to
-map today — this section exists so the next one that surfaces has a documented process to
-follow rather than an ad hoc call. The counterexamples TLC has produced against either spec so
-far are the three deliberate mutations recorded in "Bounds and state count" above (`S1`'s
-`ConcurrencyLimit` conjunct removed, and `WF_vars(Claim(w))` / `WF_vars(Reap)` each removed
-from `Fairness`, one at a time, to prove `S1`/`L1`/`L2`/`S2` can actually fail); those are
-known-positive controls on the checker, not defect reports, and need no Go test for the same
-reason a passing negative control never does.
+No counterexample has been found yet on any of the three specs' shipped, GATED
+invariants/properties, so there is nothing to map today — this section exists so the next one
+that surfaces has a documented process to follow rather than an ad hoc call.
+`CleatRunLifecycle.tla`'s `L1_EventualSettlement`/`L2_ClaimProgress`/`L3_CascadeProgress` are a
+distinct, already-documented case (see its own section above): three genuine counterexamples
+were found for them during development, which is exactly why they are defined but deliberately
+left ungated rather than shipped as a false green — not a gated property failing, so this
+policy does not (yet) apply to them. The counterexamples TLC has produced against a GATED
+property so far are `CleatQueueAdmission.tla`'s three deliberate mutations recorded in "Bounds
+and state count" above (`S1`'s `ConcurrencyLimit` conjunct removed, and `WF_vars(Claim(w))` /
+`WF_vars(Reap)` each removed from `Fairness`, one at a time, to prove `S1`/`L1`/`L2`/`S2` can
+actually fail); those are known-positive controls on the checker, not defect reports, and need
+no Go test for the same reason a passing negative control never does.
 
-## Adding a model (cleat#1997-#1999)
+## Adding a model (cleat#1998-#1999)
 
-Per cleat#1996, the treatment is the same `CleatClaim.tla` and `CleatQueueAdmission.tla` both
-got, whether the result is a new file or eventually retires one of the two remaining
-unmaintained ones: get it parsing and checking clean, write a `.cfg` with bounds small enough
+Per cleat#1996, the treatment is the same `CleatClaim.tla`, `CleatRunLifecycle.tla` and
+`CleatQueueAdmission.tla` all got, whether the result is a new file or eventually retires one
+of the two remaining unmaintained ones: get it parsing and checking clean, write a `.cfg` with bounds small enough
 for `make tla` to stay well under a minute for that spec, record the bounds and state count
 here, and extend the CI job's path filter (and `make tla`'s spec discovery, which is "every
 `.tla` with a matching `.cfg`") to pick it up automatically — no per-spec CI wiring should be
@@ -270,7 +276,8 @@ it here rather than silently shipping the fast bound.
 # tla2tools.jar is not vendored here; fetched by checksum in CI. Locally:
 # https://github.com/tlaplus/tlaplus/releases
 java -cp tla2tools.jar tlc2.TLC -config specs/CleatClaim.cfg specs/CleatClaim.tla
+java -cp tla2tools.jar tlc2.TLC -config specs/CleatRunLifecycle.cfg specs/CleatRunLifecycle.tla
 java -cp tla2tools.jar tlc2.TLC -config specs/CleatQueueAdmission.cfg specs/CleatQueueAdmission.tla
 ```
 
-Tracked in `IMPROVEMENT-PLAN.md` Phase 4, and in cleat#1997-#1999.
+Tracked in `IMPROVEMENT-PLAN.md` Phase 4, and in cleat#1998-#1999.
