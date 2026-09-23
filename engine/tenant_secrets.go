@@ -14,7 +14,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -276,13 +278,14 @@ func (s *SecretStore) GetSecret(ctx context.Context, tenantID, name string) (str
 	return s.open(tenantID, sealed)
 }
 
-// CountSecrets reports how many secrets exist across all tenants.
+// CountSecrets reports how many secrets exist across all tenants, retired
+// ones included.
 //
-// For the worker's startup check only, and deliberately not tenant-scoped: it
-// is asked before any request exists. A deployment holding secrets and started
-// without a master key should be told at boot, not on the first workflow that
-// needs one -- which would surface as a plugin call failing for a reason with
-// no obvious connection to the missing configuration.
+// For the worker's startup check only, and deliberately not scoped to one
+// tenant: it is asked before any request exists. A deployment holding secrets
+// and started without a master key should be told at boot, not on the first
+// workflow that needs one -- which would surface as a plugin call failing for
+// a reason with no obvious connection to the missing configuration.
 //
 // DELIBERATELY COUNTS RETIRED ROWS TOO (cleat#1989). Retiring a secret
 // (disabled_at) stops it resolving; it does not touch the ciphertext or
@@ -294,29 +297,119 @@ func (s *SecretStore) GetSecret(ctx context.Context, tenantID, name string) (str
 // retiring more of it, needs the key either way. Filtering retired rows out
 // here would tell that operator "no secrets" while their ciphertext sits
 // unreadable.
+//
+// READ TENANT BY TENANT, NOT "ACROSS ALL TENANTS" (cleat#2123). This used to
+// mark the context plugin.AcrossAllTenants and run one unscoped
+// SELECT count(*), and that read cannot see tenant_secrets on two of the
+// three dialects. Measured against a real database per dialect, PostgreSQL as
+// cleat_app so that the policy applied, with two rows seeded, one of them under
+// a suspended tenant:
+//
+//	PostgreSQL   0, with "cleat.tenant_id is not set (P0001)"
+//	SQL Server   0, with no error at all
+//	MySQL        1  (MySQL is single-tenant, so one row was all it could hold)
+//
+// PostgreSQL: AcrossAllTenants does SET LOCAL ROLE cleat_sweep and sets
+// cleat.cross_tenant, but this table's policy is
+// `tenant_id = cleat.assert_tenant_set()` (migration 081) and that function
+// raises when cleat.tenant_id is unset -- it never reads the marker. SQL
+// Server: the policy binds dbo.fn_tenant_filter, whose default form
+// (migration 075) reads only SESSION_CONTEXT('tenant_id'), so the marker is
+// ignored and the filter returns nothing. The marker is honoured by PLUGIN
+// tables, which is what plugin.AcrossAllTenants documents; it is not honoured
+// by this core table, and nothing said so.
+//
+// So the answer is assembled the way the rotating claim does it: enumerate
+// admin.tenants, which carries no row-level security, then read each tenant's
+// rows under that tenant's own context. That works for the role a worker
+// actually runs as, with no cleat_sweep grant and no BYPASSRLS.
+//
+// EVERY TENANT, SUSPENDED ONES INCLUDED, which is why this does not call
+// TenantLister.ListTenantIDs: that excludes suspended tenants, on purpose,
+// because it decides where NEW work goes. A suspended tenant's secrets are
+// still ciphertext sealed under some key, and revival needs that key exactly
+// as a retired secret's does. The enumeration is complete by construction --
+// tenant_secrets.tenant_id is a foreign key to the tenants table on all three
+// dialects (migrations 081 / 069 / 073), so no row can belong to a tenant this
+// does not list.
+//
+// A READ THAT FAILS IS AN ERROR AND NOT A ZERO. The caller must treat it as
+// "could not establish", never as "none"; see checkSecretsUsable.
 func (s *SecretStore) CountSecrets(ctx context.Context) (int, error) {
 	if s == nil || s.db == nil {
 		return 0, ErrNoSecretDB
 	}
-	// ACROSS ALL TENANTS, BY NAME. This asks a question that has no tenant --
-	// "does this deployment hold any secrets at all" -- before any request
-	// exists. On PostgreSQL tenant_secrets carries a policy whose
-	// cleat.assert_tenant_set() raises on the first candidate row whatever the
-	// WHERE clause says, so a direct read is not merely unscoped: it errors.
-	// TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet caught the
-	// first version doing exactly that, and the consequence was worse than an
-	// error, because the caller treats an error as "cannot tell" and the check
-	// would have silently never fired.
-	ctx = plugin.AcrossAllTenants(ctx,
-		"startup check: whether this deployment holds any secrets, asked before any request and therefore for no tenant")
-	var n int
-	err := s.execTenantScoped(ctx, func(q querier) error {
-		return q.QueryRowContext(ctx, `SELECT count(*) FROM tenant_secrets`).Scan(&n)
-	})
+	tenants, err := s.allTenantIDs(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return n, nil
+	total := 0
+	for _, tid := range tenants {
+		id, perr := uuid.Parse(tid)
+		if perr != nil {
+			return 0, fmt.Errorf("tenant id %q is not a UUID: %w", tid, perr)
+		}
+		tctx := tenantctx.With(ctx, id)
+		var n int
+		if err := s.execTenantScoped(tctx, func(q querier) error {
+			return q.QueryRowContext(tctx, countTenantSecretsStmt(s.dialect), tid).Scan(&n)
+		}); err != nil {
+			return 0, fmt.Errorf("count secrets for tenant %s: %w", tid, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// allTenantIDs lists every tenant, suspended or not. See CountSecrets for why
+// this is not ListTenantIDs.
+//
+// THE STATEMENT IS A LITERAL AT EACH CALL SITE, not the result of a helper.
+// TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet reads the query
+// string out of the source and refuses one it cannot resolve -- "an unreadable
+// statement is not a safe statement, it is one nothing has checked". This table
+// has no row-level security, so nothing here needs the guard's protection, but
+// the guard cannot know that without reading it. SQL Server converts the id
+// because TestMSSQLUUIDColumnsAreConvertedInProjections refuses a bare
+// UNIQUEIDENTIFIER in a SELECT list.
+func (s *SecretStore) allTenantIDs(ctx context.Context) ([]string, error) {
+	var rows *sql.Rows
+	var err error
+	switch s.dialect {
+	case "mysql":
+		rows, err = s.db.QueryContext(ctx, `SELECT tenant_id FROM tenants`)
+	case "mssql":
+		rows, err = s.db.QueryContext(ctx, `SELECT CONVERT(varchar(36), tenant_id) FROM admin.tenants`)
+	default:
+		rows, err = s.db.QueryContext(ctx, `SELECT tenant_id FROM admin.tenants`)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list tenants: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("list tenants: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list tenants: %w", err)
+	}
+	return ids, nil
+}
+
+func countTenantSecretsStmt(dialect string) string {
+	switch dialect {
+	case "mysql":
+		return `SELECT count(*) FROM tenant_secrets WHERE tenant_id = ?`
+	case "mssql":
+		return `SELECT count(*) FROM tenant_secrets WHERE tenant_id = @p1`
+	default:
+		return `SELECT count(*) FROM tenant_secrets WHERE tenant_id = $1`
+	}
 }
 
 // HasMasterKey reports whether secrets can be used at all.

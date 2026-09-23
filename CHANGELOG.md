@@ -183,6 +183,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A worker with no `CLEAT_SECRET_MASTER_KEY` now refuses to start on PostgreSQL and SQL Server when the
+  database holds secrets, as it always did on MySQL.** (cleat#2123)
+
+  The startup check read `tenant_secrets` across all tenants, and that read cannot see the table there: on
+  PostgreSQL it raised (and the caller treated the error as "cannot tell"), on SQL Server it returned 0. So a
+  worker started without the key against a database full of secrets booted normally and failed on the first
+  workflow that resolved one, from inside a plugin call, with an error that does not mention keys.
+
+  The check now reads each tenant's rows under that tenant's own context, **suspended tenants included**, and
+  runs after the migrations. **A read that fails now refuses to start** rather than passing: with no key and a
+  table it cannot read, the worker cannot tell whether it would fail on its first plugin call.
+
+  **Upgrade note.** A deployment that was silently running without the key while holding secrets will now
+  refuse to start. That is the check working; set `CLEAT_SECRET_MASTER_KEY` to the key the secrets were sealed
+  with.
+
 - **Write-ahead call intent now works on a sharded deployment, and an operator can resolve an
   ambiguous call there.** (cleat#1778)
 
