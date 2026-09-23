@@ -2087,6 +2087,22 @@ jobs:
           pip install .
           pip install "componentize-py>=0.12.0"
 
+      # cleat#2127. publish-pypi.yml has no TestPyPI rehearsal (the owner
+      # skipped it), so the release tag is the first real run against the
+      # real index -- this is the only place a broken sdist/wheel is caught
+      # before then. `pip install .` two steps up proves the package
+      # imports; it does not prove `python -m build`'s packaging succeeds or
+      # that PyPI's own metadata checks (which `pip install` does not run)
+      # pass. Runs on every PR unconditionally, matching how this job
+      # already builds Go/Rust/AS/Java regardless of what changed, rather
+      # than adding path-filtering this job has never had.
+      - name: Build and check the Python SDK's PyPI artifacts
+        working-directory: python-sdk
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*
+
   # -------------------------------------------------------------------------
   # Coverage (informational, non-blocking)
   # -------------------------------------------------------------------------

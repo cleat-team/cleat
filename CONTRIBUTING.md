@@ -605,12 +605,18 @@ either — so if crate or npm publishing is wired up later, the first real
 release would find its version already claimed.
 
 The Python number is different: it *is* load-bearing, because a publisher reads
-it. Note that it does not track the repo tag and never has — `python-sdk` went
-`0.1.0` → `0.2.0` on **2026-05-07**, six days before the `v0.1.0` tag
-(2026-05-13) and three months before `v0.2.0` (2026-08-10). The agreement
-between "python-sdk 0.2.0" and "tag v0.2.0" is a coincidence of numbering, not
-a policy. Re-derive with
+it. Historically it did not track the repo tag — `python-sdk` went `0.1.0` →
+`0.2.0` on **2026-05-07**, six days before the `v0.1.0` tag (2026-05-13) and
+three months before `v0.2.0` (2026-08-10); the agreement between "python-sdk
+0.2.0" and "tag v0.2.0" was a coincidence of numbering, not a policy.
+Re-derive the history with
 `git log --format='%h %cI %s' -S'version = "0.2.0"' -- python-sdk/pyproject.toml`.
+
+**As of cleat#2127 this is enforced, not coincidental.** `publish-pypi.yml`
+fails the run before any upload if the pushed tag's version and
+`python-sdk/pyproject.toml`'s version disagree, so from the 0.3.0 release
+onward the two cannot drift apart silently — bump `pyproject.toml` on the
+release branch before tagging, per #2058.
 
 Which registries the project depends on is decided by tier, and
 `.github/workflows/tier1-gate.yml` already states it: PyPI is accepted because
@@ -618,10 +624,13 @@ python is tier 1; crates.io, npm and Maven Central are not, because their
 languages are tier 2. That is the reason the three inert versions have no
 publisher, and it is a deliberate position rather than an oversight.
 
-**The Python publish path is currently broken — see IMPROVEMENT-PLAN 3.304.**
-`cleat-sdk` is not on PyPI (`curl -s -o /dev/null -w '%{http_code}'
+**The Python publish path's trigger and version-check were fixed in
+cleat#2127 — see IMPROVEMENT-PLAN 3.304.** `cleat-sdk` is still not on PyPI as
+of this writing (`curl -s -o /dev/null -w '%{http_code}'
 https://pypi.org/pypi/cleat-sdk/json` → `404`, against `200` for a control
-package), and `publish-pypi.yml` has never run.
+package), and `publish-pypi.yml` still has never run — both expected to stay
+true until the 0.3.0 release tag is actually pushed, which is what would
+exercise it for the first time.
 
 ## Areas that need help
 
