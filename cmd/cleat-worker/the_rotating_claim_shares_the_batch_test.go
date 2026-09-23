@@ -356,7 +356,21 @@ func TestTheStartupReportSaysWhetherOtherTenantsAreServed(t *testing.T) {
 		if !withFactory {
 			w.storeFactory = nil
 		}
-		w.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		// ReplaceAttr drops the timestamp before it reaches buf: slog stamps
+		// every line with millisecond precision (e.g. "023" for a line logged
+		// at 18:58:52.023Z), and the assertions below check the report text
+		// for a bare "023" (a retired migration number). Without this, the
+		// check fails about 1 in 1,000 runs on the wall clock rather than on
+		// anything the code under test did (cleat#2104).
+		w.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.TimeKey && len(groups) == 0 {
+					return slog.Attr{}
+				}
+				return a
+			},
+		}))
 		w.reportCrossTenantCapability()
 		return buf.String()
 	}
