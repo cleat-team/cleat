@@ -283,6 +283,17 @@ func (s *SecretStore) GetSecret(ctx context.Context, tenantID, name string) (str
 // without a master key should be told at boot, not on the first workflow that
 // needs one -- which would surface as a plugin call failing for a reason with
 // no obvious connection to the missing configuration.
+//
+// DELIBERATELY COUNTS RETIRED ROWS TOO (cleat#1989). Retiring a secret
+// (disabled_at) stops it resolving; it does not touch the ciphertext or
+// remove the row, and set-secret revives it in place by clearing disabled_at
+// -- the same master key that sealed it originally is what a revival needs to
+// keep being readable. So a deployment with only retired secrets and no
+// master key configured is exactly as stuck as one with only active
+// secrets: reviving anything, or reading what's already there before
+// retiring more of it, needs the key either way. Filtering retired rows out
+// here would tell that operator "no secrets" while their ciphertext sits
+// unreadable.
 func (s *SecretStore) CountSecrets(ctx context.Context) (int, error) {
 	if s == nil || s.db == nil {
 		return 0, ErrNoSecretDB
@@ -326,14 +337,20 @@ func validSecretName(name string) bool {
 	return true
 }
 
+// putSecretUpdateStmt also clears disabled_at (cleat#1989): re-running
+// set-secret for a retired name is the documented way to revive it -- "Re-run
+// set-secret to make it live again" is what retire-secret prints -- so the
+// write path that already runs on every set-secret is where that has to
+// happen, rather than a separate revive command nothing would remind an
+// operator exists.
 func putSecretUpdateStmt(dialect string) string {
 	switch dialect {
 	case "mysql":
-		return `UPDATE tenant_secrets SET ciphertext = ? WHERE tenant_id = ? AND name = ?`
+		return `UPDATE tenant_secrets SET ciphertext = ?, disabled_at = NULL WHERE tenant_id = ? AND name = ?`
 	case "mssql":
-		return `UPDATE tenant_secrets SET ciphertext = @p1 WHERE tenant_id = @p2 AND name = @p3`
+		return `UPDATE tenant_secrets SET ciphertext = @p1, disabled_at = NULL WHERE tenant_id = @p2 AND name = @p3`
 	default:
-		return `UPDATE tenant_secrets SET ciphertext = $1, updated_at = now() WHERE tenant_id = $2 AND name = $3`
+		return `UPDATE tenant_secrets SET ciphertext = $1, disabled_at = NULL, updated_at = now() WHERE tenant_id = $2 AND name = $3`
 	}
 }
 
@@ -362,15 +379,101 @@ func getSecretExistsStmt(dialect string) string {
 	}
 }
 
+// getSecretStmt refuses a retired row the same way it refuses a missing one
+// (cleat#1989): AND disabled_at IS NULL, on all three dialects. Without it, a
+// row an operator retired -- during a leak, exactly when it matters most --
+// kept resolving via ${secret:NAME} as though nothing had happened.
 func getSecretStmt(dialect string) string {
 	switch dialect {
 	case "mysql":
-		return `SELECT ciphertext FROM tenant_secrets WHERE tenant_id = ? AND name = ?`
+		return `SELECT ciphertext FROM tenant_secrets WHERE tenant_id = ? AND name = ? AND disabled_at IS NULL`
 	case "mssql":
-		return `SELECT ciphertext FROM tenant_secrets WHERE tenant_id = @p1 AND name = @p2`
+		return `SELECT ciphertext FROM tenant_secrets WHERE tenant_id = @p1 AND name = @p2 AND disabled_at IS NULL`
 	default:
-		return `SELECT ciphertext FROM tenant_secrets WHERE tenant_id = $1 AND name = $2`
+		return `SELECT ciphertext FROM tenant_secrets WHERE tenant_id = $1 AND name = $2 AND disabled_at IS NULL`
 	}
+}
+
+// retireSecretStmt sets disabled_at, but only on a row that is not already
+// retired -- so RowsAffected distinguishes "retired just now" (1) from
+// "already retired, or no such row" (0), the same way revoke-api-key's own
+// UPDATE does for admin.tenant_api_keys.
+func retireSecretStmt(dialect string) string {
+	switch dialect {
+	case "mysql":
+		return `UPDATE tenant_secrets SET disabled_at = NOW(6) WHERE tenant_id = ? AND name = ? AND disabled_at IS NULL`
+	case "mssql":
+		return `UPDATE tenant_secrets SET disabled_at = SYSDATETIMEOFFSET() WHERE tenant_id = @p1 AND name = @p2 AND disabled_at IS NULL`
+	default:
+		return `UPDATE tenant_secrets SET disabled_at = now() WHERE tenant_id = $1 AND name = $2 AND disabled_at IS NULL`
+	}
+}
+
+// secretMetaStmt reads disabled_at without touching ciphertext, so looking a
+// secret up to report its status needs no master key -- retire-secret and
+// revoke-api-key both print the row before mutating it, on purpose, so an
+// operator sees what they are about to cut off.
+func secretMetaStmt(dialect string) string {
+	switch dialect {
+	case "mysql":
+		return `SELECT disabled_at FROM tenant_secrets WHERE tenant_id = ? AND name = ?`
+	case "mssql":
+		return `SELECT disabled_at FROM tenant_secrets WHERE tenant_id = @p1 AND name = @p2`
+	default:
+		return `SELECT disabled_at FROM tenant_secrets WHERE tenant_id = $1 AND name = $2`
+	}
+}
+
+// SecretMeta reports whether a secret row exists and, if so, whether it is
+// retired -- without decrypting anything, so it needs no master key. Used by
+// cleatctl retire-secret to show what it is about to change before changing
+// it.
+func (s *SecretStore) SecretMeta(ctx context.Context, tenantID, name string) (exists bool, disabledAt sql.NullTime, err error) {
+	if s == nil || s.db == nil {
+		return false, sql.NullTime{}, ErrNoSecretDB
+	}
+	err = s.execTenantScoped(ctx, func(q querier) error {
+		return q.QueryRowContext(ctx, secretMetaStmt(s.dialect), tenantID, name).Scan(&disabledAt)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, sql.NullTime{}, nil
+	}
+	if err != nil {
+		return false, sql.NullTime{}, err
+	}
+	return true, disabledAt, nil
+}
+
+// RetireSecret sets disabled_at on one tenant's secret, so it stops resolving
+// via ${secret:NAME} -- the not-found error, the same as a name that was
+// never set. It needs no master key: retiring is a metadata change, not a
+// read or write of the ciphertext, and an operator cutting off a leaked
+// secret during an incident must not be blocked on CLEAT_SECRET_MASTER_KEY
+// being available right now.
+//
+// Reversible: re-running set-secret for the same name clears disabled_at
+// (putSecretUpdateStmt, above).
+//
+// Returns rowsAffected = 0 for BOTH "no such secret" and "already retired" --
+// callers that need to tell those apart (cleatctl's operator-facing message
+// does) call SecretMeta first, the same way revoke-api-key looks its row up
+// before deciding what to print.
+func (s *SecretStore) RetireSecret(ctx context.Context, tenantID, name string) (rowsAffected int64, err error) {
+	if s == nil || s.db == nil {
+		return 0, ErrNoSecretDB
+	}
+	err = s.execTenantScoped(ctx, func(q querier) error {
+		res, execErr := q.ExecContext(ctx, retireSecretStmt(s.dialect), tenantID, name)
+		if execErr != nil {
+			return execErr
+		}
+		rowsAffected, execErr = res.RowsAffected()
+		return execErr
+	})
+	if err != nil {
+		return 0, err
+	}
+	return rowsAffected, nil
 }
 
 // ResolveSecretRefs replaces every ${secret:NAME} in input with its value.

@@ -150,6 +150,8 @@ func main() {
 		runEgressAllow(ctx, db, d, args[1:])
 	case "set-secret":
 		runSetSecret(ctx, db, d, args[1:])
+	case "retire-secret":
+		runRetireSecret(ctx, db, d, args[1:])
 	case "queue":
 		runQueue(ctx, db, d, *dsn, args[1:])
 	case "reseal-payloads":
