@@ -40,7 +40,7 @@
 
   document.getElementById("go").onclick = async () => {
     statusEl.textContent = "starting...";
-    const res = await fetch(`${API}/api/workflows/my-fullstack-app`, {
+    const res = await fetch(`${API}/api/workflows/my-fullstack-app/start`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -48,7 +48,7 @@
         // creating a second one. The response says which happened.
         "Idempotency-Key": crypto.randomUUID(),
       },
-      body: JSON.stringify({ item: document.getElementById("item").value, qty: 1 }),
+      body: JSON.stringify({ input: { item: document.getElementById("item").value, qty: 1 } }),
     });
     if (!res.ok) { statusEl.textContent = `start failed: ${res.status}`; return; }
     const { id } = await res.json();
