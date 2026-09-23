@@ -220,6 +220,27 @@ self-served. A test nobody follows is not a safeguard.
 `MERGEABLE`**, or with all required checks running or green, **nothing red, no conflict, and no
 cancelled twin**. Red, `CONFLICTING`, draft and twinned all disqualify — those need their author.
 
+**Out of the queue is not waiting, and the PR page will not say so** (added 2026-09-23). A PR
+removed from the queue for failed checks has no entry to read, and it keeps reading
+`mergeStateStatus: CLEAN` with its own checks green: the failure was on the queue's *batch*
+commit, a different SHA. That day there were 8 removals that were not merges — 3 `failed_checks`
+(#2016, #2037, #2057) and 5 `manual` — and #2057's (15:12:25Z; a plugins-job failure on batch
+`a543752ead`, cleat#2063) was found by the coordinator's 15-minute tick, not by its author's
+watcher, which polled `mergeStateStatus`. So the last queue event matters too: a removal whose
+reason is not `merged`, with nothing pushed since, disqualifies. `scripts/pr-watch.py` applies the
+whole candidacy test, this clause included, and reads a dropped PR's failing jobs from its batch:
+
+```
+scripts/pr-watch.py 2057 2061          # WAITING / MERGED / NEEDS-AUTHOR, one line per PR
+scripts/pr-watch.py --watch 120 2061   # poll; returns the moment one needs its author
+```
+
+Known-positive: #2057's state between 15:12:25Z and its re-enqueue at 15:19:10Z, rebuilt from its
+real timeline and batch, reports `DROPPED … batch a543752ead failed: Test Go (plugins) on 1.26
+(run 35878274795, job 107239811455). The PR page still reads CLEAN`. Negative controls: the three
+PRs open at 15:4xZ (two running checks, one `AWAITING_CHECKS`) read `WAITING`; #2054 and #2056
+read `MERGED`.
+
 **The queue entry has its own state, and it is not the PR's.** `MergeQueueEntryState` is
 `QUEUED | AWAITING_CHECKS | MERGEABLE | UNMERGEABLE | LOCKED`, and an entry can read `UNMERGEABLE`
 while the PR's own `mergeStateStatus` still reads `CLEAN` — WS-2 hit this on 2026-09-16 with two of
@@ -280,8 +301,27 @@ both members `success` every time. That last one lands at exactly the sample a w
 Known-positive `431737a0` reports **55 cancelled**; negative control
 `cab6353741afd57203d338f06b79b24334baee34`, which merged, reports **0**.
 
-**Cap: one held PR plus one new item.** R6 still governs — if the second item would touch the same
-declaration file, it is not eligible regardless of R9.
+**Cap: two held PRs plus one new item** (raised from one held PR on 2026-09-23, owner-approved).
+R6 still governs, and more of it now: no two of the three — both held PRs and the new item — may
+touch the same declaration file, derived files included (R6a). If one of them would, the new item
+is not eligible regardless of R9. A held PR that turns NEEDS-AUTHOR comes before the new item.
+
+Why two. Measured 2026-09-23 over the 31 non-dependabot PRs merged that day: median open→merged
+**65 min** (q1 46, q3 95), of which about **42 min** is CI run twice — once on the PR, once on
+the queue's batch (merge_group `CI/CD Pipeline` and `Tier 1 Gate` medians **21 min** each). With
+a cap of one, a stream holding two waiting PRs is not offered work however long they wait: WS-3
+held #2054 and #2057 together from 14:00:12Z to 15:12:25Z (**72 min**) and sat idle for that span.
+This is the same finding R9 started from — the streams already held pairs — one level up.
+
+```
+gh pr list --repo cleat-team/cleat --state merged --limit 100 \
+  --search "merged:>=2026-09-23T00:00:00Z -author:app/dependabot" --json createdAt,mergedAt \
+  --jq 'map(((.mergedAt|fromdateiso8601)-(.createdAt|fromdateiso8601))/60|floor)|sort'
+```
+
+The cost is more rebases: with two PRs in the queue at once, the first to merge can leave the
+second `UNMERGEABLE` over a file R6 did not catch. The candidacy test catches that one, and that is
+why a held PR that needs its author comes first.
 
 **It is an offer, and a decline is final.** Both refusals on the day it was written were correct
 and were respected: WS-1 declined `#1410` while mid-task, and declined `#1688` on the grounds that
