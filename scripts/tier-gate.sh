@@ -18,21 +18,230 @@
 # asserts the connection up front rather than inferring anything from one.
 #
 # Usage:
-#   scripts/tier-gate.sh            enforce (exit non-zero on failure or skip)
-#   scripts/tier-gate.sh --measure  report only, never fail the build
+#   scripts/tier-gate.sh                    enforce (exit non-zero on failure or skip)
+#   scripts/tier-gate.sh --measure          report only, never fail the build
+#   scripts/tier-gate.sh --shard I/N        run only shard I of N (1-based; see below)
+#   scripts/tier-gate.sh --verify-shard-coverage N
+#                                            no DB needed: confirm the N-1 engine
+#                                            buckets union to exactly the full
+#                                            ./engine/... test list, no gaps or dupes
+#   scripts/tier-gate.sh --list-shard I/N   print what shard I/N would run, then exit
+#   scripts/tier-gate.sh --self-test        offline check of the sharding logic itself
 #
+# Sharding (cleat#2081). Shards 1..N-1 partition ./engine/...'s top-level tests by
+# a stable hash of the test name; shard N runs every other tier-1 package plus the
+# cleat module, unsharded. N must be >= 2. The hash is sha1, not Python's built-in
+# hash() -- hash() is randomised per PROCESS via PYTHONHASHSEED, and this script
+# shells out to a fresh python3 on every call, so a hash()-based partition would
+# put the same test in a different bucket on every invocation. That would make
+# "the shards union to the full list" true by luck on any one run and false as a
+# property of the partition -- see --self-test, which asserts two independent
+# invocations agree.
+#
+# Deliberately unfixed here: the package-list extraction below still finds only
+# 8 of tiers.yaml's declared 12 tier1.packages entries (cleat#2085 -- an awk
+# pattern that stops at an embedded comment). This PR shards what tier-gate
+# already runs; it does not change what that is.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TIERS="$REPO_ROOT/tiers.yaml"
 MEASURE=0
-[ "${1:-}" = "--measure" ] && MEASURE=1
+SHARD_SPEC=""
+VERIFY_N=""
+LIST_SHARD_SPEC=""
+SELF_TEST=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --measure) MEASURE=1; shift ;;
+    --shard) SHARD_SPEC="${2:?--shard wants I/N}"; shift 2 ;;
+    --verify-shard-coverage) VERIFY_N="${2:?--verify-shard-coverage wants N}"; shift 2 ;;
+    --list-shard) LIST_SHARD_SPEC="${2:?--list-shard wants I/N}"; shift 2 ;;
+    --self-test) SELF_TEST=1; shift ;;
+    *) echo "tier-gate: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
 
 fail() { echo "tier-gate: FAIL: $*" >&2; FAILED=1; }
 note() { echo "tier-gate: $*"; }
 FAILED=0
 
+# --- sharding helpers ----------------------------------------------------------
+# Top-level Test funcs only. -list does not expand subtests (a dialect subtest
+# like TestPluginMigrations_AllDialects/postgres never appears here), so this
+# partitions exactly the names go test -run can select at this granularity.
+#
+# sort -u, not sort: TestDialectConstants is a top-level Test func in two
+# DIFFERENT packages under ./engine/... (confirmed live,
+# `go test ./engine/... -list '.*' | grep -E '^Test' | sort | uniq -d`), so the
+# raw list carries the same name twice. A shared name always hashes to the same
+# bucket regardless, so this cannot split it across shards either way -- but an
+# undeduplicated count double-counts it, which is what --verify-shard-coverage
+# measured before this line read plain `sort`: sum-of-buckets 3486, full list
+# 3486, but only 3485 DISTINCT names in the union. Both readings were of a real
+# duplicate name, not a partition bug; dedupe once here rather than at every
+# caller.
+engine_all_tests() {
+  (cd "$REPO_ROOT" && go test ./engine/... -list '.*' 2>/dev/null) | grep -E '^Test' | LC_ALL=C sort -u
+}
+
+# engine_shard_names BUCKET NBUCKETS: reads test names on stdin (one per line),
+# prints the ones whose sha1 falls in this bucket. sha1, not hash() -- see the
+# usage comment above.
+engine_shard_names() {
+  python3 -c '
+import sys, hashlib
+bucket, n = int(sys.argv[1]), int(sys.argv[2])
+for name in sorted(l.strip() for l in sys.stdin if l.strip()):
+    if int(hashlib.sha1(name.encode()).hexdigest(), 16) % n == bucket:
+        print(name)
+' "$1" "$2"
+}
+
+# names_to_run_pattern: reads names on stdin, prints an anchored go test -run
+# alternation. Empty input prints the LITERAL PATTERN '^$', which matches no
+# test -- never the empty string, which go test reads as "run everything" and
+# is exactly the false-green this format exists to avoid on an empty bucket.
+# Test names are Go identifiers (go test ./engine/... -list '.*' | grep -vE
+# '^Test[A-Za-z0-9_]*$' returns nothing but module 'ok' lines), so none can
+# carry a regex metacharacter that would need escaping here.
+names_to_run_pattern() {
+  local names
+  names=$(cat)
+  if [ -z "$names" ]; then
+    echo '^$'
+  else
+    echo "^($(printf '%s\n' "$names" | paste -sd '|' -))\$"
+  fi
+}
+
+if [ "$SELF_TEST" = "1" ]; then
+  st_fail() { echo "tier-gate --self-test: FAIL: $*" >&2; ST_FAILED=1; }
+  ST_FAILED=0
+
+  # Determinism across independent processes -- the property sha1 has and a
+  # PYTHONHASHSEED-randomised hash() would not.
+  FIXTURE=$(printf 'TestAlpha\nTestBeta\nTestGamma\nTestDelta\nTestEpsilon\n')
+  A1=$(printf '%s' "$FIXTURE" | engine_shard_names 1 3)
+  A2=$(printf '%s' "$FIXTURE" | engine_shard_names 1 3)
+  [ "$A1" = "$A2" ] || st_fail "engine_shard_names disagreed with itself across two invocations on the same input: '$A1' vs '$A2'"
+
+  # Coverage + disjointness over a synthetic 50-name corpus, 4 buckets.
+  SYN=$(python3 -c "print('\n'.join('TestSynthetic%d' % i for i in range(50)))")
+  UNION=""
+  TOTAL=0
+  for b in 0 1 2 3; do
+    part=$(printf '%s' "$SYN" | engine_shard_names "$b" 4)
+    n=$(printf '%s\n' "$part" | grep -c . || true)
+    TOTAL=$((TOTAL + n))
+    UNION="$UNION
+$part"
+  done
+  UNIQ_COUNT=$(printf '%s\n' "$UNION" | grep . | sort -u | grep -c . || true)
+  [ "$TOTAL" = "50" ] || st_fail "4 buckets covered $TOTAL of 50 synthetic names, not 50"
+  [ "$UNIQ_COUNT" = "50" ] || st_fail "4 buckets produced $UNIQ_COUNT distinct names from 50 -- not disjoint"
+
+  # Known positive: splitting one name two ways must leave one bucket empty,
+  # and that empty bucket's pattern must be the literal '^$', never "".
+  EMPTY_BUCKET=""
+  for b in 0 1; do
+    part=$(printf 'TestLonely' | engine_shard_names "$b" 2)
+    [ -z "$part" ] && EMPTY_BUCKET="$b"
+  done
+  [ -n "$EMPTY_BUCKET" ] || st_fail "splitting one name into 2 buckets left neither empty -- cannot exercise the empty-bucket case"
+  PAT=$(printf '' | names_to_run_pattern)
+  [ "$PAT" = '^$' ] || st_fail "names_to_run_pattern on empty input produced '$PAT', not '^\$' -- an empty -run pattern matches EVERYTHING"
+
+  PAT2=$(printf 'TestFoo\nTestBar\n' | names_to_run_pattern)
+  [ "$PAT2" = '^(TestFoo|TestBar)$' ] || st_fail "names_to_run_pattern on [TestFoo TestBar] produced '$PAT2', expected '^(TestFoo|TestBar)\$'"
+
+  if [ "$ST_FAILED" = "1" ]; then
+    echo "tier-gate --self-test: FAILED" >&2
+    exit 1
+  fi
+  echo "tier-gate --self-test: all checks passed"
+  exit 0
+fi
+
 [ -f "$TIERS" ] || { echo "tier-gate: $TIERS not found" >&2; exit 2; }
+
+if [ -n "$VERIFY_N" ]; then
+  case "$VERIFY_N" in ''|*[!0-9]*) echo "tier-gate --verify-shard-coverage: N must be a positive integer, got '$VERIFY_N'" >&2; exit 2 ;; esac
+  [ "$VERIFY_N" -ge 2 ] || { echo "tier-gate --verify-shard-coverage: N must be >= 2 (>=1 engine bucket plus the rest shard), got $VERIFY_N" >&2; exit 2; }
+  EBUCKETS=$((VERIFY_N - 1))
+
+  note "verifying ./engine/... shard coverage across $EBUCKETS bucket(s) (N=$VERIFY_N)"
+  ALL=$(engine_all_tests)
+  NALL=$(printf '%s\n' "$ALL" | grep -c . || true)
+  if [ "$NALL" = "0" ]; then
+    echo "tier-gate --verify-shard-coverage: go test ./engine/... -list produced no top-level tests -- could not measure, not a coverage finding" >&2
+    exit 2
+  fi
+  note "  full unsharded list: $NALL top-level tests"
+
+  UNION=""
+  TOTAL=0
+  b=0
+  while [ "$b" -lt "$EBUCKETS" ]; do
+    part=$(printf '%s\n' "$ALL" | engine_shard_names "$b" "$EBUCKETS")
+    n=$(printf '%s\n' "$part" | grep -c . || true)
+    note "  bucket $b/$EBUCKETS: $n tests"
+    TOTAL=$((TOTAL + n))
+    UNION="$UNION
+$part"
+    b=$((b + 1))
+  done
+
+  UNIQ_COUNT=$(printf '%s\n' "$UNION" | grep . | sort -u | grep -c . || true)
+  MISSING=$(comm -23 <(printf '%s\n' "$ALL" | grep . | sort -u) <(printf '%s\n' "$UNION" | grep . | sort -u))
+  EXTRA=$(comm -13 <(printf '%s\n' "$ALL" | grep . | sort -u) <(printf '%s\n' "$UNION" | grep . | sort -u))
+
+  if [ "$TOTAL" != "$NALL" ] || [ "$UNIQ_COUNT" != "$NALL" ] || [ -n "$MISSING" ] || [ -n "$EXTRA" ]; then
+    echo "tier-gate --verify-shard-coverage: FAIL -- union of $EBUCKETS bucket(s) does not equal the full list" >&2
+    echo "  full=$NALL  sum-of-buckets=$TOTAL  distinct-in-union=$UNIQ_COUNT" >&2
+    [ -n "$MISSING" ] && { echo "  MISSING from every bucket:" >&2; printf '%s\n' "$MISSING" | sed 's/^/    /' >&2; }
+    [ -n "$EXTRA" ] && { echo "  in a bucket but not in the full list (stale? flaky -list?):" >&2; printf '%s\n' "$EXTRA" | sed 's/^/    /' >&2; }
+    exit 1
+  fi
+
+  note "tier-gate --verify-shard-coverage: OK -- $EBUCKETS bucket(s) partition all $NALL tests exactly once"
+  exit 0
+fi
+
+RUN_MODE="full"
+SHARD_I_NUM=""
+SHARD_N_NUM=""
+SHARD_TO_PARSE="${SHARD_SPEC:-$LIST_SHARD_SPEC}"
+if [ -n "$SHARD_TO_PARSE" ]; then
+  case "$SHARD_TO_PARSE" in
+    */*) ;;
+    *) echo "tier-gate: --shard/--list-shard wants I/N, got '$SHARD_TO_PARSE'" >&2; exit 2 ;;
+  esac
+  SHARD_I_NUM=${SHARD_TO_PARSE%%/*}
+  SHARD_N_NUM=${SHARD_TO_PARSE##*/}
+  case "$SHARD_I_NUM" in ''|*[!0-9]*) echo "tier-gate: --shard I must be a positive integer, got '$SHARD_I_NUM'" >&2; exit 2 ;; esac
+  case "$SHARD_N_NUM" in ''|*[!0-9]*) echo "tier-gate: --shard N must be a positive integer, got '$SHARD_N_NUM'" >&2; exit 2 ;; esac
+  [ "$SHARD_N_NUM" -ge 2 ] || { echo "tier-gate: --shard N must be >= 2 (>=1 engine bucket plus the rest shard), got $SHARD_N_NUM" >&2; exit 2; }
+  { [ "$SHARD_I_NUM" -ge 1 ] && [ "$SHARD_I_NUM" -le "$SHARD_N_NUM" ]; } || { echo "tier-gate: --shard I must be between 1 and N ($SHARD_N_NUM), got $SHARD_I_NUM" >&2; exit 2; }
+  if [ "$SHARD_I_NUM" -lt "$SHARD_N_NUM" ]; then
+    RUN_MODE="engine-shard"
+  else
+    RUN_MODE="rest-shard"
+  fi
+fi
+
+if [ -n "$LIST_SHARD_SPEC" ]; then
+  if [ "$RUN_MODE" = "engine-shard" ]; then
+    EBUCKETS=$((SHARD_N_NUM - 1))
+    BUCKET=$((SHARD_I_NUM - 1))
+    engine_all_tests | engine_shard_names "$BUCKET" "$EBUCKETS" | names_to_run_pattern
+  else
+    echo "REST shard $SHARD_I_NUM/$SHARD_N_NUM: every tier1 package except ./engine/..., plus the cleat module"
+  fi
+  exit 0
+fi
+
+[ -n "$SHARD_SPEC" ] && note "shard $SHARD_I_NUM/$SHARD_N_NUM ($RUN_MODE)"
 
 # --- 1. CGO must be on -------------------------------------------------------------
 # CGO_ENABLED=0 does not skip a check: it removes NewWasmtimeBackend (//go:build cgo)
@@ -147,7 +356,11 @@ done
 # Guarded on the package actually being listed, so removing ./tests/crash/... from
 # tiers.yaml removes this requirement with it rather than leaving a check for a
 # suite that no longer runs.
-if awk '/^tier1:/{t=1} t&&/^  packages:/{p=1;next} p&&/^    - /{print;next} p{exit}' "$TIERS" \
+# An engine shard never runs ./tests/crash/... (it isn't part of the engine module and
+# never can be), so this precondition does not apply there -- checked here rather than
+# left to be discovered as an unused service, so a future engine-shard-only CI job does
+# not carry a requirement it cannot trigger.
+if [ "$RUN_MODE" != "engine-shard" ] && awk '/^tier1:/{t=1} t&&/^  packages:/{p=1;next} p&&/^    - /{print;next} p{exit}' "$TIERS" \
      | grep -q '\./tests/crash/'; then
   if [ -z "${CLEAT_CRASH_DB:-}" ]; then
     fail "CLEAT_CRASH_DB is unset -- ./tests/crash/... is a tier-1 package and does not use
@@ -220,6 +433,34 @@ NDECL=$(awk '/^tier1:/{t=1} t&&/^  packages:/{p=1;next} p&&/^    - /{n++;next} p
 if [ "$NPKG" != "$NDECL" ]; then
   echo "tier-gate: extracted $NPKG package(s) but tiers.yaml declares $NDECL" >&2; exit 2
 fi
+
+# --- Which packages does THIS invocation actually run? -------------------------
+# Unsharded: all of them, as always. An engine shard: only ./engine/..., further
+# narrowed by -run below. The rest shard: everything else, unchanged -- deliberately
+# still the buggy 8-of-12 extraction above (cleat#2085), not fixed here.
+SHARD_PATTERN=""
+RUN_MOD_DIRS=1
+case "$RUN_MODE" in
+  engine-shard)
+    if ! printf '%s\n' "$PKGS" | grep -Fxq './engine/...'; then
+      echo "tier-gate: --shard requested an engine shard but ./engine/... is not in tier1.packages" >&2
+      exit 2
+    fi
+    EBUCKETS=$((SHARD_N_NUM - 1))
+    BUCKET=$((SHARD_I_NUM - 1))
+    SHARD_PATTERN=$(engine_all_tests | engine_shard_names "$BUCKET" "$EBUCKETS" | names_to_run_pattern)
+    ACTIVE_PKGS="./engine/..."
+    RUN_MOD_DIRS=0
+    note "  engine shard $SHARD_I_NUM/$SHARD_N_NUM: -run '$SHARD_PATTERN'"
+    ;;
+  rest-shard)
+    ACTIVE_PKGS=$(printf '%s\n' "$PKGS" | grep -Fxv './engine/...')
+    note "  rest shard $SHARD_I_NUM/$SHARD_N_NUM: $(echo "$ACTIVE_PKGS" | tr '\n' ' ')"
+    ;;
+  *)
+    ACTIVE_PKGS="$PKGS"
+    ;;
+esac
 
 # --- 3b. Lower-tier tests living in tier-1 packages ---------------------------------
 # D5. tier1.packages contains the Rust, Java and AssemblyScript integration tests and
@@ -306,26 +547,31 @@ LOG="${TIER_GATE_LOG:-$REPO_ROOT/tier-gate.log}"
 # to cover two sequential invocations, the root module and each tier-1 module.
 GO_TEST_TIMEOUT="${GO_TEST_TIMEOUT:-30m}"
 
-note "running root module: $(echo "$PKGS" | tr '\n' ' ')"
+note "running root module: $(echo "$ACTIVE_PKGS" | tr '\n' ' ')"
 # SKIP_ARGS is empty when tier1.exclude_tests is empty, so the unfiltered run is the
 # default and the filter has to be asked for in the manifest.
 SKIP_ARGS=""
 [ -n "$SKIP_RE" ] && SKIP_ARGS="-skip $SKIP_RE"
+RUN_ARGS=""
+[ -n "$SHARD_PATTERN" ] && RUN_ARGS="-run $SHARD_PATTERN"
 # shellcheck disable=SC2086
-(cd "$REPO_ROOT" && go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" -v $SKIP_ARGS $PKGS) >> "$LOG" 2>&1
+(cd "$REPO_ROOT" && go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" -v $RUN_ARGS $SKIP_ARGS $ACTIVE_PKGS) >> "$LOG" 2>&1
 TEST_RC=$?
 
 # Separate Go modules must be tested from inside their own directory; `go test
 # ./cleat/...` from the root fails with "main module does not contain package".
-MODDIRS=$(awk '/^tier1:/{t=1} t&&/^  modules:/{p=1;next} p&&/^    - dir: /{sub(/^    - dir: /,"");print;next} p&&/^      /{next} p{exit}' "$TIERS")
-for md in $MODDIRS; do
-  [ -f "$REPO_ROOT/$md/go.mod" ] || { fail "tiers.yaml names module '$md' but $md/go.mod does not exist"; continue; }
-  note "running module: $md"
-  # shellcheck disable=SC2086
-  (cd "$REPO_ROOT/$md" && go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" -v $SKIP_ARGS ./...) >> "$LOG" 2>&1
-  rc=$?
-  [ "$rc" = "0" ] || TEST_RC=$rc
-done
+# Run once only -- skipped by the engine shards, which own no module directory.
+if [ "$RUN_MOD_DIRS" = "1" ]; then
+  MODDIRS=$(awk '/^tier1:/{t=1} t&&/^  modules:/{p=1;next} p&&/^    - dir: /{sub(/^    - dir: /,"");print;next} p&&/^      /{next} p{exit}' "$TIERS")
+  for md in $MODDIRS; do
+    [ -f "$REPO_ROOT/$md/go.mod" ] || { fail "tiers.yaml names module '$md' but $md/go.mod does not exist"; continue; }
+    note "running module: $md"
+    # shellcheck disable=SC2086
+    (cd "$REPO_ROOT/$md" && go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" -v $SKIP_ARGS ./...) >> "$LOG" 2>&1
+    rc=$?
+    [ "$rc" = "0" ] || TEST_RC=$rc
+  done
+fi
 
 RAN=$(grep -c '^=== RUN'    "$LOG")
 PASS=$(grep -c -- '--- PASS' "$LOG")
@@ -375,4 +621,4 @@ if [ "$MEASURE" = "1" ]; then
 fi
 
 [ "$FAILED" = "0" ] || exit 1
-note "tier 1 green: $PASS passed, 0 failed, 0 skipped, on all of: $DIALECTS"
+note "tier 1 green: $PASS passed, 0 failed, 0 skipped, on all of: $DIALECTS${SHARD_SPEC:+ (shard $SHARD_SPEC)}"
