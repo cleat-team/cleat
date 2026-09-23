@@ -210,6 +210,55 @@ func TestQueueCommandWorksOnEveryDialect(t *testing.T) {
 			} else if q.RateLimit != nil || q.RatePeriodSeconds != nil {
 				t.Errorf("GetQueue after --clear-rate-limit = RateLimit=%v RatePeriodSeconds=%v, want nil, nil", q.RateLimit, q.RatePeriodSeconds)
 			}
+
+			// queue update sets a per-worker cap on the same queue -- cleat#1917.
+			out, _ = withExitPanicOutput(t, func() {
+				runQueue(ctx, db, tc.d, dsn, []string{"update", tenant, name, "--worker-concurrency", "2"})
+			})
+			if !strings.Contains(out, "capped at 2 holder(s) per worker") {
+				t.Errorf("update does not confirm the worker concurrency it just set:\n%s", out)
+			}
+			if q, err := store.GetQueue(ctx, tenant, name); err != nil {
+				t.Fatalf("GetQueue after worker concurrency update: %v", err)
+			} else if q.WorkerConcurrency == nil || *q.WorkerConcurrency != 2 {
+				t.Errorf("GetQueue after update = WorkerConcurrency=%v, want 2", q.WorkerConcurrency)
+			}
+
+			// list reflects it.
+			out, _ = withExitPanicOutput(t, func() {
+				runQueue(ctx, db, tc.d, dsn, []string{"list", tenant})
+			})
+			if !strings.Contains(out, "worker<=2") {
+				t.Errorf("list does not show the worker concurrency just set:\n%s", out)
+			}
+
+			// --clear-worker-concurrency removes it again.
+			out, _ = withExitPanicOutput(t, func() {
+				runQueue(ctx, db, tc.d, dsn, []string{"update", tenant, name, "--clear-worker-concurrency"})
+			})
+			if !strings.Contains(out, "has no per-worker cap") {
+				t.Errorf("update --clear-worker-concurrency does not confirm the clear:\n%s", out)
+			}
+			if q, err := store.GetQueue(ctx, tenant, name); err != nil {
+				t.Fatalf("GetQueue after clearing worker concurrency: %v", err)
+			} else if q.WorkerConcurrency != nil {
+				t.Errorf("GetQueue after --clear-worker-concurrency = WorkerConcurrency=%v, want nil", q.WorkerConcurrency)
+			}
+
+			// A registration can set --worker-concurrency directly, validated
+			// against the queue's own --concurrency.
+			wcName := fmt.Sprintf("ctl-queue-wc-%s-%d", tc.name, time.Now().UnixNano())
+			out, _ = withExitPanicOutput(t, func() {
+				runQueue(ctx, db, tc.d, dsn, []string{"create", tenant, wcName, "--concurrency", "5", "--worker-concurrency", "2"})
+			})
+			if !strings.Contains(out, "Capped at 2 holder(s) per worker") {
+				t.Errorf("create does not confirm the worker concurrency it just set:\n%s", out)
+			}
+			if q, err := store.GetQueue(ctx, tenant, wcName); err != nil {
+				t.Fatalf("GetQueue for %s: %v", wcName, err)
+			} else if q.WorkerConcurrency == nil || *q.WorkerConcurrency != 2 {
+				t.Errorf("GetQueue for %s = WorkerConcurrency=%v, want 2", wcName, q.WorkerConcurrency)
+			}
 		})
 	}
 }
@@ -257,10 +306,22 @@ func TestQueueCommandRefusesBadInput(t *testing.T) {
 			"--rate-limit and --rate-period must both be given",
 		},
 		{"update an unregistered name", []string{"update", tenant, "no-such-queue-here", "--rate-limit", "5", "--rate-period", "60"}, "has no queue named"},
-		{"update with neither a rate limit nor --clear-rate-limit", []string{"update", tenant, "q-update-nothing"}, "needs --rate-limit and --rate-period, or --clear-rate-limit"},
+		{"update with no flags at all", []string{"update", tenant, "q-update-nothing"}, "needs at least one of"},
 		{
 			"update with --clear-rate-limit and --rate-limit together",
 			[]string{"update", tenant, "q-update-both", "--clear-rate-limit", "--rate-limit", "5", "--rate-period", "60"},
+			"mutually exclusive",
+		},
+		{
+			// cleat#1917 decision 5: a worker cap above the queue's own
+			// concurrency limit can never bind, so it is refused.
+			"create with worker-concurrency above concurrency",
+			[]string{"create", tenant, "q-wc-too-high", "--concurrency", "2", "--worker-concurrency", "3"},
+			"must not exceed the queue's concurrency limit",
+		},
+		{
+			"update with --clear-worker-concurrency and --worker-concurrency together",
+			[]string{"update", tenant, "q-update-wc-both", "--clear-worker-concurrency", "--worker-concurrency", "2"},
 			"mutually exclusive",
 		},
 	} {

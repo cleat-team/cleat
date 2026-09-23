@@ -60,7 +60,7 @@ func TestAQueueRoundTripsThroughItsStore(t *testing.T) {
 			nameA := queueTestName("aaa-payments")
 			nameB := queueTestName("zzz-emails")
 
-			if err := store.CreateQueue(ctx, tenantID, nameA, 3, nil, nil); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, nameA, 3, nil, nil, nil); err != nil {
 				t.Fatalf("CreateQueue: %v", err)
 			}
 
@@ -78,7 +78,7 @@ func TestAQueueRoundTripsThroughItsStore(t *testing.T) {
 				t.Errorf("CreatedAt/UpdatedAt were not populated: %+v", got)
 			}
 
-			if err := store.CreateQueue(ctx, tenantID, nameB, 1, nil, nil); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, nameB, 1, nil, nil, nil); err != nil {
 				t.Fatalf("CreateQueue (second queue): %v", err)
 			}
 
@@ -120,10 +120,10 @@ func TestARegisteredQueueCannotBeRegisteredTwice(t *testing.T) {
 			store := NewQueueStore(db, string(dialect))
 			name := queueTestName("payments")
 
-			if err := store.CreateQueue(ctx, tenantID, name, 3, nil, nil); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, name, 3, nil, nil, nil); err != nil {
 				t.Fatalf("first CreateQueue: %v", err)
 			}
-			err := store.CreateQueue(ctx, tenantID, name, 5, nil, nil)
+			err := store.CreateQueue(ctx, tenantID, name, 5, nil, nil, nil)
 			if !errors.Is(err, ErrQueueAlreadyExists) {
 				t.Fatalf("second CreateQueue for the same name: got %v, want ErrQueueAlreadyExists", err)
 			}
@@ -170,7 +170,7 @@ func TestDisablingAQueueIsIdempotent(t *testing.T) {
 			store := NewQueueStore(db, string(dialect))
 			name := queueTestName("payments")
 
-			if err := store.CreateQueue(ctx, tenantID, name, 3, nil, nil); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, name, 3, nil, nil, nil); err != nil {
 				t.Fatalf("CreateQueue: %v", err)
 			}
 
@@ -219,7 +219,7 @@ func TestAQueueRateLimitRoundTripsThroughItsStore(t *testing.T) {
 			name := queueTestName("rate-payments")
 
 			limit, period := 5, 60
-			if err := store.CreateQueue(ctx, tenantID, name, 3, &limit, &period); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, name, 3, &limit, &period, nil); err != nil {
 				t.Fatalf("CreateQueue with a rate limit: %v", err)
 			}
 
@@ -267,7 +267,7 @@ func TestAQueueWithNoRateLimitIsUnlimited(t *testing.T) {
 			store := NewQueueStore(db, string(dialect))
 			name := queueTestName("no-rate-payments")
 
-			if err := store.CreateQueue(ctx, tenantID, name, 3, nil, nil); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, name, 3, nil, nil, nil); err != nil {
 				t.Fatalf("CreateQueue: %v", err)
 			}
 			got, err := store.GetQueue(ctx, tenantID, name)
@@ -307,13 +307,13 @@ func TestCreateQueueRefusesAnUnpairedRateLimit(t *testing.T) {
 			store := NewQueueStore(db, string(dialect))
 
 			limit := 5
-			err := store.CreateQueue(ctx, tenantID, queueTestName("unpaired-a"), 1, &limit, nil)
+			err := store.CreateQueue(ctx, tenantID, queueTestName("unpaired-a"), 1, &limit, nil, nil)
 			if err == nil || !strings.Contains(err.Error(), wantSubstr) {
 				t.Errorf("CreateQueue with rate_limit set and rate_period_seconds nil: got %v, want an error containing %q", err, wantSubstr)
 			}
 
 			period := 60
-			err = store.CreateQueue(ctx, tenantID, queueTestName("unpaired-b"), 1, nil, &period)
+			err = store.CreateQueue(ctx, tenantID, queueTestName("unpaired-b"), 1, nil, &period, nil)
 			if err == nil || !strings.Contains(err.Error(), wantSubstr) {
 				t.Errorf("CreateQueue with rate_period_seconds set and rate_limit nil: got %v, want an error containing %q", err, wantSubstr)
 			}
@@ -335,7 +335,7 @@ func TestSetQueueRateLimitSetsAndClears(t *testing.T) {
 			// Created with no rate limit, then set, then cleared -- the full
 			// round trip an operator's `queue create` then `queue update`
 			// then `queue update --clear-rate-limit` goes through.
-			if err := store.CreateQueue(ctx, tenantID, name, 2, nil, nil); err != nil {
+			if err := store.CreateQueue(ctx, tenantID, name, 2, nil, nil, nil); err != nil {
 				t.Fatalf("CreateQueue: %v", err)
 			}
 

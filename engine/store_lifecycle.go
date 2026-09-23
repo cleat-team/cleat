@@ -109,11 +109,14 @@ type claimCandidate struct {
 // queues row: the concurrency semaphore's capacity, and -- cleat#1918 -- the
 // rate limiter's capacity and window. RateLimit and RatePeriodSeconds are nil
 // together when the queue has no rate limit, the same nil/nil convention
-// Queue itself uses (queue_store.go).
+// Queue itself uses (queue_store.go). workerConcurrency is cleat#1917: nil
+// means no per-worker cap, the same lone-nullable shape Queue.WorkerConcurrency
+// carries.
 type registeredQueueLimits struct {
 	concurrencyLimit  int
 	rateLimit         *int
 	ratePeriodSeconds *int
+	workerConcurrency *int
 }
 
 // logClaimKeyDecision records what a claim decided about one candidate's
@@ -259,7 +262,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	// Statement 3: acquire each candidate's key and keep the winners.
 	var ids []string
 	for _, c := range cands {
-		ok, err := s.acquireCandidateConcurrencyKey(ctx, tx, c, limits)
+		ok, err := s.acquireCandidateConcurrencyKey(ctx, tx, c, limits, workerID)
 		if err != nil {
 			return nil, err
 		}
@@ -327,7 +330,7 @@ func (s *PostgresStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.T
 		return limits, nil
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, concurrency_limit, rate_limit, rate_period_seconds FROM queues
+		SELECT name, concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency FROM queues
 		WHERE tenant_id = $1 AND name = ANY($2) AND disabled_at IS NULL
 		ORDER BY name
 		FOR UPDATE
@@ -339,11 +342,12 @@ func (s *PostgresStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.T
 	for rows.Next() {
 		var name string
 		var ql registeredQueueLimits
-		var rateLimit, ratePeriodSeconds sql.NullInt64
-		if err := rows.Scan(&name, &ql.concurrencyLimit, &rateLimit, &ratePeriodSeconds); err != nil {
+		var rateLimit, ratePeriodSeconds, workerConcurrency sql.NullInt64
+		if err := rows.Scan(&name, &ql.concurrencyLimit, &rateLimit, &ratePeriodSeconds, &workerConcurrency); err != nil {
 			return nil, fmt.Errorf("claim workflows: scan queue limit: %w", err)
 		}
 		ql.rateLimit, ql.ratePeriodSeconds = nullInt64Pair(rateLimit, ratePeriodSeconds)
+		ql.workerConcurrency = nullableIntFromSQL(workerConcurrency)
 		limits[name] = ql
 	}
 	if err := rows.Err(); err != nil {
@@ -357,8 +361,9 @@ func (s *PostgresStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.T
 // registered queue uses the semaphore path, safe because the queue's row was
 // locked by lockRegisteredQueueLimits. cleat#1918: a registered queue's rate
 // limit, if it has one, is a second and independent gate checked under the
-// same lock -- both must admit for the candidate to be claimed.
-func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]registeredQueueLimits) (bool, error) {
+// same lock. cleat#1917: workerID's own per-worker cap, if the queue has one,
+// is a third -- all three must admit for the candidate to be claimed.
+func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]registeredQueueLimits, workerID string) (bool, error) {
 	if !c.registered {
 		if c.hash == nil {
 			return true, nil // no key at all
@@ -400,39 +405,72 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 		// next poll re-evaluates it, this time as a bare key.
 		return false, nil
 	}
-	// Re-claim: a run that already holds its own slot claims again after a lost
-	// fence, without counting against the limit OR taking a new rate token --
-	// it is continuing an admission already granted, not a new one.
-	var selfHolds bool
+	// Does this workflow already hold a live slot on this queue, and whose
+	// worker_id does it carry? cleat#1917 decision 4: a holder owned by the
+	// CLAIMING worker is the original re-claim shortcut, unchanged. A holder
+	// that exists but belongs to nobody (pre-#1917 row) or to a DIFFERENT
+	// worker (a parked run waking and being claimed elsewhere) is not free --
+	// it must pass every gate below for the claiming worker, and if admitted,
+	// the holder MOVES to it rather than a second row being inserted.
+	var existingWorker sql.NullString
+	holderExists := true
 	err := tx.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM queue_holders qh
-			WHERE qh.tenant_id = $1 AND qh.queue_name = $2 AND qh.workflow_id = $3
-			  AND qh.expires_at > now()
-		)
-	`, c.tenantID, *c.key, c.id).Scan(&selfHolds)
-	if err != nil {
+		SELECT worker_id FROM queue_holders
+		WHERE tenant_id = $1 AND queue_name = $2 AND workflow_id = $3 AND expires_at > now()
+	`, c.tenantID, *c.key, c.id).Scan(&existingWorker)
+	if errors.Is(err, sql.ErrNoRows) {
+		holderExists = false
+	} else if err != nil {
 		return false, fmt.Errorf("claim workflows: queue self-hold check: %w", err)
 	}
-	if selfHolds {
+	if holderExists && existingWorker.Valid && existingWorker.String == workerID {
+		// Re-claim: a run that already holds its own slot on THIS worker claims
+		// again after a lost fence, without counting against any limit or
+		// taking a new rate token -- it is continuing an admission already
+		// granted, not a new one.
 		return true, nil
 	}
-	// Not already holding: count other holders and insert if a slot is free.
+	// A fresh admission, or a holder about to move to this worker. Either way,
+	// count OTHER holders: `<> $3` excludes this workflow's own row so a move
+	// (which changes no total) is not double-counted against the global cap.
 	var held int
 	err = tx.QueryRowContext(ctx, `
 		SELECT count(*) FROM queue_holders qh
 		WHERE qh.tenant_id = $1 AND qh.queue_name = $2 AND qh.expires_at > now()
-	`, c.tenantID, *c.key).Scan(&held)
+		  AND qh.workflow_id <> $3
+	`, c.tenantID, *c.key, c.id).Scan(&held)
 	if err != nil {
 		return false, fmt.Errorf("claim workflows: count queue holders: %w", err)
 	}
 	if held >= ql.concurrencyLimit {
 		return false, nil // at capacity
 	}
+	// cleat#1917: the per-worker cap, if declared, is checked under this same
+	// lock -- a free global slot does not admit past a worker already at its
+	// own cap. Unlike the count above, this one does not need to exclude this
+	// workflow's own row: the same-worker case already returned true above, so
+	// any existing holder for this workflow belongs to nobody or to a
+	// DIFFERENT worker and cannot match `worker_id = workerID`.
+	if ql.workerConcurrency != nil {
+		var workerHeld int
+		err = tx.QueryRowContext(ctx, `
+			SELECT count(*) FROM queue_holders qh
+			WHERE qh.tenant_id = $1 AND qh.queue_name = $2 AND qh.worker_id = $3
+			  AND qh.expires_at > now()
+		`, c.tenantID, *c.key, workerID).Scan(&workerHeld)
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: count worker queue holders: %w", err)
+		}
+		if workerHeld >= *ql.workerConcurrency {
+			return false, nil // this worker is at its own cap
+		}
+	}
 	// cleat#1918: the rate limit, if declared, is checked under this same
-	// queues-row lock -- independent of the concurrency check above, so a free
-	// concurrency slot does not admit past a full rate window.
-	if ql.rateLimit != nil {
+	// queues-row lock -- independent of the concurrency and worker checks
+	// above. It applies only to a genuinely fresh admission: a holder that
+	// already exists consumed its rate token when it was first admitted, and
+	// moving it to a new worker is not a new admission.
+	if !holderExists && ql.rateLimit != nil {
 		var rateHeld int
 		err = tx.QueryRowContext(ctx, `
 			SELECT count(*) FROM queue_rate_tokens qrt
@@ -445,11 +483,25 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 			return false, nil // rate-limited
 		}
 	}
+	if holderExists {
+		// Move: the slot already exists (owned by nobody or by a different
+		// worker). Refresh its lease and reassign it to the claiming worker.
+		res, err := tx.ExecContext(ctx, `
+			UPDATE queue_holders
+			SET worker_id = $4, expires_at = now() + make_interval(secs => $5)
+			WHERE tenant_id = $1 AND queue_name = $2 AND workflow_id = $3
+		`, c.tenantID, *c.key, c.id, workerID, claimedKeyTTL.Seconds())
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: move queue holder: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		return n > 0, nil
+	}
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at)
-		VALUES ($1, $2, $3, now() + make_interval(secs => $4))
+		INSERT INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at, worker_id)
+		VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5)
 		ON CONFLICT (tenant_id, queue_name, workflow_id) DO NOTHING
-	`, c.tenantID, *c.key, c.id, claimedKeyTTL.Seconds())
+	`, c.tenantID, *c.key, c.id, claimedKeyTTL.Seconds(), workerID)
 	if err != nil {
 		return false, fmt.Errorf("claim workflows: acquire queue holder: %w", err)
 	}
