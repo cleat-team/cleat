@@ -75,6 +75,7 @@ SECTION_SANDBOXES=(
   "WS-1:/Users/Shared/localssd/rcownie/cleat"
   "WS-2:/Users/Shared/localssd/rcownie/cleat-agent1"
   "WS-3:/Users/Shared/localssd/rcownie/cleat-agent2"
+  "WS-4:/Users/Shared/localssd/rcownie/cleat-agent3"
 )
 
 # section_block_for <number> -> "WS-N" | "grandfathered" | "unallocated"

@@ -51,7 +51,7 @@ wrong. Derive it. `skip-budget.txt`'s total becomes a sum over per-test declarat
 next to the tests; nobody edits a total, so there is nothing to conflict on.
 
 **R2 — Section numbers are per-stream blocks.** WS-1 `3.200–299`, WS-2 `3.300–399`, WS-3
-`3.400–499`. Sequential integers across three streams made collisions that
+`3.400–499`, WS-4 `3.500–599` (added 2026-09-23 with the fourth stream). Sequential integers across three streams made collisions that
 `check-section-numbers.sh` structurally cannot see, because they exist only across open PRs.
 Disjoint blocks make them impossible instead of detected.
 
