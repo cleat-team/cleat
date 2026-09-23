@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -568,7 +569,10 @@ func MSSQLRowDisappearanceReport(statsDB, readerDB *sql.DB) string {
 	for _, table := range mssqlAuditedTables {
 		physicalVsVisible(&b, statsDB, readerDB, table)
 	}
-	return mssqlDeletionSection(&b, statsDB)
+	mssqlDeletionSection(&b, statsDB)
+	mssqlActiveLocksSection(&b, statsDB)
+	goroutineStackSection(&b)
+	return b.String()
 }
 
 // physicalVsVisible writes the two-handle reading: is the row still physically
@@ -653,7 +657,10 @@ func MSSQLRowDisappearanceReportFor(r MSSQLRowDisappearanceReaders) string {
 			physical, visible, note)
 	}
 
-	return mssqlDeletionSection(&b, r.Stats)
+	mssqlDeletionSection(&b, r.Stats)
+	mssqlActiveLocksSection(&b, r.Stats)
+	goroutineStackSection(&b)
+	return b.String()
 }
 
 func mssqlDeletionSection(b *strings.Builder, statsDB *sql.DB) string {
@@ -710,4 +717,81 @@ func trimmedStmt(s string) string {
 		s = s[:200] + "..."
 	}
 	return s
+}
+
+// mssqlActiveLocksSection answers a question deletion and visibility cannot:
+// is something holding a lock on an audited table RIGHT NOW, at the moment of
+// failure. The deletion audit only sees a completed DELETE; a claim or update
+// that is still in flight, blocked or blocking, has committed nothing yet and
+// leaves no row in the audit table -- this is the only one of the report's
+// instruments that can see it.
+//
+// statsDB must be the administrative connection MSSQLStatsDB returns:
+// sys.dm_tran_locks is server-wide state, like sys.dm_db_partition_stats
+// above, and the test suite's own principal does not have permission to read
+// it either.
+func mssqlActiveLocksSection(b *strings.Builder, statsDB *sql.DB) {
+	rows, err := statsDB.Query(`
+		SELECT l.request_session_id, l.resource_type, l.request_mode,
+		       l.request_status, s.program_name, s.host_name,
+		       CONVERT(NVARCHAR(4000), COALESCE(r.text, ''))
+		FROM sys.dm_tran_locks l
+		JOIN sys.partitions p ON p.hobt_id = l.resource_associated_entity_id
+		JOIN sys.objects o ON o.object_id = p.object_id
+		LEFT JOIN sys.dm_exec_sessions s ON s.session_id = l.request_session_id
+		OUTER APPLY sys.dm_exec_sql_text(
+			(SELECT TOP 1 sql_handle FROM sys.dm_exec_requests
+			  WHERE session_id = l.request_session_id)) r
+		WHERE o.name IN ('workflow_instances')
+		ORDER BY l.request_session_id`)
+	if err != nil {
+		fmt.Fprintf(b, "  active locks: UNMEASURED (%v)\n", err)
+		return
+	}
+	defer rows.Close()
+
+	var lines []string
+	for rows.Next() {
+		var spid int
+		var resType, mode, status, prog, host, stmt sql.NullString
+		if err := rows.Scan(&spid, &resType, &mode, &status, &prog, &host, &stmt); err != nil {
+			fmt.Fprintf(b, "  active locks: UNMEASURED (scanning a row: %v)\n", err)
+			return
+		}
+		lines = append(lines, fmt.Sprintf("    spid=%d %s %s status=%s program=%q host=%q\n      %s",
+			spid, resType.String, mode.String, status.String, prog.String, host.String,
+			trimmedStmt(stmt.String)))
+	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(b, "  active locks: UNMEASURED (%v)\n", err)
+		return
+	}
+	if len(lines) == 0 {
+		fmt.Fprintf(b, "  active locks: none held on workflow_instances at report time.\n")
+		return
+	}
+	fmt.Fprintf(b, "  active locks: %d held on workflow_instances at report time\n", len(lines))
+	for _, l := range lines {
+		b.WriteString(l)
+		b.WriteByte('\n')
+	}
+}
+
+// goroutineStackSection prints every live goroutine's stack, so a background
+// claimer, sweeper or retention loop that outlived the test that started it --
+// the "not eliminated" candidate this issue's own body names -- shows up by
+// name rather than by inference. A static read of every `go func(` in
+// engine/*.go cannot see a leak reached through an interface value rather than
+// a literal call site at the leak's origin; this can, because it does not
+// care how the goroutine was started.
+//
+// This is necessarily noisy -- it is every goroutine in the test binary, not
+// only ones touching MSSQL -- so it is the last section of the report and
+// gated the same way the rest of it is: only printed on an already-failed
+// test, never on a pass.
+func goroutineStackSection(b *strings.Builder) {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	fmt.Fprintf(b, "  goroutine stacks at report time (%d goroutines' worth of output follows):\n%s\n",
+		runtime.NumGoroutine(), buf[:n])
 }
