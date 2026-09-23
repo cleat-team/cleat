@@ -100,7 +100,19 @@ builds:
     mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
+  # cleat#2107: a single archives block spanning builds with different `goos`
+  # sets produces a different binary count per platform -- linux would get 3
+  # binaries (cleat, cleat-gen, cleat-worker), darwin only 2 (cleat,
+  # cleat-gen) -- and goreleaser's archive validation refuses that asymmetry
+  # ("archive has different count of binaries for each platform"). Verified
+  # against develop's own unmodified config, in both --snapshot and a real
+  # tagged release. Split by `ids:` so each archive only ever sees a
+  # consistent count: one for the two both-OS binaries, one for the
+  # linux-only worker.
   - id: default
+    ids:
+      - cleat
+      - cleat-gen
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz
@@ -112,6 +124,16 @@ archives:
       - goos: linux
         formats:
           - tar.gz
+    files:
+      - LICENSE
+      - README.md
+
+  - id: cleat-worker
+    ids:
+      - cleat-worker
+    name_template: "{{ .ProjectName }}-worker_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
     files:
       - LICENSE
       - README.md
