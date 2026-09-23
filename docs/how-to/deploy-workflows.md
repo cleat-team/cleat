@@ -97,7 +97,7 @@ The WASM blob IS the version. Rolling back changes which WASM binary new workflo
 
 ## Step 3: Deploy via REST API
 
-When the worker runs with `--api-addr`, you can deploy workflows programmatically via the `POST /api/definitions` endpoint:
+When the worker runs with `--api-addr`, you can deploy workflows programmatically via the `POST /api/definitions` endpoint. `--require-auth` defaults to true, so most deployments need an API key (`cleat-worker --generate-api-key <tenant-id> --db "$CLEAT_DATABASE_URL"`) in the `Authorization` header:
 
 ```bash
 # Encode the WASM binary as base64 and POST.
@@ -105,23 +105,21 @@ WASM_B64=$(base64 -w0 ./out/place_order.wasm)
 
 curl -X POST http://localhost:8080/api/definitions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CLEAT_API_KEY" \
   -d "{
     \"name\": \"place_order\",
-    \"namespace\": \"staging\",
-    \"wasm_base64\": \"$WASM_B64\",
-    \"task_queue\": \"default\"
+    \"wasm_bytes_base64\": \"$WASM_B64\"
   }"
 ```
 
-The API response includes the assigned version:
+There is no `namespace` or `task_queue` field: neither is a concept this endpoint knows about. The response is a `201` with the assigned version:
 
 ```json
 {
+  "created": true,
   "name": "place_order",
   "version": 1,
-  "namespace": "staging",
-  "task_queue": "default",
-  "status": "deployed"
+  "plugin_deps": null
 }
 ```
 
