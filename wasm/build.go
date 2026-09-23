@@ -462,6 +462,15 @@ func AbsoluteEntryPath(entry string) string {
 //   - "wasmtime" — Component Model binary (skip decomposition)
 //   - "wazero"   — decomposed core WASM module
 //   - ""         — both formats (default)
+//
+// FindRepoRoot BELOW MEANS THIS ONLY WORKS INSIDE A CLEAT CHECKOUT (cleat#1971):
+// it finds build_wasm.py by walking up from the project directory to a
+// cleat repo root and then into python-sdk/scripts/, so a project scaffolded
+// outside this repo -- which is every real user's, once cleat-sdk is
+// installable from PyPI -- has no repo root to find. Parked on #1779
+// (publishing cleat-sdk, targeted for the 0.3.0 release): once the SDK is a
+// package rather than a subdirectory, this needs to find build_wasm.py
+// relative to the INSTALLED package instead of a repo root.
 func BuildPythonWasmWithRuntime(entry, output, targetRuntime string, verbose bool) error {
 	repoRoot, err := FindRepoRoot(".")
 	if err != nil {
