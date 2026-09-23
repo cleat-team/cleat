@@ -44,6 +44,13 @@ import (
 // exists, an operator reviving a secret has the value in hand to re-set it
 // with, and a second command doing the same UPDATE would just be a second
 // place disabled_at could be cleared from.
+
+// gosec G101 reports this constant as "potential hardcoded credentials". It
+// is the --help text, flagged for containing the word `secret` next to a
+// string literal -- the same false positive revokeapikey.go's usage text
+// already carries, for the same reason. There is no credential in it.
+//
+//nolint:gosec // G101: usage text, not a credential -- see revokeapikey.go's identical finding.
 const retireSecretUsage = `Usage: cleatctl --db <dsn> retire-secret <tenant-uuid> --name <name> [--dry-run]
 
 NOTE: --db is a GLOBAL flag and goes BEFORE the command name.
