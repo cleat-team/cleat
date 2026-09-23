@@ -28,7 +28,15 @@ import "github.com/cleat-team/cleat/wasm"
 // See cleat#1077. The ABI fields matter beyond deploy: cleat#1054 proposes
 // comparing a guest's abi_version against the host's, and until this landed
 // every non-Go guest carried 0 against a host CurrentABIVersion of 1.
-func nonGoMetadata(language, workflowName string, workflowVersion int) *wasm.Metadata {
+//
+// entryPoints is required, not optional, cleat#2097: the Go path
+// (runBuild's exportedEntryPointNames, cleat#2096) stamps the WASM export
+// names determineEntryPoint (cmd/cleat-worker/setup.go) reads to resolve an
+// implicit start on any deploy path. Before this, Rust/Java/AssemblyScript
+// builds left wasm.Metadata.EntryPoints empty -- the same "cannot determine
+// entry point" failure #2096 fixed for Go, still live for the other three
+// SDKs, since none of them emit a `handle_`-prefixed export either.
+func nonGoMetadata(language, workflowName string, workflowVersion int, entryPoints []string) *wasm.Metadata {
 	// `cleat build` defaults --version to 1; guard anyway, because a
 	// non-positive value here fails Validate() at deploy time rather than
 	// here, which is the displacement this whole change is about.
@@ -41,5 +49,6 @@ func nonGoMetadata(language, workflowName string, workflowVersion int) *wasm.Met
 		ABIVersion:           wasm.CurrentABIVersion,
 		MinCompatibleVersion: wasm.CurrentABIVersion,
 		Language:             language,
+		EntryPoints:          entryPoints,
 	}
 }

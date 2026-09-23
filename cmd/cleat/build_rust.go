@@ -97,10 +97,21 @@ func runBuildRust(pattern, outDir, channel string, workflowVersion int) {
 		os.Exit(1)
 	}
 
+	// entryPoints is source-extracted, not read from the compiler's own
+	// output -- see build_entry_points.go's doc comment for why, and why
+	// verifyEntryPointsAreExports (immediately below) is what makes that
+	// safe: a name the extractor predicted wrong fails THIS build rather
+	// than surfacing later as a live entry-point-resolution failure.
+	entryPoints := rustEntryPointNames(cargoDir)
+	if verifyErr := verifyEntryPointsAreExports("rust", input, entryPoints); verifyErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", verifyErr)
+		os.Exit(1)
+	}
+
 	// Inject cleat.metadata. Must pass wasm.Metadata.Validate(), which
 	// `cleat deploy` runs and exits 1 on; see cleat#1077.
 	if enriched, metaErr := wasm.WriteMetadata(input,
-		nonGoMetadata("rust", crateName, workflowVersion)); metaErr == nil {
+		nonGoMetadata("rust", crateName, workflowVersion, entryPoints)); metaErr == nil {
 		input = enriched
 	}
 
