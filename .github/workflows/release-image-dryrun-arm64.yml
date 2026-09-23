@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------------
+# Release image dry run — arm64
+#
+# cleat#2064's per-PR "Release Dry Run" job (ci.yml) builds only linux/amd64
+# for the cleat-worker Docker image. Measured on #2076, adding linux/arm64
+# there took 18m56s against that job's ~3.2min median on develop -- arm64
+# under QEMU emulates the entire build (go build, apt-get, the lot), not
+# just the final binary the way goreleaser's cross-compiled arm64 verify
+# does. Six times the cost on every PR and every merge-queue batch, for an
+# architecture a PR job has no ghcr credentials to push anyway.
+#
+# This runs the same build, arm64 only, on a cadence instead of every PR --
+# same shape as soak.yml's reasoning for not being a PR gate. It is not a
+# substitute for release.yml's real multi-arch build-and-push on a v* tag;
+# it exists to catch an arm64-only regression (e.g. something in the
+# Dockerfile that only breaks under emulation) BETWEEN tags, since tags can
+# be sparse.
+# ---------------------------------------------------------------------------
+name: Release Image Dry Run (arm64)
+
+on:
+  schedule:
+    # Mondays at 07:00 UTC -- same day as soak.yml, an hour after it, so the
+    # two long-running non-gating jobs don't contend for runners at once.
+    - cron: "0 7 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  dryrun-arm64:
+    name: Docker build cleat-worker (linux/arm64, no push)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up QEMU for cross-architecture emulation
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Dockerfile's own `RUN /cleat-worker --verify-backend` (see Dockerfile
+      # and scripts/verify-release-worker.sh) runs as part of this build, so
+      # a broken arm64 backend fails here rather than first at a tag.
+      - name: Docker build cleat-worker (linux/arm64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
