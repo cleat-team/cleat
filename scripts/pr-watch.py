@@ -33,7 +33,7 @@ WHAT IT CHECKS, in the order WORKSTREAM.md R9 states them:
     or a lone cancellation (a re-run clears it); anything still running is
     WAITING.
   - CLEAN, all green, and not queued is NEEDS-AUTHOR too: nothing merges it
-    until someone enqueues it.
+    until someone enqueues it -- unless auto-merge is set, which enqueues it.
 
 Exit status: 0 when every PR is WAITING or MERGED; 1 when any NEEDS-AUTHOR
 or is CLOSED; 2 when something could not be measured. With --watch, it polls
@@ -68,6 +68,7 @@ PR_QUERY = """
 query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){
   pullRequest(number:$n){
     number state isDraft mergeStateStatus headRefOid
+    autoMergeRequest{enabledAt}
     author{login}
     mergeQueueEntry{state position}
     timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){
@@ -216,6 +217,12 @@ def classify(state: dict) -> tuple[str, str]:
     if running:
         return "WAITING", f"{running} check(s) running, not yet queued"
     if pr["mergeStateStatus"] == "CLEAN":
+        # Auto-merge enqueues a CLEAN PR on its own, a few seconds after the last
+        # required check passes. Sampled inside that window the PR reads exactly
+        # like a forgotten one: #2072 did, at 16:21:15Z on 2026-09-23, and its
+        # timeline shows AddedToMergeQueueEvent at that same second.
+        if pr.get("autoMergeRequest"):
+            return "WAITING", "CLEAN with auto-merge set; GitHub is enqueueing it"
         return "NEEDS-AUTHOR", f"CLEAN but not in the merge queue -- enqueue: gh pr merge {pr['number']}"
     return "NEEDS-AUTHOR", f"{pr['mergeStateStatus']} with nothing red or running"
 
