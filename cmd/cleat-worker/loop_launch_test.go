@@ -4,9 +4,12 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // Every background loop that gets a context must also be started.
@@ -84,6 +87,62 @@ func TestEveryPreparedLoopIsLaunched(t *testing.T) {
 	t.Logf("%d loops prepared, %d launched, %d registered", len(prepared), len(launched), len(registered))
 }
 
+// TestHealthzStaysHealthyPastMaxAgeOnADefaultWorker is cleat#2004's
+// regression test. On a default worker (no --version-gc-interval, no
+// tenant pools) /healthz turned 503 about two minutes after start, because
+// version_gc and tenant_pool_reaper were registered with the health
+// tracker at startup and never recorded a run -- they are permanently
+// off by default, so nothing ever would. Kubernetes read the 503 as a
+// liveness failure and restarted an otherwise-healthy worker in a loop.
+//
+// This exercises the SAME code Run() runs for those two loops -- not a
+// hand-rolled substitute -- so a future regression that reintroduces
+// unconditional health-tracker registration is caught here rather than
+// two minutes into a real deployment.
+func TestHealthzStaysHealthyPastMaxAgeOnADefaultWorker(t *testing.T) {
+	ms := &mockStore{}
+	api := newTestAPIServer(ms)
+	w := api.worker
+
+	fakeNow := time.Now()
+	w.healthTracker.now = func() time.Time { return fakeNow }
+
+	// Mirrors Run(): version_gc always gets a loop context, so launchLoop
+	// can start its goroutine, but the health tracker only learns about it
+	// if the loop decides to keep running.
+	w.initLoopCtxUnmonitored("version_gc")
+	w.versionGCInterval = 0 // the documented flag default
+	w.wg.Add(1)
+	w.versionGCLoop() // returns immediately: interval <= 0, never registers
+
+	// tenant_pool_reaper's context and registration are both gated in Run()
+	// on hasReapablePools(); a default test worker has neither tenantPools
+	// nor a TenantPoolReaper-capable store factory, so Run() would not
+	// call initLoopCtx("tenant_pool_reaper") either.
+	if w.hasReapablePools() {
+		t.Fatal("test worker unexpectedly reports reapable pools; this test no longer models a default worker")
+	}
+
+	// Positive control: a loop that IS running must still read healthy, so
+	// the assertion below is not vacuously true from an empty tracker.
+	w.healthTracker.registerLoop("heartbeat")
+	w.healthTracker.setInterval("heartbeat", time.Second)
+
+	// Advance the fake clock well past the 120s default maxAge, with no
+	// real sleep, then record the heartbeat's run at the new time -- the
+	// loop is still alive and ticking, only the clock moved.
+	fakeNow = fakeNow.Add(3 * time.Minute)
+	w.healthTracker.recordRun("heartbeat")
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	api.handleHealthz(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/healthz = %d on a default worker 3 minutes after start, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // loopNamesIn collects the string-literal argument of each initLoopCtx,
 // launchLoop and registerLoopFunc call.
 //
@@ -126,7 +185,14 @@ func loopNamesIn(t *testing.T, file string) (prepared, launched, registered map[
 		}
 
 		switch fn {
-		case "initLoopCtx":
+		case "initLoopCtx", "initLoopCtxUnmonitored":
+			// Both give launchLoop the loopCtxMap entry it needs to start the
+			// goroutine and the watchdog needs to cancel it; the only
+			// difference is whether the loop is registered with the health
+			// tracker immediately or registers itself once it knows it will
+			// actually keep running (cleat#2004, versionGCLoop). This test's
+			// "prepared" is about the context existing, not about health
+			// tracking, so the two are the same answer to the question it asks.
 			prepared[name] = true
 		case "launchLoop":
 			launched[name] = true
