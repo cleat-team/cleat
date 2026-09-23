@@ -13,7 +13,7 @@ on:
 
 permissions:
   contents: write
-  packages: read
+  packages: write
 
 jobs:
   goreleaser:
@@ -118,3 +118,65 @@ jobs:
           # '/lib/ld-linux-aarch64.so.1'" before cleat-worker's main runs, and
           # the release aborts. Found by the Release Dry Run job on its first run.
           QEMU_LD_PREFIX: /usr/aarch64-linux-gnu
+
+      # .goreleaser.yml has no dockers:/docker_manifests: section -- GoReleaser
+      # above publishes binaries only. This publishes the cleat-worker image
+      # cleat#2058 needs charts/cleat to be able to pull.
+      #
+      # No Dockerfile changes were needed for arm64: the build stage has no
+      # GOARCH/CC override, so buildx's per-platform build (under the QEMU
+      # registered above) produces a correctly-arched binary for each target,
+      # the same way `go build` does natively when buildx runs it under
+      # emulation. And Dockerfile's own `RUN /cleat-worker --verify-backend`
+      # (the fix for cleat's own "a green build proves nothing about whether
+      # the binary runs" lesson -- see scripts/verify-release-worker.sh) runs
+      # as part of the build for EACH platform, so this step verifies both
+      # architectures by construction, with no separate verify step.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Only reachable on a v* tag push (this whole workflow's trigger), so
+      # the actual push cannot fire from a PR. Kept as its own explicit
+      # condition anyway: a future trigger change should not silently start
+      # pushing from somewhere else.
+      - name: Log in to ghcr.io
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute cleat-worker image tags
+        id: worker_image
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$VERSION' is not vX.Y.Z -- refusing to guess a major.minor tag from it"
+            exit 1
+          fi
+          MAJOR_MINOR="$(echo "$VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\.[0-9]+$/\1/')"
+          IMAGE="ghcr.io/cleat-team/cleat-worker"
+          {
+            echo "full=$IMAGE:$VERSION"
+            echo "minor=$IMAGE:$MAJOR_MINOR"
+            echo "latest=$IMAGE:latest"
+          } >> "$GITHUB_OUTPUT"
+
+      # push: true here is safe only because the whole workflow triggers
+      # solely on a v* tag push -- see the trigger at the top of this file.
+      # ghcr.io's package visibility (public/private) and this token's
+      # packages: write permission are repository settings; until an owner
+      # sets them, this step 401s/403s rather than publishing, and everything
+      # else in this workflow (binaries, GitHub release) still completes.
+      - name: Build and push cleat-worker image (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.worker_image.outputs.full }}
+            ${{ steps.worker_image.outputs.minor }}
+            ${{ steps.worker_image.outputs.latest }}

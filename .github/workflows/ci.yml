@@ -1879,6 +1879,25 @@ jobs:
             exit 1
           fi
 
+      # cleat#2064: release.yml also publishes a multi-arch cleat-worker image
+      # to ghcr.io on a v* tag. That push can only be proven by actually
+      # tagging a release, so this proves everything up to the push on every
+      # PR instead: the same buildx multi-platform build, under the same QEMU
+      # registered above, with push: false. Dockerfile's own
+      # `RUN /cleat-worker --verify-backend` (see Dockerfile and
+      # scripts/verify-release-worker.sh) runs per platform as part of this
+      # build, so a PR that breaks --verify-backend on either architecture
+      # fails here, not first at a tag.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker build cleat-worker (linux/amd64, linux/arm64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+
   build:
     name: Build
     runs-on: ubuntu-latest
