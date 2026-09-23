@@ -423,34 +423,19 @@ are not interrupted.
 ```
 $ cleat plugin list
 
-Installed plugins:
-  Name                    Version    Deprecated    Capabilities
-  ────────────────────────────────────────────────────────────────
-  llm                     0.1.0      no            database=true, start_workflow=true
-  blobstore               0.1.0      no            database=true, start_workflow=false
-  example/hello-world     0.1.0      no            database=false, start_workflow=false
-  acme/salesforce         1.2.0      no            database=true, start_workflow=false
+NAME                         VERSION         INSTALLED AT                   STATUS
+-------------------------------------------------------------------------------------
+llm                          0.1.0           2026-05-01T10:30:00Z           active
+blobstore                    0.1.0           2026-05-01T10:30:00Z           active
+example/hello-world          0.1.0           2026-05-01T10:30:00Z           active
+acme/salesforce              1.2.0           2026-05-01T10:30:00Z           active
 ```
 
-### List with capabilities detail
-
-```
-$ cleat plugin list --verbose
-
-  Plugin: example/hello-world v0.1.0
-  ─────────────────────────────────────
-  Author: example-corp
-  Installed: 2026-05-01T10:30:00Z
-  Deprecated: no
-  Capabilities:
-    database:        false
-    start_workflow:  false
-    signal_workflow: false
-    http_routes:     false
-    call_plugin:     []
-  WASM size: 2.3 MB
-  Checksum: sha256:abc123...
-```
+There is no `--verbose` flag, and `plugin list` reads only `name, version,
+created_at, deprecated` from `plugin_defs` -- it has no per-plugin
+capabilities detail view. For a plugin's declared capabilities, read its
+manifest (`plugin validate` below reports whether the manifest itself is
+well-formed, not its contents).
 
 ### List by tenant
 
@@ -485,42 +470,47 @@ ORDER BY created_at DESC;
 
 ### Inspect from the index
 
+There is no separate `inspect` subcommand. `plugin install --dry-run` fetches
+the index entry, prints it, and stops before downloading or deploying
+anything:
+
 ```
-$ cleat plugin inspect example/hello-world@0.1.0
+$ cleat plugin install --dry-run --yes example/hello-world@0.1.0
 
-Plugin: example/hello-world v0.1.0
-Author: example-corp
-Repository: https://github.com/example/cleat-hello-world
-Capabilities:
-  database:        false
-  start_workflow:  false
-  signal_workflow: false
+Plugin: example/hello-world
+  Description: Greets a user by name
+  Author: example-corp
+  Repository: https://github.com/example/cleat-hello-world
+  Version: 0.1.0
+  Version description: Initial release
+  Requires cleat >= 0.2.0
 
-Host functions:
-  greet(name: string) → message: string
-    Returns a greeting for the given name. Idempotent: yes.
+  SECURITY WARNING: This is a third-party plugin.
+  Plugins have access to your database and infrastructure.
+  Only install plugins from trusted sources.
+  Review the source code and manifest before installing.
 
-Checksum: sha256:abc123def456...
-WASM URL: https://github.com/example/cleat-hello-world/releases/download/v0.1.0/plugin.wasm
+Dry run: no changes were made.
+  Would download: https://github.com/example/cleat-hello-world/releases/download/v0.1.0/plugin.wasm
+  Would verify checksum: abc123def456
+  Would deploy to database (set --db or CLEAT_DATABASE_URL): example/hello-world v0.1.0
 ```
+
+Neither host-function signatures nor a manifest's declared capabilities are
+shown here -- the index carries none of that. To see them, download the
+plugin's manifest yourself and run `plugin validate` on it (below).
 
 ### Inspect a local manifest
 
+`plugin validate` checks the manifest is well-formed and prints nothing but
+`valid` or the validation errors -- it does not echo back the manifest's
+fields. Read the manifest file itself (a plain JSON file) for its
+capabilities and host functions:
+
 ```
-$ cleat plugin validate --manifest plugin.json --verbose
+$ cleat plugin validate --manifest plugin.json
 
-✓ Manifest is valid
-  Name:        example/hello-world
-  Version:     0.1.0
-  Author:      example-corp
-  Repository:  https://github.com/example/cleat-hello-world
-  Capabilities:
-    database:        false
-    start_workflow:  false
-    signal_workflow: false
-
-Host functions:
-  greet: (object) → (object), idempotent
+valid
 ```
 
 ### Manual checks before installing

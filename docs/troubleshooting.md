@@ -823,9 +823,14 @@ A workflow that should complete in seconds is taking minutes.
    takes 50-100 ms for standard Go modules. If you see long load times, check
    the `wasm_bytes` column size in `workflow_defs`.
 
-3. **Profile with `cleat build --bench`**:
+3. **Profile with `cleat-bench`**: it's a separate binary (`cmd/cleat-bench`)
+   that profiles a workflow already deployed to a database, by name -- not a
+   source package path, so build and deploy it first (see
+   [Deploying workflows](how-to/deploy-workflows.md)):
    ```bash
-   cleat build --bench ./workflows/my-workflow/
+   cleat build -o ./out ./workflows/my-workflow/
+   cleat deploy --db "$CLEAT_DATABASE_URL" --name my-workflow ./out/my-workflow.wasm
+   cleat-bench --db "$CLEAT_DATABASE_URL" --workflow my-workflow --count 100
    ```
 
 **Fix: How to resolve**

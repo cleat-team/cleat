@@ -50,26 +50,11 @@ var docInvocation = regexp.MustCompile(`(?m)^[ \t]*\$?[ \t]*cleat[ \t]+(\S.*)$`)
 // from this test alone. It may only shrink, and TestEveryDocumentedCleat
 // InvocationClearsFlagParsing below already asserts that -- an entry with
 // nothing left in the tree to match is a grant covering nothing.
-var docCommandBaseline = map[string]string{
-	// Explicitly labeled "(future CLI option)" by the doc itself -- not a
-	// broken example, an illustration of something not built yet.
-	"docs/explanation/workflow-versioning.md|cleat build --channel stable --binding-policy frozen": "cleat#2029: --binding-policy is documented as a future CLI option; no such flag exists",
-
-	// cmd/cleat has no --bench flag on `build`; the profiling tool is the
-	// separate cleat-bench binary (cmd/cleat-bench), whose interface takes a
-	// DEPLOYED workflow NAME plus --db, not a source package path -- fixing
-	// this doc means rewriting the example's shape, not just its flags.
-	"docs/troubleshooting.md|cleat build --bench ./workflows/my-workflow/": "cleat#2029: no --bench flag; meant cleat-bench, a different binary with a different interface",
-
-	// `plugin install` takes --index-url/--yes/--dry-run and installs by NAME
-	// from an index; it has never taken --manifest or --wasm (local-file
-	// install is not how it works). `plugin list`/`plugin validate` have no
-	// --verbose. Three docs show the same fictional interface.
-	"docs/contributor/plugins/plugin-security.md|cleat plugin list --verbose":                                             "cleat#2029: no --verbose flag on `plugin list`",
-	"docs/contributor/plugins/plugin-security.md|cleat plugin validate --manifest plugin.json --verbose":                  "cleat#2029: no --verbose flag on `plugin validate`",
-	"docs/contributor/plugins/third-party-plugin-guide.md|cleat plugin install --manifest plugin.json --wasm plugin.wasm": "cleat#2029: `plugin install` takes no --manifest/--wasm; installs by name from an index",
-	"examples/third-party-plugin/README.md|cleat plugin install --manifest plugin.json --wasm plugin.wasm":                "cleat#2029: same as third-party-plugin-guide.md",
-}
+//
+// cleat#2029's four entries were all fixed by rewriting the docs to the real
+// CLI rather than by adding the flags they showed -- see that issue and the
+// PR that closed it for the four sites and what each became.
+var docCommandBaseline = map[string]string{}
 
 func TestEveryDocumentedCleatInvocationClearsFlagParsing(t *testing.T) {
 	if testing.Short() || cleatBinary == "" {
