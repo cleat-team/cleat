@@ -65,10 +65,12 @@ func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error)
 		    (q.name IS NULL AND (
 		      w.concurrency_key_hash IS NULL
 		      OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-		                      WHERE ck.key_hash = w.concurrency_key_hash
+		                      WHERE (ck.key_hash = w.concurrency_key_hash
 		                        AND ck.tenant_id = w.tenant_id
-		                        AND ck.expires_at > now()
 		                        AND ck.workflow_id <> w.id)
+		                        AND EXISTS (SELECT 1 FROM workflow_instances wi
+		                                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+		                                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')))
 		    ))
 		    OR
 		    (q.name IS NOT NULL AND (
@@ -76,8 +78,10 @@ func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error)
 		        (SELECT count(*) FROM queue_holders qh
 		          WHERE qh.tenant_id = w.tenant_id
 		            AND qh.queue_name = q.name
-		            AND qh.expires_at > now()
-		            AND qh.workflow_id <> w.id) < q.concurrency_limit
+		            AND qh.workflow_id <> w.id
+		            AND EXISTS (SELECT 1 FROM workflow_instances wi
+		                         WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+		                           AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))) < q.concurrency_limit
 		      )
 		      AND (
 		        q.rate_limit IS NULL OR
@@ -207,10 +211,12 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			    (q.name IS NULL AND (
 			      w.concurrency_key_hash IS NULL
 			      OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-			                      WHERE ck.key_hash = w.concurrency_key_hash
+			                      WHERE (ck.key_hash = w.concurrency_key_hash
 			                        AND ck.tenant_id = w.tenant_id
-			                        AND ck.expires_at > now()
 			                        AND ck.workflow_id <> w.id)
+			                        AND EXISTS (SELECT 1 FROM workflow_instances wi
+			                                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+			                                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')))
 			    ))
 			    OR
 			    (q.name IS NOT NULL AND (
@@ -218,8 +224,10 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			        (SELECT count(*) FROM queue_holders qh
 			          WHERE qh.tenant_id = w.tenant_id
 			            AND qh.queue_name = q.name
-			            AND qh.expires_at > now()
-			            AND qh.workflow_id <> w.id) < q.concurrency_limit
+			            AND qh.workflow_id <> w.id
+			            AND EXISTS (SELECT 1 FROM workflow_instances wi
+			                         WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+			                           AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))) < q.concurrency_limit
 			      )
 			      AND (
 			        q.rate_limit IS NULL OR
@@ -416,7 +424,7 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 	holderExists := true
 	err := tx.QueryRowContext(ctx, `
 		SELECT worker_id FROM queue_holders
-		WHERE tenant_id = $1 AND queue_name = $2 AND workflow_id = $3 AND expires_at > now()
+		WHERE tenant_id = $1 AND queue_name = $2 AND workflow_id = $3
 	`, c.tenantID, *c.key, c.id).Scan(&existingWorker)
 	if errors.Is(err, sql.ErrNoRows) {
 		holderExists = false
@@ -436,8 +444,10 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 	var held int
 	err = tx.QueryRowContext(ctx, `
 		SELECT count(*) FROM queue_holders qh
-		WHERE qh.tenant_id = $1 AND qh.queue_name = $2 AND qh.expires_at > now()
-		  AND qh.workflow_id <> $3
+		WHERE qh.tenant_id = $1 AND qh.queue_name = $2 AND qh.workflow_id <> $3
+		  AND EXISTS (SELECT 1 FROM workflow_instances wi
+		               WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+		                 AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
 	`, c.tenantID, *c.key, c.id).Scan(&held)
 	if err != nil {
 		return false, fmt.Errorf("claim workflows: count queue holders: %w", err)
@@ -456,7 +466,9 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 		err = tx.QueryRowContext(ctx, `
 			SELECT count(*) FROM queue_holders qh
 			WHERE qh.tenant_id = $1 AND qh.queue_name = $2 AND qh.worker_id = $3
-			  AND qh.expires_at > now()
+			  AND EXISTS (SELECT 1 FROM workflow_instances wi
+			               WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+			                 AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
 		`, c.tenantID, *c.key, workerID).Scan(&workerHeld)
 		if err != nil {
 			return false, fmt.Errorf("claim workflows: count worker queue holders: %w", err)
@@ -543,10 +555,12 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 			  AND task_queue = ANY($2)
   AND (workflow_instances.concurrency_key_hash IS NULL
        OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-                       WHERE ck.key_hash = workflow_instances.concurrency_key_hash
+                       WHERE (ck.key_hash = workflow_instances.concurrency_key_hash
                          AND ck.tenant_id = workflow_instances.tenant_id
-                         AND ck.expires_at > now()
-                         AND ck.workflow_id <> workflow_instances.id))
+                         AND ck.workflow_id <> workflow_instances.id)
+                         AND EXISTS (SELECT 1 FROM workflow_instances wi
+                                      WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+                                        AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))))
 			ORDER BY priority ASC, created_at
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED

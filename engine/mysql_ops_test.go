@@ -399,7 +399,7 @@ func TestMySQLStore_ReleaseConcurrencyKey(t *testing.T) {
 
 func TestMySQLStore_ReapExpiredConcurrencyKeys(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "DELETE FROM concurrency_keys WHERE expires_at", affected: 5},
+		{match: "DELETE FROM concurrency_keys ck", affected: 5},
 	})
 	n, err := store.ReapExpiredConcurrencyKeys(testCtx)
 	if err != nil {

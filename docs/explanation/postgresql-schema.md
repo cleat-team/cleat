@@ -415,6 +415,16 @@ makes it one.
 A key that names a live row in `queues` takes the semaphore path below instead, and this
 table is not involved.
 
+A row is held for as long as its workflow is non-terminal (cleat#1965), not until `expires_at`
+passes -- a terminal commit deletes it immediately (`ReleaseWorkflowConcurrencyKeys`), and
+`ReapExpiredConcurrencyKeys` sweeps any that survive a run going terminal without it, e.g. a
+failed release. `expires_at` is a long (about a week) safety backstop for whatever that sweep
+misses, not the release path: a parked run (sleeping, or waiting on a signal with no deadline)
+sends no heartbeat and has no wake time to renew a shorter TTL from, so binding validity to
+elapsed time at all made a long-lived run eventually stop counting against its own limit while
+still alive. See `claimedKeyTTL`'s doc comment (`engine/concurrency_key_holder.go`) for the full
+reasoning, including why renewal-on-activity was rejected.
+
 ```sql
 CREATE TABLE concurrency_keys (
     key_hash BYTEA NOT NULL,
@@ -475,8 +485,9 @@ never bind). See `queue_holders.worker_id` below for what it counts.
 
 One row per admitted holder — the semaphore `concurrency_keys` cannot be, since its primary
 key admits only one row per key. Transient, and shaped like `concurrency_keys` rather than
-like `queues`: a terminal commit frees the slot, and a crashed worker's holder ages out on
-the same TTL backstop.
+like `queues`: a terminal commit frees the slot, held for as long as the run is non-terminal
+rather than until `expires_at` passes (cleat#1965) -- see `concurrency_keys` above for the full
+reasoning, which applies here identically.
 
 ```sql
 CREATE TABLE queue_holders (
@@ -494,12 +505,13 @@ each read one slot free and both insert — so the claim locks the `queues` row 
 (in sorted name order, against deadlock across multi-key claims) and counts under that lock.
 
 `worker_id` (cleat#1917) is the claiming worker's id, nullable because a holder written before
-this column existed carries none — such a row counts toward no worker's cap until it expires or
-is released, at most `claimedKeyTTL` (30 minutes) later. A holder's count is per `worker_id`, and
-includes a PARKED run (`assigned_to = NULL, status = 'ready'`, `ReleaseWorkflow`) — a sleeping
-workflow still occupies its slot, matching DBOS's own parity fixture. When a parked run wakes and
-a different worker claims it, this column MOVES to that worker (an `UPDATE`, not a new row) and
-that worker's cap applies from then on.
+this column existed carries none — such a row counts toward no worker's cap until its run goes
+terminal and it is released. A holder's count is per `worker_id`, and includes a PARKED run
+(`assigned_to = NULL, status = 'ready'`, `ReleaseWorkflow`) — a sleeping workflow still occupies
+its slot, matching DBOS's own parity fixture, for as long as it stays non-terminal (cleat#1965),
+not merely until `expires_at` passes. When a parked run wakes and a different worker claims it,
+this column MOVES to that worker (an `UPDATE`, not a new row) and that worker's cap applies from
+then on.
 
 #### queue_rate_tokens
 

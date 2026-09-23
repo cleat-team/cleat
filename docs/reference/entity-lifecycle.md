@@ -98,12 +98,23 @@ and `public.tenant_domains` are structurally identical to `public.workflow_routi
 ### Not an entity
 
 Runs and everything hanging off one (`workflow_instances`, `event_history`, `workflow_promises`,
-`workflow_signals`, `workflow_update_requests`), holder-scoped TTL-reclaimed rows
-(`concurrency_keys`, `idempotency_keys`), statistics (`workflow_memory_samples`,
+`workflow_signals`, `workflow_update_requests`), holder-scoped rows (`concurrency_keys`,
+`queue_holders`, `idempotency_keys`), statistics (`workflow_memory_samples`,
 `workflow_memory_stats`), and infrastructure (`admin.workers`, `admin.rls_predicate_form`).
 
-A run is not retired, it *finishes* — see [Workflow lifecycle](workflow-lifecycle.md). A
-concurrency key is not retired, it *expires*.
+A run is not retired, it *finishes* — see [Workflow lifecycle](workflow-lifecycle.md).
+
+A concurrency key or queue holder is not retired, it is **freed the moment the run holding it goes
+terminal** (cleat#1965) — released immediately in the ordinary case, by the same commit that ends
+the run, and by `ReapExpiredConcurrencyKeys` on a sweep otherwise. It does **not** expire on a
+fixed clock: a parked run (sleeping, or waiting on a signal with no deadline) sends no heartbeat
+and has no wake time to renew from, so a run outliving a fixed TTL would otherwise stop counting
+against its own limit while still alive. `expires_at` on both tables is a long (about a week)
+safety backstop for what the run-state check misses — a bug in the join, or a row whose run was
+pruned by retention before it was released — not the release mechanism itself.
+
+`idempotency_keys` is unrelated and unaffected: it deduplicates START requests, not concurrency
+holders, and genuinely does expire on a fixed clock.
 
 ---
 

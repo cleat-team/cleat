@@ -8,13 +8,18 @@ import (
 )
 
 // The claim path's concurrency-key filter is written out many times over --
-// three arms, at different site counts: the mutex arm (a bare key is held by
+// four arms, at different site counts: the mutex arm (a bare key is held by
 // at most one run) appears at NINE sites, the registered-queue arm (a
-// declared queue admits at most concurrency_limit holders) at SIX, and the
+// declared queue admits at most concurrency_limit holders) at SIX, the
 // registered-queue RATE arm (cleat#1918: a declared queue admits at most
 // rate_limit holders per rate_period_seconds) at the same SIX -- it appears
-// only where the concurrency arm does, one AND-ed onto the other. This test
-// is the reason that duplication is safe.
+// only where the concurrency arm does, one AND-ed onto the other -- and the
+// RUN-LIVENESS arm (cleat#1965: a held row counts only while its run is
+// non-terminal, not merely unexpired) at TWENTY-ONE: the three mutex sites,
+// the two registered-arm candidate-predicate sites, and, per dialect,
+// acquireCandidateConcurrencyKey's own held-count and worker-cap queries,
+// which the registered arm's regex does not reach (see its own comment).
+// This test is the reason that duplication is safe.
 //
 // # Why it is not one shared constant
 //
@@ -71,10 +76,11 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 		mutexWant      int
 		registeredWant int
 		rateWant       int
+		liveWant       int
 	}{
-		{"store_lifecycle.go", 3, 2, 2},
-		{"mysql_lifecycle.go", 3, 2, 2},
-		{"mssql_lifecycle.go", 3, 2, 2},
+		{"store_lifecycle.go", 3, 2, 2, 7},
+		{"mysql_lifecycle.go", 3, 2, 2, 7},
+		{"mssql_lifecycle.go", 3, 2, 2, 7},
 	}
 
 	// The clock is the one licensed difference between dialects.
@@ -113,8 +119,22 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	// the same shape as the registered arm one level down.
 	rate := regexp.MustCompile(`(?s)q\.rate_limit IS NULL OR\s*\(SELECT count\(\*\) FROM queue_rate_tokens qrt\s+WHERE.*?< q\.rate_limit\s*\)`)
 
-	var mutexCanon, regCanon, rateCanon, mutexFrom, regFrom, rateFrom string
-	mutexTotal, regTotal, rateTotal := 0, 0, 0
+	// The "is this holder's run still live" arm: cleat#1965, AND-ed onto every
+	// site above that decides whether a concurrency_keys or queue_holders row
+	// still counts -- the three mutex sites (aliased ck) and, per dialect, the
+	// two registered-arm candidate-predicate sites plus acquireCandidateConcurrencyKey's
+	// own held-count and worker-cap queries (aliased qh; not the same six sites
+	// the registered arm above counts, since two of these live outside the
+	// candidate predicate the registered regex is scoped to). Grabbed from
+	// "EXISTS (SELECT 1 FROM workflow_instances wi" through the closing
+	// "cancelled'))" that ends the run-state check. The alias (ck or qh) is
+	// normalised to H before comparing, since the two are genuinely different
+	// tables at different sites, not a divergence this guard should flag.
+	live := regexp.MustCompile(`(?s)EXISTS \(SELECT 1 FROM workflow_instances wi\s+WHERE wi\.id = \w+\.workflow_id AND wi\.tenant_id = \w+\.tenant_id\s+AND wi\.status NOT IN \([^)]+\)\)`)
+	aliasNorm := regexp.MustCompile(`\b(?:ck|qh)\.`)
+
+	var mutexCanon, regCanon, rateCanon, liveCanon, mutexFrom, regFrom, rateFrom, liveFrom string
+	mutexTotal, regTotal, rateTotal, liveTotal := 0, 0, 0, 0
 
 	for _, f := range files {
 		raw, err := os.ReadFile(f.name)
@@ -186,6 +206,27 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 					"function. Divergence here is silent at runtime.", f.name, i+1, rateFrom, norm, rateCanon)
 			}
 		}
+
+		liveh := live.FindAllString(src, -1)
+		if len(liveh) != f.liveWant {
+			t.Errorf("%s: found %d copies of the run-liveness arm, expected %d.\n\n"+
+				"A count or claim statement either lost the cleat#1965 run-state filter or gained "+
+				"one that does not match the shape this test looks for.", f.name, len(liveh), f.liveWant)
+			continue
+		}
+		liveTotal += len(liveh)
+		for i, h := range liveh {
+			norm := space.ReplaceAllString(aliasNorm.ReplaceAllString(h, "H."), " ")
+			if liveCanon == "" {
+				liveCanon, liveFrom = norm, f.name
+				continue
+			}
+			if norm != liveCanon {
+				t.Errorf("%s run-liveness copy %d differs from the one in %s.\n\n  this: %s\n  that: %s\n\n"+
+					"Every site must carry the same predicate modulo the ck/qh alias. Divergence "+
+					"here is silent at runtime.", f.name, i+1, liveFrom, norm, liveCanon)
+			}
+		}
 	}
 
 	if mutexTotal != 9 {
@@ -197,6 +238,9 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	if rateTotal != 6 {
 		t.Errorf("found %d rate-limit-arm sites in total, expected 6", rateTotal)
 	}
+	if liveTotal != 21 {
+		t.Errorf("found %d run-liveness-arm sites in total, expected 21", liveTotal)
+	}
 
 	// The original design note, kept as an assertion because it is the property
 	// that lets this text sit inside statements numbered $N, ? and @pN alike --
@@ -204,9 +248,9 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	// would shift every index after its insertion point, at four sites per
 	// dialect, and the failure would be a query that RUNS and matches the wrong
 	// rows.
-	if regexp.MustCompile(`\$\d|@p\d|\?`).MatchString(mutexCanon + regCanon + rateCanon) {
-		t.Errorf("a predicate arm has acquired a placeholder:\n  %s\n  %s\n  %s\n\n"+
-			"It must reference only columns and literals. See the comment above.", mutexCanon, regCanon, rateCanon)
+	if regexp.MustCompile(`\$\d|@p\d|\?`).MatchString(mutexCanon + regCanon + rateCanon + liveCanon) {
+		t.Errorf("a predicate arm has acquired a placeholder:\n  %s\n  %s\n  %s\n  %s\n\n"+
+			"It must reference only columns and literals. See the comment above.", mutexCanon, regCanon, rateCanon, liveCanon)
 	}
 	if !strings.Contains(mutexCanon, "ck.tenant_id = w.tenant_id") {
 		t.Errorf("the mutex arm no longer correlates the key to the candidate row's tenant:\n  %s\n\n"+
