@@ -24,6 +24,21 @@ type Metadata struct {
 	ChildVersions        map[string]int    `json:"child_versions,omitempty"`
 	ChildBindingPolicy   string            `json:"child_binding_policy,omitempty"` // deployment channel / binding policy
 	Language             string            `json:"language,omitempty"`
+
+	// EntryPoints names the WASM exports a caller may start this workflow at,
+	// in source declaration order -- nothing about their parameters, types or
+	// signature. cleat#2066: none of this repo's SDKs ever export a
+	// "handle_"-prefixed function by convention, so a worker guessing from
+	// export names alone cannot tell a workflow's entry point from a helper,
+	// and cannot disambiguate a binary with more than one. Codegen already
+	// computes this list to generate the exports in the first place; this
+	// carries it to the host instead of discarding it.
+	//
+	// See wasm/metadata_carries_no_entry_point_parameters_test.go for why this
+	// field is allowed to exist at all: it is named and structurally
+	// constrained ([]string, names only) so it cannot become the parameter
+	// list cleat#1065/#1705 documented the host as unable to validate against.
+	EntryPoints []string `json:"entry_points,omitempty"`
 }
 
 // EffectivePolicy returns the effective child binding policy after applying

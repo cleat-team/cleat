@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/wasm"
 )
 
 func TestGenerateWorkerID(t *testing.T) {
@@ -129,12 +130,79 @@ func TestDetermineEntryPoint(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := determineEntryPoint(tt.input, nil)
+			got, _ := determineEntryPoint(tt.input, nil)
 			if got != tt.want {
 				t.Errorf("determineEntryPoint(%s) = %q, want %q", string(tt.input), got, tt.want)
 			}
 		})
 	}
+}
+
+// minimalWASMWithMetadata returns the smallest byte sequence ReadMetadata
+// accepts (a valid magic+version header) carrying the given entry points,
+// so this test exercises the real WriteMetadata/ReadMetadata round trip
+// rather than a synthetic struct -- the thing determineEntryPoint actually
+// reads at runtime is the custom section, not a Go value.
+func minimalWASMWithMetadata(t *testing.T, entryPoints []string) []byte {
+	t.Helper()
+	header := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	out, err := wasm.WriteMetadata(header, &wasm.Metadata{
+		WorkflowName: "test", WorkflowVersion: 1, ABIVersion: 1, MinCompatibleVersion: 1,
+		EntryPoints: entryPoints,
+	})
+	if err != nil {
+		t.Fatalf("WriteMetadata: %v", err)
+	}
+	return out
+}
+
+// TestDetermineEntryPointFromMetadata is cleat#2066's regression test: no SDK
+// in this repo produces a "handle_"-prefixed export by convention (measured
+// across Go, Rust, Java, AssemblyScript), so a workflow started with no
+// explicit __entry_point had no reliable way to resolve one before this.
+func TestDetermineEntryPointFromMetadata(t *testing.T) {
+	t.Run("one declared entry point resolves with no __entry_point in input", func(t *testing.T) {
+		wasmBytes := minimalWASMWithMetadata(t, []string{"submit_order"})
+		got, err := determineEntryPoint(json.RawMessage(`{"item":"widget"}`), wasmBytes)
+		if err != nil {
+			t.Fatalf("determineEntryPoint: unexpected error: %v", err)
+		}
+		if got != "submit_order" {
+			t.Errorf("determineEntryPoint() = %q, want %q", got, "submit_order")
+		}
+	})
+
+	t.Run("explicit __entry_point still wins over metadata", func(t *testing.T) {
+		wasmBytes := minimalWASMWithMetadata(t, []string{"submit_order"})
+		got, err := determineEntryPoint(json.RawMessage(`{"__entry_point":"cancel_order"}`), wasmBytes)
+		if err != nil {
+			t.Fatalf("determineEntryPoint: unexpected error: %v", err)
+		}
+		if got != "cancel_order" {
+			t.Errorf("determineEntryPoint() = %q, want %q", got, "cancel_order")
+		}
+	})
+
+	t.Run("more than one declared entry point is ambiguous and names the candidates", func(t *testing.T) {
+		wasmBytes := minimalWASMWithMetadata(t, []string{"place_order", "cancel_order"})
+		_, err := determineEntryPoint(json.RawMessage(`{"item":"widget"}`), wasmBytes)
+		if err == nil {
+			t.Fatal("determineEntryPoint: expected an ambiguity error, got nil")
+		}
+		for _, want := range []string{"place_order", "cancel_order"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("determineEntryPoint error %q does not name candidate %q", err.Error(), want)
+			}
+		}
+	})
+
+	t.Run("no metadata and no handle_ export still fails as before", func(t *testing.T) {
+		header := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+		_, err := determineEntryPoint(json.RawMessage(`{"item":"widget"}`), header)
+		if err == nil {
+			t.Fatal("determineEntryPoint: expected an error, got nil")
+		}
+	})
 }
 
 func TestBaseDSNFromDSN(t *testing.T) {
