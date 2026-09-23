@@ -422,6 +422,15 @@ func (s *ShardedStore) CountEventHistory(ctx context.Context, workflowID string)
 	return shard.Store.CountEventHistory(ctx, workflowID)
 }
 
+// IsHistorySwept routes by workflow ID. cleat#2038.
+func (s *ShardedStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return false, fmt.Errorf("no shard available for workflow %s", workflowID)
+	}
+	return shard.Store.IsHistorySwept(ctx, workflowID)
+}
+
 // VerifyWorkflowEvents routes by workflow ID.
 func (s *ShardedStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error {
 	shard := s.getShard(workflowID)

@@ -141,6 +141,16 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select step, checksum from event_history where workflow_id = @p1 order by step",
 		Reason: scopedByCaller,
 	},
+	// cleat#2038: the swept ids come from deleteExpiredEventsOnce's own
+	// OUTPUT-clause read a few lines above, which is itself restricted by
+	// msExpiredEventsWorkflows AND tenant_id = @p2 -- so an id in this list
+	// cannot name another tenant's workflow. Same shape as
+	// mssqlDeleteByWorkflowPrefix's id-list deletes, which read under the
+	// same guarantee two functions over.
+	"mssql_schedules.go:deleteExpiredEventsOnce#dda05248e3b6": {
+		SQL:    "update workflow_instances set history_swept_at = sysutcdatetime() where id in ",
+		Reason: scopedByCaller,
+	},
 	"mssql_lifecycle.go:heartbeatOnce#06ee287986f2": {
 		SQL:    "update workflow_instances set heartbeat_at = sysutcdatetime() where id = @p1 a",
 		Reason: scopedByCaller,

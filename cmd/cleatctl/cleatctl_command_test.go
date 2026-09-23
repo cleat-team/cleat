@@ -126,6 +126,10 @@ func (m *mockStore) LoadEventHistory(ctx context.Context, workflowID string) ([]
 	return nil, nil
 }
 
+func (m *mockStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	return false, nil
+}
+
 func (m *mockStore) AppendEventHistory(ctx context.Context, workflowID string, rec engine.EventRecord) error {
 	if m.appendEventHistoryFn != nil {
 		return m.appendEventHistoryFn(ctx, workflowID, rec)

@@ -11,9 +11,13 @@ import (
 //
 // DeleteExpiredEvents deleted event_history rows and, in a second loop,
 // cleared compaction bookkeeping on workflow_instances -- discarding that
-// loop's RowsAffected. The first loop can never match (finalize already purged
-// those events, cleat#1016), so the sweep logged "deleted 0" on runs where it
-// had cleared thousands of rows.
+// loop's RowsAffected. cleat#1016 read the first loop as never matching,
+// because finalize already purges those events -- true for 'done' via
+// finalize_workflow_status, and NOT true for 'failed', whose events go
+// through store.FailWorkflow instead and are purged only by this sweep (see
+// cleat#2038 and engine/db.go's DeleteExpiredEvents doc comment). The mock
+// below returns 0 by construction, standing in for the 'done' case; it is
+// not a claim that the real function is structurally zero.
 //
 // The obvious fix was to sum them. These tests exist to stop that: the two
 // counts are of different tables and different operations, and one number
@@ -24,7 +28,7 @@ func TestTheSweepReportsTheCompactionClearSeparately(t *testing.T) {
 	ms := &mockStore{}
 	ms.deleteExpiredEventsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
 		eventsCutoff = olderThan
-		return 0, nil // structurally zero -- see cleat#1016
+		return 0, nil // standing in for the 'done' case -- see cleat#1016, cleat#2038
 	}
 	ms.clearExpiredCompactionStateFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
 		clearCutoff = olderThan

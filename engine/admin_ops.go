@@ -118,6 +118,28 @@ func ReReplay(ctx context.Context, store WorkflowStore, workflowID string, gener
 					workflowID, rec.Step, rec.Service, rec.Op, workflowID, rec.Step)
 			}
 		}
+		// cleat#2038: empty history is ambiguous between "no call was ever
+		// made" and "a call's outcome was swept by --retention-days before
+		// it could be recorded" -- DeleteExpiredEvents deletes a workflow's
+		// event_history all at once, so a swept workflow always reads as
+		// EMPTY here, indistinguishable from one that never dispatched
+		// anything. history_swept_at is the only remaining signal; without
+		// it this loop would have found nothing to refuse and allowed a
+		// blind redispatch, which is the real S1 violation cleat#1999's
+		// TLA+ model (specs/CleatDurableCallIntent.tla) traced.
+		if len(history) == 0 {
+			if swept, serr := store.IsHistorySwept(ctx, workflowID); serr == nil && swept {
+				return adminErrorf(ErrAdminStateConflict,
+					"re-replay: workflow %s's event history was already removed by the "+
+						"retention sweep (--retention-days), so whether a call was left pending "+
+						"when it stopped can no longer be told. Re-replaying could silently "+
+						"redispatch an already-applied call. This cannot be recovered; consider "+
+						"reprocessing the workflow as a new run instead",
+					workflowID)
+			}
+			// A failed or negative IsHistorySwept lookup is deliberately not
+			// fatal, same reasoning as the failed LoadEventHistory case below.
+		}
 	}
 	// A failed history load is deliberately not fatal here: it would turn a
 	// read this operation does not otherwise need into a reason the operation

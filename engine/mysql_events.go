@@ -563,6 +563,22 @@ func (s *MySQLStore) CountEventHistory(ctx context.Context, workflowID string) (
 	return count, err
 }
 
+// IsHistorySwept reports whether DeleteExpiredEvents has ever swept this
+// workflow's event_history. cleat#2038.
+func (s *MySQLStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	var sweptAt sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		`SELECT history_swept_at FROM workflow_instances WHERE id = ? AND tenant_id = ?`,
+		workflowID, s.tenantID).Scan(&sweptAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return sweptAt.Valid, nil
+}
+
 // ---------------------------------------------------------------------------
 // VerifyWorkflowEvents
 // ---------------------------------------------------------------------------

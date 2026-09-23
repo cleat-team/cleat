@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -302,4 +303,26 @@ func (s *PostgresStore) CountEventHistory(ctx context.Context, workflowID string
 		return 0, err
 	}
 	return count, tx.Commit()
+}
+
+// IsHistorySwept reports whether DeleteExpiredEvents has ever swept this
+// workflow's event_history. cleat#2038.
+func (s *PostgresStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return false, fmt.Errorf("is history swept: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var sweptAt sql.NullTime
+	err = tx.QueryRowContext(ctx,
+		`SELECT history_swept_at FROM workflow_instances WHERE id = $1 AND tenant_id = $2`,
+		workflowID, s.tenantID).Scan(&sweptAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return sweptAt.Valid, tx.Commit()
 }

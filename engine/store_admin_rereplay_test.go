@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // IMPROVEMENT-PLAN 3.20's third body. AdminReReplay was a stub on all three
@@ -147,6 +148,68 @@ func TestAdminReReplay_RefusesAnUnresolvedAmbiguity(t *testing.T) {
 		}
 		if err := ReReplay(ctx, store, wfID, after.Generation, "ops"); err != nil {
 			t.Fatalf("ReReplay after resolving the ambiguity: %v", err)
+		}
+	})
+}
+
+// cleat#2038, reproducing cleat#1999's TLA+ S1 trace against the real store:
+// a pending call intent, left by a crash, survives until --retention-days
+// sweeps it -- and before this fix, a swept workflow's empty history read
+// exactly like one that never made a call, so ReReplay allowed a blind
+// redispatch of whatever the pending call had been about to do.
+//
+// Falsified: reverting the history_swept_at guard in ReReplay (engine/admin_ops.go)
+// while keeping the migration and the sweep's own marking turns this red --
+// ReReplay proceeds instead of refusing. Reverting the sweep's marking as well
+// (so history_swept_at is never set) also turns it red, for the same reason:
+// the guard has nothing to read.
+func TestAdminReReplay_RefusesAfterTheRetentionSweepHasSweptAPendingCall(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store WorkflowStore) {
+		ctx := context.Background()
+		wfID := newIntentWorkflow(t, ctx, store, "rereplay-swept")
+		writePendingCall(t, ctx, store, wfID)
+		wf := claimAndFail(t, ctx, store, wfID)
+
+		// Sweep it -- FailWorkflow set completed_at to now(), so any cutoff in
+		// the future catches it, the same "everything is expired" cutoff
+		// TestTheCompactionClearIsCountedApartFromTheEventDelete uses.
+		cutoff := time.Now().Add(24 * time.Hour)
+		if _, err := store.DeleteExpiredEvents(ctx, cutoff); err != nil {
+			t.Fatalf("DeleteExpiredEvents: %v", err)
+		}
+
+		// The sweep must have actually swept it, or this test is not
+		// reproducing the trace it claims to: empty history is the
+		// precondition for the guard's ambiguity, and history_swept_at is
+		// what is supposed to distinguish it from "never attempted".
+		hist, err := store.LoadEventHistory(ctx, wfID)
+		if err != nil {
+			t.Fatalf("LoadEventHistory after sweep: %v", err)
+		}
+		if len(hist) != 0 {
+			t.Fatalf("event history has %d rows after the sweep, want 0 -- the sweep did not "+
+				"remove the pending call this test seeded, so it cannot exercise the guard", len(hist))
+		}
+		swept, err := store.IsHistorySwept(ctx, wfID)
+		if err != nil {
+			t.Fatalf("IsHistorySwept: %v", err)
+		}
+		if !swept {
+			t.Fatalf("IsHistorySwept = false after DeleteExpiredEvents swept this workflow's "+
+				"only event row; history_swept_at was not set, so ReReplay's guard has nothing "+
+				"to read and cannot tell this apart from a workflow that never made a call")
+		}
+
+		err = ReReplay(ctx, store, wfID, wf.Generation, "ops")
+		if err == nil {
+			t.Fatal("re-replayed a workflow whose pending call was removed by the retention " +
+				"sweep before it could be recorded as resolved or ambiguous -- this is exactly " +
+				"the unwitnessed redispatch cleat#1999's TLA+ model (S1) traced")
+		}
+		if !strings.Contains(err.Error(), "retention sweep") {
+			t.Errorf("err = %v, want it to name the retention sweep so an operator understands "+
+				"why this workflow, unlike an ordinary unresolved ambiguity, cannot be recovered "+
+				"by resolving a step", err)
 		}
 	})
 }

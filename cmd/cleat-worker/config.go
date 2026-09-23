@@ -221,13 +221,19 @@ var (
 	rateLimitPerTenant      = flag.Float64("rate-limit-per-tenant", 0, "Requests/second per tenant (0 = disabled; requires --require-auth)")
 	rateLimitPerTenantBurst = flag.Int("rate-limit-per-tenant-burst", 0, "Burst size for per-tenant rate limit")
 	maxRetries              = flag.Int("max-retries", 100, "Maximum retry attempts for DurableCallWithRetry")
-	// WHAT THIS FLAG ACTUALLY DOES: it clears compaction state. Its
-	// event_history arm cannot match anything (cleat#1016).
+	// WHAT THIS FLAG ACTUALLY DOES: it clears compaction state, AND -- for
+	// 'failed' workflows specifically -- deletes event_history.
 	//
-	// The arm selects `status IN ('done','failed')`, and those rows are already
-	// gone -- finalize_workflow_status deletes a workflow's events when it
-	// reaches either status, deliberately, so event_history stays bounded to
-	// active workflows. See PostgresStore.DeleteExpiredEvents, which measures it.
+	// THIS COMMENT USED TO SAY THE EVENT ARM "CANNOT MATCH ANYTHING"
+	// (cleat#1016), reasoning that finalize_workflow_status already purges a
+	// terminal workflow's events by the time this sweep looks. That is true
+	// for 'done' -- CompleteWorkflow calls finalize_workflow_status, which
+	// purges immediately -- and WRONG for 'failed': store.FailWorkflow is the
+	// path a real failure takes, and it purges no event_history. So on any
+	// deployment that fails workflows, this flag's event arm is not a no-op;
+	// it is what removes their history, --retention-days days later. See
+	// PostgresStore.DeleteExpiredEvents's doc comment in engine/db.go for the
+	// full correction (cleat#2038).
 	//
 	// AND THE PART AN OPERATOR WILL GET WRONG: this flag does NOT bound
 	// event_history for 'terminated' or 'dead_lettered' runs. The arm does not
@@ -237,9 +243,9 @@ var (
 	// --dead-letter-retention-days, both of which default to 0 (off).
 	//
 	// So on default settings the events of every terminated and dead-lettered
-	// run are retained indefinitely, and the on-by-default flag whose name says
-	// "retention" is not what bounds them.
-	retentionDays                  = flag.Int("retention-days", 30, "Days after which the compaction state of completed/failed workflows is cleared (0 disables). This does NOT bound event_history: its event arm selects done/failed runs, whose events finalize_workflow_status already deleted at terminal time, so that arm cannot match. Events of 'terminated' and 'dead_lettered' runs are bounded only by --completed-workflow-retention-days and --dead-letter-retention-days, both off by default. See cleat#1016.")
+	// run are retained indefinitely, while 'done' and 'failed' events are
+	// bounded by this flag (redundantly, for 'done').
+	retentionDays                  = flag.Int("retention-days", 30, "Days after which the compaction state of completed/failed workflows is cleared, and a failed workflow's event history is deleted (0 disables). A done workflow's event history is already gone by the time this runs, at finalize -- this arm only does first-hand work for 'failed'. Events of 'terminated' and 'dead_lettered' runs are bounded only by --completed-workflow-retention-days and --dead-letter-retention-days, both off by default. See cleat#1016, cleat#2038.")
 	completedWorkflowRetentionDays = flag.Int("completed-workflow-retention-days", 0, "Days to retain workflow_instances rows for terminal workflows (done/failed/terminated) before permanently deleting them, along with any remaining event_history. 0 (default) disables this -- unlike --retention-days, this deletes the workflow record itself (status, result, error, def_name), not just its step-by-step history, so it is opt-in rather than on by default. dead_lettered workflows are never touched by this flag.")
 	// VERSION GC. Three flags: one switch and two policy knobs. cleat#1315.
 	//

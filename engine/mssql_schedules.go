@@ -445,6 +445,12 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 	return out, nil
 }
 
+// deleteExpiredEventsOnce also marks history_swept_at on every workflow it
+// actually swept, so ReReplay's pending-intent guard (engine/admin_ops.go)
+// can tell "never attempted" from "swept, outcome unknown" -- see
+// PostgresStore.DeleteExpiredEvents in engine/db.go for the full cleat#2038
+// reasoning; this is the MSSQL implementation of the same fix, using OUTPUT
+// deleted.workflow_id as the RETURNING-equivalent.
 func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
@@ -452,8 +458,13 @@ func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete expired events: begin: %w", err)
 		}
-		result, err := tx.ExecContext(ctx, `
+		// OUTPUT deleted.workflow_id, not a separate re-run of the same
+		// predicate: ties history_swept_at to the workflows this statement
+		// actually removed rows for. A workflow_id can repeat (multiple
+		// event_history rows); deduplicated below before the UPDATE.
+		rows, err := tx.QueryContext(ctx, `
 			DELETE FROM event_history
+			OUTPUT deleted.workflow_id
 			WHERE workflow_id IN (
 				SELECT id`+msExpiredEventsWorkflows+`
 				  AND tenant_id = @p2
@@ -465,12 +476,66 @@ func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time
 			tx.Rollback()
 			return totalDeleted, fmt.Errorf("delete expired events: %w", err)
 		}
+		// rowsDeleted counts EVENT ROWS (what totalDeleted has always
+		// counted); swept collects the DISTINCT workflow ids, for the
+		// UPDATE below.
+		var rowsDeleted int64
+		seen := make(map[string]struct{})
+		var swept []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				tx.Rollback()
+				return totalDeleted, fmt.Errorf("delete expired events: scan: %w", err)
+			}
+			rowsDeleted++
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				swept = append(swept, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			tx.Rollback()
+			return totalDeleted, fmt.Errorf("delete expired events: rows: %w", err)
+		}
+		rows.Close()
+
+		if len(swept) > 0 {
+			placeholders := make([]string, len(swept))
+			args := make([]any, len(swept))
+			for i, id := range swept {
+				placeholders[i] = fmt.Sprintf("@p%d", i+1)
+				args[i] = id
+			}
+			// cleat#2038: mark, don't just delete -- ReReplay's
+			// pending-intent guard needs to tell "never attempted" from
+			// "swept, outcome unknown" apart, and both currently read as
+			// empty history.
+			//
+			// No tenant_id predicate here: swept is scopedByCaller, not
+			// missing a check. Every id in it came from THIS function's own
+			// SELECT above (msExpiredEventsWorkflows AND tenant_id = @p2),
+			// so it cannot name another tenant's workflow -- see the
+			// tenantPredicateAllowlist entry below.
+			//nolint:gosec // G202: the only concatenated fragment is placeholders, built above
+			// as "@p1", "@p2", ... -- ids are bound as arguments, never interpolated.
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE workflow_instances
+				SET history_swept_at = SYSUTCDATETIME()
+				WHERE id IN (`+strings.Join(placeholders, ",")+`)
+			`, args...); err != nil {
+				tx.Rollback()
+				return totalDeleted, fmt.Errorf("delete expired events: mark swept: %w", err)
+			}
+		}
+
 		if err := tx.Commit(); err != nil {
 			return totalDeleted, fmt.Errorf("delete expired events: commit: %w", err)
 		}
-		n, _ := result.RowsAffected()
-		totalDeleted += n
-		if n == 0 {
+		totalDeleted += rowsDeleted
+		if rowsDeleted == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -485,9 +550,16 @@ func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time
 // SPLIT OUT OF DeleteExpiredEvents, and the reason is a metric rather than
 // tidiness. It used to be a second loop inside that function whose RowsAffected
 // was discarded, so the sweep reported "deleted 0 rows" on runs where it had
-// done real work: the first loop can never match (finalize_workflow_status
-// already purged those events, cleat#1016) while this one clears up to 10000
-// workflow_instances rows a batch.
+// done real work.
+//
+// THIS COMMENT USED TO SAY THE FIRST LOOP "CAN NEVER MATCH" -- that finalize
+// already purges those events -- citing cleat#1016. That was wrong about which
+// code path a 'failed' workflow takes: finalize_workflow_status purges a
+// 'done' workflow's events, not a 'failed' one's, and DeleteExpiredEvents is
+// what removes a 'failed' workflow's events, --retention-days days later.
+// See engine/db.go's PostgresStore.DeleteExpiredEvents doc comment and
+// engine/retention_predicates.go for the full correction, found via cleat#2038
+// while grounding cleat#1999's TLA+ model in source.
 //
 // Summing the two into one return was the obvious fix and the wrong one. They
 // are different tables, different operations and different units -- deleted

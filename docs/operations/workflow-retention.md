@@ -12,13 +12,15 @@ turning one on says nothing about the other.
 
 See `docs/reference/worker-config.md` for the flag reference entries.
 
-## `--retention-days` has nothing to delete, and that is by design
+## `--retention-days` -- what it finds depends on how the workflow stopped
 
-The table above describes what the flag *aims* at. What it actually finds is
-nothing, because the rows are already gone.
-
-`finalize_workflow_status` -- the stored procedure the worker finalizes
-through -- ends its `done`/`failed` branch with
+**This section used to say the flag finds nothing to delete, because
+`finalize_workflow_status` already purges a workflow's events the moment it
+reaches `done` or `failed`. That is true for `done` and WRONG for `failed`,
+and the error was about which code path a real failure takes, not about what
+the stored procedure does.** `finalize_workflow_status` -- the stored
+procedure `FinalizeWorkflowSegment` calls -- does end its `done`/`failed`
+branch with
 
 ```sql
 -- Delete this workflow's events -- they are no longer needed
@@ -28,26 +30,45 @@ through -- ends its `done`/`failed` branch with
 DELETE FROM event_history WHERE workflow_id = p_workflow_id;
 ```
 
-So a workflow's replay log is purged the moment it reaches `done` or `failed`,
-not `--retention-days` later. Measured on PostgreSQL: a run holding one event,
-finalized to `done`, and separately to `failed`, goes `1 -> 0` both times. The
-same `DELETE` is in the MySQL and SQL Server finalize procedures.
+and calling it directly with `finalStatus = 'failed'` does purge the events,
+which is where the old "measured: `1 -> 0` both times" claim came from. **A
+production failure never calls it that way.** `cmd/cleat-worker/setup.go`'s
+own comment on `FinalizeWorkflowSegment`'s one production call site says
+`finalStatus` there is "only ever 'done' or 'ready' ... never 'failed'" --
+the real failure path is `store.FailWorkflow`
+(`engine/store_lifecycle.go`), which never calls
+`finalize_workflow_status` and purges no event_history at all. Found via
+cleat#2038, while grounding cleat#1999's TLA+ model in source; confirmed
+empirically by `engine/store_admin_rereplay_test.go`'s
+`TestAdminReReplay_ResetsAStoppedWorkflowAndKeepsItsHistory`, which fails a
+claimed workflow through `store.FailWorkflow` and asserts a preserved call
+event survives.
+
+So: a `done` workflow's replay log is purged at finalize, and
+`--retention-days` never sees it. A **`failed` workflow's replay log is not**
+-- it survives until this sweep removes it, `--retention-days` days later
+(default 30, on by default). The same distinction holds in the MySQL and SQL
+Server finalize procedures and `FailWorkflow` implementations.
 
 **What this means in practice:**
 
-* Setting `--retention-days` to any value does not change how long replay
-  detail is kept. It is already zero.
-* `cleat_events_deleted_total` is fed by this sweep's event-deletion count, so
-  it stays at zero permanently. That is expected, not a broken exporter.
+* Setting `--retention-days` changes how long a **failed** workflow's replay
+  detail is kept. For a **done** workflow it changes nothing -- that detail
+  is already gone, at finalize, regardless of the flag.
+* `cleat_events_deleted_total` is fed by this sweep's event-deletion count.
+  On a deployment where workflows only ever succeed, it stays at zero
+  permanently, which is expected. On a deployment where workflows fail, it
+  moves, and a flat zero there is worth investigating rather than dismissing.
 * `cleat_compaction_events_deleted_total` is a **different** counter, fed by
   compaction (`engine/compaction.go`), not by this sweep. Zero there means
   compaction is not running, which is a real signal and should not be
   dismissed. An earlier version of this page named that counter here, which
   told an operator to ignore the one metric of the two that still carries
   information.
-* The sweep is **not** inert. It also clears `compaction_state`,
-  `compaction_step` and `compacted_at` on the same workflows, and that half
-  does real work. It is not currently reflected in any metric.
+* The sweep is **not** inert, on any deployment. It also clears
+  `compaction_state`, `compaction_step` and `compacted_at` on the same
+  workflows, and that half does real work regardless of status mix. It is
+  not currently reflected in any metric.
 * `dead_lettered` is the exception: finalize does not purge it and neither does
   this sweep, so those events survive. **`--completed-workflow-retention-days`
   does not collect them either** -- its predicate covers `done`, `failed` and
@@ -60,10 +81,28 @@ same `DELETE` is in the MySQL and SQL Server finalize procedures.
   it destroys exactly the record it was kept for. Set it only when you have
   decided how long you need those runs.
 
-If you need replay detail to survive a workflow's completion, this is the
-thing to change, and it is a change to the procedure -- not to the flag.
+If you need a **done** workflow's replay detail to survive completion, this
+is the thing to change, and it is a change to the procedure -- not to the
+flag. A **failed** workflow's replay detail already survives until
+`--retention-days` removes it; lower the flag if you need it gone sooner, or
+disable the flag (`0`) if you need it kept.
 
-See cleat#1016.
+**cleat#2038: a swept `failed` workflow can no longer be re-replayed.** If a
+`failed` workflow had a call left pending when it stopped (a crash between
+dispatch and recording the response -- `[AMBIGUOUS]` on replay), and this
+sweep removes its history before an operator resolves that ambiguity, the
+workflow's `history_swept_at` column is set at the same time. `ReReplay`
+refuses a re-replay of any workflow whose history is empty **and**
+`history_swept_at` is set, because it can no longer tell "never made a call"
+from "made a call whose outcome was swept" -- silently redispatching in the
+second case is the exact defect cleat#1999's TLA+ model
+(`specs/CleatDurableCallIntent.tla`) found and traced. There is no recovery
+for a workflow already in this state; the only path forward is reprocessing
+it as a new run. A `done` workflow can never reach this state: a workflow
+only completes to `done` once its function returns, which requires every
+call it made to have already resolved.
+
+See cleat#1016, cleat#2038.
 
 ## Why the defaults differ
 
@@ -193,9 +232,13 @@ Step 2 is not optional and not everywhere a genuine no-op:
 - **PostgreSQL**: `event_history` has no foreign key back to
   `workflow_instances` at all. `migrations/postgres/003_procedures.sql` drops
   it deliberately, because `finalize_workflow_status()` already deletes a
-  `done`/`failed` workflow's events itself when it reaches that status. But
-  `TerminateWorkflow` (the path to `terminated`) does **not** call
-  `finalize_workflow_status`, so a force-terminated workflow's events are not
+  `done` workflow's events itself when it reaches that status. (Not
+  `failed` too, despite this section's own history -- see cleat#2038 above.
+  A `failed` workflow's events are gone by the time
+  `--completed-workflow-retention-days` looks only if `--retention-days`
+  already swept them.) But `TerminateWorkflow` (the path to `terminated`)
+  does **not** call `finalize_workflow_status`, so a force-terminated
+  workflow's events are not
   guaranteed to be gone by the time this runs, and would be orphaned forever
   the moment its `workflow_instances` row disappeared. PostgresStore deletes
   `event_history` explicitly, in the same transaction, for exactly this

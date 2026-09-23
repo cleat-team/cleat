@@ -172,6 +172,7 @@ CREATE TABLE workflow_instances (
     run_host_retry_budget_ms BIGINT,
     run_max_workflow_duration_ms BIGINT,
     completed_by TEXT,
+    history_swept_at TIMESTAMPTZ,
     PRIMARY KEY (id),
     FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs(tenant_id, name, version)
 );
