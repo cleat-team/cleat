@@ -156,3 +156,47 @@ func ReReplay(ctx context.Context, store WorkflowStore, workflowID string, gener
 	)
 	return nil
 }
+
+// RetryWorkflow moves a dead_lettered workflow back to 'ready' so the
+// dispatcher picks it up again. dead_lettered is one of the three
+// reReplayableStatuses ReReplay also reaches, and shares the same hazard: a
+// history whose last call was left mid-flight by a crash retries straight
+// back into [AMBIGUOUS], redispatching a call whose outcome is still
+// unknown. See ReReplay's guard above, which this mirrors.
+//
+// Unlike ReReplay, this does not also check IsHistorySwept.
+// DeleteExpiredEvents' retention sweep only matches status IN ('done',
+// 'failed') (engine/retention_predicates.go) -- dead_lettered is excluded --
+// and a dead_lettered workflow's own retention sweep,
+// deleteDeadLetteredWorkflowsBatch, removes the whole workflow_instances row
+// rather than just its event_history. So there is no "row survives, history
+// swept" state for a dead_lettered workflow to be caught in: by the time its
+// history could be ambiguous this way, RetryWorkflow has no row left to act
+// on either. cleat#2039.
+func RetryWorkflow(ctx context.Context, store WorkflowStore, workflowID string) error {
+	if workflowID == "" {
+		return adminErrorf(ErrAdminBadRequest, "retry: workflow ID is required")
+	}
+
+	if history, herr := store.LoadEventHistory(ctx, workflowID); herr == nil {
+		for _, rec := range history {
+			if rec.isPendingIntent() {
+				return adminErrorf(ErrAdminStateConflict,
+					"retry: workflow %s has an unresolved ambiguous call at step %d "+
+						"(%s.%s): retrying would report it again. Check the external service and record "+
+						"the outcome with POST /api/admin/instances/%s/steps/%d/resolve first",
+					workflowID, rec.Step, rec.Service, rec.Op, workflowID, rec.Step)
+			}
+		}
+	}
+	// A failed history load is deliberately not fatal here, same reasoning as
+	// ReReplay's identical fallback above: it would turn a read this operation
+	// does not otherwise need into a reason the operation cannot run.
+
+	if err := store.RetryWorkflow(ctx, workflowID); err != nil {
+		return fmt.Errorf("retry: %w", err)
+	}
+
+	slog.WarnContext(ctx, "admin: retry dead-lettered workflow", "workflow_id", workflowID)
+	return nil
+}
