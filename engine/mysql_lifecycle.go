@@ -203,6 +203,19 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		idArgs[i] = id
 	}
 
+	// `AND status IN ('ready', 'terminating')` and Step 5's own
+	// `AND status = 'running' AND assigned_to = ?` are a claimability
+	// RECHECK, defense-in-depth for cleat#1963's SQL Server finding applied
+	// here too: InnoDB's row locks ultimately land on the clustered record
+	// even when taken via a secondary index (unlike SQL Server, where a
+	// nonclustered and the clustered index are independent lock resources),
+	// so two concurrent claimWorkflowsOnce transactions should not be able to
+	// both select the same row as a Step 1 candidate in the first place --
+	// this is reasoned from InnoDB's documented locking model, not measured
+	// live the way the SQL Server finding was. The recheck costs nothing and
+	// removes the doubt: without it, a row this transaction did not actually
+	// win would still be reported to the caller as claimed, sourced from
+	// Step 5's unconditional fetch rather than from what Step 4 touched.
 	updateArgs := append([]any{workerID}, idArgs...)
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE workflow_instances
@@ -214,17 +227,21 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		    started_at = COALESCE(started_at, NOW(6)),
 		    generation = generation + 1
 		WHERE id IN (%s)
+		  AND status IN ('ready', 'terminating')
 	`, idClause), updateArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: update: %w", err)
 	}
 
-	// Step 5: fetch the full rows.
+	// Step 5: fetch the rows this transaction actually claimed -- not every
+	// id Step 3 admitted, in case Step 4's recheck excluded some of them.
+	fetchArgs := append(append([]any{}, idArgs...), workerID)
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, COALESCE(pending_terminal_status, '') AS pending_terminal_status
 		FROM workflow_instances
 		WHERE id IN (%s)
-	`, idClause), idArgs...)
+		  AND status = 'running' AND assigned_to = ?
+	`, idClause), fetchArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: fetch: %w", err)
 	}
@@ -240,6 +257,31 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	}
 	if err := rows2.Err(); err != nil {
 		return nil, fmt.Errorf("claim workflows rows: %w", err)
+	}
+
+	// See mssql_lifecycle.go's claimWorkflowsOnce for why: release the
+	// concurrency key (or queue slot) of any id Step 3 admitted but Step 4/5
+	// then excluded, atomically with the decision not to claim it.
+	if len(wfs) != len(ids) {
+		claimedIDs := make(map[string]bool, len(wfs))
+		for _, wf := range wfs {
+			claimedIDs[wf.ID] = true
+		}
+		for _, id := range ids {
+			if claimedIDs[id] {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM concurrency_keys WHERE workflow_id = ? AND tenant_id = ?`,
+				id, s.tenantID); err != nil {
+				return nil, fmt.Errorf("claim workflows: release lost candidate's concurrency key: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM queue_holders WHERE workflow_id = ? AND tenant_id = ?`,
+				id, s.tenantID); err != nil {
+				return nil, fmt.Errorf("claim workflows: release lost candidate's queue slot: %w", err)
+			}
+		}
 	}
 
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)

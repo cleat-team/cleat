@@ -13,6 +13,12 @@ import (
 	"github.com/google/uuid"
 )
 
+// mssqlClaimStep4Recheck is claimWorkflowsOnce's Step 4 claimability
+// recheck (cleat#1963) -- a shared constant, not an inline literal, so
+// TestMSSQLClaimStep4RecheckPreventsDoubleClaim exercises the actual clause
+// shipped here rather than a copy that could silently drift from it.
+const mssqlClaimStep4Recheck = `status IN ('ready', 'terminating')`
+
 // ---------------------------------------------------------------------------
 // Claim Methods (C.3)
 // ---------------------------------------------------------------------------
@@ -226,7 +232,20 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 	}
 
 	// Step 4: update the claimed rows and read them back through OUTPUT.
-	rows2, err := tx.QueryContext(ctx, `
+	//
+	// `AND status IN ('ready', 'terminating')` is a claimability RECHECK, not
+	// redundant with Step 1's predicate -- Step 1 read the status once, and this
+	// UPDATE can block (cleat#1963: Step 1's READPAST/UPDLOCK and this UPDATE's
+	// own X lock can land on different indexes for the same row, so a genuinely
+	// held lock is not detected and this row is treated as a free candidate).
+	// Without the recheck, an id that lost that block -- another claimer
+	// committed 'running' on it first -- silently gets overwritten when this
+	// UPDATE finally proceeds: a second `running`, a second `assigned_to`, a
+	// second `generation + 1`, i.e. two workers dispatching the same run. The
+	// recheck makes that id simply not match any more, so it drops out of
+	// OUTPUT instead of being stolen; see the reconciliation below for what
+	// that id's already-acquired concurrency key needs.
+	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		UPDATE workflow_instances
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
@@ -246,7 +265,8 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		       COALESCE(INSERTED.pending_terminal_status, '') AS pending_terminal_status
 		WHERE id IN (SELECT value FROM STRING_SPLIT(@p2, ','))
 		  AND tenant_id = @p3
-	`, workerID, strings.Join(ids, ","), s.tenantID)
+		  AND %s
+	`, mssqlClaimStep4Recheck), workerID, strings.Join(ids, ","), s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
 	}
@@ -287,6 +307,37 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 	}
 	if err := rows2.Err(); err != nil {
 		return nil, fmt.Errorf("claim workflows rows: %w", err)
+	}
+
+	// Release the concurrency key (or queue slot) of any id that Step 3
+	// admitted but Step 4's recheck then excluded -- it lost the claim, not
+	// the key. Left unreleased, that key/slot stays held by a workflow this
+	// transaction never actually claimed, until claimedKeyTTL expires, for
+	// no reason a caller can see. Same two deletes as
+	// releaseWorkflowConcurrencyKeysOnce, inline in this transaction rather
+	// than a separate one: the release must commit atomically with the
+	// decision not to claim, not as a follow-up that a crash between the two
+	// could skip.
+	if len(wfs) != len(ids) {
+		claimedIDs := make(map[string]bool, len(wfs))
+		for _, wf := range wfs {
+			claimedIDs[wf.ID] = true
+		}
+		for _, id := range ids {
+			if claimedIDs[id] {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM concurrency_keys WHERE workflow_id = @p1 AND tenant_id = @p2`,
+				id, s.tenantID); err != nil {
+				return nil, fmt.Errorf("claim workflows: release lost candidate's concurrency key: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM queue_holders WHERE workflow_id = @p1 AND tenant_id = @p2`,
+				id, s.tenantID); err != nil {
+				return nil, fmt.Errorf("claim workflows: release lost candidate's queue slot: %w", err)
+			}
+		}
 	}
 
 	if len(wfs) == 0 {
