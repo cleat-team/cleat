@@ -33,27 +33,6 @@ import (
 // So this test fails when the premise changes, and the failure message says
 // what to go and fix. It is deliberately NOT a check that Metadata is frozen:
 // adding an unrelated field is fine and must stay fine.
-//
-// ONE FIELD IS EXEMPTED, cleat#2066: EntryPoints []string names which WASM
-// exports a caller may start at, in source order -- nothing about their
-// parameters, types or signature. It does not weaken what this test
-// protects, because "which exports exist" and "what a schedule's stored
-// payload must look like to bind one" are different questions; the second is
-// the one CHANGELOG's cleat#1065/#1705 notes say the host cannot answer, and
-// this field still cannot answer it. The exemption is amended openly rather
-// than dodged by naming the field to miss the substring scan (which is how
-// this field was named the first time, and was wrong: a reader of Metadata
-// should not have to guess what a field called something else entirely
-// holds). The exemption is STRUCTURAL, not by name alone -- isExemptField
-// below also requires the type to be exactly []string, so a later field
-// that keeps the same name but grows into carrying types or defaults still
-// fails, and nothing except this one exact field is let through.
-func isExemptField(f reflect.StructField) bool {
-	return f.Name == "EntryPoints" &&
-		f.Tag.Get("json") == "entry_points,omitempty" &&
-		f.Type == reflect.TypeOf([]string(nil))
-}
-
 func TestMetadataCarriesNoEntryPointParameterList(t *testing.T) {
 	// Substrings that would indicate a field describing an entry point's
 	// parameters. Matched against both the Go field name and the JSON tag,
@@ -128,6 +107,27 @@ func TestMetadataCarriesNoEntryPointParameterList(t *testing.T) {
 			"cannot see what it looks for reports a clean result whatever the truth is.",
 			hits)
 	}
+}
+
+// isExemptField names the one field TestMetadataCarriesNoEntryPointParameterList
+// above lets through, cleat#2066: EntryPoints []string names which WASM
+// exports a caller may start at, in source order -- nothing about their
+// parameters, types or signature. It does not weaken what that test
+// protects, because "which exports exist" and "what a schedule's stored
+// payload must look like to bind one" are different questions; the second is
+// the one CHANGELOG's cleat#1065/#1705 notes say the host cannot answer, and
+// this field still cannot answer it. The exemption is amended openly rather
+// than dodged by naming the field to miss the substring scan (which is how
+// this field was named the first time, and was wrong: a reader of Metadata
+// should not have to guess what a field called something else entirely
+// holds). The exemption is STRUCTURAL, not by name alone -- this also
+// requires the type to be exactly []string, so a later field that keeps the
+// same name but grows into carrying types or defaults still fails, and
+// nothing except this one exact field is let through.
+func isExemptField(f reflect.StructField) bool {
+	return f.Name == "EntryPoints" &&
+		f.Tag.Get("json") == "entry_points,omitempty" &&
+		f.Type == reflect.TypeOf([]string(nil))
 }
 
 // TestTheEntryPointsExemptionIsStructuralNotByName proves isExemptField lets
