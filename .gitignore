@@ -235,3 +235,10 @@ tests/plugin-harness/testdata/asworkflow/dist/
 # Release Dry Run CI job runs and which is the documented way to reproduce a
 # release build locally (docs/project/release-process.md).
 dist/
+
+# TLC's disk-based fingerprint/state checkpoints (MSBDiskFPSet, DiskStateQueue).
+# Written wherever `java -cp tla2tools.jar tlc2.TLC` is invoked FROM -- ./states/
+# at the repo root when run via `make tla`, ./specs/states/ if run from specs/
+# directly. cleat#1996.
+/states/
+specs/states/

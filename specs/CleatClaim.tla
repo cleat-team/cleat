@@ -8,12 +8,22 @@
   lifecycle: ready -> claimed by worker -> heartbeat loop -> completed /
   suspended / reaped.
 
-  Implementation references:
-    - internal/host/db.go:295-312   (ClaimWorkflows)
-    - internal/host/db.go:601-612   (Heartbeat)
-    - internal/host/db.go:614-678   (CompleteWorkflow, FailWorkflow, ReleaseWorkflow)
-    - internal/host/db.go:852-864   (ReapStaleInstances)
-    - cmd/durable-worker/main.go    (worker loops: heartbeatLoop, reaperLoop, dispatchLoop)
+  Implemented by (no line numbers -- CLAUDE.md's own rule on why a number
+  like that rots faster than the fact it describes; CI's path filter matches
+  on these file names, not on line ranges):
+    - engine/store_lifecycle.go   (PostgresStore: ClaimWorkflows, ReapStaleInstances)
+    - engine/mysql_lifecycle.go   (MySQLStore: ClaimWorkflows, HeartbeatBatchFenced, ReapStaleInstances)
+    - engine/mssql_lifecycle.go   (MSSQLStore: ClaimWorkflows, HeartbeatBatchFenced)
+    - engine/mssql_operations.go  (MSSQLStore: ReapStaleInstances)
+    - engine/sharded_store.go     (ShardedStore: fans the above out per shard)
+    - engine/db.go                (PostgresStore: HeartbeatBatchFenced)
+    - cmd/cleat-worker/setup.go   (worker loops: heartbeatLoop, dispatch, executeWorkflow)
+
+  This list moved from "internal/host/db.go" (a single file, pre-3eeb74e)
+  to per-dialect files across a 2026-09 fencing rewrite (cleat#2008); the
+  Complete/Fail/Release names in the original comment no longer match a
+  single function each either. The model's actions are unaffected -- see
+  "Known drift" in specs/README.md for what IS affected.
 
   State machine (instance lifecycle):
 
@@ -45,13 +55,18 @@ CONSTANTS
     NumInstances,         \* Number of workflow instances, modelled as 1..NumInstances
     HeartbeatInterval,    \* Logical time between heartbeats (model parameter)
     HeartbeatTimeout,     \* How much clock advance before a heartbeat goes stale
-    MaxClaimBatch         \* Maximum instances claimed in one batch query
+    MaxClaimBatch,        \* Maximum instances claimed in one batch query
+    NULL                  \* Sentinel "unassigned" value, distinct from every worker --
+                           \* a model value bound in CleatClaim.cfg, not derived, since
+                           \* CHOOSE x : x \notin Workers is unbounded and TLC cannot
+                           \* evaluate it.
 
 ASSUME HeartbeatTimeout > HeartbeatInterval
 ASSUME MaxClaimBatch >= 1
+ASSUME NULL \notin Workers
 
 \* =============================================================================
-VARIABLES
+\* VARIABLES
 \* =============================================================================
 
 VARIABLES
@@ -65,16 +80,13 @@ VARIABLES
 vars == <<status, assignedTo, heartbeatAt, nextWakeAt, clock, alive>>
 
 \* =============================================================================
-CONSTANT HELPERS
+\* CONSTANT HELPERS
 \* =============================================================================
-
-\* Sentinel: a value guaranteed not to be a worker.
-NULL == CHOOSE x : x \notin Workers
 
 Instances == 1..NumInstances
 
 \* =============================================================================
-TYPE INVARIANT
+\* TYPE INVARIANT
 \* =============================================================================
 
 TypeOK ==
@@ -86,7 +98,7 @@ TypeOK ==
     /\ alive \in [Workers -> BOOLEAN]
 
 \* =============================================================================
-STATE PREDICATES (helpers used by actions and properties)
+\* STATE PREDICATES (helpers used by actions and properties)
 \* =============================================================================
 
 \* Instances eligible for claiming: status is ready AND wake time has passed.
@@ -106,7 +118,7 @@ StaleInstances ==
         ~alive[assignedTo[i]] \/ clock - heartbeatAt[i] >= HeartbeatTimeout}
 
 \* =============================================================================
-ACTIONS
+\* ACTIONS
 \* =============================================================================
 
 (*
@@ -137,7 +149,7 @@ Claim(w) ==
     /\ alive[w]                                    \* dead workers don't claim
     /\ \E S \in SUBSET ReadyInstances :
         /\ S /= {}                                 \* claim at least one
-        /\ |S| <= MaxClaimBatch                    \* respect batch limit
+        /\ Cardinality(S) <= MaxClaimBatch          \* respect batch limit
         /\ status'  = [i \in Instances |->
             IF i \in S THEN "running" ELSE status[i]]
         /\ assignedTo' = [i \in Instances |->
@@ -281,7 +293,7 @@ Tick ==
     /\ UNCHANGED <<status, assignedTo, heartbeatAt, nextWakeAt, alive>>
 
 \* =============================================================================
-NEXT-STATE RELATION
+\* NEXT-STATE RELATION
 \* =============================================================================
 
 \* The full next-state relation: any action can fire at any step.
@@ -293,7 +305,7 @@ Next ==
     \/ Tick
 
 \* =============================================================================
-INITIAL STATE
+\* INITIAL STATE
 \* =============================================================================
 
 Init ==
@@ -305,7 +317,7 @@ Init ==
     /\ alive     = [w \in Workers |-> TRUE]
 
 \* =============================================================================
-FAIRNESS (TEMPORAL)
+\* FAIRNESS (TEMPORAL)
 \* =============================================================================
 
 (*
@@ -333,13 +345,19 @@ Fairness ==
     /\ WF_vars(Reap)
 
 \* =============================================================================
-COMPLETE SPECIFICATION
+\* COMPLETE SPECIFICATION
 \* =============================================================================
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
+\* State constraint bounding the logical clock, so TLC's search stays finite.
+\* Referenced by name (not inline) from CleatClaim.cfg's CONSTRAINT clause --
+\* a .cfg CONSTRAINT takes an operator defined in the spec, not a raw
+\* expression.
+ClockBound == clock < 8
+
 \* =============================================================================
-SAFETY INVARIANTS
+\* SAFETY INVARIANTS
 \* =============================================================================
 
 (*
@@ -388,7 +406,7 @@ ClaimGuard ==
 Safety == AtMostOnce /\ TerminalStable /\ ClaimGuard
 
 \* =============================================================================
-LIVENESS (TEMPORAL PROPERTIES)
+\* LIVENESS (TEMPORAL PROPERTIES)
 \* =============================================================================
 
 (*
@@ -447,45 +465,30 @@ NoStarvation ==
         => <>(status[i] /= "ready") )
 
 \* =============================================================================
-MODEL CHECKING CONFIGURATION (TLC)
+\* MODEL CHECKING CONFIGURATION (TLC)
 \* =============================================================================
 (*
 
-  Create a TLC model config file `CleatClaim.cfg` with:
+  The actual model config is CleatClaim.cfg, checked into this directory --
+  read it rather than this comment, which used to duplicate it and drifted
+  (see below). Run with:
 
-    CONSTANTS
-        Workers = {w1, w2, w3}
-        NumInstances = 5
-        HeartbeatInterval = 2
-        HeartbeatTimeout = 5
-        MaxClaimBatch = 2
+    java -cp tla2tools.jar tlc2.TLC -config CleatClaim.cfg CleatClaim.tla
 
-    INVARIANTS
-        TypeOK
-        Safety
+  `make tla` runs this. Bounds and the measured state count are in
+  specs/README.md, not here, for the same reason CLAUDE.md gives for not
+  carrying a live count in prose: it is checked by CI on every run, and a
+  number written here would rot the first time either file changed alone.
 
-    PROPERTIES
-        ClaimProgress
-        ReapProgress
-        TerminalStableLiveness
-        NoStarvation
-
-    \* Optional: bound the clock to keep the state space finite.
-    \* With 3 workers and 5 instances, clock < 30 is usually sufficient
-    \* to exhaustively explore all reachable configurations.
-    CONSTRAINT
-        clock < 30
-
-  Then run:
-
-    java -cp tla2tools.jar tlc2.TLC CleatClaim.tla -config CleatClaim.cfg
-
-  Expected state space (rough): a few thousand distinct states with
-  3 workers, 5 instances, clock bounded to 30.  Exhaustive checking
-  should complete in seconds.
-
-  Tip: if the state space is too large, reduce NumInstances to 3 or
-  MaxClock to 20 in the CONSTRAINT.
+  This comment previously suggested Workers = {w1, w2, w3}, NumInstances = 5,
+  CONSTRAINT clock < 30, and estimated "a few thousand distinct states,
+  completing in seconds." Measured 2026-09-23, before this file had ever
+  been run through TLC: that configuration reached 1.9M+ distinct states and
+  was still growing past two minutes, because clock < 30 bounds the clock but
+  not the reachable heartbeatAt/nextWakeAt combinations beneath it -- the
+  state space this config actually explores is far larger than a bound on
+  one variable suggests. CleatClaim.cfg uses much smaller bounds so the
+  model checks in seconds, per CI's own requirement.
 
   For initial debugging, run WITHOUT the PROPERTIES line first to
   check that TypeOK and Safety hold, then add properties one at a

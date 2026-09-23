@@ -889,10 +889,10 @@ for attention at the seams, and it went unspent there.
   The whole module table also still uses pre-refactor `internal/` paths.
 - `docs/review-status.md` — declares the project production-ready off an audit of 11 plugins
   and pre-refactor paths.
-- `specs/CleatClaim.tla` — uses `=====` as decorative separators, which is TLA+'s module
-  terminator. First one is at line 53 of 495, so 89% of the spec is outside the module. No
-  `.cfg` files exist for any spec and TLC never runs in CI. Either fix + run them, or move
-  them to `docs/` as design notes.
+- `specs/CleatClaim.tla` — **fixed in cleat#1996.** Parses under SANY and checks clean under
+  TLC (`make tla`, wired into CI on `specs/**` and its named implementers), with a real
+  `.cfg`. The other three specs are marked not-maintained in `specs/README.md` rather than
+  fixed, superseded by the model issues in cleat#1997-#2000.
 - Head-to-head numbers still do not exist. `benchmarks/comparative/` was removed from this
   repo in favour of [cleat-bench](https://github.com/cleat-team/cleat-bench), which already
   has the runners, seven workload specs and the AWS infrastructure — **run them there.**
