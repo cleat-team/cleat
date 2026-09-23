@@ -1,0 +1,198 @@
+# ---------------------------------------------------------------------------
+# Engine Race Detector (scheduled)
+#
+# `./engine/...` under `-race` used to run on every PR as the `engine` leg of
+# `ci.yml`'s `test-go` matrix (`Test Go (engine) on 1.26`, a required
+# context). Measured 2026-09-21 through 2026-09-23 (cleat#2082): 7 PR
+# failures of that job, 0 data races -- every one was skip-ledger bookkeeping
+# (4) or a real test failure that `Tier 1 Gate` (required, all three
+# dialects, no -race) also caught or would have. It cost ~21 runner-minutes
+# per PR, on the critical path, for a catch Tier 1 Gate already makes.
+#
+# Moved here: a 4-hour schedule, so a genuine data race is still caught, just
+# not gating every PR. `./engine/...` still runs on every PR -- via Tier 1
+# Gate, against postgres, mysql and mssql -- just never under -race there.
+# This workflow is now the ONLY place `-race` runs on `./engine/...` at all.
+#
+# `Test Go (engine) on 1.26` was removed from develop's required status
+# checks the same day (see .github/required-checks.txt and tiers.yaml's
+# required_contexts block) -- leaving it required with nothing left to post
+# that context would have blocked every future PR forever.
+#
+# A red run here does not block any merge; nothing depends on it. It IS a
+# stop-the-line finding when the failure is a genuine data race (cleat#2082)
+# -- see the "Report a failure" step, which says which kind of failure it was
+# rather than treating every red run as equally urgent.
+# ---------------------------------------------------------------------------
+name: Engine Race Detector
+
+on:
+  schedule:
+    # Every 4 hours. cleat#2082.
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+
+# Keyed on run_id, NOT github.ref or github.workflow alone: every run of this
+# workflow targets the same ref (develop), so a ref-keyed group would put
+# every scheduled run in one group, and GitHub allows only one *pending* run
+# per group -- the next schedule tick would cancel a still-queued run before
+# it started (scripts/check-workflow-concurrency.sh's "(2)"; see soak.yml,
+# which has no concurrency block at all for the same underlying reason). This
+# workflow has no `push:` trigger, so that guard's own scan does not reach it
+# -- keyed on run_id here anyway, deliberately, because the issue asks for it
+# explicitly ("a concurrency group per run (not per ref), so consecutive runs
+# don't cancel each other").
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # To open or update the failure-tracking issue below.
+  issues: write
+
+jobs:
+  engine-race:
+    name: Engine Race Detector
+    runs-on: ubuntu-latest
+    # 30m, matching the -timeout this suite ran under inside ci.yml's test-go
+    # job. That job's whole timeout was per-step; this is the job's own cap.
+    timeout-minutes: 40
+
+    services:
+      postgres:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        # 127.0.0.1, not localhost: on GitHub runners localhost resolves to
+        # ::1 first while a service container publishes on IPv4 only. See the
+        # note on ci.yml's test-go job, where that cost the entire job its
+        # coverage for months without anyone noticing (testutil.TestDB used
+        # to turn the refusal into a skip).
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+
+      - name: Run ./engine/... under -race
+        shell: bash
+        run: |
+          # pipefail is required: without it `tee` supplies the exit status
+          # and a failing `go test` is silently reported as a green step.
+          set -o pipefail
+
+          # -p 1: ./engine/... is two packages, engine and engine/testutil,
+          # and `go test` runs packages in parallel by default. Both point
+          # at the one database this job provides, and testutil's own tests
+          # call CleanupPostgresTestData -- an unqualified DELETE FROM over
+          # every tier-1 table including workflow_instances -- so in
+          # parallel they delete each other's fixtures mid-test. Carried
+          # over unchanged from the entry this workflow replaces in ci.yml.
+          go test -race -count=1 -timeout 30m -p 1 -json ./engine/... 2>&1 | tee test-report.json
+
+      # Same job-key ('test-go/engine') the removed ci.yml matrix entry used,
+      # deliberately: scripts/skip-ledger.d/'s existing test-go/engine lines
+      # were written against that key, and moving the job must not silently
+      # detach them from anything that checks them (cleat#2082's own
+      # verification step 3). A skip that hides a crash is a failure wearing
+      # a skip's clothing -- this budget is what still catches that here.
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh 'test-go/engine' test-report.json
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: engine-race-report-${{ github.run_id }}
+          path: test-report.json
+          retention-days: 30
+
+      # Opens or updates a single tracking issue rather than filing a new one
+      # per red run -- a flaky failure that reruns every 4 hours would
+      # otherwise fill the tracker. Says explicitly whether the log contains
+      # an actual `WARNING: DATA RACE`, because most red runs here will not
+      # be one (0 of 7 in the measurement this workflow's header cites): a
+      # skip-ledger regression or an ordinary flaky test failure is worth
+      # looking at, but it is not the stop-the-line case cleat#2082 names,
+      # and a report that cannot tell the two apart trains readers to ignore
+      # it either way.
+      - name: Report a failure
+        if: failure()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+
+            let log = '';
+            try {
+              log = fs.readFileSync('test-report.json', 'utf8');
+            } catch (e) {
+              log = `(could not read test-report.json: ${e.message})`;
+            }
+
+            const hasRace = log.includes('WARNING: DATA RACE');
+            let snippet = '';
+            if (hasRace) {
+              const idx = log.indexOf('WARNING: DATA RACE');
+              snippet = log.slice(Math.max(0, idx - 200), idx + 4000);
+            }
+
+            const title = '[engine-race] scheduled ./engine/... -race run is failing';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const severity = hasRace
+              ? '**`WARNING: DATA RACE` found in this run\'s output.** Treat as a stop-the-line finding, same as a red develop (cleat#2082).'
+              : 'No `WARNING: DATA RACE` in this run\'s output -- likely an ordinary test failure or a skip-ledger regression, not a race. Still worth reading, not necessarily urgent.';
+
+            const bodySection = [
+              `Run: ${runUrl}`,
+              `Commit: ${context.sha}`,
+              '',
+              severity,
+              '',
+              hasRace ? ('```\n' + snippet + '\n```') : '',
+            ].join('\n');
+
+            const openIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'area/ci',
+              per_page: 100,
+            });
+            const existing = openIssues.data.find(i => i.title === title);
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Failed again.\n\n${bodySection}`,
+              });
+              core.notice(`Updated existing issue #${existing.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body: bodySection,
+                labels: ['area/ci'],
+              });
+              core.notice(`Opened issue #${created.data.number}`);
+            }

@@ -33,7 +33,13 @@ CI_FILE="${1:-$REPO_ROOT/.github/workflows/ci.yml}"
 #     `go run`, not a package `go build ./...` or `go test ./...` ever
 #     compiles. It has no tests to run and needs no matrix entry; it is
 #     exercised by the "Dead-export code guard" lint step instead.
-EXEMPT="examples testdata benchmarks tests packages scripts"
+#   engine                        — removed from this matrix 2026-09-23
+#     (cleat#2082): the -race run cost ~21 runner-minutes per PR for 0 data
+#     races in 7 failures, every catch already made by Tier 1 Gate (all
+#     three dialects, no -race, which this guard does not scan). Still run
+#     on every PR via Tier 1 Gate, and under -race on a 4-hour schedule --
+#     .github/workflows/engine-race.yml.
+EXEMPT="examples testdata benchmarks tests packages scripts engine"
 
 cd "$REPO_ROOT"
 

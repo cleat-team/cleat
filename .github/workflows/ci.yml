@@ -1259,21 +1259,21 @@ jobs:
           - name: core
             dir: cleat
             path: ./...
-          - name: engine
-            path: ./engine/...
-            # -p 1: ./engine/... is two packages, engine and engine/testutil,
-            # and `go test` runs packages in parallel by default. Both point at
-            # the one database this job provides, and testutil's own tests call
-            # CleanupPostgresTestData -- an unqualified DELETE FROM eleven
-            # tables including workflow_defs and workflow_instances -- so in
-            # parallel they delete each other's fixtures mid-test. The cluster
-            # job below already runs this same path with -p 1 for exactly this
-            # reason; this entry did not, and the failures it produces are
-            # timing-dependent (a workflow that vanishes between two statements,
-            # a foreign key to a definition deleted since it was deployed) and
-            # so read as flakes rather than as one cause. See IMPROVEMENT-PLAN
-            # 2.60d, which is the underlying fix.
-            flags: -p 1
+          # engine was here (-race, -p 1, postgres only) until cleat#2082
+          # (2026-09-23). Measured 2026-09-21 through 2026-09-23: 7 PR
+          # failures of this leg, 0 data races -- every catch was
+          # skip-ledger bookkeeping (4) or a real test failure that Tier 1
+          # Gate (required, all three dialects, no -race) also caught or
+          # would have caught. It cost ~21 runner-minutes per PR for a check
+          # Tier 1 Gate already makes, on the critical path, without
+          # shortening it (Tier 1 Gate is equally long). ./engine/... under
+          # -race now runs on a schedule instead -- see
+          # .github/workflows/engine-race.yml, which uses the identical
+          # env/service/flags this entry used and reports skips under the
+          # same job-key ('test-go/engine') so scripts/skip-ledger.d/'s
+          # existing engine lines keep meaning what they said. Per PR,
+          # ./engine/... still runs -- via Tier 1 Gate, against postgres,
+          # mysql and mssql, without -race.
           - name: wasm
             path: ./wasm/... ./wasmrw/...
           - name: internal
