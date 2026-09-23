@@ -891,7 +891,13 @@ for attention at the seams, and it went unspent there.
   and pre-refactor paths.
 - `specs/CleatClaim.tla` — **fixed in cleat#1996.** Parses under SANY and checks clean under
   TLC (`make tla`, wired into CI on `specs/**` and its named implementers), with a real
-  `.cfg`. `specs/CleatRunLifecycle.tla` — **new in cleat#1997**, modelling every writer of
+  `.cfg`. **cleat#2034 (2026-09-23) found that "checks clean" had been true and unsound at
+  the same time** — a `.cfg` `CONSTRAINT` on its clock silently made every liveness property
+  vacuous (WF/SF withdrawn, verdict unchanged). Fixed with a self-clamping clock, an `SF`
+  fairness upgrade and a `FleetEventuallyStable` assumption; the fix then surfaced a real
+  `ReapProgress` gap (fixed) and a real `NoStarvation` gap (not fixable the same way — see
+  `specs/README.md`'s "Bounds and state count" for both). `specs/CleatRunLifecycle.tla` —
+  **new in cleat#1997**, modelling every writer of
   `workflow_instances.status`. `specs/CleatQueueAdmission.tla` — **fixed in cleat#2000** the
   same way, and directly replaces (and, since its replacement landed, deletes)
   `specs/CleatConcurrencyKeys.tla`, which this bullet used to count among "the other three"
