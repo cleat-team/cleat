@@ -896,7 +896,8 @@ for attention at the seams, and it went unspent there.
   vacuous (WF/SF withdrawn, verdict unchanged). Fixed with a self-clamping clock, an `SF`
   fairness upgrade and a `FleetEventuallyStable` assumption; the fix then surfaced a real
   `ReapProgress` gap (fixed) and a real `NoStarvation` gap (not fixable the same way — see
-  `specs/README.md`'s "Bounds and state count" for both). `specs/CleatRunLifecycle.tla` —
+  `specs/CleatClaim.md`'s "Bounds and state count" for both, split out of `specs/README.md`
+  in cleat#2044). `specs/CleatRunLifecycle.tla` —
   **new in cleat#1997**, modelling every writer of
   `workflow_instances.status`. `specs/CleatQueueAdmission.tla` — **fixed in cleat#2000** the
   same way, and directly replaces (and, since its replacement landed, deletes)
