@@ -113,12 +113,14 @@ if [ "${1:-}" = "--self-test" ]; then
 399 WS-2
 400 WS-3
 499 WS-3
-500 unallocated
+500 WS-4
+599 WS-4
+600 unallocated
 CASES
   # A while-read loop that read nothing would report zero failures, which is
   # this file's own trap.
-  if [ "$ran" -ne 11 ]; then
-    echo "SELF-TEST FAIL: ran $ran cases, expected 11 -- the case table was not read." >&2
+  if [ "$ran" -ne 13 ]; then
+    echo "SELF-TEST FAIL: ran $ran cases, expected 13 -- the case table was not read." >&2
     exit 1
   fi
   if [ "$fails" -gt 0 ]; then

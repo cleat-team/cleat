@@ -56,6 +56,7 @@ SECTION_BLOCKS=(
   "WS-1:200-299"
   "WS-2:300-399"
   "WS-3:400-499"
+  "WS-4:500-599"
 )
 
 # Which sandbox is which stream. Keyed on the git COMMON directory rather than
@@ -74,6 +75,7 @@ SECTION_SANDBOXES=(
   "WS-1:/Users/Shared/localssd/rcownie/cleat"
   "WS-2:/Users/Shared/localssd/rcownie/cleat-agent1"
   "WS-3:/Users/Shared/localssd/rcownie/cleat-agent2"
+  "WS-4:/Users/Shared/localssd/rcownie/cleat-agent3"
 )
 
 # section_block_for <number> -> "WS-N" | "grandfathered" | "unallocated"

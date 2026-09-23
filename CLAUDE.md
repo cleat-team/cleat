@@ -1615,9 +1615,11 @@ stream does.** After the 2026-09-16 reboot every `session_…` mapping recorded 
 that no longer existed, three PRs could not be attributed at all, and one session merged two PRs it
 had not authored on the strength of a dead id. The new form:
 
-    Claude-Stream: WS-1        # closed set: WS-1, WS-2, WS-3, coordinator,
-                               #             cleat-review
+    Claude-Stream: WS-1        # closed set: WS-1, WS-2, WS-3, WS-4,
+                               #             coordinator, cleat-review
                                # anchor greps at ^Claude-Stream: , as before
+
+`WS-4` is a fourth delivery stream, added 2026-09-23 by owner decision to shorten the 0.3.0 critical path. Its IMPROVEMENT-PLAN block is `3.500–599` (`scripts/section-blocks.sh`).
 
 `cleat-review` is a review session rather than a delivery stream, added 2026-09-17. The set had no
 value for one, and the nearest was actively wrong: two of its PRs went out trailered `coordinator`,
