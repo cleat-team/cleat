@@ -653,6 +653,45 @@ see "What did not come across" at the end.
 one from memory: the section around that pointer records a run where doing so produced a tidy
 876 → 581 → 4 skip progression that was 1,086 connection failures wearing the right costume.
 
+### Two rules for the shared Docker host (owner-approved 2026-09-23)
+
+Every stream's containers share one Docker daemon, and one CLI setting, on this machine. Two
+incidents on 2026-09-23 each cost more than one stream an afternoon's evidence:
+
+**1. Never change the machine-wide docker context. Name the target instead.** `colima start` (and
+`docker context use`) rewrites the *current context* for every session on the machine, not just
+the one that ran it. When WS-1 started a colima VM for #982, WS-2's running SQL Server container
+"vanished" from `docker ps`: it was still up, on `default`. WS-2 "recreated" it, and the copy
+landed *inside* WS-1's VM, publishing the same host port. That invalidated both streams' runs from
+the switch onward. So for any non-default daemon, pass the target on each command, and restore
+the context if something changed it:
+
+```
+docker --context colima-<profile> ps          # or DOCKER_CONTEXT=colima-<profile> in your own shell
+docker context show                           # must read `default` when you finish
+```
+
+**2. Cap every SQL Server container's memory; suspect memory before code.** SQL Server on Linux
+sizes its buffer pool to 80% of the memory it can see, and inside Docker that is the whole VM,
+not the container. With five SQL Server containers in one 11.7 GiB Docker VM, each planned on
+about 9 GiB, and they starved one another: Errors 802 and 17300, refused logins, one container
+killed (exit 137). The Mac itself was fine (`memory_pressure` read 61% free; `vm_stat`'s low "free"
+is normal on macOS and is not the signal). So:
+
+```
+docker run … -e MSSQL_MEMORY_LIMIT_MB=2048 … mcr.microsoft.com/mssql/server@<digest>
+```
+
+On any odd SQL Server behaviour (a hang, a block, a "row not there"), check the host first,
+before a query, lock or driver theory:
+
+```
+docker stats --no-stream
+docker logs <container> 2>&1 | grep -E 'Error: (802|17300)|insufficient system memory'
+```
+
+Stop, rather than remove, the containers you are not using; `docker start` brings them back.
+
 ---
 
 ## ⚠️ CORRECTION 2026-09-16: everything below about *this machine* describes one that is gone
