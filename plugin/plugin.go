@@ -28,8 +28,28 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 )
+
+// ErrNotConfigured is returned by Init when a plugin received no
+// configuration at all (env.Config is empty) and, absent one, cannot do
+// anything useful -- so it disables itself rather than running degraded.
+//
+// IT IS NOT THE SAME AS A CONFIGURATION ERROR. A plugin given a config
+// section that fails validation (bad JSON, a required field left blank
+// inside an otherwise-present section) must return a plain error instead,
+// so that mistake keeps failing loudly. Conflating the two turned "I forgot
+// to set the SendGrid API key" and "I never touched this plugin" into the
+// same ERROR-level log line on every stock worker start, cleat#2070.
+//
+// A caller distinguishes the two with errors.Is(err, ErrNotConfigured), not
+// by matching error text -- wrap it, don't replace it:
+//
+//	if len(env.Config) == 0 {
+//		return fmt.Errorf("myplugin: %w", plugin.ErrNotConfigured)
+//	}
+var ErrNotConfigured = errors.New("plugin not configured")
 
 // PluginInfo describes a plugin for discovery and documentation.
 type PluginInfo struct {

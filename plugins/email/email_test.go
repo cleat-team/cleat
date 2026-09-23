@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -202,6 +203,29 @@ func TestInitMissingAPIKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "sendgrid_api_key is required") {
 		t.Errorf("expected error about missing api key, got: %v", err)
+	}
+	// This is a MISCONFIGURATION, not an absent one -- cleat#2070. A config
+	// section is present ("{}"), it is simply missing the required field, so
+	// this must NOT be reported as plugin.ErrNotConfigured: that would tell
+	// the worker to log it as a quiet INFO line, and an operator who wrote a
+	// config section with a typo'd or blank key needs to see ERROR.
+	if errors.Is(err, plugin.ErrNotConfigured) {
+		t.Errorf("a present-but-invalid config must not report ErrNotConfigured: %v", err)
+	}
+}
+
+// cleat#2070. No config section at all -- the common case for every plugin a
+// deployment never touches -- must be distinguishable from a present-but-
+// invalid one, so the worker can log the former as INFO instead of ERROR.
+func TestInitNoConfigReportsErrNotConfigured(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{}
+	err := p.Init(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected error when no config is set, got nil")
+	}
+	if !errors.Is(err, plugin.ErrNotConfigured) {
+		t.Errorf("expected errors.Is(err, plugin.ErrNotConfigured), got: %v", err)
 	}
 }
 
