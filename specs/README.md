@@ -1,11 +1,11 @@
 # TLA+ specifications — status
 
-Four specifications of cleat's concurrency-sensitive protocols.
+Five specifications of cleat's concurrency-sensitive protocols.
 
-**Only `CleatClaim.tla` has been model-checked, as of cleat#1996.** The other three —
-`CleatConcurrencyKeys.tla`, `CleatSignals.tla`, `CleatStateMachine.tla` — are **not
-maintained**. Per cleat#1996 they are not being brought up to SANY/TLC parity themselves;
-they are superseded by new models under cleat#1997 (run lifecycle, every status writer),
+**`CleatClaim.tla` (cleat#1996) and `CleatRunLifecycle.tla` (cleat#1997) have been
+model-checked.** The other three — `CleatConcurrencyKeys.tla`, `CleatSignals.tla`,
+`CleatStateMachine.tla` — are **not maintained**. Per cleat#1996 they are not being brought
+up to SANY/TLC parity themselves; they are superseded by `CleatRunLifecycle.tla`, by
 cleat#1998 (parents awaiting children, parent-close cascades) and cleat#2000 (queue
 admission, rate tokens, claim fairness) — read those issues for the actual scope rather than
 assuming a 1:1 file replacement, since none of them commits to reusing a legacy file's name
@@ -14,15 +14,54 @@ with no legacy predecessor in this directory at all. Do not cite any of the unma
 three as proof a protocol is correct, and re-derive the table below rather than trusting
 it — see CLAUDE.md's own rule on why a count like this rots.
 
+**cleat#2034, filed 2026-09-23: `CleatClaim.tla`'s own `ClaimProgress` may be silently
+vacuous, not actually verified by the "No error has been found" this file used to cite
+unqualified.** Found while building `CleatRunLifecycle.tla`'s known-positive checks: deleting
+`WF_vars(Claim(w))` from `CleatClaim.tla`'s own `Fairness` — which should trivially make
+"eventually something is claimed" fail, since nothing then forces a claim — still reports "No
+error has been found," identical state count to the unmutated run. Likely the same
+CONSTRAINT-boundary hazard `CleatRunLifecycle.tla` hit three times and fixed (see that file's
+own `SettledIsFinal`/`Fairness` comments); not yet fixed in `CleatClaim.tla` itself, and not
+yet checked against its other three properties. Treat `ClaimProgress` (and, unverified,
+`ReapProgress`/`TerminalStableLiveness`/`NoStarvation`) as **checked-but-not-proven-capable-
+of-failing** until cleat#2034 closes.
+
 ## What is and is not true, per spec
 
-| | CleatClaim | ConcurrencyKeys | Signals | StateMachine |
-|---|---|---|---|---|
-| Parsed by SANY | **Yes** | No | No | No |
-| Checked by TLC | **Yes** | No | No | No |
-| `.cfg` exists | **Yes** | No | No | No |
-| Run in CI | **Yes**, on touching PRs | No | No | No |
-| Maintained | **Yes** | **No — superseded, see above** | **No — superseded, see above** | **No — superseded, see above** |
+| | CleatClaim | CleatRunLifecycle | ConcurrencyKeys | Signals | StateMachine |
+|---|---|---|---|---|---|
+| Parsed by SANY | **Yes** | **Yes** | No | No | No |
+| Checked by TLC | **Yes**, but see cleat#2034 | **Yes** | No | No | No |
+| `.cfg` exists | **Yes** | **Yes** | No | No | No |
+| Run in CI | **Yes**, on touching PRs | **Yes**, on touching PRs | No | No | No |
+| Maintained | **Yes** | **Yes** | **No — superseded, see above** | **No — superseded, see above** | **No — superseded, see above** |
+
+## `CleatRunLifecycle.tla` (cleat#1997)
+
+Models every writer of `workflow_instances.status` — the claim/heartbeat/reap protocol
+`CleatClaim.tla` already covers, extended with the two-phase defer transition, five operator
+verbs (Terminate/Cancel/AdminForceComplete/AdminForceFail), a retry/re-replay pair, and a
+fixed two-instance parent-close cascade. `CleatRunLifecycle.cfg`: `Workers = {w1}`,
+`NumInstances = 2`, `HeartbeatTimeout = DeferPhaseTimeout = 2`, `MaxClaimBatch = 1`, clock
+self-clamping at `ClockCeiling == 5` (no `.cfg` `CONSTRAINT` — see the file's own
+`ClockCeiling`/`NextClock`/`FutureClock` comments for why a hard-wall `CONSTRAINT` was tried
+first and found to silently defeat liveness checking, the same day, on this same model).
+Measured 2026-09-23: 444,729 distinct states, 4,330,355 generated, search depth 14, ~9s.
+`TypeOK`, `Safety`, and `SettledIsFinal` (an action invariant) all hold at this bound —
+re-derive with `make tla`, not by trusting this paragraph.
+
+`L1_EventualSettlement`, `L2_ClaimProgress` and `L3_CascadeProgress` are **defined but
+deliberately NOT gated** in `CleatRunLifecycle.cfg`. Three distinct, real, no-mutation-needed
+counter-examples were found for this family of `[](P => <>Q)` property on the clean spec in
+one session — an unfair, single-step operator/redrive action (Terminate, Cancel,
+AdminReReplay) can establish and then revoke a leads-to antecedent before any
+fairness-dependent mechanism gets a qualifying window to react. Two were fixed (L2: WF→SF on
+worker-gated actions, plus an explicit `FleetEventuallyStable` assumption; L3: an honest "or
+the antecedent itself later became false" escape clause matching L2's). The pattern did not
+converge after three fixes — each one closed a specific trace, not the general hazard — so
+gating stopped there rather than continuing indefinitely; see the file's own header comment
+above `L1_EventualSettlement` for the full account. L1 has not been separately confirmed to
+have or lack the same class of issue.
 
 `CleatClaim.tla` used a full-width `======` rule as a decorative section separator, and
 several bare-word section headers (`VARIABLES`, `ACTIONS`, ...) between `\* ===` comment
