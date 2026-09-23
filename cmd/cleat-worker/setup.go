@@ -985,6 +985,12 @@ type healthTracker struct {
 	restarts     map[string]int           // loop_name -> restart count
 	intervals    map[string]time.Duration // loop_name -> expected run interval
 	registeredAt map[string]time.Time     // loop_name -> when the loop was first registered
+
+	// now stands in for time.Now in every method below. Always time.Now in
+	// production; a test overrides it to advance the clock past maxAge
+	// without a real sleep (cleat#2004) -- same shape as
+	// engine/tenant_egress_store.go's `now func() time.Time // tests`.
+	now func() time.Time
 }
 
 func newHealthTracker() healthTracker {
@@ -994,13 +1000,14 @@ func newHealthTracker() healthTracker {
 		restarts:     make(map[string]int),
 		intervals:    make(map[string]time.Duration),
 		registeredAt: make(map[string]time.Time),
+		now:          time.Now,
 	}
 }
 
 func (ht *healthTracker) recordRun(name string) {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
-	ht.lastRun[name] = time.Now()
+	ht.lastRun[name] = ht.now()
 }
 
 func (ht *healthTracker) recordPanic(name string) {
@@ -1024,7 +1031,7 @@ func (ht *healthTracker) setInterval(name string, interval time.Duration) {
 func (ht *healthTracker) registerLoop(name string) {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
-	ht.registeredAt[name] = time.Now()
+	ht.registeredAt[name] = ht.now()
 }
 
 // isStale re-checks a single loop atomically to prevent TOCTOU races where
@@ -1032,6 +1039,7 @@ func (ht *healthTracker) registerLoop(name string) {
 func (ht *healthTracker) isStale(name string) bool {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
+	now := ht.now()
 	lastRun, ok := ht.lastRun[name]
 	if !ok {
 		regAt, regOk := ht.registeredAt[name]
@@ -1042,14 +1050,14 @@ func (ht *healthTracker) isStale(name string) bool {
 		if interval, iOk := ht.intervals[name]; iOk && interval > 0 {
 			maxAge = interval * 6
 		}
-		return time.Since(regAt) > maxAge
+		return now.Sub(regAt) > maxAge
 	}
 	interval, iOk := ht.intervals[name]
 	maxAge := 120 * time.Second
 	if iOk && interval > 0 {
 		maxAge = interval * 6
 	}
-	return time.Since(lastRun) > maxAge
+	return now.Sub(lastRun) > maxAge
 }
 
 // registeredCount returns the total number of registered loops.
@@ -1078,7 +1086,7 @@ func (ht *healthTracker) staleLoops() []string {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
 	var stale []string
-	now := time.Now()
+	now := ht.now()
 	for name, lastRun := range ht.lastRun {
 		interval, ok := ht.intervals[name]
 		maxAge := 120 * time.Second
@@ -1665,6 +1673,27 @@ func (w *Worker) getLoopCtx(name string) context.Context {
 // A method rather than a closure so it can be called from a test that runs it
 // against a live reader under -race.
 func (w *Worker) initLoopCtx(name string) {
+	w.initLoopCtxUnmonitored(name)
+	w.healthTracker.registerLoop(name)
+}
+
+// initLoopCtxUnmonitored is initLoopCtx without the health-tracker
+// registration -- for a loop that launchLoop always starts (so it still
+// needs a loopCtxMap entry, or launchLoop's map lookup panics on a nil
+// *loopContext), but that may permanently no-op depending on configuration.
+//
+// cleat#2004: versionGCLoop is launched unconditionally, and returns at once
+// when --version-gc-interval is 0, the default -- before ever calling
+// setInterval or recordRun. initLoopCtx's unconditional registerLoop still
+// ran, so healthTracker.staleLoops() flagged a loop that was never going to
+// run again, and /healthz turned 503 about two minutes after every default
+// worker started (maxAge with no interval set is 120s). versionGCLoop calls
+// w.healthTracker.registerLoop itself, at the same point it already calls
+// setInterval -- once it has confirmed it is actually going to keep running,
+// not before. A loop that is registered without ever running is exactly the
+// state a health tracker exists to complain about; the bug was registering
+// one that had already decided not to.
+func (w *Worker) initLoopCtxUnmonitored(name string) {
 	ctx, cancel := context.WithCancel(w.ctx)
 	lc := &loopContext{
 		ctx:    ctx,
@@ -1674,7 +1703,6 @@ func (w *Worker) initLoopCtx(name string) {
 	w.loopMu.Lock()
 	w.loopCtxMap[name] = lc
 	w.loopMu.Unlock()
-	w.healthTracker.registerLoop(name)
 }
 
 // registerLoopFunc records a loop's restart function under loopMu.
@@ -1730,13 +1758,20 @@ func (w *Worker) Run() {
 	initLoopCtx("heartbeat")
 	initLoopCtx("reaper")
 	initLoopCtx("concurrency_key_reaper")
-	initLoopCtx("tenant_pool_reaper")
+	// tenant_pool_reaper's initLoopCtx moved below, next to the same
+	// w.hasReapablePools() guard that decides whether it is registered and
+	// launched at all -- see that guard's comment, and cleat#2004.
 	initLoopCtx("dispatch")
 	initLoopCtx("schedule")
 	initLoopCtx("memory_reload")
 	initLoopCtx("memory_cleanup")
 	initLoopCtx("retention")
-	initLoopCtx("version_gc")
+	// version_gc is launched unconditionally below but no-ops when
+	// --version-gc-interval is 0, the default -- initLoopCtxUnmonitored
+	// still gives launchLoop the context entry it needs without telling the
+	// health tracker to expect a run. versionGCLoop registers itself once it
+	// knows it is actually going to keep running. cleat#2004.
+	w.initLoopCtxUnmonitored("version_gc")
 	initLoopCtx("compaction")
 	if *metricsSweepInterval > 0 {
 		initLoopCtx("metrics_sweep")
@@ -1792,13 +1827,25 @@ func (w *Worker) Run() {
 	// reporting success for doing nothing, which is why this is still a guard
 	// rather than an unconditional launch.
 	//
-	// Its context is initialised UNCONDITIONALLY above, with the others.
-	// TestEveryPreparedLoopIsLaunched caught the first version of this, which
-	// had the launch inside the guard and no initLoopCtx at all: the loop ran
-	// with no entry in the loop-context map, so the watchdog could neither
-	// cancel nor restart it. Preparing a context for a loop that is not
-	// launched is harmless; launching one without a context is not.
+	// initLoopCtx is INSIDE the guard, with registerLoopFunc and launchLoop --
+	// all three, or none. TestEveryPreparedLoopIsLaunched caught the version of
+	// this with the launch inside the guard and no initLoopCtx at all: the
+	// loop ran with no entry in the loop-context map, so the watchdog could
+	// neither cancel nor restart it. "Preparing a context for a loop that is
+	// not launched is harmless" used to be this comment's conclusion, and
+	// cleat#2004 found the half that isn't: initLoopCtx also registers the
+	// loop with the health tracker, so a worker with no reapable pools
+	// registered a loop that would never run and never recordRun, and
+	// staleLoops() flagged it forever once maxAge (120s, no interval ever
+	// set) passed -- /healthz turned 503 about two minutes after every such
+	// worker started. Moving initLoopCtx inside the same guard as the launch
+	// it was already conditioned on keeps the watchdog's invariant
+	// (never launch without a context) and drops the health tracker's false
+	// positive: unregistered is the correct state for a loop that is not
+	// running, same as metrics_sweep and worker_membership above, which
+	// already gate their initLoopCtx this way.
 	if w.hasReapablePools() {
+		initLoopCtx("tenant_pool_reaper")
 		w.registerLoopFunc("tenant_pool_reaper", w.tenantPoolReaperLoop)
 		w.launchLoop("tenant_pool_reaper", w.tenantPoolReaperLoop)
 	}
@@ -3806,6 +3853,14 @@ func (w *Worker) versionGCLoop() {
 	if w.versionGCInterval <= 0 {
 		return
 	}
+	// Registered HERE, not by initLoopCtx at startup -- Run() calls
+	// initLoopCtxUnmonitored("version_gc") so launchLoop always has a context
+	// to start this goroutine with, but the health tracker only learns about
+	// this loop once it has passed the check above and is actually going to
+	// keep running. cleat#2004: registering unconditionally made a disabled
+	// loop (the default) permanently stale six lines from now, in the health
+	// tracker's eyes, without ever reaching this line.
+	w.healthTracker.registerLoop("version_gc")
 	w.healthTracker.setInterval("version_gc", w.versionGCInterval)
 	ticker := time.NewTicker(w.versionGCInterval)
 	defer ticker.Stop()
