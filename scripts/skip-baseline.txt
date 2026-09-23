@@ -9,6 +9,9 @@ cmd/cleat	TestAnAssemblyScriptDefaultMakesAParameterOptional	2
 cmd/cleat	TestAnUnreadablePathIsNotAFinding	2
 cmd/cleat	TestBuildRefusesAFlagAfterThePath	1
 cmd/cleat	TestBuildStillAcceptsTheDocumentedOrder	1
+cmd/cleat	TestDeployDryRunNeedsNoDatabaseAndExitsZero	1
+cmd/cleat	TestDeployUnderTheAppRoleSetsTenantContext	1
+cmd/cleat	TestDeployWithoutDatabaseFailsRatherThanSilentlyDoingNothing	1
 cmd/cleat	TestEveryDocumentedCleatInvocationClearsFlagParsing	1
 cmd/cleat	TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds	1
 cmd/cleat	TestEveryTemplateDocumentedCommandActuallyRuns	1

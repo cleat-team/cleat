@@ -1063,11 +1063,20 @@ func runDeploy(args []string) {
 	// per definition rather than per instance because the column is keyed
 	// (tenant_id, name, version) -- see WorkflowDef.MaxHistoryLength and #889.
 	maxHistoryLengthFlag := fs.Int("max-history-length", 0, "cap this definition's event history before compaction, overriding the global threshold (0 = use the global)")
+	// cleat#2065. Without this, an unset --db/CLEAT_DATABASE_URL silently
+	// printed a preview and exited 0 -- the fullstack template's `make
+	// deploy` hit this on every run, and the operator had no way to tell
+	// "deployed" from "nothing happened" short of reading stdout. Explicit
+	// beats implicit-but-nonzero here: a scripted `make deploy` that checks
+	// only the exit code now fails loudly instead of quietly skipping, and
+	// `--dry-run` gives a real, opt-in way to preview without a database --
+	// the same flag name and behavior as `cleat plugin install --dry-run`.
+	dryRunFlag := fs.Bool("dry-run", false, "print what would be deployed without connecting to a database")
 	fs.Parse(args)
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] [--max-history-length <n>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] [--max-history-length <n>] [--dry-run] <wasm-file>\n")
 		os.Exit(1)
 	}
 	wasmPath := remainder[0]
@@ -1110,7 +1119,12 @@ func runDeploy(args []string) {
 		connStr = getDBConnStr()
 	}
 
-	if connStr == "" {
+	if connStr == "" && !*dryRunFlag {
+		fmt.Fprintln(os.Stderr, "Error: no database configured. Set CLEAT_DATABASE_URL or --db to deploy, or pass --dry-run to preview without one.")
+		os.Exit(1)
+	}
+
+	if *dryRunFlag {
 		version := 1
 		if metaErr == nil && meta.WorkflowVersion > 0 {
 			version = meta.WorkflowVersion
@@ -1122,7 +1136,7 @@ func runDeploy(args []string) {
 				meta.WorkflowName, meta.WorkflowVersion,
 				meta.ABIVersion, meta.MinCompatibleVersion)
 		}
-		fmt.Println("Dry run; set CLEAT_DATABASE_URL or --db to deploy.")
+		fmt.Println("Dry run: no changes were made.")
 		return
 	}
 
@@ -1136,20 +1150,6 @@ func runDeploy(args []string) {
 	if err := db.Ping(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error pinging database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
-	}
-
-	// Use the version embedded in WASM metadata if available; otherwise
-	// auto-increment.  Deploying the same version multiple times updates
-	// the existing row (idempotent).
-	version := 1
-	if metaErr == nil && meta.WorkflowVersion > 0 {
-		version = meta.WorkflowVersion
-	} else {
-		err = db.QueryRow("SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_defs WHERE name = $1", name).Scan(&version)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
-			os.Exit(1)
-		}
 	}
 
 	// Build the SQL with metadata columns if available.
@@ -1174,7 +1174,45 @@ func runDeploy(args []string) {
 	// deploying the same name and version OVERWROTE the first one's binary.
 	deployTenantID := resolveDeployTenant(buildTenantID, os.Getenv("CLEAT_TENANT_ID"))
 
-	_, err = db.Exec(
+	// cleat#2065. workflow_defs carries row-level security (migrations/postgres/
+	// 001_schema.sql's tenant_isolation_defs), so both the version query below
+	// and the INSERT are RLS-scoped reads/writes: on the cleat_app role -- the
+	// one the worker's own error messages tell an operator to use, since the
+	// worker refuses a superuser or BYPASSRLS connection -- they fail with
+	// "cleat.tenant_id is not set" unless something sets it first. Setting
+	// --tenant alone did nothing before this fix: deployTenantID was computed
+	// but never told to Postgres. Mirror engine/db.go's beginTxWithRLS: open a
+	// transaction and set_config('cleat.tenant_id', ...) before any
+	// tenant-scoped statement in it. (The role that owns migrations bypasses
+	// RLS, so this only bites the app role -- which is the one deploy is
+	// supposed to work under.)
+	tx, err := db.Begin()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting deploy transaction: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := tx.Exec("SELECT set_config('cleat.tenant_id', $1, true)", deployTenantID); err != nil {
+		_ = tx.Rollback()
+		fmt.Fprintf(os.Stderr, "Error setting tenant context: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Use the version embedded in WASM metadata if available; otherwise
+	// auto-increment.  Deploying the same version multiple times updates
+	// the existing row (idempotent).
+	version := 1
+	if metaErr == nil && meta.WorkflowVersion > 0 {
+		version = meta.WorkflowVersion
+	} else {
+		err = tx.QueryRow("SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_defs WHERE name = $1", name).Scan(&version)
+		if err != nil {
+			_ = tx.Rollback()
+			fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	_, err = tx.Exec(
 		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue, max_history_length, tenant_id)
 		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
 		 ON CONFLICT (tenant_id, name, version) DO UPDATE SET
@@ -1189,7 +1227,12 @@ func runDeploy(args []string) {
 		deployTenantID,
 	)
 	if err != nil {
+		_ = tx.Rollback()
 		fmt.Fprintf(os.Stderr, "Error inserting workflow definition: %v\n", err)
+		os.Exit(1)
+	}
+	if err := tx.Commit(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error committing deploy transaction: %v\n", err)
 		os.Exit(1)
 	}
 
