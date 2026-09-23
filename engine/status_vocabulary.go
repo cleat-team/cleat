@@ -1,5 +1,7 @@
 package engine
 
+import "database/sql"
+
 // The vocabulary of workflow_instances.status, stated once.
 //
 // WHY THIS FILE EXISTS. There is no CHECK constraint on the column, so nothing
@@ -77,3 +79,65 @@ const (
 // in mssql_tenant_predicate_test.go's exemption list untouched.
 const settledStatusList = `'` + statusDone + `', '` + statusFailed + `', '` +
 	statusDeadLettered + `', '` + statusTerminated + `', '` + statusCancelled + `'`
+
+// childOutcomeForSettledStatus is GetChildResult's answer to "how did my
+// child's run end", derived once here and called identically from all three
+// dialects instead of three independent copies of "if status == ...".
+//
+// cleat#1974: a parent awaiting a terminated or cancelled child never got an
+// answer, because GetChildResult had its own, narrower idea of "terminal"
+// than settledStatusList -- the same shape as cleat#1213 (dead_lettered
+// missing from this exact function) and the GetChildCount bug
+// (a_terminal_child_does_not_hold_its_parents_quota_test.go, 'terminated'
+// missing there). Three drifting hand-written lists is how each of those
+// happened; one function settles it.
+//
+// ok is false when status is not settled at all, meaning the caller should
+// report ChildOutcome{} (still running) -- the only status this repo has
+// that answers false today is 'ready'/'running'/'terminating', none of which
+// are named in this file's constants for exactly that reason (see the file
+// doc comment above).
+//
+// The fallback case -- settled, but not one of the five known statuses --
+// exists so a SIXTH settled status added later (to statusXxx and
+// settledStatusList) without a bespoke branch here still gets an answer
+// rather than silently reopening this issue: Completed+Failed with the raw
+// error_msg, no kind prefix. Nothing in this tree produces that case today;
+// it is here so the failure mode is "generic message" rather than "parent
+// waits forever."
+func childOutcomeForSettledStatus(status, result string, errMsg sql.NullString) (outcome ChildOutcome, ok bool) {
+	switch status {
+	case statusDone:
+		return ChildOutcome{Completed: true, Result: result}, true
+	case statusFailed, statusDeadLettered:
+		// The result column is never written on either branch; the message
+		// is in error_msg, which MoveToDeadLetterQueue also writes.
+		return ChildOutcome{Completed: true, Failed: true, Error: errMsg.String}, true
+	case statusTerminated:
+		// Kind travels as a stable message prefix, the way "[AMBIGUOUS]"
+		// already does (durablecalls.go, heartbeats.go) -- no new SDK
+		// surface. The guest already receives a failed child as an error
+		// message; this just makes the message say which kind of failure.
+		return ChildOutcome{Completed: true, Failed: true, Error: "[TERMINATED] " + errMsg.String}, true
+	case statusCancelled:
+		return ChildOutcome{Completed: true, Failed: true, Error: "[CANCELLED] " + errMsg.String}, true
+	}
+	if isSettledStatus(status) {
+		return ChildOutcome{Completed: true, Failed: true, Error: errMsg.String}, true
+	}
+	return ChildOutcome{}, false
+}
+
+// isSettledStatus reports whether status is one of the five settledStatusList
+// spells in SQL. Kept as a plain Go switch rather than parsing
+// settledStatusList at runtime -- this is called on every GetChildResult, and
+// the SQL string is deliberately not meant to be embedded or parsed outside
+// the literal predicates it was built for (see settledStatusList's own
+// comment on why a shared helper was reverted there).
+func isSettledStatus(status string) bool {
+	switch status {
+	case statusDone, statusFailed, statusDeadLettered, statusTerminated, statusCancelled:
+		return true
+	}
+	return false
+}

@@ -130,7 +130,9 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 	return childID, nil
 }
 
-// GetChildResult checks whether a child workflow has completed (status 'done' or 'failed').
+// GetChildResult checks whether a child workflow has settled -- 'done', or
+// any of 'failed'/'dead_lettered'/'terminated'/'cancelled' (see
+// childOutcomeForSettledStatus).
 
 func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	// Resolve the chain first: the run the parent STARTED is not necessarily
@@ -166,30 +168,27 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (Child
 	if err != nil {
 		return ChildOutcome{}, fmt.Errorf("get child result: %w", err)
 	}
-	if status == "failed" || status == "dead_lettered" {
-		// dead_lettered is terminal and was missing here until cleat#1213,
-		// while GetChildCount forty lines down has always excluded all three
-		// of ('done', 'failed', 'dead_lettered'). Two definitions of terminal
-		// in one file, and only this one decides whether a parent stops
-		// waiting -- so a parent awaiting a child that exhausted its retries
-		// suspended, was re-claimed on its next_wake_at, replayed, got the
-		// same non-answer and suspended again, for the life of the deployment.
-		//
-		// Reported as FAILED rather than left to a later retry, and the reason
-		// is that the alternative does not exist: nothing pushes a parent
-		// awake. executor.go names "child completion via wakeParent"; there is
-		// no wakeParent in this repo. The only wake is the timeout, so "the
-		// parent waits for the child to be retried" and "the parent replays
-		// forever" are the same behaviour, and only one of them is a story.
-		//
-		// A failed run's `result` column is never written -- migration 053
-		// routes finalize's payload to `error_msg` on this branch -- so
-		// returning the result here would return the '{}' from the COALESCE
-		// above, which is exactly the empty success cleat#1115 is about.
-		// MoveToDeadLetterQueue writes its reason to the same column.
-		return ChildOutcome{Completed: true, Failed: true, Error: errMsg.String}, tx.Commit()
-	}
-	if status == "done" {
+	// Terminal in this function means settled -- see
+	// childOutcomeForSettledStatus. Two definitions of terminal used to live
+	// in this file alone: this function excluded dead_lettered until
+	// cleat#1213, and then excluded terminated/cancelled until cleat#1974,
+	// while GetChildCount forty lines down has excluded all five since
+	// cleat#1153. Only this one decides whether a parent stops waiting -- so
+	// a parent awaiting a child that exhausted its retries, or was
+	// terminated, or was cancelled, suspended, was re-claimed on its
+	// next_wake_at, replayed, got the same non-answer and suspended again,
+	// for the life of the deployment. Nothing pushes a parent awake early;
+	// the only wake is the timeout, so "the parent waits to be re-checked"
+	// and "the parent replays forever" are the same behaviour here.
+	//
+	// A settled-but-not-done run's `result` column is never written --
+	// migration 053 routes finalize's payload to `error_msg` on that branch
+	// -- so returning the result for one would return the '{}' from the
+	// COALESCE above, which is exactly the empty success cleat#1115 is
+	// about. That is why compaction below only applies to the 'done' case:
+	// childOutcomeForSettledStatus never reads `result` for any other
+	// status.
+	if status == statusDone {
 		// Compact, matching the convention GetWorkflowByID and
 		// GetPromise/ListPromises already follow for JSONB result/payload
 		// columns: PostgreSQL's jsonb text output always inserts a space
@@ -199,9 +198,9 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (Child
 		if err := json.Compact(compacted, []byte(result)); err == nil {
 			result = compacted.String()
 		}
-		return ChildOutcome{Completed: true, Result: result}, tx.Commit()
 	}
-	return ChildOutcome{}, tx.Commit()
+	outcome, _ := childOutcomeForSettledStatus(status, result, errMsg)
+	return outcome, tx.Commit()
 }
 
 // GetChildCount returns the number of ACTIVE child workflows for the given

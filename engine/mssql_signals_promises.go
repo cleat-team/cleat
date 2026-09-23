@@ -366,18 +366,13 @@ func (s *MSSQLStore) GetChildResult(ctx context.Context, runID string) (ChildOut
 	if err != nil {
 		return ChildOutcome{}, fmt.Errorf("get child result: %w", err)
 	}
-	if status == "failed" || status == "dead_lettered" {
-		// dead_lettered is terminal too (cleat#1213). The result column is
-		// never written on either branch; the message is in error_msg, which
-		// MoveToDeadLetterQueue also writes. See PostgresStore.GetChildResult
-		// for why a dead-lettered child is reported as failed rather than
-		// awaited.
-		return ChildOutcome{Completed: true, Failed: true, Error: errMsg.String}, nil
-	}
-	if status == "done" {
-		return ChildOutcome{Completed: true, Result: result}, nil
-	}
-	return ChildOutcome{}, nil
+	// See PostgresStore.GetChildResult (store_children.go) for why this
+	// derives from childOutcomeForSettledStatus rather than its own
+	// "failed"/"dead_lettered"/"done" literals -- cleat#1213 and cleat#1974
+	// are both a hand-written terminal-status list here falling behind the
+	// one settledStatusList spells.
+	outcome, _ := childOutcomeForSettledStatus(status, result, errMsg)
+	return outcome, nil
 }
 
 // GetChildCount returns the number of ACTIVE child workflows for the given
