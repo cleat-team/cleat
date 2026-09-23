@@ -34,23 +34,33 @@
 #   ./out/cleat-worker --verify-backend
 #                              -> verify-backend: OK: wasmtime backend available
 #
-# RELEASING A NEW VERSION
+# THIS IS A TEMPLATE, NOT AN INSTALLABLE FORMULA (cleat#2068)
 #
-# `url`, `sha256` and `version` are hand-maintained; goreleaser's `brews:`
-# generator cannot be used here because it packages built binaries, which is
-# precisely what does not exist for macOS. On each release:
+# `url` and `sha256` below are literal placeholder tokens, not real values --
+# see scripts/render-homebrew-formula.sh, which is the only thing that
+# understands them. The working formula lives at
+# https://github.com/cleat-team/homebrew-tap/blob/main/Formula/cleat.rb ,
+# `brew install cleat-team/tap/cleat` uses it, and
+# .github/workflows/release.yml's homebrew-bump job pushes a fresh render of
+# THIS file there after every GitHub Release, so the two cannot drift the way
+# a hand-maintained pair does. This copy stays under normal PR review because
+# it is the only editable one -- the tap copy is generated, not authored.
 #
-#   curl -sSLO https://github.com/cleat-team/cleat/archive/refs/tags/vX.Y.Z.tar.gz
-#   shasum -a 256 vX.Y.Z.tar.gz
+# Structural changes (the install steps, the test block, comments) belong
+# here. Do not hand-edit url/sha256 here for a real release -- they are
+# placeholders on purpose, and the render script's own test
+# (TestRenderProducesAPinnedTaggedFormula in formula_test.go) fails if they
+# ever stop looking like ones.
 #
-# and update all three. test/homebrew_formula_test.go checks that the version
-# in `url` and the `version` field agree, so a half-done bump fails CI rather
-# than shipping a formula that installs the wrong tag.
+# Testing a structural change before a release: `brew install --HEAD
+# --build-from-source packaging/homebrew/Formula/cleat.rb.tmpl` builds from
+# the `head` line below (the develop branch) and never touches url/sha256 at
+# all -- see docs/project/release-process.md.
 class Cleat < Formula
   desc "Durable workflow engine that runs workflows compiled to WebAssembly"
   homepage "https://github.com/cleat-team/cleat"
-  url "https://github.com/cleat-team/cleat/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "40fc912649623cafc3ce080ac11a36c5879215951968fa4397452c10cfbfb5be"
+  url "https://github.com/cleat-team/cleat/archive/refs/tags/__CLEAT_TAG__.tar.gz"
+  sha256 "__CLEAT_SHA256__"
   license "Apache-2.0"
   head "https://github.com/cleat-team/cleat.git", branch: "develop"
 

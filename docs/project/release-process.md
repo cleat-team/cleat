@@ -256,35 +256,75 @@ github.com/cleat-team/cleat vX.Y.Z` line is exactly this kind of reference
 (cleat#1888 found it stuck at a version that was never even tagged), and the
 pattern above missed it entirely without that flag.
 
-That grep will not find the Homebrew formula, which is Ruby — bump it
-explicitly:
+That grep will not find the Homebrew formula, which is Ruby — but as of
+cleat#2068 nothing here needs to bump it by hand.
 
-```bash
-curl -sSLO https://github.com/cleat-team/cleat/archive/refs/tags/vX.Y.Z.tar.gz
-shasum -a 256 vX.Y.Z.tar.gz
-```
+### Releasing a Homebrew formula bump — now automatic
 
-and update `url` and `sha256` in `packaging/homebrew/Formula/cleat.rb`.
+`packaging/homebrew/Formula/cleat.rb.tmpl` in this repo is a **template**, not
+an installable formula: its `url` and `sha256` are the literal placeholder
+tokens `__CLEAT_TAG__` and `__CLEAT_SHA256__`. The installable formula lives
+in `cleat-team/homebrew-tap` (`brew install cleat-team/tap/cleat`), and is
+generated, not authored — `.github/workflows/release.yml`'s `homebrew-bump`
+job, which runs after `goreleaser` on every `v*` tag push:
 
-This is hand-maintained on purpose. goreleaser's `brews:` generator packages
-built binaries, and there is no macOS `cleat-worker` binary to package — the
-worker needs CGO and the release job cannot link a CGO darwin binary on ubuntu
-(see `IMPROVEMENT-PLAN.md` §3.54). The formula is a source build, which is what
+1. Computes the sha256 of `https://github.com/cleat-team/cleat/archive/refs/tags/vX.Y.Z.tar.gz`
+   (GitHub's own auto-generated source archive for the tag — not one of
+   goreleaser's build artifacts, so this does not depend on anything
+   goreleaser produced beyond the tag itself existing).
+2. Runs `scripts/render-homebrew-formula.sh vX.Y.Z <sha256>` to substitute
+   the template's two placeholders.
+3. Pushes the rendered file to `cleat-team/homebrew-tap`'s `Formula/cleat.rb`
+   on `main`, over HTTPS using the `HOMEBREW_TAP_TOKEN` secret (a
+   fine-grained PAT scoped to Contents: read-and-write on
+   `cleat-team/homebrew-tap` only — deploy keys are disabled by org policy,
+   so this cannot use SSH). Skips the push if the rendered file is identical
+   to what is already there.
+
+**This is hand-maintained on purpose exactly once: the template.**
+goreleaser's `brews:` generator packages built binaries, and there is no
+macOS `cleat-worker` binary to package — the worker needs CGO and the
+release job cannot link a CGO darwin binary on ubuntu (see
+`IMPROVEMENT-PLAN.md` §3.54). The formula is a source build, which is what
 gives macOS a working worker at all, so it cannot be generated from the
-artifacts.
+release artifacts the way the rest of `.goreleaser.yml`'s output is. Editing
+the template's install/test logic goes through a normal PR here, same as any
+other file; only `url`/`sha256` are generated, and they never live in this
+repo as real values, so there is nothing here to go stale between releases.
 
-`packaging/homebrew/formula_test.go` fails if the tag in `url` and the `version`
-disagree, so a half-done bump is caught in CI. It cannot check that the
-`sha256` matches the tarball — that needs the network. Verify that yourself:
+**Token rotation.** `HOMEBREW_TAP_TOKEN` expires (fine-grained PATs always
+do). If the `homebrew-bump` job starts failing with `401`/`403` pushing to
+the tap, or ahead of the token's known expiry, an owner regenerates a
+fine-grained PAT scoped identically (`cleat-team/homebrew-tap`, Contents:
+read and write, no other repos or permissions) and updates the
+`HOMEBREW_TAP_TOKEN` Actions secret on `cleat-team/cleat`. Nothing else in
+this workflow needs to change when the token is rotated.
+
+**Verifying it worked**, either by re-deriving the CI job's own steps
+locally with a fake tag (the same check `packaging/homebrew/formula_test.go`'s
+`TestRenderProducesAPinnedTaggedFormula` runs on every PR that touches this
+area) or, after a real release, against what actually landed:
 
 ```bash
-brew style   packaging/homebrew/Formula/cleat.rb
-brew install --build-from-source packaging/homebrew/Formula/cleat.rb
+# Dry run: does the render mechanism itself work, with no tag or network needed?
+scripts/render-homebrew-formula.sh v9.9.9 "$(printf '0%.0s' {1..64})"
+
+# After a real release: did the tap actually get the new version?
+gh api repos/cleat-team/homebrew-tap/contents/Formula/cleat.rb --jq '.content' \
+  | base64 -d | grep -E '^\s*(url|sha256)\s'
+
+brew style   cleat-team/tap/cleat
+brew install cleat-team/tap/cleat
 brew test    cleat && brew uninstall cleat
 ```
 
 `brew test` runs `cleat-worker --verify-backend`, so it fails if the formula
 produced a worker that cannot construct the wasmtime backend.
+
+Testing a structural change to the formula itself, ahead of a release and
+without touching the tap: `brew install --HEAD --build-from-source
+packaging/homebrew/Formula/cleat.rb.tmpl` builds from the `head` line (the
+`develop` branch), which never touches `url`/`sha256` at all.
 
 ### 4. Run multi-database tests
 
