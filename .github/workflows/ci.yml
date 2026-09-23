@@ -1875,12 +1875,30 @@ jobs:
         with:
           platforms: arm64
 
-      - name: GoReleaser build (no publish)
+      # `build` (not `release`) used to be enough here, back when this step
+      # only had to produce binaries. cleat#2069's nfpms: block runs in the
+      # release pipeline, not the build one -- `goreleaser build` doesn't
+      # touch it at all, so the .deb-install steps below found nothing in
+      # dist/ the first time this shipped ("no linux_amd64 .deb in dist/ --
+      # nfpms didn't produce one").
+      #
+      # --skip=archive is NOT about avoiding cost -- it's a workaround for
+      # cleat#2107, a pre-existing bug this step is not the place to fix.
+      # develop's own .goreleaser.yml fails goreleaser's archives stage today
+      # ("different count of binaries for each platform": linux archives get
+      # 3 binaries, darwin gets 2, because cleat-worker is linux-only, and
+      # current goreleaser refuses that), in both --snapshot and a real
+      # tagged release -- verified against a throwaway tag, not just here.
+      # v0.2.0 shipped no cleat-worker asset at all, so no real release has
+      # exercised this shape yet, and the next v* tag push would fail on it
+      # independent of anything in this PR. Once cleat#2107 is fixed, this
+      # skip can come out and the dry run will cover archives again.
+      - name: GoReleaser release (snapshot, no publish)
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: latest
-          args: build --snapshot --clean
+          args: release --snapshot --clean --skip=publish,archive
         env:
           # Where qemu-aarch64 looks for the guest's dynamic loader and libc.
           # Without it the arm64 post hook dies with "Could not open
