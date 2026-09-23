@@ -937,25 +937,40 @@ func (s *MSSQLStore) deleteWorkflowsBatchOnce(ctx context.Context, selectSQL, la
 // escalation threshold.
 func (s *MSSQLStore) deleteWorkflowsChunkOnce(ctx context.Context, chunk []string) error {
 	return withRollbackGuaranteedRetry(ctx, "delete workflows chunk", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin: %w", err)
-		}
-		defer tx.Rollback()
+		return s.deleteWorkflowsChunkOnceOnce(ctx, chunk)
+	})
+}
 
-		for _, table := range mssqlWorkflowChildTables {
-			if table == "event_history" {
-				continue
-			}
-			if err := s.deleteByWorkflowIDs(ctx, tx, table, chunk); err != nil {
-				return err
-			}
+// deleteWorkflowsChunkOnceOnce is deleteWorkflowsChunkOnce's own transaction
+// body, split out so TestEveryMSSQLTransactionBoundaryIsRetried can see it is
+// reached through withRollbackGuaranteedRetry -- that test keys retry
+// coverage on a SEPARATELY NAMED function called by selector from inside the
+// retry closure (the same shape CompactHistory/compactHistoryOnce already
+// use), not on a BeginTx/Commit pair living directly in the wrapped function.
+// The interleaved small chunks deleteWorkflowsBatchOnce drives this from are
+// exactly the shape most likely to collide with a concurrent writer and be
+// chosen as a deadlock victim, which SQL Server rolls back itself -- reaching
+// the caller as an ordinary error the retry wrapper needs to see, not one
+// this function should ever swallow unretried.
+func (s *MSSQLStore) deleteWorkflowsChunkOnceOnce(ctx context.Context, chunk []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, table := range mssqlWorkflowChildTables {
+		if table == "event_history" {
+			continue
 		}
-		if err := s.deleteByWorkflowIDs(ctx, tx, "workflow_instances", chunk); err != nil {
+		if err := s.deleteByWorkflowIDs(ctx, tx, table, chunk); err != nil {
 			return err
 		}
-		return tx.Commit()
-	})
+	}
+	if err := s.deleteByWorkflowIDs(ctx, tx, "workflow_instances", chunk); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // deleteByWorkflowIDs deletes rows keyed to the given workflow ids, in chunks.
@@ -1057,24 +1072,37 @@ func (s *MSSQLStore) deleteEventHistoryRowBoundedCommitting(ctx context.Context,
 func (s *MSSQLStore) deleteEventHistoryChunkOnce(ctx context.Context, stmt string, args []any) (int64, error) {
 	var n int64
 	err := withRollbackGuaranteedRetry(ctx, "delete event_history chunk", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin: %w", err)
-		}
-		defer tx.Rollback()
-
-		res, err := tx.ExecContext(ctx, stmt, args...)
-		if err != nil {
-			return fmt.Errorf("delete event_history: %w", err)
-		}
-		n, err = res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("delete event_history: rows affected: %w", err)
-		}
-		return tx.Commit()
+		var innerErr error
+		n, innerErr = s.deleteEventHistoryChunkOnceOnce(ctx, stmt, args)
+		return innerErr
 	})
 	if err != nil {
 		return 0, fmt.Errorf("delete completed workflows: %w", err)
+	}
+	return n, nil
+}
+
+// deleteEventHistoryChunkOnceOnce is deleteEventHistoryChunkOnce's own
+// transaction body -- named and reached the same way
+// deleteWorkflowsChunkOnceOnce is; see that function's comment for why the
+// split exists (TestEveryMSSQLTransactionBoundaryIsRetried).
+func (s *MSSQLStore) deleteEventHistoryChunkOnceOnce(ctx context.Context, stmt string, args []any) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, stmt, args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete event_history: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete event_history: rows affected: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return n, nil
 }
