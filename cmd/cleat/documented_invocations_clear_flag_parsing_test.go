@@ -312,7 +312,8 @@ func positionalArgsAfterFlags(fields []string, flagTakesValue map[string]bool) [
 		}
 		name := strings.TrimLeft(f, "-")
 		if eq := strings.IndexByte(name, '='); eq >= 0 {
-			name = name[:eq]
+			// flag=value form; the value travels with this token, nothing
+			// more to consume.
 		} else if flagTakesValue[name] && i+1 < len(fields) {
 			i++
 		}

@@ -124,6 +124,7 @@ echo ""
 # Step 5 — Restart
 # ------------------------------------------------------------------
 echo -e "${GREEN}Step 5:${NC} Restarting worker..."
+# shellcheck disable=SC2016 # this is a display string showing the command, not code to expand
 echo '  $ cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080 &'
 echo ""
 
