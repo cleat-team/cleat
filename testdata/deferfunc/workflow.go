@@ -267,3 +267,25 @@ func TwoSequentialCalls(h cleat.HostCalls, input string) (string, error) {
 	}
 	return `{"status":"ok"}`, nil
 }
+
+// RetryBacksOffOnHost is cleat#2020's fixture, not 3.88's -- it shares
+// DeferOnLongRetryPolicy's host-vs-SDK retry split (see that comment), but
+// on the HOST side of it deliberately: one attempt, then a 10s backoff short
+// enough to stay under --host-retry-budget's default (60s worst-case), so
+// the wait happens in durablecalls.go's freshCall loop, worker-held, rather
+// than as a guest-side DurableSleep. 10s is long enough for a test to
+// observe the first attempt, cancel the worker, and still leave most of the
+// interval as margin between "aborted promptly" and "ran to completion".
+//
+// No defer: this is about the backoff wait itself, not what runs after it.
+func RetryBacksOffOnHost(h cleat.HostCalls, input string) (string, error) {
+	_, err := h.DurableCallWithOptions(cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
+			MaxAttempts:        2,
+			InitialInterval:    10 * time.Second,
+			BackoffCoefficient: 1.0,
+			MaxInterval:        10 * time.Second,
+		},
+	}, "always-fails", "op", `{}`)
+	return "", err
+}

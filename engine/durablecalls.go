@@ -614,6 +614,17 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 				// to the workflow like the service had answered with "".
 				written, _ := s.writeResult(ctx, m, responsePtr, ctx.Err().Error(), responseMaxLen)
 				return packDurableCallResult(int(written), callErrorUnknown, 1)
+			case <-s.engine.shutdownRequested:
+				// cleat#2020: ctx here is context.Background()-derived (every
+				// wasmtime host function builds its own), so ctx.Done() above
+				// can never fire on a real worker shutdown -- this is the
+				// channel that actually does. Retryable, unlike the ctx.Done()
+				// branch: nothing about this attempt failed, this worker is
+				// just going away before the backoff elapsed, and the
+				// workflow's own retry policy resumes it on whichever worker
+				// reclaims the run.
+				written, _ := s.writeResult(ctx, m, responsePtr, shutdownCallError, responseMaxLen)
+				return packDurableCallResult(int(written), callFailureCode, 1)
 			case <-time.After(time.Duration(backoffMs) * time.Millisecond):
 			}
 		}
@@ -934,6 +945,18 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 			if ctx.Err() != nil {
 				return
 			}
+			// cleat#2020: ctx is context.Background()-derived, so ctx.Err()
+			// above can never observe a real worker shutdown; this is the
+			// channel that does. Checked once, like ctx.Err(), because this
+			// is a pre-dispatch guard, not a wait -- an event was already
+			// recorded above, so a shutdown after this point is the same
+			// unsent-request case the surrounding fire-and-forget contract
+			// already accepts.
+			select {
+			case <-s.engine.shutdownRequested:
+				return
+			default:
+			}
 			callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
 			_, _ = s.callService(callCtx, service, operation, requestJSON, sendStep)
@@ -1001,6 +1024,12 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 		go func() {
 			select {
 			case <-ctx.Done():
+				return
+			case <-s.engine.shutdownRequested:
+				// cleat#2020: ctx.Done() above can never fire on a real worker
+				// shutdown (ctx is context.Background()-derived); this aborts
+				// the delayed dispatch instead of waiting out the delay on a
+				// worker that is already going away.
 				return
 			case <-time.After(time.Duration(delayMs) * time.Millisecond):
 				callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
