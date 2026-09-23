@@ -19,6 +19,32 @@ import (
 // shipped here rather than a copy that could silently drift from it.
 const mssqlClaimStep4Recheck = `status IN ('ready', 'terminating')`
 
+// mssqlClaimLockTimeoutMS bounds how long claim Step 4's UPDATE will wait on
+// a lock it cannot skip via READPAST (cleat#1963).
+//
+// READPAST on the UPDATE is a fast path, not a guarantee: it skips a row
+// whose CONFLICT IS VISIBLE at the point the UPDATE qualifies rows to
+// update, but a row can also block later, during THIS UPDATE's OWN index
+// maintenance (removing the row from every nonclustered claim index once its
+// status leaves 'ready'/'terminating') -- a lock request on a different
+// resource than the one READPAST's skip-check runs against. Measured
+// directly: a holder that locks ONLY via a nonclustered index (the ambiguity
+// test's own covered SELECT, WHERE status/next_wake_at with no `id =`
+// restriction -- fully satisfied by the index without touching the
+// clustered row) is invisible to READPAST here and blocks Step 4 for as
+// long as the holder holds it; TestAContendedMSSQLClaimNeverClaimsALockedRowThoughItMayNotSkipIt
+// reproduced this 3/3 with READPAST already applied.
+//
+// A bound is the fix, not a smarter hint: whatever the lock shape -- this
+// one, an escalation from a bulk retention delete (cleat#2060), or anything
+// unforeseen -- Step 4 must not wait indefinitely. LOCK_TIMEOUT applies to
+// every lock wait this session takes for the rest of the connection, not
+// just this one statement, which is why it is set immediately before Step 4
+// and reset immediately after (see the reset below): this is a pooled
+// connection, and a low timeout leaking into whatever the pool hands the
+// connection to next would silently break an unrelated caller's own wait.
+const mssqlClaimLockTimeoutMS = 500
+
 // ---------------------------------------------------------------------------
 // Claim Methods (C.3)
 // ---------------------------------------------------------------------------
@@ -233,20 +259,58 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 
 	// Step 4: update the claimed rows and read them back through OUTPUT.
 	//
-	// `AND status IN ('ready', 'terminating')` is a claimability RECHECK, not
-	// redundant with Step 1's predicate -- Step 1 read the status once, and this
-	// UPDATE can block (cleat#1963: Step 1's READPAST/UPDLOCK and this UPDATE's
-	// own X lock can land on different indexes for the same row, so a genuinely
-	// held lock is not detected and this row is treated as a free candidate).
-	// Without the recheck, an id that lost that block -- another claimer
-	// committed 'running' on it first -- silently gets overwritten when this
-	// UPDATE finally proceeds: a second `running`, a second `assigned_to`, a
-	// second `generation + 1`, i.e. two workers dispatching the same run. The
-	// recheck makes that id simply not match any more, so it drops out of
-	// OUTPUT instead of being stolen; see the reconciliation below for what
-	// that id's already-acquired concurrency key needs.
+	// `AND status IN ('ready', 'terminating')` is a claimability RECHECK
+	// (cleat#1963/cleat#2078), not redundant with Step 1's predicate -- Step 1
+	// read the status once, and this UPDATE can block. If it does, and the
+	// blocker commits 'running' on the row first, an id that lost that block
+	// would silently get overwritten when this UPDATE finally proceeds without
+	// the recheck: a second `running`, a second `assigned_to`, a second
+	// `generation + 1`, i.e. two workers dispatching the same run. The recheck
+	// makes that id simply not match any more, so it drops out of OUTPUT
+	// instead of being stolen -- regardless of *why* this UPDATE blocked, which
+	// is the point: this holds even though the specific mechanism first
+	// blamed for the block (Step 1 and this UPDATE landing on different SQL
+	// Server index resources) does not reproduce with Step 1's real text --
+	// see the correction on cleat#1963 and cleat#2078's PR description.
+	//
+	// `WITH (READPAST)` (cleat#1963) is the liveness half: this UPDATE must
+	// remove the row from every nonclustered claim index whose filter it no
+	// longer satisfies once status leaves 'ready'/'terminating' (index
+	// maintenance), which needs an X lock on each of those leaf entries --
+	// a SEPARATE resource from the clustered row this UPDATE looks the row up
+	// by. Without READPAST, a genuinely held lock on any one of those leaves
+	// (confirmed via sys.dm_tran_locks: a synthetic UPDLOCK/ROWLOCK holder on
+	// idx_instances_tenant_claimable blocks this UPDATE for 3s+ with no hint,
+	// and returns in ~20ms with affected=0 with READPAST) makes this UPDATE
+	// WAIT rather than skip. A row READPAST skips here needs the same
+	// concurrency-key/queue-slot reconciliation as a row the recheck excludes
+	// -- both leave the row out of OUTPUT for a reason Step 3 could not have
+	// known about, and the reconciliation below does not care which.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCK_TIMEOUT %d", mssqlClaimLockTimeoutMS)); err != nil {
+		return nil, fmt.Errorf("claim workflows: set lock timeout: %w", err)
+	}
+	// Reset unconditionally on every return from here on, however this
+	// function exits -- a scan error, a cancelled ctx mid-drain, anything.
+	// This is session state on a pooled connection: a low LOCK_TIMEOUT left
+	// set when this connection returns to the pool would make some later,
+	// unrelated caller's own statement fail with 1222 for no reason it could
+	// see. Deferred rather than called explicitly on each error path, since
+	// an explicit call on each path is exactly the shape that missed the
+	// rows2.Scan error return below in an earlier version of this function.
+	//
+	// Ordering matters and is what defer's LIFO gives for free: this defer
+	// is registered before rows2.Close()'s (below), so it RUNS AFTER --
+	// rows2 is fully drained before the reset is issued, which is required
+	// (see the comment above the old inline placement this replaced) to
+	// avoid deadlocking the connection against its own unread response.
+	defer func() {
+		if _, resetErr := tx.ExecContext(ctx, "SET LOCK_TIMEOUT -1"); resetErr != nil {
+			s.log().Error("claim: failed to reset LOCK_TIMEOUT on a pooled connection",
+				"error", resetErr, "worker_id", workerID)
+		}
+	}()
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		UPDATE workflow_instances
+		UPDATE workflow_instances WITH (READPAST)
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
 		    signal_consumed_at_claim = signal_consumed_seq,
@@ -267,7 +331,22 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		  AND tenant_id = @p3
 		  AND %s
 	`, mssqlClaimStep4Recheck), workerID, strings.Join(ids, ","), s.tenantID)
+	// Measured directly why the reset above cannot run inline here instead
+	// of deferred: TestZZScratchLockTimeoutValueDuringBlock hung 30s+ with
+	// an inline reset placed at this point, confirmed via
+	// sys.dm_exec_sessions that LOCK_TIMEOUT had in fact taken (500,
+	// correctly, on the blocked session) while the session stayed
+	// status=running the whole time -- not still waiting on the holder's
+	// lock, but stuck on the driver's own next request, because this
+	// driver serializes requests per connection and rows2's own response
+	// was still unread.
 	if err != nil {
+		if isMSSQLLockTimeout(err) {
+			// Not a failure: a genuinely held lock outlived this attempt's
+			// bound. No claim this round; ClaimWorkflows' own poll loop
+			// retries on its normal schedule.
+			return nil, nil
+		}
 		return nil, fmt.Errorf("claim workflows: %w", err)
 	}
 	defer rows2.Close()
@@ -305,7 +384,13 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		wf.PendingTerminalStatus = pendingTerminal.String
 		wfs = append(wfs, &wf)
 	}
+	// A lock-timeout can also surface here rather than at QueryContext, if
+	// this driver defers a QueryContext statement's actual execution until
+	// the first Next() call.
 	if err := rows2.Err(); err != nil {
+		if isMSSQLLockTimeout(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("claim workflows rows: %w", err)
 	}
 

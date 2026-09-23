@@ -129,6 +129,35 @@ func TestIsMSSQLTimeout(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// isMSSQLLockTimeout
+// ---------------------------------------------------------------------------
+
+func TestIsMSSQLLockTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"error 1222 lock timeout", fmt.Errorf("Lock request time out period exceeded. Error 1222"), true},
+		{"lock timeout phrase, mixed case", fmt.Errorf("LOCK REQUEST TIME OUT PERIOD EXCEEDED"), true},
+		// 258 is a different error (client/network wait), not this one.
+		{"error 258 is a different timeout", fmt.Errorf("timeout expired error 258"), false},
+		{"deadlock is a different error", fmt.Errorf("transaction was deadlocked"), false},
+		{"unrelated error", fmt.Errorf("connection refused"), false},
+		{"empty error", fmt.Errorf(""), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isMSSQLLockTimeout(tt.err)
+			if got != tt.want {
+				t.Errorf("isMSSQLLockTimeout(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // isMSSQLConnectionError
 // ---------------------------------------------------------------------------
 

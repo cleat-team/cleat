@@ -21,6 +21,7 @@ const (
 	mssqlErrUniqueConstraint = 2627 // violation of UNIQUE/PRIMARY KEY constraint
 	mssqlErrSnapshotConflict = 3960 // snapshot isolation update conflict
 	mssqlErrTimeout          = 258  // wait operation timed out
+	mssqlErrLockTimeout      = 1222 // lock request time out period exceeded (SET LOCK_TIMEOUT)
 )
 
 // In-memory OLTP (Hekaton) reports its write conflicts with its own numbers
@@ -152,6 +153,24 @@ func isMSSQLTimeout(err error) bool {
 		return true
 	}
 	return containsAny(err.Error(), "timeout expired", "timed out", "query timeout", "i/o timeout")
+}
+
+// isMSSQLLockTimeout checks for SET LOCK_TIMEOUT's own error (1222), distinct
+// from isMSSQLTimeout's 258: 258 is a client/network wait timing out, 1222 is
+// the server refusing to wait past a session's own configured bound on a lock
+// request. Deliberately NOT included in isMSSQLRetryable -- the caller that
+// sets a lock timeout (claim Step 4, cleat#1963) wants to treat this as "no
+// claim this round" and let its own poll loop retry later, not as a
+// transaction to replay immediately against a lock that is probably still
+// held.
+func isMSSQLLockTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if hasNumber(err, mssqlErrLockTimeout) {
+		return true
+	}
+	return containsAny(err.Error(), "lock request time out period exceeded")
 }
 
 // isMSSQLConnectionError checks for network-level errors that may be transient.
