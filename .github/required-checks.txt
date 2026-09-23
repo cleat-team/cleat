@@ -52,6 +52,7 @@
 AssemblyScript Tests
 Blobstore S3 Round-Trip
 Build
+Closing References
 Cluster Integration Tests
 Contributor License Agreement
 Cross-Language WASM E2E
