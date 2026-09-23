@@ -4,6 +4,7 @@ cmd/cleat	TestARelativeOutputDirectoryIsNotMisplaced	2
 cmd/cleat	TestARelativePythonEntryResolvesWhereTheUserStands	4
 cmd/cleat	TestASBuildRefusesNondeterminism	2
 cmd/cleat	TestASTransform	2
+cmd/cleat	TestAnAgentPythonRequirementsTxtResolves	2
 cmd/cleat	TestAnAssemblyScriptDefaultMakesAParameterOptional	2
 cmd/cleat	TestAnUnreadablePathIsNotAFinding	2
 cmd/cleat	TestBuildRefusesAFlagAfterThePath	1
@@ -33,6 +34,7 @@ cmd/cleat	TestVetExitCode	1
 cmd/cleat	TestVetPython	3
 cmd/cleat	TestVetPythonAcceptsTheSingleFileForm	2
 cmd/cleat	compileASFixture	1
+cmd/cleat	findPipOnPathOrSkip	1
 cmd/cleat	newASVetProject	1
 cmd/cleat	runVetCmd	1
 cmd/cleat-bench	TestHelperProcess	1
