@@ -52,6 +52,9 @@ func TestMetadataCarriesNoEntryPointParameterList(t *testing.T) {
 	var found []string
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
+		if isExemptField(f) {
+			continue
+		}
 		tag := strings.ToLower(f.Tag.Get("json"))
 		name := strings.ToLower(f.Name)
 		for _, s := range suspects {
@@ -103,5 +106,78 @@ func TestMetadataCarriesNoEntryPointParameterList(t *testing.T) {
 			"in a type that deliberately has exactly one (EntryParams). A scan that "+
 			"cannot see what it looks for reports a clean result whatever the truth is.",
 			hits)
+	}
+}
+
+// isExemptField names the one field TestMetadataCarriesNoEntryPointParameterList
+// above lets through, cleat#2066: EntryPoints []string names which WASM
+// exports a caller may start at, in source order -- nothing about their
+// parameters, types or signature. It does not weaken what that test
+// protects, because "which exports exist" and "what a schedule's stored
+// payload must look like to bind one" are different questions; the second is
+// the one CHANGELOG's cleat#1065/#1705 notes say the host cannot answer, and
+// this field still cannot answer it. The exemption is amended openly rather
+// than dodged by naming the field to miss the substring scan (which is how
+// this field was named the first time, and was wrong: a reader of Metadata
+// should not have to guess what a field called something else entirely
+// holds). The exemption is STRUCTURAL, not by name alone -- this also
+// requires the type to be exactly []string, so a later field that keeps the
+// same name but grows into carrying types or defaults still fails, and
+// nothing except this one exact field is let through.
+func isExemptField(f reflect.StructField) bool {
+	return f.Name == "EntryPoints" &&
+		f.Tag.Get("json") == "entry_points,omitempty" &&
+		f.Type == reflect.TypeOf([]string(nil))
+}
+
+// TestTheEntryPointsExemptionIsStructuralNotByName proves isExemptField lets
+// through exactly the one real field it names, and nothing that merely looks
+// like it -- a name collision with a different type, and a sibling field
+// that would carry the parameter information the exemption exists to keep
+// out. Both are throwaway types local to this test; nothing here should ever
+// need to change Metadata itself.
+func TestTheEntryPointsExemptionIsStructuralNotByName(t *testing.T) {
+	// The real field passes.
+	realField, ok := reflect.TypeOf(Metadata{}).FieldByName("EntryPoints")
+	if !ok {
+		t.Fatal("wasm.Metadata no longer has an EntryPoints field -- update or remove this test")
+	}
+	if !isExemptField(realField) {
+		t.Fatal("isExemptField does not exempt wasm.Metadata's own EntryPoints field")
+	}
+
+	// Same name, wrong type: the exemption must not fire on name alone.
+	type wrongType struct {
+		EntryPoints map[string]string `json:"entry_points,omitempty"`
+	}
+	if f, _ := reflect.TypeOf(wrongType{}).FieldByName("EntryPoints"); isExemptField(f) {
+		t.Fatal("isExemptField exempted a map-typed EntryPoints -- the type check is not structural")
+	}
+
+	// A sibling field naming what the exemption is there to keep out. Not
+	// exempt, and still caught by the suspects scan above.
+	type withSiblingParams struct {
+		EntryPoints       []string `json:"entry_points,omitempty"`
+		EntryPointDefault string   `json:"entry_point_default,omitempty"`
+	}
+	styp := reflect.TypeOf(withSiblingParams{})
+	var caught bool
+	suspects := []string{"param", "arg", "entrypoint", "entry_point", "signature"}
+	for i := 0; i < styp.NumField(); i++ {
+		f := styp.Field(i)
+		if isExemptField(f) {
+			continue
+		}
+		tag := strings.ToLower(f.Tag.Get("json"))
+		name := strings.ToLower(f.Name)
+		for _, s := range suspects {
+			if strings.Contains(name, s) || strings.Contains(tag, s) {
+				caught = true
+			}
+		}
+	}
+	if !caught {
+		t.Fatal("a sibling EntryPointDefault field next to the exempt EntryPoints was not caught -- " +
+			"the exemption is leaking past the one field it should cover")
 	}
 }

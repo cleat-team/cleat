@@ -699,18 +699,40 @@ func (a *hostPluginRegistryAdapter) RegisterStream(opts plugin.FuncOptions, fn p
 // WASM helpers
 // ---------------------------------------------------------------------------
 
-// determineEntryPoint extracts the entry point name from workflow input.
-// If the input has an "__entry_point" field, that value is used.
-// Otherwise it falls back to the first "handle_*" export in the WASM binary.
-// If no exports match, it returns an empty string and the caller should fail.
-func determineEntryPoint(input json.RawMessage, wasmBytes []byte) string {
-	var meta struct {
+// determineEntryPoint extracts the entry point name a workflow start should
+// call. Three sources, in order:
+//
+//  1. an explicit "__entry_point" field in the start input;
+//  2. the WASM's own cleat.metadata, which cleat build now stamps with the
+//     entry points it already computed to generate the exports in the first
+//     place (cleat#2066). Exactly one declared entry point resolves without
+//     the caller saying so; more than one is genuinely ambiguous and errors
+//     naming the candidates, rather than silently picking one.
+//  3. firstHandleExport, kept for WASM built before this or by an SDK that
+//     has not adopted EntryPoints yet -- see its own doc comment for why this
+//     alone was never reliable.
+//
+// cleat#2066 measured that no SDK in this repo's codegen ever produces a
+// "handle_"-prefixed export by convention (confirmed for Go, Rust, Java and
+// AssemblyScript), so (2) is the one of these three that is not a guess.
+func determineEntryPoint(input json.RawMessage, wasmBytes []byte) (string, error) {
+	var in struct {
 		EntryPoint string `json:"__entry_point"`
 	}
-	if err := json.Unmarshal(input, &meta); err == nil && meta.EntryPoint != "" {
-		return meta.EntryPoint
+	if err := json.Unmarshal(input, &in); err == nil && in.EntryPoint != "" {
+		return in.EntryPoint, nil
 	}
-	return firstHandleExport(wasmBytes)
+	if meta, err := wasm.ReadMetadata(wasmBytes); err == nil && len(meta.EntryPoints) > 0 {
+		if len(meta.EntryPoints) == 1 {
+			return meta.EntryPoints[0], nil
+		}
+		return "", fmt.Errorf("cannot determine entry point: this workflow declares %d entry points (%s) and the input named none of them via __entry_point",
+			len(meta.EntryPoints), strings.Join(meta.EntryPoints, ", "))
+	}
+	if ep := firstHandleExport(wasmBytes); ep != "" {
+		return ep, nil
+	}
+	return "", fmt.Errorf("cannot determine entry point: no __entry_point in input, no entry points declared in cleat.metadata, and no handle_* export in WASM binary")
 }
 
 // firstHandleExport scans a WASM binary's export section for the first
@@ -2570,11 +2592,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 
 	// ---- Determine entry point ----
-	entryPoint := determineEntryPoint(wf.Input, wasmBytes)
-	if entryPoint == "" {
-		w.recordTerminalFailure(wf, workflowStartTime,
-			"cannot determine entry point: no __entry_point in input and no handle_* export in WASM binary",
-			engine.ErrPermanent.String(), "")
+	entryPoint, entryPointErr := determineEntryPoint(wf.Input, wasmBytes)
+	if entryPointErr != nil {
+		w.recordTerminalFailure(wf, workflowStartTime, entryPointErr.Error(), engine.ErrPermanent.String(), "")
 		return
 	}
 

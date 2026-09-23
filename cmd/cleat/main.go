@@ -501,6 +501,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		PluginDeps:           derivePluginDeps(usage),
 		ChildVersions:        childVersions,
 		ChildBindingPolicy:   channel,
+		EntryPoints:          exportedEntryPointNames(result),
 	}
 	wasmWithMeta, err := wasm.WriteMetadata(wasmBytes, meta)
 	if err != nil {
@@ -1419,6 +1420,21 @@ func shortEntryPoints(result *analyzer.AnalysisResult) []string {
 	var names []string
 	for _, ep := range result.EntryPoints {
 		names = append(names, analyzer.ShortName(ep))
+	}
+	return names
+}
+
+// exportedEntryPointNames returns the actual WASM export names generateExport
+// (wasm/exports.go) will give each entry point -- ToSnakeCase of the short Go
+// name, the same conversion wasmOutputName below already applies to the
+// first one. cleat#2066: this is what cmd/cleat-worker/setup.go's
+// determineEntryPoint needs in wasm.Metadata to resolve a start with no
+// explicit __entry_point, so it has to be the export name a caller can
+// actually invoke, not the Go source name nothing outside this build knows.
+func exportedEntryPointNames(result *analyzer.AnalysisResult) []string {
+	var names []string
+	for _, short := range shortEntryPoints(result) {
+		names = append(names, wasm.ToSnakeCase(short))
 	}
 	return names
 }

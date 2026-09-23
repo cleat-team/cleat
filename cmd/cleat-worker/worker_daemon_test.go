@@ -2008,7 +2008,7 @@ func TestDetermineEntryPoint_EdgeCases(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := determineEntryPoint(tt.input, nil)
+			got, _ := determineEntryPoint(tt.input, nil)
 			if got != tt.want {
 				t.Errorf("determineEntryPoint(%s) = %q, want %q", string(tt.input), got, tt.want)
 			}

@@ -35,6 +35,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -159,6 +160,54 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 		t.Fatalf("make run succeeded but returned no run id -- output: %s", out)
 	}
 	t.Logf("started run %s", resp.ID)
+
+	// cleat#2066: a run id alone does not prove the workflow ran. Before that
+	// fix, this exact sequence -- deploy via the CLI, start via the
+	// Makefile's documented body with no __entry_point -- got a 2xx with an
+	// id and then failed a moment later with "cannot determine entry point",
+	// invisible to every assertion above. Poll to a terminal status and check
+	// the failure, if any, is not that one. Not asserting success outright:
+	// this template's first run is DOCUMENTED to fail for an unrelated,
+	// already-tracked reason (cleat#2067 item 5, an egress-refused
+	// http.fetch to a placeholder URL) -- conflating that into this test
+	// would make it fail for a reason cleat#2066 doesn't own and didn't fix.
+	status := pollWorkflowStatus(t, "http://localhost:8080/api/workflows/"+resp.ID)
+	if status.Status == "failed" && strings.Contains(status.Error, "cannot determine entry point") {
+		t.Fatalf("workflow %s failed on entry-point resolution -- cleat#2066 regressed: %s", resp.ID, status.Error)
+	}
+	t.Logf("run %s reached terminal status %q (error: %q)", resp.ID, status.Status, status.Error)
+}
+
+// pollWorkflowStatus polls a workflow's status endpoint until it reaches a
+// terminal status (done, failed, terminated, dead_lettered) or 20s pass.
+func pollWorkflowStatus(t *testing.T, url string) struct {
+	Status string `json:"status"`
+	Error  string `json:"error"`
+} {
+	t.Helper()
+	var resp struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	terminal := map[string]bool{"done": true, "failed": true, "terminated": true, "dead_lettered": true}
+	deadline := time.Now().Add(20 * time.Second)
+	client := &http.Client{Timeout: 2 * time.Second}
+	for time.Now().Before(deadline) {
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+		r, err := client.Do(req)
+		if err == nil {
+			body, _ := io.ReadAll(r.Body)
+			r.Body.Close()
+			if r.StatusCode == http.StatusOK {
+				if jsonErr := json.Unmarshal(body, &resp); jsonErr == nil && terminal[resp.Status] {
+					return resp
+				}
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Fatalf("workflow at %s did not reach a terminal status within 20s (last status: %q)", url, resp.Status)
+	return resp
 }
 
 // buildWorkerBinaryOnce builds cmd/cleat-worker once per test process and
