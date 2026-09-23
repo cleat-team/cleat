@@ -55,7 +55,16 @@ var dueBackupsQuery = plugin.Query{
 
 // Run starts the background backup scheduler loop. Every 60 seconds it queries
 // the backup_config table for enabled configs whose next_run_at <= now() and
-// executes pg_dump for each due backup. Returns when ctx is cancelled.
+// dispatches pg_dump for each due backup. Returns promptly when ctx is
+// cancelled -- it never blocks waiting for a backup to finish.
+//
+// A due backup runs on its own goroutine (see runDueBackups), deliberately
+// detached from ctx: a backup already in flight when ctx is cancelled is left
+// to run to completion rather than killed, because an interrupted pg_dump is
+// a data-safety problem, not a shutdown-latency one. executeScheduledBackup's
+// atomic rename is what makes that safe -- an interrupted backup never
+// produces a file at its final name and is never recorded as completed. So
+// Run returning does not mean every backup it dispatched has finished.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
 		p.logger.Warn("scheduledbackup: no database, background loop disabled")
@@ -170,18 +179,28 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 	}
 
 	for _, b := range due {
-		p.logger.Info("scheduledbackup: running scheduled backup",
+		b := b
+		p.logger.Info("scheduledbackup: dispatching scheduled backup",
 			"config_id", b.id, "tenant", b.tenantID, "name", b.name)
-		// Use a background context so the backup completes even if
-		// the originating ticker context is cancelled -- and scope it to the
+		// Use a background context so the backup completes even if the
+		// originating ticker context is cancelled -- and scope it to the
 		// config's own tenant, which the scan above read into b.tenantID.
 		//
 		// Built from context.Background() rather than from ctx for both
 		// reasons: to detach from the ticker, and because ctx now carries the
 		// sweep's bypass, which would silently swallow the ForTenant
 		// (cleat#1515).
-		p.executeScheduledBackup(plugin.ForTenant(context.Background(), b.tenantID),
-			b.id, b.tenantID, b.name, b.cronExpr)
+		//
+		// Run on its own goroutine, not inline, so a due backup can never
+		// hold Run's own goroutine hostage -- Run must return promptly on
+		// cancel even while a backup is running (cleat#2055). bgBackups lets
+		// a test wait for it to actually finish instead of sleeping.
+		p.bgBackups.Add(1)
+		go func() {
+			defer p.bgBackups.Done()
+			p.executeScheduledBackup(plugin.ForTenant(context.Background(), b.tenantID),
+				b.id, b.tenantID, b.name, b.cronExpr)
+		}()
 	}
 }
 
@@ -191,9 +210,18 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 	now := time.Now()
 	filename := fmt.Sprintf("scheduled_%s_%s.dump", name, now.Format("20060102150405"))
 
+	// bookkeepCtx carries the tenant scoping ForTenant set on ctx, but not
+	// ctx's cancellation: this goroutine is already detached from Run's ctx
+	// (see runDueBackups) so ctx is never cancelled in production, but a test
+	// exercising the interrupted-backup path directly can cancel it, and a
+	// bookkeeping write must still land regardless -- a write lost to a
+	// cancelled context would leave the row at 'running' until the 1-hour
+	// orphan sweep instead of promptly.
+	bookkeepCtx := context.WithoutCancel(ctx)
+
 	// Create history entry with status "running".
 	historyID := uuid.New()
-	_, err := p.db.Exec(ctx, plugin.Rebind(`
+	_, err := p.db.Exec(bookkeepCtx, plugin.Rebind(`
 		INSERT INTO backup_history (id, config_id, tenant_id, filename, status, started_at, created_at)
 		VALUES ($1, $2, $3, $4, 'running', $5, $5)
 	`, p.dialect), historyID, configID, tenantID, filename, now)
@@ -216,28 +244,43 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 		p.markBackupFailed(tenantID, historyID, err.Error())
 		return
 	}
+
+	// pg_dump writes to a temporary name and is renamed to dumpPath ONLY on
+	// success, so a backup killed mid-dump -- by worker shutdown, a crash, or
+	// anything else -- never leaves a file at the name a restore would look
+	// for, and backup_history is never left saying 'completed' for it. It
+	// stays 'running' (cleaned up below on failure, or by the 1-hour orphan
+	// sweep in cleanupOrphanedHistory if even that update is lost).
+	tmpPath := dumpPath + ".partial"
 	var stderr bytes.Buffer
-	err = runPgDump(ctx, p.config.DSN.Reveal(), dumpPath, &stderr)
-	if err != nil {
+	dumpErr := runPgDump(ctx, p.config.DSN.Reveal(), tmpPath, &stderr)
+	if dumpErr == nil {
+		if renameErr := os.Rename(tmpPath, dumpPath); renameErr != nil {
+			dumpErr = fmt.Errorf("rename partial dump to final name: %w", renameErr)
+		}
+	}
+	if dumpErr != nil {
+		os.Remove(tmpPath) // best-effort: pg_dump may have written partial data
 		errMsg := stderr.String()
 		if errMsg == "" {
-			errMsg = err.Error()
+			errMsg = dumpErr.Error()
 		}
 		p.logger.Error("scheduledbackup: pg_dump failed",
 			"config_id", configID, "history_id", historyID, "error", errMsg,
 		)
 
-		p.db.Exec(ctx, plugin.Rebind(`
+		p.db.Exec(bookkeepCtx, plugin.Rebind(`
 			UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
 			WHERE id = $2
 		`, p.dialect), errMsg, historyID)
 
 		// Still update next_run_at so the schedule can try again later.
-		p.updateNextRun(ctx, configID, cronExpr, now)
+		p.updateNextRun(bookkeepCtx, configID, cronExpr, now)
 		return
 	}
 
-	// Read the file size.
+	// Read the file size, from the final path -- the rename above already
+	// succeeded, so this is the completed dump, not the partial one.
 	var sizeBytes int64
 	if fi, fiErr := os.Stat(dumpPath); fiErr == nil {
 		sizeBytes = fi.Size()
@@ -250,12 +293,12 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 		"size_bytes", sizeBytes,
 	)
 
-	p.db.Exec(ctx, plugin.Rebind(`
+	p.db.Exec(bookkeepCtx, plugin.Rebind(`
 		UPDATE backup_history SET status = 'completed', size_bytes = $1, completed_at = now()
 		WHERE id = $2
 	`, p.dialect), sizeBytes, historyID)
 
-	p.updateNextRun(ctx, configID, cronExpr, time.Now())
+	p.updateNextRun(bookkeepCtx, configID, cronExpr, time.Now())
 }
 
 // updateNextRun calculates and updates the next_run_at and last_run_at for a

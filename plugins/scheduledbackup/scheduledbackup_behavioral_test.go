@@ -12,6 +12,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -2030,7 +2033,86 @@ func TestSB_Run_NoDSN(t *testing.T) {
 	}
 }
 
+// installFakePgDump puts a fake pg_dump executable first on PATH for the
+// rest of the test (restored via t.Cleanup), so runPgDump's
+// exec.CommandContext runs it instead of a real pg_dump. body is the rest of
+// the script after the shebang; it runs after the fake binary has already
+// signalled it started (see the returned path).
+//
+// Returns the path to a marker file the fake binary creates as its first
+// action, before body runs -- so a test can wait for the fake process to
+// actually be running before acting on it (e.g. cancelling a context),
+// without a fixed sleep.
+func installFakePgDump(t *testing.T, body string) (startedMarker string) {
+	t.Helper()
+	fakeDir := t.TempDir()
+	fakeBin := filepath.Join(fakeDir, "pg_dump")
+	startedMarker = filepath.Join(fakeDir, "started.marker")
+	script := "#!/bin/bash\n" +
+		"echo started > " + startedMarker + "\n" +
+		body
+	if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", fakeDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+	if p, err := exec.LookPath("pg_dump"); err != nil || p != fakeBin {
+		t.Fatalf("fake pg_dump not first on PATH: %v %v", p, err)
+	}
+	return startedMarker
+}
+
+// waitForFile polls for path to exist, failing the test if it doesn't appear
+// within timeout.
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s to appear", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForBgBackups waits for p's in-flight scheduled backups to finish,
+// failing the test rather than hanging forever if they don't.
+//
+// A deterministic wait, not a sleep: since cleat#2055, a due backup runs on
+// its own goroutine that Run does not wait for, so nothing about Run
+// returning tells you whether the backup it dispatched has finished. This is
+// the replacement for the fixed sleep TestSB_Run_Cancel used to need before
+// checking backup_history/backup_config.
+func waitForBgBackups(t *testing.T, p *Plugin) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		p.bgBackups.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for dispatched backup to finish")
+	}
+}
+
 func TestSB_Run_Cancel(t *testing.T) {
+	// A fake, deliberately slow pg_dump: relying on the real binary failing
+	// fast against the bogus DSN "postgres://test" is exactly the timing
+	// dependency that made TestSB_Run_Cancel flaky in CI in the first place
+	// (cleat#2055) -- sometimes fast (masks the bug), sometimes slow (trips
+	// it). A dump that reliably takes longer than this test's assertion
+	// window makes the outcome depend on Run's behavior, not on DNS timing
+	// or whether pg_dump is even installed.
+	installFakePgDump(t, "sleep 1\nexit 1\n")
+
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
 	p.config.DSN = "postgres://test"
@@ -2052,8 +2134,28 @@ func TestSB_Run_Cancel(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
 
-	// Give time for runDueBackups (calls executeScheduledBackup → pg_dump fails) to finish.
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the claim to have happened -- not a fixed sleep, and not tied
+	// to pg_dump's duration: executeScheduledBackup creates its
+	// backup_history row (status "running") as the very first thing it does,
+	// before touching pg_dump at all, so a history row appearing is a fast,
+	// deterministic signal that Run's initial runDueBackups call claimed the
+	// due config and dispatched the backup goroutine. Only then does
+	// cancelling ctx actually exercise "Run returns promptly while a backup
+	// is in flight" -- cancelling any earlier could abort the claim
+	// transaction itself and the test would show nothing was ever dispatched.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		fdb.mu.RLock()
+		n := len(fdb.history)
+		fdb.mu.RUnlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the due backup to be claimed and dispatched")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
 
 	select {
@@ -2061,9 +2163,13 @@ func TestSB_Run_Cancel(t *testing.T) {
 		if err != nil {
 			t.Errorf("Run: want nil, got %v", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not stop after cancel")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run did not stop promptly after cancel")
 	}
+
+	// The dispatched backup keeps running after Run returns (cleat#2055):
+	// wait for it deterministically before checking its effects.
+	waitForBgBackups(t, p)
 
 	fdb.mu.RLock()
 	histCount := len(fdb.history)
@@ -2078,6 +2184,71 @@ func TestSB_Run_Cancel(t *testing.T) {
 	}
 	if cfg.lastRunAt == nil {
 		t.Error("last_run_at should be set after Run (via updateNextRun)")
+	}
+}
+
+// TestSB_ExecuteScheduledBackup_KilledMidway_LeavesNoFinalArtifactAndNoSuccess
+// is the data-safety half of cleat#2055's fix: whatever interrupts pg_dump --
+// worker shutdown, a crash, here a direct context cancellation -- must never
+// leave a file at the dump's final name, and must never record the backup as
+// 'completed'.
+func TestSB_ExecuteScheduledBackup_KilledMidway_LeavesNoFinalArtifactAndNoSuccess(t *testing.T) {
+	// Writes some bytes to its -f target immediately (so a bug that renames
+	// unconditionally would be caught), then sleeps long enough to be
+	// reliably still running when the test cancels it.
+	//
+	// "exec sleep 30" rather than "sleep 30": exec replaces the shell's own
+	// process image, so the process exec.CommandContext kills IS the sleep,
+	// with no separate child. A plain "sleep 30" forks a grandchild that
+	// inherits the stderr pipe; killing the shell then leaves that orphaned
+	// sleep holding the pipe's write end open, and cmd.Wait() -- which reads
+	// stderr to a bytes.Buffer via a pipe -- blocks until that grandchild
+	// exits on its own, defeating the kill entirely.
+	startedMarker := installFakePgDump(t, "echo partial-data > \"$2\"\nexec sleep 30\n")
+
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+	p.config.DSN = "postgres://test"
+	p.config.DumpDir = t.TempDir()
+
+	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	cfgID := uuid.MustParse("00000000-0000-0000-0000-0000000000ee")
+
+	ctx, cancel := context.WithCancel(plugin.ForTenant(context.Background(), tid))
+	done := make(chan struct{})
+	go func() {
+		p.executeScheduledBackup(ctx, cfgID, tid, "kill-midway-test", "0 9 * * *")
+		close(done)
+	}()
+
+	waitForFile(t, startedMarker, 3*time.Second)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("executeScheduledBackup did not return after its context was cancelled")
+	}
+
+	entries, err := os.ReadDir(p.config.DumpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".partial") {
+			t.Errorf("found a final-named artifact after a killed backup: %s", e.Name())
+		}
+	}
+
+	fdb.mu.RLock()
+	defer fdb.mu.RUnlock()
+	if len(fdb.history) == 0 {
+		t.Fatal("expected a history entry to have been created")
+	}
+	for _, h := range fdb.history {
+		if h.status == "completed" {
+			t.Errorf("a killed backup must not be recorded as completed, got history entry %+v", h)
+		}
 	}
 }
 
@@ -2100,6 +2271,10 @@ func TestSB_RunDueBackups(t *testing.T) {
 	fdb.mu.Unlock()
 
 	p.runDueBackups(context.Background())
+
+	// runDueBackups only claims and dispatches (cleat#2055); the backup
+	// itself runs on its own goroutine.
+	waitForBgBackups(t, p)
 
 	fdb.mu.RLock()
 	histCount := len(fdb.history)

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/cleat-team/cleat/plugin"
 )
@@ -41,6 +42,13 @@ type Plugin struct {
 	logger  *slog.Logger
 	dialect plugin.Dialect
 	config  Config
+
+	// bgBackups tracks in-flight scheduled backups started off Run's own
+	// goroutine (background.go). Run does not wait on it -- a backup already
+	// running when ctx is cancelled is deliberately left to finish rather
+	// than killed, see runDueBackups. It exists so tests can wait for a
+	// dispatched backup to actually finish without a fixed sleep.
+	bgBackups sync.WaitGroup
 }
 
 // Config controls backup storage and pg_dump output location.
