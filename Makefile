@@ -226,6 +226,48 @@ coverage-check: coverage-go
 	    } \
 	}'
 
+# ---- tla --------------------------------------------------------------------
+#
+# cleat#1996: make TLA+ checking real. Runs SANY (parse) then TLC (model
+# check) for every specs/*.tla that has a matching specs/*.cfg -- currently
+# just CleatClaim.tla. The other three specs in specs/ are NOT run here; see
+# specs/README.md for why (superseded by cleat#1997-#2000, not being fixed).
+#
+# tla2tools.jar is not vendored (it is a ~2MB, rarely-changing Java jar);
+# fetched once per machine/CI-cache to .bin/tla2tools.jar and verified
+# against a pinned checksum below (trust-on-first-use -- see ci.yml's
+# shellcheck pin for the same caveat spelled out in full: this checksum
+# proves the file has not changed since the pin was written, not that
+# upstream intended it).
+TLA_VERSION := v1.7.4
+TLA_JAR := .bin/tla2tools.jar
+TLA_JAR_SHA256 := 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
+.PHONY: tla
+tla: $(TLA_JAR)
+	@fail=0; \
+	for cfg in specs/*.cfg; do \
+		[ -e "$$cfg" ] || continue; \
+		spec="$${cfg%.cfg}.tla"; \
+		name="$$(basename "$$spec" .tla)"; \
+		echo "==> SANY $$name"; \
+		java -cp "$(TLA_JAR)" tla2sany.SANY "$$spec" || { echo "SANY FAILED: $$name"; fail=1; continue; }; \
+		echo "==> TLC $$name"; \
+		java -cp "$(TLA_JAR)" tlc2.TLC -config "$$cfg" "$$spec" || { echo "TLC FAILED: $$name"; fail=1; continue; }; \
+	done; \
+	exit $$fail
+
+$(TLA_JAR):
+	@mkdir -p "$$(dirname "$(TLA_JAR)")"
+	curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+		-o "$(TLA_JAR)" \
+		"https://github.com/tlaplus/tlaplus/releases/download/$(TLA_VERSION)/tla2tools.jar"
+	@if command -v sha256sum >/dev/null 2>&1; then \
+		echo "$(TLA_JAR_SHA256)  $(TLA_JAR)" | sha256sum -c -; \
+	else \
+		echo "$(TLA_JAR_SHA256)  $(TLA_JAR)" | shasum -a 256 -c -; \
+	fi
+
 # ---- bench -----------------------------------------------------------------
 
 .PHONY: bench

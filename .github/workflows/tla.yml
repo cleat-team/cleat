@@ -1,0 +1,51 @@
+name: TLA+ Model Checking
+on:
+  pull_request:
+    branches: [main, develop]
+    # cleat#1996: run on a PR that touches specs/ itself, OR any file named in
+    # a checked spec's "Implemented by" header -- CleatClaim.tla's, currently.
+    # This list is NOT auto-derived from the header; scripts/check-tla-ci-paths.py
+    # (run in the job below) fails if the two ever disagree, so a spec's
+    # implementers list growing without this list growing is caught rather
+    # than silently making the job stop watching a file it names.
+    paths:
+      - "specs/**"
+      - "Makefile"
+      - ".github/workflows/tla.yml"
+      - "engine/store_lifecycle.go"
+      - "engine/mysql_lifecycle.go"
+      - "engine/mssql_lifecycle.go"
+      - "engine/mssql_operations.go"
+      - "engine/sharded_store.go"
+      - "engine/db.go"
+      - "cmd/cleat-worker/setup.go"
+    # `edited` is required, not decorative -- see ecosystem-ci.yml's comment
+    # on the same line for why (a retargeted PR would otherwise never trigger
+    # this workflow at all). scripts/check-workflow-pr-triggers.sh guards it.
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main, develop]
+
+# Least-privilege token -- this job only checks out code and runs a local
+# jar, same reasoning as ecosystem-ci.yml's permissions block.
+permissions:
+  contents: read
+
+jobs:
+  tla:
+    name: TLA+ Model Checking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Check the CI path filter names every spec's implementers
+        run: python3 scripts/check-tla-ci-paths.py
+
+      - name: SANY + TLC (make tla)
+        run: make tla
