@@ -192,9 +192,36 @@ cleat plugin validate --manifest plugin.json
 
 ### Step 6: Install locally for testing
 
+`plugin install` has no local-file mode -- it always installs by *name* from
+an *index* (`--index-url`, default `https://plugins.cleat.dev/index.yaml`),
+downloading the WASM binary over HTTP and verifying its checksum. To test a
+plugin you haven't published yet, serve it from a local index instead:
+
 ```
-cleat plugin install --manifest plugin.json --wasm plugin.wasm
+# Serve the built WASM binary locally.
+python3 -m http.server 8765 &
+
+# Compute its checksum (bare hex, no "sha256:" prefix).
+CHECKSUM=$(sha256sum plugin.wasm | cut -d' ' -f1)
+
+# Write a one-entry local index pointing at it.
+cat > index.yaml <<EOF
+plugins:
+  - name: example/hello-world
+    description: A minimal example third-party plugin
+    author: example-corp
+    versions:
+      - version: "0.1.0"
+        wasm_url: http://localhost:8765/plugin.wasm
+        checksum: "$CHECKSUM"
+EOF
+
+cleat --db "$CLEAT_DATABASE_URL" plugin install --index-url ./index.yaml --yes example/hello-world@0.1.0
 ```
+
+This stores the plugin in the local `plugin_defs` table, the same as an
+install from the real index. Stop the local server (`kill %1`) once you're
+done.
 
 ---
 
@@ -487,14 +514,13 @@ This checks:
 
 ### Local install test
 
-Install your plugin locally to verify it works end-to-end:
-
-```
-cleat plugin install --manifest plugin.json --wasm plugin.wasm
-```
+Install your plugin locally to verify it works end-to-end, the same way as
+[Step 6](#step-6-install-locally-for-testing) above: serve it from a local
+index, since `plugin install` always installs by name from an index rather
+than from local `--manifest`/`--wasm` files.
 
 This stores the plugin in the local `plugin_defs` table. You can then write a
-workflow that calls your host function and run it with `cleat workflow run`.
+workflow that calls your host function and run it with `cleat run`.
 
 ### Table-driven unit tests
 

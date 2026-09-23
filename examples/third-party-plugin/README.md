@@ -85,10 +85,25 @@ authors.
 
 ## Test locally
 
-1. Install the plugin into your local cleat instance:
+1. `plugin install` always installs by name from an index over HTTP -- there
+   is no `--manifest`/`--wasm` local-file mode. Serve the built binary from a
+   throwaway local index instead:
 
 ```bash
-cleat plugin install --manifest plugin.json --wasm plugin.wasm
+python3 -m http.server 8765 &
+CHECKSUM=$(sha256sum plugin.wasm | cut -d' ' -f1)
+cat > index.yaml <<EOF
+plugins:
+  - name: example/hello-world
+    description: A minimal example third-party plugin
+    author: example-corp
+    versions:
+      - version: "0.1.0"
+        wasm_url: http://localhost:8765/plugin.wasm
+        checksum: "$CHECKSUM"
+EOF
+cleat --db "$CLEAT_DATABASE_URL" plugin install --index-url ./index.yaml --yes example/hello-world@0.1.0
+kill %1
 ```
 
 2. Write a quick workflow that calls the plugin:

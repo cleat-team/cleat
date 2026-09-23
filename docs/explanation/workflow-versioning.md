@@ -152,10 +152,8 @@ cleat build --channel stable
 # Then edit the cleat.lock and change policy to "frozen" before embedding
 ```
 
-Or set the policy explicitly at build time (future CLI option):
-```
-cleat build --channel stable --binding-policy frozen
-```
+There is no `--binding-policy` flag to set this directly at build time; the
+`cleat.lock` edit above is the only way to select `"frozen"` today.
 
 With `"frozen"`, the parent workflow compiled as version 1 will always spawn
 child `Payment` version 3 (what was pinned at build time), even after
