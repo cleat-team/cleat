@@ -10,8 +10,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -48,6 +50,7 @@ type Runner struct {
 	db            *sql.DB
 	dialect       Dialect
 	migrationsDir string
+	overrideFS    fs.FS
 	schema        string
 	lockTimeout   time.Duration
 }
@@ -204,6 +207,16 @@ func NewRunner(db *sql.DB, dialect Dialect, dir string) *Runner {
 // an operator who has decided that should not have to fight the runner.
 func (r *Runner) WithLockTimeout(d time.Duration) *Runner {
 	r.lockTimeout = d
+	return r
+}
+
+// WithFS overrides where migrations are read from: instead of the dialect
+// subdirectories under dir (NewRunner's disk path), the dialect subdirectory
+// is read from fsys directly -- e.g. an embed.FS, so a binary can apply its
+// own migrations without depending on its working directory being a source
+// checkout. cmd/cleat-worker uses this with migrations.FS; see cleat#1968.
+func (r *Runner) WithFS(fsys fs.FS) *Runner {
+	r.overrideFS = fsys
 	return r
 }
 
@@ -474,10 +487,24 @@ func (r *Runner) ensureMigrationsTable(ctx context.Context, session sqlSession) 
 // matching the NNN_name.sql naming convention and returns them sorted by
 // version number. Files that do not match the convention are silently skipped.
 func (r *Runner) readMigrations() ([]migration, error) {
-	migDir := filepath.Join(r.migrationsDir, string(r.dialect))
-	entries, err := os.ReadDir(migDir)
+	// fs.FS paths are always forward-slash and never absolute, unlike
+	// filepath.Join's OS-native separator -- dialect is a single path
+	// segment ("postgres"), so it is valid either way, and os.DirFS makes
+	// the disk case behave exactly as the old os.ReadDir/os.ReadFile calls
+	// did. displayDir is for error messages only; it plays no part in
+	// resolving the path.
+	fsys := r.overrideFS
+	displayDir := filepath.Join(r.migrationsDir, string(r.dialect))
+	if fsys == nil {
+		fsys = os.DirFS(r.migrationsDir)
+	} else {
+		displayDir = string(r.dialect) + " (embedded)"
+	}
+	migDir := string(r.dialect)
+
+	entries, err := fs.ReadDir(fsys, migDir)
 	if err != nil {
-		return nil, fmt.Errorf("read directory %s: %w", migDir, err)
+		return nil, fmt.Errorf("read directory %s: %w", displayDir, err)
 	}
 
 	var migrations []migration
@@ -501,7 +528,7 @@ func (r *Runner) readMigrations() ([]migration, error) {
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(migDir, name))
+		data, err := fs.ReadFile(fsys, path.Join(migDir, name))
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
