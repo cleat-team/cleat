@@ -8,15 +8,14 @@ import (
 	"strings"
 )
 
-// This file extracts, from source, the entry-point names each non-Go SDK's
-// own codegen will use as the WASM export name for a durable entry point --
-// cleat#2097, the Rust/Java/AssemblyScript half of cleat#2096. Each
-// extractor mirrors the ACTUAL naming rule the SDK's own codegen uses, not a
-// guess at one, so a name in wasm.Metadata.EntryPoints always matches a real
-// export determineEntryPoint (cmd/cleat-worker/setup.go) can resolve:
+// This file extracts, from source, the entry-point names the Java and
+// AssemblyScript SDKs' own codegen will use as the WASM export name for a
+// durable entry point -- cleat#2097, the Java/AssemblyScript half of
+// cleat#2096. Each extractor mirrors the ACTUAL naming rule the SDK's own
+// codegen uses, not a guess at one, so a name in wasm.Metadata.EntryPoints
+// always matches a real export determineEntryPoint
+// (cmd/cleat-worker/setup.go) can resolve:
 //
-//   - Rust (crates/cleat-macro/src/entry.rs): #[cleat_entry] takes no
-//     arguments. The export is always the literal function identifier.
 //   - Java (crates/cleat-java/.../CleatEntryProcessor.java:121-123): the
 //     export is @CleatEntry's `name` attribute WHEN GIVEN, and only falls
 //     back to the method's own name when that attribute is absent or empty.
@@ -34,50 +33,41 @@ import (
 // (cleat#2109 review). Go's own EntryPoints (wasm/exports.go, GenerateExports)
 // has no such gap: cleat's own analyzer walks the AST to decide what to
 // generate, and the SAME computation is what gets recorded, so there is
-// nothing to drift. For Rust/Java/AssemblyScript cleat does not generate the
-// export code -- cargo, TeaVM and asc do, from the SDK's own macro,
-// annotation processor and transform -- so these extractors are a SEPARATE,
-// approximate prediction of what that external compilation will produce, not
-// a report of what it already produced. That is a materially weaker
-// guarantee, and the honest list of what it can miss: a macro-generated
-// #[cleat_entry] invocation (one that does not appear literally as
-// `#[cleat_entry]` in source), a cfg-gated function compiled out for the
-// target platform, a decorator/annotation split across lines in a shape none
-// of these regexes anticipated, or the annotation imported under a renamed
-// alias.
+// nothing to drift. For Java/AssemblyScript cleat does not generate the
+// export code -- TeaVM and asc do, from the SDK's own annotation processor
+// and transform -- so these extractors are a SEPARATE, approximate
+// prediction of what that external compilation will produce, not a report
+// of what it already produced. That is a materially weaker guarantee, and
+// the honest list of what it can miss: a cfg-gated method compiled out for
+// the target platform, a decorator/annotation split across lines in a shape
+// none of these regexes anticipated, or the annotation imported under a
+// renamed alias.
+//
+// Rust no longer works this way. cleat#2113 moved Rust off source-level
+// prediction entirely: the #[cleat_entry] proc macro
+// (crates/cleat-macro/src/entry.rs) now emits a `cleat_entry_points` custom
+// WASM section at expansion -- one linker-merged static per entry, so the
+// section is authoritative for whatever the compiler actually saw, with
+// nothing left for a regex to miss. build_rust.go reads it with
+// wasm.ReadEntryPointsSection instead of calling into this file. The
+// principled fix described below for Java/AssemblyScript is the same move,
+// not yet made for either toolchain.
 //
 // The principled fix is each SDK's own codegen stating its entries in the
-// artifact it produces -- e.g. the Rust proc macro emitting a
-// `cleat.entry_points` custom WASM section at expansion, since it is the one
-// place that genuinely sees every #[cleat_entry] the way the compiler will.
-// That needs the macro to accumulate names across independent expansions
-// into one section (Rust's proc-macro model has no such state today) and an
-// equivalent per-SDK mechanism for Java/AssemblyScript -- real compiler-level
-// work in three different toolchains, not a build_entry_points.go change.
-// Out of scope for a 0.3.0 fix; tracked as a follow-up rather than folded in
-// here, so the choice is on record rather than left to be rediscovered.
+// artifact it produces. For Java and AssemblyScript that needs an
+// equivalent per-SDK mechanism to Rust's linker-merged section -- real
+// compiler-level work in two different toolchains, not a
+// build_entry_points.go change. Out of scope for a 0.3.0 fix; tracked as a
+// follow-up rather than folded in here, so the choice is on record rather
+// than left to be rediscovered.
 //
-// So THIS extractor is a stand-in, and it is not left unchecked: every name
-// it puts in cleat.metadata is cross-verified against the .wasm the build
+// So THESE extractors are a stand-in, and they are not left unchecked: every
+// name put in cleat.metadata is cross-verified against the .wasm the build
 // just produced (verifyEntryPointsAreExports, below) before that binary is
 // written to disk. A name this file predicted that the compiler did not
 // actually export fails the BUILD, loudly, at the moment the drift is
 // introduced -- rather than surfacing later as a live "cannot determine
 // entry point" a caller has no way to connect back to a source change.
-
-// rustEntryPointNames returns the WASM export names crateDir's #[cleat_entry]
-// functions will compile to, in file-then-source order.
-func rustEntryPointNames(crateDir string) []string {
-	var names []string
-	rustEntryRe := regexp.MustCompile(`#\[cleat_entry\][\s]*(?:#\[[^\]]*\][\s]*)*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?fn\s+(\w+)`)
-	walkSourceFiles(crateDir, ".rs", []string{"target", ".git", "tests", "benches", "examples"}, func(data []byte) {
-		code := stripCLikeComments(data)
-		for _, m := range rustEntryRe.FindAllSubmatch(code, -1) {
-			names = append(names, string(m[1]))
-		}
-	})
-	return names
-}
 
 // javaEntryPointNames returns the WASM export names projectDir's @CleatEntry
 // methods will compile to, in file-then-source order.

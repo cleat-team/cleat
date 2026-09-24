@@ -9,6 +9,7 @@ package wasm
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -113,6 +114,58 @@ func WriteMetadata(wasmBytes []byte, meta *Metadata) ([]byte, error) {
 	return result, nil
 }
 
+// entryPointsSectionName is the WASM custom section an SDK's own compiled
+// output carries its entry-point names in -- cleat#2113. Unlike
+// "cleat.metadata" (sectionName, above), which cleat build writes itself
+// after compilation from a source-level prediction, this section is written
+// by the SDK's own build process (the Rust #[cleat_entry] proc macro, at
+// present -- see crates/cleat-macro/src/entry.rs). Its presence is therefore
+// proof the compiler itself saw each declared entry point, not a guess at
+// what it would produce.
+const entryPointsSectionName = "cleat_entry_points"
+
+// ErrEntryPointsSectionMissing is returned by ReadEntryPointsSection when a
+// WASM binary carries no "cleat_entry_points" custom section -- an SDK
+// version built before it started emitting one. Callers should fail the
+// build rather than fall back to a source-level guess: a name a regex
+// predicts and the compiler never actually saw is exactly the silent-miss
+// risk this section exists to remove (cleat#2113).
+var ErrEntryPointsSectionMissing = errors.New("no cleat_entry_points section found in WASM binary")
+
+// ReadEntryPointsSection extracts and parses the "cleat_entry_points" custom
+// section: one export name per line, in the order the linker assembled them
+// from however many #[cleat_entry]-style expansions contributed one. Returns
+// ErrEntryPointsSectionMissing if the section is absent, and an error naming
+// every name that appears more than once if any does.
+func ReadEntryPointsSection(wasmBytes []byte) ([]string, error) {
+	payload, err := readCustomSection(wasmBytes, entryPointsSectionName)
+	if err != nil {
+		return nil, ErrEntryPointsSectionMissing
+	}
+	var names []string
+	seen := make(map[string]bool)
+	var dups []string
+	dupSeen := make(map[string]bool)
+	for _, line := range strings.Split(string(payload), "\n") {
+		if line == "" {
+			continue
+		}
+		if seen[line] {
+			if !dupSeen[line] {
+				dups = append(dups, line)
+				dupSeen[line] = true
+			}
+			continue
+		}
+		seen[line] = true
+		names = append(names, line)
+	}
+	if len(dups) > 0 {
+		return nil, fmt.Errorf("cleat_entry_points: duplicate entry point name(s): %s", strings.Join(dups, ", "))
+	}
+	return names, nil
+}
+
 // --- low-level WASM custom section helpers ---
 
 func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {
@@ -162,7 +215,7 @@ func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 		// Not the section we want; skip payload.
 		offset = sectionEnd
 	}
-	return nil, fmt.Errorf("no cleat.metadata section found in WASM binary")
+	return nil, fmt.Errorf("no %s section found in WASM binary", name)
 }
 
 func writeCustomSection(wasmBytes []byte, name string, payload []byte) ([]byte, error) {

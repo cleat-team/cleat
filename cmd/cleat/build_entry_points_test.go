@@ -10,22 +10,18 @@ import (
 
 // These run against the REAL checked-in examples, not synthetic fixtures --
 // each one already exercises the exact case that would defeat a naive
-// extractor: Rust's source mentions `#[cleat_entry]` inside doc comments
-// describing the macro itself (must not be picked up), and both AS and Java
-// give their entry an explicit display name that differs from the actual
-// identifier the export must be named after (must NOT be picked up in
-// AS's case, MUST be picked up in Java's -- the two SDKs disagree on which
-// one wins, per each one's own codegen, and a test that used only one of
-// them could not catch the extractor defaulting to the wrong rule).
-
-func TestRustEntryPointNamesReadsTheRealExample(t *testing.T) {
-	got := rustEntryPointNames("../../examples/rust-workflow/src")
-	want := []string{
-		"place_order", "cancel_order", "defer_order", "suspend_probe",
-		"sleep_probe", "sleep_discard_probe", "retry_probe", "retry_long_probe",
-	}
-	assertSameNames(t, got, want)
-}
+// extractor: both AS and Java give their entry an explicit display name that
+// differs from the actual identifier the export must be named after (must
+// NOT be picked up in AS's case, MUST be picked up in Java's -- the two SDKs
+// disagree on which one wins, per each one's own codegen, and a test that
+// used only one of them could not catch the extractor defaulting to the
+// wrong rule).
+//
+// Rust has no extractor test here since cleat#2113: its entry points come
+// from the cleat_entry_points WASM section the #[cleat_entry] macro itself
+// emits, read via wasm.ReadEntryPointsSection and proven against the real
+// example by TestRustExampleEntryPointResolutionLive
+// (rust_entry_point_resolution_live_test.go), not by source scanning.
 
 func TestJavaEntryPointNamesReadsTheRealExample(t *testing.T) {
 	got := javaEntryPointNames("../../examples/java-workflow")
@@ -63,27 +59,6 @@ class Workflow {
 `)
 	got := javaEntryPointNames(dir)
 	assertSameNames(t, got, []string{"runIt"})
-}
-
-// The risk this guards against isn't a `//` line comment mentioning the
-// attribute (each commented line's own leading `//` already breaks the
-// regex's required adjacency between #[cleat_entry] and `fn`, with or
-// without stripping) -- it's a function commented out inside a `/* */`
-// block, where nothing but the block delimiters separates them, and the
-// delimiters are NOT part of what the regex matches against once stripped.
-func TestRustEntryPointNamesIgnoresAFunctionCommentedOutInABlockComment(t *testing.T) {
-	dir := t.TempDir()
-	writeTestFile(t, dir, "lib.rs", `
-/*
-#[cleat_entry]
-fn commented_out(h: &HostCalls, input: Input) -> Result<String, String> { Ok(input) }
-*/
-
-#[cleat_entry]
-fn real_one(h: &HostCalls, input: Input) -> Result<String, String> { Ok(input) }
-`)
-	got := rustEntryPointNames(dir)
-	assertSameNames(t, got, []string{"real_one"})
 }
 
 // Same risk, Java's side: a block comment is the one case where nothing but

@@ -1,12 +1,13 @@
-// cleat#2097. cmd/cleat/build_entry_points_test.go proves rustEntryPointNames
-// reads the right names out of source; cmd/cleat/build_metadata_test.go
-// proves nonGoMetadata's result passes Validate(). Neither proves the names
-// that land in wasm.Metadata.EntryPoints are the names actually exported by
-// the .wasm cargo produces -- a mismatch there (mangled symbols, a build
-// target that doesn't preserve `#[no_mangle]`-style naming, an extractor
-// regex that drifted from the SDK's real codegen) would build and deploy
-// cleanly and only surface as a live "cannot determine entry point" or a
-// trap once a worker tried to run it. Same standard
+// cleat#2097, extended by cleat#2113. cmd/cleat/build_metadata_test.go proves
+// nonGoMetadata's result passes Validate(). Neither that nor the fact that
+// wasm.ReadEntryPointsSection parses correctly (wasm/metadata_test.go) proves
+// the names that land in wasm.Metadata.EntryPoints are the names actually
+// exported by the .wasm cargo produces -- a mismatch there (mangled symbols,
+// a build target that doesn't preserve `#[no_mangle]`-style naming, a linker
+// that drops or reorders the cleat_entry_points section under some
+// LTO/strip combination this repo's own examples don't exercise) would build
+// and deploy cleanly and only surface as a live "cannot determine entry
+// point" or a trap once a worker tried to run it. Same standard
 // fullstack_template_run_starts_a_workflow_test.go (cleat#2066) already holds
 // the Go path to: "NOT MERELY A 2XX, AND NOT MERELY THAT CURL RAN" -- a
 // string search over source cannot tell "the export exists" from "the build
@@ -31,7 +32,8 @@
 //  2. An explicit entry_point naming one of the build's real, extracted
 //     names must be accepted and actually reach the guest -- proving the
 //     string cargo put in the .wasm's export section is byte-for-byte the
-//     string rustEntryPointNames put in cleat.metadata.
+//     string the cleat_entry_points section (and, from it, cleat.metadata)
+//     carries the same name as.
 package main
 
 import (
@@ -44,6 +46,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cleat-team/cleat/wasm"
 )
 
 func TestRustExampleEntryPointResolutionLive(t *testing.T) {
@@ -66,29 +70,45 @@ func TestRustExampleEntryPointResolutionLive(t *testing.T) {
 		t.Fatalf("computed rust example dir %s has no Cargo.toml: %v", cargoDir, statErr)
 	}
 
+	// Confirmed directly, rather than by matching a substring against the
+	// build's combined output: runBuildRust prints "Compiling Rust WASM
+	// module (wasm32-unknown-unknown)..." as an ordinary progress line on
+	// every build, successful or not, so a
+	// strings.Contains(out, "wasm32-unknown-unknown") check misclassifies
+	// ANY later build failure as "target not installed" and skips past it
+	// silently -- caught while falsifying cleat#2113's own regression test
+	// (rust_entry_points_survive_a_renamed_import_test.go), which used this
+	// exact check and skipped instead of failing on a real, deliberately
+	// introduced regression.
+	if listOut, listErr := exec.Command("rustup", "target", "list", "--installed").CombinedOutput(); listErr != nil ||
+		!strings.Contains(string(listOut), "wasm32-unknown-unknown") {
+		t.Skip("wasm32-unknown-unknown target not installed")
+	}
+
 	outDir := t.TempDir()
 	buildCmd := exec.Command(cleatBinary, "build", "--target", "rust", "-o", outDir, cargoDir)
 	buildCmd.Dir = repoRoot
 	if out, buildErr := buildCmd.CombinedOutput(); buildErr != nil {
-		if strings.Contains(string(out), "wasm32-unknown-unknown") {
-			t.Skipf("wasm32-unknown-unknown target not installed: %s", out)
-		}
 		t.Fatalf("cleat build --target rust: %v\n%s", buildErr, out)
 	}
 
-	// rustEntryPointNames is the same extractor the build just used to
-	// populate cleat.metadata -- read directly here as the independent
-	// expectation the live error message is checked against below, rather
-	// than hardcoding the example's entry point list a second time where it
-	// could drift from the source.
-	wantEntryPoints := rustEntryPointNames(filepath.Join(cargoDir, "src"))
-	if len(wantEntryPoints) < 2 {
-		t.Fatalf("expected examples/rust-workflow to declare multiple entry points, got %v", wantEntryPoints)
+	wasmPath := filepath.Join(outDir, "rust_workflow.wasm")
+	wasmBytes, readErr := os.ReadFile(wasmPath)
+	if readErr != nil {
+		t.Fatalf("build did not produce %s: %v", wasmPath, readErr)
 	}
 
-	wasmPath := filepath.Join(outDir, "rust_workflow.wasm")
-	if _, statErr := os.Stat(wasmPath); statErr != nil {
-		t.Fatalf("build did not produce %s: %v", wasmPath, statErr)
+	// wantEntryPoints is read from the SAME compiled artifact the build just
+	// produced and deploy is about to use -- the authoritative
+	// cleat_entry_points section the #[cleat_entry] macro itself emitted at
+	// expansion (cleat#2113), not a source-level re-derivation that could
+	// drift from what cleat build actually put in cleat.metadata.
+	wantEntryPoints, epErr := wasm.ReadEntryPointsSection(wasmBytes)
+	if epErr != nil {
+		t.Fatalf("reading cleat_entry_points from the build's own output: %v", epErr)
+	}
+	if len(wantEntryPoints) < 2 {
+		t.Fatalf("expected examples/rust-workflow to declare multiple entry points, got %v", wantEntryPoints)
 	}
 
 	dsn, containerName := startSandboxPostgres(t)
@@ -167,8 +187,8 @@ func TestRustExampleEntryPointResolutionLive(t *testing.T) {
 	status = pollWorkflowStatus(t, "http://localhost:8080/api/workflows/"+explicitID)
 	if strings.Contains(status.Error, "cannot determine entry point") || strings.Contains(status.Error, "no handle_* export") {
 		t.Fatalf("run %s (entry_point=place_order, a name the build itself extracted) failed on entry-point "+
-			"resolution: %s -- the name cargo exported does not match what rustEntryPointNames put in cleat.metadata",
-			explicitID, status.Error)
+			"resolution: %s -- the name cargo exported does not match what the cleat_entry_points section put "+
+			"in cleat.metadata", explicitID, status.Error)
 	}
 	t.Logf("explicit entry_point=place_order reached the guest: status %q, error %q", status.Status, status.Error)
 }

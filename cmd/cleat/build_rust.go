@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -97,12 +98,33 @@ func runBuildRust(pattern, outDir, channel string, workflowVersion int) {
 		os.Exit(1)
 	}
 
-	// entryPoints is source-extracted, not read from the compiler's own
-	// output -- see build_entry_points.go's doc comment for why, and why
-	// verifyEntryPointsAreExports (immediately below) is what makes that
-	// safe: a name the extractor predicted wrong fails THIS build rather
-	// than surfacing later as a live entry-point-resolution failure.
-	entryPoints := rustEntryPointNames(cargoDir)
+	// entryPoints is read from the "cleat_entry_points" custom section the
+	// #[cleat_entry] proc macro itself emits at expansion (cleat#2113) --
+	// authoritative, not a source-level guess: its presence is proof the
+	// compiler saw every declared entry, so there is nothing left for a
+	// regex to get wrong. See wasm.ReadEntryPointsSection and
+	// crates/cleat-macro/src/entry.rs for how the section is assembled by
+	// the linker from one static per #[cleat_entry] expansion.
+	//
+	// A missing section means a crate built against a cleat-sdk/cleat-macro
+	// old enough to predate this mechanism -- refused rather than silently
+	// falling back to source-level prediction, which would reopen exactly
+	// the silent-miss risk this section exists to close.
+	entryPoints, epErr := wasm.ReadEntryPointsSection(input)
+	if epErr != nil {
+		if errors.Is(epErr, wasm.ErrEntryPointsSectionMissing) {
+			fmt.Fprintf(os.Stderr, "Error: rust build: the compiled .wasm carries no \"cleat_entry_points\" "+
+				"section. This crate's cleat-macro dependency predates cleat#2113 and does not emit it. "+
+				"Upgrade cleat-macro (and cleat-sdk) to a version that emits cleat_entry_points, then rebuild.\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: rust build: %v\n", epErr)
+		}
+		os.Exit(1)
+	}
+	// The other direction still matters: the section can only name what the
+	// macro expanded over, and says nothing about whether the linker
+	// actually kept the export alive under this crate's own LTO/strip
+	// settings. See verifyEntryPointsAreExports's own doc comment.
 	if verifyErr := verifyEntryPointsAreExports("rust", input, entryPoints); verifyErr != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", verifyErr)
 		os.Exit(1)
