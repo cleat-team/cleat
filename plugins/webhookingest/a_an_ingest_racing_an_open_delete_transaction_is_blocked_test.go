@@ -42,51 +42,68 @@ import (
 // of this test that just ran both sequentially would pass whether or not the
 // ingest actually waited for anything.
 //
-// PostgreSQL, MySQL and SQL Server. PostgreSQL: FOR SHARE closes the gap at
-// its default READ COMMITTED, where a plain read does not see an UPDATE
-// inside a still-open transaction. SQL Server: with READ_COMMITTED_SNAPSHOT
-// (RCSI) ON -- the configuration docs/reference/database-backends.md
-// recommends -- a plain read sees a row-versioned snapshot instead of
-// blocking on the open UPDATE's lock, so it has the SAME gap PostgreSQL has
-// and needs the SAME kind of fix: WITH (READCOMMITTEDLOCK) on the
-// existsGuard SELECT (routes.go). This test runs SQL Server's leg against a
-// PRIVATE database with RCSI forced ON, because RCSI ON is the case the fix
-// exists for and the shared CI database's own RCSI setting is not this
-// test's to depend on. cleat#2237, the same gap cleat#2233 closed for
-// notifications' sendWebhook -- this test is that PR's
-// TestASendWebhookRacingAnOpenDeleteTransactionIsBlocked, adapted to this
-// package's HTTP handler.
+// PostgreSQL, MySQL (at both its default isolation and at READ COMMITTED)
+// and SQL Server. PostgreSQL: FOR SHARE closes the gap at its default READ
+// COMMITTED, where a plain read does not see an UPDATE inside a still-open
+// transaction.
 //
-// MySQL gets a "mysql" subtest too, not on the strength of the routes.go
-// comment's claim that its default isolation already blocks a plain read
-// against a row an open UPDATE holds -- that claim shipped in #2221 (the PR
-// that added FOR SHARE there) with no live-interleaving test behind it,
-// which is exactly the unmeasured-claim shape CLAUDE.md warns about. This
-// subtest is that measurement: same runIngestRaceTest, same 700ms proof of
-// blocking, against real MySQL, with FOR SHARE already in production code
-// for that dialect (routes.go's existsGuard applies it to everything but
-// MSSQL).
+// MySQL gets TWO subtests, and neither is on the strength of the routes.go
+// comment's original claim that its default isolation already blocks a
+// plain read against a row an open UPDATE holds -- that claim shipped in
+// #2221 with no live-interleaving test behind it, which is exactly the
+// unmeasured-claim shape CLAUDE.md warns about, and it was also imprecise: a
+// plain InnoDB SELECT never blocks. What actually closes the gap is
+// narrower -- this is an INSERT ... SELECT, and InnoDB takes shared
+// next-key locks on the rows the SELECT half reads, but only at REPEATABLE
+// READ (MySQL's default). "mysql" measures that: real MySQL, its ordinary
+// connection, same runIngestRaceTest, same 700ms proof of blocking.
+// "mysql_read_committed" measures the case docs/reference/database-backends.md
+// actually recommends for this dialect -- READ COMMITTED, where the same
+// INSERT ... SELECT does NOT take those locks and the gap reopens unless
+// FOR SHARE forces it, which is why FOR SHARE stays unconditional in
+// routes.go rather than being gated on MySQL's isolation level. cleat#2242,
+// cleat-review.
+//
+// SQL Server: with READ_COMMITTED_SNAPSHOT (RCSI) ON -- the configuration
+// docs/reference/database-backends.md recommends -- a plain read sees a
+// row-versioned snapshot instead of blocking on the open UPDATE's lock, so
+// it has the SAME gap PostgreSQL has and needs the SAME kind of fix: WITH
+// (REPEATABLEREAD) on the existsGuard SELECT (routes.go) -- not
+// READCOMMITTEDLOCK, which closes the race but opens a deadlock window
+// instead (see routes.go's comment for the measurements). This test runs
+// SQL Server's leg against a PRIVATE database with RCSI forced ON, because
+// RCSI ON is the case the fix exists for and the shared CI database's own
+// RCSI setting is not this test's to depend on. cleat#2237, the same gap
+// cleat#2233 closed for notifications' sendWebhook -- this test is that
+// PR's TestASendWebhookRacingAnOpenDeleteTransactionIsBlocked, adapted to
+// this package's HTTP handler.
+//
+// Every subtest whose backend is optional SKIPS explicitly rather than
+// silently doing nothing: a loop over testutil.NewPluginTestBackends that
+// filters by dialect and falls through with no t.Run body when the dialect
+// is absent reports a trivial PASS, not a skip -- measured directly on the
+// "mysql" subtest with CLEAT_TEST_MYSQL unset (0.06s, no work done, no skip
+// event in `go test -json`). cleat-review's nit.
 func TestAnIngestRacingAnOpenDeleteTransactionIsBlocked(t *testing.T) {
 	t.Run("postgres", func(t *testing.T) {
-		for _, be := range testutil.NewPluginTestBackends(t) {
-			if be.Dialect != testutil.DialectPostgres {
-				continue
-			}
-			defer be.Cleanup()
-			runIngestRaceTest(t, plugin.DialectPostgres, be.DB)
-			return
-		}
+		db := testutil.TestDB(t, testutil.DialectPostgres)
+		runIngestRaceTest(t, plugin.DialectPostgres, db)
 	})
 
 	t.Run("mysql", func(t *testing.T) {
-		for _, be := range testutil.NewPluginTestBackends(t) {
-			if be.Dialect != testutil.DialectMySQL {
-				continue
-			}
-			defer be.Cleanup()
-			runIngestRaceTest(t, plugin.DialectMySQL, be.DB)
-			return
+		if os.Getenv("CLEAT_TEST_MYSQL") == "" {
+			t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")
 		}
+		db := testutil.MySQLTestDB(t)
+		runIngestRaceTest(t, plugin.DialectMySQL, db)
+	})
+
+	t.Run("mysql_read_committed", func(t *testing.T) {
+		if os.Getenv("CLEAT_TEST_MYSQL") == "" {
+			t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")
+		}
+		db := mysqlReadCommittedTestDB(t)
+		runIngestRaceTest(t, plugin.DialectMySQL, db)
 	})
 
 	t.Run("mssql_rcsi_on", func(t *testing.T) {
@@ -96,6 +113,46 @@ func TestAnIngestRacingAnOpenDeleteTransactionIsBlocked(t *testing.T) {
 		db := webhookingestPrivateRCSIDatabase(t)
 		runIngestRaceTest(t, plugin.DialectMSSQL, db)
 	})
+}
+
+// mysqlReadCommittedTestDB opens CLEAT_TEST_MYSQL with
+// transaction_isolation forced to READ-COMMITTED, the isolation level
+// docs/reference/database-backends.md actually recommends for this dialect
+// -- MySQL's default (REPEATABLE READ) gives INSERT ... SELECT an implicit
+// shared-lock read that masks the race FOR SHARE exists to close.
+//
+// The go-sql-driver/mysql DSN param, not a SET SESSION after connect: the
+// pool may hand runIngestRaceTest's two concurrent statements (the seeded
+// create and the racing ingest) different pooled connections, and a SET
+// SESSION issued on only one of them would leave the other at the default
+// isolation with no visible error -- silently testing the wrong thing. The
+// DSN param applies to every connection the pool opens.
+func mysqlReadCommittedTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	base := os.Getenv("CLEAT_TEST_MYSQL")
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	dsn := base + sep + "transaction_isolation=%27READ-COMMITTED%27"
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("open MySQL at READ COMMITTED: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping MySQL at READ COMMITTED: %v", err)
+	}
+
+	var iso string
+	if err := db.QueryRow("SELECT @@transaction_isolation").Scan(&iso); err != nil {
+		t.Fatalf("read @@transaction_isolation: %v", err)
+	}
+	if iso != "READ-COMMITTED" {
+		t.Fatalf("precondition: @@transaction_isolation reads %q, want READ-COMMITTED -- "+
+			"mysqlReadCommittedTestDB's own setup is wrong, not the tree", iso)
+	}
+	return db
 }
 
 // runIngestRaceTest holds handleDeleteSource's soft-delete UPDATE open in its
