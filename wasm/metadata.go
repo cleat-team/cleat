@@ -166,6 +166,28 @@ func ReadEntryPointsSection(wasmBytes []byte) ([]string, error) {
 	return names, nil
 }
 
+// WriteEntryPointsSection embeds names as the "cleat_entry_points" custom
+// section, replacing any existing one -- the same section
+// ReadEntryPointsSection reads back, and in the same format: one name per
+// line. cleat#2145: AssemblyScript and Java have no linker-level mechanism
+// equivalent to Rust's `#[link_section]` statics (crates/cleat-macro), so
+// their `cleat build` paths call this to embed, post-compilation, the list
+// their own codegen (the AS transform's AST walk, the Java annotation
+// processor) already computed at compile time -- not a source-level guess
+// assembled separately, but the same computation that decided what to
+// export, written down where the Rust path gets it for free from the
+// linker. Callers should immediately re-read the result with
+// ReadEntryPointsSection: that gets duplicate-name detection for free,
+// rather than duplicating it here, and confirms the round-trip.
+func WriteEntryPointsSection(wasmBytes []byte, names []string) ([]byte, error) {
+	var payload strings.Builder
+	for _, n := range names {
+		payload.WriteString(n)
+		payload.WriteByte('\n')
+	}
+	return writeCustomSection(wasmBytes, entryPointsSectionName, []byte(payload.String()))
+}
+
 // --- low-level WASM custom section helpers ---
 
 func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {

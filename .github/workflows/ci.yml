@@ -1397,6 +1397,39 @@ jobs:
         with:
           targets: wasm32-wasip1
 
+      # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
+      # compiles for the former (cmd/cleat/build_rust.go), same as
+      # plugin-harness-ci.yml's identically-named step. Without it,
+      # TestRustExampleEntryPointResolutionLive and
+      # TestRustEntryPointsSurviveARenamedMacroImport skip in this job --
+      # cleat#2146. Node and Java below cover the AssemblyScript and Java
+      # counterparts added by cleat#2145: TestAssemblyScriptExampleEntryPointResolutionLive,
+      # TestJavaExampleEntryPointResolutionLive, and the staleness guards in
+      # entry_point_manifest_staleness_test.go. All four are scoped to the
+      # 'commands' entry (./cmd/...), the only one that builds these examples.
+      - name: Setup Rust + wasm32-unknown-unknown
+        if: matrix.package.name == 'commands'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node (AssemblyScript build path)
+        if: matrix.package.name == 'commands'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Setup Java (Java build path)
+        if: matrix.package.name == 'commands'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle (Java build path)
+        if: matrix.package.name == 'commands'
+        uses: gradle/actions/setup-gradle@v6
+
       - name: Run tests
         shell: bash
         working-directory: ${{ matrix.package.dir || '.' }}

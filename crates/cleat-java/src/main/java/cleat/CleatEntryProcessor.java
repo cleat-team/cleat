@@ -13,9 +13,12 @@ import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.tools.Diagnostic;
+import javax.tools.FileObject;
 import javax.tools.JavaFileObject;
+import javax.tools.StandardLocation;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.io.Writer;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.HashSet;
@@ -143,6 +146,7 @@ public class CleatEntryProcessor extends AbstractProcessor {
             }
             generateAggregator();
             generateWorkflowEntry();
+            generateEntryPointManifest();
             aggregatorGenerated = true;
         }
         return true;
@@ -670,6 +674,53 @@ public class CleatEntryProcessor extends AbstractProcessor {
                 Diagnostic.Kind.ERROR,
                 "Failed to generate CleatEntryIndex: " + e.getMessage(),
             (Element) null);
+        }
+    }
+
+    /**
+     * Emit the sidecar manifest {@code cleat build} reads to embed the
+     * {@code cleat_entry_points} WASM custom section (cleat#2145).
+     * <p>
+     * Written unconditionally, even with zero {@code @CleatEntry} methods --
+     * same reasoning as {@link #generateAggregator}'s {@code getEntries()}
+     * returning an empty array rather than nothing: "manifest missing"
+     * downstream must mean only one thing, an annotation processor old
+     * enough to predate this mechanism, never "zero entry points", which is
+     * a distinct, later error ({@code wasm.Metadata.Validate}).
+     * <p>
+     * {@code wrapperExportNames} is exactly the list {@link #generateAggregator}
+     * already writes into {@code CleatEntryIndex.getEntries()} -- this is not
+     * a second, separate computation of what got exported, it is the same
+     * one this processor already made deciding what to generate a wrapper
+     * for, written where {@code cleat build} (a separate Go process; it
+     * cannot call into the compiled class to ask {@code getEntries()}) can
+     * read it without running a JVM.
+     * <p>
+     * {@link StandardLocation#CLASS_OUTPUT} with an empty package name
+     * places the resource at the build's class output root (Gradle:
+     * {@code build/classes/java/main/}), alongside the {@code .class} files
+     * {@code generateWasm} compiles from -- not inside {@code build/wasm/}
+     * or {@code build/generated/teavm/}, which don't exist yet at annotation
+     * -processing time.
+     */
+    private void generateEntryPointManifest() {
+        try {
+            FileObject file = processingEnv.getFiler().createResource(
+                StandardLocation.CLASS_OUTPUT, "", "cleat-entry-points.txt");
+            try (Writer out = file.openWriter()) {
+                for (String fqcn : generatedWrappers) {
+                    String exportName = wrapperExportNames.get(fqcn);
+                    if (exportName != null) {
+                        out.write(exportName);
+                        out.write("\n");
+                    }
+                }
+            }
+        } catch (IOException e) {
+            processingEnv.getMessager().printMessage(
+                Diagnostic.Kind.ERROR,
+                "Failed to write cleat-entry-points.txt: " + e.getMessage(),
+                (Element) null);
         }
     }
 
