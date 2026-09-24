@@ -62,8 +62,8 @@ func TestAnExplicitReclaimTimeoutWins(t *testing.T) {
 
 func TestValidateReclaimTimeoutRefusesAFootgun(t *testing.T) {
 	const hb = 5 * time.Second
-	// minimumReclaimAfter(5s) = 5s + 3*dbCallDeadlineFor(5s) + heartbeatRetryIntervalFor(5s)
-	//                         = 5s + 3*2.5s + min(5s, 1s) = 13.5s.
+	// minimumReclaimAfter(5s) = 5s + 3*dbCallDeadlineFor(5s) + heartbeatRetryIntervalFor(5s) + reclaimSlack
+	//                         = 5s + 3*2.5s + min(5s, 1s) + 1s = 14.5s.
 	// hb*2 = 10s used to be the floor; it is now correctly refused.
 	floor := minimumReclaimAfter(hb)
 

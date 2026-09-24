@@ -3645,17 +3645,62 @@ func dbCallDeadlineFor(heartbeat time.Duration) time.Duration {
 // round trip caught by a 190ms stall does not return until the stall
 // clears, then retries after a further 200ms wait, landing around 635ms
 // after the last successful write. That is safe under this round's 700ms
-// invariant and NOT safe under round 3's own 500ms one -- see
+// (now 1700ms with reclaimSlack, see below) invariant and NOT safe under
+// round 3's own 500ms one -- see
 // TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne
 // in reaper_recovery_grace_period_test.go.
 //
-// Changes the default --reclaim-timeout from ~12.5s (round 3) to ~13.5s at
-// the default --heartbeat (5s: 5 + 3*2.5 + min(5, 1)). Worth noting in the
-// changelog: it is a wider window before a genuinely dead worker's run is
-// reclaimed, not a behaviour change anyone has to opt into.
+// ROUND 5: THE BOUND ABOVE HAS ZERO SLACK, AND THAT IS ITSELF THE DEFECT.
+// heartbeat + 3*deadline + retryInterval is not a bound WITH margin on the
+// modeled worst case -- it IS the modeled worst case, exactly, whenever
+// dbCallDeadlineFor's floor does not bind (deadline == heartbeat/2, true
+// for every heartbeat >= 4s, including the 5s default): substituting
+// d = hb/2 into `hb + 3d + r` gives `2.5*hb + r`, which is exactly
+// `2*heartbeat + deadline + retryInterval`, the derivation's own total.
+// Algebra, not measurement -- reproduce with substitution.
+//
+// A model with no margin is only as good as its inputs, and one input was
+// wrong: the retry's own latency was modeled as `deadline`, its worst-case
+// QUERY execution time, but the retry can also need a NEW CONNECTION. On
+// SQL Server this is not a corner case, it is documented driver behaviour --
+// github.com/microsoft/go-mssqldb's token.go, on the same cancel-drain path
+// this file's stall model already exercises: "If the drain fails for any
+// reason (timeout, I/O error, or context cancellation), the connection is
+// marked bad via checkBadConn" -- and checkBadConn's own doc says a bad
+// connection is "dropped from the connection pool rather than reused."
+// A genuine stall is exactly a case where the drain fails (nothing is
+// answering), so the failed call's connection is discarded and the RETRY
+// dials, TLS-handshakes and logs in fresh -- none of which `deadline`
+// represents, because `deadline` bounds a query's execution, not a
+// connection's setup. Confirmed by reading that source directly, not
+// assumed from the symptom.
+//
+// So the invariant needs a term for what it does not model at all, not a
+// bigger version of a term that already accounts for something else.
+// reclaimSlack is that term: fixed, independent of heartbeat, and named for
+// what it absorbs (a reconnect, the retry's own initial round trip, and
+// ordinary Timer/scheduler lateness) rather than folded silently into
+// dbCallDeadline or retryInterval where a future reader would have to
+// re-derive why it is there.
+//
+// Changes the default --reclaim-timeout from ~13.5s (round 4) to ~14.5s at
+// the default --heartbeat (5s: 5 + 3*2.5 + min(5, 1) + 1). Worth noting in
+// the changelog: it is a wider window before a genuinely dead worker's run
+// is reclaimed, not a behaviour change anyone has to opt into.
 func minimumReclaimAfter(heartbeat time.Duration) time.Duration {
-	return heartbeat + 3*dbCallDeadlineFor(heartbeat) + heartbeatRetryIntervalFor(heartbeat)
+	return heartbeat + 3*dbCallDeadlineFor(heartbeat) + heartbeatRetryIntervalFor(heartbeat) + reclaimSlack
 }
+
+// reclaimSlack is fixed headroom on top of minimumReclaimAfter's modeled
+// worst case, added in round 5 on cleat#2005 because that model has ZERO
+// margin at heartbeat >= 4s (see minimumReclaimAfter's doc) and does not
+// account for a reconnect before the retry -- real on SQL Server, where a
+// cancelled call whose drain also fails (a genuine stall) marks the
+// connection bad, so the retry pays a fresh dial, TLS handshake and login
+// that dbCallDeadlineFor was never meant to cover. Deliberately a constant,
+// not a function of heartbeat: it is not modeling a heartbeat-scaled
+// quantity, it is covering everything the model leaves out.
+const reclaimSlack = 1 * time.Second
 
 // reclaimWindow is reclaimAfter's arithmetic, as a function of its two
 // inputs. Split out so that startup advice which has to reason about the

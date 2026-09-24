@@ -700,6 +700,134 @@ func TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNew
 // already stale (age >= 500ms, measured ~605-607ms) at the 600ms check
 // while idle's gate still reads safe. Confirmed 2026-09-24.
 
+// TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack
+// is cleat-review's fifth-round finding on cleat#2005: round 4's invariant
+// (heartbeat + 3*dbCallDeadlineFor + heartbeatRetryIntervalFor) has ZERO
+// margin over its own modeled worst case whenever dbCallDeadlineFor's floor
+// does not bind (every heartbeat >= 4s, including the 5s default) -- see
+// minimumReclaimAfter's doc comment for the algebra showing the two are
+// exactly equal there. So ANY latency the model does not represent breaks
+// it, and one is real and documented: SQL Server marks a connection bad
+// after a cancelled call whose own cancel-drain also fails -- exactly what
+// a genuine stall produces -- so the RETRY pays a fresh dial, TLS
+// handshake and login that dbCallDeadlineFor was never meant to cover (it
+// bounds query execution, not connection setup). See
+// github.com/microsoft/go-mssqldb's token.go and mssql.go's checkBadConn.
+//
+// This reproduces round 4's own worst case (a 190ms stall shorter than one
+// 200ms heartbeat interval, caught mid-call) and adds a fixed 250ms delay
+// before the RETRY's own call body, standing in for that reconnect. Total
+// time to recovery becomes ~885ms (340ms stall-clear + 200ms
+// heartbeatRetryInterval + 250ms reconnect + 95ms retry latency): past
+// round 4's own 700ms invariant (the zero-slack case this test exists to
+// catch) and comfortably under round 5's 1700ms one (+= reclaimSlack).
+//
+// RED against minimumReclaimAfter with reclaimSlack removed; GREEN with it
+// -- see the falsification note at the end of this function.
+func TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack(t *testing.T) {
+	withDBCallDeadlineFloor(t, time.Millisecond)
+	const heartbeatInterval = 200 * time.Millisecond
+	const reconnectDelay = 250 * time.Millisecond
+	reclaimTimeout := minimumReclaimAfter(heartbeatInterval) // 1700ms today
+
+	var stalled atomic.Bool
+	unblock := make(chan struct{})
+	blockWhileStalled := func(ctx context.Context) error {
+		if !stalled.Load() {
+			return nil
+		}
+		<-unblock
+		return ctx.Err()
+	}
+
+	var rowHeartbeatAt atomic.Int64
+	t0 := time.Now()
+	rowHeartbeatAt.Store(t0.UnixNano())
+
+	// hasFailed marks that the PREVIOUS call failed, so the NEXT one (the
+	// retry) pays the modeled reconnect cost before it does anything else
+	// -- a fresh connection is established first, then the query runs.
+	var hasFailed atomic.Bool
+	holderStore := &mockStore{
+		heartbeatBatchFencedFn: func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
+			if hasFailed.Load() {
+				hasFailed.Store(false)
+				time.Sleep(reconnectDelay)
+			}
+			select {
+			case <-time.After(95 * time.Millisecond):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			if err := blockWhileStalled(ctx); err != nil {
+				hasFailed.Store(true)
+				return nil, err
+			}
+			rowHeartbeatAt.Store(time.Now().UnixNano())
+			return nil, nil
+		},
+	}
+	holder := newTestWorker(holderStore)
+	holder.id = "holder"
+	holder.heartbeatInterval = heartbeatInterval
+	holder.reclaimTimeout = reclaimTimeout
+	seedRecentlyConfirmedHealthy(holder)
+	holder.inflight.Store("live-run", &engine.WorkflowInstance{ID: "live-run", Generation: 1})
+
+	idleStore := &pingingMockStore{mockStore: &mockStore{}, pingDBFn: func(ctx context.Context) error { return nil }}
+	idle := newTestWorkerFromStore(idleStore)
+	idle.id = "idle"
+	idle.heartbeatInterval = heartbeatInterval
+	idle.reclaimTimeout = reclaimTimeout
+	seedRecentlyConfirmedHealthy(idle)
+
+	holder.wg.Add(1)
+	go holder.heartbeatLoop()
+	idle.wg.Add(1)
+	go idle.heartbeatLoop()
+
+	time.Sleep(150 * time.Millisecond)
+	stalled.Store(true)
+	time.Sleep(190 * time.Millisecond)
+	close(unblock)
+	stalled.Store(false)
+
+	// The discriminating instant: past the reconnect-inflated recovery
+	// (~885ms) minus margin, past round 4's zero-slack 700ms invariant,
+	// and comfortably short of round 5's 1700ms one.
+	const checkAt = 800 * time.Millisecond
+	if remaining := checkAt - 150*time.Millisecond - 190*time.Millisecond; remaining > 0 {
+		time.Sleep(remaining)
+	}
+
+	safe := idle.reapingIsSafe()
+	age := time.Since(time.Unix(0, rowHeartbeatAt.Load()))
+	stale := age >= reclaimTimeout
+
+	holder.cancel()
+	idle.cancel()
+	holder.wg.Wait()
+	idle.wg.Wait()
+
+	if safe && stale {
+		t.Fatalf("idle worker reclaimed the holder's live run %v after its last write, "+
+			"under reclaimTimeout=%v -- a %v reconnect delay before the retry outlasted the invariant",
+			age, reclaimTimeout, reconnectDelay)
+	}
+	if !safe {
+		t.Fatalf("test setup: idle's own gate was unexpectedly unsafe (its ping never stalls in this test) -- age=%v", age)
+	}
+}
+
+// Falsification (applied by hand, verified, and reverted -- never
+// committed): replace minimumReclaimAfter's body with
+// `return heartbeat + 3*dbCallDeadlineFor(heartbeat) + heartbeatRetryIntervalFor(heartbeat)`,
+// round 4's formula with the `+ reclaimSlack` term round 5 adds removed.
+// TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack
+// must then fail, because reclaimTimeout becomes 700ms and the row is
+// already stale (age >= 700ms) at the 800ms check while idle's gate still
+// reads safe.
+
 // TestReclaimWindowDefaultMatchesTheStatedInvariant is the deterministic
 // counterpart to the two timing-based tests above: it asserts the actual
 // arithmetic, with no sleeping, against minimumReclaimAfter -- THE stated
