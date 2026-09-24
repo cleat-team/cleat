@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,8 +17,80 @@ import (
 // database coming back, because ReapStaleInstances' staleness predicate is
 // satisfied by the stall's own duration and nothing asked whether THIS
 // worker's own observation of that staleness could be trusted. These cover
-// reapOnce's grace-period gate directly (deterministic, no sleeps) and one
-// end-to-end reproduction of the reported timeline (real short sleeps).
+// reapOnce's grace-period gate directly (deterministic, no sleeps) and two
+// end-to-end reproductions of the reported timeline (real short sleeps).
+//
+// cleat-review's follow-up review on the first version of this gate found a
+// second hole: an IDLE worker made no database call at all, so its
+// lastDBTrouble stayed clean through a stall it never observed, and its
+// reaper reclaimed a run whose true holder was alive throughout. reapingIsSafe
+// now requires BOTH a recent CONFIRMED contact (lastDBContactOK) and an
+// old-enough trouble-free window (lastDBTrouble) -- see reapingIsSafe's doc.
+// Every test below that wants the gate OPEN has to seed both; that is
+// deliberate, not boilerplate -- a test that seeds only lastDBTrouble is
+// exercising the OLD, insufficient rule, and several of these failed for
+// exactly that reason when the gate was tightened (some outright, and two --
+// TestReapOnceDoesNotRecordTroubleOnASuccessfulCall and
+// TestReapOnceCutsOffACallThatOutlivesItsDeadline -- passed VACUOUSLY,
+// because a worker that has never confirmed contact skips before ever
+// reaching the call the test meant to exercise).
+
+// seedRecentlyConfirmedHealthy seeds both atomics reapingIsSafe reads to
+// "this worker just proved it can reach the database, cleanly": a recent
+// lastDBContactOK and an old-enough (i.e. absent) lastDBTrouble. Tests that
+// want the gate to start OPEN use this instead of seeding lastDBTrouble
+// alone, which is no longer sufficient -- see the file doc above.
+func seedRecentlyConfirmedHealthy(w *Worker) {
+	w.lastDBContactOK.Store(time.Now().UnixNano())
+	w.lastDBTrouble.Store(time.Now().Add(-time.Hour).UnixNano())
+}
+
+// pingingMockStore adds a controllable DBPinger to mockStore. mockStore
+// itself deliberately does NOT implement DBPinger -- see DBPinger's doc for
+// why that has to stay true for every other test in this package -- so this
+// is its own type, used only by the tests in this file that need an idle
+// worker's ping path to be real.
+type pingingMockStore struct {
+	*mockStore
+	pingDBFn func(ctx context.Context) error
+}
+
+func (p *pingingMockStore) PingDB(ctx context.Context) error {
+	if p.pingDBFn != nil {
+		return p.pingDBFn(ctx)
+	}
+	return nil
+}
+
+// newTestWorkerFromStore is newTestWorker with the store typed as the
+// engine.WorkflowStore interface rather than the concrete *mockStore, so a
+// test can pass a *pingingMockStore (which mockStore itself deliberately
+// cannot satisfy DBPinger's own type assertion for -- see that type's doc).
+func newTestWorkerFromStore(store engine.WorkflowStore) *Worker {
+	ctx, cancel := context.WithCancel(context.Background())
+	monitor := NewMemoryMonitor(5 * time.Second)
+	mc := NewMemoryController(monitor, store, "test-worker", 5, 1<<40, 1<<40)
+	w := &Worker{
+		Metrics:             newTestPrometheus(),
+		id:                  "test-worker",
+		store:               store,
+		concurrency:         5,
+		memoryController:    mc,
+		heartbeatInterval:   10 * time.Millisecond,
+		pollInterval:        1 * time.Millisecond,
+		compactionThreshold: engine.DefaultCompactionThreshold,
+		compactionInterval:  10 * time.Millisecond,
+		ctx:                 ctx,
+		cancel:              cancel,
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		wasmCache:           newWasmLRUCache(100, 500),
+		healthTracker:       newHealthTracker(),
+		loopCtxMap:          make(map[string]*loopContext),
+	}
+	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	w.lastDBTrouble.Store(time.Now().UnixNano())
+	return w
+}
 
 func TestReapOnceSkipsWhenRecentDBTroubleHasNotClearedTheGracePeriod(t *testing.T) {
 	var reapCalled atomic.Bool
@@ -28,7 +102,11 @@ func TestReapOnceSkipsWhenRecentDBTroubleHasNotClearedTheGracePeriod(t *testing.
 	}
 	w := newTestWorker(ms)
 	w.reclaimTimeout = 200 * time.Millisecond
-	// Trouble recorded a moment ago -- well inside the grace period.
+	// Trouble recorded a moment ago -- well inside the grace period. (A
+	// recent lastDBContactOK would not help here: condition 2, the
+	// trouble-free window, is what this test exercises, and it must gate
+	// on its own.)
+	seedRecentlyConfirmedHealthy(w)
 	w.lastDBTrouble.Store(time.Now().UnixNano())
 
 	w.reapOnce()
@@ -48,8 +126,7 @@ func TestReapOnceReclaimsOnceTheGracePeriodHasCleared(t *testing.T) {
 	}
 	w := newTestWorker(ms)
 	w.reclaimTimeout = 50 * time.Millisecond
-	// Trouble recorded well outside the grace period.
-	w.lastDBTrouble.Store(time.Now().Add(-time.Second).UnixNano())
+	seedRecentlyConfirmedHealthy(w)
 
 	w.reapOnce()
 
@@ -67,7 +144,7 @@ func TestReapOnceRecordsDBTroubleOnAFailedCall(t *testing.T) {
 	w := newTestWorker(ms)
 	w.reclaimTimeout = 50 * time.Millisecond
 	// Healthy going in, so the call is actually attempted.
-	w.lastDBTrouble.Store(time.Now().Add(-time.Second).UnixNano())
+	seedRecentlyConfirmedHealthy(w)
 
 	before := time.Now()
 	w.reapOnce()
@@ -82,18 +159,24 @@ func TestReapOnceRecordsDBTroubleOnAFailedCall(t *testing.T) {
 }
 
 func TestReapOnceDoesNotRecordTroubleOnASuccessfulCall(t *testing.T) {
+	var reapCalled atomic.Bool
 	ms := &mockStore{
 		reapStaleInstancesFn: func(ctx context.Context, timeout time.Duration) (int, error) {
+			reapCalled.Store(true)
 			return 0, nil
 		},
 	}
 	w := newTestWorker(ms)
 	w.reclaimTimeout = 50 * time.Millisecond
+	seedRecentlyConfirmedHealthy(w)
 	staleTrouble := time.Now().Add(-time.Hour)
 	w.lastDBTrouble.Store(staleTrouble.UnixNano())
 
 	w.reapOnce()
 
+	if !reapCalled.Load() {
+		t.Fatal("setup: ReapStaleInstances was never called -- this test proves nothing about a successful call if the gate skipped it")
+	}
 	if got := time.Unix(0, w.lastDBTrouble.Load()); !got.Equal(staleTrouble) {
 		t.Fatalf("lastDBTrouble moved from %v to %v after a SUCCESSFUL call -- only a failure should advance it", staleTrouble, got)
 	}
@@ -105,8 +188,10 @@ func TestReapOnceCutsOffACallThatOutlivesItsDeadline(t *testing.T) {
 	// cancellation the way a real driver under a real (non-frozen-container)
 	// stall does, which is the shape dbCallDeadline exists to bound.
 	release := make(chan struct{})
+	var reapAttempted atomic.Bool
 	ms := &mockStore{
 		reapStaleInstancesFn: func(ctx context.Context, timeout time.Duration) (int, error) {
+			reapAttempted.Store(true)
 			select {
 			case <-release:
 				return 1, nil
@@ -120,7 +205,7 @@ func TestReapOnceCutsOffACallThatOutlivesItsDeadline(t *testing.T) {
 	w := newTestWorker(ms)
 	w.heartbeatInterval = 20 * time.Millisecond // dbCallDeadline() = 10ms
 	w.reclaimTimeout = time.Second
-	w.lastDBTrouble.Store(time.Now().Add(-time.Hour).UnixNano())
+	seedRecentlyConfirmedHealthy(w)
 
 	done := make(chan struct{})
 	go func() {
@@ -134,8 +219,337 @@ func TestReapOnceCutsOffACallThatOutlivesItsDeadline(t *testing.T) {
 		t.Fatal("reapOnce did not return within 2s -- the bound context did not cut off the hung call")
 	}
 
+	if !reapAttempted.Load() {
+		t.Fatal("setup: ReapStaleInstances was never attempted -- this test proves nothing about a hung call if the gate skipped it before ever calling the store")
+	}
 	if w.reapingIsSafe() {
 		t.Fatal("reapingIsSafe() = true right after a call that was cut off by its deadline -- recordDBTrouble should have fired")
+	}
+}
+
+// TestReapingIsSafeRequiresAConfirmedRecentContactNotJustAnAbsenceOfTrouble is
+// the direct, deterministic test of cleat-review's finding: lastDBTrouble
+// being old enough is NOT sufficient on its own. A worker that has never
+// made a single successful round trip -- lastDBContactOK still at its
+// atomic.Int64 zero value -- must not reap, no matter how long ago
+// lastDBTrouble was (including "never", which reads as infinitely long ago).
+func TestReapingIsSafeRequiresAConfirmedRecentContactNotJustAnAbsenceOfTrouble(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.reclaimTimeout = 50 * time.Millisecond
+	// lastDBTrouble: never recorded -- the OLD rule's "clean" state.
+	// lastDBContactOK: also never recorded -- deliberately left this way.
+	if w.reapingIsSafe() {
+		t.Fatal("reapingIsSafe() = true with no confirmed contact ever recorded -- an absence of trouble is not evidence of a checked, clean connection")
+	}
+}
+
+// TestAnIdleWorkerDoesNotReclaimABusyWorkersLiveRunAcrossAStall is
+// cleat-review's two-worker acceptance case: one worker (L) holds a live
+// run and heartbeats it; a second worker (I) is idle -- nothing in its own
+// inflight set -- and shares the same (fake) database. Before this fix, I's
+// heartbeatAndFenceInFlight made no database call at all while idle, so I's
+// lastDBTrouble stayed clean through the whole stall and I's reaper
+// reclaimed L's live run the moment the stall cleared, because "L died" and
+// "I never checked" were indistinguishable to I. Repeated at several stall
+// lengths relative to the heartbeat interval, per cleat-review's ask.
+//
+// I's reaper is driven exactly ONCE, at the very end -- deliberately, not
+// for test speed. In production reaperLoop's own ticker never fires more
+// often than max(heartbeatInterval, 10s), so a stall of a few seconds can
+// start and end entirely BETWEEN two real reaper ticks: cleat-review's own
+// wording was "if no [reaper] tick lands in the stall." Driving I's reaper
+// on the same fast cadence as its heartbeat -- an earlier version of this
+// test did exactly that -- lets I's OWN reap attempts stumble into
+// detecting the stall as a side effect, which is not the mechanism this
+// test exists to check and made the result depend on which of two
+// independently-scheduled goroutines happened to run first at the stall's
+// boundary. Driving I's HEARTBEAT frequently but its REAPER only once,
+// after recovery, is what actually isolates the claim: an idle worker's
+// heartbeat tick alone -- via DBPinger -- has to be what keeps its gate
+// closed, because its reaper never gets a chance to notice anything
+// itself.
+func TestAnIdleWorkerDoesNotReclaimABusyWorkersLiveRunAcrossAStall(t *testing.T) {
+	for _, stall := range []time.Duration{
+		150 * time.Millisecond, // under reclaimTimeout (200ms): the row never even looks stale
+		250 * time.Millisecond, // past reclaimTimeout, but still under the OTHER new mechanism's
+		// own recency bound (2*(heartbeat+deadline) = 300ms) -- this is the
+		// narrow window where a seed-only "recently confirmed" reading
+		// (from before the stall) would still look recent enough on its
+		// own, so this specifically isolates whether the idle heartbeat's
+		// OWN ping during the stall is doing the work, not just the fact
+		// that an unrefreshed timestamp eventually ages out.
+		600 * time.Millisecond, // well past both, sustained
+	} {
+		t.Run(stall.String(), func(t *testing.T) {
+			testIdleWorkerDoesNotReclaimAcrossStall(t, stall)
+		})
+	}
+}
+
+func testIdleWorkerDoesNotReclaimAcrossStall(t *testing.T, stallDuration time.Duration) {
+	const (
+		heartbeatInterval = 100 * time.Millisecond // dbCallDeadline() = 50ms
+		reclaimTimeout    = 200 * time.Millisecond // the invariant's exact floor: heartbeat + 2*deadline
+	)
+
+	// unblock, not a bare ctx timeout, is what actually gates a call during
+	// the stall: a call issued while stalled=true cannot succeed until
+	// unblock closes, no matter how many times its own bounded context
+	// expires and it is retried. Without this, a call made just as
+	// stalled flips back to false can race a DIFFERENT call (the holder's
+	// next heartbeat, refreshing the row, vs. this worker's own recheck)
+	// purely on goroutine scheduling, which would make this test's outcome
+	// depend on timing luck rather than on the gate. Mirrors
+	// TestReaperDoesNotReclaimALiveWorkersOwnRunAcrossADatabaseStallItObservedItself's
+	// pattern, which already relies on the same determinism.
+	var stalled atomic.Bool
+	unblock := make(chan struct{})
+	blockWhileStalled := func(ctx context.Context) error {
+		if !stalled.Load() {
+			return nil
+		}
+		select {
+		case <-unblock:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// The shared fake row: assignedTo/heartbeatAt is what a real
+	// workflow_instances row would carry. Guarded by the stall flag rather
+	// than a mutex-protected clock, since both worker's calls are cut off by
+	// their own bounded context the same way a real driver would be.
+	var rowHeartbeatAt atomic.Int64
+	var reclaimed atomic.Bool
+	rowHeartbeatAt.Store(time.Now().UnixNano())
+
+	// L: holds the run, heartbeats it.
+	holderStore := &mockStore{
+		heartbeatBatchFencedFn: func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
+			if err := blockWhileStalled(ctx); err != nil {
+				return nil, err
+			}
+			rowHeartbeatAt.Store(time.Now().UnixNano())
+			return nil, nil
+		},
+	}
+	holder := newTestWorker(holderStore)
+	holder.id = "worker-L"
+	holder.heartbeatInterval = heartbeatInterval
+	holder.reclaimTimeout = reclaimTimeout
+	seedRecentlyConfirmedHealthy(holder)
+	holder.inflight.Store("live-run", &engine.WorkflowInstance{ID: "live-run", Generation: 1})
+
+	// I: idle. Its store implements DBPinger, so its own heartbeat tick
+	// still makes a real round trip with nothing in flight -- that is
+	// exactly what this test is checking actually happens.
+	idleBase := &mockStore{
+		reapStaleInstancesFn: func(ctx context.Context, timeout time.Duration) (int, error) {
+			if err := blockWhileStalled(ctx); err != nil {
+				return 0, err
+			}
+			hb := time.Unix(0, rowHeartbeatAt.Load())
+			if time.Since(hb) >= timeout {
+				reclaimed.Store(true)
+				return 1, nil
+			}
+			return 0, nil
+		},
+	}
+	idleStore := &pingingMockStore{mockStore: idleBase, pingDBFn: blockWhileStalled}
+	idle := newTestWorkerFromStore(idleStore)
+	idle.id = "worker-I"
+	idle.heartbeatInterval = heartbeatInterval
+	idle.reclaimTimeout = reclaimTimeout
+	seedRecentlyConfirmedHealthy(idle)
+	// idle.inflight is deliberately left empty.
+
+	// L: heartbeat only, driven fast -- there is no L reaper in this test.
+	stopHolder := make(chan struct{})
+	holderDone := make(chan struct{})
+	go func() {
+		defer close(holderDone)
+		for {
+			select {
+			case <-stopHolder:
+				return
+			default:
+			}
+			holder.heartbeatAndFenceInFlight()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	// I: heartbeat driven fast (this is the mechanism under test -- an idle
+	// worker's own ping). Its reaper is NOT driven here at all; see below.
+	stopIdleHeartbeat := make(chan struct{})
+	idleHeartbeatDone := make(chan struct{})
+	go func() {
+		defer close(idleHeartbeatDone)
+		for {
+			select {
+			case <-stopIdleHeartbeat:
+				return
+			default:
+			}
+			idle.heartbeatAndFenceInFlight()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	stalled.Store(true)
+	time.Sleep(stallDuration)
+
+	// Stop BOTH heartbeat loops BEFORE clearing the stall, and only then
+	// unblock. Nothing is left running that could refresh the row or
+	// re-touch I's gate between "the stall ends" and "I's one reap check,"
+	// so the row's age at that check is exactly stallDuration and the
+	// check is deterministic rather than a race between L's next heartbeat
+	// (refreshing the row) and I's reap (reading it) -- both of which would
+	// otherwise fire the instant unblock closes.
+	close(stopHolder)
+	close(stopIdleHeartbeat)
+	<-holderDone
+	<-idleHeartbeatDone
+	close(unblock)
+	stalled.Store(false)
+
+	// NOW I's reaper gets its one and only tick -- the "no tick landed
+	// during the stall" case cleat-review described. If I's heartbeat-only
+	// probing during the stall did its job, I's gate is still closed here
+	// (recent trouble recorded during the stall, grace period not yet
+	// elapsed) and this call skips. If it did not, this is the FIRST
+	// database contact I's reaper has ever had, the gate reads clean by
+	// default, and it reclaims L's live, stale-looking row on the spot.
+	idle.reapOnce()
+
+	if reclaimed.Load() {
+		t.Fatalf("idle worker I reclaimed L's live run after a %v stall -- I never observed the stall directly (nothing in its own inflight, and its reaper never ticked during it), so its own heartbeat-driven gate is what should have refused this, and it did not", stallDuration)
+	}
+}
+
+// TestASlowHeartbeatCycleDoesNotOpenAGapWiderThanReclaimAfterAllows is
+// cleat-review's "sliver": a busy worker's heartbeat_at is only refreshed
+// once per successful call, and a call can legitimately take up to
+// dbCallDeadline to return -- so the true gap between two successful writes
+// can be heartbeatInterval + dbCallDeadline, not heartbeatInterval alone.
+// This drives a holder whose every heartbeat call takes right up against
+// its own deadline (a slow, but never failing, round trip -- not a stall)
+// and confirms an observer polling at high frequency never sees the row
+// look stale, at the tightest legal reclaimAfter the current invariant
+// allows (heartbeatInterval + 2*dbCallDeadline). If this ever goes red, the
+// arithmetic relationship reclaimWindow and validateReclaimTimeout enforce
+// has stopped covering the gap it exists for.
+func TestASlowHeartbeatCycleDoesNotOpenAGapWiderThanReclaimAfterAllows(t *testing.T) {
+	const heartbeatInterval = 200 * time.Millisecond // dbCallDeadline() = 100ms
+	const reclaimTimeout = heartbeatInterval + 2*100*time.Millisecond // 400ms: the invariant's own floor
+
+	var rowHeartbeatAt atomic.Int64
+	rowHeartbeatAt.Store(time.Now().UnixNano())
+
+	holderStore := &mockStore{
+		heartbeatBatchFencedFn: func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
+			// Just under the deadline every time: the worst legitimate case,
+			// not a failure.
+			select {
+			case <-time.After(90 * time.Millisecond):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			rowHeartbeatAt.Store(time.Now().UnixNano())
+			return nil, nil
+		},
+	}
+	holder := newTestWorker(holderStore)
+	holder.heartbeatInterval = heartbeatInterval
+	holder.reclaimTimeout = reclaimTimeout
+	seedRecentlyConfirmedHealthy(holder)
+	holder.inflight.Store("live-run", &engine.WorkflowInstance{ID: "live-run", Generation: 1})
+
+	var maxGap atomic.Int64
+	stop := make(chan struct{})
+	holderDone := make(chan struct{})
+	go func() {
+		defer close(holderDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			before := time.Unix(0, rowHeartbeatAt.Load())
+			holder.heartbeatAndFenceInFlight()
+			after := time.Unix(0, rowHeartbeatAt.Load())
+			if after.After(before) {
+				if gap := after.Sub(before); gap > time.Duration(maxGap.Load()) {
+					maxGap.Store(int64(gap))
+				}
+			}
+		}
+	}()
+
+	// An observer polling far faster than the heartbeat cadence -- worst
+	// case for catching any gap the holder's own writes leave open.
+	deadline := time.Now().Add(2 * time.Second)
+	var sawStale bool
+	for time.Now().Before(deadline) {
+		hb := time.Unix(0, rowHeartbeatAt.Load())
+		if time.Since(hb) >= reclaimTimeout {
+			sawStale = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(stop)
+	<-holderDone
+
+	if sawStale {
+		t.Fatalf("the row looked stale (age >= reclaimTimeout %v) even though the holder's heartbeat calls never failed -- "+
+			"max observed gap between successful writes was %v; reclaimAfter's invariant (heartbeatInterval + 2*dbCallDeadline) should prevent this",
+			reclaimTimeout, time.Duration(maxGap.Load()))
+	}
+}
+
+// TestReclaimWindowDefaultMatchesTheStatedInvariant is the deterministic
+// counterpart to the two timing-based tests above: it asserts the actual
+// arithmetic, with no sleeping. reclaimWindow's doc claims the default is
+// heartbeat + 2*dbCallDeadlineFor(heartbeat), not a bare heartbeat*2 -- this
+// fails if anyone reintroduces the simpler (and, per cleat-review, provably
+// insufficient at the margins) formula.
+func TestReclaimWindowDefaultMatchesTheStatedInvariant(t *testing.T) {
+	for _, hb := range []time.Duration{
+		time.Second,
+		5 * time.Second,
+		200 * time.Millisecond,
+		30 * time.Second,
+	} {
+		want := hb + 2*dbCallDeadlineFor(hb)
+		if want < 10*time.Second {
+			want = 10 * time.Second
+		}
+		got := reclaimWindow(0, hb)
+		if got != want {
+			t.Errorf("reclaimWindow(0, %v) = %v, want %v (heartbeat + 2*dbCallDeadlineFor(heartbeat), floored at 10s)", hb, got, want)
+		}
+	}
+}
+
+// TestValidateReclaimTimeoutRefusesBelowTheStatedInvariant is
+// TestReclaimWindowDefaultMatchesTheStatedInvariant's counterpart for the
+// explicit --reclaim-timeout path: the refusal floor must track the same
+// formula reclaimWindow derives its default from, not a separately
+// maintained `2 * heartbeat` literal.
+func TestValidateReclaimTimeoutRefusesBelowTheStatedInvariant(t *testing.T) {
+	hb := 4 * time.Second
+	floor := hb + 2*dbCallDeadlineFor(hb)
+
+	if err := validateReclaimTimeout(floor-time.Millisecond, hb); err == nil {
+		t.Fatalf("validateReclaimTimeout(%v, %v) = nil, want a refusal: %v is below the invariant floor %v", floor-time.Millisecond, hb, floor-time.Millisecond, floor)
+	}
+	if err := validateReclaimTimeout(floor, hb); err != nil {
+		t.Fatalf("validateReclaimTimeout(%v, %v) = %v, want nil: %v meets the invariant floor exactly", floor, hb, err, floor)
 	}
 }
 
@@ -191,13 +605,24 @@ func TestReaperDoesNotReclaimALiveWorkersOwnRunAcrossADatabaseStallItObservedIts
 	w := newTestWorker(ms)
 	w.heartbeatInterval = 10 * time.Millisecond // dbCallDeadline() = 5ms
 	w.reclaimTimeout = 150 * time.Millisecond   // reclaimAfter() = 150ms
+	// This worker's OWN live run, so heartbeatAndFenceInFlight takes the
+	// busy path (through heartbeatBatchFencedFn, exercised below) rather
+	// than the empty-inflight path -- which, on a plain mockStore with no
+	// DBPinger, has no way to confirm contact at all. See DBPinger's doc:
+	// a store that cannot prove liveness while idle must not let its
+	// reaper trust staleness while idle either, which is deliberately NOT
+	// the case this test is about.
+	w.inflight.Store("live-run", &engine.WorkflowInstance{ID: "live-run", Generation: 1})
 
 	// Establish a healthy baseline: this worker has ALREADY gone a full
-	// reclaimAfter() window with no recorded trouble, same as a worker that
-	// has been running uneventfully for a while (newTestWorker itself seeds
-	// lastDBTrouble pessimistically -- see lastDBTrouble's doc -- which a
-	// fresh worker must earn, not something this test is exercising).
-	w.lastDBTrouble.Store(time.Now().Add(-time.Second).UnixNano())
+	// reclaimAfter() window with no recorded trouble, AND has confirmed
+	// contact recently -- same as a worker that has been running
+	// uneventfully for a while (newTestWorker itself seeds lastDBTrouble
+	// pessimistically -- see lastDBTrouble's doc -- which a fresh worker
+	// must earn, not something this test is exercising; lastDBContactOK
+	// needs the same earning, which is what seedRecentlyConfirmedHealthy
+	// establishes here).
+	seedRecentlyConfirmedHealthy(w)
 	if !w.reapingIsSafe() {
 		t.Fatal("setup: worker is not healthy before the stall even begins")
 	}
@@ -266,8 +691,22 @@ func TestReaperDoesNotReclaimALiveWorkersOwnRunAcrossADatabaseStallItObservedIts
 	}
 
 	// Once reclaimAfter() has genuinely elapsed since the last recorded
-	// trouble, the reaper trusts itself again.
-	time.Sleep(w.reclaimTimeout + 20*time.Millisecond)
+	// trouble, the reaper trusts itself again -- but reapingIsSafe ALSO
+	// requires a RECENTLY confirmed contact (cleat-review's follow-up
+	// review), so this worker has to keep proving itself the same way a
+	// real heartbeatLoop would, not just wait silently. A single call
+	// followed by a bare sleep would let lastDBContactOK itself age past
+	// its own recency bound and fail the gate for an unrelated reason.
+	recoveryDone := make(chan struct{})
+	go func() {
+		defer close(recoveryDone)
+		deadline := time.Now().Add(w.reclaimTimeout + 20*time.Millisecond)
+		for time.Now().Before(deadline) {
+			w.heartbeatAndFenceInFlight()
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	<-recoveryDone
 	if !w.reapingIsSafe() {
 		t.Fatal("reapingIsSafe() = false well after recovery and a full reclaimAfter() window -- the grace period should have cleared")
 	}

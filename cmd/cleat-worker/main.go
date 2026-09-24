@@ -2092,7 +2092,17 @@ func validateReclaimTimeout(reclaim, heartbeat time.Duration) error {
 	if reclaim <= 0 {
 		return nil // derive from the heartbeat, as before
 	}
-	if floor := 2 * heartbeat; reclaim < floor {
+	// This floor is heartbeat + 2*dbCallDeadlineFor(heartbeat), spelled out
+	// rather than the bare `2 * heartbeat` this used to be -- the two are
+	// numerically identical today only because dbCallDeadlineFor(heartbeat)
+	// is exactly heartbeat/2 with no independent floor. See reclaimWindow's
+	// doc for the two separate races this bound has to close (a reaper call
+	// racing a stall, and a heartbeat-gap "sliver" on the run's own holder),
+	// found in cleat-review's follow-up on cleat#2005. Spelling it out here
+	// means this refusal keeps matching reclaimWindow's own derivation if
+	// dbCallDeadlineFor ever changes, instead of silently drifting apart
+	// from a value it merely happens to equal today.
+	if floor := heartbeat + 2*dbCallDeadlineFor(heartbeat); reclaim < floor {
 		return fmt.Errorf(
 			"--reclaim-timeout %v is below two heartbeats (2 x --heartbeat %v = %v).\n"+
 				"A run is considered stale when it misses that window, so this would reclaim "+

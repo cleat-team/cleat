@@ -159,6 +159,23 @@ func (s *ShardedStore) forEachShard(fn func(WorkflowStore) error) error {
 	return nil
 }
 
+// PingDB satisfies DBPinger by pinging every shard and returning the first
+// error. Fail-if-any-shard-unreachable, deliberately: a worker that cannot
+// prove ALL of its shards are reachable has no basis to trust a stale
+// heartbeat_at on any of them as evidence of a dead holder rather than an
+// outage on the shard it happens to live on. A shard whose underlying store
+// doesn't implement DBPinger (a test double) is silently skipped, same as
+// the non-sharded case.
+func (s *ShardedStore) PingDB(ctx context.Context) error {
+	return s.forEachShard(func(store WorkflowStore) error {
+		pinger, ok := store.(DBPinger)
+		if !ok {
+			return nil
+		}
+		return pinger.PingDB(ctx)
+	})
+}
+
 // ---------------------------------------------------------------------------
 // WorkflowStore implementation
 // ---------------------------------------------------------------------------
