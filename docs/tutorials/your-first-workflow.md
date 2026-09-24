@@ -287,14 +287,31 @@ cleat-worker --db "postgres://cleat_app:a-password-you-choose@localhost/cleat?ss
 
 The next time you ship a new migration, apply it the same way you did in
 Step 6 (`cleat-worker --migrate-only --db <superuser DSN>`) before
-restarting the workers. A single `--migrate-on-start` flag also exists, as a
-shortcut for local, single-node dev; see
+restarting the workers.
+
+A single `--migrate-on-start` flag also exists, as a one-command shortcut
+for local, single-node dev -- no separate migrate step:
+
+```bash
+cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
+    --api-addr :8080 \
+    --require-auth=false \
+    --migrate-on-start
+```
+
+This connects as the superuser rather than `cleat_app`, since applying the
+schema needs DDL rights that role doesn't have. That means the RLS check
+from above logs a warning instead of refusing -- `--require-auth=false` is
+what turns the refusal into a warning; drop it and this exact command
+refuses to start, for the same reason Step 7 does. Fine alone on a laptop;
+not once a second tenant's data could land on that connection. See
 [Upgrading](../operations/upgrading.md#migration-is-a-deploy-step) for how
-it compares to the two-step flow above. `--require-auth=false` is for local
-development only: it skips the API key `--generate-api-key` would otherwise
-require on every request below. See [Deploy via REST
-API](../how-to/deploy-workflows.md#step-3-deploy-via-rest-api) for the
-production path.
+this compares to the two-step flow above.
+
+`--require-auth=false` also skips the API key `--generate-api-key` would
+otherwise require on every request below -- that's local development only.
+See [Deploy via REST API](../how-to/deploy-workflows.md#step-3-deploy-via-rest-api)
+for the production path.
 
 ## Step 8: Trigger execution
 
