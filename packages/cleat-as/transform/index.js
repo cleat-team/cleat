@@ -45,7 +45,7 @@ class CleatEntryTransformer {
   // ---------------------------------------------------------------
   // AssemblyScript transformer hook - called after all sources are parsed
   // ---------------------------------------------------------------
-  afterParse(parser) {
+  async afterParse(parser) {
     // Use this.program (set on the prototype by AS) instead of parser.program,
     // because AS 0.27.32+ does not set parser.program.  The parser argument
     // is still valid for parser.parseFile() calls in _injectWrappers.
@@ -154,6 +154,37 @@ class CleatEntryTransformer {
         );
       }
     }
+
+    // cleat#2145: emit the entry-point list this transform itself just
+    // computed (Phase 1, above) into a sidecar manifest next to the .wasm
+    // `cleat build` is about to produce. This is authoritative in the sense
+    // that matters -- it is not a second, separate guess at what the AST
+    // contains, it IS the AST walk that decides which functions get
+    // renamed and exported below (Phase 2/3). The syntax-variety misses a
+    // source-level regex is prone to (a decorator split across lines, an
+    // aliased import) cannot happen here, because this code already parsed
+    // the real AST to find them.
+    //
+    // Written unconditionally (even when empty) so "manifest missing" means
+    // only one thing downstream -- an old @cleat/transform that predates
+    // this mechanism -- and never "zero @cleatEntry functions", which is a
+    // separate, later validation error (cleat build's metadata Validate()).
+    //
+    // Written directly with Node's fs, not via this.writeFile. asc's own
+    // writeFile (assigned onto this transform's prototype -- see the class
+    // doc comment) silently returned false here every time this was tried,
+    // for a reason that did not reproduce against a standalone reimplementation
+    // of its own resolve/mkdir/write sequence -- that sequence, run outside
+    // the transform, succeeds. Writing it here directly sidesteps whatever
+    // about the transform-hook calling context asc's writeFile does not like,
+    // and resolves against the same baseDir asc itself uses (this.baseDir,
+    // default "."), so the manifest lands in the same place asc's own writes
+    // (workflow.wasm, .js, .d.ts) do: dist/, where build_as.go expects it.
+    const allNames = [];
+    for (const { entries } of sourceEntries) {
+      for (const entry of entries) allNames.push(entry.funcName);
+    }
+    this._writeEntryPointManifest(allNames);
 
     if (sourceEntries.length === 0) return;
 
@@ -852,6 +883,23 @@ class CleatEntryTransformer {
     }
   }
 
+
+  // ---------------------------------------------------------------
+  // cleat#2145: write the entry-point sidecar manifest, one name per line,
+  // to dist/cleat-entry-points.txt relative to this.baseDir (asc's own
+  // --baseDir, default "."). Throws on failure rather than swallowing it --
+  // a manifest that silently fails to write is worse than a loud build
+  // error, because build_as.go's "no manifest" message would then blame an
+  // out-of-date @cleat/transform for a write that this transform's own
+  // version actually attempted and lost.
+  // ---------------------------------------------------------------
+  _writeEntryPointManifest(names) {
+    const base = this.baseDir || ".";
+    const dir = path.resolve(base, "dist");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "cleat-entry-points.txt");
+    fs.writeFileSync(file, names.map(n => n + "\n").join(""), "utf-8");
+  }
 
   // ---------------------------------------------------------------
   // Fallback: write wrapper code to a file on disk

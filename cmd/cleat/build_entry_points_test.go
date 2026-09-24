@@ -1,104 +1,23 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
 
-// These run against the REAL checked-in examples, not synthetic fixtures --
-// each one already exercises the exact case that would defeat a naive
-// extractor: both AS and Java give their entry an explicit display name that
-// differs from the actual identifier the export must be named after (must
-// NOT be picked up in AS's case, MUST be picked up in Java's -- the two SDKs
-// disagree on which one wins, per each one's own codegen, and a test that
-// used only one of them could not catch the extractor defaulting to the
-// wrong rule).
-//
-// Rust has no extractor test here since cleat#2113: its entry points come
-// from the cleat_entry_points WASM section the #[cleat_entry] macro itself
-// emits, read via wasm.ReadEntryPointsSection and proven against the real
-// example by TestRustExampleEntryPointResolutionLive
-// (rust_entry_point_resolution_live_test.go), not by source scanning.
-
-func TestJavaEntryPointNamesReadsTheRealExample(t *testing.T) {
-	got := javaEntryPointNames("../../examples/java-workflow")
-	// The annotation's name= attribute wins over the method's own name --
-	// placeOrder/cancelOrder in source, place_order/cancel_order expected.
-	want := []string{"place_order", "cancel_order"}
-	assertSameNames(t, got, want)
-}
-
-func TestASEntryPointNamesReadsTheRealExample(t *testing.T) {
-	got := asEntryPointNames("../../examples/as-workflow")
-	// The decorator's string argument ("PlaceOrder") is a display name and
-	// must NOT appear here -- the function identifier is the export name.
-	want := []string{
-		"place_order", "cancel_order", "defer_order", "defer_suspend",
-		"spin_forever", "trap_after_defer", "defer_registers_defer",
-		"defer_continues_as_new",
-	}
-	assertSameNames(t, got, want)
-}
-
-// TestJavaEntryPointNamesFallsBackToMethodNameWithoutAnExplicitOne is a
-// synthetic case the real example doesn't cover: every entry in it gives an
-// explicit name=, so a version of the extractor that only ever reads the
-// annotation (and never falls back) would still pass the example test above.
-func TestJavaEntryPointNamesFallsBackToMethodNameWithoutAnExplicitOne(t *testing.T) {
-	dir := t.TempDir()
-	writeTestFile(t, dir, "Workflow.java", `
-package com.example;
-import cleat.CleatEntry;
-class Workflow {
-    @CleatEntry
-    public static String runIt(HostCalls h, String input) { return input; }
-}
-`)
-	got := javaEntryPointNames(dir)
-	assertSameNames(t, got, []string{"runIt"})
-}
-
-// Same risk, Java's side: a block comment is the one case where nothing but
-// the delimiters separates the annotation from a method, so it is the one
-// case that actually exercises stripCLikeCommentsKeepStrings rather than the
-// regex's own adjacency requirement.
-func TestJavaEntryPointNamesIgnoresAMethodCommentedOutInABlockComment(t *testing.T) {
-	dir := t.TempDir()
-	writeTestFile(t, dir, "Workflow.java", `
-package com.example;
-import cleat.CleatEntry;
-class Workflow {
-    /*
-    @CleatEntry(name = "commented_out")
-    public static String commentedOut(HostCalls h, String input) { return input; }
-    */
-
-    @CleatEntry(name = "real_one")
-    public static String realOne(HostCalls h, String input) { return input; }
-}
-`)
-	got := javaEntryPointNames(dir)
-	assertSameNames(t, got, []string{"real_one"})
-}
-
-// AssemblyScript's side of the same risk.
-func TestASEntryPointNamesIgnoresAFunctionCommentedOutInABlockComment(t *testing.T) {
-	dir := t.TempDir()
-	writeTestFile(t, dir, filepath.Join("assembly", "index.ts"), `
-/*
-@cleatEntry("CommentedOut")
-export function commented_out(input: string): string { return input; }
-*/
-
-@cleatEntry("RealOne")
-export function real_one(input: string): string { return input; }
-`)
-	got := asEntryPointNames(dir)
-	assertSameNames(t, got, []string{"real_one"})
-}
+// Java and AssemblyScript no longer predict entry points by scanning
+// source: cleat#2145 moved both onto the same model cleat#2113 gave Rust --
+// each SDK's own codegen states the list in the artifact it produces (a
+// sidecar manifest for AS/Java, a linker-merged WASM section for Rust), and
+// cleat build reads THAT, rather than reconstructing it with a regex. See
+// build_as.go, build_java.go, build_rust.go and wasm.WriteEntryPointsSection
+// / wasm.ReadEntryPointsSection. The live proof that each SDK's manifest
+// actually survives compilation and names real exports is
+// rust_entry_point_resolution_live_test.go,
+// as_entry_point_resolution_live_test.go and
+// java_entry_point_resolution_live_test.go -- not a source-scanning test
+// here, because there is no longer any source-level prediction to test.
 
 // syntheticWasmModule is a hand-built (not compiler-produced) minimal WASM
 // module: two function exports, "foo" and "bar", plus a non-function export
@@ -159,23 +78,5 @@ func TestVerifyEntryPointsAreExportsRejectsAPredictedNameNotExported(t *testing.
 	}
 	if strings.Contains(err.Error(), "\"foo\"") {
 		t.Errorf("error should not blame \"foo\", which IS a real export: %v", err)
-	}
-}
-
-func assertSameNames(t *testing.T, got, want []string) {
-	t.Helper()
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-}
-
-func writeTestFile(t *testing.T, dir, name, content string) {
-	t.Helper()
-	path := filepath.Join(dir, name)
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatalf("creating test fixture dir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatalf("writing test fixture: %v", err)
 	}
 }
