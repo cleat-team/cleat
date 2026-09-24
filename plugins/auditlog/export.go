@@ -99,6 +99,12 @@ type exportCheckpoint struct {
 	To        *string `json:"to"`
 	AfterSeq  *int64  `json:"after_seq"`
 	Events    int64   `json:"events"`
+	// Unchained is how many of Events carry no seq or hash: rows written before the chain
+	// existed. They are covered by nothing, so a caller who wants to notice one being added
+	// or removed records this beside the head and floor. It is NOT the tenant's current
+	// count: retention removes old unchained rows, so the count of an earlier export is the
+	// one to compare an earlier export with.
+	Unchained int64 `json:"unchained"`
 }
 
 // ExportTenant streams tenant's audit rows to emit, one JSON line per call (newline
@@ -134,7 +140,7 @@ func ExportTenant(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialec
 		return fmt.Errorf("audit export: read head: %w", err)
 	}
 
-	var n int64
+	var n, unchained int64
 	send := func(v any) error {
 		b, err := json.Marshal(v)
 		if err != nil {
@@ -154,6 +160,7 @@ func ExportTenant(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialec
 					return err
 				}
 				n++
+				unchained++
 				afterMicros, afterID = e.micros, e.event.ID
 			}
 			if !more {
@@ -194,7 +201,7 @@ func ExportTenant(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialec
 		}
 	}
 	cp := exportCheckpoint{Type: "checkpoint", TenantID: tenant.String(), HeadSeq: headSeq, HeadHash: headHash,
-		FloorSeq: floorSeq, FloorHash: floorHash, Events: n}
+		FloorSeq: floorSeq, FloorHash: floorHash, Events: n, Unchained: unchained}
 	if opts.From != nil {
 		v := canonicalTimestamp(*opts.From)
 		cp.From = &v

@@ -223,23 +223,32 @@ def verify_export():
     not just the checkpoint:
 
       --require-full         the caller asked for a whole export: kind must be full
-      --expect-floor S:H     kind full; the first chained event is seq S+1 linking to hash H
-      --expect-head  S:H     the last chained event is seq S with hash H. Kind full, or
-                             resumed when --expect-after is given
+      --expect-floor S:H     kind full; the chain passes through seq S with hash H (S is usually the
+                             floor: then the first chained event is seq S+1 linking to H)
+      --expect-head  S:H     the chain passes through seq S with hash H, S <= the export's head.
+                             Kind full, or resumed when --expect-after is given
       --expect-after S:H     kind resumed with after_seq == S; the first chained event is seq
                              S+1 linking to hash H (the last record of the part you already
                              hold, which is what makes the join checkable)
-      --expect-unchained N   exactly N unchained events (take N from `GET /audit/verify`'s
-                             `unchained`). Kind full, or resumed with --expect-after (then N=0)
+      --expect-unchained N   exactly N unchained events. Kind full, or resumed with --expect-after
+                             (then N=0). Record N from the checkpoint's `unchained` when you record
+                             the head and floor, NOT from `GET /audit/verify` later: retention removes
+                             old unchained rows, so today's count is not an earlier export's
 
-    WHY THE ANCHORS BIND THE RECORDS, NOT ONLY THE CHECKPOINT. For a full or resumed export the
-    structure rules tie the records to the checkpoint (the first chained record is floor_seq+1 linking
-    to floor_hash, or after_seq+1; the last is head_seq with head_hash), and the anchors tie the
-    checkpoint to the values you trust; a range, which those rules do not cover, is refused as
-    DOWNGRADED whenever an anchor is given. So an edit that moves the checkpoint to hide a deletion
-    disagrees with the anchor, and one that leaves the checkpoint alone disagrees with the records.
-    The join of a resumed export is the exception, and is checked directly: nothing in the file
-    can say what precedes its first record.
+    WHAT AN ANCHOR IS. "The chain passes through seq S with hash H": the record at S must be in the
+    export with that hash (S may be any seq up to the head, so an anchor taken earlier still
+    verifies an honest later export of a live tenant). A hash depends on every record before it,
+    so the anchor binds every record at or below S and says nothing about the ones above, which
+    are bound only by the unsigned checkpoint; a NOTE says how many. An anchor above the export's
+    head means the chain was cut back. An anchor below the export's start (retention has removed
+    it) is RETIRED: it verified nothing, a NOTE says so, and it is not a failure. A range, which
+    has no such rules, is refused as DOWNGRADED whenever an anchor is given. The join of a resumed
+    export is checked directly: nothing in the file says what precedes its first record.
+
+    THE CHAIN IS UNKEYED. Anyone who can edit the file can recompute every hash, so deleting or
+    editing a record and re-hashing what follows gives a file that is consistent with itself. Only
+    an anchor at or above the edit disagrees with it. The NOTE printed says which records are not
+    bound.
 
     --expect-after cannot be combined with --require-full or --expect-floor: one asks for a
     whole export and the other for a resume. --expect-floor alone binds the START only, and
@@ -357,6 +366,8 @@ def verify_export():
     if after is not None and not ranged and unchained:
         brk("UNCHAINED IN A RESUMED EXPORT: %d unchained event(s) in an export that resumed after seq %d, which "
             "starts in the chained part and so has none" % (unchained, after))
+    if cp.get("unchained") is not None and int(cp["unchained"]) != unchained:
+        brk("UNCHAINED COUNT: the checkpoint says %s unchained event(s) and the file has %d" % (cp["unchained"], unchained))
     if expect_unchained is not None and unchained != expect_unchained:
         brk("UNCHAINED COUNT: the export has %d unchained event(s), the caller expected %d" % (unchained, expect_unchained))
     head_seq, floor_seq = int(cp["head_seq"]), int(cp["floor_seq"])
@@ -397,21 +408,49 @@ def verify_export():
                 brk("HEAD MISMATCH: no chained events, so the head must be the floor, and the checkpoint's head hash %s is not its floor hash %s" % (
                     cp["head_hash"][:12], cp["floor_hash"][:12]))
 
-    # The anchors bind the RECORDS, not only the checkpoint, and for --expect-head and --expect-floor
-    # that is by construction rather than by a second comparison: the structure rules above already
-    # require the last chained record to be the checkpoint's head and the first to follow the
-    # checkpoint's floor, so once the checkpoint agrees with the anchor the records do too. What makes
-    # it hold is that a range, the one kind those rules do not apply to, is refused as DOWNGRADED
-    # before any of this. (A second comparison here could never decide anything a run could observe.)
+    # An anchor says "the chain passes through seq S with hash H". A hash depends on every record
+    # before it, so a record at S with hash H binds every record at or below S, and says nothing
+    # about the ones above (they are bound only by the unsigned checkpoint, and a NOTE says so).
+    # An anchor recorded earlier than this export is therefore checked against the RECORD at S,
+    # not against the checkpoint's head: an honest later export of a live tenant still verifies.
+    # Once retention has removed seq S the anchor is retired: there is nothing left to compare it
+    # with, which is reported and is not a failure.
     first = chained[0] if chained else None
-    if "--expect-head" in expect:
-        eseq, ehash = expect["--expect-head"]
-        if head_seq != eseq or cp["head_hash"] != ehash:
-            brk("ANCHOR MISMATCH: the checkpoint's head is seq %d %s, the anchor is seq %d %s" % (head_seq, cp["head_hash"][:12], eseq, ehash[:12]))
-    if "--expect-floor" in expect:
-        eseq, ehash = expect["--expect-floor"]
-        if floor_seq != eseq or cp["floor_hash"] != ehash:
-            brk("ANCHOR MISMATCH: the checkpoint's floor is seq %d %s, the anchor is seq %d %s" % (floor_seq, cp["floor_hash"][:12], eseq, ehash[:12]))
+    by_seq = {seq: h for seq, _, h in chained}
+    start_seq = floor_seq if after is None else after   # the last seq BEFORE this export's records
+    bound_to = None                                     # the highest seq an anchor verified
+    retired = []
+
+    def passes_through(flag, eseq, ehash):
+        nonlocal bound_to
+        if eseq > head_seq:
+            brk("ANCHOR MISMATCH: %s is seq %d, and this export's head is seq %d: the chain was cut back, or "
+                "this export is older than the anchor" % (flag, eseq, head_seq))
+        elif eseq in by_seq:
+            if by_seq[eseq] != ehash:
+                brk("ANCHOR MISMATCH: seq %d has hash %s in this export, and %s says %s: the records at or "
+                    "below it were changed" % (eseq, by_seq[eseq][:12], flag, ehash[:12]))
+            else:
+                bound_to = max(bound_to or 0, eseq)
+        elif eseq == start_seq:
+            have_hash = cp["floor_hash"] if after is None else expect.get("--expect-after", (None, None))[1]
+            if have_hash is None:
+                retired.append((flag, eseq, "it is the seq this export resumes after, which it does not contain"))
+            elif have_hash != ehash:
+                brk("ANCHOR MISMATCH: %s says seq %d is %s, and this export starts after it with hash %s" % (
+                    flag, eseq, ehash[:12], have_hash[:12]))
+            else:
+                bound_to = max(bound_to or 0, eseq)
+        elif eseq < start_seq:
+            retired.append((flag, eseq, "this export starts after seq %d (retention has removed it, or it is in "
+                                        "the part you already hold)" % start_seq))
+        else:
+            brk("ANCHOR MISMATCH: %s is seq %d, between this export's start and its head, and the export has no "
+                "record at that seq" % (flag, eseq))
+
+    for flag in ("--expect-floor", "--expect-head"):
+        if flag in expect:
+            passes_through(flag, *expect[flag])
     if "--expect-after" in expect:
         eseq, ehash = expect["--expect-after"]
         if first is None:
@@ -422,21 +461,33 @@ def verify_export():
                 first[0], first[1][:12], eseq, ehash[:12], eseq + 1))
 
     # NOTEs say what the run did NOT establish, so an exit 0 is not read as more than it is.
-    if unchained and expect_unchained is None:
-        print("NOTE: %d unchained event(s) are not covered by the chain and were not checked. Pass "
-              "--expect-unchained N (the `unchained` count of GET /audit/verify) to bind their number." % unchained)
+    if unchained:
+        print("NOTE: %d unchained event(s): %s Their CONTENTS are covered by nothing (no hash), whatever is passed." % (
+            unchained, "their number was checked." if expect_unchained is not None else
+            "their number was not checked (pass --expect-unchained N, recorded from an export's checkpoint)."))
+    rewrite = ("The chain is unkeyed: whoever can edit the file can rewrite and re-hash every record above "
+               "the highest anchored seq, and only an anchor binds the records at or below it.")
+    for flag, eseq, why in retired:
+        print("NOTE: %s at seq %d verified NOTHING: %s. Record a newer anchor." % (flag, eseq, why))
     if want_kind is None:
         if have != "a full export":
             print("NOTE: coverage not checked: %s claims none. Pass --require-full for a whole export, or "
-                  "--expect-after SEQ:HASH for a resume." % have)
+                  "--expect-after SEQ:HASH for a resume. %s" % (have, rewrite))
         else:
             print("NOTE: the ends of this export are the checkpoint's own, and the checkpoint is unsigned. Pass "
-                  "--expect-head and --expect-floor with values recorded elsewhere.")
+                  "--expect-head and --expect-floor with values recorded elsewhere. %s" % rewrite)
     else:
-        if "--expect-head" not in expect:
-            print("NOTE: the end is not anchored: pass --expect-head SEQ:HASH, or the last records may have been cut.")
+        top = chained[-1][0] if chained else None
+        if bound_to is None:
+            if chained:
+                print("NOTE: no anchor verified any record, so all %d are bound only by the checkpoint, which is "
+                      "unsigned. %s Pass --expect-head SEQ:HASH from an export's checkpoint." % (len(chained), rewrite))
+        elif top is not None and bound_to < top:
+            print("NOTE: %d record(s) above seq %d are bound only by the checkpoint, which is unsigned. %s "
+                  "Pass a newer --expect-head SEQ:HASH." % (len([1 for q, _, _ in chained if q > bound_to]), bound_to, rewrite))
         if want_kind == "a full export" and "--expect-floor" not in expect:
-            print("NOTE: the start is not anchored: pass --expect-floor SEQ:HASH, or the first records may have been cut.")
+            print("NOTE: the start is not anchored: pass --expect-floor SEQ:HASH to check it for as long as the floor has "
+                  "not moved. A cut of the first records is otherwise indistinguishable from a retention sweep.")
     print("%d events (%d chained checked, %d unchained not covered), %s, %d breaks" % (events, len(chained), unchained, have, breaks))
     sys.exit(1 if breaks else 0)
 

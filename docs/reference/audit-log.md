@@ -92,7 +92,8 @@ Records:
      "status_code":200,"user_id":"...","ip_address":"...","user_agent":"...","duration_ms":12,
      "metadata":{},"prev_hash":"<64 hex>","hash":"<64 hex>"}
     {"type":"checkpoint","tenant_id":"...","head_seq":15,"head_hash":"<64 hex>",
-     "floor_seq":0,"floor_hash":"<64 hex>","events":15}
+     "floor_seq":0,"floor_hash":"<64 hex>","from":null,"to":null,"after_seq":null,
+     "events":15,"unchained":0}
 
 - `seq`, `prev_hash` and `hash` are `null` for a row written before the chain existed, which the
   chain does not cover.
@@ -101,8 +102,12 @@ Records:
 - `cursor` is a position, not data, and is not covered by the hash. Pass the cursor of the last
   record you received as `cursor=` (`--cursor` on `cleatctl`, single tenant) to resume after it.
   It is opaque: it is not a format to build.
-- `checkpoint.events` counts the records of this call. `head_seq` and `head_hash` are the tenant's
-  chain head when the export began, and are what an external anchor would record.
+- `checkpoint.events` counts the records of this call, and `unchained` how many of them carry no `seq`.
+  `head_seq` and `head_hash` are the tenant's chain head when the export began, and `floor_seq` and
+  `floor_hash` where retention has moved the start; these are what an external anchor would record.
+  `unchained` is the count **in this export**, not the tenant's current one: retention removes old
+  unchained rows, so record it beside the head and floor and compare a later export against an
+  earlier one's.
 
 The checkpoint also says what kind of export this was, which decides what a verifier may require:
 `from` and `to` (set for a range), and `after_seq` (set when the export resumed from a cursor).
@@ -129,31 +134,46 @@ Exit `0` verified, `1` a break, `2` incomplete, unreadable, or a contradictory c
 records and relabel the file as a range, or move an end to match. From the file alone that is not
 detectable, and the verifier prints a `NOTE` saying what it did not establish. The options say what *you*
 know from somewhere the editor cannot reach. Each pins the kind you expect (a checkpoint claiming another
-is `DOWNGRADED`) and checks the **records**, not just the checkpoint:
+is `DOWNGRADED`) and is checked against the **records**, not against the checkpoint:
 
-| option | kind it requires | what it binds |
+| option | kind it requires | what it checks |
 |---|---|---|
 | `--require-full` | full | nothing more: you asked for a whole export |
-| `--expect-floor SEQ:HASH` | full | the first chained record is `SEQ + 1` and links to `HASH` (the **start** only) |
-| `--expect-head SEQ:HASH` | full, or resumed with `--expect-after` | the last chained record is `SEQ` with `HASH` (the **end** only) |
-| `--expect-after SEQ:HASH` | resumed, with `after_seq == SEQ` | the first chained record is `SEQ + 1` and links to `HASH`: the join to the part you already hold |
-| `--expect-unchained N` | full, or resumed with `--expect-after` (then `N` is 0) | exactly `N` unchained records; take `N` from `GET /audit/verify`'s `unchained` |
+| `--expect-floor SEQ:HASH` | full | the chain passes through `SEQ` with `HASH` (normally the floor: then the first chained record is `SEQ + 1` linking to it) |
+| `--expect-head SEQ:HASH` | full, or resumed with `--expect-after` | the chain passes through `SEQ` with `HASH`, `SEQ` at most the export's head |
+| `--expect-after SEQ:HASH` | resumed, with `after_seq == SEQ` | the first chained record is `SEQ + 1` linking to `HASH`: the join to the part you already hold |
+| `--expect-unchained N` | full, or resumed with `--expect-after` (then `N` is 0) | exactly `N` unchained records: record `N` from the checkpoint's `unchained` when you record the head and floor |
 
-The anchors bind the records and not only the checkpoint. The structure rules tie the first and last
-chained records to the checkpoint's floor (or `after_seq`) and head, and the anchors tie the checkpoint to
-the values you trust, so an edit that moves the checkpoint to hide a deletion disagrees with the anchor and
-one that leaves it alone disagrees with the records. A range is refused whenever an anchor is given. The
-join of a resumed export is checked directly, because nothing in the file says what precedes its first
-record.
+**An anchor is a point the chain passes through**, not the end of the export. The record at `SEQ` must be
+in the export with `HASH`; a hash depends on every record before it, so the anchor binds every record at or
+below `SEQ`. That is what lets an anchor recorded last week verify an honest export made today, after the
+tenant has grown. What it does not bind is everything **above** `SEQ`: those records are held only by the
+unsigned checkpoint, and the run prints how many. Record the newest head you have.
+
+- An anchor **above** the export's head means the chain was cut back, or the export is older than the
+  anchor: `ANCHOR MISMATCH`.
+- An anchor **below** the export's start has been retired by retention (or, for a resumed export, is in the
+  part you already hold): the verifier has nothing to compare it with, prints `NOTE ... verified NOTHING`,
+  and does not fail. An export can therefore pass with every anchor retired; read the notes, and keep a
+  newer anchor.
+- **The chain is unkeyed.** Anyone who can edit the file can recompute every hash, so deleting or editing a
+  record and re-hashing what follows makes a file that is consistent with itself. Only an anchor at or above
+  the edit disagrees with it. `--expect-floor` at the floor binds where the export starts and what it links
+  to and **nothing else**: every record after it can have been rewritten.
+- **A cut of the first records looks exactly like a retention sweep** to an offline check, so no anchor can
+  catch it: an anchor below the new start is simply retired. Whether the floor moved because retention
+  expired those rows is a question for the database, and `cleatctl audit verify --retention-days` asks it.
 
 `--expect-after` cannot be combined with `--require-full` or `--expect-floor`. For a whole export give
-`--expect-head` **and** `--expect-floor`: either alone leaves the other end open. For a resumed one give
-`--expect-after` and `--expect-head`.
+`--expect-head` with the newest head you have recorded: that is what binds the records. `--expect-floor` adds
+a check at the start for as long as the floor has not moved. For a resumed one give `--expect-after` and
+`--expect-head`.
 
 **`--expect-unchained` exists because an unchained record has no hash.** The chain cannot say that one was
 added, and one added at the front of the file looks like the rows written before the chain existed. One
 added after a chained record is refused without any option; one at the front is caught only by a count you
-supply.
+recorded earlier from a checkpoint (or the checkpoint's own `unchained`, which an editor can change to match,
+so the recorded value is what counts). Their **contents** are covered by nothing, whatever is passed.
 
 With no option a downgraded file verifies (exit `0`, with the note). That is the limit of the file alone, and
 `chain_export_matrix_test.go` pins it: the whole grid of export kinds, option sets and edits, with the exit

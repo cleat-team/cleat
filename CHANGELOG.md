@@ -379,9 +379,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `verify-export` knows which completeness rules apply. The checkpoint itself is unsigned, so an edit can
   present a full export as a range or a resumed one: the options say what the caller knows (`--require-full`,
   `--expect-head`, `--expect-floor`, `--expect-after`, `--expect-unchained`), each pins the kind of export
-  expected, and a bare run prints a `NOTE` saying what it did not establish. An unchained record after a
-  chained one is refused, as is any unchained record in a resumed export. The behaviour of every kind x
-  option x edit is one table, `chain_export_matrix_test.go`.
+  expected, and a bare run prints a `NOTE` saying what it did not establish. An anchor is a point the chain
+  passes through, so one recorded earlier still verifies an honest later export; one that retention has
+  removed is reported as retired, not failed. The chain is unkeyed, so records above the highest anchor can
+  be rewritten and re-hashed: the run says how many. An unchained record after a chained one is refused, as is
+  any in a resumed export, and the checkpoint records `unchained`. The behaviour of every kind x option x edit
+  is one table, `chain_export_matrix_test.go`.
 
   **`GET /audit/events` no longer answers 500 on SQL Server:** it wrote a literal `LIMIT`.
 

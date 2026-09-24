@@ -14,6 +14,7 @@ package auditlog
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,54 +46,65 @@ const (
 var matrixOptions = []string{
 	"(none)", "--require-full", "--expect-head", "--expect-floor", "--expect-after",
 	"head + floor", "head + after", "--expect-unchained", "best for the kind",
+	"earlier --expect-head (seq 10)", "earlier --expect-floor (seq 2)",
 }
 
 // matrixTampers are the rows' edits. Each is made SELF-CONSISTENT the way a forger would: the
 // checkpoint's count is adjusted, and where a deletion moves an end the checkpoint's end moves
-// with it. Nothing is re-hashed: a rewrite of the hashes is caught by any anchor, and is the
-// documented limit without one.
+// with it. The three tampers after the "checkpoint left alone" pair RE-HASH with the reference
+// implementation's own row_hash (testdata/audit_chain_forge.py): the chain is unkeyed, so an
+// editor can. Only an anchor on the HEAD disagrees with that; --expect-floor and --expect-after
+// bind where the export starts and what it links to, not the records after.
 var matrixTampers = []string{
 	"none", "delete first record", "delete a middle record", "delete last two records",
 	"delete middle + relabel as range", "unchained added after the chain",
 	"unchained added at the front", "unchained added mid-stream",
 	"delete last two, checkpoint left alone", "delete first record, checkpoint left alone",
+	"delete a middle record + renumber + re-hash", "edit a record + re-hash",
+	"unchained added at the front, checkpoint left alone",
 }
 
 // matrixWant[kind][option][tamper]. Read a row as "with these options, what does each tamper do".
-var matrixWant = map[string][9][10]string{
+var matrixWant = map[string][11][13]string{
 	"full": {
-		//               none  del-first del-mid del-last relabel fake-tail fake-front fake-mid del-last* del-first*
-		/* (none)     */ {mOK, mOK, mGAP, mOK, mOK, mUA, mOK, mUA, mME, mMS},
-		/* req-full   */ {mOK, mOK, mGAP, mOK, mDG, mUA, mOK, mUA, mME, mMS},
-		/* head       */ {mOK, mOK, mGAP, mAM, mDG, mUA, mOK, mUA, mME, mMS},
-		/* floor      */ {mOK, mAM, mGAP, mOK, mDG, mUA, mOK, mUA, mME, mMS},
-		/* after      */ {mDG, mDG, mGAP, mDG, mDG, mUA, mDG, mUA, mME, mMS},
-		/* head+floor */ {mOK, mAM, mGAP, mAM, mDG, mUA, mOK, mUA, mME, mMS},
-		/* head+after */ {mDG, mDG, mGAP, mDG, mDG, mUA, mDG, mUA, mME, mMS},
-		/* unchained  */ {mOK, mOK, mGAP, mOK, mDG, mUA, mUC, mUA, mME, mMS},
-		/* best       */ {mOK, mAM, mGAP, mAM, mDG, mUA, mUC, mUA, mME, mMS},
+		//               none  del-first del-mid del-last relabel fake-tail fake-front fake-mid del-last* del-first* rewrite edit+rehash fake-front*
+		/* (none)     */ {mOK, mOK, mGAP, mOK, mOK, mUA, mOK, mUA, mME, mMS, mOK, mOK, mUC},
+		/* req-full   */ {mOK, mOK, mGAP, mOK, mDG, mUA, mOK, mUA, mME, mMS, mOK, mOK, mUC},
+		/* head       */ {mOK, mOK, mGAP, mAM, mDG, mUA, mOK, mUA, mME, mMS, mAM, mAM, mUC},
+		/* floor      */ {mOK, mOK, mGAP, mOK, mDG, mUA, mOK, mUA, mME, mMS, mOK, mOK, mUC},
+		/* after      */ {mDG, mDG, mGAP, mDG, mDG, mUA, mDG, mUA, mME, mMS, mDG, mDG, mUC},
+		/* head+floor */ {mOK, mOK, mGAP, mAM, mDG, mUA, mOK, mUA, mME, mMS, mAM, mAM, mUC},
+		/* head+after */ {mDG, mDG, mGAP, mDG, mDG, mUA, mDG, mUA, mME, mMS, mDG, mDG, mUC},
+		/* unchained  */ {mOK, mOK, mGAP, mOK, mDG, mUA, mUC, mUA, mME, mMS, mOK, mOK, mUC},
+		/* best       */ {mOK, mOK, mGAP, mAM, mDG, mUA, mUC, mUA, mME, mMS, mAM, mAM, mUC},
+		/* earlier head */ {mOK, mOK, mGAP, mOK, mDG, mUA, mOK, mUA, mME, mMS, mAM, mAM, mUC},
+		/* earlier floor */ {mOK, mOK, mGAP, mOK, mDG, mUA, mOK, mUA, mME, mMS, mOK, mOK, mUC},
 	},
 	"resumed": {
-		/* (none)     */ {mOK, mOK, mGAP, mOK, mOK, mUA, mUR, mUA, mME, mMS},
-		/* req-full   */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS},
-		/* head       */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS},
-		/* floor      */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS},
-		/* after      */ {mOK, mAM, mGAP, mOK, mDG, mUA, mUR, mUA, mME, mMS},
-		/* head+floor */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS},
-		/* head+after */ {mOK, mAM, mGAP, mAM, mDG, mUA, mUR, mUA, mME, mMS},
-		/* unchained  */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS},
-		/* best       */ {mOK, mAM, mGAP, mAM, mDG, mUA, mUR, mUA, mME, mMS},
+		/* (none)     */ {mOK, mOK, mGAP, mOK, mOK, mUA, mUR, mUA, mME, mMS, mOK, mOK, mUC},
+		/* req-full   */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
+		/* head       */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
+		/* floor      */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
+		/* after      */ {mOK, mAM, mGAP, mOK, mDG, mUA, mUR, mUA, mME, mMS, mOK, mOK, mUC},
+		/* head+floor */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
+		/* head+after */ {mOK, mAM, mGAP, mAM, mDG, mUA, mUR, mUA, mME, mMS, mAM, mAM, mUC},
+		/* unchained  */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
+		/* best       */ {mOK, mAM, mGAP, mAM, mDG, mUA, mUR, mUA, mME, mMS, mAM, mAM, mUC},
+		/* earlier head + after */ {mOK, mAM, mGAP, mOK, mDG, mUA, mUR, mUA, mME, mMS, mOK, mOK, mUC},
+		/* earlier floor */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
 	},
 	"range": {
-		/* (none)     */ {mOK, mOK, mOK, mOK, mNA, mUA, mOK, mUA, mOK, mOK},
-		/* req-full   */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG},
-		/* head       */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG},
-		/* floor      */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG},
-		/* after      */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG},
-		/* head+floor */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG},
-		/* head+after */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG},
-		/* unchained  */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG},
-		/* best       */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG},
+		/* (none)     */ {mOK, mOK, mOK, mOK, mNA, mUA, mOK, mUA, mOK, mOK, mOK, mOK, mUC},
+		/* req-full   */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG, mDG, mDG, mUC},
+		/* head       */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG, mDG, mDG, mUC},
+		/* floor      */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG, mDG, mDG, mUC},
+		/* after      */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG, mDG, mDG, mUC},
+		/* head+floor */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG, mDG, mDG, mUC},
+		/* head+after */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG, mDG, mDG, mUC},
+		/* unchained  */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG, mDG, mDG, mUC},
+		/* best       */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG, mDG, mDG, mUC},
+		/* earlier head */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG, mDG, mDG, mUC},
+		/* earlier floor */ {mDG, mDG, mDG, mDG, mNA, mUA, mDG, mUA, mDG, mDG, mDG, mDG, mUC},
 	},
 }
 
@@ -136,6 +148,19 @@ func TestTheOfflineVerifierMatrix(t *testing.T) {
 		head := fmt.Sprintf("%d:%s", fullCP.HeadSeq, fullCP.HeadHash)
 		floor := fmt.Sprintf("%d:%s", fullCP.FloorSeq, fullCP.FloorHash)
 		after := fmt.Sprintf("6:%s", *six.Hash)
+		// Anchors recorded EARLIER than the export: seq 10 and seq 2 of a chain that has since grown to 15.
+		var earlierHead, earlierFloor string
+		for _, ev := range fullEvents {
+			if ev.Seq != nil && *ev.Seq == 10 {
+				earlierHead = fmt.Sprintf("10:%s", *ev.Hash)
+			}
+			if ev.Seq != nil && *ev.Seq == 2 {
+				earlierFloor = fmt.Sprintf("2:%s", *ev.Hash)
+			}
+		}
+		if earlierHead == "" || earlierFloor == "" {
+			t.Fatal("no seq 10 / seq 2 in the export")
+		}
 
 		// A record with no seq, hash or prev_hash, and an id nothing else has: what an editor
 		// with write access to the file (or the table) would invent. Cloned from the legacy row.
@@ -178,9 +203,13 @@ func TestTheOfflineVerifierMatrix(t *testing.T) {
 				{"--expect-head", head, "--expect-after", after},
 				{"--expect-unchained", fmt.Sprint(nUnch)},
 				nil, // best for the kind, below
+				nil, // earlier head
+				{"--expect-floor", earlierFloor},
 			}
+			opts[9] = []string{"--expect-head", earlierHead}
 			switch kind {
 			case "resumed":
+				opts[9] = []string{"--expect-head", earlierHead, "--expect-after", after}
 				opts[8] = []string{"--expect-head", head, "--expect-after", after, "--expect-unchained", "0"}
 			default:
 				opts[8] = []string{"--expect-head", head, "--expect-floor", floor, "--expect-unchained", fmt.Sprint(nUnch)}
@@ -223,6 +252,32 @@ func TestTheOfflineVerifierMatrix(t *testing.T) {
 					c = c[:len(c)-2]
 				case 9:
 					c = c[1:]
+				case 10, 11: // an editor with the whole file: change it and re-hash what follows
+					forgeArgs := []string{"--drop", fmt.Sprint(*exportEventOf(t, c[mid]).Seq)}
+					if kind != "range" {
+						forgeArgs = append(forgeArgs, "--renumber")
+					}
+					if ti == 11 {
+						forgeArgs = []string{"--edit-path", fmt.Sprint(*exportEventOf(t, c[mid]).Seq), "/forged/path"}
+					}
+					forgedBody := runForge(t, py, bodies[kind], forgeArgs...)
+					_, _, forgedRaw := exportLines(t, forgedBody)
+					u, c = nil, nil
+					fevs, _, _ := exportLines(t, forgedBody)
+					for i, ev := range fevs {
+						if ev.Seq == nil {
+							u = append(u, forgedRaw[i])
+						} else {
+							c = append(c, forgedRaw[i])
+						}
+					}
+					cpEdit = forgedCheckpoint(t, forgedBody)
+				case 12: // the checkpoint still counts the honest number of unchained events
+					u = append([]string{forged}, u...)
+					cpEdit["unchained"] = len(unch)
+				}
+				if _, set := cpEdit["unchained"]; !set && ti != 10 && ti != 11 {
+					cpEdit["unchained"] = countUnchained(u, c)
 				}
 				stream := assemble(t, cp, u, c, cpEdit)
 				if ti > 0 && stream == bodies[kind] {
@@ -279,13 +334,13 @@ func TestTheOfflineVerifierMatrix(t *testing.T) {
 		if _, out := runVerifyExport(t, py, full); !strings.Contains(out, "the checkpoint is unsigned") {
 			t.Errorf("a whole export with no options must say its ends are the checkpoint's own:\n%s", out)
 		}
-		if _, out := runVerifyExport(t, py, full, "--expect-floor", floor); !strings.Contains(out, "the end is not anchored") {
-			t.Errorf("--expect-floor alone must say the end is not anchored:\n%s", out)
+		if _, out := runVerifyExport(t, py, full, "--expect-floor", floor); !strings.Contains(out, "record(s) above seq 0 are bound only by the checkpoint") {
+			t.Errorf("--expect-floor alone must say every record is bound only by the checkpoint:\n%s", out)
 		}
 		if _, out := runVerifyExport(t, py, full, "--expect-head", head); !strings.Contains(out, "the start is not anchored") {
 			t.Errorf("--expect-head alone must say the start is not anchored:\n%s", out)
 		}
-		if _, out := runVerifyExport(t, py, full, "--require-full"); !strings.Contains(out, "1 unchained event(s) are not covered") {
+		if _, out := runVerifyExport(t, py, full, "--require-full"); !strings.Contains(out, "1 unchained event(s)") {
 			t.Errorf("an unchained event must be noted whenever there is one:\n%s", out)
 		}
 		// The command line: --help prints the docstring; a contradictory or unknown option is
@@ -351,4 +406,133 @@ func runVerifyExport(t *testing.T, py, stream string, args ...string) (int, stri
 		code = ee.ExitCode()
 	}
 	return code, out.String()
+}
+
+// countUnchained counts the lines with no seq, wherever the tamper put them.
+func countUnchained(u, c []string) int {
+	n := 0
+	for _, l := range append(append([]string{}, u...), c...) {
+		if strings.Contains(l, `"seq":null`) {
+			n++
+		}
+	}
+	return n
+}
+
+// runForge runs audit_chain_forge.py over an export.
+func runForge(t *testing.T, py, stream string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(py, append([]string{"testdata/audit_chain_forge.py"}, args...)...)
+	cmd.Stdin = strings.NewReader(stream)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("forging: %v\n%s", err, errb.String())
+	}
+	return out.String()
+}
+
+// forgedCheckpoint returns the forged export's checkpoint as the edits assemble should apply.
+func forgedCheckpoint(t *testing.T, body string) map[string]any {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	var m map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &m); err != nil {
+		t.Fatal(err)
+	}
+	delete(m, "type")
+	return m
+}
+
+// The documented workflow is to record the head and floor on a schedule and check a LATER export
+// against them. The matrix takes its anchors from the export it checks, so it could not see that an
+// anchor which must equal the checkpoint's head refuses every honest export of a live tenant
+// (cleat-review on #2191). This runs the lifecycle for real: anchors, growth, then a retention sweep.
+func TestAnAnchorRecordedEarlierStillVerifiesAnHonestLaterExport(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatalf("python3 is not installed, so the reference verifier cannot run: %v", err)
+	}
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		e.record(p, tenant, 8)
+		export := func() (string, *exportCheckpoint, map[int64]string) {
+			t.Helper()
+			code, body := e.get(p, tenant, "/audit/export")
+			if code != 200 {
+				t.Fatalf("export: %d %s", code, body)
+			}
+			evs, cp, _ := exportLines(t, body)
+			hashes := map[int64]string{}
+			for _, ev := range evs {
+				if ev.Seq != nil {
+					hashes[*ev.Seq] = *ev.Hash
+				}
+			}
+			return body, cp, hashes
+		}
+		_, cp0, h0 := export()
+		head0 := fmt.Sprintf("%d:%s", cp0.HeadSeq, cp0.HeadHash)
+		floor0 := fmt.Sprintf("%d:%s", cp0.FloorSeq, cp0.FloorHash)
+		mid0 := fmt.Sprintf("4:%s", h0[4])
+
+		// The chain grows by 7 rows: the anchors are now 7 rows behind.
+		e.record(p, tenant, 7)
+		grown, _, hg := export()
+		for name, args := range map[string][]string{
+			"the head recorded 7 rows ago":  {"--expect-head", head0},
+			"a floor recorded before then":  {"--expect-floor", floor0},
+			"a mid-chain anchor":            {"--expect-head", mid0},
+			"the head and the floor":        {"--expect-head", head0, "--expect-floor", floor0},
+			"the head, floor and unchained": {"--expect-head", head0, "--expect-floor", floor0, "--expect-unchained", "0"},
+		} {
+			code, out := runVerifyExport(t, py, grown, args...)
+			if code != 0 {
+				t.Errorf("%s vs an honest export after growth: exit %d, want 0\n%s", name, code, out)
+			}
+			if strings.Contains(args[0], "head") && !strings.Contains(out, "record(s) above seq") {
+				t.Errorf("%s: the 7 newer records are bound only by the checkpoint, and the run must say so:\n%s", name, out)
+			}
+		}
+		// A record at or below the anchor changed, and everything after it re-hashed: the anchor disagrees.
+		forged := runForge(t, py, grown, "--edit-path", "3", "/rewritten")
+		if code, out := runVerifyExport(t, py, forged, "--expect-head", mid0); code != 1 || !strings.Contains(out, "ANCHOR MISMATCH") {
+			t.Errorf("a record below the anchor rewritten and re-hashed: exit %d\n%s", code, out)
+		}
+		// ...and one ABOVE it is the documented limit: only the checkpoint binds it.
+		forgedAbove := runForge(t, py, grown, "--edit-path", "6", "/rewritten")
+		if code, out := runVerifyExport(t, py, forgedAbove, "--expect-head", mid0); code != 0 || !strings.Contains(out, "record(s) above seq 4") {
+			t.Errorf("a record above the anchor rewritten and re-hashed: exit %d\n%s", code, out)
+		}
+
+		// Retention removes rows 1..6, and the floor moves past the old anchors.
+		cutoff := e.tsOf(tenant, 6).Add(time.Microsecond)
+		if n, err := e.plugin().retainTenant(context.Background(), tenant, cutoff); err != nil || n != 6 {
+			t.Fatalf("the sweep removed %d rows, %v", n, err)
+		}
+		swept, cps, _ := export()
+		if cps.FloorSeq != 6 {
+			t.Fatalf("the floor is seq %d after the sweep, want 6", cps.FloorSeq)
+		}
+		code, out := runVerifyExport(t, py, swept, "--expect-floor", floor0, "--expect-head", mid0)
+		if code != 0 || strings.Count(out, "verified NOTHING") != 2 {
+			t.Errorf("anchors below the moved floor must be reported retired, not failed: exit %d\n%s", code, out)
+		}
+		// The head anchor that is still inside the export still binds it.
+		if code, out := runVerifyExport(t, py, swept, "--expect-head", head0); code != 0 || strings.Contains(out, "verified NOTHING") {
+			t.Errorf("a head anchor inside the swept export: exit %d\n%s", code, out)
+		}
+		// The seq the floor now sits at is checked against the checkpoint's floor hash.
+		if code, out := runVerifyExport(t, py, swept, "--expect-floor", fmt.Sprintf("6:%s", hg[6])); code != 0 {
+			t.Errorf("an anchor at the new floor: exit %d\n%s", code, out)
+		}
+		if code, out := runVerifyExport(t, py, swept, "--expect-floor", "6:"+strings.Repeat("ab", 32)); code != 1 || !strings.Contains(out, "ANCHOR MISMATCH") {
+			t.Errorf("a wrong hash at the new floor: exit %d\n%s", code, out)
+		}
+		// Rolled back: the export is older than an anchor recorded after it.
+		if code, out := runVerifyExport(t, py, swept, "--expect-head", fmt.Sprintf("%d:%s", cps.HeadSeq+5, strings.Repeat("cd", 32))); code != 1 || !strings.Contains(out, "cut back") {
+			t.Errorf("an anchor above the export's head: exit %d\n%s", code, out)
+		}
+	})
 }
