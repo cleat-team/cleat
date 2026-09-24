@@ -1167,7 +1167,7 @@ func TestHandleListDBQueryError(t *testing.T) {
 	// Fail on list SELECT.
 	_, handler, _, _ := setupSelectiveErrorDB(t,
 		nil,
-		[]string{"SELECT i.key, i.sha256, i.size"},
+		[]string{`SELECT i."key", i.sha256, i.size`},
 	)
 
 	req := authedRequest("GET", "/blobs", nil)

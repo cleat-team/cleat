@@ -148,10 +148,15 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		defName = &req.DefName
 	}
 
+	// plugin.JSONColumn.Value, not req.Payload/req.Input directly: go-mssqldb
+	// maps a bare []byte arg to VARBINARY, which corrupts the NVARCHAR
+	// payload/input columns on write -- a 200 with an empty body on the next
+	// read, because encoding/json fails part-way through writing the
+	// response. See plugin.JSONColumn. cleat#2206.
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO task_queue (tenant_id, queue_name, job_id, payload, def_name, input)
 			VALUES ($1, $2, $3, $4, $5, $6)
-		`, p.dialect), tid, queueName, jobID, req.Payload, defName, req.Input)
+		`, p.dialect), tid, queueName, jobID, plugin.JSONColumn{Raw: req.Payload}, defName, plugin.JSONColumn{Raw: req.Input})
 	if err != nil {
 		p.logger.Error("jobqueue: enqueue", "error", err)
 		p.writeError(w, 500, "failed to enqueue job")
@@ -211,7 +216,11 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query += " ORDER BY created_at DESC"
-	query += fmt.Sprintf(" LIMIT $%d", argIdx)
+	// plugin.LimitClause, not a literal "LIMIT $N": SQL Server has no LIMIT,
+	// and this endpoint answered every list request with a 500,
+	// "Incorrect syntax near 'LIMIT'" -- the same bug #2191 and #2198 already
+	// fixed at the other list endpoints, missed here. cleat#2206.
+	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
@@ -226,20 +235,20 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var (
 			j           JobResponse
-			payloadRaw  []byte
+			payloadCol  plugin.JSONColumn
 			startedAt   sql.NullTime
 			completedAt sql.NullTime
 			runID       sql.NullString
 		)
 		if err := plugin.ScanRow(rows,
 			&j.JobID, &j.QueueName, &j.Status,
-			&payloadRaw, &j.CreatedAt,
+			&payloadCol, &j.CreatedAt,
 			&startedAt, &completedAt, &runID,
 		); err != nil {
 			p.logger.Error("jobqueue: scan row", "error", err)
 			continue
 		}
-		j.Payload = json.RawMessage(payloadRaw)
+		j.Payload = payloadCol.Raw
 		if startedAt.Valid {
 			j.StartedAt = &startedAt.Time
 		}
@@ -280,7 +289,7 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var j JobResponse
-	var payloadRaw []byte
+	var payloadCol plugin.JSONColumn
 	var startedAt, completedAt sql.NullTime
 	var runID sql.NullString
 
@@ -290,7 +299,7 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 			WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3
 		`, p.dialect), tid, queueName, jobID),
 		&j.JobID, &j.QueueName, &j.Status,
-		&payloadRaw, &j.CreatedAt,
+		&payloadCol, &j.CreatedAt,
 		&startedAt, &completedAt, &runID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -303,7 +312,7 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	j.Payload = json.RawMessage(payloadRaw)
+	j.Payload = payloadCol.Raw
 	if startedAt.Valid {
 		j.StartedAt = &startedAt.Time
 	}
