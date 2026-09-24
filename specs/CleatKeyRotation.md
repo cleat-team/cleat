@@ -66,11 +66,50 @@ sentence was written before this model.
 - **Three or more key versions**, i.e. a second rotation begun before the first ended.
 - **Tenants.** The per-tenant HKDF derivation is orthogonal to which *master* key sealed a row.
 - **A worker restarting under an unchanged ring.** It adds no reachable state.
-- **Whether the implementation does what the model assumes.** TLA+ verifies the design, not the
-  code; the assumption that the registry read and the write are one serialisable transaction is
-  an obligation on the implementation that only a three-dialect test can discharge — see
-  `specs/README.md`, *Invariant-to-test mapping*. MySQL and SQL Server take different locks
-  than PostgreSQL, and "serialisable" is where the dialects differ most.
+- **Whether the implementation does what the model assumes.** TLA+ verifies the design,
+  not the code. The obligation the model places on the implementation is that the two
+  spans `WriteGate = "registry"` treats as atomic with respect to each other never
+  interleave. See the next section for how the code discharges it, and which tests would
+  go red if it stopped.
+
+## Where the model meets the code
+
+The design comment on cleat#1991 proposed "one serialisable transaction" for each span. The
+implementation uses **one named database lock** instead (`engine/secret_key_gate.go`), because
+the boot check reads one tenant per transaction under row-level security and because
+SERIALIZABLE means three different things on the three dialects.
+
+| model | code | refinement |
+|---|---|---|
+| worker span: `Register` then `BootCheck` | `WorkerRegistry.RegisterUnderKeyGate`: takes the gate **shared**, replaces the row (publishing the key set), runs the check, commits or withdraws | held from the first step through commit |
+| writer span: read registry, then write | `SecretStore.gatedWrite`: takes the gate **exclusive**, reads the live key sets, refuses unless every one can open the version, writes on the same connection | held from the read through commit |
+| "the spans do not interleave" | shared/exclusive exclusion on one lock name | a worker span and a writer span never overlap; two worker spans may |
+
+**Why that is enough.** With the spans mutually exclusive, only two orders exist. Writer
+first: its row is committed before the worker's span starts, so the worker's boot check reads
+it (this is the counterexample the model finds for `WriteGate = "observed"`, 5 states, and
+`TestAWorkerBootingDuringAWriteSeesTheRowTheWriterWrote` is that trace). Worker first: its
+row is committed before the writer's span starts, so the writer's registry read sees it
+(`TestAWriteDuringABootSeesTheWorkerThatWasBooting`). The other three counterexamples map to:
+`BootCheck = FALSE` to `checkSecretsUsable` and its tests; `WriteGate = "none"` to
+`TestAWriteIsRefusedWhileALiveWorkerCannotOpenItsVersion`; `ResealCAS = FALSE` to
+`TestResealDoesNotOverwriteAConcurrentSetSecret`.
+
+**Scope of the lock per dialect.** PostgreSQL `pg_advisory_xact_lock[_shared]` and SQL Server
+`sp_getapplock` with a Transaction owner are released by COMMIT/ROLLBACK. MySQL `GET_LOCK` is
+**session**-scoped, survives COMMIT, and is exclusive-only, so it is taken on a dedicated
+connection and released in a defer on every exit; MySQL workers starting together take
+turns. `TestAFailedBootCheckDoesNotLeaveTheGateHeld` and `TestAPanickingWriteDoesNotLeaveTheGateHeld`
+read the lock's state from each database's own catalog, because on MySQL the connection that
+leaked the lock re-acquires it re-entrantly and "the next writer succeeded" proves nothing.
+
+**What the lock does not cover, and the model cannot say.** "Live" is a heartbeat within five
+minutes (`SecretKeyLiveWindow`). A worker stalled for longer while still serving is invisible
+to a writer; when its membership loop next runs it re-registers, re-checks and stops if it
+cannot open something stored (`TestALapsedWorkerThatCannotOpenAStoredSecretStopsInsteadOfServing`),
+which bounds the exposure without removing it. Workers older than the registry are invisible
+unless they registered under the connection budget, and a registry row with no key set is read
+as "opens version 1 only".
 
 ## Bounds
 

@@ -24,6 +24,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/internal/tenantctx"
@@ -367,6 +368,105 @@ func TestResealDoesNotOverwriteAConcurrentSetSecret(t *testing.T) {
 		}
 		if got, _ := e.store(ringOf(t, rotV2)).GetSecret(e.ctx(tenant), tenant.String(), name); got != "value-set-during-reseal" {
 			t.Fatalf("after convergence the value is %q, want the one set during the first run", got)
+		}
+	})
+}
+
+// A sweep that dies part-way leaves every row readable, and running it again
+// finishes the job (cleat#1991).
+//
+// Each row is resealed by its own compare-and-swap, so there is no window in which
+// a row is half-written: it holds either the old ciphertext under the old version
+// or the new under the new, and both open under a ring that carries both keys.
+// That is what makes "just run it again" the whole recovery, and it is a property
+// of the write, not of the sweep -- so the test kills the sweep BETWEEN two writes,
+// which is where a process death, a lost connection or an operator's ^C would
+// land, and checks the state that is left rather than the sweep's own report.
+func TestAResealSweepThatDiesMidWayLeavesEveryRowReadableAndRerunFinishes(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, e *rotationEnv) {
+		tenant := e.tenants[0]
+		var names []string
+		values := map[string]string{}
+		for _, suffix := range []string{"a", "b", "c", "d"} {
+			name := "cleat-1991-crash-" + suffix
+			e.claim(t, tenant, name)
+			e.put(t, ringOf(t, rotV1), tenant, name, "value-"+name)
+			names = append(names, name)
+			values[name] = "value-" + name
+		}
+		isMine := map[string]bool{}
+		for _, n := range names {
+			isMine[n] = true
+		}
+
+		rotating := e.store(ringOf(t, rotV2, rotV1))
+		written, crashed := 0, false
+		rotating.beforeResealWrite = func(tid, n string) {
+			if !isMine[n] {
+				return
+			}
+			if written == 1 {
+				crashed = true
+				panic("simulated process death between two row writes")
+			}
+			written++
+		}
+		func() {
+			defer func() { _ = recover() }()
+			_, _ = rotating.ResealSecrets(context.Background(), false)
+		}()
+		if !crashed {
+			t.Fatal("the sweep never reached its second write: this test measured nothing")
+		}
+
+		// What is left: exactly the rows written before the death are on version 2,
+		// the rest untouched on version 1, and EVERY row opens under {2, 1} with its
+		// own plaintext.
+		onNew, onOld := 0, 0
+		reader := e.store(ringOf(t, rotV2, rotV1))
+		for _, n := range names {
+			switch v := e.rawKeyVersion(t, tenant, n); v {
+			case 2:
+				onNew++
+			case 1:
+				onOld++
+			default:
+				t.Errorf("%q is on key_version %d after an interrupted sweep, want 1 or 2", n, v)
+			}
+			got, err := reader.GetSecret(e.ctx(tenant), tenant.String(), n)
+			if err != nil || got != values[n] {
+				t.Errorf("%q after an interrupted sweep: %q, %v (want %q): the sweep left a row unreadable",
+					n, got, err, values[n])
+			}
+		}
+		if onNew != 1 || onOld != len(names)-1 {
+			t.Errorf("after dying between the first and second write, %d rows are on the new key and %d on the old; "+
+				"want 1 and %d", onNew, onOld, len(names)-1)
+		}
+
+		// Run again: it does the rest, changes nothing that was done, and afterwards
+		// the new key alone is enough.
+		rotating.beforeResealWrite = nil
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		res, err := rotating.ResealSecrets(ctx, false)
+		if err != nil {
+			t.Fatalf("the re-run after an interrupted sweep failed: %v", err)
+		}
+		if res.Changed != 0 || len(mine(res, names...)) != 0 {
+			t.Fatalf("the re-run found changed or unreadable rows of this test's: %+v", res)
+		}
+		if res.Resealed < len(names)-1 {
+			t.Errorf("the re-run resealed %d, want at least the %d rows the first sweep did not reach", res.Resealed, len(names)-1)
+		}
+		afterOnly := e.store(ringOf(t, rotV2))
+		for _, n := range names {
+			if v := e.rawKeyVersion(t, tenant, n); v != 2 {
+				t.Errorf("%q is key_version %d after the re-run, want 2", n, v)
+			}
+			if got, err := afterOnly.GetSecret(e.ctx(tenant), tenant.String(), n); err != nil || got != values[n] {
+				t.Errorf("%q under the new key alone: %q, %v (want %q)", n, got, err, values[n])
+			}
 		}
 	})
 }

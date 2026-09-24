@@ -53,7 +53,9 @@ Reads the key ring from the environment, exactly as the workers do:
   CLEAT_SECRET_MASTER_KEY_PREVIOUS          the key being retired
   CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION  its key_version (required with it)
 
-Run it only after EVERY worker has been deployed with the new key in its ring.
+Every write is refused while a live worker cannot open the current key version (workers
+publish the versions they can open); the refusal names them. Nothing is written by a
+refused run.
 
 Exit status is non-zero while anything is left: a secret this ring cannot open
 (reported with its tenant, name and key_version, and never touched), or one that

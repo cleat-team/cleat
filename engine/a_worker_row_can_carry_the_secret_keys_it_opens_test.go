@@ -8,9 +8,10 @@ package engine
 //
 //   - it is NULLABLE, because a worker from before the column reads as "unknown"
 //     and a gate must never read unknown as "can open anything";
-//   - a registration made by the CURRENT Register statement, which does not know
-//     the column, still works and reads back NULL -- an upgrade must not break
-//     the workers that are already running;
+//   - a registration made by the statement that PREDATES the column -- what a
+//     worker not yet upgraded still runs -- works and reads back NULL: an upgrade
+//     must not break the workers that are already running. (Register itself now
+//     writes the column, always; see the second half of this test.)
 //   - NULL, "" and "1,2" are three DIFFERENT values on every dialect. "" means a
 //     worker with no key, which blocks every write; NULL means unknown. A dialect
 //     that folded the empty string into NULL (the way some databases do) would
@@ -54,10 +55,17 @@ func TestAWorkerRowCanCarryTheSecretKeysItOpens(t *testing.T) {
 					"existing worker's registration fail on upgrade", nullable)
 			}
 
-			// A registration made without the column still works, and reads NULL.
+			// A registration made by the statement that predates the column still
+			// works, and reads NULL. It is written out here rather than called,
+			// because Register no longer has that shape.
 			id := "cleat-1991-" + uuid.New().String()
-			if err := reg.Register(ctx, WorkerRegistration{WorkerID: id, Hostname: "h", PID: 1, Concurrency: 1}); err != nil {
-				t.Fatalf("Register (the statement that predates the column): %v", err)
+			d := Dialect(string(dialect))
+			legacy := `INSERT INTO ` + reg.table() +
+				` (worker_id, hostname, pid, concurrency, connection_budget, started_at, last_heartbeat_at) VALUES (` +
+				d.placeholder(1) + `, ` + d.placeholder(2) + `, ` + d.placeholder(3) + `, ` + d.placeholder(4) + `, ` +
+				d.placeholder(5) + `, ` + d.nowExpr() + `, ` + d.nowExpr() + `)`
+			if _, err := db.ExecContext(ctx, legacy, id, "h", 1, 1, 0); err != nil {
+				t.Fatalf("the registration statement that predates the column: %v", err)
 			}
 			t.Cleanup(func() { _ = reg.Deregister(context.Background(), id) })
 
@@ -85,7 +93,7 @@ func TestAWorkerRowCanCarryTheSecretKeysItOpens(t *testing.T) {
 			}
 
 			if got := read(); got.Valid {
-				t.Fatalf("a worker registered by the current code has secret_key_versions = %q, want NULL (unknown)", got.String)
+				t.Fatalf("a worker registered by the pre-column statement has secret_key_versions = %q, want NULL (unknown)", got.String)
 			}
 			write("1,2")
 			if got := read(); !got.Valid || got.String != "1,2" {
@@ -100,6 +108,44 @@ func TestAWorkerRowCanCarryTheSecretKeysItOpens(t *testing.T) {
 			write(nil)
 			if got := read(); got.Valid {
 				t.Fatalf("NULL read back as %+v", got)
+			}
+		})
+	}
+}
+
+// Register ALWAYS writes the column. Nil versions is "" (a worker with no key),
+// not NULL: NULL means "did not say", and a current worker always can.
+func TestRegisterWritesTheSecretKeysItOpens(t *testing.T) {
+	for _, dialect := range []testutil.Dialect{testutil.DialectPostgres, testutil.DialectMySQL, testutil.DialectMSSQL} {
+		t.Run(string(dialect), func(t *testing.T) {
+			db := testutil.TestDB(t, dialect)
+			t.Cleanup(func() { db.Close() })
+			testutil.SetupFullSchema(t, db, dialect)
+			ctx := context.Background()
+			reg := &WorkerRegistry{DB: db, Dialect: Dialect(string(dialect))}
+			d := Dialect(string(dialect))
+
+			for _, c := range []struct {
+				name     string
+				versions []int
+				want     string
+			}{
+				{"no key", nil, ""},
+				{"two keys, given out of order", []int{2, 1}, "1,2"},
+			} {
+				id := "cleat-1991-" + uuid.New().String()
+				if err := reg.Register(ctx, WorkerRegistration{WorkerID: id, Hostname: "h", PID: 1, SecretKeyVersions: c.versions}); err != nil {
+					t.Fatalf("%s: Register: %v", c.name, err)
+				}
+				t.Cleanup(func() { _ = reg.Deregister(context.Background(), id) })
+				var got sql.NullString
+				if err := db.QueryRowContext(ctx, `SELECT secret_key_versions FROM `+reg.table()+
+					` WHERE worker_id = `+d.placeholder(1), id).Scan(&got); err != nil {
+					t.Fatalf("%s: read: %v", c.name, err)
+				}
+				if !got.Valid || got.String != c.want {
+					t.Errorf("%s: secret_key_versions = %+v, want %q (non-NULL)", c.name, got, c.want)
+				}
 			}
 		})
 	}

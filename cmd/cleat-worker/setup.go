@@ -1559,14 +1559,20 @@ type Worker struct {
 	// had for plugins.
 	secrets *engine.SecretStore
 
-	// Worker membership and this worker's slice of the cluster connection
+	// Worker membership, and this worker's slice of the cluster connection
 	// budget. cleat#1487.
 	//
-	// All four are nil or zero unless --cluster-connection-budget is set, and
-	// the loop that uses them is not launched in that case. A worker that was
-	// upgraded must not start participating in a budget nobody configured --
-	// the same opt-in rule the per-worker budget follows.
-	workerRegistry            *engine.WorkerRegistry
+	// The registry and the membership loop exist on EVERY worker, because the
+	// registry is also how a writer learns which secret keys the live workers
+	// can open (cleat#1991). The connection share, and the budget fields that
+	// feed it, are nil or zero unless --cluster-connection-budget is set: a
+	// worker that was upgraded must not start resizing its pools against a
+	// budget nobody configured -- the same opt-in rule the per-worker budget
+	// follows.
+	workerRegistry *engine.WorkerRegistry
+	// membershipLastBeat is when the last membership tick succeeded. Read and
+	// written only by the membership loop's goroutine.
+	membershipLastBeat        time.Time
 	connectionShare           *connectionShare
 	connectionBudgetParts     connectionBudget
 	clusterConnectionBudget   int
@@ -1896,10 +1902,9 @@ func (w *Worker) Run() {
 
 	// Worker membership and the cluster connection share. cleat#1487.
 	//
-	// Launched only when --cluster-connection-budget is set. A worker that was
-	// merely upgraded must not begin registering itself and resizing its pools
-	// against a budget nobody configured -- the same opt-in rule the
-	// per-worker budget follows.
+	// Launched on every worker, since the registry carries the secret keys it
+	// can open (cleat#1991). Only the connection share is opt-in, and the loop
+	// leaves it alone when --cluster-connection-budget is not set.
 	if w.workerRegistry != nil {
 		w.registerLoopFunc("worker_membership", w.workerMembershipLoop)
 		w.launchLoop("worker_membership", w.workerMembershipLoop)
@@ -5635,9 +5640,9 @@ func checkSecretsUsable(ctx context.Context, store secretKeyChecker, warn func(s
 				"than assume it holds none. Set the key, or fix the database access this read needs", err)
 		}
 		if n > 0 {
-			return fmt.Errorf("%d secret(s) are stored and CLEAT_SECRET_MASTER_KEY is not set, "+
+			return refuseSecrets(fmt.Errorf("%d secret(s) are stored and CLEAT_SECRET_MASTER_KEY is not set, "+
 				"so every workflow that references one would fail at the plugin call; "+
-				"set it, or remove the secrets", n)
+				"set it, or remove the secrets", n))
 		}
 		return nil
 	}
@@ -5657,11 +5662,11 @@ func checkSecretsUsable(ctx context.Context, store secretKeyChecker, warn func(s
 		for _, v := range versions {
 			parts = append(parts, fmt.Sprintf("%d secret(s) under key_version %d", chk.Unopenable[v], v))
 		}
-		return fmt.Errorf("%s, and no configured master key carries that version (configured: %v): "+
+		return refuseSecrets(fmt.Errorf("%s, and no configured master key carries that version (configured: %v): "+
 			"every workflow that references one would fail at the plugin call. Add the key that has "+
 			"that version as CLEAT_SECRET_MASTER_KEY or CLEAT_SECRET_MASTER_KEY_PREVIOUS (with its "+
 			"_VERSION), or do not remove it until `cleatctl reseal-secrets` has moved every row off it",
-			strings.Join(parts, ", "), chk.Configured)
+			strings.Join(parts, ", "), chk.Configured))
 	}
 	if warn != nil {
 		versions := make([]int, 0, len(chk.OnPrevious))
@@ -5676,4 +5681,32 @@ func checkSecretsUsable(ctx context.Context, store secretKeyChecker, warn func(s
 		}
 	}
 	return nil
+}
+
+// secretsRefusal marks a check failure that is a DEFINITE answer -- this worker
+// cannot open something that is stored -- as opposed to a read that failed and
+// leaves the question open. At startup both refuse; a worker that is already
+// serving stops only on the first, because a database that cannot be read is
+// failing everything else too and a stopped worker is not evidence of safety.
+type secretsRefusal struct{ err error }
+
+func (e *secretsRefusal) Error() string { return e.err.Error() }
+func (e *secretsRefusal) Unwrap() error { return e.err }
+
+func refuseSecrets(err error) error { return &secretsRefusal{err: err} }
+
+// registerWithKeyCheck publishes this worker's key set and runs the secrets
+// check as one span under the shared secret-key gate (engine.RegisterUnderKeyGate).
+// It is the ONE place that pairs the two, used at startup and again after a
+// lapse, because the model's obligation is that they are never separated.
+func registerWithKeyCheck(ctx context.Context, registry *engine.WorkerRegistry, store *engine.SecretStore,
+	reg engine.WorkerRegistration, warn func(string)) error {
+	reg.SecretKeyVersions = store.KeyVersions()
+	var checker secretKeyChecker
+	if store != nil {
+		checker = store
+	}
+	return registry.RegisterUnderKeyGate(ctx, reg, func(cctx context.Context) error {
+		return checkSecretsUsable(cctx, checker, warn)
+	})
 }

@@ -82,6 +82,12 @@ type SecretStore struct {
 	// for and which a sequential test cannot otherwise reach. Nil in
 	// production.
 	beforeResealWrite func(tenantID, name string)
+
+	// beforeGateCheck, when set, runs inside a write's gate span after the lock
+	// is held and before the registry is read. It exists so a test can hold a
+	// writer at the point where a booting worker must be excluded. Nil in
+	// production.
+	beforeGateCheck func()
 }
 
 // NewSecretStore builds a store around ONE key, which it treats as key_version
@@ -322,7 +328,7 @@ func (s *SecretStore) PutSecret(ctx context.Context, tenantID, name, value strin
 	// sealed it opens under the wrong key or under none, and no later read can
 	// tell which -- so the two values are never written separately.
 	version := s.ring.current.Version
-	return s.execTenantScoped(ctx, func(q querier) error {
+	return s.gatedWrite(ctx, version, func(q querier) error {
 		_, err := q.ExecContext(ctx, putSecretUpdateStmt(s.dialect), sealed, version, tenantID, name)
 		if err != nil {
 			return err
@@ -566,6 +572,15 @@ func countTenantSecretsStmt(dialect string) string {
 
 // HasMasterKey reports whether secrets can be used at all.
 func (s *SecretStore) HasMasterKey() bool { return s != nil && s.ring != nil }
+
+// KeyVersions lists the key versions this store can open, ascending; nil when
+// it holds no key. It is what a worker publishes to the registry.
+func (s *SecretStore) KeyVersions() []int {
+	if s == nil {
+		return nil
+	}
+	return s.ring.Versions()
+}
 
 func validSecretName(name string) bool {
 	if name == "" || len(name) > 128 {

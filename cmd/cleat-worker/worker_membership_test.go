@@ -46,6 +46,9 @@ func TestTheShareFollowsTheLiveWorkerCount(t *testing.T) {
 		Metrics:         newTestPrometheus(),
 		workerRegistry:  reg,
 		connectionShare: newConnectionShare(budget, hold, clk.now),
+		// Registration carries the budget, and CountLive counts only workers
+		// that have one: a worker with none divides nothing.
+		clusterConnectionBudget: budget,
 		// A small fixed census so the arithmetic below is legible: a share of
 		// 200 leaves 190 for tenant pools, a share of 100 leaves 90.
 		connectionBudgetParts: connectionBudget{Core: 10},
@@ -67,7 +70,7 @@ func TestTheShareFollowsTheLiveWorkerCount(t *testing.T) {
 	}
 
 	// A second worker joins. The share must shrink on this very tick.
-	if err := reg.Register(ctx, engine.WorkerRegistration{WorkerID: other, Hostname: "elsewhere"}); err != nil {
+	if err := reg.Register(ctx, engine.WorkerRegistration{WorkerID: other, Hostname: "elsewhere", ConnectionBudget: budget}); err != nil {
 		t.Fatalf("register other: %v", err)
 	}
 	w.membershipTick(hold)
@@ -161,7 +164,8 @@ func TestWorkerMembershipIsWiredAtStartup(t *testing.T) {
 
 	for _, c := range []struct{ file, want, why string }{
 		{"main.go", "*clusterConnectionBudgetFlag", "the flag is read rather than a constant"},
-		{"main.go", "workerRegistry.Register(", "the worker registers BEFORE it counts"},
+		{"main.go", "registerWithKeyCheck(", "the worker registers, and runs the secrets check, BEFORE it counts or serves"},
+		{"worker_membership.go", "registerInWorkerRegistry(", "a lapsed worker registers and re-checks again"},
 		{"main.go", "newConnectionShare(", "the share is constructed"},
 		{"setup.go", `w.launchLoop("worker_membership"`, "the loop actually runs"},
 		{"worker_membership.go", "SetConnectionBudget(", "the share reaches the pools"},
@@ -175,5 +179,83 @@ func TestWorkerMembershipIsWiredAtStartup(t *testing.T) {
 				"complete function with no caller (EvictIdle); this is the guard for "+
 				"the same failure in cleat#1487.", c.file, c.want, c.why)
 		}
+	}
+}
+
+// Registration is UNCONDITIONAL, and this is the guard for that. It used to be
+// opt-in with --cluster-connection-budget; it is now how a writer learns which
+// secret keys the live workers can open (cleat#1991), so a worker that skips it
+// is invisible to the gate, and a gate that cannot see a worker cannot protect
+// it. A textual check, because the alternative is starting a worker: the call
+// must come BEFORE the first place main.go tests the budget flag, which is the
+// only shape a conditional registration can take.
+func TestRegistrationDoesNotDependOnTheConnectionBudget(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var code []string
+	for _, l := range strings.Split(string(src), "\n") {
+		if i := strings.Index(l, "//"); i >= 0 {
+			l = l[:i]
+		}
+		code = append(code, l)
+	}
+	text := strings.Join(code, "\n")
+	reg := strings.Index(text, "registerWithKeyCheck(")
+	gate := strings.Index(text, "*clusterConnectionBudgetFlag > 0")
+	if reg < 0 || gate < 0 {
+		t.Fatalf("main.go: registerWithKeyCheck( at %d, budget test at %d; expected both", reg, gate)
+	}
+	if reg > gate {
+		t.Errorf("main.go tests --cluster-connection-budget BEFORE it registers, so registration " +
+			"may be conditional on it. Every worker must register: the registry is how a secret " +
+			"write learns which keys the live workers can open")
+	}
+}
+
+// A worker with NO connection budget registers now -- registration is
+// unconditional -- and must not be counted toward the connection share. Counting
+// it would shrink every budgeted worker's share for a cluster it is not spending
+// from. cleat#1991 made registration unconditional, and this is the cost that
+// change had to pay for.
+func TestAWorkerWithoutABudgetDoesNotShrinkTheShare(t *testing.T) {
+	db := testutil.SuiteTestDB(t, "cleat_worker")
+	ctx := context.Background()
+	reg := &engine.WorkerRegistry{DB: db, Dialect: engine.DialectPostgres}
+	const window = 2 * time.Minute
+
+	me := fmt.Sprintf("mixed-me-%d", time.Now().UnixNano())
+	free := fmt.Sprintf("mixed-nobudget-%d", time.Now().UnixNano())
+	other := fmt.Sprintf("mixed-budgeted-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		for _, id := range []string{me, free, other} {
+			_ = reg.Deregister(context.Background(), id)
+		}
+	})
+
+	if err := reg.Register(ctx, engine.WorkerRegistration{WorkerID: me, ConnectionBudget: 200}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := reg.CountLive(ctx, window)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reg.Register(ctx, engine.WorkerRegistration{WorkerID: free, ConnectionBudget: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := reg.CountLive(ctx, window); got != before {
+		t.Errorf("a worker with connection_budget = 0 changed the live count %d -> %d; it takes no "+
+			"part in the budget and must not divide it", before, got)
+	}
+
+	// Known-positive: the same count DOES move for a worker that has a budget,
+	// so the assertion above is capable of failing.
+	if err := reg.Register(ctx, engine.WorkerRegistration{WorkerID: other, ConnectionBudget: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := reg.CountLive(ctx, window); got != before+1 {
+		t.Errorf("a budgeted worker took the live count %d -> %d, want %d", before, got, before+1)
 	}
 }

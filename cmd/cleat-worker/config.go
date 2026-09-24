@@ -361,7 +361,9 @@ var (
 			"Separate from --connection-budget, which bounds one worker: this is the number "+
 			"the cluster divides, and each worker takes an equal share of it -- "+
 			"budget/live-workers, floor 1. Requires the worker registry, so workers must "+
-			"reach the same database. Set both to mean \"no worker above X, and no more than "+
+			"reach the same database. Every worker registers whether or not this is set "+
+			"(the registry also carries the secret keys each can open); only a worker that "+
+			"has a budget counts toward the division. Set both to mean \"no worker above X, and no more than "+
 			"Y between them\": the effective budget is the smaller. A worker shrinks its "+
 			"share the moment another joins, and waits before growing when one leaves, "+
 			"because a crashed worker's connections outlive its heartbeat. cleat#1487")

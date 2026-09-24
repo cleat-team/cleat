@@ -1174,17 +1174,35 @@ func main() {
 		os.Exit(0)
 	}
 
-	// The secrets startup check, now that the schema is current. See the comment
-	// where the store is built for why it is not there, and checkSecretsUsable
-	// for why an unreadable table refuses to start rather than passing.
-	if err := checkSecretsUsable(ctx, secretStore, func(msg string) {
+	// Publish this worker's secret keys and run the secrets startup check, as
+	// ONE span under the shared secret-key gate, now that the schema is current.
+	//
+	// UNCONDITIONAL. Registration used to be opt-in with
+	// --cluster-connection-budget; it is not any more, because the registry is
+	// how a writer (cleatctl set-secret, reseal-secrets) learns which keys the
+	// live workers can open. The connection share stays opt-in.
+	//
+	// The order is the model's and it is load-bearing: publish, then read every
+	// stored secret, with no writer able to interleave (engine/secret_key_gate.go,
+	// specs/CleatKeyRotation.tla). See checkSecretsUsable for why an unreadable
+	// table refuses to start rather than passing.
+	workerRegistry := &engine.WorkerRegistry{DB: db, Dialect: engine.Dialect(*driver)}
+	if err := registerWithKeyCheck(ctx, workerRegistry, secretStore, engine.WorkerRegistration{
+		WorkerID:         workerID,
+		Hostname:         hostnameOrEmpty(),
+		PID:              os.Getpid(),
+		Concurrency:      *concurrency,
+		ConnectionBudget: *clusterConnectionBudgetFlag,
+	}, func(msg string) {
 		logger.WarnContext(context.Background(), msg, "worker_id", workerID)
 	}); err != nil {
 		logger.ErrorContext(context.Background(),
-			"the secrets startup check refused to start this worker",
+			"refusing to start: could not register in the worker registry and pass the secrets startup check",
 			"worker_id", workerID, "error", err)
 		os.Exit(1)
 	}
+	logger.InfoContext(context.Background(), "registered in the worker registry",
+		"worker_id", workerID, "secret_key_versions", secretStore.KeyVersions())
 
 	// Reconcile every already-provisioned tenant's role password to the
 	// current key, unconditionally, on every boot. cleat#1990: without this, a
@@ -1605,38 +1623,19 @@ func main() {
 			"tenant_pools_that_fit", budget.TenantHeadroom(*connectionBudgetFlag))
 	}
 
-	// Cluster-wide budget: register in admin.workers, then take an equal share
-	// of what every live worker divides. cleat#1487.
+	// Cluster-wide budget: this worker is already registered (right after the
+	// migrations), so a count taken now includes it, and it takes an equal share
+	// of what every budgeted worker divides. cleat#1487.
 	//
 	// REGISTER BEFORE COUNTING, and the order is load-bearing rather than
 	// tidy. A worker that counts first sizes itself to a cluster it is not yet
 	// part of, so every joining worker would briefly claim one worker's worth
 	// too much -- exactly when the cluster is growing and least able to
-	// absorb it. Registering first means the count already includes this
-	// worker and the share it computes is one it is entitled to.
-	var workerRegistry *engine.WorkerRegistry
+	// absorb it.
 	var share *connectionShare
 	if *clusterConnectionBudgetFlag > 0 {
-		workerRegistry = &engine.WorkerRegistry{DB: db, Dialect: engine.Dialect(*driver)}
-		reg := engine.WorkerRegistration{
-			WorkerID:         workerID,
-			Hostname:         hostnameOrEmpty(),
-			PID:              os.Getpid(),
-			Concurrency:      *concurrency,
-			ConnectionBudget: *clusterConnectionBudgetFlag,
-		}
-		if err := workerRegistry.Register(ctx, reg); err != nil {
-			// Fatal on purpose. The alternative is a worker that silently
-			// opts out of a budget the operator configured and takes
-			// whatever it likes, which is worse than not starting: every
-			// other worker in the cluster has already divided the budget on
-			// the assumption that participants are countable.
-			logger.ErrorContext(ctx, "refusing to start: could not register in the worker registry",
-				"worker_id", workerID, "error", err)
-			os.Exit(1)
-		}
 		share = newConnectionShare(*clusterConnectionBudgetFlag, connectionShareGrowHoldDown, nil)
-		logger.InfoContext(ctx, "registered in the worker registry",
+		logger.InfoContext(ctx, "taking part in the cluster connection budget",
 			"worker_id", workerID, "cluster_connection_budget", *clusterConnectionBudgetFlag,
 			"grow_hold_down", connectionShareGrowHoldDown)
 	}

@@ -160,6 +160,10 @@ Requires CLEAT_SECRET_MASTER_KEY, which must match what the workers use, and
 CLEAT_SECRET_MASTER_KEY_VERSION if the current key is not version 1. During a key
 rotation, run this from an environment that already has the NEW key as current.
 
+The write is REFUSED while any live worker cannot open the key version it would
+write (workers publish the versions they can open), and the refusal names them. A
+worker with no master key blocks every write. Nothing is written by a refused run.
+
   head -c 32 /dev/urandom | base64          # generate a master key, once
   printf %%s "$API_KEY" | cleatctl --db "$DSN" set-secret <uuid> --name openai
 

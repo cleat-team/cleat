@@ -222,7 +222,7 @@ func (s *SecretStore) ResealSecrets(ctx context.Context, dryRun bool) (SecretRes
 				s.beforeResealWrite(tid, r.name)
 			}
 			var affected int64
-			if err := s.execTenantScoped(tctx, func(q querier) error {
+			if err := s.gatedWrite(tctx, cur, func(q querier) error {
 				out, err := q.ExecContext(tctx, resealSecretStmt(s.dialect),
 					next, cur, tid, r.name, r.keyVersion, r.ciphertext)
 				if err != nil {

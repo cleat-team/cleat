@@ -65,28 +65,51 @@ func (w *Worker) workerMembershipLoop() {
 func (w *Worker) membershipTick(staleAfter time.Duration) {
 	ctx := w.ctx
 
-	if err := w.workerRegistry.Heartbeat(ctx, w.id); err != nil {
-		if errors.Is(err, engine.ErrWorkerNotRegistered) {
-			// A sweep removed this worker: it was paused, or its heartbeat
-			// was blocked, for longer than the expiry window. Re-register
-			// rather than heartbeat into a row that is not there -- an
-			// UPDATE matching nothing reports no error, so nothing else
-			// would ever notice.
-			w.logger.WarnContext(ctx, "worker registry: re-registering after expiry",
-				"worker_id", w.id, "stale_after", staleAfter)
-			if rerr := w.registerInWorkerRegistry(ctx); rerr != nil {
-				w.logger.ErrorContext(ctx, "worker registry: re-registration failed",
-					"worker_id", w.id, "error", rerr)
-				w.Metrics.RecordBackgroundLoop(ctx, "worker_membership", "error")
+	// A lapse is a gap longer than the stale window between two successful
+	// ticks. Nothing was watching during it: a writer can have judged this
+	// worker gone and written a key version it cannot open, and the row may not
+	// even have been swept, in which case the heartbeat below succeeds and
+	// would say nothing. So a lapse is treated like a swept row -- register
+	// again and run the secrets check again, as one span under the gate -- and
+	// the worker does not resume unless the check passes. (cleat#1991. A stall
+	// still leaves the stall itself unobserved; this bounds it, it does not
+	// remove it.)
+	lapsed := !w.membershipLastBeat.IsZero() && time.Since(w.membershipLastBeat) > staleAfter
+
+	hbErr := w.workerRegistry.Heartbeat(ctx, w.id)
+	notRegistered := errors.Is(hbErr, engine.ErrWorkerNotRegistered)
+	if hbErr != nil && !notRegistered {
+		w.logger.ErrorContext(ctx, "worker registry: heartbeat failed",
+			"worker_id", w.id, "error", hbErr)
+		w.Metrics.RecordBackgroundLoop(ctx, "worker_membership", "error")
+		return
+	}
+	if notRegistered || lapsed {
+		// A sweep removed this worker, or its membership loop stalled: it was
+		// paused, or its heartbeat was blocked, for longer than the expiry
+		// window. Re-register rather than heartbeat into a row that is not
+		// there -- an UPDATE matching nothing reports no error, so nothing else
+		// would ever notice.
+		w.logger.WarnContext(ctx, "worker registry: re-registering after a lapse",
+			"worker_id", w.id, "stale_after", staleAfter, "row_was_swept", notRegistered)
+		if rerr := w.registerInWorkerRegistry(ctx); rerr != nil {
+			var refusal *secretsRefusal
+			if errors.As(rerr, &refusal) {
+				// A definite answer: while this worker was not being watched,
+				// something was stored that it cannot open. Serving on would
+				// fail the first workflow that resolves it, so stop.
+				w.logger.ErrorContext(ctx, "CRITICAL: after a lapse this worker cannot open "+
+					"every stored secret; shutting down rather than serve", "worker_id", w.id, "error", rerr)
+				w.cancel()
 				return
 			}
-		} else {
-			w.logger.ErrorContext(ctx, "worker registry: heartbeat failed",
-				"worker_id", w.id, "error", err)
+			w.logger.ErrorContext(ctx, "worker registry: re-registration failed",
+				"worker_id", w.id, "error", rerr)
 			w.Metrics.RecordBackgroundLoop(ctx, "worker_membership", "error")
 			return
 		}
 	}
+	w.membershipLastBeat = time.Now()
 
 	// Every worker sweeps. A DELETE matching nothing is free, and two workers
 	// removing the same expired row is not a conflict -- the second removes
@@ -175,13 +198,14 @@ func (w *Worker) applyConnectionShare(ctx context.Context, share, live int) {
 		"fixed_pools", fixed, "tenant_connection_budget", tenantShare)
 }
 
-// registerInWorkerRegistry records this worker as present.
+// registerInWorkerRegistry records this worker as present and re-runs the
+// secrets check under the gate. See registerWithKeyCheck.
 func (w *Worker) registerInWorkerRegistry(ctx context.Context) error {
-	return w.workerRegistry.Register(ctx, engine.WorkerRegistration{
+	return registerWithKeyCheck(ctx, w.workerRegistry, w.secrets, engine.WorkerRegistration{
 		WorkerID:         w.id,
 		Hostname:         hostnameOrEmpty(),
 		PID:              os.Getpid(),
 		Concurrency:      w.concurrency,
 		ConnectionBudget: w.clusterConnectionBudget,
-	})
+	}, func(msg string) { w.logger.WarnContext(ctx, msg, "worker_id", w.id) })
 }

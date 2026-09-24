@@ -48,6 +48,13 @@ type WorkerRegistration struct {
 	ConnectionBudget int
 	StartedAt        time.Time
 	LastHeartbeatAt  time.Time
+
+	// SecretKeyVersions are the tenant-secret key versions this worker can
+	// open, published so a writer can refuse a version some live worker cannot
+	// read (cleat#1991, secret_key_gate.go). Written on every registration --
+	// nil means "no master key", which is stored as the empty string and is NOT
+	// the same as NULL, which means a row that predates this column.
+	SecretKeyVersions []int
 }
 
 // table is admin.workers everywhere except MySQL, which has no schemas -- its
@@ -107,14 +114,23 @@ func (r *WorkerRegistry) exec(ctx context.Context, query string, args ...any) (s
 // PROCESS (generateWorkerID): a restarted worker is a new row, and its old row
 // is removed by Deregister on a clean exit or by SweepExpired on a crash.
 func (r *WorkerRegistry) Register(ctx context.Context, reg WorkerRegistration) error {
-	_, err := r.exec(ctx, r.stmt(
+	return r.registerOn(ctx, r.DB, reg)
+}
+
+// registerOn is Register on a caller-chosen connection or transaction, which is
+// how RegisterUnderKeyGate makes the registration part of the span that holds
+// the secret-key gate.
+func (r *WorkerRegistry) registerOn(ctx context.Context, q querier, reg WorkerRegistration) error {
+	_, err := q.ExecContext(ctx, r.stmt(
 		"INSERT INTO ", r.table(),
 		" (worker_id, hostname, pid, concurrency, connection_budget,",
-		" started_at, last_heartbeat_at) VALUES (",
+		" started_at, last_heartbeat_at, secret_key_versions) VALUES (",
 		r.Dialect.placeholder(1), ", ", r.Dialect.placeholder(2), ", ",
 		r.Dialect.placeholder(3), ", ", r.Dialect.placeholder(4), ", ",
-		r.Dialect.placeholder(5), ", ", r.Dialect.nowExpr(), ", ", r.Dialect.nowExpr(), ")"),
-		reg.WorkerID, reg.Hostname, reg.PID, reg.Concurrency, reg.ConnectionBudget)
+		r.Dialect.placeholder(5), ", ", r.Dialect.nowExpr(), ", ", r.Dialect.nowExpr(), ", ",
+		r.Dialect.placeholder(6), ")"),
+		reg.WorkerID, reg.Hostname, reg.PID, reg.Concurrency, reg.ConnectionBudget,
+		encodeKeyVersions(reg.SecretKeyVersions))
 	if err != nil {
 		return fmt.Errorf("worker registry: register %s: %w", reg.WorkerID, err)
 	}
@@ -180,10 +196,18 @@ func (r *WorkerRegistry) Deregister(ctx context.Context, workerID string) error 
 	return nil
 }
 
-// CountLive returns the number of workers whose heartbeat is within maxAge.
+// CountLive returns the number of workers whose heartbeat is within maxAge AND
+// that take part in the cluster connection budget.
+//
+// The second condition exists because registration is no longer conditional on
+// --cluster-connection-budget: every worker registers, to publish the secret
+// keys it can open. A worker with no budget divides nothing, so counting it
+// would shrink every budgeted worker's share for a cluster it is not spending
+// from. connection_budget > 0 is the same test the worker used to decide
+// whether to register at all.
 func (r *WorkerRegistry) CountLive(ctx context.Context, maxAge time.Duration) (int, error) {
 	q := r.stmt("SELECT count(*) FROM ", r.table(),
-		" WHERE last_heartbeat_at > ", r.Dialect.intervalExpr(1))
+		" WHERE connection_budget > 0 AND last_heartbeat_at > ", r.Dialect.intervalExpr(1))
 	var n int
 	if err := r.DB.QueryRowContext(ctx, q, cutoffSeconds(maxAge)).Scan(&n); err != nil {
 		return 0, fmt.Errorf("worker registry: count live: %w", err)
