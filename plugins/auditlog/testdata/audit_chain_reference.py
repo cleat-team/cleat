@@ -197,18 +197,50 @@ def verify():
 def verify_export():
     """Verify a `GET /audit/export` / `cleatctl audit export` stream from stdin, offline.
 
-    Every chained event must hash to its own `hash` from its own fields and `prev_hash`;
-    consecutive seq values must link; and the stream must end with a checkpoint line (a
-    stream without one is TRUNCATED, and says so with status 2). Where the last event is
-    the chain head the checkpoint names, its hash must be the checkpoint's. Rows written
-    before the chain existed carry no seq and are counted, not verified.
+        verify-export [--expect-head SEQ:HASH] [--expect-floor SEQ:HASH]
 
-    Exit status: 0 verified, 1 a break, 2 the stream is incomplete or unreadable.
+    What it checks, and what the checkpoint line lets it require:
+
+      * every chained event hashes to its own `hash` from its own fields and `prev_hash`;
+      * event ids are unique (a duplicated line is refused);
+      * chained `seq` values strictly increase, and consecutive ones link (`prev_hash` is the
+        previous event's `hash`);
+      * the stream ends in exactly one checkpoint whose `events` matches the count;
+      * unless the export was of a RANGE (the checkpoint's `from` or `to` is set), the chained
+        events are an unbroken run: no gaps at all;
+      * a full export (no range, no `after_seq`) starts at `floor_seq + 1` with `prev_hash`
+        equal to `floor_hash`, and ends at `head_seq` with `hash` equal to `head_hash`; a
+        resumed export (`after_seq`) starts at `after_seq + 1` and ends at the head. A range
+        claims nothing about coverage.
+
+    THE CHECKPOINT IS NOT SIGNED. Deleting a middle event, a duplicate, or a reordering is
+    caught from the file alone. Deleting events from an END, or rewriting the whole file
+    with the hashes recomputed and the checkpoint edited to match, is caught only against
+    an anchor recorded elsewhere: pass --expect-head and --expect-floor.
+
+    Exit status: 0 verified, 1 a break, 2 incomplete or unreadable.
     """
+    expect = {}
+    argv = sys.argv[2:]
+    while argv:
+        flag = argv.pop(0)
+        if flag in ("--expect-head", "--expect-floor") and argv:
+            seq, _, h = argv.pop(0).partition(":")
+            expect[flag] = (int(seq), h)
+        else:
+            print("UNREADABLE: unknown argument %r" % flag)
+            sys.exit(2)
+
     events = unchained = breaks = 0
-    prev_seq = prev_hash = None
-    last_seq = last_hash = None
+    seen_ids = set()
+    chained = []  # (seq, prev_hash, hash)
     checkpoints = []
+
+    def brk(msg):
+        nonlocal breaks
+        breaks += 1
+        print(msg)
+
     for n, line in enumerate(sys.stdin, 1):
         if not line.strip():
             continue
@@ -228,6 +260,9 @@ def verify_export():
             print("UNREADABLE line %d: an event after the checkpoint" % n)
             sys.exit(2)
         events += 1
+        if r["id"] in seen_ids:
+            brk("DUPLICATE line %d: id %s appears more than once" % (n, r["id"]))
+        seen_ids.add(r["id"])
         if r["seq"] is None:
             unchained += 1
             continue
@@ -239,13 +274,9 @@ def verify_export():
         rc["seq"] = seq
         want = row_hash(bytes.fromhex(r["prev_hash"]), rc).hex()
         if want != r["hash"]:
-            breaks += 1
-            print("EDITED seq %d: hash %s is not the hash of the record's fields %s" % (seq, r["hash"][:12], want[:12]))
-        if prev_seq is not None and seq == prev_seq + 1 and r["prev_hash"] != prev_hash:
-            breaks += 1
-            print("RELINKED seq %d: prev_hash does not match seq %d's hash" % (seq, prev_seq))
-        prev_seq, prev_hash = seq, r["hash"]
-        last_seq, last_hash = seq, r["hash"]
+            brk("EDITED seq %d: hash %s is not the hash of the record's fields %s" % (seq, r["hash"][:12], want[:12]))
+        chained.append((seq, r["prev_hash"], r["hash"]))
+
     if len(checkpoints) != 1:
         print("TRUNCATED: %d checkpoint line(s), want exactly 1. The stream is incomplete." % len(checkpoints))
         sys.exit(2)
@@ -253,10 +284,55 @@ def verify_export():
     if int(cp["events"]) != events:
         print("TRUNCATED: the checkpoint says %s events, the stream has %d" % (cp["events"], events))
         sys.exit(2)
-    if last_seq is not None and last_seq == int(cp["head_seq"]) and last_hash != cp["head_hash"]:
-        breaks += 1
-        print("HEAD MISMATCH: the newest row (seq %d) hashes to %s, the checkpoint records %s" % (last_seq, last_hash[:12], cp["head_hash"][:12]))
-    print("%d events (%d chained verified, %d unchained not covered), %d breaks" % (events, events - unchained, unchained, breaks))
+
+    ranged = cp.get("from") is not None or cp.get("to") is not None
+    after = None if cp.get("after_seq") is None else int(cp["after_seq"])
+    head_seq, floor_seq = int(cp["head_seq"]), int(cp["floor_seq"])
+
+    prev = None
+    for seq, prev_hash, h in chained:
+        if prev is not None:
+            pseq, phash = prev
+            if seq <= pseq:
+                brk("OUT OF ORDER seq %d after seq %d: seq must strictly increase" % (seq, pseq))
+            elif seq == pseq + 1:
+                if prev_hash != phash:
+                    brk("RELINKED seq %d: prev_hash does not match seq %d's hash" % (seq, pseq))
+            elif not ranged:
+                brk("GAP: seq %d follows seq %d, so seq %d..%d are missing from an export that claims the whole chain" % (seq, pseq, pseq + 1, seq - 1))
+        prev = (seq, h)
+
+    if not ranged:
+        start = floor_seq + 1 if after is None else after + 1
+        if chained:
+            first_seq, first_prev, _ = chained[0]
+            last_seq, _, last_hash = chained[-1]
+            if first_seq != start:
+                brk("MISSING START: the first chained event is seq %d, want seq %d (%s)" % (
+                    first_seq, start, "the row after the floor" if after is None else "the row after the cursor"))
+            elif after is None and first_prev != cp["floor_hash"]:
+                brk("FLOOR MISMATCH: seq %d links to %s, the checkpoint's floor hash is %s" % (first_seq, first_prev[:12], cp["floor_hash"][:12]))
+            if last_seq != head_seq:
+                brk("MISSING END: the last chained event is seq %d, the checkpoint's head is seq %d" % (last_seq, head_seq))
+            elif last_hash != cp["head_hash"]:
+                brk("HEAD MISMATCH: seq %d hashes to %s, the checkpoint records %s" % (last_seq, last_hash[:12], cp["head_hash"][:12]))
+        else:
+            # No chained events: only a chain with nothing in it may say so.
+            want_head = floor_seq if after is None else after
+            if head_seq != want_head:
+                brk("MISSING EVENTS: no chained events, but the checkpoint's head is seq %d and the export started after seq %d" % (head_seq, want_head))
+
+    if "--expect-head" in expect:
+        eseq, ehash = expect["--expect-head"]
+        if head_seq != eseq or cp["head_hash"] != ehash:
+            brk("ANCHOR MISMATCH: the checkpoint's head is seq %d %s, the anchor is seq %d %s" % (head_seq, cp["head_hash"][:12], eseq, ehash[:12]))
+    if "--expect-floor" in expect:
+        eseq, ehash = expect["--expect-floor"]
+        if floor_seq != eseq or cp["floor_hash"] != ehash:
+            brk("ANCHOR MISMATCH: the checkpoint's floor is seq %d %s, the anchor is seq %d %s" % (floor_seq, cp["floor_hash"][:12], eseq, ehash[:12]))
+
+    kind = "a range" if ranged else ("a resumed export" if after is not None else "a full export")
+    print("%d events (%d chained checked, %d unchained not covered), %s, %d breaks" % (events, len(chained), unchained, kind, breaks))
     sys.exit(1 if breaks else 0)
 
 

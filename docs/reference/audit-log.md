@@ -78,6 +78,13 @@ Rows written before the chain existed come first (ordered by timestamp, then id)
 rows by `seq`. Chained rows appended after the export began are not in it: they are the next
 export's, and the checkpoint's `head_seq` says where this one ends.
 
+**Rows removed while an export runs are not the next export's, they are missing from this one.**
+Without a `from`/`to` range the chained rows must be an unbroken run, and if a retention sweep (or a
+missing row) breaks it, the export fails instead of ending in a checkpoint over a hole: the HTTP
+handler answers `409` if nothing was sent yet and otherwise aborts the connection, and `cleatctl`
+prints `INCOMPLETE`. Repeat the export. A resume whose next rows were swept away gets the same
+answer; start again from the beginning.
+
 Records:
 
     {"type":"event","cursor":"...","id":"...","tenant_id":"...","seq":12,
@@ -97,10 +104,32 @@ Records:
 - `checkpoint.events` counts the records of this call. `head_seq` and `head_hash` are the tenant's
   chain head when the export began, and are what an external anchor would record.
 
-Offline verification: `python3 plugins/auditlog/testdata/audit_chain_reference.py verify-export <
-export.jsonl` recomputes every chained record's hash from its own fields, checks that consecutive
-`seq` values link, and requires the checkpoint. Exit `0` verified, `1` a break, `2` incomplete or
-unreadable. It needs no database and shares no code with cleat.
+The checkpoint also says what kind of export this was, which decides what a verifier may require:
+`from` and `to` (set for a range), and `after_seq` (set when the export resumed from a cursor).
+
+Offline verification:
+
+    python3 plugins/auditlog/testdata/audit_chain_reference.py verify-export \
+        [--expect-head SEQ:HASH] [--expect-floor SEQ:HASH] < export.jsonl
+
+It needs no database and shares no code with cleat. It recomputes every chained record's hash from its
+own fields; refuses duplicate ids, a `seq` that does not strictly increase, and consecutive records that
+do not link; and requires exactly one checkpoint whose `events` matches. What else it requires depends on
+the kind of export:
+
+| export | also required |
+|---|---|
+| full (no range, no `after_seq`) | no gaps; the first chained record is `floor_seq + 1` and links to `floor_hash`; the last is `head_seq` with `head_hash` |
+| resumed (`after_seq`) | no gaps; the first is `after_seq + 1`; the last is the head. The join to the part before the cursor cannot be checked, so it verifies as a chain from that point |
+| range (`from` or `to`) | nothing about coverage: a range has gaps by design, and a record deleted from inside one is not detectable |
+
+Exit `0` verified, `1` a break, `2` incomplete or unreadable.
+
+**The checkpoint is not signed.** A record deleted from the middle, a duplicated record, and a
+reordering are caught from the file alone. Records removed from an end of a full export are caught
+because the checkpoint says where the ends should be; but someone who edits the file can edit the
+checkpoint to match. Only an anchor recorded somewhere they cannot reach makes the ends binding: pass
+`--expect-head` and `--expect-floor` with the head and floor you recorded earlier.
 
 ## Verifying
 

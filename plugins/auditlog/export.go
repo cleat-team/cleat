@@ -43,6 +43,10 @@ import (
 // export cross page boundaries.
 var exportPageSize = 1000
 
+// ErrExportGap is wrapped by the error an export returns when the chained rows it read were
+// not an unbroken run, so it cannot honestly end in a checkpoint.
+var ErrExportGap = errors.New("audit export: the chained rows are not contiguous")
+
 // ErrBadCursor is returned, before any record is emitted, for a cursor this code did not
 // issue.
 var ErrBadCursor = errors.New("audit export: the cursor is not one this export issued")
@@ -78,14 +82,23 @@ type exportEvent struct {
 // exportCheckpoint is the last line. HeadSeq and HeadHash are the tenant's chain head at
 // the moment the export began: chained rows appended after that are not in this export
 // and are the next one's.
+//
+// From, To and AfterSeq say WHICH KIND of export this was, and so which completeness rules
+// an offline verifier may apply: with none of them set the export claims the whole chain
+// from the floor to the head; with AfterSeq it claims the chain after that seq; with a range
+// it claims nothing about coverage, only that every record is intact. The checkpoint is
+// not signed: the ends of a file are binding only against an anchor recorded elsewhere.
 type exportCheckpoint struct {
-	Type      string `json:"type"`
-	TenantID  string `json:"tenant_id"`
-	HeadSeq   int64  `json:"head_seq"`
-	HeadHash  string `json:"head_hash"`
-	FloorSeq  int64  `json:"floor_seq"`
-	FloorHash string `json:"floor_hash"`
-	Events    int64  `json:"events"`
+	Type      string  `json:"type"`
+	TenantID  string  `json:"tenant_id"`
+	HeadSeq   int64   `json:"head_seq"`
+	HeadHash  string  `json:"head_hash"`
+	FloorSeq  int64   `json:"floor_seq"`
+	FloorHash string  `json:"floor_hash"`
+	From      *string `json:"from"`
+	To        *string `json:"to"`
+	AfterSeq  *int64  `json:"after_seq"`
+	Events    int64   `json:"events"`
 }
 
 // ExportTenant streams tenant's audit rows to emit, one JSON line per call (newline
@@ -103,6 +116,7 @@ func ExportTenant(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialec
 	if err != nil {
 		return err
 	}
+	cursorSeq := afterSeq
 
 	var headSeq, floorSeq int64
 	var headHash, floorHash string
@@ -147,12 +161,28 @@ func ExportTenant(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialec
 			}
 		}
 	}
+	// Without a range, the chained rows must be an unbroken run: the first is the one after
+	// the floor (or after the cursor), and each next is the previous plus one. A hole means a
+	// retention sweep removed rows between pages, or a row is missing, and an export that
+	// went on to end in a checkpoint would look complete with a silent gap in it. Fail
+	// instead: the HTTP handler aborts the connection, cleatctl says INCOMPLETE, and the
+	// caller repeats the export. A range legitimately has gaps and is exempt.
+	continuous := opts.From == nil && opts.To == nil
+	expectSeq := afterSeq + 1
+	if phase != "c" {
+		expectSeq = floorSeq + 1
+	}
 	for {
 		evs, more, err := exportPage(ctx, db, dialect, tenant, opts, true, 0, "", afterSeq, bound)
 		if err != nil {
 			return err
 		}
 		for _, e := range evs {
+			if continuous && *e.event.Seq != expectSeq {
+				return fmt.Errorf("audit export: expected seq %d and found seq %d: the rows between were removed while the export ran (a retention sweep) or are missing. The export is incomplete; repeat it (%w)",
+					expectSeq, *e.event.Seq, ErrExportGap)
+			}
+			expectSeq = *e.event.Seq + 1
 			if err := send(e.event); err != nil {
 				return err
 			}
@@ -163,8 +193,21 @@ func ExportTenant(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialec
 			break
 		}
 	}
-	return send(exportCheckpoint{Type: "checkpoint", TenantID: tenant.String(), HeadSeq: headSeq, HeadHash: headHash,
-		FloorSeq: floorSeq, FloorHash: floorHash, Events: n})
+	cp := exportCheckpoint{Type: "checkpoint", TenantID: tenant.String(), HeadSeq: headSeq, HeadHash: headHash,
+		FloorSeq: floorSeq, FloorHash: floorHash, Events: n}
+	if opts.From != nil {
+		v := canonicalTimestamp(*opts.From)
+		cp.From = &v
+	}
+	if opts.To != nil {
+		v := canonicalTimestamp(*opts.To)
+		cp.To = &v
+	}
+	if phase == "c" {
+		v := cursorSeq
+		cp.AfterSeq = &v
+	}
+	return send(cp)
 }
 
 type exportRow struct {

@@ -373,6 +373,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verifiable offline with `plugins/auditlog/testdata/audit_chain_reference.py verify-export`, and the
   record schema is documented as a contract in `docs/reference/audit-log.md`.
 
+  **An export never ends in a checkpoint over a hole.** Rows removed while it runs (a retention sweep) fail
+  the export (`409` before anything was sent, otherwise the connection is aborted and `cleatctl` says
+  `INCOMPLETE`) rather than leave a gap that verifies. The checkpoint records `from`, `to` and `after_seq`, so
+  `verify-export` knows which completeness rules apply, and it takes `--expect-head` / `--expect-floor` to
+  bind the ends of a file to an anchor recorded elsewhere. The checkpoint itself is unsigned.
+
   **`GET /audit/events` no longer answers 500 on SQL Server:** it wrote a literal `LIMIT`.
 
   Behaviour changes to know about:

@@ -334,13 +334,19 @@ func TestVerifyEndpointReportsTheChain(t *testing.T) {
 
 // The exported strings are what an offline verifier hashes. The reference verifier is
 // written in Python from the prose contract and shares no code with chain.go.
+//
+// Each tamper below is a file-level edit with the checkpoint's event count ADJUSTED to match,
+// because the checkpoint is unsigned and an attacker would do that: the count alone must not
+// be what catches them. (cleat-review found that a 10-row export verified clean after
+// deleting seq 5, deleting the first three lines, deleting the last three, or duplicating
+// seq 5.)
 func TestAnExportVerifiesOfflineWithTheReferenceImplementation(t *testing.T) {
 	py, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is not installed, so the reference verifier cannot run")
 	}
-	verify := func(stream string) (int, string) {
-		cmd := exec.Command(py, "testdata/audit_chain_reference.py", "verify-export")
+	verify := func(stream string, args ...string) (int, string) {
+		cmd := exec.Command(py, append([]string{"testdata/audit_chain_reference.py", "verify-export"}, args...)...)
 		cmd.Stdin = strings.NewReader(stream)
 		var out bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &out
@@ -354,27 +360,165 @@ func TestAnExportVerifiesOfflineWithTheReferenceImplementation(t *testing.T) {
 		}
 		return code, out.String()
 	}
+	// rewrite applies edit to the event lines and puts the checkpoint's count back in step.
+	rewrite := func(body string, edit func(events []string) []string) string {
+		lines := strings.Split(strings.TrimSpace(body), "\n")
+		events, cp := lines[:len(lines)-1], lines[len(lines)-1]
+		events = edit(append([]string{}, events...))
+		var m map[string]any
+		if err := json.Unmarshal([]byte(cp), &m); err != nil {
+			t.Fatal(err)
+		}
+		m["events"] = len(events)
+		out, _ := json.Marshal(m)
+		return strings.Join(append(events, string(out)), "\n") + "\n"
+	}
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
 		p := e.plugin()
 		tenant := uuid.New()
 		e.record(p, tenant, 15) // awkward text and an empty user id, on every dialect
 		e.legacyRow(tenant, 200)
 		_, body := e.get(p, tenant, "/audit/export")
+		lines := strings.Split(strings.TrimSpace(body), "\n")
+		// lines[0] is the pre-chain row; lines[1..15] are seq 1..15; lines[16] is the checkpoint.
 
-		if code, out := verify(body); code != 0 || !strings.Contains(out, "15 chained verified, 1 unchained") {
+		if code, out := verify(body); code != 0 || !strings.Contains(out, "15 chained checked, 1 unchained") || !strings.Contains(out, "a full export") {
 			t.Fatalf("the reference verifier rejects an untouched export: exit %d\n%s", code, out)
 		}
-		// Known positives: an edit, and a truncation, must each be refused, differently.
-		edited := strings.Replace(body, `"/api/café/3/`, `"/api/cafe/3/`, 1)
-		if edited == body {
-			t.Fatal("the edit changed nothing, so the control tests nothing")
+		mustFail := func(name string, stream string, wantCode int, wantText string, args ...string) {
+			t.Helper()
+			if stream == body && len(args) == 0 {
+				t.Fatalf("%s: the edit changed nothing, so the control tests nothing", name)
+			}
+			if code, out := verify(stream, args...); code != wantCode || !strings.Contains(out, wantText) {
+				t.Errorf("%s: exit %d\n%s\nwant exit %d and %q", name, code, out, wantCode, wantText)
+			}
 		}
-		if code, out := verify(edited); code != 1 || !strings.Contains(out, "EDITED") {
-			t.Errorf("an edited record: exit %d\n%s\nwant exit 1 and EDITED", code, out)
+		// A record edited in place.
+		mustFail("an edited record", strings.Replace(body, `"/api/café/3/`, `"/api/cafe/3/`, 1), 1, "EDITED")
+		// No checkpoint at all.
+		mustFail("no checkpoint", strings.Join(lines[:len(lines)-1], "\n")+"\n", 2, "TRUNCATED")
+		// The four that used to pass, each with the count adjusted.
+		mustFail("seq 5 deleted", rewrite(body, func(ev []string) []string { return append(ev[:5], ev[6:]...) }), 1, "GAP")
+		mustFail("the first three chained lines deleted", rewrite(body, func(ev []string) []string { return append(ev[:1], ev[4:]...) }), 1, "MISSING START")
+		mustFail("the last three lines deleted", rewrite(body, func(ev []string) []string { return ev[:len(ev)-3] }), 1, "MISSING END")
+		mustFail("seq 5 duplicated", rewrite(body, func(ev []string) []string {
+			return append(ev[:6], append([]string{ev[5]}, ev[6:]...)...)
+		}), 1, "DUPLICATE")
+		mustFail("two events swapped", rewrite(body, func(ev []string) []string { ev[3], ev[4] = ev[4], ev[3]; return ev }), 1, "OUT OF ORDER")
+		// Every chained line deleted: an empty export of a chain that has 15 rows.
+		mustFail("every chained line deleted", rewrite(body, func(ev []string) []string { return ev[:1] }), 1, "MISSING EVENTS")
+
+		// An anchor recorded elsewhere is what binds the ENDS: the right one passes, a wrong one
+		// (the head as it was before rows were removed from the tail) does not.
+		var cp exportCheckpoint
+		_ = json.Unmarshal([]byte(lines[len(lines)-1]), &cp)
+		if code, out := verify(body, "--expect-head", fmt.Sprintf("%d:%s", cp.HeadSeq, cp.HeadHash)); code != 0 {
+			t.Errorf("the right anchor: exit %d\n%s", code, out)
 		}
-		lines := strings.Split(strings.TrimSpace(body), "\n")
-		if code, out := verify(strings.Join(lines[:len(lines)-1], "\n") + "\n"); code != 2 || !strings.Contains(out, "TRUNCATED") {
-			t.Errorf("an export with no checkpoint: exit %d\n%s\nwant exit 2 and TRUNCATED", code, out)
+		mustFail("a wrong head anchor", body, 1, "ANCHOR MISMATCH", "--expect-head", fmt.Sprintf("%d:%s", cp.HeadSeq+3, cp.HeadHash))
+
+		// The other kinds of export verify by their own rules, and are not held to the full one's.
+		// A range: gaps are the point, and it says so.
+		from, to := e.tsOf(tenant, 4), e.tsOf(tenant, 11)
+		_, ranged := e.get(p, tenant, "/audit/export?from="+url.QueryEscape(from.Format(time.RFC3339Nano))+"&to="+url.QueryEscape(to.Format(time.RFC3339Nano)))
+		if code, out := verify(ranged); code != 0 || !strings.Contains(out, "a range") {
+			t.Errorf("a range export: exit %d\n%s", code, out)
+		}
+		// A resumed export starts after its cursor and ends at the head.
+		var ev6 exportEvent
+		_ = json.Unmarshal([]byte(lines[6]), &ev6)
+		_, resumed := e.get(p, tenant, "/audit/export?cursor="+url.QueryEscape(ev6.Cursor))
+		if code, out := verify(resumed); code != 0 || !strings.Contains(out, "a resumed export") {
+			t.Errorf("a resumed export: exit %d\n%s", code, out)
+		}
+		// ...and one with its first rows removed is refused as the resumed export it claims to be.
+		cutResumed := rewrite(resumed, func(ev []string) []string { return ev[2:] })
+		if code, out := verify(cutResumed); code != 1 || !strings.Contains(out, "MISSING START") {
+			t.Errorf("a resumed export missing its first rows: exit %d\n%s", code, out)
+		}
+	})
+}
+
+// A retention sweep between two pages used to leave a silent hole: 200, seqs [1,2,7..12], a
+// checkpoint saying floor 0, and a verifier that saw nothing wrong. Rows removed while an
+// export runs are not "the next export's", they are missing from this one, so it must not end
+// in a checkpoint. (cleat-review on #2191.)
+func TestAnExportOverARetentionSweepFailsInsteadOfLeavingAHole(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		tenant := uuid.New()
+		writer := e.plugin()
+		e.record(writer, tenant, 12)
+		cutoff := e.tsOf(tenant, 6).Add(time.Microsecond) // rows 1..6 are expired
+		old := exportPageSize
+		exportPageSize = 2
+		t.Cleanup(func() { exportPageSize = old })
+
+		run := func(sweepAtQuery int, opts ExportOptions) (lines []string, err error) {
+			p := e.plugin()
+			p.db = &hookDB{PluginDB: p.db, at: sweepAtQuery, fn: func() {
+				if n, err := e.plugin().retainTenant(context.Background(), tenant, cutoff); err != nil || n != 6 {
+					t.Errorf("the sweep removed %d rows, %v; want 6", n, err)
+				}
+			}}
+			err = ExportTenant(context.Background(), p.db, e.d.dialect, tenant, opts, func(l []byte) error {
+				lines = append(lines, string(l))
+				return nil
+			})
+			return lines, err
+		}
+		// Query 1 is the (empty) pre-chain phase, 2 and 3 are the first two chained pages; the
+		// sweep lands before the third page.
+		lines, err := run(4, ExportOptions{})
+		if !errors.Is(err, ErrExportGap) {
+			t.Fatalf("an export across a sweep ended with %v after %d records, want ErrExportGap", err, len(lines))
+		}
+		for _, l := range lines {
+			if strings.Contains(l, `"type":"checkpoint"`) {
+				t.Fatalf("an export with a hole ended in a checkpoint: %v", lines)
+			}
+		}
+		if len(lines) != 4 {
+			t.Errorf("%d records were sent before the hole, want the 4 that came before it", len(lines))
+		}
+	})
+}
+
+// Before anything is sent the same condition is an ordinary error the client retries: 409.
+// A resume after a sweep is the same: the rows after the cursor are gone.
+func TestAnExportThatStartsOverAHoleIsRefusedWith409(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		tenant := uuid.New()
+		e.record(e.plugin(), tenant, 12)
+		cutoff := e.tsOf(tenant, 6).Add(time.Microsecond)
+		p := e.plugin()
+		ex := e.get
+		_, body := ex(p, tenant, "/audit/export")
+		evs, _, _ := exportLines(t, body)
+		cursor4 := evs[3].Cursor
+		if n, err := e.plugin().retainTenant(context.Background(), tenant, cutoff); err != nil || n != 6 {
+			t.Fatalf("the sweep removed %d rows, %v", n, err)
+		}
+		code, out := e.get(p, tenant, "/audit/export?cursor="+url.QueryEscape(cursor4))
+		if code != 409 || strings.Contains(out, `"type"`) {
+			t.Fatalf("a resume whose next rows were swept: %d %s, want 409 and no records", code, out)
+		}
+		// A fresh export, from the new floor, is fine and says where it starts.
+		code, out = e.get(p, tenant, "/audit/export")
+		fresh, cp, _ := exportLines(t, out)
+		if code != 200 || len(fresh) != 6 || cp == nil || cp.FloorSeq != 6 || *fresh[0].Seq != 7 {
+			t.Fatalf("an export after the sweep: %d, %d records, checkpoint %+v; want the 6 after the floor", code, len(fresh), cp)
+		}
+		// The checkpoint says what kind of export it was.
+		_, out = e.get(p, tenant, "/audit/export?cursor="+url.QueryEscape(fresh[2].Cursor))
+		_, cp, _ = exportLines(t, out)
+		if cp == nil || cp.AfterSeq == nil || *cp.AfterSeq != 9 || cp.From != nil || cp.To != nil {
+			t.Fatalf("a resumed export's checkpoint: %+v, want after_seq 9 and no range", cp)
+		}
+		_, out = e.get(p, tenant, "/audit/export?from="+url.QueryEscape("2000-01-01T00:00:00Z"))
+		_, cp, _ = exportLines(t, out)
+		if cp == nil || cp.From == nil || *cp.From != "2000-01-01T00:00:00.000000Z" || cp.AfterSeq != nil {
+			t.Fatalf("a range export's checkpoint: %+v, want from set", cp)
 		}
 	})
 }

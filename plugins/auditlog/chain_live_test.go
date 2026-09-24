@@ -374,6 +374,11 @@ func TestRowsSurvivingBelowAFloorAreReported(t *testing.T) {
 			if err != nil || rep.OK() || rep.Break.Kind != BreakRowsBelowFloor || rep.Break.Seq != 1 {
 				t.Fatalf("%s: %+v, %v (break %+v), want %s at seq 1 -- the edit at seq 5 must not be hidden by the floor", name, rep, err, rep.Break, BreakRowsBelowFloor)
 			}
+			// Reporting the rows below the floor must not make the report claim the floor's age
+			// was not checked when a retention period was supplied.
+			if rep.FloorAgeChecked != (opts.RetentionDays > 0) {
+				t.Fatalf("%s: floor_age_checked is %v, want %v", name, rep.FloorAgeChecked, opts.RetentionDays > 0)
+			}
 		}
 
 		// The honest floor: retention removed the rows, so nothing is below it, and the report

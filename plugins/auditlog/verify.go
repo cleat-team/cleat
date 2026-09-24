@@ -206,6 +206,8 @@ func verifyOnce(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect,
 	// hides an edit anywhere below it: the scan starts above the floor and never looks.
 	// It cannot misfire on a concurrent sweep: the delete and the move are one commit, and a
 	// floor only moves up, so rows at or below the floor this run read are already gone.
+	// Whether the floor's age is checked does not depend on this check returning early.
+	rep.FloorAgeChecked = haveHead && head.floorSeq > 0 && opts.RetentionDays > 0
 	if haveHead && head.floorSeq > 0 {
 		var below int64
 		var lowest sql.NullInt64
@@ -226,8 +228,7 @@ func verifyOnce(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect,
 	// about seq <= floor, which precedes every row this scan reads. It cannot see a floor
 	// recorded with a forged timestamp (nothing outside the database says what it should
 	// be); it sees a floor moved carelessly, or by code that did not know to record one.
-	if haveHead && head.floorSeq > 0 && opts.RetentionDays > 0 {
-		rep.FloorAgeChecked = true
+	if rep.FloorAgeChecked {
 		now := time.Now
 		if opts.Now != nil {
 			now = opts.Now

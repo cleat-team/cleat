@@ -70,6 +70,10 @@ func (p *Plugin) handleExport(w http.ResponseWriter, r *http.Request) {
 		}
 	case !started && errors.Is(err, ErrBadCursor):
 		p.writeError(w, http.StatusBadRequest, "cursor is not one this export issued")
+	case !started && errors.Is(err, ErrExportGap):
+		// The log changed under the export before it sent anything (a retention sweep, or a
+		// missing row). Nothing was sent, so this can be an ordinary error the client retries.
+		p.writeError(w, http.StatusConflict, "the audit log changed while the export was starting; repeat it")
 	case !started:
 		p.logger.Error("audit-log: export", "tenant", tid, "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to export audit events")
