@@ -81,13 +81,6 @@ SELECT @sql = @sql + N'DROP SECURITY POLICY dbo.' + QUOTENAME(policy_name) + N';
   FROM (SELECT DISTINCT policy_name FROM @bound) AS d;
 EXEC sp_executesql @sql;
 
--- Carries the same cleat_dispatcher disjunct 075's plain form does
--- (cleat#2125), so applying this file after migration 102 does not silently
--- revoke the in-flight-workflow-ids exemption a background sweep depends on.
--- Not read by engine's routine-definition drift guard at all -- this file
--- lives under optional/, which parseRoutineDefinitions's os.ReadDir never
--- descends into -- so the dynamic-SQL wrapping that would corrupt that
--- guard's parse (see 075's comment) is harmless here.
 EXEC(N'
 CREATE OR ALTER FUNCTION dbo.fn_tenant_filter(@tenant_id UNIQUEIDENTIFIER)
 RETURNS TABLE
@@ -95,8 +88,7 @@ WITH SCHEMABINDING
 AS
 RETURN SELECT 1 AS access
     WHERE @tenant_id = CAST(SESSION_CONTEXT(N''tenant_id'') AS UNIQUEIDENTIFIER)
-       OR IS_ROLEMEMBER(N''cleat_admin'') = 1
-       OR USER_NAME() = N''cleat_dispatcher'';
+       OR IS_ROLEMEMBER(N''cleat_admin'') = 1;
 ');
 
 SET @sql = N'';

@@ -164,7 +164,7 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 // mssqlReleaseAdminDB is the Cleanup counterpart of every MSSQLAdminDB call
 // that flipped or reused the admin predicate form. When the count for baseDSN
 // reaches zero, no live caller still needs 'admin', so it restores 'plain'
-// (migration 102 is idempotent -- see restoreMSSQLPlainPredicate) and evicts
+// (migration 075 is idempotent -- see restoreMSSQLPlainPredicate) and evicts
 // the cached pool, so the next MSSQLAdminDB call re-provisions and
 // re-verifies rather than handing back a pool that now authenticates into a
 // predicate it never checked.
@@ -201,18 +201,19 @@ func mssqlReleaseAdminDB(t *testing.T, baseDSN string) {
 }
 
 // restoreMSSQLPlainPredicate re-applies
-// migrations/mssql/102_a_plugin_sweep_can_ask_which_workflows_are_in_flight.sql,
-// not 075 -- both are idempotent and both restore the plain predicate, but
-// only 102 also carries the cleat_dispatcher disjunct (cleat#2125). 075's own
-// body does not: migration.Runner never re-runs an already-applied file on a
-// real deployment, so 075 is reachable only through this helper, and editing
-// its SQL in place to add the disjunct would make it byte-identical to 102's
-// definition -- which left engine/routine_definition_drift_test.go's
-// dbo.fn_tenant_filter discriminator with no earlier/latest difference to
-// find (measured: "the latest introduces neither a new identifier nor a new
-// body line ... nothing here can tell the versions apart"). Re-pointing this
-// helper at 102 instead keeps 075's shipped bytes untouched and restores
-// exactly what a real, fully-migrated, not-opted-in deployment has.
+// migrations/mssql/075_the_admin_bypass_is_opt_in.sql, which is idempotent
+// and restores exactly what a real, fully-migrated, not-opted-in deployment
+// has -- migration.Runner never re-runs an already-applied file, so this
+// helper is the only path back to 075's form once a test has opted in.
+//
+// cleat#2125 briefly pointed this at a since-deleted migration 102 instead,
+// which carried a cleat_dispatcher exemption on the same predicate. That
+// design (an OR-disjunct added to dbo.fn_tenant_filter) was dropped after
+// cleat-review measured it turning index seeks into scans on every table
+// sharing the predicate, not just workflow_instances -- see
+// plugins/blobstore/background.go's sweepStaleWorkflowRefsMSSQL for the
+// per-tenant replacement. 075 was never touched by that migration and never
+// needed to be.
 //
 // Takes baseDSN, not the caller's plain db, and opens its OWN connection --
 // store_backends_test.go's mssqlRowDisappearanceReporter already documents
@@ -235,7 +236,7 @@ func restoreMSSQLPlainPredicate(t *testing.T, baseDSN string) {
 	defer restoreDB.Close()
 
 	path := filepath.Join(repoRootForMSSQLTestutil(t), "migrations", "mssql",
-		"102_a_plugin_sweep_can_ask_which_workflows_are_in_flight.sql")
+		"075_the_admin_bypass_is_opt_in.sql")
 	execMSSQLBatchFile(t, restoreDB, path)
 }
 
