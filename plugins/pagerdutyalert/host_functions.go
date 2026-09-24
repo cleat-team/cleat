@@ -112,15 +112,30 @@ func (p *Plugin) triggerIncident(ctx context.Context, inputJSON string) (string,
 		return "", fmt.Errorf("pagerduty: invalid severity: %q (must be critical, error, or warning)", input.Severity)
 	}
 
-	// Look up the PagerDuty config, verifying tenant ownership.
-	var routingKey plugin.Secret
+	// Look up the PagerDuty config, verifying tenant ownership. routing_key
+	// has no column of its own any more (cleat#1992) -- fetched from tenant
+	// secrets below, once this confirms the config exists and belongs to
+	// this workflow's tenant.
+	// plugin.GUID, not uuid.UUID: SQL Server returns UNIQUEIDENTIFIER in
+	// mixed-endian byte order, which scans without error into a different id.
+	// See its doc comment, and plugins/scheduler for the same pattern.
+	var configID plugin.GUID
 	err := p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT routing_key
+			SELECT id
 			FROM pd_config
 			WHERE id = $1 AND tenant_id = $2 AND enabled = true
-		`, p.dialect), input.ConfigID, cc.TenantID).Scan(&routingKey)
+		`, p.dialect), input.ConfigID, cc.TenantID).Scan(&configID)
 	if err != nil {
 		return "", fmt.Errorf("pagerduty: config not found or disabled")
+	}
+
+	// Request-path Get, not ForTenant: ctx already carries this workflow's
+	// tenant (engine's tenantScopedContext marks every plugin call context,
+	// engine/plugin_call_context.go), the same way the SQL call above is
+	// already scoped without a plugin.ForTenant call of its own.
+	routingKey, err := p.secrets.Get(ctx, PagerdutyRoutingKeySecretName(configID.UUID))
+	if err != nil {
+		return "", fmt.Errorf("pagerduty: routing key unavailable: %w", err)
 	}
 
 	// Build the custom_details from optional details field.
@@ -136,7 +151,7 @@ func (p *Plugin) triggerIncident(ctx context.Context, inputJSON string) (string,
 	}
 
 	payload := pdEventRequest{
-		RoutingKey:  routingKey.Reveal(),
+		RoutingKey:  routingKey,
 		EventAction: "trigger",
 		Payload: &pdEventPayload{
 			Summary:       input.Summary,
@@ -169,19 +184,27 @@ func (p *Plugin) resolveIncident(ctx context.Context, inputJSON string) (string,
 		return "", fmt.Errorf("pagerduty: incident_key is required")
 	}
 
-	// Look up the PagerDuty config, verifying tenant ownership.
-	var routingKey plugin.Secret
+	// Look up the PagerDuty config, verifying tenant ownership. See
+	// triggerIncident above for why this is a two-step existence check plus a
+	// request-path Secrets.Get, and for why the scan target is plugin.GUID
+	// rather than uuid.UUID.
+	var configID plugin.GUID
 	err := p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT routing_key
+			SELECT id
 			FROM pd_config
 			WHERE id = $1 AND tenant_id = $2 AND enabled = true
-		`, p.dialect), input.ConfigID, cc.TenantID).Scan(&routingKey)
+		`, p.dialect), input.ConfigID, cc.TenantID).Scan(&configID)
 	if err != nil {
 		return "", fmt.Errorf("pagerduty: config not found or disabled")
 	}
 
+	routingKey, err := p.secrets.Get(ctx, PagerdutyRoutingKeySecretName(configID.UUID))
+	if err != nil {
+		return "", fmt.Errorf("pagerduty: routing key unavailable: %w", err)
+	}
+
 	payload := pdEventRequest{
-		RoutingKey:  routingKey.Reveal(),
+		RoutingKey:  routingKey,
 		EventAction: "resolve",
 		DedupKey:    input.IncidentKey,
 	}

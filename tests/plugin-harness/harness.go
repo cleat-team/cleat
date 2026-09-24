@@ -74,9 +74,30 @@ func NewTestPluginEnv(t *testing.T, ctx context.Context, db *sql.DB, dialect plu
 		t.Fatalf("NewTestPluginEnv: Discover: %v", err)
 	}
 
+	// A fixed, harness-only key. cleat#1992 moved pagerduty-alert's routing key
+	// (and datadog-export's API key) out of their own plugin tables and into
+	// tenant_secrets, sealed under this ring -- so a plugin that reads a
+	// secret via env.Secrets now needs one wired here, where nothing did
+	// before, because no plugin exercised through this harness went through
+	// env.Secrets until then. Every other plugin here that stores a
+	// credential (slack-notify's webhook_url, for one) still keeps it as a
+	// plain, redacted-on-read column in its own table, not through Secrets --
+	// that is the gap #1992's migration closes for these two, and this key is
+	// what makes SeedPluginConfig's write and triggerIncident's read agree.
+	testSecretKey := make([]byte, 32)
+	for i := range testSecretKey {
+		testSecretKey[i] = 0x42
+	}
+	testSecretRing, err := engine.NewKeyRing(engine.VersionedKey{Version: 1, Key: testSecretKey})
+	if err != nil {
+		t.Fatalf("NewTestPluginEnv: build the harness secret key ring: %v", err)
+	}
+	secretStore := engine.NewSecretStoreWithRing(db, string(dialect), testSecretRing)
+
 	envCfg := &plugin.Environment{
 		DB:      pluginDB,
 		Dialect: dialect,
+		Secrets: engine.NewPluginSecrets(secretStore),
 	}
 	plugin.InitAll(ctx, envCfg, loadedPlugins)
 	env.Plugins = loadedPlugins
@@ -84,8 +105,13 @@ func NewTestPluginEnv(t *testing.T, ctx context.Context, db *sql.DB, dialect plu
 	// Run plugin migrations.
 	RunPluginMigrations(t, db, dialect, loadedPlugins)
 
-	// Seed config tables.
+	// Seed config tables, then the secrets those rows now need
+	// out-of-band (cleat#1992): SeedPluginConfig no longer writes
+	// pd_config.routing_key -- the column is gone -- so the row it creates
+	// for config 00000000-0000-0000-0000-000000000003 has no routing key
+	// until this writes one under the same store triggerIncident reads from.
 	SeedPluginConfig(t, db, dialect)
+	SeedPluginSecrets(t, ctx, envCfg.Secrets)
 
 	// Build host registries.
 	pr := engine.NewPluginRegistry()

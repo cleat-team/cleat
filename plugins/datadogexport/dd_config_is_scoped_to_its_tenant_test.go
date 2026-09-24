@@ -118,10 +118,13 @@ func TestDDConfigIsScopedToItsTenant(t *testing.T) {
 	// The other tenant's row is seeded FIRST. A table holding only `mine`
 	// passes against a policy that is wrong, absent, or bypassed, and a USING
 	// clause over an empty table is never evaluated at all (cleat#1285).
+	// api_key has no column any more (cleat#1992, migration v4) -- the keys
+	// this test seeds live only in the names 'theirs'/'mine' below, not in
+	// dd_config itself.
 	if _, err := su.ExecContext(ctx,
-		`INSERT INTO `+schema+`.dd_config (id, tenant_id, api_key, site, metrics_prefix, enabled)
-		 VALUES (gen_random_uuid(), $1, 'k-theirs', 'datadoghq.com', 'cleat', true),
-		        (gen_random_uuid(), $2, 'k-mine',   'datadoghq.com', 'cleat', true)`,
+		`INSERT INTO `+schema+`.dd_config (id, tenant_id, site, metrics_prefix, enabled)
+		 VALUES (gen_random_uuid(), $1, 'datadoghq.com', 'cleat', true),
+		        (gen_random_uuid(), $2, 'datadoghq.com', 'cleat', true)`,
 		theirs, mine); err != nil {
 		t.Fatalf("seeding both tenants' configs: %v", err)
 	}

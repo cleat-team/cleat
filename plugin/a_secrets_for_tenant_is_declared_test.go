@@ -44,7 +44,15 @@ import (
 // bypass-spanning AllTenantIDs loop versus a single named tenant) closely
 // enough that folding them would make one file's diff answer a question about
 // the other's scanner.
-var secretsForTenantLedger = map[string]bool{}
+var secretsForTenantLedger = map[string]bool{
+	// cleat#1992: dd_config.api_key moved into tenant secrets. exportForConfig
+	// runs in the background export loop (a plugin_lease-elected leader
+	// sweeping every tenant's configs, not a request), so it has no ctx
+	// already scoped to one tenant the way a request-path handler does --
+	// same reasoning as the plugin.ForTenant(ctx, cfg.TenantID) call two
+	// lines above it in the same function, for the SQL side.
+	"plugins/datadogexport/background.go:(*Plugin).exportForConfig": true,
+}
 
 // secretsForTenantSite is one Secrets.ForTenant-shaped call, located by
 // go/ast -- same reasoning as crossTenantSite and perTenantLoopSite: a regex

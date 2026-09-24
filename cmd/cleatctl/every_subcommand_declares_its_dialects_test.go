@@ -68,6 +68,17 @@ var unrestrictedSubcommands = map[string]string{
 	// tenant_egress_allow and tenant_api_keys. Every statement in quota.go goes
 	// through d.rebind, asserted directly by TestQuotaStatementsRebindPerDialect.
 	"quota": "ported to all three; tenant_quota is control-plane like tenant_settings (plugins read one shared env.DB, no per-tenant MySQL routing), and every statement goes through d.rebind (cleat#2046)",
+
+	// All three. dd_config and pd_config are plain plugin data tables, not
+	// admin.*-schema-gated and not per-tenant-database on MySQL: every plugin
+	// reads one shared env.DB (same reasoning as quota's and set-secret's
+	// entries above), so the base --db connection this command already has is
+	// the same one cleat-worker's plugins read at runtime. Its two SELECTs
+	// carry no $N placeholders and no dialect-specific syntax -- column names
+	// and the table shape agree across all three (plugins/datadogexport/
+	// migrations.go, plugins/pagerdutyalert/migrations.go) -- so there is
+	// nothing here for d.rebind to rewrite.
+	"migrate-plugin-secrets": "ported to all three; dd_config/pd_config are plain plugin tables read on the shared base connection, same as set-secret/quota, and its SELECTs carry no dialect-specific syntax (cleat#1992)",
 }
 
 // Every subcommand main.go dispatches declares the dialects it runs on.

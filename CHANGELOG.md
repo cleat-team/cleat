@@ -12,6 +12,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **`dd_config.api_key` and `pd_config.routing_key` move into tenant secrets; the plaintext
+  columns are dropped.** (cleat#1992)
+
+  datadog-export and pagerduty-alert used to store the Datadog API key and the PagerDuty
+  routing key in plain SQL columns. They now go through the same `plugin.Secrets` envelope
+  encryption every other tenant secret uses, under the names
+  `datadogexport.api_key.<config-id>` and `pagerdutyalert.routing_key.<config-id>` (one secret
+  per config, not one per tenant, since a tenant can have more than one config of each kind).
+  Admin routes are unchanged (`POST`/`PUT .../configs` still take `api_key`/`routing_key` in the
+  request body, and responses still redact it) — only where the value lives has changed.
+
+  Each plugin's migration that drops the plaintext column (`datadog-export` v4, `pagerduty-alert`
+  v3) has no function hook to move existing data itself — `plugin.Migration.Up` is plain SQL.
+  **Run `cleatctl migrate-plugin-secrets --plugin <name>` against the OLD schema, before
+  deploying a build that carries the column-dropping migration:**
+
+  ```
+  cleatctl --db "$DSN" migrate-plugin-secrets --plugin datadog-export --dry-run
+  cleatctl --db "$DSN" migrate-plugin-secrets --plugin datadog-export
+  cleatctl --db "$DSN" migrate-plugin-secrets --plugin pagerduty-alert --dry-run
+  cleatctl --db "$DSN" migrate-plugin-secrets --plugin pagerduty-alert
+  ```
+
+  It needs `CLEAT_SECRET_MASTER_KEY` (the same key the workers use) and is idempotent — safe to
+  re-run, including after a partial failure. **Once the column-dropping migration has run, the
+  plaintext value is gone with no recovery path** — this command reads nothing that is not
+  there, so the order above is not optional. An operator who upgrades without running it first
+  loses every existing API key and routing key; sends and sweeps for those configs then fail with
+  "secret not found" until the key is re-entered through the admin route.
+
 - **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
   (cleat#2046)
 

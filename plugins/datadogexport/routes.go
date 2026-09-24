@@ -45,6 +45,25 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 	return tid
 }
 
+// DatadogAPIKeySecretName is the tenant-secret name a dd_config row's API key
+// is stored under. cleat#1992.
+//
+// PER-CONFIG, NOT PER-TENANT: dd_config is not one row per tenant -- a tenant
+// can have several named Datadog configs (own id, site, metrics_prefix) -- so
+// a single fixed name like "datadogexport.api_key" would collide across a
+// tenant's own configs (tenant secrets are keyed (tenant_id, name), a
+// singleton per name). Keying by config id preserves that multi-config
+// capability with no product change. See migrations.go v4's own comment.
+//
+// EXPORTED, not package-private: cmd/cleatctl's migrate-plugin-secrets
+// backfill (cmd/cleatctl/migratepluginsecrets.go) imports this plugin
+// package to compute the exact same name it will later be read back under --
+// one function, not two copies of a naming scheme that must never drift
+// apart.
+func DatadogAPIKeySecretName(id uuid.UUID) string {
+	return "datadogexport.api_key." + id.String()
+}
+
 // ---- types ----
 
 type configJSON struct {
@@ -113,12 +132,24 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
+	// The secret is written FIRST. If it fails, nothing else has happened --
+	// no orphaned config row. If the INSERT below fails after this succeeds,
+	// the secret is orphaned under a name no config row references; harmless
+	// (unreachable, never resolved by anything) but logged so it is not a
+	// silent leak of key material nobody can account for.
+	if err := p.secrets.Put(r.Context(), DatadogAPIKeySecretName(id), req.APIKey.Reveal()); err != nil {
+		p.logger.Error("datadog-export: store api key", "error", err)
+		p.writeError(w, 500, "failed to store api key")
+		return
+	}
+
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
-			INSERT INTO dd_config (tenant_id, id, name, api_key, site, metrics_prefix, enabled, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
-		`, p.dialect), tid, id, req.Name, req.APIKey.Reveal(), site, prefix, now)
+			INSERT INTO dd_config (tenant_id, id, name, site, metrics_prefix, enabled, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
+		`, p.dialect), tid, id, req.Name, site, prefix, now)
 	if err != nil {
-		p.logger.Error("datadog-export: create config", "error", err)
+		p.logger.Error("datadog-export: create config",
+			"error", err, "orphaned_secret", DatadogAPIKeySecretName(id))
 		p.writeError(w, 500, "failed to create config")
 		return
 	}
@@ -150,7 +181,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
-			SELECT id, name, api_key, site, metrics_prefix, enabled, created_at, updated_at
+			SELECT id, name, site, metrics_prefix, enabled, created_at, updated_at
 			FROM dd_config
 			WHERE tenant_id = $1
 			ORDER BY created_at DESC
@@ -162,10 +193,15 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	// c.APIKey is left at its zero value throughout this handler. Secret's
+	// MarshalJSON always emits RedactedPlaceholder regardless of content
+	// (plugin/secret.go), so a real value here would never reach the
+	// response -- fetching it from tenant secrets would be a decrypt spent on
+	// a byte the client can never see.
 	var configs []configJSON
 	for rows.Next() {
 		var c configJSON
-		if err := plugin.ScanRow(rows, &c.ID, &c.Name, &c.APIKey, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.Name, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			p.logger.Error("datadog-export: scan config", "error", err)
 			continue
 		}
@@ -198,10 +234,10 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	var c configJSON
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT id, name, api_key, site, metrics_prefix, enabled, created_at, updated_at
+			SELECT id, name, site, metrics_prefix, enabled, created_at, updated_at
 			FROM dd_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid), &c.ID, &c.Name, &c.APIKey, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.Name, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "config not found")
 		return
@@ -246,7 +282,16 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build dynamic UPDATE query for the fields that are present.
+	// req.APIKey has no column of its own any more -- it goes through
+	// p.secrets below -- but it still counts as a field being updated, or a
+	// request that touches only api_key would wrongly 400 as "no fields to
+	// update".
+	if req.Name == nil && req.APIKey == nil && req.Site == nil && req.MetricsPrefix == nil && req.Enabled == nil {
+		p.writeError(w, 400, "no fields to update")
+		return
+	}
+
+	// Build dynamic UPDATE query for the SQL-column fields that are present.
 	setClauses := []string{}
 	args := []any{}
 	argIdx := 1
@@ -254,11 +299,6 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argIdx))
 		args = append(args, *req.Name)
-		argIdx++
-	}
-	if req.APIKey != nil {
-		setClauses = append(setClauses, fmt.Sprintf("api_key = $%d", argIdx))
-		args = append(args, req.APIKey.Reveal())
 		argIdx++
 	}
 	if req.Site != nil {
@@ -277,11 +317,10 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		argIdx++
 	}
 
-	if len(setClauses) == 0 {
-		p.writeError(w, 400, "no fields to update")
-		return
-	}
-
+	// updated_at is unconditional, so setClauses is never empty here even
+	// when api_key is the only field the caller asked to change -- which
+	// keeps this UPDATE, and its WHERE id = $.. AND tenant_id = $.., as the
+	// single existence-and-ownership check before the secret write below.
 	setClauses = append(setClauses, "updated_at = now()")
 	args = append(args, id, tid)
 
@@ -302,13 +341,25 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The secret write happens AFTER the row update confirms id belongs to
+	// tid -- so a request naming another tenant's (or no) config id never
+	// reaches p.secrets.Put at all, rather than writing an orphaned secret
+	// under the caller's own tenant for an id that is not theirs.
+	if req.APIKey != nil {
+		if err := p.secrets.Put(r.Context(), DatadogAPIKeySecretName(id), req.APIKey.Reveal()); err != nil {
+			p.logger.Error("datadog-export: rotate api key", "error", err, "id", id)
+			p.writeError(w, 500, "failed to store api key")
+			return
+		}
+	}
+
 	// Return the updated config.
 	var c configJSON
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT id, name, api_key, site, metrics_prefix, enabled, created_at, updated_at
+			SELECT id, name, site, metrics_prefix, enabled, created_at, updated_at
 			FROM dd_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid), &c.ID, &c.Name, &c.APIKey, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.Name, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("datadog-export: re-fetch config", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated config")
@@ -347,6 +398,15 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if rows == 0 {
 		p.writeError(w, 404, "config not found")
 		return
+	}
+
+	// Best-effort: the config row is already gone, which is the operation
+	// the caller asked for and got. A failure here leaves a retired-but-not-
+	// yet-retired secret with no config row pointing at it -- inert, since
+	// nothing looks it up by an id that no longer exists -- so it is logged
+	// rather than turned into a 500 for an otherwise-successful delete.
+	if _, err := p.secrets.Retire(r.Context(), DatadogAPIKeySecretName(id)); err != nil {
+		p.logger.Error("datadog-export: retire api key after delete", "error", err, "id", id)
 	}
 
 	p.logger.Info("datadog-export: config deleted", "id", id, "tenant", tid)

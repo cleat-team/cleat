@@ -33,7 +33,6 @@ type fakeConfigRow struct {
 	id            string
 	tenantID      string
 	name          string
-	apiKey        string
 	site          string
 	metricsPrefix string
 	enabled       bool
@@ -143,7 +142,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
-	case strings.Contains(query, "SELECT id, name, api_key, site, metrics_prefix, enabled, created_at, updated_at"):
+	case strings.Contains(query, "SELECT id, name, site, metrics_prefix, enabled, created_at, updated_at"):
 		if strings.Contains(query, "WHERE id = $") {
 			c.store.mu.RLock()
 			defer c.store.mu.RUnlock()
@@ -152,7 +151,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryListConfigs(args)
-	case strings.Contains(query, "SELECT id, tenant_id, api_key, site, metrics_prefix"):
+	case strings.Contains(query, "SELECT id, tenant_id, site, metrics_prefix"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryEnabledConfigs(args)
@@ -160,7 +159,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryWorkflowStats(args)
-	case strings.Contains(query, "SELECT id, name, api_key, site, metrics_prefix, enabled, created_at, updated_at"):
+	case strings.Contains(query, "SELECT id, name, site, metrics_prefix, enabled, created_at, updated_at"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryGetConfig(args)
@@ -190,19 +189,15 @@ func (c *fakeConn) execInsertConfig(args []driver.NamedValue) (driver.Result, er
 	if err != nil {
 		return nil, err
 	}
-	apiKey, err := argString(args, 4)
+	site, err := argString(args, 4)
 	if err != nil {
 		return nil, err
 	}
-	site, err := argString(args, 5)
+	prefix, err := argString(args, 5)
 	if err != nil {
 		return nil, err
 	}
-	prefix, err := argString(args, 6)
-	if err != nil {
-		return nil, err
-	}
-	nowVal, err := argTime(args, 7)
+	nowVal, err := argTime(args, 6)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +206,6 @@ func (c *fakeConn) execInsertConfig(args []driver.NamedValue) (driver.Result, er
 		id:            id,
 		tenantID:      tenantID,
 		name:          name,
-		apiKey:        apiKey,
 		site:          site,
 		metricsPrefix: prefix,
 		enabled:       true,
@@ -266,12 +260,6 @@ func (c *fakeConn) execUpdateConfig(query string, args []driver.NamedValue) (dri
 			if strings.Contains(setClause, "name = $") {
 				if v, err := argString(args, argIdx); err == nil {
 					cfg.name = v
-				}
-				argIdx++
-			}
-			if strings.Contains(setClause, "api_key = $") {
-				if v, err := argString(args, argIdx); err == nil {
-					cfg.apiKey = v
 				}
 				argIdx++
 			}
@@ -460,11 +448,11 @@ func (c *fakeConn) queryListConfigs(args []driver.NamedValue) (driver.Rows, erro
 		}
 	}
 
-	columns := []string{"id", "name", "api_key", "site", "metrics_prefix", "enabled", "created_at", "updated_at"}
+	columns := []string{"id", "name", "site", "metrics_prefix", "enabled", "created_at", "updated_at"}
 	var data [][]driver.Value
 	for _, cfg := range results {
 		data = append(data, []driver.Value{
-			cfg.id, cfg.name, cfg.apiKey, cfg.site, cfg.metricsPrefix,
+			cfg.id, cfg.name, cfg.site, cfg.metricsPrefix,
 			cfg.enabled, cfg.createdAt, cfg.updatedAt,
 		})
 	}
@@ -485,16 +473,16 @@ func (c *fakeConn) queryGetConfig(args []driver.NamedValue) (driver.Rows, error)
 	for _, cfg := range c.store.configs {
 		if cfg.id == id && (tid == "" || cfg.tenantID == tid) {
 			return &fakeRows{
-				columns: []string{"id", "name", "api_key", "site", "metrics_prefix", "enabled", "created_at", "updated_at"},
+				columns: []string{"id", "name", "site", "metrics_prefix", "enabled", "created_at", "updated_at"},
 				data: [][]driver.Value{{
-					cfg.id, cfg.name, cfg.apiKey, cfg.site, cfg.metricsPrefix,
+					cfg.id, cfg.name, cfg.site, cfg.metricsPrefix,
 					cfg.enabled, cfg.createdAt, cfg.updatedAt,
 				}},
 			}, nil
 		}
 	}
 	return &fakeRows{
-		columns: []string{"id", "name", "api_key", "site", "metrics_prefix", "enabled", "created_at", "updated_at"},
+		columns: []string{"id", "name", "site", "metrics_prefix", "enabled", "created_at", "updated_at"},
 	}, nil
 }
 
@@ -506,11 +494,11 @@ func (c *fakeConn) queryEnabledConfigs(_ []driver.NamedValue) (driver.Rows, erro
 		}
 	}
 
-	columns := []string{"id", "tenant_id", "api_key", "site", "metrics_prefix"}
+	columns := []string{"id", "tenant_id", "site", "metrics_prefix"}
 	var data [][]driver.Value
 	for _, cfg := range results {
 		data = append(data, []driver.Value{
-			cfg.id, cfg.tenantID, cfg.apiKey, cfg.site, cfg.metricsPrefix,
+			cfg.id, cfg.tenantID, cfg.site, cfg.metricsPrefix,
 		})
 	}
 	return &fakeRows{columns: columns, data: data}, nil
@@ -658,6 +646,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 		db:         &engine.SQLDBAdapter{DB: db},
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
+		secrets:    plugintest.NewFakeSecrets(),
 	}
 
 	mux := http.NewServeMux()
@@ -732,6 +721,156 @@ func TestConfigCreateAndGet(t *testing.T) {
 	}
 	if fetched["name"] != "test-config" {
 		t.Errorf("expected name 'test-config', got %s", fetched["name"])
+	}
+}
+
+// TestAPIKeySetViaAdminRouteIsUsedByTheNextExport is the known-positive
+// cleat#1992 asked for: a key that only ever reaches the plugin through the
+// public HTTP route (handleCreate, which calls p.secrets.Put -- never
+// secrets.Seed, which every other test in this file uses to shortcut past
+// the route) is the key the next background export actually sends to
+// Datadog. It is the route and the sweep agreeing about where the key
+// lives, exercised end to end rather than asserted separately at each side.
+func TestAPIKeySetViaAdminRouteIsUsedByTheNextExport(t *testing.T) {
+	p, handler, _ := setupTestPlugin(t)
+
+	const routeKey = "dd-set-via-the-admin-route"
+	body := `{"name":"route-key-test","api_key":"` + routeKey + `"}`
+	req := authedRequest("POST", "/datadog/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var capturedKey string
+	p.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			capturedKey = req.Header.Get("DD-API-KEY")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader([]byte(`{"status":"ok"}`))),
+			}, nil
+		}),
+		Timeout: 5 * time.Second,
+	}
+
+	if err := p.exportMetrics(context.Background()); err != nil {
+		t.Fatalf("exportMetrics: %v", err)
+	}
+	if capturedKey != routeKey {
+		t.Errorf("the export sent DD-API-KEY %q, want the key set via the admin route %q", capturedKey, routeKey)
+	}
+}
+
+// TestAPIKeyRotationTakesEffectWithoutARestart is the second cleat#1992
+// known-positive: an operator PUTting a new api_key over an existing config
+// changes what the VERY NEXT export sends, with no plugin re-Init and no new
+// Plugin value -- the same p, mid-process, the way a long-running worker
+// would see a rotation land. If exportForConfig or the secret it reads were
+// cached anywhere between requests, the second export below would still see
+// the first key.
+func TestAPIKeyRotationTakesEffectWithoutARestart(t *testing.T) {
+	p, handler, _ := setupTestPlugin(t)
+
+	createBody := `{"name":"rotation-test","api_key":"dd-key-before-rotation"}`
+	req := authedRequest("POST", "/datadog/configs", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	id := created["id"].(string)
+
+	var capturedKey string
+	p.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			capturedKey = req.Header.Get("DD-API-KEY")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader([]byte(`{"status":"ok"}`))),
+			}, nil
+		}),
+		Timeout: 5 * time.Second,
+	}
+
+	if err := p.exportMetrics(context.Background()); err != nil {
+		t.Fatalf("exportMetrics (before rotation): %v", err)
+	}
+	if capturedKey != "dd-key-before-rotation" {
+		t.Fatalf("before rotation: exported %q, want %q", capturedKey, "dd-key-before-rotation")
+	}
+
+	// Rotate. Same process, same *Plugin, no restart.
+	updateBody := `{"api_key":"dd-key-after-rotation"}`
+	req = authedRequest("PUT", "/datadog/configs/"+id, bytes.NewReader([]byte(updateBody)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if err := p.exportMetrics(context.Background()); err != nil {
+		t.Fatalf("exportMetrics (after rotation): %v", err)
+	}
+	if capturedKey != "dd-key-after-rotation" {
+		t.Errorf("after rotation: exported %q, want %q -- rotation did not take effect without a restart", capturedKey, "dd-key-after-rotation")
+	}
+}
+
+// TestTenantBCannotReadTenantAsKeyThroughTheRoute is the third cleat#1992
+// known-positive: tenant B, authenticated as itself, cannot reach tenant A's
+// config -- or its key -- through the admin route, by ID or by list. Every
+// GET/LIST here goes through the SAME handler tenant A used to create it;
+// the only thing that differs is which tenant the request authenticates as.
+func TestTenantBCannotReadTenantAsKeyThroughTheRoute(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	const realKey = "dd-tenant-a-secret-key"
+	body := `{"name":"tenant-a-config","api_key":"` + realKey + `"}`
+	req := authedRequest("POST", "/datadog/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("tenant A create: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	tenantAConfigID := created["id"].(string)
+
+	// A second tenant, with its own valid credential -- not tenant A's.
+	tenantBID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	tenantBKeyHash := sha256.Sum256([]byte("tenant-b-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", tenantBKeyHash)] = tenantBID.String()
+	tenantBRequest := func(method, target string) *http.Request {
+		req := httptest.NewRequest(method, target, nil)
+		req.Header.Set("Authorization", "Bearer tenant-b-api-key")
+		return req
+	}
+
+	// GET by tenant A's config id, authenticated as tenant B: not found, and
+	// the real key must not appear anywhere in the response regardless.
+	req = tenantBRequest("GET", "/datadog/configs/"+tenantAConfigID)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("tenant B GET tenant A's config: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("tenant B GET response leaked tenant A's real api_key: %s", rec.Body.String())
+	}
+
+	// LIST as tenant B: tenant A's config must not appear.
+	req = tenantBRequest("GET", "/datadog/configs")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant B LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) || strings.Contains(rec.Body.String(), tenantAConfigID) {
+		t.Errorf("tenant B LIST response contained tenant A's config or key: %s", rec.Body.String())
 	}
 }
 
@@ -968,13 +1107,14 @@ func TestMetricDataFormatting(t *testing.T) {
 		id:            cfgID,
 		tenantID:      testTenantStr,
 		name:          "test",
-		apiKey:        "dd-api-key",
 		site:          "datadoghq.com",
 		metricsPrefix: "cleat",
 		enabled:       true,
 		createdAt:     time.Now(),
 		updatedAt:     time.Now(),
 	})
+	secrets := plugintest.NewFakeSecrets()
+	secrets.Seed(testTenantStr, DatadogAPIKeySecretName(uuid.MustParse(cfgID)), "dd-api-key")
 
 	// Add workflow instances with different statuses.
 	for _, status := range []string{"running", "completed", "failed"} {
@@ -1007,12 +1147,12 @@ func TestMetricDataFormatting(t *testing.T) {
 			}),
 			Timeout: 5 * time.Second,
 		},
+		secrets: secrets,
 	}
 
 	cfg := ddConfigRow{
 		ID:            uuid.MustParse(cfgID),
 		TenantID:      testTenantID,
-		APIKey:        "dd-api-key",
 		Site:          "datadoghq.com",
 		MetricsPrefix: "cleat",
 	}
@@ -1074,17 +1214,19 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestBackgroundExportWorker(t *testing.T) {
 	store := newFakeDBStore()
 
-	// Add two enabled configs.
+	// Add two enabled configs, each with its own secret.
+	secrets := plugintest.NewFakeSecrets()
 	for i := 0; i < 2; i++ {
+		id := uuid.New()
 		store.configs = append(store.configs, fakeConfigRow{
-			id:            uuid.New().String(),
+			id:            id.String(),
 			tenantID:      testTenantStr,
 			name:          fmt.Sprintf("cfg-%d", i),
-			apiKey:        fmt.Sprintf("key-%d", i),
 			site:          "datadoghq.com",
 			metricsPrefix: "cleat",
 			enabled:       true,
 		})
+		secrets.Seed(testTenantStr, DatadogAPIKeySecretName(id), fmt.Sprintf("key-%d", i))
 	}
 
 	db := sql.OpenDB(&fakeConnector{store: store})
@@ -1102,6 +1244,7 @@ func TestBackgroundExportWorker(t *testing.T) {
 			}),
 			Timeout: 5 * time.Second,
 		},
+		secrets: secrets,
 	}
 
 	// Call exportMetrics directly (what the background worker calls).
@@ -1379,6 +1522,11 @@ func TestDD_ErrorPaths_DBError_Create(t *testing.T) {
 		db:         &engine.SQLDBAdapter{DB: db},
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
+		// A WORKING secrets store: this test's simulated error is on the SQL
+		// side (store.simulateErr), so the secret write must succeed and let
+		// execution reach the failing INSERT -- otherwise a nil p.secrets
+		// panics before the code under test ever runs.
+		secrets: plugintest.NewFakeSecrets(),
 	}
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
@@ -1399,7 +1547,7 @@ func TestDD_ErrorPaths_DBError_List(t *testing.T) {
 	store.simulateErr = false
 	store.configs = append(store.configs, fakeConfigRow{
 		id: uuid.New().String(), tenantID: testTenantStr,
-		name: "test", apiKey: "k", enabled: true,
+		name: "test", enabled: true,
 	})
 	store.simulateErr = true
 
@@ -1427,7 +1575,7 @@ func TestDD_ErrorPaths_DBError_Get(t *testing.T) {
 	cfgID := uuid.New().String()
 	store.configs = append(store.configs, fakeConfigRow{
 		id: cfgID, tenantID: testTenantStr,
-		name: "test", apiKey: "k", enabled: true,
+		name: "test", enabled: true,
 	})
 	store.simulateErr = true
 
@@ -1455,7 +1603,7 @@ func TestDD_ErrorPaths_DBError_Update(t *testing.T) {
 	cfgID := uuid.New().String()
 	store.configs = append(store.configs, fakeConfigRow{
 		id: cfgID, tenantID: testTenantStr,
-		name: "test", apiKey: "k", enabled: true,
+		name: "test", enabled: true,
 	})
 	store.simulateErr = true
 
@@ -1483,7 +1631,7 @@ func TestDD_ErrorPaths_DBError_Delete(t *testing.T) {
 	cfgID := uuid.New().String()
 	store.configs = append(store.configs, fakeConfigRow{
 		id: cfgID, tenantID: testTenantStr,
-		name: "test", apiKey: "k", enabled: true,
+		name: "test", enabled: true,
 	})
 	store.simulateErr = true
 
@@ -1530,20 +1678,27 @@ func TestDD_ExportMetrics_QueryError(t *testing.T) {
 
 func TestDD_ExportForConfig_QueryError(t *testing.T) {
 	store := newFakeDBStore()
-	store.simulateErr = true
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
+
+	cfg := ddConfigRow{
+		ID:       uuid.New(),
+		TenantID: testTenantID,
+		Site:     "datadoghq.com",
+	}
+	// Populated BEFORE arming simulateErr: fakeSecrets is a separate store
+	// from p.db, unaffected by it either way, but seeding first keeps the
+	// test's intent legible -- the secret fetch must succeed so execution
+	// reaches the workflow-stats query this test actually means to fail.
+	secrets := plugintest.NewFakeSecrets()
+	secrets.Seed(testTenantStr, DatadogAPIKeySecretName(cfg.ID), "test")
+	store.simulateErr = true
 
 	p := &Plugin{
 		db:         &engine.SQLDBAdapter{DB: db},
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
-	}
-	cfg := ddConfigRow{
-		ID:       uuid.New(),
-		TenantID: testTenantID,
-		APIKey:   "test",
-		Site:     "datadoghq.com",
+		secrets:    secrets,
 	}
 	err := p.exportForConfig(context.Background(), cfg)
 	if err == nil {

@@ -91,10 +91,12 @@ func (p *Plugin) Run(ctx context.Context) error {
 // ---- types for metric export ----
 
 // ddConfigRow represents an enabled Datadog configuration from the database.
+// It carries no API key -- cleat#1992 moved that into tenant secrets, keyed
+// per-config by DatadogAPIKeySecretName(ID) (routes.go); exportForConfig
+// fetches it separately, once it has narrowed to this row's own tenant.
 type ddConfigRow struct {
 	ID            uuid.UUID
 	TenantID      uuid.UUID
-	APIKey        plugin.Secret
 	Site          string
 	MetricsPrefix string
 }
@@ -201,7 +203,7 @@ func (p *Plugin) exportMetrics(ctx context.Context) error {
 	discoverCtx := plugin.AcrossAllTenants(ctx, "datadog-export: discovering which tenants have an export configured")
 
 	rows, err := p.db.Query(discoverCtx, `
-			SELECT id, tenant_id, api_key, site, metrics_prefix
+			SELECT id, tenant_id, site, metrics_prefix
 			FROM dd_config
 			WHERE enabled = true
 		`)
@@ -213,7 +215,7 @@ func (p *Plugin) exportMetrics(ctx context.Context) error {
 	var configs []ddConfigRow
 	for rows.Next() {
 		var cfg ddConfigRow
-		if err := plugin.ScanRow(rows, &cfg.ID, &cfg.TenantID, &cfg.APIKey, &cfg.Site, &cfg.MetricsPrefix); err != nil {
+		if err := plugin.ScanRow(rows, &cfg.ID, &cfg.TenantID, &cfg.Site, &cfg.MetricsPrefix); err != nil {
 			p.logger.Error("datadog-export: scan config row", "error", err)
 			continue
 		}
@@ -265,6 +267,18 @@ func (p *Plugin) exportForConfig(ctx context.Context, cfg ddConfigRow) error {
 	// plugin.ForTenant. The caller marks cross-tenant for its discovery query;
 	// it passes the UNMARKED parent ctx here for exactly that reason.
 	ctx = plugin.ForTenant(ctx, cfg.TenantID)
+
+	// The API key lives in tenant secrets now (cleat#1992), not on this row.
+	// Secrets.ForTenant, not the request-path Get: this sweep has no request
+	// to inherit a tenant from, and cfg.TenantID is the same tenant this
+	// function just scoped its SQL to via plugin.ForTenant above -- see
+	// plugin.Secrets.ForTenant's own doc comment for why a background loop
+	// reaches for this rather than Get. Declared in
+	// plugin/a_secrets_for_tenant_is_declared_test.go's secretsForTenantLedger.
+	apiKey, err := p.secrets.ForTenant(cfg.TenantID.String()).Get(ctx, DatadogAPIKeySecretName(cfg.ID))
+	if err != nil {
+		return fmt.Errorf("get api key: %w", err)
+	}
 
 	// Query workflow counts by status for this tenant.
 	statusRows, err := p.db.Query(ctx, plugin.Rebind(`
@@ -332,7 +346,7 @@ func (p *Plugin) exportForConfig(ctx context.Context, cfg ddConfigRow) error {
 		return fmt.Errorf("create request: %w", err)
 	}
 	plugin.SetTraceparentFromContext(ctx, req)
-	req.Header.Set("DD-API-KEY", cfg.APIKey.Reveal())
+	req.Header.Set("DD-API-KEY", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.httpClient.Do(req)

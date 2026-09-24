@@ -115,5 +115,63 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Version:      3,
 			TenantScoped: []string{"dd_config"},
 		},
+		{
+			// dd_config.api_key moves into tenant secrets. cleat#1992.
+			//
+			// BREAKING, AND DELIBERATELY SEQUENCED. This migration only drops
+			// the column -- it cannot also move the data, because
+			// engine.SecretStore's PutSecret does envelope encryption with a
+			// Go-held master key/KeyRing, and plugin.Migration.Up is plain SQL
+			// with no function hook (there is nothing here to call PutSecret
+			// with). Moving the data is a separate, Go-level, OPERATOR-RUN
+			// step: `cleatctl migrate-plugin-secrets --plugin=datadog-export`
+			// (cmd/cleatctl/migrateplugin secrets.go), which reads every
+			// existing dd_config row and writes api_key into tenant secrets
+			// under DatadogAPIKeySecretName(id) BEFORE this migration ever
+			// runs.
+			//
+			// The two cannot be one step: plugin.RunMigrations applies every
+			// plugin's schema migrations, across the whole fleet, before any
+			// plugin's Init (where env.Secrets first becomes reachable) is
+			// called. So doing the backfill in Init would already be too late
+			// on the same deploy that carries this DROP COLUMN -- the column
+			// would be gone before Init ever ran. See CHANGELOG.md's upgrade
+			// notes: an operator MUST run the cleatctl command against the OLD
+			// schema before upgrading to a worker binary carrying this
+			// migration, or the plaintext key is lost with no recovery path.
+			//
+			// PER-CONFIG, NOT PER-TENANT NAMING. dd_config is not one row per
+			// tenant -- a tenant can have several named Datadog configs (own
+			// id, site, metrics_prefix) -- so the secret name is keyed by
+			// config id (DatadogAPIKeySecretName, routes.go) rather than a
+			// single fixed name per tenant. Confirmed with WS-3 (owner of the
+			// Secrets interface and cleat#1992's PR split) before writing this:
+			// no downstream assumption of one fixed name per tenant.
+			Version: 4,
+			Up: `
+				ALTER TABLE dd_config DROP COLUMN IF EXISTS api_key;
+			`,
+			UpMySQL: `
+				ALTER TABLE dd_config DROP COLUMN api_key;
+			`,
+			UpMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dd_config') AND name = 'api_key')
+				ALTER TABLE dd_config DROP COLUMN api_key;
+			`,
+			// Down restores the SCHEMA, not the data -- ordinary for a DROP
+			// COLUMN reversal (the value is gone from dd_config the moment Up
+			// runs; it now lives in tenant secrets, a different store). No
+			// NOT NULL/DEFAULT: existing rows have nothing to put there.
+			Down: `
+				ALTER TABLE dd_config ADD COLUMN IF NOT EXISTS api_key TEXT;
+			`,
+			DownMySQL: `
+				ALTER TABLE dd_config ADD COLUMN api_key TEXT;
+			`,
+			DownMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dd_config') AND name = 'api_key')
+				ALTER TABLE dd_config ADD api_key NVARCHAR(MAX);
+			`,
+		},
 	}
 }
