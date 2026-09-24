@@ -107,7 +107,10 @@ leaked the lock re-acquires it re-entrantly and "the next writer succeeded" prov
 minutes (`SecretKeyLiveWindow`). A worker stalled for longer while still serving is invisible
 to a writer; when its membership loop next runs it re-registers, re-checks and stops if it
 cannot open something stored (`TestALapsedWorkerThatCannotOpenAStoredSecretStopsInsteadOfServing`),
-which bounds the exposure without removing it. Workers older than the registry are invisible
+which bounds the exposure without removing it. That bound needs the worker's lapse threshold
+(`max(2 x --heartbeat, 10s)`) to be below the five minutes, so `cleat-worker` refuses a `--heartbeat`
+of 150s or more (`validateHeartbeat`, cleat#2167), and the lapse clock starts at registration rather than
+at the first tick. Workers older than the registry are invisible
 unless they registered under the connection budget, and a registry row with no key set is read
 as "opens version 1 only".
 

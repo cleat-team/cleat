@@ -221,7 +221,11 @@ ciphertext moved between rows fails to open rather than decrypting.
   heartbeating for longer while still handling work is invisible to a writer. When
   its own membership loop next runs it notices the gap, re-registers and re-checks,
   and **stops** if it now holds a secret it cannot open — which bounds the
-  exposure to the stall; it does not remove it.
+  exposure to the stall; it does not remove it. That holds for every `--heartbeat`
+  the worker accepts: it refuses to start with one of 150s or more, because above
+  that a stall could outlast the writer's five minutes yet end before the worker
+  called it a lapse. A worker's boot counts too: the gap is measured from when it
+  registered, so a boot slower than the threshold re-checks on its first tick.
 - **An external KMS.** The master key is supplied directly.
 - **References outside plugin call arguments.** Workflow input, signals and
   schedule payloads are not scanned.

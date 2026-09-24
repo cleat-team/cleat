@@ -211,6 +211,13 @@ The worker updates its heartbeat in the database at this interval. Stale
 instances (missing two consecutive heartbeats) are reaped and made available
 to other workers.
 
+**Must be below 150s.** `cleat-worker` refuses to start otherwise. A secret
+writer (`set-secret`, `reseal-secrets`) counts a worker as live for five minutes
+after its last heartbeat, and the worker re-checks its secrets after a gap longer
+than `max(2 × --heartbeat, 10s)`. At 150s or more that threshold reaches the
+writer's five minutes, so a stalled worker could be written past and resume
+without noticing.
+
 ---
 
 ### --poll
