@@ -557,6 +557,16 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 		}
 	}()
 
+	// Fetched per attempt, not cached -- see backupDSN's doc comment
+	// (plugin.go).
+	dsn, err := p.backupDSN(context.Background())
+	if err != nil {
+		p.logger.Error("scheduledbackup: refusing backup", "config_id", configID,
+			"history_id", historyID, "error", err)
+		p.markBackupFailed(tenantID, historyID, err.Error())
+		return
+	}
+
 	dumpPath, err := SafeDumpPath(p.config.DumpDir, filename)
 	if err != nil {
 		p.logger.Error("scheduledbackup: refusing backup", "config_id", configID,
@@ -566,7 +576,7 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 	}
 
 	var stderr bytes.Buffer
-	err = runPgDump(context.Background(), p.config.DSN.Reveal(), dumpPath, &stderr)
+	err = runPgDump(context.Background(), dsn, dumpPath, &stderr)
 	if err != nil {
 		errMsg := stderr.String()
 		if errMsg == "" {

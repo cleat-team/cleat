@@ -111,6 +111,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moving the secret first. A leftover `slack_signing_secret` in `--plugin-config` otherwise does
   nothing and logs a WARN at boot naming the replacement command.
 
+- **`scheduled-backup`'s Postgres backup-target DSN moves to a deployment secret,
+  `scheduledbackup.dsn`, fetched fresh on every backup attempt rather than cached at `Init`, and
+  it now refuses to start the worker under the same conditional rule as `slack-notify`.**
+  (cleat#1992)
+
+  `Config.DSN` is gone; a worker configured for scheduled backups no longer needs the DSN in
+  `--plugin-config` at all. This also removed an unconditional boot-time gate: `Run`'s background
+  loop used to refuse to start when `Config.DSN` was empty, which would have made setting the
+  deployment secret after the worker was already running silently do nothing until the next
+  restart — the opposite of what a deployment secret is for. The loop now polls unconditionally,
+  the same as the `scheduler` plugin's own always-on loop; an unresolvable `scheduledbackup.dsn`
+  surfaces per attempt, recorded as a `failed` row in `backup_history` with a generic
+  tenant-facing message ("backup target credentials unavailable; contact the operator" — the
+  detailed error goes to the operator log instead), exactly like any other `pg_dump` failure,
+  rather than silencing scheduled backups deployment-wide.
+
+  `scheduled-backup` now implements `plugin.HasRequiredDeploymentSecrets`
+  **conditionally**, by the same precedent `slack-notify` set above (cleat#2172, owner decision
+  option A): if `--plugin-config` still carries the legacy `dsn` field — proof this deployment ran
+  scheduled backups against a real database before upgrading, since a fresh database does not
+  reset an operator's `--plugin-config` — and `scheduledbackup.dsn` cannot be resolved, the worker
+  refuses to start rather than silently failing every backup attempt until someone needs a
+  restore and finds nothing there. A deployment that has never set `dsn` is never asked for
+  `scheduledbackup.dsn` and boots exactly as before. See `docs/how-to/use-deployment-secrets.md`.
+
+  **Who is affected:** any deployment using scheduled backups must set `scheduledbackup.dsn` via
+  `cleatctl set-deployment-secret`. A leftover `dsn` in `--plugin-config` otherwise logs a WARN at
+  boot naming the replacement command; a deployment carrying a leftover `dsn` with no
+  `scheduledbackup.dsn` set will now refuse to start on upgrade, where it previously started
+  fine and failed backups silently.
+
 - **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
   (cleat#2046)
 
