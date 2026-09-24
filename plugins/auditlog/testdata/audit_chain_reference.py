@@ -194,5 +194,71 @@ def verify():
     sys.exit(1 if bad else 0)
 
 
+def verify_export():
+    """Verify a `GET /audit/export` / `cleatctl audit export` stream from stdin, offline.
+
+    Every chained event must hash to its own `hash` from its own fields and `prev_hash`;
+    consecutive seq values must link; and the stream must end with a checkpoint line (a
+    stream without one is TRUNCATED, and says so with status 2). Where the last event is
+    the chain head the checkpoint names, its hash must be the checkpoint's. Rows written
+    before the chain existed carry no seq and are counted, not verified.
+
+    Exit status: 0 verified, 1 a break, 2 the stream is incomplete or unreadable.
+    """
+    events = unchained = breaks = 0
+    prev_seq = prev_hash = None
+    last_seq = last_hash = None
+    checkpoints = []
+    for n, line in enumerate(sys.stdin, 1):
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line, parse_int=_Num, parse_float=_Num)
+        except ValueError as e:
+            print("UNREADABLE line %d: %s" % (n, e))
+            sys.exit(2)
+        t = r.get("type")
+        if t == "checkpoint":
+            checkpoints.append(r)
+            continue
+        if t != "event":
+            print("UNREADABLE line %d: unknown record type %r" % (n, t))
+            sys.exit(2)
+        if checkpoints:
+            print("UNREADABLE line %d: an event after the checkpoint" % n)
+            sys.exit(2)
+        events += 1
+        if r["seq"] is None:
+            unchained += 1
+            continue
+        seq = int(r["seq"])
+        meta = None if r["metadata"] is None else _enc(r["metadata"])
+        rc = {k: (None if r[k] is None else (r[k] if k in ("timestamp", "metadata") else str(r[k])))
+              for k in FIELDS if k not in ("metadata",)}
+        rc["metadata"] = meta
+        rc["seq"] = seq
+        want = row_hash(bytes.fromhex(r["prev_hash"]), rc).hex()
+        if want != r["hash"]:
+            breaks += 1
+            print("EDITED seq %d: hash %s is not the hash of the record's fields %s" % (seq, r["hash"][:12], want[:12]))
+        if prev_seq is not None and seq == prev_seq + 1 and r["prev_hash"] != prev_hash:
+            breaks += 1
+            print("RELINKED seq %d: prev_hash does not match seq %d's hash" % (seq, prev_seq))
+        prev_seq, prev_hash = seq, r["hash"]
+        last_seq, last_hash = seq, r["hash"]
+    if len(checkpoints) != 1:
+        print("TRUNCATED: %d checkpoint line(s), want exactly 1. The stream is incomplete." % len(checkpoints))
+        sys.exit(2)
+    cp = checkpoints[0]
+    if int(cp["events"]) != events:
+        print("TRUNCATED: the checkpoint says %s events, the stream has %d" % (cp["events"], events))
+        sys.exit(2)
+    if last_seq is not None and last_seq == int(cp["head_seq"]) and last_hash != cp["head_hash"]:
+        breaks += 1
+        print("HEAD MISMATCH: the newest row (seq %d) hashes to %s, the checkpoint records %s" % (last_seq, last_hash[:12], cp["head_hash"][:12]))
+    print("%d events (%d chained verified, %d unchained not covered), %d breaks" % (events, events - unchained, unchained, breaks))
+    sys.exit(1 if breaks else 0)
+
+
 if __name__ == "__main__":
-    {"generate": generate, "verify": verify}[sys.argv[1]]()
+    {"generate": generate, "verify": verify, "verify-export": verify_export}[sys.argv[1]]()

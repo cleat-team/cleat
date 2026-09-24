@@ -347,3 +347,52 @@ func TestAHeadCreatedDuringVerifyIsNotReportedMissing(t *testing.T) {
 		}
 	})
 }
+
+// A floor is trusted only if nothing survives below it: retention deletes the rows at or
+// below the floor in the same transaction that moves it. One UPDATE of the head (floor_seq
+// and the hash of the row there) used to hide an edit anywhere below that row, because the
+// scan starts above the floor and never looked, whatever the retention period or the
+// timestamp the forger wrote.
+func TestRowsSurvivingBelowAFloorAreReported(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		T := tenant.String()
+		e.record(p, tenant, 20)
+		e.mustChange(tenant, `UPDATE audit_events SET path = '/edited' WHERE tenant_id = $1 AND seq = 5`, T)
+		var h10 string
+		e.scan(tenant, `SELECT row_hash FROM audit_events WHERE tenant_id = $1 AND seq = 10`, []any{T}, &h10)
+		// The forgery: one UPDATE. Rows 1..10 stay where they are.
+		e.mustChange(tenant, `UPDATE audit_chain_heads SET floor_seq = 10, floor_hash = $1, floor_ts = $2 WHERE tenant_id = $3`,
+			strings.TrimSpace(h10), time.Now().Add(-100*24*time.Hour).UnixMicro(), T)
+
+		for name, opts := range map[string]VerifyOptions{
+			"no options":                         {},
+			"retention 90 days, floor_ts forged": {RetentionDays: 90},
+		} {
+			rep, err := VerifyChain(context.Background(), p.db, e.d.dialect, tenant, opts)
+			if err != nil || rep.OK() || rep.Break.Kind != BreakRowsBelowFloor || rep.Break.Seq != 1 {
+				t.Fatalf("%s: %+v, %v (break %+v), want %s at seq 1 -- the edit at seq 5 must not be hidden by the floor", name, rep, err, rep.Break, BreakRowsBelowFloor)
+			}
+		}
+
+		// The honest floor: retention removed the rows, so nothing is below it, and the report
+		// says whether the floor's age was checked.
+		honest := uuid.New()
+		sweeper := e.plugin()
+		sweeper.now = func() time.Time { return time.Now().Add(100 * 24 * time.Hour) }
+		e.record(p, honest, 10)
+		e.record(p, honest, 4)
+		if n, err := sweeper.retainTenant(context.Background(), honest, e.tsOf(honest, 10).Add(time.Microsecond)); err != nil || n != 10 {
+			t.Fatalf("the sweep removed %d rows, %v; want 10", n, err)
+		}
+		rep, err := VerifyChain(context.Background(), p.db, e.d.dialect, honest, VerifyOptions{})
+		if err != nil || !rep.OK() || rep.FloorSeq != 10 || rep.FloorAgeChecked {
+			t.Fatalf("an honest floor, no retention period: %+v, %v; want ok, floor 10, floor_age_checked false", rep, err)
+		}
+		rep, err = VerifyChain(context.Background(), p.db, e.d.dialect, honest, VerifyOptions{RetentionDays: 90, Now: func() time.Time { return time.Now().Add(100 * 24 * time.Hour) }})
+		if err != nil || !rep.OK() || !rep.FloorAgeChecked {
+			t.Fatalf("an honest floor, retention period given: %+v, %v; want ok and floor_age_checked true", rep, err)
+		}
+	})
+}

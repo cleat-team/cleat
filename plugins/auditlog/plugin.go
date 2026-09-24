@@ -114,5 +114,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 		return fmt.Errorf("audit-log: nil mux")
 	}
 	mux.HandleFunc("GET /audit/events", p.handleQueryEvents)
+	mux.HandleFunc("GET /audit/export", p.handleExport)
+	mux.HandleFunc("GET /audit/verify", p.handleVerify)
 	return nil
 }

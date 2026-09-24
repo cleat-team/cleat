@@ -366,6 +366,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded, and it does not stop a database administrator who rewrites a whole chain and its head
   together. `docs/reference/audit-log.md` states both, with the encoding an offline verifier needs.
 
+  **Export.** `GET /audit/export` streams the caller's tenant as JSON Lines (any authenticated caller of
+  the tenant, like `/audit/events`), ending in a `checkpoint` record so a truncated export is visible,
+  and `GET /audit/verify` reports the chain. `cleatctl audit export (--tenant | --all-tenants)` is the
+  operator variant: there is deliberately no cross-tenant HTTP endpoint. Every event record is
+  verifiable offline with `plugins/auditlog/testdata/audit_chain_reference.py verify-export`, and the
+  record schema is documented as a contract in `docs/reference/audit-log.md`.
+
+  **`GET /audit/events` no longer answers 500 on SQL Server:** it wrote a literal `LIMIT`.
+
   Behaviour changes to know about:
   - **Existing rows are not backfilled.** They stay unchained and are outside the guarantee.
   - **Retention is per tenant.** It deletes an expired prefix of a tenant's chain (at most 5,000 rows
@@ -382,6 +391,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `TIMESTAMP(6)`, which stops at 2038).
   - **`cleatctl audit verify --retention-days N`** also reports a retention floor that covers rows too
     young to have expired.
+  - **Verify also reports `rows_below_floor`:** chained rows that survive at or below the recorded floor.
+    Retention deletes them in the same transaction that moves the floor, so a floor moved by a single
+    `UPDATE` no longer hides an edit beneath it (cleat#2188).
 
 - **Tenant-secrets master-key rotation: a key ring and `cleatctl reseal-secrets`.** (cleat#1991)
 

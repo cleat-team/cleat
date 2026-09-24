@@ -148,10 +148,10 @@ var crossTenantLedger = map[string]bypassKind{
 	// Config read across tenants; the per-tenant work that follows is scoped.
 	"plugins/datadogexport/background.go:(*Plugin).exportMetrics": kindDiscovery,
 	"plugins/kafkaconnect/background.go:(*Plugin).pollConfigs":    kindDiscovery,
-	// cleat#2047: which tenants have an audit chain to verify. Operator-only
-	// (cleatctl audit verify --all-tenants); it reads ids, and each tenant's chain is
+	// cleat#2047: which tenants have audit data to verify or export. Operator-only
+	// (cleatctl audit verify|export --all-tenants); it reads ids, and each tenant's chain is
 	// then verified under that tenant's own context.
-	"plugins/auditlog/verify.go:ChainedTenants":          kindDiscovery,
+	"plugins/auditlog/verify.go:listAuditTenants":        kindDiscovery,
 	"plugins/ratelimiter/background.go:(*Plugin).reload": kindDiscovery,
 
 	// The tenant is the value being looked up. Not sweeps.

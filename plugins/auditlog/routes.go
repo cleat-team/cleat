@@ -88,8 +88,11 @@ func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	query += " ORDER BY timestamp DESC"
-	query += fmt.Sprintf(" LIMIT $%d", argIdx)
+	query += " ORDER BY timestamp DESC "
+	// LimitClause, not a literal LIMIT: SQL Server has no LIMIT, so this endpoint answered
+	// every request there with a 500 (found while proving the export returns the same rows
+	// on all three dialects, cleat#2047).
+	query += plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
