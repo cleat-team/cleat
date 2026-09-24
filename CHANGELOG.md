@@ -640,6 +640,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TTL. They freed themselves silently, with every workflow queued on those keys
   waiting out the window for nothing.
 
+- **The reaper's reclaim-timeout default was too tight to safely cover a single
+  failed-then-retried heartbeat, and an idle worker had no way to detect a
+  database stall at all.** After a database stall, every running instance's
+  `heartbeat_at` ages past the stale threshold at once; whichever worker's
+  reaper reaches the database first after recovery could reclaim a run that is
+  still alive, including its own. `engine.DBPinger` gives an otherwise-idle
+  worker (nothing in flight, so no heartbeat write to prove liveness with) a
+  real liveness signal, and `reapingIsSafe()` now requires both a recent
+  confirmed contact-OK and an elapsed grace period since the last recorded
+  trouble before trusting a stale `heartbeat_at` as evidence of a dead holder.
+
+  **`--reclaim-timeout`'s derived default changes from `2*heartbeat` (floored
+  at 10s) to `heartbeat + 3*dbCallDeadline(heartbeat) + heartbeatRetryInterval(heartbeat)
+  + reclaimSlack` (floored at 10s) — about 14.5s at the default 5s
+  `--heartbeat`, up from 10s.** This is a wider safety margin, not a
+  behaviour anyone has to opt into: the old value undercounted a single
+  heartbeat call that fails and is retried. A real network-level stall (not
+  just a slow-but-reachable server) also keeps a failing call blocked until
+  the stall itself clears rather than until its own client-side deadline —
+  measured directly against a real PostgreSQL container under `docker
+  pause` — so the invariant also accounts for the wait before that retry is
+  even issued, which at `--heartbeat` below one second gets no faster a
+  retry than the worker's own ordinary cadence. Finally, the modeled worst
+  case has zero margin at `--heartbeat` >= 4s (the two formulas are
+  algebraically identical there), and does not account for the retry
+  needing a fresh connection — real and documented on SQL Server, which
+  marks a connection bad after a cancelled call whose own cancel-drain also
+  fails, exactly what a genuine stall produces — so `reclaimSlack` (a fixed
+  1s) covers what the model leaves out rather than widening a term that
+  means something else. An explicit `--reclaim-timeout` is unaffected.
+
+  MySQL's `ReapStaleInstances` also now runs inside an explicit transaction —
+  under `interpolateParams=true`, the previous autocommit statement could keep
+  committing server-side after the caller's context was cancelled, so a
+  caller-visible "deadline exceeded" did not mean the reclaim had not
+  happened. Postgres and SQL Server were already transactional here.
+  cleat#2005.
+
 ## [0.2.0] - 2026-08-10
 
 ### UPGRADE NOTES — breaking

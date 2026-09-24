@@ -1750,6 +1750,11 @@ func main() {
 	// lost from the instant it starts, before heartbeatLoop has ticked even
 	// once.
 	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	// cleat#2005: also seed to now, but for the OPPOSITE reason -- see
+	// lastDBTrouble's doc. A fresh worker has not yet PROVEN a clean window
+	// of database contact either, and its reaper must not act on anyone
+	// else's staleness until it has.
+	w.lastDBTrouble.Store(time.Now().UnixNano())
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
@@ -2101,9 +2106,17 @@ func validateReclaimTimeout(reclaim, heartbeat time.Duration) error {
 	if reclaim <= 0 {
 		return nil // derive from the heartbeat, as before
 	}
-	if floor := 2 * heartbeat; reclaim < floor {
+	// This floor is minimumReclaimAfter(heartbeat) -- ONE function, shared
+	// with reclaimWindow's default derivation and the regression tests that
+	// pin the arithmetic, per cleat-review's third-round ask on cleat#2005:
+	// state the invariant once and have startup and the tests both use it,
+	// rather than restating the formula here and letting it drift the way
+	// the previous `heartbeat + 2*dbCallDeadlineFor(heartbeat)` did. See
+	// minimumReclaimAfter's doc for the derivation and the measured case
+	// that raised it from 2*deadline to 3*deadline.
+	if floor := minimumReclaimAfter(heartbeat); reclaim < floor {
 		return fmt.Errorf(
-			"--reclaim-timeout %v is below two heartbeats (2 x --heartbeat %v = %v).\n"+
+			"--reclaim-timeout %v is below the minimum safe window for --heartbeat %v (%v).\n"+
 				"A run is considered stale when it misses that window, so this would reclaim "+
 				"runs from workers that are alive and checking in normally.\n"+
 				"Raise --reclaim-timeout to at least %v, or lower --heartbeat.",

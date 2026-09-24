@@ -1183,7 +1183,26 @@ func (s *MySQLStore) RetryWorkflow(ctx context.Context, workflowID string) error
 // ReapStaleInstances reclaims workflow instances that have been running
 // but whose heartbeat has not been updated within the given timeout.
 // Returns the number of instances reclaimed.
+//
+// Runs in an explicit transaction, which this did not always do. A bare
+// autocommit ExecContext sends the statement and lets the server run it to
+// completion regardless of the caller's context: measured against a real
+// MySQL instance under interpolateParams=true (cleat#2005's follow-up
+// review), a reap issued right as a database stall began returned "deadline
+// exceeded" to the caller and STILL reclaimed the live run once the stall
+// cleared, because cancelling the client-side wait does not stop a
+// statement the server already has. An explicit transaction gives this the
+// same fail-closed property PostgresStore and MSSQLStore already have from
+// their own beginTx/rollback shape: a cancelled context means tx.Commit
+// itself returns an error and nothing lands, rather than a self-contained
+// autocommit statement finishing on its own.
 func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	// See PostgresStore.ReapStaleInstances: a workflow reaped mid-defer-phase
 	// goes back to 'terminating', because its terminal outcome is already
 	// decided and calling it 'ready' would undo the distinction D6 created the
@@ -1192,7 +1211,7 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 	// IN subquery ("This version of MySQL doesn't yet support 'LIMIT & IN/ALL/
 	// ANY/SOME subquery'"), and wrapping it in SELECT ... FROM (...) t is the
 	// documented way round. See the interface doc for why the sweep is bounded.
-	result, err := s.db.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
@@ -1213,7 +1232,14 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
 	n, _ := result.RowsAffected()
-	return int(n), nil
+	return int(n), tx.Commit()
+}
+
+// PingDB satisfies DBPinger: a bounded round trip with no workflow-specific
+// query, so a worker with nothing in flight still has a way to prove it can
+// reach the database. See DBPinger's doc comment for why this exists.
+func (s *MySQLStore) PingDB(ctx context.Context) error {
+	return s.db.PingContext(ctx)
 }
 
 // ---- ParentClosePolicy ----

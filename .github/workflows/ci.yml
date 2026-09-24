@@ -1430,6 +1430,47 @@ jobs:
         if: matrix.package.name == 'commands'
         uses: gradle/actions/setup-gradle@v6
 
+      # GAP2 from cleat#2005's third review round: the real-Postgres
+      # docker-pause reproduction
+      # (TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun,
+      # cmd/cleat-worker) was manual-only, gated behind
+      # CLEAT_TEST_DOCKER_PAUSE_CONTAINER because pausing a container by name
+      # only makes sense against one this job actually controls. This job
+      # runs directly on the runner (no job-level `container:` wrapping these
+      # steps), so the Postgres service above is a sibling container the
+      # Docker daemon here can see and pause -- matched by the exact pinned
+      # image ref rather than a guessed name, since GitHub Actions assigns
+      # service containers a name this workflow does not choose.
+      #
+      # A STEP OUTPUT, not $GITHUB_ENV: the earlier version of this exported
+      # CLEAT_TEST_DOCKER_PAUSE_CONTAINER as a job-wide env var here, before
+      # "Run tests" -- which meant the docker-pause test ran SOMEWHERE inside
+      # that step's one `go test ./cmd/... ` invocation, sharing the paused
+      # Postgres service with whatever else that invocation had in flight.
+      # -p 1 (below) and cmd/cleat-worker carrying no t.Parallel already made
+      # that safe in practice, but a peer review of this wiring (cleat#2005)
+      # asked for the stronger property that needs no such argument: the
+      # reproduction now runs in its OWN step, after "Run tests" has already
+      # finished, so nothing else can be mid-query against this job's
+      # Postgres when it gets paused.
+      #
+      # Best-effort, not a gate: the reproduction step below already skips
+      # cleanly (see the test's own t.Skip) when this output is empty, so a
+      # failure to locate the container here degrades to "the reproduction
+      # skips this run," not to a broken job.
+      - name: Locate the Postgres service container for the docker-pause reproduction
+        id: locate-pg
+        if: matrix.package.name == 'commands'
+        run: |
+          id=$(docker ps -q --filter "ancestor=postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b")
+          count=$(echo "$id" | wc -w)
+          if [ "$count" -eq 1 ]; then
+            echo "container_id=$id" >> "$GITHUB_OUTPUT"
+            echo "found the Postgres service container: $id"
+          else
+            echo "::warning::expected exactly one Postgres service container matching the pinned image, found $count -- the docker-pause reproduction will skip this run"
+          fi
+
       - name: Run tests
         shell: bash
         working-directory: ${{ matrix.package.dir || '.' }}
@@ -1447,6 +1488,27 @@ jobs:
           # matters is the one the suite grows into, and -race makes this job
           # the slower of the two per test.
           go test -race -count=1 -timeout 30m ${{ matrix.package.flags }} -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
+
+      # Runs AFTER "Run tests" has already finished -- see this step's own
+      # comment above, on why the container id is a step output rather than
+      # a job-wide env var. Not `-race`: it drives two real Workers'
+      # background goroutines against a real database on its own, and
+      # nothing about GAP2 is about a data race. `if:` requires the
+      # discovery step to have actually found something, so an empty output
+      # (the container-count warning above) skips this step outright rather
+      # than running `go test` with an empty CLEAT_TEST_DOCKER_PAUSE_CONTAINER
+      # -- which the test would itself treat as "unset" and skip anyway, but
+      # doing it here makes that visible as a skipped STEP rather than a
+      # passing one that quietly ran nothing.
+      - name: Run the docker-pause reproduction (GAP2)
+        if: matrix.package.name == 'commands' && steps.locate-pg.outputs.container_id != ''
+        env:
+          CLEAT_TEST_DOCKER_PAUSE_CONTAINER: ${{ steps.locate-pg.outputs.container_id }}
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 120s -v \
+            -run '^TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun$' \
+            ./cmd/cleat-worker/... 2>&1 | tee docker-pause-report.txt
 
       # A warning here was not enough. This job spun up a Postgres service it
       # could not reach, skipped every Postgres-backed test, emitted exactly

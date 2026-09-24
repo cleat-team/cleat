@@ -1608,6 +1608,13 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	return int(n), tx.Commit()
 }
 
+// PingDB satisfies DBPinger: a bounded round trip with no workflow-specific
+// query, so a worker with nothing in flight still has a way to prove it can
+// reach the database. See DBPinger's doc comment for why this exists.
+func (s *PostgresStore) PingDB(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
 // ---- SignalStore interface implementation ----
 
 // DeliverSignal satisfies the SignalStore interface.

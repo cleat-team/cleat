@@ -798,5 +798,23 @@ type WorkflowStore interface {
 	AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error
 }
 
+// DBPinger is implemented by a store that can report whether it can reach
+// its underlying database right now, independent of any workflow it holds.
+//
+// It is deliberately its own interface rather than a WorkflowStore method:
+// adding it there would force every test stub and mock in engine/ and
+// cmd/cleat-worker to grow a new method before it could compile, for a
+// capability most of them have no database to back. A caller checks for it
+// with a type assertion; a store that doesn't implement it is simply never
+// probed while idle, which is every test double today.
+//
+// cleat#2005's follow-up review: a worker with no in-flight runs made no
+// heartbeat round trip at all, so "no trouble recorded" meant "never
+// checked," not "checked and fine." PingDB is what an idle worker's
+// heartbeat tick calls instead, so the two read the same.
+type DBPinger interface {
+	PingDB(ctx context.Context) error
+}
+
 // DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.
 const DefaultTenantUUID = "00000000-0000-0000-0000-000000000000"

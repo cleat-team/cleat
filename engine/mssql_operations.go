@@ -57,6 +57,13 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 	return int(n), tx.Commit()
 }
 
+// PingDB satisfies DBPinger: a bounded round trip with no workflow-specific
+// query, so a worker with nothing in flight still has a way to prove it can
+// reach the database. See DBPinger's doc comment for why this exists.
+func (s *MSSQLStore) PingDB(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
 // GetQueryState reads one key of a workflow's query state.
 //
 // Tenant-predicated for the reason on TerminateWorkflow: the id comes from the

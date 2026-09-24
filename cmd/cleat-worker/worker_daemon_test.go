@@ -675,6 +675,8 @@ func newTestWorker(ms *mockStore) *Worker {
 	// cleat#2008: seed to now, not the atomic.Int64 zero value -- see the
 	// identical comment at the real construction site in main.go.
 	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	// cleat#2005: same seeding, opposite reason -- see lastDBTrouble's doc.
+	w.lastDBTrouble.Store(time.Now().UnixNano())
 	return w
 }
 
@@ -704,6 +706,8 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 		loopCtxMap:          make(map[string]*loopContext),
 	}
 	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	// cleat#2005: same seeding, opposite reason -- see lastDBTrouble's doc.
+	w.lastDBTrouble.Store(time.Now().UnixNano())
 	return w
 }
 
