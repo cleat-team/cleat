@@ -247,11 +247,23 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 	// Fetched per attempt, not cached -- see backupDSN's doc comment
 	// (plugin.go) and Run's, above, for why this can no longer be a
 	// precondition checked once at Run's start.
+	//
+	// No call to p.updateNextRun here, deliberately: runDueBackups already
+	// stamped last_run_at/next_run_at for this config inside its claim
+	// transaction, via updateNextRunTx, before this goroutine was even
+	// dispatched -- so the schedule has already advanced and will retry on
+	// its own. Calling updateNextRun a second time here would not just be
+	// redundant: nextRun always searches forward from the NEXT full minute
+	// after the time it's given (cron.go), so a second call using this
+	// (later) failure-time now() can compute a LATER slot than the one
+	// already committed if the two calls straddle a minute boundary --
+	// silently skipping one legitimate run rather than merely repeating the
+	// same computation.
 	dsn, err := p.backupDSN(bookkeepCtx)
 	if err != nil {
 		p.logger.Error("scheduledbackup: refusing scheduled backup",
 			"config_id", configID, "history_id", historyID, "error", err)
-		p.markBackupFailed(tenantID, historyID, err.Error())
+		p.markBackupFailed(tenantID, historyID, backupDSNUnavailableMessage)
 		return
 	}
 

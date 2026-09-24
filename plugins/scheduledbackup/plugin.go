@@ -68,18 +68,20 @@ type Config struct {
 // before cleat#1992 part 1b. json.Unmarshal ignores fields a target struct
 // does not declare, so once Config dropped the field a leftover value there
 // silently stopped doing anything -- no error, no log, just quietly wrong.
-// This is unmarshaled from the same bytes purely to detect that and WARN;
+// This is unmarshaled from the same bytes purely to detect that and WARN, and
+// -- as of the owner's #2172 1A precedent extended here on the coordinator's
+// instruction -- to require scheduledbackup.dsn at boot when it is present.
 // Config above no longer has anywhere to put the value even if this found
 // one.
 //
-// Deliberately NOT wired into a RequiredDeploymentSecrets, unlike
-// slacknotify's identically-shaped legacySlackConfig (cleat#2172 GAP 2,
-// owner decision 1A): that is a genuine, structurally identical case for
-// the same boot-refusal treatment -- this field's presence would equally
-// prove backups were configured before -- but making that call for a
-// second plugin without it being asked for is scope creep on a security
-// boot-behavior decision. Flagged to the coordinator/owner separately
-// rather than decided here.
+// Why boot-refusal, not just a WARN: dsn's presence is proof this deployment
+// ran scheduled backups against a real database before upgrading, and a
+// missing dsn secret would otherwise fail every backup attempt silently
+// (into backup_history, not the operator's face) until someone happens to
+// need a restore and finds nothing there. "dsn" is also a generic key a
+// future plugin's own --plugin-config could collide with, which is why the
+// WARN below and RequiredDeploymentSecrets' error both say to remove the key
+// itself, not only to add the replacement secret.
 type legacyScheduledBackupConfig struct {
 	DSN plugin.Secret `json:"dsn"`
 }
@@ -113,8 +115,10 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		var legacy legacyScheduledBackupConfig
 		if err := json.Unmarshal(env.Config, &legacy); err == nil && legacy.DSN != "" {
 			p.logger.Warn("scheduledbackup: dsn in --plugin-config is no longer read " +
-				"(cleat#1992 part 1b); it has no effect. Use " +
-				"`cleatctl set-deployment-secret --name scheduledbackup.dsn` instead.")
+				"(cleat#1992 part 1b) and now makes scheduledbackup.dsn required at " +
+				"boot. Run `cleatctl set-deployment-secret --name scheduledbackup.dsn`, " +
+				"then remove dsn from --plugin-config -- removing the key is what stops " +
+				"this WARN and the boot requirement, not just setting the new secret.")
 		}
 	}
 
@@ -160,6 +164,13 @@ func (p *Plugin) checkDBVersion(ctx context.Context) error {
 	return nil
 }
 
+// backupDSNUnavailableMessage is what a tenant sees in backup_history.error_message
+// when backupDSN fails -- never the underlying error text, which names internal
+// state ("not found", "no secret master key") that means nothing to a tenant and
+// is an operator's business, not theirs. The detailed error still reaches the
+// operator, via p.logger.Error at each call site.
+const backupDSNUnavailableMessage = "backup target credentials unavailable; contact the operator"
+
 // backupDSN fetches the current PostgreSQL connection string pg_dump backs
 // up. Called at the moment of use -- once per scheduled or manually
 // triggered backup attempt (background.go, routes.go) -- rather than cached,
@@ -188,4 +199,21 @@ func (p *Plugin) backupDSN(ctx context.Context) (string, error) {
 // scheduledbackup only ever reads "scheduledbackup.dsn".
 func (p *Plugin) DeploymentSecretPrefix() string {
 	return "scheduledbackup."
+}
+
+// RequiredDeploymentSecrets implements plugin.HasRequiredDeploymentSecrets.
+// Conditional, the same shape as slacknotify's (cleat#2172 GAP 2, owner
+// decision 1A), extended here to scheduledbackup on the coordinator's
+// instruction: a leftover dsn in --plugin-config is what makes
+// scheduledbackup.dsn required, not an unconditional requirement on every
+// deployment that merely has this plugin loaded (plugin.Discover loads every
+// registered plugin unconditionally -- see CLAUDE.md -- so an unconditional
+// requirement here would refuse to boot any worker that has never used
+// scheduled backups at all).
+func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
+	var legacy legacyScheduledBackupConfig
+	if err := json.Unmarshal(config, &legacy); err == nil && legacy.DSN != "" {
+		return []string{"scheduledbackup.dsn"}, nil
+	}
+	return nil, nil
 }

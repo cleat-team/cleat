@@ -2150,8 +2150,9 @@ func TestSB_Run_PollsEvenWithNoDeploymentSecretsWired(t *testing.T) {
 		if h.status != "failed" {
 			t.Errorf("expected the due backup to fail cleanly with no deployment secret store, got status %q", h.status)
 		}
-		if h.errorMessage == nil || !strings.Contains(*h.errorMessage, "deployment secret") {
-			t.Errorf("expected the failure to name the missing deployment secret store, got: %v", h.errorMessage)
+		if h.errorMessage == nil || *h.errorMessage != backupDSNUnavailableMessage {
+			t.Errorf("expected the generic tenant-facing message %q, got: %v",
+				backupDSNUnavailableMessage, h.errorMessage)
 		}
 	}
 }
@@ -2605,8 +2606,9 @@ func TestSB_RunBackupAsync_NoDeploymentSecrets(t *testing.T) {
 	if h.status != "failed" {
 		t.Errorf("want status 'failed', got %q", h.status)
 	}
-	if h.errorMessage == nil || !strings.Contains(*h.errorMessage, "deployment secret") {
-		t.Errorf("expected the failure to name the missing deployment secret store, got: %v", h.errorMessage)
+	if h.errorMessage == nil || *h.errorMessage != backupDSNUnavailableMessage {
+		t.Errorf("expected the generic tenant-facing message %q, got: %v",
+			backupDSNUnavailableMessage, h.errorMessage)
 	}
 }
 

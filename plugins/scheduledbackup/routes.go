@@ -563,7 +563,7 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 	if err != nil {
 		p.logger.Error("scheduledbackup: refusing backup", "config_id", configID,
 			"history_id", historyID, "error", err)
-		p.markBackupFailed(tenantID, historyID, err.Error())
+		p.markBackupFailed(tenantID, historyID, backupDSNUnavailableMessage)
 		return
 	}
 
