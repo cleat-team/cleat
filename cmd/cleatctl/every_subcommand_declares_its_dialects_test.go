@@ -68,7 +68,6 @@ var unrestrictedSubcommands = map[string]string{
 	// tenant_egress_allow and tenant_api_keys. Every statement in quota.go goes
 	// through d.rebind, asserted directly by TestQuotaStatementsRebindPerDialect.
 	"quota": "ported to all three; tenant_quota is control-plane like tenant_settings (plugins read one shared env.DB, no per-tenant MySQL routing), and every statement goes through d.rebind (cleat#2046)",
-
 }
 
 // Every subcommand main.go dispatches declares the dialects it runs on.
