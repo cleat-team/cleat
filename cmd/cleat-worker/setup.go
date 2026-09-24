@@ -3221,7 +3221,16 @@ func (w *Worker) heartbeatLoop() {
 // (an operator running with --heartbeat below one second gets no slower a
 // retry than their own normal cadence). cleat#2005.
 func (w *Worker) heartbeatRetryInterval() time.Duration {
-	return min(w.heartbeatInterval, time.Second)
+	return heartbeatRetryIntervalFor(w.heartbeatInterval)
+}
+
+// heartbeatRetryIntervalFor is heartbeatRetryInterval's arithmetic as a pure
+// function of heartbeat, split out (cleat-review's fourth round on
+// cleat#2005) so minimumReclaimAfter can fold this delay into the stated
+// invariant instead of restating `min(heartbeat, time.Second)` as a second,
+// separately-maintained literal.
+func heartbeatRetryIntervalFor(heartbeat time.Duration) time.Duration {
+	return min(heartbeat, time.Second)
 }
 
 // heartbeatAndFenceInFlight heartbeats every run this worker's OWN goroutines
@@ -3573,65 +3582,79 @@ func dbCallDeadlineFor(heartbeat time.Duration) time.Duration {
 // reclaimWindow's default and validateReclaimTimeout's refusal enforce.
 // Third round on cleat#2005: the first version of this file used
 // `heartbeat + 2*dbCallDeadlineFor(heartbeat)`, restated separately in each
-// of those two call sites. cleat-review found a real, reproducible case
-// where that was not enough margin -- see below -- and asked that the
-// corrected value be computed in exactly one place rather than fixed twice
-// in parallel, which is how the first version drifted from `2*heartbeat` in
-// the first place without anyone deciding it should.
+// of those two call sites, and cleat-review found that undercounted a single
+// failed-then-retried heartbeat. Fourth round: cleat-review found the
+// THIRD round's own correction -- heartbeat + 3*deadline -- still
+// undercounts, by the retry delay itself, and this file's own regression
+// test for round 3 could not have caught it, because its mock modeled the
+// wrong failure shape. Both are fixed here.
 //
 // THE INVARIANT: reclaimAfter must be at least
 //
-//	heartbeat + 3*dbCallDeadlineFor(heartbeat)
+//	heartbeat + 3*dbCallDeadlineFor(heartbeat) + heartbeatRetryIntervalFor(heartbeat)
 //
-// which cleat-review also writes as `2*heartbeat + deadline` -- identical
-// today, since dbCallDeadlineFor(heartbeat) is exactly heartbeat/2 once the
-// 2-second floor doesn't bind, but this file uses the 3*deadline form
+// which cleat-review also writes as `2*heartbeat + deadline + retryInterval`
+// -- identical once dbCallDeadlineFor(heartbeat) is exactly heartbeat/2 (the
+// 2-second floor not binding), but this file keeps the 3*deadline form
 // because it is deadline's OWN floor-inclusive value, so a low --heartbeat
 // that hits the floor raises this invariant automatically rather than
-// silently falling short of it.
+// silently falling short of it -- the same reason round 3 chose it.
 //
-// WHY 3*deadline, not 2. There are two separate races, not one:
+// WHAT ROUND 4 FOUND, AND WHY ROUND 3's OWN TEST MISSED IT. Round 3's doc
+// comment (and its regression test's mock) assumed a call that fails during
+// a stall does so "using its full deadline" -- i.e. that dbCallDeadlineFor
+// bounds how long a FAILING call can take to return. That is true for a
+// slow-but-reachable server, where the context deadline can carry a real
+// cancellation to a server that is still listening. It is FALSE for a
+// genuine network-level stall -- exactly what a docker-pause reproduction,
+// and a real outage, are -- because lib/pq's context cancellation for
+// Exec/Query sends an actual PostgreSQL CancelRequest over a NEW
+// connection, and that connection cannot complete either while the server
+// is unreachable. Measured directly against a real Postgres container,
+// `docker pause`d mid-call, on both ExecContext (matching
+// HeartbeatBatchFenced's own call shape) and QueryRowContext: a call given
+// a 2-second context deadline did not return until the pause was lifted --
+// 11.7s later, not 2s -- with the context error delivered only once the
+// connection could finally act on it. THE CALL'S OWN DURATION IS BOUNDED BY
+// THE STALL, NOT BY dbCallDeadlineFor. A client-side deadline cannot cut off
+// a call that has nothing left alive on the other end to cancel.
 //
-//   - the REAPER side: an in-flight ReapStaleInstances call that started
-//     before a stall began must not be able to commit a reclaim once the
-//     stall clears. One deadline's worth of margin covers a call racing the
-//     stall's tail.
-//   - the HOLDER side, and this is the one 2*deadline UNDER-COUNTED. A busy
-//     worker's own heartbeat writes land at best every heartbeat interval
-//     plus however long the call itself took (up to deadline) -- that part
-//     was already accounted for. What was missing: a single call that
-//     actually FAILS (using its full deadline before erroring) is followed
-//     by a retry after heartbeatRetryInterval, which at --heartbeat below
-//     1s equals heartbeat itself -- NO faster than the worker's ordinary
-//     cadence, because heartbeatRetryInterval is capped at
-//     min(heartbeat, 1s). So one failed-then-recovered cycle can cost a
-//     full extra heartbeat's wait on top of the call's own two deadlines
-//     (one to fail, one for the retry's own worst-case latency before
-//     succeeding) -- and a stall shorter than heartbeat is exactly what can
-//     trigger one such failure on the holder's side while never registering
-//     on a differently-phased idle worker's own probe at all, so the idle
-//     worker's gate reads clean throughout.
+// So the holder-side race has three terms, not two:
 //
-// MEASURED: cleat-review reproduced this directly against reapOnce at
-// heartbeat=200ms (deadline=100ms, so the old floor was 400ms): a holder
-// whose heartbeat calls normally complete in 95ms hits a 190ms stall (under
-// one heartbeat interval) on a single call, fails it, and its retry
-// -- itself taking close to a full deadline -- does not land until
-// ~595ms after the last successful write. A differently-phased idle
-// worker's own gate, never having observed the stall, reads safe the whole
-// time. Between roughly 400ms and 490ms after the last real write the row
-// looks stale under the old 400ms floor and does not under the corrected
-// 500ms one -- see
+//   - up to `heartbeat`, waiting for the next scheduled attempt after the
+//     last successful write;
+//   - up to `heartbeat` AGAIN for that attempt's own duration, once it is
+//     caught by a stall shorter than one heartbeat interval -- not
+//     `deadline`, because (see above) the call cannot return faster than
+//     the stall itself clears;
+//   - `heartbeatRetryIntervalFor(heartbeat)`, the wait before the retry is
+//     even ISSUED once the failed call finally returns -- previously
+//     missing from this invariant entirely;
+//   - plus `deadline` once more, as the retry's own worst-case latency
+//     (this one legitimately bounded, since the retry runs against a
+//     healthy connection).
+//
+// That is `2*heartbeat + deadline + retryInterval`, i.e. this function's
+// `heartbeat + 3*deadline + retryInterval` in its floor-safe form.
+//
+// MEASURED: reproduced with two real Workers running their real
+// heartbeatLoop and a mock whose stall blocks the call until explicitly
+// released -- IGNORING its context, matching the real-Postgres measurement
+// above, not racing ctx.Done() the way round 3's own mock did -- at
+// heartbeat=200ms (deadline=100ms unfloored, retryInterval=200ms): a 95ms
+// round trip caught by a 190ms stall does not return until the stall
+// clears, then retries after a further 200ms wait, landing around 635ms
+// after the last successful write. That is safe under this round's 700ms
+// invariant and NOT safe under round 3's own 500ms one -- see
 // TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne
-// in reaper_recovery_grace_period_test.go, which reproduces exactly this
-// timeline and is red against the old formula.
+// in reaper_recovery_grace_period_test.go.
 //
-// Changes the default --reclaim-timeout from 10s to ~12.5s at the default
-// --heartbeat (5s: 5 + 3*2.5). Worth noting in the changelog: it is a wider
-// window before a genuinely dead worker's run is reclaimed, not a behaviour
-// change anyone has to opt into.
+// Changes the default --reclaim-timeout from ~12.5s (round 3) to ~13.5s at
+// the default --heartbeat (5s: 5 + 3*2.5 + min(5, 1)). Worth noting in the
+// changelog: it is a wider window before a genuinely dead worker's run is
+// reclaimed, not a behaviour change anyone has to opt into.
 func minimumReclaimAfter(heartbeat time.Duration) time.Duration {
-	return heartbeat + 3*dbCallDeadlineFor(heartbeat)
+	return heartbeat + 3*dbCallDeadlineFor(heartbeat) + heartbeatRetryIntervalFor(heartbeat)
 }
 
 // reclaimWindow is reclaimAfter's arithmetic, as a function of its two

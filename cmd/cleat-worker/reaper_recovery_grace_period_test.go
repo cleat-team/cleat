@@ -546,47 +546,57 @@ func TestASlowHeartbeatCycleDoesNotOpenAGapWiderThanReclaimAfterAllows(t *testin
 }
 
 // TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne
-// is cleat-review's third-round finding on cleat#2005, reproduced with two
-// real Workers running their REAL heartbeatLoop (not a hand-rolled
+// is cleat-review's third- and fourth-round finding on cleat#2005, reproduced
+// with two real Workers running their REAL heartbeatLoop (not a hand-rolled
 // substitute): a stall SHORTER than one heartbeat interval can still cost
 // the holder a full failed-then-retried cycle, and the resulting gap
-// between successful writes exceeds the old heartbeat + 2*deadline floor
-// while a differently-phased idle worker's own gate -- which never
-// observed the stall itself -- reads clean throughout.
+// between successful writes exceeds even round 3's corrected invariant,
+// while a differently-phased idle worker's own gate -- which never observed
+// the stall itself -- reads clean throughout.
 //
-// The mechanics, at heartbeatInterval=200ms (dbCallDeadline=100ms):
-//   - The holder's heartbeat call ordinarily takes 95ms -- close to, but
-//     under, its own 100ms deadline.
+// blockWhileStalled deliberately does NOT race ctx.Done(): round 3's own
+// version of this mock did, which is exactly what let round 3's fix pass a
+// test that could not have caught round 4's gap. A real network-level stall
+// (docker pause; a real outage) leaves nothing alive on the other end to
+// carry a cancellation, so a context deadline cannot cut the call off --
+// measured directly against a real Postgres container for both ExecContext
+// (HeartbeatBatchFenced's own call shape) and QueryRowContext: a 2-second
+// deadline did not stop a call mid-pause, which returned only once the pause
+// was lifted, 11.7s later. See minimumReclaimAfter's doc for the full
+// measurement. blockWhileStalled models that: it blocks on unblock ALONE,
+// and only checks ctx.Err() once unblock fires -- reporting whatever the
+// context's state is BY THEN, not at some earlier moment nothing in this
+// codepath could actually observe.
+//
+// The mechanics, at heartbeatInterval=200ms (dbCallDeadline=100ms,
+// heartbeatRetryInterval=200ms, so minimumReclaimAfter=700ms):
+//   - The holder's heartbeat call ordinarily takes 95ms.
 //   - A single 190ms stall (under one heartbeat interval) overlaps one
-//     call. Since 95ms of the call's own latency is spent before it even
-//     checks whether the database is reachable, the remaining budget under
-//     its 100ms deadline is only 5ms -- nowhere near enough to outlast a
-//     190ms stall, so this call fails.
-//   - heartbeatRetryInterval is min(heartbeatInterval, 1s), which AT THIS
-//     HEARTBEAT provides no speedup at all (200ms either way) -- so the
-//     retry does not start until a full heartbeatInterval after the
-//     failure, and itself can take up to another 95ms to succeed.
-//   - Total: heartbeatInterval (to the failing call) + dbCallDeadline (to
-//     fail) + heartbeatInterval (retry wait) + ~dbCallDeadline (retry's own
-//     latency) -- measured at ~595ms here, comfortably past the OLD 400ms
-//     floor and the corrected 500ms one alike, eventually. The WINDOW this
-//     test targets is the part in between: at approximately 400-490ms
-//     after the last real write, the row already looks stale under the old
-//     floor and does not yet under the corrected one.
+//     call. The call cannot return until the stall clears -- not at its own
+//     100ms deadline -- so it takes the full remaining stall length, and by
+//     the time it returns its own context has already expired, so it fails.
+//   - heartbeatRetryInterval is min(heartbeatInterval, 1s) = 200ms here,
+//     which this invariant now accounts for explicitly; the retry itself
+//     then takes another ~95ms to succeed.
+//   - Total: heartbeat (to the failing call) + up to heartbeat again (the
+//     call blocked on the stall, not the deadline) + heartbeatRetryInterval
+//     (before the retry is even issued) + ~dbCallDeadline (the retry's own
+//     worst-case latency) -- measured at ~635ms here. Safe under this
+//     round's 700ms invariant; NOT safe under round 3's own 500ms one.
 //   - The idle worker's own ping never overlaps this particular stall (a
 //     different phase on the same cadence -- realistic for two
 //     independently-started workers), so its own lastDBTrouble is never
 //     touched and its gate reads safe the entire time, exactly as it
 //     should once real time has passed since it last confirmed health.
 //
-// This is RED against the pre-round-3 formula (heartbeat + 2*deadline,
-// 400ms here) and GREEN against minimumReclaimAfter (heartbeat +
-// 3*deadline, 500ms here) -- see the falsification note at the end of this
-// function.
+// This is RED against round 3's own minimumReclaimAfter (heartbeat +
+// 3*deadline, 500ms here) and GREEN against the round-4 corrected one
+// (heartbeat + 3*deadline + retryInterval, 700ms here) -- see the
+// falsification note at the end of this function.
 func TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne(t *testing.T) {
 	withDBCallDeadlineFloor(t, time.Millisecond)
 	const heartbeatInterval = 200 * time.Millisecond
-	reclaimTimeout := minimumReclaimAfter(heartbeatInterval) // 500ms today
+	reclaimTimeout := minimumReclaimAfter(heartbeatInterval) // 700ms today
 
 	var stalled atomic.Bool
 	unblock := make(chan struct{})
@@ -594,12 +604,11 @@ func TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNew
 		if !stalled.Load() {
 			return nil
 		}
-		select {
-		case <-unblock:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		<-unblock
+		// The stall has cleared. Report whatever the call's OWN context
+		// says at this instant -- not earlier, since nothing in a real
+		// stalled connection could have observed it earlier than this.
+		return ctx.Err()
 	}
 
 	var rowHeartbeatAt atomic.Int64
@@ -650,12 +659,15 @@ func TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNew
 	close(unblock)
 	stalled.Store(false)
 
-	// The discriminating instant: past 340ms (150+190) but still short of
-	// the holder's actual recovery (~595ms) and short of the corrected
-	// 500ms invariant. 450ms was chosen empirically as comfortably inside
-	// the window the old 400ms floor gets wrong and the new 500ms one gets
-	// right (measured window: roughly 400-490ms).
-	const checkAt = 450 * time.Millisecond
+	// The discriminating instant: past 340ms (150+190, when the stall
+	// clears and the failing call's error lands) but short of the holder's
+	// actual recovery (~635ms: the retry starts at 340+heartbeatRetryInterval
+	// and itself takes ~95ms). 600ms sits with a 100ms margin on both
+	// sides of the two invariants it discriminates between -- comfortably
+	// past round 3's own 500ms floor (heartbeat + 3*dbCallDeadline, with no
+	// term for the retry's own wait) and comfortably short of the round-4
+	// corrected 700ms one (+ heartbeatRetryInterval).
+	const checkAt = 600 * time.Millisecond
 	if remaining := checkAt - 150*time.Millisecond - 190*time.Millisecond; remaining > 0 {
 		time.Sleep(remaining)
 	}
@@ -681,11 +693,12 @@ func TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNew
 
 // Falsification (applied by hand, verified, and reverted -- never
 // committed): replace minimumReclaimAfter's body with
-// `return heartbeat + 2*dbCallDeadlineFor(heartbeat)`, the pre-round-3
-// formula. TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne
-// must then fail, because reclaimTimeout becomes 400ms and the row is
-// already stale (age >= 400ms) at the 450ms check while idle's gate still
-// reads safe.
+// `return heartbeat + 3*dbCallDeadlineFor(heartbeat)`, round 3's own
+// formula, missing the `+ heartbeatRetryIntervalFor(heartbeat)` term round 4
+// adds. TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne
+// must then fail, because reclaimTimeout becomes 500ms and the row is
+// already stale (age >= 500ms, measured ~605-607ms) at the 600ms check
+// while idle's gate still reads safe. Confirmed 2026-09-24.
 
 // TestReclaimWindowDefaultMatchesTheStatedInvariant is the deterministic
 // counterpart to the two timing-based tests above: it asserts the actual

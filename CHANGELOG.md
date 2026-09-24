@@ -617,10 +617,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trouble before trusting a stale `heartbeat_at` as evidence of a dead holder.
 
   **`--reclaim-timeout`'s derived default changes from `2*heartbeat` (floored
-  at 10s) to `heartbeat + 3*dbCallDeadline(heartbeat)` (floored at 10s) — about
-  12.5s at the default 5s `--heartbeat`, up from 10s.** This is a wider safety
-  margin, not a behaviour anyone has to opt into: the old value undercounted a
-  single heartbeat call that fails and is retried, which at `--heartbeat`
+  at 10s) to `heartbeat + 3*dbCallDeadline(heartbeat) + heartbeatRetryInterval(heartbeat)`
+  (floored at 10s) — about 13.5s at the default 5s `--heartbeat`, up from 10s.**
+  This is a wider safety margin, not a behaviour anyone has to opt into: the
+  old value undercounted a single heartbeat call that fails and is retried.
+  A real network-level stall (not just a slow-but-reachable server) also
+  keeps a failing call blocked until the stall itself clears rather than
+  until its own client-side deadline — measured directly against a real
+  PostgreSQL container under `docker pause` — so the invariant also accounts
+  for the wait before that retry is even issued, which at `--heartbeat`
   below one second gets no faster a retry than the worker's own ordinary
   cadence. An explicit `--reclaim-timeout` is unaffected.
 
