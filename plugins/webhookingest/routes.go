@@ -268,23 +268,51 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// the read done a few lines up, closes that window regardless of how
 	// wide it is.
 	//
-	// FOR SHARE on the EXISTS subquery on PostgreSQL and MySQL, not on SQL
-	// Server. cleat-review's re-check found the guard above NARROWED the
-	// race rather than closing it on PostgreSQL: at its default READ
-	// COMMITTED isolation, an uncommitted UPDATE is invisible to a plain
-	// read, so an ingest whose EXISTS subquery ran while a delete's
-	// transaction was still open (UPDATE applied, not yet committed) saw the
-	// pre-delete row -- 201, inserted, signalled inline -- and only then did
-	// the delete commit. Measured: one signal delivered, event
-	// 'completed'. FOR SHARE makes this subquery a locking read: against a
-	// row an open UPDATE already holds, it BLOCKS until that transaction
-	// ends, then re-reads under READ COMMITTED's per-statement snapshot
-	// rule and sees the committed deleted_at. MySQL and SQL Server were
-	// never affected -- both already block a plain read against a
-	// row an open UPDATE holds, which is the same effect FOR SHARE adds to
-	// PostgreSQL explicitly -- so this is added there too, where it is a
-	// harmless restatement of what already happens, but left off SQL Server,
-	// which has no FOR SHARE syntax at all.
+	// FOR SHARE on the EXISTS subquery on PostgreSQL and MySQL. cleat-review's
+	// re-check found the guard above NARROWED the race rather than closing it
+	// on PostgreSQL: at its default READ COMMITTED isolation, an uncommitted
+	// UPDATE is invisible to a plain read, so an ingest whose EXISTS subquery
+	// ran while a delete's transaction was still open (UPDATE applied, not
+	// yet committed) saw the pre-delete row -- 201, inserted, signalled
+	// inline -- and only then did the delete commit. Measured: one signal
+	// delivered, event 'completed'. FOR SHARE makes this subquery a locking
+	// read: against a row an open UPDATE already holds, it BLOCKS until that
+	// transaction ends, then re-reads under READ COMMITTED's per-statement
+	// snapshot rule and sees the committed deleted_at.
+	//
+	// MySQL does NOT block a plain read here by default, and this used to say
+	// it did. A plain InnoDB SELECT never blocks -- it is always a
+	// non-locking consistent read. What actually closes the gap at MySQL's
+	// default REPEATABLE READ is narrower: this is an INSERT ... SELECT, and
+	// InnoDB takes shared next-key locks on the rows the SELECT half reads,
+	// but only at REPEATABLE READ -- at READ COMMITTED (which
+	// docs/reference/database-backends.md recommends for this dialect) it is
+	// a plain consistent read like any other and does not block. cleat#2242,
+	// cleat-review: removing FOR SHARE stayed green at REPEATABLE READ and
+	// raced (201 before the delete committed) at READ COMMITTED, which is
+	// what the "mysql" and "mysql_read_committed" subtests below pin. FOR
+	// SHARE is what forces the lock at either isolation level, so it stays
+	// unconditional for MySQL rather than being an isolation-dependent nicety.
+	//
+	// SQL Server does NOT get the same guarantee for free, and this used to
+	// say it did. That is true only with READ_COMMITTED_SNAPSHOT (RCSI) off.
+	// docs/reference/database-backends.md recommends RCSI ON, and under RCSI
+	// a plain SELECT reads a row-versioned snapshot instead of blocking on
+	// the open UPDATE's lock -- so on the recommended configuration this
+	// subquery would read the pre-delete row and race exactly like the
+	// PostgreSQL case above, with no FOR SHARE syntax available to close it.
+	//
+	// WITH (REPEATABLEREAD), not READCOMMITTEDLOCK: the first hint tried.
+	// cleat-review measured both over 1000+ jittered concurrent
+	// ingest/delete pairs with RCSI on: develop (no hint) raced 204 times and
+	// deadlocked 79; READCOMMITTEDLOCK raced 0 times but deadlocked 11-15 per
+	// 1000 -- it releases the shared lock right after the read, leaving a
+	// window where the ingest's FK check waits on the delete's exclusive
+	// lock while the delete's own cancel UPDATE waits on the ingest's new
+	// event row, and SQL Server resolves that by killing the DELETE (a 500,
+	// source left live). REPEATABLEREAD holds the shared lock to the end of
+	// the statement -- the same semantics FOR SHARE gives PostgreSQL and
+	// MySQL -- and raced 0 times with 0 deadlocks over 2000 pairs. cleat#2237.
 	//
 	// The residual: an ingest that reads and commits ENTIRELY before the
 	// delete's transaction begins is not a race at either isolation level --
@@ -298,7 +326,11 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// Reusing $2 for the EXISTS clause would work on PostgreSQL and SQL
 	// Server, which bind by number, and silently misalign every MySQL
 	// argument after it. sourceID is passed twice, once per placeholder.
-	existsGuard := "SELECT 1 FROM webhook_sources WHERE id = $8 AND deleted_at IS NULL"
+	existsGuard := "SELECT 1 FROM webhook_sources"
+	if p.dialect == plugin.DialectMSSQL {
+		existsGuard += " WITH (REPEATABLEREAD)"
+	}
+	existsGuard += " WHERE id = $8 AND deleted_at IS NULL"
 	if p.dialect != plugin.DialectMSSQL {
 		existsGuard += " FOR SHARE"
 	}

@@ -227,6 +227,7 @@ plugins/blobstore	TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkfl
 plugins/notifications	TestASendWebhookRacingAnOpenDeleteTransactionIsBlocked	1
 plugins/scheduledbackup	TestNextRun_Feb29NonLeapYear	1
 plugins/scheduler	TestCronDSTTransition	1
+plugins/webhookingest	TestAnIngestRacingAnOpenDeleteTransactionIsBlocked	3
 tests/cluster	TestAddRemoveWorkers	1
 tests/cluster	TestClusterBasicWorkflowExecution	1
 tests/cluster	TestClusterSpreadWorkflows	1
