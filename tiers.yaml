@@ -269,6 +269,24 @@ tier1:
     - "^TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow$"
     - "^TestJavaExportsTheDeferRunner$"
     - "^TestTheHostRunsDefersOfAKilledJavaWorkflow$"
+    # tier 2 -- docker. cmd/cleat-worker/a_real_postgres_docker_pause_idle_worker_gap_test.go
+    # (cleat#2005's third review round, GAP2): a real-database reproduction of the
+    # reaper's idle-worker recovery-grace-period fix, using `docker pause` on the
+    # job's own Postgres SERVICE container to create a genuine network stall rather
+    # than a simulated one. Gated on CLEAT_TEST_DOCKER_PAUSE_CONTAINER, not just a
+    # DSN: pausing a container by name only makes sense against one this process
+    # actually controls, and the tier-1 gate's own setup does not run a Postgres
+    # service at all (it points at whatever CLEAT_TEST_POSTGRES names, which need
+    # not be a container this job can discover or pause). ci.yml's
+    # test-go/commands leg is the one place that wires this: a step there locates
+    # the leg's own Postgres service container by its pinned image ref and exports
+    # the variable, specifically so this reproduction runs somewhere real rather
+    # than only ever skipping. Provisioning that same discovery into the tier-1
+    # gate would tie a release blocker to `docker ps` succeeding on the runner,
+    # which is the same shape CLAUDE.md and the toolchain entries above already
+    # reject for Rust/Java/AssemblyScript -- so this stays tier 2 rather than
+    # gaining a second provisioning path.
+    - "^TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun$"
     # TestComponentPythonBinary was excluded here, as tier 3 -- component decomposition.
     # Removed 2026-09-01: the path it covered was deleted (IMPROVEMENT-PLAN 3.65), so the
     # test, wasm/component_test.go and wasm/component.go went with it and there is nothing

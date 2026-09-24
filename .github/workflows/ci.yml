@@ -1430,6 +1430,40 @@ jobs:
         if: matrix.package.name == 'commands'
         uses: gradle/actions/setup-gradle@v6
 
+      # GAP2 from cleat#2005's third review round: the real-Postgres
+      # docker-pause reproduction
+      # (TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun,
+      # cmd/cleat-worker) was manual-only, gated behind
+      # CLEAT_TEST_DOCKER_PAUSE_CONTAINER because pausing a container by name
+      # only makes sense against one this job actually controls. This job
+      # runs directly on the runner (no job-level `container:` wrapping these
+      # steps), so the Postgres service above is a sibling container the
+      # Docker daemon here can see and pause -- matched by the exact pinned
+      # image ref rather than a guessed name, since GitHub Actions assigns
+      # service containers a name this workflow does not choose.
+      #
+      # Scoped to the 'commands' leg: that is the only matrix entry covering
+      # ./cmd/... , where the test lives, and -p 1 already serialises this
+      # leg's database-backed packages (see that flag's own comment below) so
+      # pausing Postgres here cannot stall a concurrently-running package in
+      # the same invocation.
+      #
+      # Best-effort, not a gate: the test already skips cleanly (see its own
+      # t.Skip) when this variable is unset, so a failure to locate the
+      # container here degrades to "the reproduction skips this run," not to
+      # a broken job.
+      - name: Locate the Postgres service container for the docker-pause reproduction
+        if: matrix.package.name == 'commands'
+        run: |
+          id=$(docker ps -q --filter "ancestor=postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b")
+          count=$(echo "$id" | wc -w)
+          if [ "$count" -eq 1 ]; then
+            echo "CLEAT_TEST_DOCKER_PAUSE_CONTAINER=$id" >> "$GITHUB_ENV"
+            echo "found the Postgres service container: $id"
+          else
+            echo "::warning::expected exactly one Postgres service container matching the pinned image, found $count -- the docker-pause reproduction will skip this run"
+          fi
+
       - name: Run tests
         shell: bash
         working-directory: ${{ matrix.package.dir || '.' }}

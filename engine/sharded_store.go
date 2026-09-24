@@ -163,14 +163,22 @@ func (s *ShardedStore) forEachShard(fn func(WorkflowStore) error) error {
 // error. Fail-if-any-shard-unreachable, deliberately: a worker that cannot
 // prove ALL of its shards are reachable has no basis to trust a stale
 // heartbeat_at on any of them as evidence of a dead holder rather than an
-// outage on the shard it happens to live on. A shard whose underlying store
-// doesn't implement DBPinger (a test double) is silently skipped, same as
-// the non-sharded case.
+// outage on the shard it happens to live on.
+//
+// A shard whose underlying store doesn't implement DBPinger fails the same
+// way, rather than being silently skipped: every real backend (Postgres,
+// MySQL, MSSQL) implements DBPinger, so this only fires against a test
+// double that doesn't -- and the caller of PingDB (reapingIsSafe, via
+// heartbeatAndFenceInFlight's idle-worker branch) treats an error exactly
+// like an unreachable database: no basis to widen the reaper's gate.
+// Returning nil here for that case would have been the GAP3 fail-open bug
+// this comment replaces: a shard that can neither confirm nor deny its own
+// reachability is not evidence of "reachable."
 func (s *ShardedStore) PingDB(ctx context.Context) error {
 	return s.forEachShard(func(store WorkflowStore) error {
 		pinger, ok := store.(DBPinger)
 		if !ok {
-			return nil
+			return fmt.Errorf("shard store %T does not implement DBPinger", store)
 		}
 		return pinger.PingDB(ctx)
 	})

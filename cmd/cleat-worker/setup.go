@@ -3537,62 +3537,118 @@ func (w *Worker) dbCallDeadline() time.Duration {
 // repeatedly, keeping lastDBTrouble current until the stall genuinely
 // clears" -- see cleat#2005's issue body for the reproduction this closes.
 //
-// DELIBERATELY NOT GIVEN AN INDEPENDENT FLOOR. cleat-review's follow-up
-// considered raising this at a low --heartbeat to avoid false-positive
-// trouble from ordinary latency, and rejected it: reclaimWindow's default
-// derivation and validateReclaimTimeout's refusal both key off this exact
-// value, specifically `heartbeatInterval + 2*dbCallDeadlineFor(heartbeat)`,
-// which is what stops an in-flight reap call from committing across a stall
-// (see reclaimWindow's doc). Moving this independently of heartbeatInterval
-// would silently move that invariant's other side too. An operator who
-// needs more headroom raises --heartbeat (which raises both sides together)
-// or --reclaim-timeout (refused below that floor); this function does not
-// grow on its own.
+// dbCallDeadlineFloor is the minimum value dbCallDeadlineFor ever returns
+// (cleat-review's GAP1, third round on cleat#2005). This used to have no
+// independent floor at all, on the theory that any value keeps
+// reclaimWindow's and validateReclaimTimeout's derivations consistent with
+// each other because both key off this function -- true, but beside the
+// point. Below --heartbeat 4s, plain hb/2 shrinks past what a real driver's
+// own ordinary latency needs (lib/pq and go-mssqldb's own internal timeouts
+// run several seconds under normal conditions -- see cleat#2005's issue
+// body), so at --heartbeat 1s a perfectly healthy round trip could exceed a
+// 500ms deadline and get recorded as DB trouble.
+//
+// A PACKAGE-LEVEL VAR, NOT A CONST, and this is the one place in this file
+// that bends the "no test hooks in production code" instinct. Every
+// timing-based test in reaper_recovery_grace_period_test.go runs at
+// millisecond-scale heartbeat intervals specifically so it completes in
+// milliseconds rather than tens of seconds -- a real 2s floor would make
+// dbCallDeadlineFor(200ms) return 2s instead of 100ms, silently turning
+// every one of those tests' timing assumptions to nonsense (and, in two
+// cases, into a hung-call test that never actually gets cut off within its
+// own 2s wait). Production code never assigns to this; tests that need the
+// pre-floor arithmetic call withDBCallDeadlineFloor to substitute a smaller
+// one for their own duration, restored via t.Cleanup. Never overridden by a
+// test that is actually testing the floor itself.
+var dbCallDeadlineFloor = 2 * time.Second
+
 func dbCallDeadlineFor(heartbeat time.Duration) time.Duration {
-	d := heartbeat / 2
-	if d <= 0 {
-		return 5 * time.Second
+	if d := heartbeat / 2; d > dbCallDeadlineFloor {
+		return d
 	}
-	return d
+	return dbCallDeadlineFloor
 }
 
-// reclaimWindow is reclaimAfter's arithmetic, as a function of its two inputs.
+// minimumReclaimAfter is THE STATED INVARIANT, in one place, that both
+// reclaimWindow's default and validateReclaimTimeout's refusal enforce.
+// Third round on cleat#2005: the first version of this file used
+// `heartbeat + 2*dbCallDeadlineFor(heartbeat)`, restated separately in each
+// of those two call sites. cleat-review found a real, reproducible case
+// where that was not enough margin -- see below -- and asked that the
+// corrected value be computed in exactly one place rather than fixed twice
+// in parallel, which is how the first version drifted from `2*heartbeat` in
+// the first place without anyone deciding it should.
 //
-// Split out so that startup advice which has to reason about the window --
-// flushRetryWindowAdvice, before any Worker exists -- computes it rather than
-// restating it. A second copy of the same arithmetic somewhere else is a
-// second source of truth that nothing would notice diverging.
+// THE INVARIANT: reclaimAfter must be at least
 //
-// THE DEFAULT IS heartbeat + 2*dbCallDeadlineFor(heartbeat), NOT A BARE
-// heartbeat*2, and the two happen to be numerically identical today only
-// because dbCallDeadlineFor(heartbeat) is exactly heartbeat/2 with no
-// independent floor (see that function's doc for why it stays that way).
-// The reason to spell it out rather than rely on that coincidence:
-// cleat-review's follow-up on cleat#2005 found TWO separate races this
-// value has to cover, not one --
+//	heartbeat + 3*dbCallDeadlineFor(heartbeat)
+//
+// which cleat-review also writes as `2*heartbeat + deadline` -- identical
+// today, since dbCallDeadlineFor(heartbeat) is exactly heartbeat/2 once the
+// 2-second floor doesn't bind, but this file uses the 3*deadline form
+// because it is deadline's OWN floor-inclusive value, so a low --heartbeat
+// that hits the floor raises this invariant automatically rather than
+// silently falling short of it.
+//
+// WHY 3*deadline, not 2. There are two separate races, not one:
 //
 //   - the REAPER side: an in-flight ReapStaleInstances call that started
 //     before a stall began must not be able to commit a reclaim once the
-//     stall clears, which needs reclaimAfter >= heartbeat + 2*deadline (one
-//     deadline for the call racing the stall, one for the grace period's own
-//     next check to have had a chance to run);
-//   - the HOLDER side: a busy worker's own heartbeat writes land at best
-//     every heartbeat interval plus however long the call itself took (up to
-//     deadline), so a stall shorter than heartbeat can fall entirely between
-//     two successful writes without either one observing it -- a "sliver"
-//     cleat-review measured at up to dbCallDeadlineFor(heartbeat) itself at
-//     the defaults. The same heartbeat + 2*deadline bound covers this too.
+//     stall clears. One deadline's worth of margin covers a call racing the
+//     stall's tail.
+//   - the HOLDER side, and this is the one 2*deadline UNDER-COUNTED. A busy
+//     worker's own heartbeat writes land at best every heartbeat interval
+//     plus however long the call itself took (up to deadline) -- that part
+//     was already accounted for. What was missing: a single call that
+//     actually FAILS (using its full deadline before erroring) is followed
+//     by a retry after heartbeatRetryInterval, which at --heartbeat below
+//     1s equals heartbeat itself -- NO faster than the worker's ordinary
+//     cadence, because heartbeatRetryInterval is capped at
+//     min(heartbeat, 1s). So one failed-then-recovered cycle can cost a
+//     full extra heartbeat's wait on top of the call's own two deadlines
+//     (one to fail, one for the retry's own worst-case latency before
+//     succeeding) -- and a stall shorter than heartbeat is exactly what can
+//     trigger one such failure on the holder's side while never registering
+//     on a differently-phased idle worker's own probe at all, so the idle
+//     worker's gate reads clean throughout.
 //
-// Both races are closed by the same arithmetic at the defaults (10s ==
-// 5s + 2*2.5s), which is why this was never wrong in practice -- but it was
-// only ever checked against the weaker heartbeat*2 statement, which does not
-// mention dbCallDeadline at all and would silently stop holding if that
-// function's floor ever moved independently.
+// MEASURED: cleat-review reproduced this directly against reapOnce at
+// heartbeat=200ms (deadline=100ms, so the old floor was 400ms): a holder
+// whose heartbeat calls normally complete in 95ms hits a 190ms stall (under
+// one heartbeat interval) on a single call, fails it, and its retry
+// -- itself taking close to a full deadline -- does not land until
+// ~595ms after the last successful write. A differently-phased idle
+// worker's own gate, never having observed the stall, reads safe the whole
+// time. Between roughly 400ms and 490ms after the last real write the row
+// looks stale under the old 400ms floor and does not under the corrected
+// 500ms one -- see
+// TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne
+// in reaper_recovery_grace_period_test.go, which reproduces exactly this
+// timeline and is red against the old formula.
+//
+// Changes the default --reclaim-timeout from 10s to ~12.5s at the default
+// --heartbeat (5s: 5 + 3*2.5). Worth noting in the changelog: it is a wider
+// window before a genuinely dead worker's run is reclaimed, not a behaviour
+// change anyone has to opt into.
+func minimumReclaimAfter(heartbeat time.Duration) time.Duration {
+	return heartbeat + 3*dbCallDeadlineFor(heartbeat)
+}
+
+// reclaimWindow is reclaimAfter's arithmetic, as a function of its two
+// inputs. Split out so that startup advice which has to reason about the
+// window -- flushRetryWindowAdvice, before any Worker exists -- computes it
+// rather than restating it. A second copy of the same arithmetic somewhere
+// else is a second source of truth that nothing would notice diverging.
+//
+// The 10s floor is a separate, simpler concern from minimumReclaimAfter's
+// invariant: a sane minimum wait even at a very low --heartbeat, where the
+// invariant itself might compute something smaller. It only ever raises the
+// value minimumReclaimAfter already guarantees is safe.
 func reclaimWindow(reclaimTimeout, heartbeat time.Duration) time.Duration {
 	if reclaimTimeout > 0 {
 		return reclaimTimeout
 	}
-	return max(heartbeat+2*dbCallDeadlineFor(heartbeat), 10*time.Second)
+	return max(minimumReclaimAfter(heartbeat), 10*time.Second)
 }
 
 // reapSkipWarnThreshold is how many reaper ticks in a row reapOnce will skip

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"sync"
 	"testing"
 	"time"
 
@@ -73,13 +72,16 @@ func TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun(t *testin
 		t.Fatalf("StartNewRun: %v", err)
 	}
 
-	const (
-		heartbeat     = 2 * time.Second
-		reclaimWin    = 4 * time.Second // == heartbeat + 2*dbCallDeadline(heartbeat); see reclaimWindow
-		steadyState   = 5 * time.Second // > reclaimWin, so both workers start from a settled state
-		pauseDuration = 6 * time.Second // > reclaimWin, so the row is genuinely stale by the raw predicate
-		driveEvery    = 250 * time.Millisecond
-	)
+	const heartbeat = 2 * time.Second
+	// reclaimWin is the SAME invariant reclaimWindow derives in production
+	// (see minimumReclaimAfter), not a value picked for this test -- so a
+	// change to that formula changes this test's timing automatically
+	// instead of silently drifting out of sync with it, the way this test's
+	// old hardcoded `4 * time.Second` (== heartbeat + 2*dbCallDeadline, the
+	// PRE-round-3 formula) did the moment the invariant was raised.
+	reclaimWin := minimumReclaimAfter(heartbeat)
+	steadyState := reclaimWin + 2*time.Second   // > reclaimWin, so both workers start from a settled state
+	pauseDuration := reclaimWin + 4*time.Second // > reclaimWin, so the row is genuinely stale by the raw predicate
 
 	busy := newRealBackgroundLoopWorker(t, db, store, "docker-pause-busy")
 	busy.heartbeatInterval = heartbeat
@@ -91,29 +93,33 @@ func TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun(t *testin
 	claimed := claimOne(t, ctx, store, busy.id, wfID)
 	busy.inflight.Store(wfID, claimed)
 
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	drive := func(w *Worker) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				w.heartbeatAndFenceInFlight()
-				select {
-				case <-stop:
-					return
-				case <-time.After(driveEvery):
-				}
-			}
-		}()
+	// Drive both workers with the REAL heartbeatLoop -- production cadence,
+	// including its Timer-not-Ticker re-arm and its retry-sooner-after-a-
+	// failed-call behaviour (see heartbeatLoop's and heartbeatRetryInterval's
+	// doc comments) -- rather than an artificial fixed-interval poll. GAP2
+	// from cleat#2005's review: a 250ms poll exercises a cadence no
+	// production worker ever runs at, and cannot reproduce a defect (like
+	// Edge 1's single-failed-retry sliver) that depends on the real timer's
+	// behaviour around a failed call.
+	//
+	// Each loop gets its OWN per-loop context (initLoopCtxUnmonitored),
+	// distinct from the worker's root w.ctx, so it can be stopped on its own
+	// before idle.reapOnce() runs below -- cancelling w.ctx itself would also
+	// cancel every context reapOnce derives from it (probeBoundedCall does
+	// exactly that), turning the reap call into an instant context-cancelled
+	// error rather than a real measurement.
+	busy.initLoopCtxUnmonitored("heartbeat")
+	idle.initLoopCtxUnmonitored("heartbeat")
+	stopHeartbeatLoop := func(w *Worker) {
+		w.loopMu.Lock()
+		lc := w.loopCtxMap["heartbeat"]
+		w.loopMu.Unlock()
+		lc.cancel()
 	}
-	drive(busy)
-	drive(idle)
+	busy.wg.Add(1)
+	go busy.heartbeatLoop()
+	idle.wg.Add(1)
+	go idle.heartbeatLoop()
 
 	t.Logf("steady state for %s before pausing %s", steadyState, container)
 	time.Sleep(steadyState)
@@ -141,8 +147,10 @@ func TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun(t *testin
 	// heartbeat ping) account for the correct outcome, same trap the
 	// mock-based two-worker test in reaper_recovery_grace_period_test.go
 	// documents hitting first.
-	close(stop)
-	wg.Wait()
+	stopHeartbeatLoop(busy)
+	stopHeartbeatLoop(idle)
+	busy.wg.Wait()
+	idle.wg.Wait()
 
 	idle.reapOnce()
 
