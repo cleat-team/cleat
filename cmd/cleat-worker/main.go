@@ -576,6 +576,8 @@ func main() {
 	var store engine.WorkflowStore
 	var db *sql.DB
 	var pluginDB *sql.DB
+	var heartbeatDB *sql.DB
+	var heartbeatStore engine.WorkflowStore
 	var tenantPools *plugin.TenantPools
 	// shardPoolCount is captured here rather than read from shardDBs, which is
 	// scoped to the sharded branch below. The connection census (cleat#1486)
@@ -702,6 +704,12 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		}
+		// heartbeatStore is intentionally left nil here. cleat#2009's reserved
+		// heartbeat pool is not wired for the sharded path: HeartbeatBatchFenced
+		// would need to run per-shard, against each shard's own connection
+		// pool, and no shard-aware heartbeat routing exists yet. Every shard
+		// falls back to heartbeating through its own store, same as before
+		// this change -- a known scope limit, not a silent gap.
 		// Start idempotency key cleanup on each shard. Sharding is a
 		// PostgreSQL configuration -- shardDBs come from the postgres
 		// connection strings above -- so the driver is named explicitly rather
@@ -811,6 +819,30 @@ func main() {
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
+
+			// Create a reserved connection pool for heartbeat writes, isolated
+			// from the execution pool. cleat#2009: a saturated execution pool
+			// (long-held connections claiming/deferring workflows) starves
+			// heartbeats on the shared pool, and a missed heartbeat is what
+			// triggers reclaim -- so pool exhaustion looks like a dead worker.
+			// HeartbeatBatchFenced filters purely by assigned_to/workerID with
+			// no tenant_id predicate, and beginTxWithRLS sets RLS context per
+			// transaction rather than baking it into the pool, so a bare,
+			// separately-pooled *sql.DB fed straight into engine.NewPostgresStore
+			// (bypassing the factory) is correct here, mirroring pluginDB above.
+			if *heartbeatMaxConnections > 0 {
+				heartbeatDB, err = sql.Open(sqlDriver, dbDSN)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatDB.SetMaxOpenConns(*heartbeatMaxConnections)
+				heartbeatDB.SetMaxIdleConns(*heartbeatMaxConnections)
+				heartbeatDB.SetConnMaxLifetime(5 * time.Minute)
+				defer heartbeatDB.Close()
+				heartbeatStore = engine.NewPostgresStore(heartbeatDB, taskQueues...)
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
+			}
 		case "mysql":
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
@@ -836,6 +868,22 @@ func main() {
 				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
+			}
+
+			// Reserved heartbeat connection pool -- see the postgres arm above
+			// for why a bare, separately-pooled *sql.DB is correct here.
+			if *heartbeatMaxConnections > 0 {
+				heartbeatDB, err = sql.Open(sqlDriver, *dbURL)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatDB.SetMaxOpenConns(*heartbeatMaxConnections)
+				heartbeatDB.SetMaxIdleConns(*heartbeatMaxConnections)
+				heartbeatDB.SetConnMaxLifetime(5 * time.Minute)
+				defer heartbeatDB.Close()
+				heartbeatStore = engine.NewMySQLStore(heartbeatDB, taskQueues...)
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
 			}
 		case "mssql":
 			factory = engine.NewMSSQLStoreFactory(*dbURL).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
@@ -863,6 +911,22 @@ func main() {
 				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
+			}
+
+			// Reserved heartbeat connection pool -- see the postgres arm above
+			// for why a bare, separately-pooled *sql.DB is correct here.
+			if *heartbeatMaxConnections > 0 {
+				heartbeatDB, err = sql.Open(sqlDriver, *dbURL)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatDB.SetMaxOpenConns(*heartbeatMaxConnections)
+				heartbeatDB.SetMaxIdleConns(*heartbeatMaxConnections)
+				heartbeatDB.SetConnMaxLifetime(5 * time.Minute)
+				defer heartbeatDB.Close()
+				heartbeatStore = engine.NewMSSQLStore(heartbeatDB, taskQueues...)
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
 			}
 		default:
 			logger.ErrorContext(context.Background(), "invalid driver", "worker_id", workerID, "driver", *driver)
@@ -1668,6 +1732,7 @@ func main() {
 		id:                               workerID,
 		logger:                           logger,
 		store:                            store,
+		heartbeatStore:                   heartbeatStore,
 		storeTenantID:                    defaultTenantID,
 		storeFactory:                     factory,
 		taskQueues:                       taskQueues,

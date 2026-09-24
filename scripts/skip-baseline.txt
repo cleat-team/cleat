@@ -55,6 +55,7 @@ cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishes
 cmd/cleat-worker	TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun	4
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
 cmd/cleat-worker	TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP	1
+cmd/cleat-worker	TestHeartbeatBatchFencedIsolatedFromASaturatedExecutionPool	2
 cmd/cleat-worker	TestMigrationIsADeployStepOnEveryDialect	2
 cmd/cleat-worker	TestReapOnceRecoveryTailAgainstARealDatabase	2
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	1

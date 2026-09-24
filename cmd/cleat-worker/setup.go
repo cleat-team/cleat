@@ -1450,6 +1450,23 @@ type Worker struct {
 	logger *slog.Logger
 	store  engine.WorkflowStore
 
+	// heartbeatStore is HeartbeatBatchFenced's own store, backed by a
+	// connection pool isolated from `store`'s -- nil unless
+	// --heartbeat-max-connections > 0 (main.go), in which case
+	// heartbeatBatchStore() prefers it. cleat#2009 investigation: `store`'s
+	// pool is shared with every claim, execution and defer-phase write
+	// (main.go SetMaxOpenConns(concurrency+5)), so a burst of long-held
+	// connections can queue a heartbeat write behind them with no priority
+	// -- indistinguishable, from the reaper's side, from the worker being
+	// genuinely gone. This closes that specific cause (pool exhaustion) the
+	// same way pluginDB and flusherDB are already isolated from `store`'s
+	// pool; it does not address a GC pause or a network path to the
+	// database degraded for this worker only, which #2009 covers instead.
+	//
+	// Nil falls back to `store`, so a Worker built without one (tests, or
+	// --heartbeat-max-connections=0) behaves exactly as before.
+	heartbeatStore engine.WorkflowStore
+
 	// storeTenantID is the tenant `store` was opened as. `store` backs the
 	// dispatch, heartbeat and scheduler loops, which are worker-level and stay
 	// on it.
@@ -3263,6 +3280,19 @@ func heartbeatRetryIntervalFor(heartbeat time.Duration) time.Duration {
 // wait out the full interval. cleat#2005: see the loop's own comment on why
 // that matters for how soon this worker's own reaper (and every other
 // worker's) trusts it again after a stall.
+// heartbeatBatchStore is the store HeartbeatBatchFenced actually calls
+// through: heartbeatStore when one was built (--heartbeat-max-connections >
+// 0), else `store` -- see heartbeatStore's own doc comment for why this
+// exists. Not used for the idle-ping path in heartbeatAndFenceInFlight below,
+// which has no in-flight work of this worker's own competing for `store`'s
+// pool at the moment it runs.
+func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
+	if w.heartbeatStore != nil {
+		return w.heartbeatStore
+	}
+	return w.store
+}
+
 func (w *Worker) heartbeatAndFenceInFlight() bool {
 	var runs []engine.GenerationKey
 	w.inflight.Range(func(key, value any) bool {
@@ -3315,7 +3345,7 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 	var lost []string
 	err := w.probeBoundedCall(func(hbCtx context.Context) error {
 		var err error
-		lost, err = w.store.HeartbeatBatchFenced(hbCtx, w.id, runs)
+		lost, err = w.heartbeatBatchStore().HeartbeatBatchFenced(hbCtx, w.id, runs)
 		return err
 	})
 	if err != nil {
