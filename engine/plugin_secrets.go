@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/plugin"
@@ -258,4 +259,48 @@ func (p *pluginPayloads) Open(ctx context.Context, sealed []byte) ([]byte, error
 		return nil, err
 	}
 	return p.enc.OpenForPlugin(tid.String(), sealed)
+}
+
+// pluginDeploymentSecrets adapts *DeploymentSecretStore to
+// plugin.DeploymentSecrets. Unlike pluginSecrets/pluginPayloads, no ctx
+// tenant marking applies -- there is no tenant, and no cross-tenant bypass
+// to refuse -- so this is a thin, direct wrapper.
+type pluginDeploymentSecrets struct {
+	store *DeploymentSecretStore
+}
+
+// NewPluginDeploymentSecrets wraps store for use as a
+// plugin.Environment.DeploymentSecrets value. A nil store is valid input,
+// same convention as NewPluginSecrets/NewPluginPayloads.
+func NewPluginDeploymentSecrets(store *DeploymentSecretStore) plugin.DeploymentSecrets {
+	return &pluginDeploymentSecrets{store: store}
+}
+
+func (d *pluginDeploymentSecrets) Get(ctx context.Context, name string) (string, error) {
+	return d.store.GetDeploymentSecret(ctx, name)
+}
+
+// scopedDeploymentSecrets wraps a plugin.DeploymentSecrets and refuses any
+// name that does not start with prefix, so a plugin declaring
+// plugin.HasDeploymentSecretPrefix cannot read another plugin's credential
+// through the one adapter every plugin otherwise shares. cleat-review's
+// #2202 pass, "least privilege at almost no cost".
+type scopedDeploymentSecrets struct {
+	inner  plugin.DeploymentSecrets
+	prefix string
+}
+
+// NewScopedPluginDeploymentSecrets wraps inner so Get refuses any name not
+// starting with prefix. The caller (cmd/cleat-worker) builds one of these
+// per plugin that implements plugin.HasDeploymentSecretPrefix, from that
+// plugin's own declared prefix.
+func NewScopedPluginDeploymentSecrets(inner plugin.DeploymentSecrets, prefix string) plugin.DeploymentSecrets {
+	return &scopedDeploymentSecrets{inner: inner, prefix: prefix}
+}
+
+func (d *scopedDeploymentSecrets) Get(ctx context.Context, name string) (string, error) {
+	if !strings.HasPrefix(name, d.prefix) {
+		return "", fmt.Errorf("deployment secret %q is outside this plugin's %q prefix", name, d.prefix)
+	}
+	return d.inner.Get(ctx, name)
 }

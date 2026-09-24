@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/sendgrid/sendgrid-go"
 	"github.com/sendgrid/sendgrid-go/helpers/mail"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -151,7 +152,11 @@ func (p *Plugin) send(ctx context.Context, inputJSON string) (string, error) {
 		"tenant", cc.TenantID,
 	)
 
-	response, err := p.client.SendWithContext(ctx, m)
+	apiKey, err := p.sendGridAPIKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	response, err := sendgrid.NewSendClient(apiKey).SendWithContext(ctx, m)
 	if err != nil {
 		return "", fmt.Errorf("email: send failed: %w", err)
 	}
@@ -228,7 +233,11 @@ func (p *Plugin) sendTemplate(ctx context.Context, inputJSON string) (string, er
 		"tenant", cc.TenantID,
 	)
 
-	response, err := p.client.SendWithContext(ctx, m)
+	apiKey, err := p.sendGridAPIKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	response, err := sendgrid.NewSendClient(apiKey).SendWithContext(ctx, m)
 	if err != nil {
 		return "", fmt.Errorf("email: send template failed: %w", err)
 	}
@@ -282,7 +291,11 @@ func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, err
 	q.Add("query", fmt.Sprintf(`msg_id="%s"`, input.MessageID))
 	req.URL.RawQuery = q.Encode()
 
-	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	apiKey, err := p.sendGridAPIKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	p.logger.Info("email: checking delivery status",
 		"message_id", input.MessageID,

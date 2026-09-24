@@ -193,6 +193,83 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 	return runID, err
 }
 
+// pluginInitSeverity is how main()'s per-plugin Init loop should react to an
+// error Init returned.
+type pluginInitSeverity int
+
+const (
+	// pluginInitDisabledQuiet is plugin.ErrNotConfigured: the plugin is
+	// disabled, and it is unremarkable enough to log at INFO.
+	pluginInitDisabledQuiet pluginInitSeverity = iota
+	// pluginInitFatal is plugin.ErrFatalMisconfiguration: the whole worker
+	// refuses to start, not just this one plugin.
+	pluginInitFatal
+	// pluginInitDisabledLoud is anything else: the plugin is disabled, and
+	// it is unexpected enough to log at ERROR.
+	pluginInitDisabledLoud
+)
+
+// classifyPluginInitError decides pluginInitSeverity for an error a plugin's
+// Init returned. Extracted out of the switch in main()'s Init loop -- rather
+// than left inline -- so the FATAL case has a call site a test can exercise
+// directly, without going through Init and without actually calling os.Exit.
+//
+// Untested until cleat-review's #2202 re-check: mutating the inline switch's
+// `case errors.Is(err, plugin.ErrFatalMisconfiguration):` to `case false:`
+// left every test green, because nothing called the switch with a fatal
+// error and asserted on the OUTCOME -- the mutated build still ran, and the
+// email test at the time only asserted `errors.Is(err,
+// plugin.ErrFatalMisconfiguration)` on Init's return value, never on what
+// main() does with it. Under that mutation the fatal case falls to the
+// default arm: the plugin merely disables (ERROR log, no os.Exit), so a
+// worker with a leftover sendgrid_api_key and no email_enabled BOOTS with
+// email off -- exactly the silent regression this whole GAP2 mechanism
+// exists to prevent, and exactly what the CHANGELOG's upgrade note says
+// cannot happen. TestClassifyPluginInitError's fatal case is what catches
+// it: it calls this function directly with an error wrapping
+// plugin.ErrFatalMisconfiguration and asserts pluginInitFatal, which the
+// mutation turns into pluginInitDisabledLoud.
+func classifyPluginInitError(err error) pluginInitSeverity {
+	switch {
+	case errors.Is(err, plugin.ErrNotConfigured):
+		return pluginInitDisabledQuiet
+	case errors.Is(err, plugin.ErrFatalMisconfiguration):
+		return pluginInitFatal
+	default:
+		return pluginInitDisabledLoud
+	}
+}
+
+// deploymentSecretsForPlugin returns the plugin.DeploymentSecrets value a
+// plugin's Environment should carry: a scoped adapter refusing any name
+// outside its own declared prefix if it implements
+// plugin.HasDeploymentSecretPrefix, else nil.
+//
+// Default-deny, not the unscoped adapter every plugin used to share
+// regardless of whether it read deployment secrets at all -- cleat-review's
+// #2202 re-check GAP 2, found after the first version of
+// plugin.HasDeploymentSecretPrefix left every non-declaring plugin (all but
+// email and llm) able to read email's and llm's secrets through the one
+// adapter they all still received.
+//
+// Extracted to its own function -- rather than left inline in main()'s
+// per-plugin Init loop -- so it has a call site a test can exercise directly
+// against the REAL registered plugins (plugin.Discover()), per GAP 3: the
+// wiring itself was untested, and deleting this decision (or either
+// email's/llm's DeploymentSecretPrefix method) left every test green.
+// TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix and
+// TestDeploymentSecretsForPluginDefaultsToNilForAPluginThatDeclaresNoPrefix
+// (a_deployment_secrets_wiring_test.go) exercise this function; a third test
+// there, TestMainWiresDeploymentSecretsForPlugin, asserts main() still calls
+// it -- extracting the DECISION into a function a test can call does not by
+// itself prove anything calls that function.
+func deploymentSecretsForPlugin(p plugin.Plugin, unscoped plugin.DeploymentSecrets) plugin.DeploymentSecrets {
+	if dsp, ok := p.(plugin.HasDeploymentSecretPrefix); ok {
+		return engine.NewScopedPluginDeploymentSecrets(unscoped, dsp.DeploymentSecretPrefix())
+	}
+	return nil
+}
+
 // scopeToTenant returns a copy of store re-scoped to tenantID, for the
 // dialects that support cheap, no-I/O per-call re-scoping (Postgres, SQL
 // Server, and a sharded Postgres store, via each store's own WithTenant).
@@ -1183,6 +1260,10 @@ func main() {
 			"key_versions", secretRing.Versions())
 	}
 	secretStore := engine.NewSecretStoreWithRing(db, string(factory.Dialect()), secretRing)
+	// deployment_secrets shares tenant secrets' ring (cleat#1992 part 1) --
+	// domain separation is carried by engine.DeploymentSecretStore's own HKDF
+	// info string and AAD, not a second master key.
+	deploymentSecretStore := engine.NewDeploymentSecretStore(db, string(factory.Dialect()), secretRing)
 	// checkSecretsUsable runs AFTER the migrations below, not here: it reads
 	// tenant_secrets, which does not exist until migration 080 has applied, and a
 	// check that has to tolerate a missing table is a check that tolerates every
@@ -1269,8 +1350,9 @@ func main() {
 		// Every method on both then returns a clear "not configured" error
 		// rather than panicking, which is what lets these be assigned
 		// unconditionally instead of behind an if.
-		Secrets:  engine.NewPluginSecrets(secretStore),
-		Payloads: engine.NewPluginPayloads(payloadEncryption),
+		Secrets:           engine.NewPluginSecrets(secretStore),
+		Payloads:          engine.NewPluginPayloads(payloadEncryption),
+		DeploymentSecrets: engine.NewPluginDeploymentSecrets(deploymentSecretStore),
 	}
 
 	var err error
@@ -1471,6 +1553,7 @@ func main() {
 			continue
 		}
 		envCopy := *pluginEnv
+		envCopy.DeploymentSecrets = deploymentSecretsForPlugin(lp.Plugin, pluginEnv.DeploymentSecrets)
 		switch lp.Plugin.Info().DatabaseAccess {
 		case plugin.DatabaseAccessNone:
 			envCopy.DB = nil
@@ -1498,13 +1581,32 @@ func main() {
 			if err := lp.Plugin.Init(ctx, &envCopy); err != nil {
 				lp.Healthy = false
 				lp.Error = err
-				if errors.Is(err, plugin.ErrNotConfigured) {
+				switch classifyPluginInitError(err) {
+				case pluginInitDisabledQuiet:
 					logger.InfoContext(context.Background(), "plugin not configured, disabled", "worker_id", workerID, "plugin", lp.Plugin.Info().Name)
-				} else {
+				case pluginInitFatal:
+					// Same severity as checkRequiredDeploymentSecrets below:
+					// this is not "disable and continue", it is "the
+					// deployment is broken in a way nobody should be allowed
+					// to not notice". See ErrFatalMisconfiguration's doc
+					// comment (plugin/plugin.go).
+					logger.ErrorContext(context.Background(), "refusing to start: "+err.Error(), "worker_id", workerID, "plugin", lp.Plugin.Info().Name)
+					os.Exit(1)
+				default: // pluginInitDisabledLoud
 					logger.ErrorContext(context.Background(), "plugin init failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", err)
 				}
 			}
 		}()
+	}
+
+	// cleat#1992 part 1: fail closed if an ENABLED plugin's required
+	// deployment secret is missing or unopenable, rather than starting and
+	// having every call that plugin serves fail individually. See
+	// checkRequiredDeploymentSecrets (setup.go) for why this runs after Init
+	// rather than folded into it.
+	if rErr := checkRequiredDeploymentSecrets(ctx, plugList, pluginEnv.Config, deploymentSecretStore); rErr != nil {
+		logger.ErrorContext(context.Background(), "refusing to start: "+rErr.Error(), "worker_id", workerID)
+		os.Exit(1)
 	}
 
 	for _, lp := range plugList {

@@ -162,6 +162,12 @@ func main() {
 		runAudit(ctx, db, d, args[1:])
 	case "reseal-secrets":
 		runResealSecrets(ctx, db, d, args[1:])
+	case "set-deployment-secret":
+		runSetDeploymentSecret(ctx, db, d, args[1:])
+	case "retire-deployment-secret":
+		runRetireDeploymentSecret(ctx, db, d, args[1:])
+	case "reseal-deployment-secrets":
+		runResealDeploymentSecrets(ctx, db, d, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -206,6 +212,10 @@ Commands:
   audit verify (--tenant <id> | --all-tenants) [--json] [--retention-days N]
                                   recompute the audit-log hash chain; exit 1 on a break, 2 if unmeasured
   reseal-secrets [--dry-run]      re-encrypt tenant secrets under the current master key
+  set-deployment-secret --name <name> [--from-file <path>]
+                                  write one deployment-wide credential, encrypted
+  retire-deployment-secret --name <name> [--dry-run]  stop a deployment secret resolving
+  reseal-deployment-secrets [--dry-run]  re-encrypt deployment secrets under the current master key
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)

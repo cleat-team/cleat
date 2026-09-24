@@ -85,14 +85,25 @@ func fakeOllamaServer(t *testing.T) *httptest.Server {
 
 func setupPlugin(t *testing.T, serverURL, provider string) *Plugin {
 	t.Helper()
+	return setupPluginWithKey(t, serverURL, provider, "sk-test")
+}
+
+// setupPluginWithKey is setupPlugin with the deployment-secret API key as a
+// parameter, for tests that need a specific value rather than the fixed
+// "sk-test" every other setupPlugin caller uses.
+func setupPluginWithKey(t *testing.T, serverURL, provider, apiKey string) *Plugin {
+	t.Helper()
 	p := &Plugin{}
 	cfg := Config{
 		Providers: map[string]ProviderConfig{
-			provider: {APIKey: "sk-test", BaseURL: serverURL, Enabled: true, DefaultModel: "test-model"},
+			provider: {BaseURL: serverURL, Enabled: true, DefaultModel: "test-model"},
 		},
 	}
 	cfgJSON, _ := json.Marshal(cfg)
-	env := &plugin.Environment{Config: cfgJSON}
+	env := &plugin.Environment{
+		Config:            cfgJSON,
+		DeploymentSecrets: newFakeProviderKeys(map[string]string{provider: apiKey}),
+	}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
@@ -145,10 +156,11 @@ func TestChatAnthropic(t *testing.T) {
 	srv := fakeAnthropicServer(t)
 	defer srv.Close()
 
-	p := setupPlugin(t, srv.URL, "anthropic")
-	// Anthropic uses x-api-key, so override the key.
+	// Anthropic uses x-api-key, so setupPluginWithKey gets the key the fake
+	// server actually checks rather than setupPlugin's fixed "sk-test".
+	p := setupPluginWithKey(t, srv.URL, "anthropic", "sk-ant-test")
 	p.config.Providers["anthropic"] = ProviderConfig{
-		APIKey: "sk-ant-test", BaseURL: srv.URL, Enabled: true, DefaultModel: "claude-sonnet-4-6",
+		BaseURL: srv.URL, Enabled: true, DefaultModel: "claude-sonnet-4-6",
 	}
 
 	req := chatRequest{
@@ -269,7 +281,7 @@ func TestChatDisabledProvider(t *testing.T) {
 	p := &Plugin{}
 	p.config = Config{
 		Providers: map[string]ProviderConfig{
-			"openai": {APIKey: "sk-test", Enabled: false},
+			"openai": {Enabled: false},
 		},
 	}
 	req := chatRequest{Provider: "openai", Messages: []providers.Message{{Role: "user", Content: "hello"}}}

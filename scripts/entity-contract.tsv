@@ -39,6 +39,7 @@ public.workflow_routing	member
 public.workflow_tags	member
 public.tenant_settings	member
 public.tenant_secrets	member
+public.deployment_secrets	member	cleat#1992 part 1; the operator-wide sibling of tenant_secrets, same shape, no tenant dimension
 admin.tenant_egress_allow	member	migration 079; absent from the issue's list of eleven
 public.tenant_domains	member	migration 080; absent from the issue's list of eleven
 public.queues	member	cleat#1116, #1702's twelfth instance; migration 093/092/092

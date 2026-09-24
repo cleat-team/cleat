@@ -302,7 +302,7 @@ func TestChatStreamRefusesUnresolvedSecretReference(t *testing.T) {
 // ===========================================================================
 
 func TestEffectiveAPIKey(t *testing.T) {
-	cfg := ProviderConfig{APIKey: "configured-key"}
+	p := &Plugin{deploymentSecrets: newFakeProviderKeys(map[string]string{"openai": "configured-key"})}
 
 	cases := []struct {
 		name       string
@@ -317,7 +317,7 @@ func TestEffectiveAPIKey(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := effectiveAPIKey(tc.requestKey, cfg)
+			got, err := p.effectiveAPIKey(context.Background(), tc.requestKey, "openai")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error, got key %q", got)

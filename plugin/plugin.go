@@ -52,6 +52,26 @@ import (
 //	}
 var ErrNotConfigured = errors.New("plugin not configured")
 
+// ErrFatalMisconfiguration is returned by Init when the config a plugin
+// received is not merely absent (see ErrNotConfigured) but actively
+// contradicts itself in a way that must stop the WHOLE WORKER, not just
+// disable the one plugin.
+//
+// The case that motivated it: cleat#1992 part 1 moved email-notify's
+// SendGrid key out of --plugin-config into a deployment secret, gated behind
+// a new "email_enabled" field. A pre-upgrade config still carrying
+// "sendgrid_api_key" but not yet "email_enabled" is a deployment that was
+// clearly sending email and, under the ordinary ErrNotConfigured path, would
+// silently stop -- disabled, ERROR-logged at most, worker still starts.
+// Found in cleat-review's #2202 re-check.
+//
+// A caller distinguishes this from every other Init error with
+// errors.Is(err, ErrFatalMisconfiguration): cmd/cleat-worker's Init loop
+// logs it and os.Exit(1)s immediately, the same severity as
+// checkRequiredDeploymentSecrets' fail-closed boot check, rather than
+// marking the plugin unhealthy and continuing.
+var ErrFatalMisconfiguration = errors.New("plugin: fatal misconfiguration")
+
 // PluginInfo describes a plugin for discovery and documentation.
 type PluginInfo struct {
 	Name           string         `json:"name"`
@@ -164,6 +184,13 @@ type Environment struct {
 	// cannot catch here, same as it cannot for those either.
 	Secrets  Secrets
 	Payloads Payloads
+
+	// DeploymentSecrets gives a plugin access to credentials that belong to
+	// the whole deployment rather than to a tenant (cleat#1992 part 1) -- see
+	// secrets.go's DeploymentSecrets doc comment for the fixed names and why
+	// a plugin must call Get per use rather than cache it from Config. Nil
+	// under the same convention as Secrets/Payloads.
+	DeploymentSecrets DeploymentSecrets
 }
 
 // StartRequest is everything a plugin must supply to start a workflow.
@@ -543,4 +570,51 @@ type StreamFuncRegistry interface {
 type HasHealth interface {
 	Plugin
 	Health() error // nil = healthy
+}
+
+// HasRequiredDeploymentSecrets: plugin names the deployment secrets it
+// cannot run without, given the same raw config bytes Init receives
+// (cleat#1992 part 1).
+//
+// Checked by the worker AFTER Init succeeds, not during it: Init's own
+// config-presence check is what decides whether the plugin is enabled at
+// all (see Environment.Config's doc comment, and ErrNotConfigured), and a
+// plugin with no config section is skipped before this is ever consulted.
+// This interface answers a narrower, later question -- for a plugin that IS
+// enabled, which of its deployment secrets must actually resolve before the
+// worker is allowed to serve traffic.
+//
+// RequiredDeploymentSecrets returns the deployment-secret NAMES this
+// instance needs (e.g. "email.sendgrid_api_key", or one
+// "llm.providers.<provider>.api_key" per enabled provider) -- not whether
+// they currently resolve. The worker checks that separately, against
+// Environment.DeploymentSecrets, and refuses to start if any is missing or
+// unopenable: a plugin enabled but unable to reach its own credential is
+// worse than one not enabled at all, because every call it serves fails
+// individually instead of the worker saying so once, at boot.
+type HasRequiredDeploymentSecrets interface {
+	Plugin
+	RequiredDeploymentSecrets(config []byte) ([]string, error)
+}
+
+// HasDeploymentSecretPrefix: plugin declares the name prefix its own
+// deployment secrets carry (e.g. "email.", "llm.providers."), so the worker
+// can hand it a DeploymentSecrets that refuses to Get anything outside that
+// prefix. Least privilege, cheap: every plugin currently shares ONE
+// DeploymentSecretStore connection wrapped in one adapter, so without this a
+// bug in any plugin using DeploymentSecrets (reachable through a workflow's
+// own HostCall arguments, not just plugin-author error) could read a
+// SIBLING plugin's credential -- llm reading email.sendgrid_api_key, say.
+// Optional, unlike HasRequiredDeploymentSecrets, but NOT permissive: a
+// plugin that does not implement this gets DeploymentSecrets == nil, not the
+// unscoped adapter every plugin used to share regardless of whether it read
+// deployment secrets at all. Default-deny, tightened in cleat-review's
+// #2202 re-check after the first version of this left every non-declaring
+// plugin able to read email's and llm's secrets through the one adapter
+// they all received. Only email and llm read deployment secrets today, so
+// this costs nothing; a plugin that starts needing one declares its prefix.
+// Found in cleat-review's #2202 pass.
+type HasDeploymentSecretPrefix interface {
+	Plugin
+	DeploymentSecretPrefix() string
 }

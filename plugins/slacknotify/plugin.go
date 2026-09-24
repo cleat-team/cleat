@@ -87,6 +87,21 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.signalWorkflow = env.SignalWorkflow
 	p.slackSigningSecret = p.config.SlackSigningSecret
 
+	if p.slackSigningSecret == "" {
+		// interactive.go only verifies the Slack signature when this is set --
+		// existing behaviour, not new here. Flagged at WARN rather than left
+		// silent so an operator who forgot the secret can see it at boot.
+		//
+		// States the PRESENT truth, not only the future one: an earlier
+		// version of this wording said only what cleat#2172 will do, which a
+		// reader could take as "nothing is wrong yet". What is true right
+		// now is the worse half -- /slack/interactive accepts every request
+		// unsigned, verifying nothing -- and cleat#2172 (owner decision,
+		// option A) is what changes that to a refusal. Found in
+		// cleat-review's #2202 pass.
+		p.logger.Warn("slack-notify: no signing secret configured -- /slack/interactive currently ACCEPTS unsigned requests; cleat#2172 will make it refuse them")
+	}
+
 	p.logger.Info("slack-notify: initialized")
 	return nil
 }

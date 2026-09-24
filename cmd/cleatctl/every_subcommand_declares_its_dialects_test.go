@@ -77,6 +77,13 @@ var unrestrictedSubcommands = map[string]string{
 	// database), so no tenantScopedDB is needed on MySQL. This package's own test,
 	// TestAuditVerifyExitStatusesAreDistinct, covers the exit statuses on PostgreSQL only.
 	"audit": "ported to all three through plugins/auditlog, whose statements are exercised on every dialect (cleat#2047)",
+
+	// All three, same reasoning as set-secret/retire-secret: deployment_secrets
+	// is a plain table with no tenant dimension at all on every dialect
+	// (engine/deployment_secrets.go), so there is no admin.*-schema or
+	// per-tenant-database question to get wrong.
+	"set-deployment-secret":    "ported to all three; deployment_secrets has no tenant dimension, same reasoning as set-secret (cleat#1992 part 1)",
+	"retire-deployment-secret": "ported to all three; deployment_secrets has no tenant dimension, same reasoning as retire-secret (cleat#1992 part 1)",
 }
 
 // Every subcommand main.go dispatches declares the dialects it runs on.

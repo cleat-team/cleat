@@ -119,3 +119,32 @@ type Payloads interface {
 	Seal(ctx context.Context, plaintext []byte) ([]byte, error)
 	Open(ctx context.Context, sealed []byte) ([]byte, error)
 }
+
+// DeploymentSecrets gives a plugin access to credentials that belong to the
+// whole deployment rather than to any one tenant (cleat#1992 part 1):
+// blobstore's S3 key pair, email's SendGrid key, one key per configured llm
+// provider, slacknotify's request-signing secret, scheduledbackup's
+// backup-target DSN.
+//
+// READ-ONLY, unlike Secrets. There is no Put/Retire here because the write
+// path is cleatctl's (set-deployment-secret / retire-deployment-secret), not
+// a plugin's -- the same "operator-only by convention" rule Secrets.Put
+// documents, made structural here rather than left to convention: a plugin
+// given this interface has no method that could write.
+//
+// PER-USE, NOT PER-Init. A plugin must call Get at the moment it is about to
+// use the credential (a dial-out, a client construction, a verification) --
+// never cache the result across calls the way env.Config was read once at
+// Init -- so that a credential rotated with `cleatctl set-deployment-secret`
+// takes effect on the next call without a worker restart. That is the whole
+// reason this exists rather than a fifth read of env.Config.
+//
+// FIXED, DOCUMENTED NAMES, not operator-chosen: "blobstore.access_key_id",
+// "blobstore.secret_access_key", "email.sendgrid_api_key",
+// "llm.providers.<provider>.api_key" (one per configured provider),
+// "slacknotify.signing_secret", "scheduledbackup.dsn". A plugin looks one up
+// by the name docs/how-to/use-deployment-secrets.md documents for it; no new
+// config field names one.
+type DeploymentSecrets interface {
+	Get(ctx context.Context, name string) (string, error)
+}

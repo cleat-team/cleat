@@ -6560,3 +6560,43 @@ func registerWithKeyCheck(ctx context.Context, registry *engine.WorkerRegistry, 
 		return checkSecretsUsable(cctx, checker, warn)
 	})
 }
+
+// deploymentSecretGetter is the read-only slice of *engine.DeploymentSecretStore
+// checkRequiredDeploymentSecrets needs, narrowed so the check can be exercised
+// against a fake rather than a real database.
+type deploymentSecretGetter interface {
+	GetDeploymentSecret(ctx context.Context, name string) (string, error)
+}
+
+// checkRequiredDeploymentSecrets refuses to start if any already-healthy
+// plugin's required deployment secret (plugin.HasRequiredDeploymentSecrets,
+// cleat#1992 part 1) is missing or unreadable -- so an enabled plugin that
+// cannot reach its own credential is caught once, at boot, instead of every
+// call it serves failing individually.
+//
+// Runs AFTER the plugin Init loop, on lp.Healthy alone: a plugin Init left
+// unhealthy (ErrNotConfigured or a real Init failure) is already excluded,
+// so this never marks anything unhealthy that Init did not already refuse to
+// start -- it only adds a reason to stop for a plugin Init had already
+// accepted.
+func checkRequiredDeploymentSecrets(ctx context.Context, plugins []*plugin.LoadedPlugin, config []byte, store deploymentSecretGetter) error {
+	for _, lp := range plugins {
+		if lp == nil || !lp.Healthy {
+			continue
+		}
+		hrds, ok := lp.Plugin.(plugin.HasRequiredDeploymentSecrets)
+		if !ok {
+			continue
+		}
+		names, err := hrds.RequiredDeploymentSecrets(config)
+		if err != nil {
+			return fmt.Errorf("%s: determining required deployment secrets: %w", lp.Plugin.Info().Name, err)
+		}
+		for _, name := range names {
+			if _, gErr := store.GetDeploymentSecret(ctx, name); gErr != nil {
+				return fmt.Errorf("%s: required deployment secret %q: %w", lp.Plugin.Info().Name, name, gErr)
+			}
+		}
+	}
+	return nil
+}

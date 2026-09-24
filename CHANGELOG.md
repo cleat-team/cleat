@@ -12,6 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **A `--plugin-config` file carrying a leftover `sendgrid_api_key` with no `email_enabled` now
+  refuses to start the worker, instead of silently disabling email.** (cleat#1992)
+
+  `email-notify`'s SendGrid key moved out of `--plugin-config` into a deployment secret, gated
+  behind a new `email_enabled` field. A config file still carrying `sendgrid_api_key` but not yet
+  `email_enabled` used to read as "email is not configured" and disable the plugin quietly, with
+  only an INFO log line — a deployment that had genuinely been sending email would stop, with no
+  clear signal why. It now refuses to boot instead. To upgrade: add `"email_enabled": true` to
+  `--plugin-config`, move the key with
+  `cleatctl set-deployment-secret --name email.sendgrid_api_key`, then remove `sendgrid_api_key`
+  from `--plugin-config` (a leftover key alongside `email_enabled: true` logs a WARN instead, and
+  is otherwise harmless). See `docs/how-to/use-deployment-secrets.md`.
+
 - **`dd_config.api_key` and `pd_config.routing_key` move into tenant secrets; the plaintext
   columns are dropped.** (cleat#1992)
 

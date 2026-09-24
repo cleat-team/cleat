@@ -297,6 +297,34 @@ var knownUnreadableStatements = map[string]string{
 		"table, but the guard reports the statement rather than the half it can read -- a " +
 		"partial resolution could be dropping a FROM clause, which is the failure this whole " +
 		"file exists to prevent, reintroduced as a convenience",
+
+	// deployment_secrets.go (cleat#1992 part 1), all seven: DeploymentSecretStore's
+	// query text lives in per-dialect helper functions -- putDeploymentSecretUpdateStmt
+	// and its five siblings -- called as the query argument to s.db.ExecContext/
+	// QueryContext/QueryRowContext directly, the same shape tenant_secrets.go's
+	// putSecretUpdateStmt and its siblings use. Those are never reported here: every
+	// call to them runs through s.execTenantScoped's querier closure, which this guard
+	// does not inspect at all (dbStatementKind only matches a call made directly on
+	// s.db). DeploymentSecretStore has no such wrapper and none is needed --
+	// deployment_secrets carries no tenant_id column and no RLS policy at all
+	// (migration 103/102/102's header, "NO tenant_id"), so s.db is called directly on
+	// purpose, which is exactly what puts these seven in front of the guard.
+	//
+	// Each statement's target table is deployment_secrets, verifiable by reading the
+	// named helper function -- none of the three dialect branches names any other
+	// table -- so even a full resolution would clear all seven via namesRLSTable
+	// finding no match, not exempt them via this map. Recorded here rather than by
+	// teaching sqlTextOf to evaluate a called function's switch, which would have to
+	// pick (or union) branches for every future caller of this guard, not just these
+	// seven -- the same "a partial resolution reintroduces the failure as a
+	// convenience" argument db.go:2198's entry above makes.
+	"deployment_secrets.go:201": "putDeploymentSecretUpdateStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
+	"deployment_secrets.go:210": "putDeploymentSecretInsertStmt(s.dialect): INSERT INTO deployment_secrets, no tenant_id column, not an RLS table",
+	"deployment_secrets.go:225": "getDeploymentSecretStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
+	"deployment_secrets.go:253": "deploymentSecretMetaStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
+	"deployment_secrets.go:285": "retireDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
+	"deployment_secrets.go:390": "listDeploymentSecretsForResealStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
+	"deployment_secrets.go:435": "resealDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
 }
 
 // receiversWithoutRLS are store types whose backends have no row-level

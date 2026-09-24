@@ -10,10 +10,14 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 	mux.HandleFunc("GET /api/llm/health", func(w http.ResponseWriter, r *http.Request) {
 		providers := map[string]any{}
 		for name, cfg := range p.config.Providers {
+			// Live, per-use lookup (cleat#1992 part 1) rather than a cached
+			// field, so this reports the deployment secret's actual current
+			// state -- including a rotation or retirement since boot.
+			_, err := p.providerAPIKey(r.Context(), name)
 			providers[name] = map[string]any{
 				"enabled":       cfg.Enabled,
 				"default_model": cfg.DefaultModel,
-				"has_api_key":   cfg.APIKey != "",
+				"has_api_key":   err == nil,
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
