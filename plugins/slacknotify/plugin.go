@@ -90,9 +90,13 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	if p.slackSigningSecret == "" {
 		// interactive.go only verifies the Slack signature when this is set --
 		// existing behaviour, not new here. Flagged at WARN rather than left
-		// silent so an operator who forgot the deployment secret can see it at
-		// boot instead of discovering it from an unverified webhook later.
-		p.logger.Warn("slack-notify: no signing secret configured -- inbound requests will not be signature-verified")
+		// silent so an operator who forgot the secret can see it at boot. The
+		// wording deliberately does NOT say unsigned requests are accepted:
+		// the owner's decision on cleat#2172 (option A) is that they must not
+		// be, and that PR replaces this warning with a hard refusal at
+		// /slack/interactive once it lands -- this WARN is what an operator
+		// sees in the window before that.
+		p.logger.Warn("slack-notify: no signing secret configured -- /slack/interactive will refuse all requests once cleat#2172 lands")
 	}
 
 	p.logger.Info("slack-notify: initialized")
