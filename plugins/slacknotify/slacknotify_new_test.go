@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -587,6 +588,65 @@ func TestSN_InteractiveCallback_SignalError(t *testing.T) {
 	mux.ServeHTTP(rec, signedInteractiveRequest(body))
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500 for signal error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSN_InteractiveCallback_RealBlockActionsPayload is cleat#2230(a): a real
+// Slack block_actions click, shaped the way Slack actually sends it and the
+// way this plugin's own sendMessage host function actually builds buttons
+// (host_functions.go's Blocks field is opaque JSON the plugin never stamps
+// a callback_id into) -- no top-level callback_id at all, route embedded in
+// the clicked action's action_id. Before cleat#2230(a) this fell straight
+// into the "no callback_id -- nothing to route" 200-OK no-op, so every
+// button this plugin ever sent was unroutable. Known-positive: falsified by
+// reverting extractCallbackRoute to check only payload.CallbackID, which
+// makes signalCalled stay false and this test fail.
+func TestSN_InteractiveCallback_RealBlockActionsPayload(t *testing.T) {
+	p, mux := interactiveServer(t)
+	var gotWF, gotSig string
+	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+		gotWF, gotSig = workflowID, signalName
+		return nil
+	}
+
+	// A real Slack block_actions payload: no callback_id field at all, the
+	// route lives in actions[0].action_id.
+	rawPayload := `{"type":"block_actions","actions":[{"type":"button","action_id":"wf:wf-456:sig:approve","block_id":"approval_block","value":"approve","action_ts":"1234567890.123456"}],"team":{"id":"T123"},"user":{"id":"U123"}}`
+	body := "payload=" + url.QueryEscape(rawPayload)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotWF != "wf-456" || gotSig != "approve" {
+		t.Errorf("expected signal for wf-456/approve from actions[].action_id, got wf=%q sig=%q", gotWF, gotSig)
+	}
+}
+
+// TestSN_InteractiveCallback_BlockActionsFallsBackToValueThenBlockID pins
+// the fallback order the owner specified on #2230: action_id, then value,
+// then block_id. Here action_id carries no routable convention (it's the
+// button's own opaque identifier, as a workflow author might reasonably
+// choose), so the route must come from value instead.
+func TestSN_InteractiveCallback_BlockActionsFallsBackToValueThenBlockID(t *testing.T) {
+	p, mux := interactiveServer(t)
+	var gotWF, gotSig string
+	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+		gotWF, gotSig = workflowID, signalName
+		return nil
+	}
+
+	rawPayload := `{"type":"block_actions","actions":[{"type":"button","action_id":"approve-button","block_id":"approval_block","value":"wf:wf-789:sig:approve"}]}`
+	body := "payload=" + url.QueryEscape(rawPayload)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotWF != "wf-789" || gotSig != "approve" {
+		t.Errorf("expected signal for wf-789/approve from actions[].value, got wf=%q sig=%q", gotWF, gotSig)
 	}
 }
 

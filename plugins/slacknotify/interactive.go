@@ -36,6 +36,70 @@ type slackInteractivePayload struct {
 	Message     json.RawMessage `json:"message,omitempty"`
 }
 
+// slackBlockAction is one element of a block_actions payload's "actions"
+// array -- the shape Slack actually sends for a Block Kit button click.
+// Only the three fields the routing convention can live in are decoded;
+// the rest (type, action_ts, text, style, ...) are ignored.
+type slackBlockAction struct {
+	ActionID string `json:"action_id"`
+	BlockID  string `json:"block_id"`
+	Value    string `json:"value"`
+}
+
+// parseCallbackRoute extracts a workflow ID and signal name from a string
+// carrying the "wf:<workflow_id>:sig:<signal_name>" convention. Shared by
+// the legacy top-level callback_id and the per-action fields of a
+// block_actions payload -- both are just strings a workflow author chose to
+// embed the same convention in.
+func parseCallbackRoute(s string) (wfID, sigName string, ok bool) {
+	if s == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(s, ":", 4)
+	if len(parts) != 4 || parts[0] != "wf" || parts[2] != "sig" {
+		return "", "", false
+	}
+	return parts[1], parts[3], true
+}
+
+// extractCallbackRoute finds a wf:<id>:sig:<name> route in a Slack
+// interactive payload, trying every place a workflow author could have put
+// it. The legacy top-level callback_id is checked first for backward
+// compatibility with callers that already relied on it (Slack's older
+// "attachment" interactive_message payloads still carry one), but the
+// plugin's OWN button-sending path (sendMessage's opaque Blocks
+// json.RawMessage, host_functions.go) never populates that field -- a
+// Block Kit message's routing has nowhere to live except inside the block
+// itself, so a real click on a button this plugin sent arrives as a
+// block_actions payload with an EMPTY top-level callback_id and the route
+// embedded in the clicked action instead. cleat#2230(a): today's handler
+// read only callback_id, which is exactly the field the plugin's own
+// buttons never carry, so a click on a real button silently routed
+// nowhere. actions[].action_id is checked first (the field a workflow
+// author would put a deliberate identifier in), then .value, then
+// .block_id, per the owner's decision on #2230 -- only the first action is
+// considered, matching Slack's own behavior of sending exactly one action
+// per block_actions payload for a single click.
+func extractCallbackRoute(payload slackInteractivePayload) (wfID, sigName string, ok bool) {
+	if wfID, sigName, ok := parseCallbackRoute(payload.CallbackID); ok {
+		return wfID, sigName, true
+	}
+	if len(payload.Actions) == 0 {
+		return "", "", false
+	}
+	var actions []slackBlockAction
+	if err := json.Unmarshal(payload.Actions, &actions); err != nil || len(actions) == 0 {
+		return "", "", false
+	}
+	first := actions[0]
+	for _, candidate := range []string{first.ActionID, first.Value, first.BlockID} {
+		if wfID, sigName, ok := parseCallbackRoute(candidate); ok {
+			return wfID, sigName, true
+		}
+	}
+	return "", "", false
+}
+
 // signingSecret fetches the current Slack request-signing secret. Called at
 // the moment of use, on every request, rather than cached at Init -- the
 // same "PER-USE, NOT PER-Init" convention as email's sendGridAPIKey
@@ -159,25 +223,19 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Extract workflow signal from callback_id
+	// Extract workflow signal, trying the legacy top-level callback_id and
+	// then a block_actions payload's actions[].action_id/value/block_id.
 	// Convention: wf:<workflowID>:sig:<signalName>
-	if payload.CallbackID == "" {
-		// No callback_id — nothing to route. Return 200 OK per Slack requirements.
+	wfID, sigName, ok := extractCallbackRoute(payload)
+	if !ok {
+		// Nothing to route. Return 200 OK per Slack requirements.
+		if payload.CallbackID != "" {
+			p.logger.Warn("slack-notify: unrecognized callback_id format", "callback_id", payload.CallbackID)
+		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 		return
 	}
-
-	parts := strings.SplitN(payload.CallbackID, ":", 4)
-	if len(parts) != 4 || parts[0] != "wf" || parts[2] != "sig" {
-		p.logger.Warn("slack-notify: unrecognized callback_id format", "callback_id", payload.CallbackID)
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-		return
-	}
-
-	wfID := parts[1]
-	sigName := parts[3]
 
 	// Deliver as workflow signal
 	sigPayload, _ := json.Marshal(payload)
