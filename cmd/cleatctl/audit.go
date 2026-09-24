@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugins/auditlog"
@@ -45,6 +46,7 @@ import (
 // verifies its own chain over HTTP (GET /audit/verify).
 
 const auditUsage = `Usage: cleatctl audit verify (--tenant <uuid> | --all-tenants) [--json] [--retention-days N]
+       cleatctl audit export (--tenant <uuid> | --all-tenants) [--from <rfc3339>] [--to <rfc3339>] [--out <file>]
 
 Recomputes a tenant's audit-log hash chain and reports the first place it does not
 verify. Reads only.
@@ -76,11 +78,18 @@ docs/reference/audit-log.md.
 var auditVerifyChain = auditlog.VerifyChain
 
 func runAudit(ctx context.Context, db *sql.DB, d dialect, args []string) {
-	if len(args) < 1 || args[0] != "verify" {
+	switch {
+	case len(args) >= 1 && args[0] == "verify":
+		runAuditVerify(ctx, db, d, args[1:])
+	case len(args) >= 1 && args[0] == "export":
+		runAuditExport(ctx, db, d, args[1:])
+	default:
 		fmt.Fprint(os.Stderr, auditUsage)
 		osExit(2)
-		return
 	}
+}
+
+func runAuditVerify(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	fs := flag.NewFlagSet("audit verify", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, auditUsage) }
@@ -88,7 +97,7 @@ func runAudit(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	all := fs.Bool("all-tenants", false, "verify every tenant that has a chain")
 	asJSON := fs.Bool("json", false, "print the reports as JSON")
 	retentionDays := fs.Int("retention-days", 0, "the audit-log plugin's retention_days; lets verify report a floor over unexpired rows")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		osExit(2)
 		return
 	}
@@ -122,6 +131,7 @@ func runAudit(ctx context.Context, db *sql.DB, d dialect, args []string) {
 
 	var (
 		reports                []auditlog.ChainReport
+		unchecked              []string
 		ok, broken, unmeasured int
 	)
 	for _, t := range tenants {
@@ -132,9 +142,8 @@ func runAudit(ctx context.Context, db *sql.DB, d dialect, args []string) {
 			continue
 		}
 		reports = append(reports, rep)
-		if rep.FloorSeq > 0 && *retentionDays == 0 {
-			// Say so, rather than let the check that was not made read as one that passed.
-			fmt.Fprintf(os.Stderr, "NOTE tenant %s: retention has moved the floor to seq %d and --retention-days was not given, so whether the floor covers only expired rows was not checked\n", t, rep.FloorSeq)
+		if rep.FloorSeq > 0 && !rep.FloorAgeChecked {
+			unchecked = append(unchecked, fmt.Sprintf("%s (floor at seq %d)", t, rep.FloorSeq))
 		}
 		if rep.OK() {
 			ok++
@@ -153,6 +162,16 @@ func runAudit(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		for _, rep := range reports {
 			printChainReport(rep)
 		}
+	}
+	// One line, not one per tenant. Said out loud so that a check that was not made does not
+	// read as one that passed; --json carries the same fact as floor_age_checked.
+	if len(unchecked) > 0 {
+		shown := unchecked
+		if len(shown) > 5 {
+			shown = append(append([]string{}, unchecked[:5]...), fmt.Sprintf("and %d more", len(unchecked)-5))
+		}
+		fmt.Fprintf(os.Stderr, "NOTE: %d tenant(s) have a retention floor and --retention-days was not given, so the age of the floor was not checked: %s\n",
+			len(unchecked), strings.Join(shown, ", "))
 	}
 	// The denominator is stated beside the verdict, so "all clean" cannot be read off a
 	// run that looked at nothing.

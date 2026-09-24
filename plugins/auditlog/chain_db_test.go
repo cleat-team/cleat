@@ -557,6 +557,17 @@ func TestChainedTenantsListsEveryTenantThatHasAChain(t *testing.T) {
 		if fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Errorf("ChainedTenants = %v, want exactly %v (a tenant with a chain, and one whose head is gone; not the tenant with only pre-chain rows %v)", got, want, preChain)
 		}
+		// The export walks a wider list: a tenant with only pre-chain rows has nothing to
+		// verify and something to export.
+		all, err := TenantsWithAuditRows(context.Background(), p.db, e.d.dialect)
+		if err != nil {
+			t.Fatalf("TenantsWithAuditRows: %v", err)
+		}
+		wantAll := []uuid.UUID{withChain, headLost, preChain}
+		sort.Slice(wantAll, func(i, j int) bool { return wantAll[i].String() < wantAll[j].String() })
+		if fmt.Sprint(all) != fmt.Sprint(wantAll) {
+			t.Errorf("TenantsWithAuditRows = %v, want %v", all, wantAll)
+		}
 		// The known positive behind the list: the tenant whose head is gone really is
 		// reported as broken, so leaving it out of the list would have hidden something.
 		if rep := e.verify(headLost); rep.OK() || rep.Break.Kind != BreakHeadMissing {

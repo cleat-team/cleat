@@ -47,6 +47,10 @@ const (
 	BreakHeadMismatch = "head_mismatch"
 	// BreakUnreadable: a row could not be hashed at all (metadata that is not JSON).
 	BreakUnreadable = "unreadable"
+	// BreakRowsBelowFloor: chained rows survive at or below the recorded floor. Retention
+	// deletes them in the same transaction that moves the floor, so the floor was moved by
+	// something else, and every row below it went unverified.
+	BreakRowsBelowFloor = "rows_below_floor"
 	// BreakFloorUnexpired: the floor covers a row that was too young to have expired, or
 	// has no recorded timestamp. Retention only removes expired rows, so this is a floor
 	// moved by something else. It is reported only when the caller supplies the retention
@@ -71,12 +75,23 @@ type ChainReport struct {
 	// FloorSeq is the seq retention has removed through: the chain is verified from
 	// FloorSeq+1. Zero means nothing has been removed.
 	FloorSeq int64 `json:"floor_seq"`
+	// FloorHash and HeadHash are the hashes recorded with the floor and the head. An export
+	// file's checkpoint states its own; comparing them with these, at or after the time of
+	// the export, is how a file cut to look like a retention sweep is told from a real one
+	// (the floor only moves forward, so a file floor ahead of this one was cut).
+	FloorHash string `json:"floor_hash"`
 	// HeadSeq is the seq the head row records as newest.
-	HeadSeq int64 `json:"head_seq"`
+	HeadSeq  int64  `json:"head_seq"`
+	HeadHash string `json:"head_hash"`
 	// Unchained is how many rows have no seq: written before the chain existed, and not
 	// covered by it.
-	Unchained int64       `json:"unchained"`
-	Break     *ChainBreak `json:"break,omitempty"`
+	Unchained int64 `json:"unchained"`
+	// FloorAgeChecked says whether the floor's age was checked against the retention
+	// period (VerifyOptions.RetentionDays). It is false whenever no period was given, and is
+	// only meaningful when FloorSeq is above zero: a floor that was not checked is not one
+	// that passed.
+	FloorAgeChecked bool        `json:"floor_age_checked"`
+	Break           *ChainBreak `json:"break,omitempty"`
 }
 
 // OK reports whether the chain verified end to end.
@@ -185,17 +200,42 @@ func verifyOnce(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect,
 		return rep, err
 	}
 	rep.HeadSeq, rep.FloorSeq = head.seq, head.floorSeq
+	rep.HeadHash, rep.FloorHash = head.hash, head.floorHash
 
 	if err := db.QueryRow(ctx, plugin.Rebind(
 		`SELECT COUNT(*) FROM audit_events WHERE tenant_id = $1 AND seq IS NULL`, dialect), tenant).Scan(&rep.Unchained); err != nil {
 		return rep, fmt.Errorf("audit verify: count unchained rows: %w", err)
 	}
 
-	// A floor over rows that had not expired is reported before anything else: it is
+	// Retention deletes the rows at or below the floor in the same transaction that moves
+	// it, so a chained row that survives there means the floor was not set by retention.
+	// Without this a single UPDATE of the head (floor_seq and the hash of the row there)
+	// hides an edit anywhere below it: the scan starts above the floor and never looks.
+	// It cannot misfire on a concurrent sweep: the delete and the move are one commit, and a
+	// floor only moves up, so rows at or below the floor this run read are already gone.
+	// Whether the floor's age is checked does not depend on this check returning early.
+	rep.FloorAgeChecked = haveHead && head.floorSeq > 0 && opts.RetentionDays > 0
+	if haveHead && head.floorSeq > 0 {
+		var below int64
+		var lowest sql.NullInt64
+		if err := db.QueryRow(ctx, plugin.Rebind(
+			`SELECT COUNT(*), MIN(seq) FROM audit_events WHERE tenant_id = $1 AND seq IS NOT NULL AND seq <= $2`, dialect),
+			tenant, head.floorSeq).Scan(&below, &lowest); err != nil {
+			return rep, fmt.Errorf("audit verify: look for rows below the floor: %w", err)
+		}
+		if below > 0 {
+			rep.Break = &ChainBreak{Seq: lowest.Int64, Kind: BreakRowsBelowFloor,
+				Detail: fmt.Sprintf("%d chained row(s) survive at or below the floor (seq %d, lowest %d); retention deletes them in the same transaction that moves the floor, so this floor was not set by retention",
+					below, head.floorSeq, lowest.Int64)}
+			return rep, nil
+		}
+	}
+
+	// A floor over rows that had not expired is reported next: it is
 	// about seq <= floor, which precedes every row this scan reads. It cannot see a floor
 	// recorded with a forged timestamp (nothing outside the database says what it should
 	// be); it sees a floor moved carelessly, or by code that did not know to record one.
-	if haveHead && head.floorSeq > 0 && opts.RetentionDays > 0 {
+	if rep.FloorAgeChecked {
 		now := time.Now
 		if opts.Now != nil {
 			now = opts.Now
@@ -376,31 +416,46 @@ func short(h string) string {
 // path, and it reads ids, never a row. The plugin's own HTTP surface verifies the
 // caller's tenant only.
 func ChainedTenants(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect) ([]uuid.UUID, error) {
+	return listAuditTenants(ctx, db, dialect,
+		`SELECT %[1]s FROM audit_chain_heads UNION SELECT %[1]s FROM audit_events WHERE seq IS NOT NULL`)
+}
+
+// TenantsWithAuditRows lists every tenant that has an audit row or a head, chained or not:
+// what an operator export walks. A tenant with only rows from before the chain existed
+// has nothing to verify and something to export.
+func TenantsWithAuditRows(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect) ([]uuid.UUID, error) {
+	return listAuditTenants(ctx, db, dialect,
+		`SELECT %[1]s FROM audit_chain_heads UNION SELECT %[1]s FROM audit_events`)
+}
+
+// listAuditTenants runs a query of tenant ids under a named cross-tenant bypass. query has
+// %[1]s where the id column goes: SQL Server hands a UNIQUEIDENTIFIER back in a byte order
+// that is not the UUID's text, so it is converted in the statement.
+func listAuditTenants(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect, query string) ([]uuid.UUID, error) {
 	col := "tenant_id"
 	if dialect == plugin.DialectMSSQL {
 		col = "CONVERT(varchar(36), tenant_id)"
 	}
-	ctx = plugin.AcrossAllTenants(ctx, "audit verify: list the tenants that have a chain")
-	rows, err := db.Query(ctx, fmt.Sprintf(
-		`SELECT %[1]s FROM audit_chain_heads UNION SELECT %[1]s FROM audit_events WHERE seq IS NOT NULL`, col))
+	ctx = plugin.AcrossAllTenants(ctx, "audit: list the tenants that have audit data, for an operator verify or export")
+	rows, err := db.Query(ctx, fmt.Sprintf(query, col))
 	if err != nil {
-		return nil, fmt.Errorf("audit verify: list tenants: %w", err)
+		return nil, fmt.Errorf("audit: list tenants: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []uuid.UUID
 	for rows.Next() {
 		var raw string
 		if err := rows.Scan(&raw); err != nil {
-			return nil, fmt.Errorf("audit verify: list tenants: scan: %w", err)
+			return nil, fmt.Errorf("audit: list tenants: scan: %w", err)
 		}
 		id, err := uuid.Parse(raw)
 		if err != nil {
-			return nil, fmt.Errorf("audit verify: tenant id %q is not a UUID: %w", raw, err)
+			return nil, fmt.Errorf("audit: tenant id %q is not a UUID: %w", raw, err)
 		}
 		out = append(out, id)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("audit verify: list tenants: %w", err)
+		return nil, fmt.Errorf("audit: list tenants: %w", err)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
 	return out, nil

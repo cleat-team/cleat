@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -180,6 +181,34 @@ func TestAuditVerifyExitStatusesAreDistinct(t *testing.T) {
 		t.Errorf("--json: exit %d, stdout %s", code, stdout)
 	}
 
+	// 5b. EXPORT. One tenant to a file: six events and one checkpoint, and the checkpoint
+	// names the head the events end at.
+	outFile := filepath.Join(t.TempDir(), "good.jsonl")
+	code, _, stderr = runAuditCapturing(t, db, "export", "--tenant", good.String(), "--out", outFile)
+	body, rerr := os.ReadFile(outFile)
+	if code != 0 || rerr != nil || strings.Count(string(body), `"type":"event"`) != n || strings.Count(string(body), `"type":"checkpoint"`) != 1 ||
+		!strings.Contains(string(body), fmt.Sprintf(`"head_seq":%d`, n)) || !strings.Contains(stderr, "exported 1 of 1 tenant(s), 0 incomplete") {
+		t.Errorf("export of one tenant: exit %d, err %v\nstderr: %s\nfile: %s", code, rerr, stderr, body)
+	}
+	// Every tenant: one stream each, each ending in its own checkpoint, to stdout.
+	code, stdout, stderr = runAuditCapturing(t, db, "export", "--all-tenants")
+	if code != 0 || strings.Count(stdout, `"type":"checkpoint"`) != 2 || strings.Count(stdout, `"type":"event"`) != 2*n ||
+		!strings.Contains(stderr, "exported 2 of 2 tenant(s)") {
+		t.Errorf("export of all tenants: exit %d\nstderr: %s\nstdout has %d checkpoints, %d events", code, stderr,
+			strings.Count(stdout, `"type":"checkpoint"`), strings.Count(stdout, `"type":"event"`))
+	}
+	// A cursor this export did not issue cannot be resumed from: the run says it is
+	// incomplete and exits 2, and nothing is written for the tenant.
+	code, stdout, stderr = runAuditCapturing(t, db, "export", "--tenant", good.String(), "--cursor", "bm90LWEtY3Vyc29y")
+	if code != 2 || !strings.Contains(stderr, "INCOMPLETE") || strings.Contains(stdout, `"type"`) {
+		t.Errorf("export from a bad cursor: exit %d\nstderr: %s\nstdout: %s", code, stderr, stdout)
+	}
+	// A range that matches nothing is a complete, empty export: a checkpoint and no events.
+	code, stdout, _ = runAuditCapturing(t, db, "export", "--tenant", good.String(), "--to", "2000-01-01T00:00:00Z")
+	if code != 0 || strings.Contains(stdout, `"type":"event"`) || !strings.Contains(stdout, `"type":"checkpoint"`) {
+		t.Errorf("an empty range: exit %d, stdout %s", code, stdout)
+	}
+
 	// 5c. A FLOOR. Move it over the first two of `good`'s rows, recording their true
 	// timestamp (minutes old). Without --retention-days that verifies, and says out loud that
 	// the floor was not checked; with it, the floor over unexpired rows is a finding.
@@ -195,7 +224,7 @@ func TestAuditVerifyExitStatusesAreDistinct(t *testing.T) {
 		t.Fatalf("moved the floor on %d rows (err %v)", n, err)
 	}
 	code, stdout, stderr = runAuditCapturing(t, db, "verify", "--tenant", good.String())
-	if code != 0 || !strings.Contains(stdout, "OK") || !strings.Contains(stderr, "NOTE tenant "+good.String()) || !strings.Contains(stderr, "was not checked") {
+	if code != 0 || !strings.Contains(stdout, "OK") || !strings.Contains(stderr, "NOTE: 1 tenant(s) have a retention floor") || !strings.Contains(stderr, good.String()+" (floor at seq 2)") || !strings.Contains(stderr, "was not checked") {
 		t.Errorf("a floor with no --retention-days: exit %d\nstdout: %s\nstderr: %s\nwant OK and a NOTE that the floor was not checked", code, stdout, stderr)
 	}
 	code, stdout, stderr = runAuditCapturing(t, db, "verify", "--tenant", good.String(), "--retention-days", "90")
@@ -209,6 +238,11 @@ func TestAuditVerifyExitStatusesAreDistinct(t *testing.T) {
 		{"verify", "--tenant", good.String(), "--all-tenants"},
 		{"verify", "--tenant", "not-a-uuid"},
 		{"export"},
+		{"export", "--tenant", good.String(), "--all-tenants"},
+		{"export", "--all-tenants", "--cursor", "x"},
+		{"export", "--tenant", good.String(), "--from", "yesterday"},
+		{"export", "--tenant", good.String(), "--from", "2026-09-24T00:00:00Z", "--to", "2026-09-23T00:00:00Z"},
+		{"frobnicate"},
 		{},
 	} {
 		if code, _, _ := runAuditCapturing(t, db, args...); code != 2 {
