@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/internal/tenantctx"
@@ -1448,6 +1450,23 @@ type Worker struct {
 	logger *slog.Logger
 	store  engine.WorkflowStore
 
+	// heartbeatStore is HeartbeatBatchFenced's own store, backed by a
+	// connection pool isolated from `store`'s -- nil unless
+	// --heartbeat-max-connections > 0 (main.go), in which case
+	// heartbeatBatchStore() prefers it. cleat#2009 investigation: `store`'s
+	// pool is shared with every claim, execution and defer-phase write
+	// (main.go SetMaxOpenConns(concurrency+5)), so a burst of long-held
+	// connections can queue a heartbeat write behind them with no priority
+	// -- indistinguishable, from the reaper's side, from the worker being
+	// genuinely gone. This closes that specific cause (pool exhaustion) the
+	// same way pluginDB and flusherDB are already isolated from `store`'s
+	// pool; it does not address a GC pause or a network path to the
+	// database degraded for this worker only, which #2009 covers instead.
+	//
+	// Nil falls back to `store`, so a Worker built without one (tests, or
+	// --heartbeat-max-connections=0) behaves exactly as before.
+	heartbeatStore engine.WorkflowStore
+
 	// storeTenantID is the tenant `store` was opened as. `store` backs the
 	// dispatch, heartbeat and scheduler loops, which are worker-level and stay
 	// on it.
@@ -1699,6 +1718,14 @@ type Worker struct {
 	// reapingIsSafe's doc -- is visible as "the reaper is not running," not
 	// silent. cleat#2005 follow-up review, GAP3.
 	consecutiveReapSkips atomic.Int64
+
+	// stallEpisodes tracks cleat#2006's suspected-database-stall suppression
+	// state, one *stallSuppressionEpisode per reap unit -- keyed by shard
+	// name for a MultiShard store, or by "" for a plain one. A sync.Map
+	// rather than a plain map because reapOnce runs on its own loop
+	// goroutine but shard names are not known until the store exists, so
+	// there is no single point to pre-size a guarded map at construction.
+	stallEpisodes sync.Map
 
 	scheduleMu       sync.Mutex
 	scheduleInterval time.Duration
@@ -3235,6 +3262,19 @@ func heartbeatRetryIntervalFor(heartbeat time.Duration) time.Duration {
 	return min(heartbeat, time.Second)
 }
 
+// heartbeatBatchStore is the store HeartbeatBatchFenced actually calls
+// through: heartbeatStore when one was built (--heartbeat-max-connections >
+// 0), else `store` -- see heartbeatStore's own doc comment for why this
+// exists. Not used for the idle-ping path in heartbeatAndFenceInFlight below,
+// which has no in-flight work of this worker's own competing for `store`'s
+// pool at the moment it runs.
+func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
+	if w.heartbeatStore != nil {
+		return w.heartbeatStore
+	}
+	return w.store
+}
+
 // heartbeatAndFenceInFlight heartbeats every run this worker's OWN goroutines
 // are currently executing, fenced individually per (run, generation) rather
 // than in the single unfenced statement BatchHeartbeat issues. cleat#2008:
@@ -3305,7 +3345,7 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 	var lost []string
 	err := w.probeBoundedCall(func(hbCtx context.Context) error {
 		var err error
-		lost, err = w.store.HeartbeatBatchFenced(hbCtx, w.id, runs)
+		lost, err = w.heartbeatBatchStore().HeartbeatBatchFenced(hbCtx, w.id, runs)
 		return err
 	})
 	if err != nil {
@@ -3704,6 +3744,271 @@ func minimumReclaimAfter(heartbeat time.Duration) time.Duration {
 // quantity, it is covering everything the model leaves out.
 const reclaimSlack = 1 * time.Second
 
+// ---------------------------------------------------------------------------
+// Suspected database stall detection (cleat#2006)
+// ---------------------------------------------------------------------------
+//
+// #2166 (minimumReclaimAfter, reapingIsSafe) covers a worker that itself
+// observed database trouble. This covers the complementary gap: the reaper
+// had contact (its own reads succeed), but heartbeat WRITES were silenced
+// fleet-wide -- a paused volume that reads survive but writes stall on, or a
+// failover only some workers saw. Every running row ages past reclaimAfter()
+// at once, and whichever worker's reaper reaches the database first after
+// recovery reclaims runs that are still alive, including its own.
+//
+// THE RAMP HOLE, AND WHY DETECTION USES A SHORTER THRESHOLD THAN RECLAIM
+// ELIGIBILITY. A first version of this gated the "is this a stall" ratio on
+// the SAME threshold ReapStaleInstances reclaims at (reclaimAfter, R). That
+// is wrong: each worker's own last-good heartbeat, right before a stall
+// begins, lands anywhere in its own current cycle -- up to
+// missedBeatThreshold's own width -- so individual rows cross R STAGGERED
+// over that same window, not all at once. For a whole-fleet stall lasting
+// somewhat less than R, only a minority of rows are already R-stale at any
+// single tick; the ratio never reads as "nearly everyone", and each row gets
+// reclaimed the instant it individually crosses R -- precisely the harm this
+// file exists to prevent, arriving through the detector's own blind spot.
+//
+// So DETECTION uses a much shorter threshold -- "has this row missed at
+// least one expected heartbeat" -- and RECLAIM ELIGIBILITY stays exactly
+// where it already was (R, via reclaimAfter()). The two are deliberately
+// different questions answered by different thresholds.
+const missedBeatSlack = 1 * time.Second
+
+// missedBeatThreshold is the DETECTION threshold: how stale a row has to be
+// before it counts as "missed at least one heartbeat", not "eligible to
+// reclaim". heartbeat + dbCallDeadlineFor(heartbeat) is the width a single
+// worker's own write cycle can legitimately span (a call caught right at
+// its own deadline), plus missedBeatSlack for the same reason reclaimSlack
+// exists on minimumReclaimAfter -- ordinary scheduling and round-trip
+// latency the model does not itemize. 8.5s at the 5s default.
+func missedBeatThreshold(heartbeat time.Duration) time.Duration {
+	return heartbeat + dbCallDeadlineFor(heartbeat) + missedBeatSlack
+}
+
+// suspectedDBStall implements #2006's proposal, on the criterion
+// cleat-review substituted for the original fraction+spread one
+// (2026-09-24): a stall is suspected when NOT EVEN ONE running row in
+// scope has a heartbeat newer than missedBeatThreshold -- shape.
+// NoRecentHeartbeat, computed server-side -- across more than one worker.
+//
+// WHAT THIS REPLACED, AND WHY. The original test was
+// `fraction > 0.80 && distinctAssignedTo > 1 && spread <= missedBeatThreshold`,
+// against the MissedBeat population. It had a residual false-negative at
+// its own boundary: 5 workers, the 4 oldest rows already past
+// missedBeatThreshold and the 5th (freshest) not quite there yet, is
+// 4/5 = 80% -- and 80% is not > 80%, so a genuine whole-fleet stall one
+// worker's phase away from full staleness went undetected. It also
+// degraded as the running set aged: one long-dead, never-reclaimed row
+// widens MissedBeatOldest..MissedBeatNewest without bound, eventually
+// exceeding the spread gate on its own regardless of what every other row
+// is doing.
+//
+// NoRecentHeartbeat has neither problem: it doesn't average or compare
+// against a spread window, it asks the single sharpest form of the
+// question this heuristic exists to answer -- has ANYTHING happened,
+// anywhere, recently. A single fresh survivor anywhere in scope answers
+// "yes" and the whole gate reports false, with no fraction arithmetic
+// to sit exactly on a boundary.
+//
+// A single-worker fleet can never trip this: every running row shares one
+// assigned_to, so DistinctAssignedTo > 1 never holds. That is correct, not
+// a gap -- if that one worker's own writes are what's failing, its own
+// probeBoundedCall failure already calls recordDBTrouble on itself, and
+// reapingIsSafe (#2166) already refuses its own reaper on that signal. This
+// heuristic exists for the case #2166 cannot see: worker B reclaiming
+// worker A's row with no trouble of its own recorded anywhere.
+func suspectedDBStall(shape engine.StaleSetShape) bool {
+	if shape.Running == 0 {
+		return false
+	}
+	return shape.NoRecentHeartbeat && shape.DistinctAssignedTo > 1
+}
+
+// stallSuppressionEpisode tracks one independent instance of the
+// suspected-stall suppression decision -- one per shard for a MultiShard
+// store, or one for a plain store. Zero value is ready to use.
+type stallSuppressionEpisode struct {
+	// since is the UnixNano of the tick suspicion FIRST fired for the
+	// current episode. Zero means no active episode. Deliberately does not
+	// reset merely because one tick briefly sees a fresh heartbeat -- see
+	// evaluate's doc -- so a mass-death event with one flickering survivor
+	// cannot win a fresh grace period on the strength of a single blip.
+	since atomic.Int64
+	// alerted marks that the bound-hit warning has already fired for the
+	// current episode, so it logs once at the transition rather than on
+	// every tick past the bound.
+	alerted atomic.Bool
+}
+
+// stallSuppressionDecision is what one reaper tick does for one episode.
+type stallSuppressionDecision struct {
+	// Suppress: true means skip reclaiming entirely this tick for this unit.
+	Suppress bool
+	// BoundHit: true the tick the suppression bound is first crossed --
+	// exactly when an operator alert should fire. False on every other
+	// tick, including subsequent ticks where the bound is still exceeded
+	// (BoundHit only marks the TRANSITION, Suppress==false covers the rest).
+	BoundHit bool
+}
+
+// stallProtectionLower and stallProtectionUpper bound how long a
+// whole-fleet stall can last and still be fully protected from a wrongful
+// reclaim -- cleat-review asked this be documented explicitly with a
+// number, on cleat#2006 (2026-09-24), rather than left implicit in the
+// arithmetic below.
+//
+// Lower bound: missedBeatThreshold (detection latency -- how long a stall
+// has to run before NoRecentHeartbeat can even become true) plus
+// reclaimAfter (the suppression window itself, evaluate's `reclaimAfter`
+// argument). At the 5s heartbeat default, 8.5s + 14.5s = 23s.
+//
+// Upper bound: the lower bound plus one full reaper tick interval
+// (max(heartbeat, 10s)) -- reapOnce only samples StaleSetShape once per
+// tick, so a stall that begins just after a tick fires is not observed,
+// and therefore not detected, until nearly a full interval later. At the
+// default, 23s + 10s = 33s.
+//
+// A stall shorter than the lower bound is always protected; a stall
+// longer than the upper bound is never protected (BoundHit fires and
+// reclaiming resumes mid-stall); a stall between the two may or may not
+// be, depending on tick phase. This does not model reapingIsSafe's own
+// grace period (#2166), which covers the reaper's OWN observed trouble
+// and runs independently of this suppression.
+func stallProtectionLower(heartbeat, reclaimAfter time.Duration) time.Duration {
+	return missedBeatThreshold(heartbeat) + reclaimAfter
+}
+
+func stallProtectionUpper(heartbeat, reclaimAfter time.Duration) time.Duration {
+	return stallProtectionLower(heartbeat, reclaimAfter) + max(heartbeat, 10*time.Second)
+}
+
+// evaluate is one reaper tick's decision for one episode. reclaimAfter is
+// the caller's current R (minimumReclaimAfter-derived window); the
+// suppression bound reuses that same duration rather than a new constant --
+// see the doc comment on suspectedDBStall's call site (reapOnce) for why.
+//
+// WORST-CASE DEAD-RUN RECOVERY. A genuinely dead worker's run, discovered
+// mid-episode right as an unrelated fleet-wide stall trips this suppression,
+// can wait up to 2*R for the bound to hit -- R for the episode already in
+// progress when it happened to start observing the dead row, plus another
+// full R because the row's own individual staleness only just crossed the
+// gate as the bound was reached, then one more reaper tick (interval,
+// floored at 10s) before the next reapOnce actually reclaims it. At the
+// heartbeat default this is 2*14.5s + 10s = 39s -- worse than the pre-#2006
+// R alone, and deliberately so: the alternative is reclaiming a run that is
+// still alive, which #2166 exists to prevent.
+//
+// THE RECOVERY TAIL (cleat-review on cleat#2006, round 2, 2026-09-24). A
+// stall does not end for every worker at once: one worker's heartbeat can
+// land before its siblings', and the moment it does, shape.NoRecentHeartbeat
+// flips false -- suspectedDBStall stops firing -- while the siblings' rows
+// are still individually stale and still eligible under reclaimAfter alone.
+// Un-suppressing on THAT tick reclaims the siblings on the strength of one
+// survivor's heartbeat, which is the exact wrongful reclaim this whole
+// mechanism exists to prevent; it is just reached through the un-suspected
+// branch instead of the suspected one. So suppression is STICKY: once an
+// episode is open, a tick that stops looking suspected but still has
+// reclaim-eligible rows (shape.Stale > 0) keeps suppressing on the SAME
+// clock, exactly as if it were still suspected. Only true quiescence
+// (shape.Stale == 0 -- nothing left that reclaimAfter alone would take)
+// resets the episode; a tick with no episode open (since == 0) and nothing
+// suspected has nothing to stay suppressed on behalf of, and reclaims
+// normally, which is what keeps a genuinely non-suspected stale set (a
+// single dead worker, TestReapOnceDoesNotSuppressAHealthyStaleSet)
+// unaffected.
+//
+// A reaper that starts up (or whose episode map is otherwise empty) mid-tail
+// -- after the stall was suspected but before this reaper ever observed
+// it -- has no episode to be sticky about, and reclaims the still-stale
+// laggards as soon as they individually cross reclaimAfter. That window is
+// bounded by missedBeatSlack (~1s): the gap between one worker's heartbeat
+// landing and the rest following is not itself something this suppression
+// models or protects.
+func (e *stallSuppressionEpisode) evaluate(shape engine.StaleSetShape, reclaimAfter time.Duration, now time.Time) stallSuppressionDecision {
+	suspected := suspectedDBStall(shape)
+	if !suspected && shape.Stale == 0 {
+		// True quiescence: nothing even reclaim-eligible remains. Reset,
+		// so the NEXT suspected episode gets its own full grace period
+		// rather than inheriting elapsed time from a stall that already
+		// ended.
+		e.since.Store(0)
+		e.alerted.Store(false)
+		return stallSuppressionDecision{}
+	}
+	if !suspected && e.since.Load() == 0 {
+		// Not suspected, and no episode is open to be sticky about --
+		// ordinary dead-worker staleness (or the reaper missed the stall
+		// entirely, see the recovery-tail doc above). Reclaim normally.
+		return stallSuppressionDecision{}
+	}
+	// Either genuinely suspected this tick, or sticky: an episode is
+	// already open and reclaim-eligible rows remain even though this
+	// particular tick no longer looks suspected (the recovery tail).
+	// Both share the same clock and bound -- a survivor's heartbeat must
+	// not buy the laggards a fresh window, and must not cut their existing
+	// one short either.
+	sinceNano := e.since.Load()
+	if sinceNano == 0 {
+		e.since.Store(now.UnixNano())
+		return stallSuppressionDecision{Suppress: true}
+	}
+	elapsed := now.Sub(time.Unix(0, sinceNano))
+	if elapsed < reclaimAfter {
+		return stallSuppressionDecision{Suppress: true}
+	}
+	// Bound hit: stop suppressing. Deliberately does NOT reset `since` --
+	// a persistent stall past the bound must keep losing the benefit of the
+	// doubt on every subsequent tick, not earn a fresh window each time.
+	firstAlert := !e.alerted.Swap(true)
+	return stallSuppressionDecision{Suppress: false, BoundHit: firstAlert}
+}
+
+// reapUnit is one independently-processed reap target: a whole store, or
+// one shard of a MultiShard one.
+type reapUnit struct {
+	// name is the shard name for a MultiShard store, "" for a plain one.
+	name  string
+	store engine.WorkflowStore
+}
+
+// logLabel is what reapOnce logs and tags the suspected-stall metric with.
+func (u reapUnit) logLabel() string {
+	if u.name == "" {
+		return "default"
+	}
+	return u.name
+}
+
+// reapUnits enumerates what reapOnce processes this tick. A MultiShard
+// store (ShardedStore) yields one unit per shard, so cleat#2006's
+// suspected-stall suppression -- and any per-call failure -- is decided
+// independently per shard: one stalled shard must not pause reclaiming on
+// a healthy sibling, and a healthy majority must not mask a genuinely
+// stalled minority. A plain store yields exactly one unit.
+func (w *Worker) reapUnits() []reapUnit {
+	ms, ok := w.store.(engine.MultiShard)
+	if !ok {
+		return []reapUnit{{store: w.store}}
+	}
+	names := ms.ShardNames()
+	units := make([]reapUnit, 0, len(names))
+	for _, name := range names {
+		if store, ok := ms.ShardStore(name); ok {
+			units = append(units, reapUnit{name: name, store: store})
+		}
+	}
+	return units
+}
+
+// stallEpisodeFor returns the cleat#2006 suppression episode for one reap
+// unit, creating it on first use. One episode per unit for the life of the
+// Worker, so the "first suspected" clock and the alert-once flag persist
+// across ticks -- see stallSuppressionEpisode's doc.
+func (w *Worker) stallEpisodeFor(unitName string) *stallSuppressionEpisode {
+	v, _ := w.stallEpisodes.LoadOrStore(unitName, &stallSuppressionEpisode{})
+	return v.(*stallSuppressionEpisode)
+}
+
 // reclaimWindow is reclaimAfter's arithmetic, as a function of its two
 // inputs. Split out so that startup advice which has to reason about the
 // window -- flushRetryWindowAdvice, before any Worker exists -- computes it
@@ -3796,18 +4101,78 @@ func (w *Worker) reapOnce() {
 	// dbCallDeadlineFor's doc. The gate above cannot protect against a call
 	// that passed it before the stall was detectable; this can.
 	staleTimeout := w.reclaimAfter()
+	missedBeat := missedBeatThreshold(w.heartbeatInterval)
+
+	// One unit per shard for a MultiShard store, or one plain unit -- see
+	// reapUnits' doc. Processed independently: cleat#2006's suspected-stall
+	// suppression, and any failure, on one unit must not affect a healthy
+	// sibling's reclaim this tick.
 	var reaped int
-	err := w.probeBoundedCall(func(reapCtx context.Context) error {
-		var err error
-		reaped, err = w.store.ReapStaleInstances(reapCtx, staleTimeout, w.maxReclaimPerTick)
-		return err
-	})
-	if err != nil {
+	var lastErr error
+	for _, unit := range w.reapUnits() {
+		suppressed := false
+		if detector, ok := unit.store.(engine.DBStallDetector); ok {
+			var shape engine.StaleSetShape
+			shapeErr := w.probeBoundedCall(func(reapCtx context.Context) error {
+				var err error
+				shape, err = detector.StaleSetShape(reapCtx, staleTimeout, missedBeat)
+				return err
+			})
+			if shapeErr != nil {
+				// FAIL CLOSED, not open (cleat-review on cleat#2006,
+				// 2026-09-24). This used to fall through to the ordinary
+				// reclaim attempt below, unsuppressed -- but a slow or
+				// failing aggregate over the very table ReapStaleInstances
+				// is about to UPDATE is exactly the shape a genuine
+				// database stall takes. Treating "I could not check" as
+				// "assume it's fine" defeats the whole point of checking:
+				// the one tick this probe is most likely to fail is the
+				// one where suppressing matters most. Skip this unit's
+				// reclaim for the tick instead, the same as an explicit
+				// Suppress=true decision; recordDBTrouble below still
+				// covers the probe failure itself.
+				lastErr = shapeErr
+				w.logger.WarnContext(w.ctx, "Reaper: suspected-database-stall probe failed -- skipping this unit's reclaim this tick rather than reclaiming blind",
+					"worker_id", w.id, "shard", unit.logLabel(), "error", shapeErr)
+				suppressed = true
+			} else {
+				episode := w.stallEpisodeFor(unit.name)
+				decision := episode.evaluate(shape, staleTimeout, time.Now())
+				if decision.BoundHit {
+					w.logger.WarnContext(w.ctx, "Reaper: suspected-database-stall suppression bound reached -- reclaiming despite a stall-shaped stale set; this may be a genuine mass worker failure rather than a database stall",
+						"worker_id", w.id, "shard", unit.logLabel(), "running", shape.Running, "missed_beat", shape.MissedBeat, "bound", staleTimeout,
+						"protection_lower", stallProtectionLower(w.heartbeatInterval, staleTimeout),
+						"protection_upper", stallProtectionUpper(w.heartbeatInterval, staleTimeout))
+				}
+				if decision.Suppress {
+					w.logger.WarnContext(w.ctx, "Reaper: stale set looks like a suspected database stall, not dead workers -- deferring reclaim by one tick",
+						"worker_id", w.id, "shard", unit.logLabel(), "running", shape.Running, "missed_beat", shape.MissedBeat,
+						"missed_beat_distinct_assigned_to", shape.MissedBeatDistinctAssignedTo)
+					w.Metrics.RecordSuspectedDBStall(w.ctx, attribute.String("shard", unit.logLabel()))
+					suppressed = true
+				}
+			}
+		}
+		if suppressed {
+			continue
+		}
+		var n int
+		err := w.probeBoundedCall(func(reapCtx context.Context) error {
+			var err error
+			n, err = unit.store.ReapStaleInstances(reapCtx, staleTimeout, w.maxReclaimPerTick)
+			return err
+		})
+		reaped += n
+		if err != nil {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
 		w.recordDBTrouble()
-		if isConnectionError(err) {
+		if isConnectionError(lastErr) {
 			w.logger.WarnContext(w.ctx, "Reaper: DB appears down", "worker_id", w.id)
 		} else {
-			w.logger.ErrorContext(w.ctx, "Reaper error", "worker_id", w.id, "error", err)
+			w.logger.ErrorContext(w.ctx, "Reaper error", "worker_id", w.id, "error", lastErr)
 		}
 		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "error")
 		w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())

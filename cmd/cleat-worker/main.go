@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"log/slog"
@@ -181,6 +182,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := validateHeartbeat(*heartbeatInterval); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := validateHeartbeatMaxConnections(*heartbeatMaxConnections); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -576,6 +581,8 @@ func main() {
 	var store engine.WorkflowStore
 	var db *sql.DB
 	var pluginDB *sql.DB
+	var heartbeatCloser io.Closer
+	var heartbeatStore engine.WorkflowStore
 	var tenantPools *plugin.TenantPools
 	// shardPoolCount is captured here rather than read from shardDBs, which is
 	// scoped to the sharded branch below. The connection census (cleat#1486)
@@ -702,6 +709,12 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		}
+		// heartbeatStore is intentionally left nil here. cleat#2009's reserved
+		// heartbeat pool is not wired for the sharded path: HeartbeatBatchFenced
+		// would need to run per-shard, against each shard's own connection
+		// pool, and no shard-aware heartbeat routing exists yet. Every shard
+		// falls back to heartbeating through its own store, same as before
+		// this change -- a known scope limit, not a silent gap.
 		// Start idempotency key cleanup on each shard. Sharding is a
 		// PostgreSQL configuration -- shardDBs come from the postgres
 		// connection strings above -- so the driver is named explicitly rather
@@ -745,7 +758,8 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(max(10, *concurrency/2))
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel).WithLogger(logger)
+			pgFactory := engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel).WithLogger(logger).WithDSN(dbDSN)
+			factory = pgFactory
 
 			// PER-TENANT POOLS, WHEN --tenant-isolation=role. cleat#1307.
 			//
@@ -811,6 +825,30 @@ func main() {
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
+
+			// Create a reserved connection pool for heartbeat writes, isolated
+			// from the execution pool. cleat#2009: a saturated execution pool
+			// (long-held connections claiming/deferring workflows) starves
+			// heartbeats on the shared pool, and a missed heartbeat is what
+			// triggers reclaim -- so pool exhaustion looks like a dead worker.
+			//
+			// Built through the factory, not a bare sql.Open: Postgres isolates
+			// tenants with RLS set per-transaction rather than baked into the
+			// pool, so this arm was already safe with a bare pool -- but MySQL
+			// is not (see the mysql arm below), and going through
+			// OpenIsolatedStore keeps all three dialects on one reviewed path
+			// instead of three hand-rolled ones that can silently diverge.
+			if *heartbeatMaxConnections > 0 {
+				hs, closer, err := pgFactory.OpenIsolatedStore(context.Background(), defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatCloser = closer
+				defer heartbeatCloser.Close()
+				heartbeatStore = hs
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
+			}
 		case "mysql":
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
@@ -821,7 +859,8 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL)).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			myFactory := engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL)).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			factory = myFactory
 
 			// Create plugin-dedicated connection pool.
 			if *maxPluginConnections > 0 {
@@ -837,8 +876,32 @@ func main() {
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
+
+			// Reserved heartbeat connection pool. cleat#2009.
+			//
+			// MUST go through the factory, unlike a bare sql.Open: MySQL has no
+			// RLS and isolates tenants by PHYSICAL DATABASE
+			// (MySQLTenantDatabaseName), selected by the DATABASE NAME COMPONENT
+			// OF THE DSN. A bare sql.Open(sqlDriver, *dbURL) connects to the base
+			// database -- same schema, zero rows for any tenant -- so every
+			// heartbeat this pool wrote landed somewhere the reaper could never
+			// see, and every run got fenced out and cancelled at its first
+			// heartbeat. OpenIsolatedStore opens its own pool on the tenant DSN,
+			// the same path OpenStore uses.
+			if *heartbeatMaxConnections > 0 {
+				hs, closer, err := myFactory.OpenIsolatedStore(context.Background(), defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatCloser = closer
+				defer heartbeatCloser.Close()
+				heartbeatStore = hs
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
+			}
 		case "mssql":
-			factory = engine.NewMSSQLStoreFactory(*dbURL).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			mssqlFactory := engine.NewMSSQLStoreFactory(*dbURL).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			factory = mssqlFactory
 			// Open a connection to verify and for plugin/migration use.
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
@@ -863,6 +926,28 @@ func main() {
 				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
+			}
+
+			// Reserved heartbeat connection pool. cleat#2009.
+			//
+			// Built through the factory rather than a bare sql.Open, for the
+			// same reason as the postgres and mysql arms above: one reviewed
+			// path for all three dialects rather than three that can silently
+			// diverge. MSSQL sets its RLS session context per-transaction
+			// (beginTxWithContext), independent of the pool's own connector, so
+			// this arm was not exposed to the mysql arm's bug -- but it shares
+			// the fix regardless, and gets the tenantID/logger wiring OpenStore
+			// already gives every other store.
+			if *heartbeatMaxConnections > 0 {
+				hs, closer, err := mssqlFactory.OpenIsolatedStore(context.Background(), defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatCloser = closer
+				defer heartbeatCloser.Close()
+				heartbeatStore = hs
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
 			}
 		default:
 			logger.ErrorContext(context.Background(), "invalid driver", "worker_id", workerID, "driver", *driver)
@@ -1566,6 +1651,12 @@ func main() {
 	if *migrateDBURL != "" {
 		budget.Migrate = migratePoolMaxConns
 	}
+	// --heartbeat-max-connections has no effect on a sharded deployment yet
+	// (see its flag doc), so counting it there would charge the budget for a
+	// pool that was never opened.
+	if *heartbeatMaxConnections > 0 && *shardsFile == "" {
+		budget.Heartbeat = *heartbeatMaxConnections
+	}
 	// WHO ACTUALLY HAS A POOL PER TENANT, asked rather than assumed.
 	//
 	// This used to read `if tenantPools == nil { budget.TenantPerPool = 0 }`,
@@ -1668,6 +1759,7 @@ func main() {
 		id:                               workerID,
 		logger:                           logger,
 		store:                            store,
+		heartbeatStore:                   heartbeatStore,
 		storeTenantID:                    defaultTenantID,
 		storeFactory:                     factory,
 		taskQueues:                       taskQueues,

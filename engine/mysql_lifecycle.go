@@ -1221,13 +1221,13 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 		    SELECT id FROM (
 		        SELECT id FROM workflow_instances
 		        WHERE status = 'running'
-		          AND heartbeat_at < NOW(6) - INTERVAL ? SECOND
+		          AND heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND
 		          AND tenant_id = ?
 		        ORDER BY heartbeat_at
 		        LIMIT ?
 		    ) t
 		)
-	`, int(timeout.Seconds()), s.tenantID, reapLimitArg(limit))
+	`, timeout.Microseconds(), s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
@@ -1240,6 +1240,45 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 // reach the database. See DBPinger's doc comment for why this exists.
 func (s *MySQLStore) PingDB(ctx context.Context) error {
 	return s.db.PingContext(ctx)
+}
+
+// StaleSetShape satisfies DBStallDetector. Same tenant scoping and same
+// status='running' population as ReapStaleInstances. MySQL has no FILTER
+// (WHERE ...) clause, so this uses CASE WHEN in place of Postgres's FILTER
+// -- same aggregates, different syntax.
+func (s *MySQLStore) StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error) {
+	var shape StaleSetShape
+	var oldest, newest sql.NullTime
+	var noRecentHeartbeat int
+	missedBeatMicros := missedBeatTimeout.Microseconds()
+	staleMicros := timeout.Microseconds()
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+		    COUNT(*),
+		    COUNT(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND THEN 1 END),
+		    COUNT(DISTINCT CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND THEN assigned_to END),
+		    MIN(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND THEN heartbeat_at END),
+		    MAX(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND THEN heartbeat_at END),
+		    COUNT(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND THEN 1 END),
+		    CASE WHEN MAX(heartbeat_at) < NOW(6) - INTERVAL ? MICROSECOND THEN 1 ELSE 0 END,
+		    COUNT(DISTINCT assigned_to)
+		FROM workflow_instances
+		WHERE status = 'running' AND tenant_id = ?
+	`, missedBeatMicros, missedBeatMicros, missedBeatMicros,
+		missedBeatMicros, staleMicros, missedBeatMicros, s.tenantID,
+	).Scan(&shape.Running, &shape.MissedBeat, &shape.MissedBeatDistinctAssignedTo,
+		&oldest, &newest, &shape.Stale, &noRecentHeartbeat, &shape.DistinctAssignedTo)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: %w", err)
+	}
+	shape.NoRecentHeartbeat = noRecentHeartbeat != 0
+	if oldest.Valid {
+		shape.MissedBeatOldest = oldest.Time
+	}
+	if newest.Valid {
+		shape.MissedBeatNewest = newest.Time
+	}
+	return shape, nil
 }
 
 // ---- ParentClosePolicy ----

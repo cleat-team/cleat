@@ -45,11 +45,11 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 		WHERE id IN (
 		    SELECT TOP (@p3) id FROM workflow_instances
 		    WHERE status = 'running'
-		      AND heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME())
+		      AND heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME())
 		      AND tenant_id = @p2
 		    ORDER BY heartbeat_at
 		)
-	`, -int(timeout.Seconds()), s.tenantID, reapLimitArg(limit))
+	`, -timeout.Milliseconds(), s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
@@ -62,6 +62,60 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 // reach the database. See DBPinger's doc comment for why this exists.
 func (s *MSSQLStore) PingDB(ctx context.Context) error {
 	return s.db.PingContext(ctx)
+}
+
+// StaleSetShape satisfies DBStallDetector. Same tenant scoping and same
+// status='running' population as ReapStaleInstances.
+//
+// cleat-review on cleat#2006 (2026-09-24): this used to run over s.db
+// directly, with no SESSION_CONTEXT set. Under the shipped RLS security
+// policies (fn_tenant_filter -- see tenantSessionConnector's doc), a
+// statement with no session context matches no rows -- so this reported
+// Running: 0, err: nil on every SQL Server call, silently, and the
+// suspected-stall detector could never fire on that dialect. It needs a
+// transaction with the context set explicitly, the same as every other
+// RLS-scoped read in this file -- see beginTxWithContext's doc.
+func (s *MSSQLStore) StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var shape StaleSetShape
+	var oldest, newest sql.NullTime
+	var noRecentHeartbeat int
+	missedBeatMillis := -missedBeatTimeout.Milliseconds()
+	staleMillis := -timeout.Milliseconds()
+	err = tx.QueryRowContext(ctx, `
+		SELECT
+		    COUNT(*),
+		    COUNT(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN 1 END),
+		    COUNT(DISTINCT CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN assigned_to END),
+		    MIN(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN heartbeat_at END),
+		    MAX(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN heartbeat_at END),
+		    COUNT(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p2, SYSUTCDATETIME()) THEN 1 END),
+		    CASE WHEN MAX(heartbeat_at) < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN 1 ELSE 0 END,
+		    COUNT(DISTINCT assigned_to)
+		FROM workflow_instances
+		WHERE status = 'running' AND tenant_id = @p3
+	`, missedBeatMillis, staleMillis, s.tenantID,
+	).Scan(&shape.Running, &shape.MissedBeat, &shape.MissedBeatDistinctAssignedTo,
+		&oldest, &newest, &shape.Stale, &noRecentHeartbeat, &shape.DistinctAssignedTo)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: %w", err)
+	}
+	shape.NoRecentHeartbeat = noRecentHeartbeat != 0
+	if oldest.Valid {
+		shape.MissedBeatOldest = oldest.Time
+	}
+	if newest.Valid {
+		shape.MissedBeatNewest = newest.Time
+	}
+	if err := tx.Commit(); err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: commit: %w", err)
+	}
+	return shape, nil
 }
 
 // GetQueryState reads one key of a workflow's query state.

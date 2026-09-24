@@ -1040,6 +1040,54 @@ func (f *MySQLStoreFactory) OpenStore(ctx context.Context, tenantID string, task
 	return store, lease, nil
 }
 
+// OpenIsolatedStore is OpenStore's shape, on a pool of its own rather than
+// the tenant's shared leased pool -- for a caller (cleat#2009's heartbeat
+// pool) that wants MySQL's per-tenant topology (the tenant DSN, its own
+// database) without competing with execution traffic for f.tenantDBs'
+// connections or being subject to EvictIdle closing that pool underneath it.
+//
+// A bare sql.Open(driver, baseDSN) is NOT equivalent to this: MySQL has no
+// RLS, so which physical database a connection is pointed at IS the tenant
+// scoping. Opening against the base database silently reaches a database
+// with none of the tenant's rows -- see the doc comment on OpenStore and
+// cleat#2009's own history, where exactly that mistake shipped once already.
+//
+// The returned closer owns this pool outright and closes it -- unlike
+// OpenStore's lease, there is nothing shared here for EvictIdle to reclaim.
+func (f *MySQLStoreFactory) OpenIsolatedStore(ctx context.Context, tenantID string, maxConns int, taskQueues ...string) (WorkflowStore, io.Closer, error) {
+	if _, err := uuid.Parse(tenantID); err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: invalid tenant ID: %w", tenantID, err)
+	}
+	dbName := MySQLTenantDatabaseName(tenantID)
+
+	// Idempotent, and needed here independent of whether OpenStore has
+	// already been called for this tenant: nothing else guarantees ordering
+	// between the two, and CREATE DATABASE IF NOT EXISTS costs one round trip
+	// against a database that already exists.
+	if _, err := f.masterDB.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+dbName+"`"); err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: create tenant database: %w", tenantID, err)
+	}
+
+	tenantDSN := f.buildTenantDSN(dbName)
+	isolatedDB, err := sql.Open("mysql", tenantDSN)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: %w", tenantID, err)
+	}
+	isolatedDB.SetMaxOpenConns(maxConns)
+	isolatedDB.SetMaxIdleConns(maxConns)
+	isolatedDB.SetConnMaxLifetime(5 * time.Minute)
+	if err := isolatedDB.PingContext(ctx); err != nil {
+		isolatedDB.Close()
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: ping: %w", tenantID, err)
+	}
+
+	store := NewMySQLStore(isolatedDB, taskQueues...)
+	store.tenantID = tenantID
+	store = store.WithLogger(f.logger)
+	store.perTenantDatabase = true
+	return store, isolatedDB, nil
+}
+
 // Close closes all tenant connection pools.
 func (f *MySQLStoreFactory) Close() error {
 	f.mu.Lock()

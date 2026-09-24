@@ -493,61 +493,52 @@ jobs:
       minio:
         # Pinned by digest, not by tag, and not to `latest`.
         #
-        # `Blobstore S3 Round-Trip` is a required status check. `:latest` on a
-        # required check means a third party can turn every PR in this repo red
-        # by publishing a release, at a moment unrelated to anything we did --
-        # and the failure would land on whichever PR happened to be open, whose
-        # author would have no reason to suspect the image. That is the shape of
-        # the actions/setup-go v7 cache-key change that made #325 permanently
-        # unmergeable (tiers.yaml records it), arriving through a different door.
+        # `Blobstore S3 Round-Trip` is a required status check (classic branch
+        # protection on develop). `:latest` on a required check means a third
+        # party can turn every PR in this repo red by publishing a release, at a
+        # moment unrelated to anything we did. That is the shape of the
+        # actions/setup-go v7 cache-key change that made #325 permanently
+        # unmergeable (tiers.yaml records it).
         #
-        # The digest below is what `:latest` resolved to when this was pinned on
-        # 2026-08-07, so this is the image the job had already been green on --
-        # RELEASE.2025-09-07T16-13-09Z, which quay has carried as `latest` since
-        # 2025-09-07. Pinning it is a no-op today and a guarantee tomorrow.
+        # Chainguard's MinIO build, not quay.io/minio/minio. On 2026-09-24
+        # (cleat#2211) quay.io/minio/minio stopped serving anonymous pulls:
+        # `unauthorized` from the Docker daemon, and 401 for the pinned digest
+        # even with an anonymous pull token. docker.io/minio/minio answers 401
+        # too. Every PR's copy of this required check went red at "Initialize
+        # containers", and every merge was blocked. A digest pin does not
+        # protect against a registry withdrawing anonymous access. Nothing
+        # does, except a registry that still serves one.
         #
-        # By digest rather than by the RELEASE tag because MinIO republishes
-        # hotfix tags against old releases (RELEASE.2024-08-03...hotfix.ca75c7346
-        # was pushed in March 2026), so a release tag is not by itself a promise
-        # that the bytes are fixed. Re-derive both:
+        # cgr.dev/chainguard/minio is served anonymously. Its free tier
+        # publishes only `latest`, so this digest is what `latest` resolved to
+        # on 2026-09-24. Re-derive it, and check that it is still pullable
+        # without credentials, with:
         #
-        #   curl -s 'https://quay.io/api/v1/repository/minio/minio/tag/?onlyActiveTags=true' \
-        #     | python3 -c "import json,sys; [print(t['name'], t['manifest_digest']) \
-        #       for t in json.load(sys.stdin)['tags'] if t['name']=='latest']"
+        #   T=$(curl -s 'https://cgr.dev/token?scope=repository:chainguard/minio:pull&service=cgr.dev' \
+        #     | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("token") or d["access_token"])')
+        #   curl -sI -H "Authorization: Bearer $T" \
+        #     -H 'Accept: application/vnd.oci.image.index.v1+json' \
+        #     https://cgr.dev/v2/chainguard/minio/manifests/latest | grep -i docker-content-digest
         #
-        # This is a pin to be bumped DELIBERATELY AND BY HAND, and nothing
-        # automates it. This comment used to say renovate.json's
-        # config:recommended would deliver a newer digest as a reviewable PR;
-        # Renovate has never run in this repository (0 PRs ever) and the file
-        # was deleted in cleat#1321, so that has never been true.
+        # Measured against this digest before pinning: TestBlobstore_S3 passes
+        # with the endpoint pointed at it, and fails with the endpoint pointed
+        # at a closed port.
         #
-        # Nor does Dependabot's github-actions ecosystem substitute for it:
-        # measured 2026-09-12, no Dependabot PR has ever touched a file under
-        # .github/workflows/, and the digest below has been unchanged since
-        # 2026-08-07. Re-derive with
-        #   git log -1 --format=%cs -S '<digest>' -- <this file>
+        # This is a pin to be bumped DELIBERATELY AND BY HAND. Nothing automates
+        # it: Renovate has never run here (renovate.json was deleted in
+        # cleat#1321), and no Dependabot PR has ever touched .github/workflows/.
         #
-        # The pin is still right -- it is the whole difference from `:latest`,
-        # which changes under you. It just needs a human to move it.
-        #
-        # The larger version of the same problem was mcr.microsoft.com/mssql/
-        # server:2022-latest, which this comment used to record as not done.
-        # Done on 2026-08-07: it is pinned by digest at six sites, and the
-        # rationale is in tier1-gate.yml's mssql service. That one had a wrinkle
-        # this one did not -- four `docker ps --filter ancestor=` lookups name
-        # the image too, and they match on the pull reference, so pinning only
-        # `image:` would have left them matching nothing.
-        image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+        # The image has no curl or shell, and runs as a non-root user (uid
+        # 65532), so the container health check the quay image used
+        # (`curl -f .../minio/health/live`) cannot run inside it. The step
+        # "Wait for MinIO" below polls the same endpoint from the runner
+        # instead.
+        image: cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
         ports:
           - 9000:9000
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
         command: server /data
     env:
       CLEAT_TEST_POSTGRES: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
@@ -568,6 +559,17 @@ jobs:
       # fails with "directory prefix tests/plugin-harness does not contain main
       # module or its selected dependencies" -- so the pattern is ./... from
       # inside the module instead. See tests/plugin-harness/go.mod.
+      - name: Wait for MinIO
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null; then
+              echo "MinIO is live after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error title=minio::MinIO did not answer /minio/health/live within 60s" >&2
+          docker ps -a
+          exit 1
       - run: go test -count=1 -timeout=120s -v ./... -run 'TestBlobstore_S3'
         working-directory: tests/plugin-harness
         env:

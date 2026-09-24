@@ -28,11 +28,12 @@ const migratePoolMaxConns = 2
 // the sum below is what a worker may reach under load rather than what it costs
 // at rest. Anything that reports live cost must read Stats(), not this.
 type connectionBudget struct {
-	Core    int // --concurrency + 5
-	Plugin  int // --max-plugin-connections, 0 when no separate pool
-	Flusher int // --batch-flush-max-connections, 0 when the flusher is off
-	Shards  int // shardPoolMaxConns per configured shard
-	Migrate int // migratePoolMaxConns, only with --migrate-db
+	Core      int // --concurrency + 5
+	Plugin    int // --max-plugin-connections, 0 when no separate pool
+	Flusher   int // --batch-flush-max-connections, 0 when the flusher is off
+	Shards    int // shardPoolMaxConns per configured shard
+	Migrate   int // migratePoolMaxConns, only with --migrate-db
+	Heartbeat int // --heartbeat-max-connections, 0 when the reserved pool is off
 
 	// TenantPerPool is --tenant-pool-max-conns: the ceiling for ONE tenant's
 	// pool. It is deliberately not part of Fixed(), because the number of
@@ -43,7 +44,7 @@ type connectionBudget struct {
 
 // Fixed is the ceiling of every pool whose count does not depend on traffic.
 func (b connectionBudget) Fixed() int {
-	return b.Core + b.Plugin + b.Flusher + b.Shards + b.Migrate
+	return b.Core + b.Plugin + b.Flusher + b.Shards + b.Migrate + b.Heartbeat
 }
 
 // TenantHeadroom is how many tenant pools fit under a budget, at their ceiling.
@@ -86,6 +87,7 @@ func (b connectionBudget) Describe() string {
 	add("flusher", b.Flusher)
 	add("shards", b.Shards)
 	add("migrate", b.Migrate)
+	add("heartbeat", b.Heartbeat)
 	s := strings.Join(parts, " + ")
 	if s == "" {
 		s = "none"
@@ -117,7 +119,8 @@ func checkConnectionBudget(budget int, b connectionBudget) error {
 			"--connection-budget=%d is smaller than this worker's fixed pools (%s). "+
 				"Those pools are opened at startup and are not evictable, so the budget "+
 				"cannot be honoured under any traffic. Raise the budget, or lower "+
-				"--concurrency, --max-plugin-connections or --batch-flush-max-connections",
+				"--concurrency, --max-plugin-connections, --batch-flush-max-connections "+
+				"or --heartbeat-max-connections",
 			budget, b.Describe())
 	}
 	return nil

@@ -55,7 +55,9 @@ cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishes
 cmd/cleat-worker	TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun	4
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
 cmd/cleat-worker	TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP	1
+cmd/cleat-worker	TestHeartbeatBatchFencedIsolatedFromASaturatedExecutionPool	2
 cmd/cleat-worker	TestMigrationIsADeployStepOnEveryDialect	2
+cmd/cleat-worker	TestReapOnceRecoveryTailAgainstARealDatabase	2
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
@@ -138,6 +140,8 @@ engine	TestPythonDeferSegmentRunsOnlyTheDefers	1
 engine	TestPythonOrdinarySegmentRunsTheBody	1
 engine	TestPythonWasmEndToEnd	1
 engine	TestRLSTenantIsolation	1
+engine	TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnMSSQL	2
+engine	TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnMySQL	2
 engine	TestRustAllHostCallsCompiles	2
 engine	TestRustDeferSegmentRunsOnlyTheDefers	1
 engine	TestRustWorkflowCancelOrder	1
@@ -145,6 +149,8 @@ engine	TestRustWorkflowCompensation	1
 engine	TestRustWorkflowDefersRun	1
 engine	TestRustWorkflowExecute	1
 engine	TestRustWorkflowReplay	1
+engine	TestStaleSetShapeMSSQLAgainstARealDatabase	2
+engine	TestStaleSetShapeMySQLAgainstARealDatabase	2
 engine	TestTenantIsolationWithSeparateStores	1
 engine	TestTenantIsolation_ActiveInstanceCounts	1
 engine	TestTenantIsolation_ConcurrencyKeys	1
@@ -178,6 +184,9 @@ engine	pythonDeferSegment	1
 engine	pythonDeterminismWasm	1
 engine	requireDialectDSN	1
 engine	setupMSSQLIntegrationTest	2
+engine	testHeartbeatReservedPoolSeesARealClaimedRunMSSQL	2
+engine	testHeartbeatReservedPoolSeesARealClaimedRunMySQL	2
+engine	testHeartbeatReservedPoolSeesARealClaimedRunPostgres	1
 engine	withWasmtimeBackend	1
 engine/testutil	MSSQLTestDB	1
 engine/testutil	MySQLTestDB	1
