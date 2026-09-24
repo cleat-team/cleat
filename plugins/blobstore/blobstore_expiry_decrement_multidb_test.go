@@ -57,8 +57,6 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 			// count rather than an error. A fixture legitimately spans whatever
 			// tenants it invents, so it takes the cross-tenant key. No-op on
 			// PostgreSQL and MySQL.
-			fixtureDB := be.CrossTenantConn(t, context.Background(),
-				"blobstore expiry fixture: seeds and verifies index rows across tenants")
 			defer be.Cleanup()
 			// MARKED THE WAY PRODUCTION MARKS IT. (*Plugin).Run wraps the
 			// sweep's context in plugin.AcrossAllTenants before calling
@@ -91,6 +89,12 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("blobstore migrations on %s: %v", be.Name, err)
 			}
+			// After the schema above, not before: on MSSQL this routes through
+			// MSSQLAdminDB, which Fatals if core RLS is enforced but migration
+			// 012's cleat_admin role does not exist yet -- true until
+			// SetupMinimalSchema has run. cleat#2226.
+			fixtureDB := be.CrossTenantConn(t, context.Background(),
+				"blobstore expiry fixture: seeds and verifies index rows across tenants")
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: dialect}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 

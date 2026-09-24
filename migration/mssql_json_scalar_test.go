@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/migration"
 )
 
@@ -37,13 +38,37 @@ func TestMSSQLPayloadConstraintsAcceptJSONScalars(t *testing.T) {
 	}
 
 	// A workflow to hang the rows off: both tables have a foreign key to it.
-	if _, err := db.ExecContext(ctx, `
+	//
+	// One pinned connection, tenant_id stamped into the session before each
+	// write. cleat#2205 (migration 103) added an AFTER INSERT / AFTER UPDATE
+	// block predicate to every table this file writes, bound to the same
+	// dbo.fn_tenant_filter the FILTER predicates already used; unlike FILTER,
+	// BLOCK checks SESSION_CONTEXT on a write regardless of the tenant_id
+	// value the statement itself supplies, so a plain db.ExecContext insert
+	// (no session context at all) is refused outright. These rows have no
+	// tenant_id column in the INSERT and so take the schema default
+	// (DefaultTenantUUID); the session context must match it or the write is
+	// refused as a mismatch rather than merely as "unset". See
+	// engine/flush_dialect_test.go's identical fix for why this has to be
+	// sp_set_session_context on one *sql.Conn rather than db.ExecContext,
+	// which may hand each call to a different pooled connection.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin a connection to seed workflow_defs/workflow_instances: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx,
+		`EXEC sp_set_session_context @key=N'tenant_id', @value=N'`+engine.DefaultTenantUUID+`'`,
+	); err != nil {
+		t.Fatalf("set the tenant session context: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, task_queue)
 		VALUES ('json-scalar-def', 1, 0x00, '[]', 'default')`); err != nil {
 		t.Fatalf("seed workflow_defs: %v", err)
 	}
 	const wfID = "json-scalar-wf"
-	if _, err := db.ExecContext(ctx, `
+	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 		VALUES (@p1, 'json-scalar-def', 1, 'ready', '{}', 'default')`, wfID); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
@@ -65,7 +90,13 @@ func TestMSSQLPayloadConstraintsAcceptJSONScalars(t *testing.T) {
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := db.ExecContext(ctx, `
+			// Same pinned conn as the seed above, not db.ExecContext:
+			// workflow_signals is also in migration 103's covered table set,
+			// and neither insert names a tenant_id column, so it takes the
+			// same schema default the seed rows above rely on -- the session
+			// context has to be the SAME value on the SAME connection, or
+			// the block predicate refuses these too.
+			_, err := conn.ExecContext(ctx, `
 				INSERT INTO workflow_signals (workflow_id, signal_name, payload)
 				VALUES (@p1, @p2, @p3)`, wfID, "sig-"+tc.name, tc.payload)
 			switch {
@@ -76,7 +107,7 @@ func TestMSSQLPayloadConstraintsAcceptJSONScalars(t *testing.T) {
 					"the constraint has become a no-op", tc.payload)
 			}
 
-			_, err = db.ExecContext(ctx, `
+			_, err = conn.ExecContext(ctx, `
 				INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload)
 				VALUES (@p1, @p2, @p2, @p3)`, wfID, "upd-"+tc.name, tc.payload)
 			switch {

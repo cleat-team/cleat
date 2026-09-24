@@ -550,10 +550,20 @@ func (s *MySQLStore) DeliverSignalIdempotent(ctx context.Context, workflowID, si
 // deliverSignalTx is the body of a delivery, inside a caller's transaction.
 // Extracted so the two entry points above cannot drift.
 func (s *MySQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID, signalName, payload string) error {
+	// Gated on EXISTS rather than a plain VALUES INSERT -- cleat#2218.
+	// workflow_signals carries FOREIGN KEY (workflow_id) REFERENCES
+	// workflow_instances(id), so a nonexistent workflowID throws instead of
+	// writing an orphan row, while a workflowID that exists under a DIFFERENT
+	// tenant satisfies the FK and writes one silently -- an existence oracle
+	// by error-versus-nil. MySQL has no RLS, so the WHERE clause is the only
+	// tenant check there is; adding it here (rather than only on the UPDATE
+	// below) makes "foreign tenant" and "does not exist" the same outcome:
+	// nothing written, no error, on the identical path.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
-		VALUES (?, ?, ?, ?)
-	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID); err != nil {
+		SELECT ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = ? AND tenant_id = ?)
+	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID, workflowID, s.tenantID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `

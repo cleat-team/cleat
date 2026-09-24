@@ -245,6 +245,32 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	testutil.SetupMSSQLFullSchema(t, db)
 	defer testutil.CleanupMSSQLTestData(t, db)
 
+	// The assertions below read workflow_instances directly to check what
+	// StartNewRun stored. That read is subject to the shipped security
+	// policies, and the rows it is looking for belong to nonDefaultTenant --
+	// so on the plain connection it finds nothing and the test fails as
+	// "query tenant_id: sql: no rows in result set", which reads like
+	// StartNewRun not having written anything.
+	//
+	// It did write. This test is deliberately cross-tenant: it passes a tenant
+	// as an argument to check the argument is honoured, so verifying it is
+	// administrative work by definition and needs the admin connection.
+	adminDB := testutil.MSSQLAdminDB(t, db)
+
+	// Seeding and StartNewRun below both go through adminDB too, and for the
+	// same reason as the read: this test writes as TWO different tenants
+	// (DefaultTenantUUID and nonDefaultTenant) through one store, to check
+	// that StartNewRun's own tenantID argument -- not any session context --
+	// decides which tenant a row lands under. A single tenant-scoped
+	// connectored pool (openMSSQLTenantStore) bakes in ONE tenant's
+	// sp_set_session_context and cannot serve both. cleat#2205's migration
+	// 102 added block predicates that check SESSION_CONTEXT('tenant_id')
+	// regardless of the tenant_id value a statement names, and adminDB's
+	// login is a cleat_admin member -- which, once MSSQLAdminDB has applied
+	// the admin-bypass predicate (it always does when policies exist), is
+	// enough to satisfy the block predicate for ANY tenant_id, session
+	// context or not. See migrations/mssql/optional/cross_tenant_claim.sql.
+
 	// Insert a workflow_defs row (required by FK constraint).
 	//
 	// tenant_id is the default tenant, not nil: migrations/mssql/001_schema.sql
@@ -253,7 +279,7 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	// nullable, which is the drift IMPROVEMENT-PLAN 3.12's ownership work
 	// corrected -- so the row this test used to insert could not exist in a
 	// real database.
-	_, err := db.Exec(`
+	_, err := adminDB.Exec(`
 		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, task_queue, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`,
 		"test-wf", 1, []byte("wasm"), "[]", "default", DefaultTenantUUID)
@@ -268,25 +294,13 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	// (IMPROVEMENT-PLAN 3.77), so that tenant needs its own definition row.
 	// Seeded here rather than by changing the runs to the default tenant,
 	// because the cross-tenant mismatch is what this test is about.
-	if _, err := db.Exec(`
+	if _, err := adminDB.Exec(`
 		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, task_queue, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`,
 		"test-wf", 1, []byte("wasm"), "[]", "default", nonDefaultTenant); err != nil {
 		t.Fatalf("insert workflow_def (non-default tenant): %v", err)
 	}
-	store := NewMSSQLStore(db, "default")
-
-	// The assertions below read workflow_instances directly to check what
-	// StartNewRun stored. That read is subject to the shipped security
-	// policies, and the rows it is looking for belong to nonDefaultTenant --
-	// so on the plain connection it finds nothing and the test fails as
-	// "query tenant_id: sql: no rows in result set", which reads like
-	// StartNewRun not having written anything.
-	//
-	// It did write. This test is deliberately cross-tenant: it passes a tenant
-	// as an argument to check the argument is honoured, so verifying it is
-	// administrative work by definition and needs the admin connection.
-	adminDB := testutil.MSSQLAdminDB(t, db)
+	store := NewMSSQLStore(adminDB, "default")
 
 	// --- Non-idempotent path ---
 	runID := uuid.New().String()

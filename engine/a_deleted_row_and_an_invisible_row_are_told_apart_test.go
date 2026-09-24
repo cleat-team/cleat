@@ -247,17 +247,30 @@ func trimForLog(s string) string {
 	return s
 }
 
-// TestAnInvisibleRowIsNotAMissingRow proves the second question can be asked.
+// TestAnInvisibleRowIsNotAMissingRow proves the second question can still be
+// asked, and its precondition changed with cleat#2205.
 //
-// A row inserted through a connection with no tenant session context is
-// accepted -- workflow_instances carries a FILTER predicate and no BLOCK
-// predicate, so nothing refuses the write -- and is then invisible to every
-// subsequent read, including the one that wrote it and including the blanket
-// DELETE that would otherwise remove it.
+// Originally the invisible row was manufactured by INSERTing through a
+// connection with no tenant session context at all -- workflow_instances
+// carried a FILTER predicate and no BLOCK predicate, so nothing refused the
+// write, and it landed invisible to every subsequent read including the one
+// that wrote it. Migration 103_a_filtered_write_is_a_blocked_write.sql closed
+// that specific door: a context-free INSERT is now refused outright
+// (see TestTheContextFreeInsertItselfIsRefused, below).
 //
-// That produces cleat#982's exact symptom with no deleter to find, which is why
-// a deletion audit alone would have answered "nothing deleted it" and been
-// right and useless.
+// A physically-present-but-invisible row is not gone, though -- there are
+// still three ways to create one on a live deployment, named in cleat-review's
+// pass on this PR: a row written before 103 was applied, a row written while
+// a security policy is deliberately STATE = OFF (the pattern
+// migrations/mssql/077 and 078 use for a core-table backfill; see
+// docs/contributor/plugins/plugin-security.md), or a row written by a
+// cleat_admin-role connection under the optional
+// migrations/mssql/optional/cross_tenant_claim.sql bypass. This test uses the
+// third: testutil.MSSQLAdminDB bypasses BOTH FILTER and BLOCK (same predicate
+// function, same disjunction), so it can still write the row, and the
+// FILTER-only, context-free `raw` pool still cannot see it -- the disappearance
+// report's "PRESENT BUT INVISIBLE" diagnostic is exercised exactly as before,
+// just reached by a path 103 does not close.
 func TestAnInvisibleRowIsNotAMissingRow(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
 		t.Skip("CLEAT_TEST_MSSQL not set")
@@ -279,19 +292,26 @@ func TestAnInvisibleRowIsNotAMissingRow(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 
-	// raw is a plain sql.Open pool: no connector, so no sp_set_session_context,
-	// and go-mssqldb answers database/sql's ResetSession with
-	// sp_reset_connection, which clears any that was set. The engine's own
-	// pools re-apply it on every recycle (tenantSessionConn.ResetSession,
-	// IMPROVEMENT-PLAN 2.71); this one cannot.
+	// admin, not raw: raw's INSERT would now be refused by the AFTER INSERT
+	// block predicate (that refusal is TestTheContextFreeInsertItselfIsRefused,
+	// below). admin bypasses both FILTER and BLOCK -- testutil.MSSQLAdminDB
+	// applies cross_tenant_claim.sql's IS_ROLEMEMBER('cleat_admin') disjunct on
+	// dbo.fn_tenant_filter, the same function both predicate types share -- so
+	// the write still lands. What makes the row invisible afterward is
+	// unchanged: raw is a plain sql.Open pool with no connector, so no
+	// sp_set_session_context, and go-mssqldb answers database/sql's
+	// ResetSession with sp_reset_connection, which clears any that was set.
+	// FILTER hides a row from a context-free reader exactly as it did before
+	// 103 -- 103 only ever added a write-side check, and admin's write bypasses
+	// that too.
 	const hidden = "wf-invisible-to-its-own-writer"
-	if _, err := raw.Exec(`INSERT INTO dbo.workflow_instances (id, def_name, def_version, tenant_id)
+	if _, err := admin.Exec(`INSERT INTO dbo.workflow_instances (id, def_name, def_version, tenant_id)
 		VALUES (@p1, @p2, 1, @p3)`, hidden, def, DefaultTenantUUID); err != nil {
-		t.Fatalf("insert through a context-free pool: %v.\n\n"+
-			"If this is a block-predicate refusal then this database refuses the write "+
-			"that the measurement depends on, and the invisibility mechanism does not "+
-			"apply here -- which is a finding, not a failure. Say so rather than "+
-			"widening the test.", err)
+		t.Fatalf("insert through the cleat_admin pool: %v.\n\n"+
+			"If this is a block-predicate refusal then the admin bypass itself is "+
+			"broken -- cross_tenant_claim.sql's disjunct is meant to defeat BLOCK "+
+			"exactly as it defeats FILTER -- which is a finding about the bypass, "+
+			"not about this test's precondition.", err)
 	}
 
 	physical, visible, err := testutil.PhysicalAndVisibleMSSQLRowCount(raw, raw, "workflow_instances")
@@ -319,7 +339,7 @@ func TestAnInvisibleRowIsNotAMissingRow(t *testing.T) {
 			"assertMSSQLPoliciesPresent, IMPROVEMENT-PLAN 2.71).", physical, visible)
 	}
 
-	// The whole point, in one assertion: the row is there, and the writer's own
+	// The whole point, in one assertion: the row is there, and a context-free
 	// connection reports it missing.
 	var found int
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM dbo.workflow_instances WHERE id = @p1`,
@@ -343,6 +363,56 @@ func TestAnInvisibleRowIsNotAMissingRow(t *testing.T) {
 	// it would sit in the table for every later test in this database.
 	if _, err := admin.Exec(`DELETE FROM dbo.workflow_instances WHERE id = @p1`, hidden); err != nil {
 		t.Logf("removing the hidden row through the admin pool: %v", err)
+	}
+}
+
+// TestTheContextFreeInsertItselfIsRefused proves the half of cleat#2205 that
+// TestAnInvisibleRowIsNotAMissingRow, above, no longer can: an INSERT through
+// a connection with no tenant session context at all -- not even the
+// cleat_admin bypass -- is refused outright by workflow_instances' AFTER
+// INSERT block predicate, rather than landing as a physically-present,
+// invisible row the way it did before migration 103.
+func TestTheContextFreeInsertItselfIsRefused(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+	raw := testutil.MSSQLTestDB(t)
+	testutil.SetupMSSQLFullSchema(t, raw)
+	testutil.CleanupMSSQLTestData(t, raw)
+
+	ctx := context.Background()
+	store := openMSSQLTenantStore(t, DefaultTenantUUID)
+	const def = "context-free-insert-probe"
+	if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
+		Name: def, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1, MinVersion: 1,
+	}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	const hidden = "wf-context-free-insert-refused"
+	_, err := raw.Exec(`INSERT INTO dbo.workflow_instances (id, def_name, def_version, tenant_id)
+		VALUES (@p1, @p2, 1, @p3)`, hidden, def, DefaultTenantUUID)
+	if err == nil {
+		t.Fatal("an INSERT through a context-free connection succeeded -- " +
+			"workflow_instances' AFTER INSERT block predicate (cleat#2205, migration 103) " +
+			"did not fire, so a row could once again land physically present and invisible " +
+			"to its own writer (cleat#982)")
+	}
+	if !isMSSQLBlockPredicateError(err) {
+		t.Fatalf("the INSERT failed, but not with a block-predicate error: %v", err)
+	}
+
+	// No row was ever created, so there is nothing left to find and nothing
+	// to clean up.
+	var found int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM dbo.workflow_instances WHERE id = @p1`,
+		hidden).Scan(&found); err != nil {
+		t.Fatalf("confirm the refused row does not exist: %v", err)
+	}
+	if found != 0 {
+		t.Fatalf("the INSERT was refused, but the row exists anyway (count=%d) -- "+
+			"the refusal and the table disagree", found)
 	}
 }
 
