@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -175,7 +176,14 @@ func refuseHost(w http.ResponseWriter) {
 // hostname it does not own is the oracle this design is avoiding.
 func (s *TenantStore) TenantForHost(ctx context.Context, hostname string, want uuid.UUID) (bool, error) {
 	var one int
-	err := s.db.QueryRowContext(ctx, tenantForHostStmt(s.dialect), hostname, want.String()).Scan(&one)
+	// Under the tenant it asks about, not on the bare pool: as the role that ships (cleat_app on
+	// PostgreSQL, the app login on SQL Server) this table is scoped by a policy that reads the tenant
+	// the CONNECTION carries, and a predicate does not stand in for it. An unscoped read raised
+	// "cleat.tenant_id is not set" on PostgreSQL and matched no row on SQL Server, so with host binding
+	// on, every authenticated request was answered 503 or 404. cleat#2258.
+	err := s.scopedRead(ctx, want, func(q querier) error {
+		return q.QueryRowContext(ctx, tenantForHostStmt(s.dialect), hostname, want.String()).Scan(&one)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		// No row is the answer for BOTH "nobody owns this hostname" and "another
 		// tenant owns it". They are deliberately indistinguishable here, and
@@ -213,13 +221,109 @@ func tenantForHostStmt(dialect string) string {
 // precedent going the other way: a budget the fixed pools cannot honour is
 // refused at boot rather than breached under load.
 //
-// Deliberately NOT tenant-scoped -- it is asked before any request exists and
-// therefore has no tenant. On PostgreSQL that means it must run on a connection
-// the policy does not apply to, which the worker's startup connection is.
+// It is asked before any request exists, so it has no tenant of its own. It therefore reads each
+// tenant's rows under THAT tenant, and adds them up. This used to be one unscoped SELECT under a comment
+// saying it "must run on a connection the policy does not apply to, which the worker's startup connection
+// is". That is true of a superuser and false of cleat_app, the role a deployment is told to run as: there
+// the read raised "cleat.tenant_id is not set" (P0001) on PostgreSQL, and on SQL Server the security policy
+// filtered every row and it returned 0, which the boot check reports as "tenant_domains is empty". So a
+// worker that followed the docs could not start with host binding on. cleat#2258.
+//
+// The tenants are enumerated from admin.tenants, which needs no exemption for cleat_app, and every tenant
+// counts, suspended included: the question is whether ANY hostname is registered. This is the same shape
+// as engine.SecretStore.CountSecrets (cleat#2123), and for the same reason it does not use a cross-tenant
+// role or marker: it needs no grant beyond the ones the worker already has, and it does not widen what the
+// role can read. MySQL is a database per tenant, so the base database's table is the whole answer.
 func (s *TenantStore) CountTenantDomains(ctx context.Context) (int, error) {
-	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM tenant_domains`).Scan(&n); err != nil {
+	if s.dialect == DialectMySQL {
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM tenant_domains`).Scan(&n); err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
+	ids, err := s.allTenantIDs(ctx)
+	if err != nil {
 		return 0, err
 	}
-	return n, nil
+	total := 0
+	for _, id := range ids {
+		var n int
+		if err := s.scopedRead(ctx, id, func(q querier) error {
+			return q.QueryRowContext(ctx, `SELECT count(*) FROM tenant_domains`).Scan(&n)
+		}); err != nil {
+			return 0, fmt.Errorf("count tenant_domains for tenant %s: %w", id, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// allTenantIDs lists every tenant, suspended or not. The statements are literals at the call site, which
+// is what the guard that reads query strings out of the source needs in order to check them.
+func (s *TenantStore) allTenantIDs(ctx context.Context) ([]uuid.UUID, error) {
+	var rows *sql.Rows
+	var err error
+	if s.dialect == DialectMSSQL {
+		rows, err = s.db.QueryContext(ctx, `SELECT CONVERT(varchar(36), tenant_id) FROM admin.tenants`)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `SELECT tenant_id FROM admin.tenants`)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list tenants: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []uuid.UUID
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("list tenants: %w", err)
+		}
+		// The canonical form, whatever the database printed: SQL Server returns a UNIQUEIDENTIFIER in
+		// upper case, and a tenant id is compared and bound as uuid.UUID.String() everywhere else.
+		id, perr := uuid.Parse(raw)
+		if perr != nil {
+			return nil, fmt.Errorf("tenant id %q is not a UUID: %w", raw, perr)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list tenants: %w", err)
+	}
+	return out, nil
+}
+
+// querier is the subset of *sql.DB and *sql.Tx a scoped read needs.
+type querier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// scopedRead runs fn on a connection that carries tenant, where the dialect scopes by the connection.
+//
+// PostgreSQL: a transaction with set_config('cleat.tenant_id', ..., true), which reverts with the
+// transaction and cannot follow the connection back into the pool. SQL Server: sp_set_session_context
+// inside a transaction, exactly as the engine does (engine.setTenantOnTx). MySQL scopes by database, so the
+// read is direct.
+func (s *TenantStore) scopedRead(ctx context.Context, tenant uuid.UUID, fn func(q querier) error) error {
+	if s.dialect == DialectMySQL {
+		return fn(s.db)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if s.dialect == DialectMSSQL {
+		_, err = tx.ExecContext(ctx, `EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenant.String())
+	} else {
+		_, err = tx.ExecContext(ctx, `SELECT set_config('cleat.tenant_id', $1, true)`, tenant.String())
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("scope the read to tenant %s: %w", tenant, err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }

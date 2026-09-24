@@ -411,6 +411,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--require-host-match` now boots and serves as the role a deployment runs as (cleat#2258).**
+  The boot check counted `tenant_domains`, and every authenticated request looked its Host up in
+  it, both on a connection that carried no tenant. As `cleat_app` on PostgreSQL the count raised
+  `cleat.tenant_id is not set` and the worker exited; on SQL Server the security policy filtered
+  every row, so the worker refused with "tenant_domains is empty" while a domain was registered.
+  Both reads now run under the tenant they are about, and the boot check counts across every
+  tenant (suspended ones included). It still refuses when no domain is registered, and a Host
+  another tenant owns is still answered exactly as an unregistered one. MySQL, which is a
+  database per tenant, was not affected.
+
 - **`GET /api/workflows/{id}/stream` answered 500 "streaming not supported by this server" on every default build.** (cleat#2254)
 
   Every plugin middleware wraps the core mux, and the audit-log's response-writer wrapper embedded
