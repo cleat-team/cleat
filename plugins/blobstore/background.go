@@ -238,31 +238,91 @@ func (p *Plugin) sweepStaleWorkflowRefs(ctx, baseCtx context.Context) (int64, er
 // sweep is what retires them), subtract the in-flight set in Go, and delete the
 // remainder with a plain IN clause, which -- unlike NOT IN -- is safe to batch:
 // each batch only needs the ids it targets.
-func (p *Plugin) sweepStaleWorkflowRefsMSSQL(ctx context.Context) (int64, error) {
-	inFlight, err := p.allInFlightWorkflowIDsMSSQL(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("blobstore: list in-flight workflow ids: %w", err)
-	}
+//
+// THE CANDIDATE READ MUST HAPPEN BEFORE THE IN-FLIGHT READ, not after. This
+// function read in-flight first until cleat-review measured what that order
+// does under real concurrency: a workflow that starts and writes its first
+// blob ref in the gap between the two reads is a CANDIDATE (it is in
+// workflow_blob_refs by the time the second query runs) but is invisible to
+// an in-flight set that was captured before it existed -- so it is deleted on
+// the very sweep that should have protected it. On a 200-tenant SQL Server
+// run with a live writer racing the sweep for 8s, this lost 48 of 1201 newly
+// started workflows' refs (4%); a 1-tenant run lost 3 of 771. See
+// TestReview2141_ConcurrentNewWorkflowKeepsItsRef.
+//
+// Reading candidates FIRST closes that window: anything that starts after
+// the candidate read is not a candidate this round (it will be one next
+// sweep, once it has actually gone stale), and anything that is in flight AT
+// THE LATER in-flight read is protected regardless of how long ago it
+// started. A workflow that finishes in the gap between the two reads is
+// correctly identified as stale either way -- this is not a race for that
+// case, since a finished workflow does not un-finish.
+//
+// THE RETRYWORKFLOW WINDOW IS NOT NEW HERE, AND IS NOT MSSQL-SPECIFIC.
+// Between a dead-lettered workflow's refs being read as stale and the DELETE
+// that removes them, RetryWorkflow could move it back to 'ready' --
+// dead-lettered is not in-flight by this sweep's own definition ('ready',
+// 'running'), so its refs are a legitimate deletion candidate right up until
+// someone retries it. All three stores implement RetryWorkflow as a bare
+// status UPDATE that does NOT recreate workflow_blob_refs rows
+// (engine/store_lifecycle.go, engine/mysql_lifecycle.go,
+// engine/mssql_lifecycle.go), so a retry landing in that window permanently
+// loses the workflow's blob references on every dialect, not only this one.
+// staleWorkflowRefs (queries.go) reads the identical in-flight set from
+// Postgres's admin.in_flight_workflow_ids() and MySQL's direct subquery, in
+// one statement each, and carries the same candidate-then-retried exposure --
+// this function's two separate reads widen the window in wall-clock terms
+// but do not change its kind. It is therefore reviewed as a pre-existing
+// property of the retry/sweep relationship, not a defect this redesign
+// introduced, and is left as-is rather than engineered around: closing it on
+// any dialect would mean re-checking in-flight status from inside the DELETE
+// itself, and here that statement is deliberately unscoped (see above) -- a
+// tenant-scoped check inlined there would reintroduce the exact
+// RLS-blindness this whole function exists to avoid.
+//
+// sweepStaleWorkflowRefsMSSQLTestHook, when non-nil, runs after the
+// candidate read and before the in-flight read below -- the exact window
+// the read order exists to protect. Nil in production;
+// TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave sets it.
+var sweepStaleWorkflowRefsMSSQLTestHook func()
 
+func (p *Plugin) sweepStaleWorkflowRefsMSSQL(ctx context.Context) (int64, error) {
 	rows, err := p.db.Query(ctx, `SELECT DISTINCT workflow_id FROM workflow_blob_refs`)
 	if err != nil {
 		return 0, fmt.Errorf("blobstore: list referenced workflow ids: %w", err)
 	}
-	var toDelete []string
+	var candidates []string
 	for rows.Next() {
 		var wfID string
 		if err := rows.Scan(&wfID); err != nil {
 			_ = rows.Close()
 			return 0, fmt.Errorf("blobstore: list referenced workflow ids: scan: %w", err)
 		}
-		if _, live := inFlight[wfID]; !live {
-			toDelete = append(toDelete, wfID)
-		}
+		candidates = append(candidates, wfID)
 	}
 	rerr := rows.Err()
 	_ = rows.Close()
 	if rerr != nil {
 		return 0, fmt.Errorf("blobstore: list referenced workflow ids: %w", rerr)
+	}
+
+	// Test-only: lets a deterministic test interleave a write in the exact
+	// window the ordering above exists to protect. Nil, and free, in
+	// production.
+	if sweepStaleWorkflowRefsMSSQLTestHook != nil {
+		sweepStaleWorkflowRefsMSSQLTestHook()
+	}
+
+	inFlight, err := p.allInFlightWorkflowIDsMSSQL(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("blobstore: list in-flight workflow ids: %w", err)
+	}
+
+	var toDelete []string
+	for _, wfID := range candidates {
+		if _, live := inFlight[wfID]; !live {
+			toDelete = append(toDelete, wfID)
+		}
 	}
 
 	const batchSize = 500 // well under SQL Server's 2100-parameter ceiling
