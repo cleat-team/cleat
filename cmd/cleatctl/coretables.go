@@ -29,6 +29,7 @@ var coreTables = []string{
 	"queues",
 	"queue_holders",
 	"queue_rate_tokens",
+	"slack_workspace",
 	"tenant_domains",
 	"tenant_secrets",
 	"tenant_settings",
