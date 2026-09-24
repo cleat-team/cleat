@@ -48,13 +48,6 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // ---- types ----
 
 type webhookSourceJSON struct {
@@ -304,8 +297,8 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 // ---- GET /ingest/sources ----
 
 func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -345,8 +338,8 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 // ---- POST /ingest/sources ----
 
 func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -417,8 +410,8 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 // ---- GET /ingest/sources/{id} ----
 
 func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -454,8 +447,8 @@ func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /ingest/sources/{id} ----
 
 func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -488,8 +481,8 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 // ---- GET /ingest/events ----
 
 func (p *Plugin) handleListEvents(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

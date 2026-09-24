@@ -39,13 +39,6 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // ---- types ----
 
 type webhookConfigJSON struct {
@@ -90,8 +83,8 @@ type deliveryJSON struct {
 // ---- POST /webhooks ----
 
 func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -154,8 +147,8 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 // ---- GET /webhooks ----
 
 func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -198,8 +191,8 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 // ---- GET /webhooks/{id} ----
 
 func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -239,8 +232,8 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 // ---- PUT /webhooks/{id} ----
 
 func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -348,8 +341,8 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /webhooks/{id} ----
 
 func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -382,8 +375,8 @@ func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 // ---- GET /webhooks/{id}/deliveries ----
 
 func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

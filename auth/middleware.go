@@ -31,6 +31,21 @@ func TenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	return tenantctx.From(ctx)
 }
 
+// TenantIDFromRequest is TenantIDFromContext for the common case of an
+// *http.Request, so a plugin route handler does not need its own copy of
+// this call.
+//
+// ok is false exactly when Middleware set no tenant -- an unauthenticated
+// request on a route with requireAuth false, or a public path. It is true
+// for every authenticated request, INCLUDING one authenticated as the
+// seeded default tenant (00000000-0000-0000-0000-000000000000), whose ID
+// is the zero uuid.UUID. Comparing the returned UUID to uuid.Nil instead of
+// checking ok cannot tell those two apart, and rejects the default tenant's
+// own valid API key with a 401 on every route that does it -- cleat#2183.
+func TenantIDFromRequest(r *http.Request) (uuid.UUID, bool) {
+	return TenantIDFromContext(r.Context())
+}
+
 // subjectContextKey is unexported, so a second declaration of an identical
 // struct elsewhere is a DIFFERENT key that silently reads nothing -- the same
 // reason tenantctx exists as its own package (see WithTenantID above). This

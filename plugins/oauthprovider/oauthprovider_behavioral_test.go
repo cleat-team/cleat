@@ -736,9 +736,27 @@ func TestOA_GenerateSessionToken(t *testing.T) {
 func TestOA_TenantID_NotPresent(t *testing.T) {
 	p := &Plugin{}
 	req := httptest.NewRequest("GET", "/", nil)
-	tid := p.tenantID(req)
+	tid, ok := p.tenantID(req)
+	if ok {
+		t.Errorf("expected ok=false with no session in context, got ok=true tid=%s", tid)
+	}
+}
+
+// TestOA_TenantID_DefaultTenant is the cleat#2183 regression case: a session
+// for the seeded default tenant, whose ID IS uuid.Nil, must read as
+// ok=true -- not be conflated with "no session" the way comparing the UUID
+// to uuid.Nil does.
+func TestOA_TenantID_DefaultTenant(t *testing.T) {
+	p := &Plugin{}
+	info := &SessionInfo{TenantID: uuid.Nil, SessionID: uuid.New()}
+	ctx := context.WithValue(context.Background(), sessionContextKey{}, info)
+	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+	tid, ok := p.tenantID(req)
+	if !ok {
+		t.Errorf("expected ok=true for the default tenant (uuid.Nil) session, got ok=false")
+	}
 	if tid != uuid.Nil {
-		t.Errorf("expected nil UUID, got %s", tid)
+		t.Errorf("expected tid=uuid.Nil, got %s", tid)
 	}
 }
 

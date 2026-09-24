@@ -706,22 +706,37 @@ func TestWriteJSON_EmptyBody(t *testing.T) {
 
 func TestTenantID(t *testing.T) {
 	t.Run("no tenant", func(t *testing.T) {
-		p := &Plugin{}
 		req := httptest.NewRequest("GET", "/", nil)
-		tid := p.tenantID(req)
-		if tid != uuid.Nil {
-			t.Errorf("expected nil UUID, got %v", tid)
+		tid, ok := auth.TenantIDFromRequest(req)
+		if ok {
+			t.Errorf("expected ok=false with no tenant in context, got ok=true tid=%v", tid)
 		}
 	})
 
 	t.Run("with tenant", func(t *testing.T) {
-		p := &Plugin{}
 		expected := uuid.New()
 		ctx := auth.WithTenantID(context.Background(), expected)
 		req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
-		tid := p.tenantID(req)
+		tid, ok := auth.TenantIDFromRequest(req)
+		if !ok {
+			t.Errorf("expected ok=true, got ok=false")
+		}
 		if tid != expected {
 			t.Errorf("expected %v, got %v", expected, tid)
+		}
+	})
+
+	// cleat#2183 regression: the default tenant's ID IS uuid.Nil, and must
+	// read as ok=true -- not be conflated with "no tenant in context".
+	t.Run("default tenant", func(t *testing.T) {
+		ctx := auth.WithTenantID(context.Background(), uuid.Nil)
+		req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+		tid, ok := auth.TenantIDFromRequest(req)
+		if !ok {
+			t.Errorf("expected ok=true for the default tenant (uuid.Nil), got ok=false")
+		}
+		if tid != uuid.Nil {
+			t.Errorf("expected tid=uuid.Nil, got %v", tid)
 		}
 	})
 }

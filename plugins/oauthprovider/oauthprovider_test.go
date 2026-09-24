@@ -146,9 +146,9 @@ func TestGenerateSessionTokenUnique(t *testing.T) {
 func TestTenantIDNoSession(t *testing.T) {
 	p := &Plugin{}
 	req := httptest.NewRequest("GET", "/test", nil)
-	tid := p.tenantID(req)
-	if tid != uuid.Nil {
-		t.Errorf("expected nil UUID when no session in context, got %v", tid)
+	tid, ok := p.tenantID(req)
+	if ok {
+		t.Errorf("expected ok=false when no session in context, got ok=true tid=%v", tid)
 	}
 }
 
@@ -161,7 +161,10 @@ func TestTenantIDWithSession(t *testing.T) {
 	}
 	ctx := context.WithValue(context.Background(), sessionContextKey{}, session)
 	req := httptest.NewRequest("GET", "/test", nil).WithContext(ctx)
-	tid := p.tenantID(req)
+	tid, ok := p.tenantID(req)
+	if !ok {
+		t.Errorf("expected ok=true, got ok=false")
+	}
 	if tid != session.TenantID {
 		t.Errorf("expected tenant %v, got %v", session.TenantID, tid)
 	}

@@ -43,11 +43,6 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // backupConfig represents a single backup_config row.
 //
 // S3Bucket and S3Prefix are vestigial: dumps are written to local disk only
@@ -105,8 +100,8 @@ type updateConfigRequest struct {
 // ---- POST /backups/configs ----
 
 func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -180,8 +175,8 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 // ---- GET /backups/configs ----
 
 func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -220,8 +215,8 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 // ---- GET /backups/configs/{id} ----
 
 func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -259,8 +254,8 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // ---- PUT /backups/configs/{id} ----
 
 func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -386,8 +381,8 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /backups/configs/{id} ----
 
 func (p *Plugin) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -422,8 +417,8 @@ func (p *Plugin) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
 // ---- GET /backups/history ----
 
 func (p *Plugin) handleListHistory(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -494,8 +489,8 @@ func (p *Plugin) handleListHistory(w http.ResponseWriter, r *http.Request) {
 // ---- POST /backups/configs/{id}/run ----
 
 func (p *Plugin) handleRunBackup(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

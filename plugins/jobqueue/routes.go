@@ -46,13 +46,6 @@ type enqueueRequest struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // JobResponse is the JSON shape returned for a single job.
 type JobResponse struct {
 	JobID     uuid.UUID `json:"job_id"`
@@ -120,8 +113,8 @@ type JobResponse struct {
 // ---- POST /jobqueue/{queue_name}/jobs ----
 
 func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -182,8 +175,8 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 // ---- GET /jobqueue/{queue_name}/jobs ----
 
 func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -267,8 +260,8 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 // ---- GET /jobqueue/{queue_name}/jobs/{job_id} ----
 
 func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -325,8 +318,8 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /jobqueue/{queue_name}/jobs/{job_id} ----
 
 func (p *Plugin) handleCancelJob(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

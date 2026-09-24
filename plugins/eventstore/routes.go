@@ -11,7 +11,6 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
-	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -52,18 +51,11 @@ func isPKConflict(err error) bool {
 		strings.Contains(s, "23505") // PostgreSQL
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // ---- POST /events/{stream_id} ----
 
 func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -139,8 +131,8 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 // ---- GET /events/{stream_id} ----
 
 func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -203,8 +195,8 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 // ---- GET /events/{stream_id}/stream (SSE) ----
 
 func (p *Plugin) handleSSE(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

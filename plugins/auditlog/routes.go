@@ -29,8 +29,8 @@ type auditEvent struct {
 
 // handleQueryEvents handles GET /audit/events.
 func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, http.StatusUnauthorized, "tenant required")
 		return
 	}
@@ -129,10 +129,4 @@ func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// tenantID extracts the tenant UUID from the request context.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
 }

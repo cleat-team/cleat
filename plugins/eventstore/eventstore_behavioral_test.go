@@ -422,11 +422,26 @@ func TestES_WriteError(t *testing.T) {
 // ===========================================================================
 
 func TestES_TenantID_NoTenant(t *testing.T) {
-	p, _, _ := newESPlugin(t)
 	req := httptest.NewRequest("GET", "/events/foo", nil)
-	tid := p.tenantID(req)
+	tid, ok := auth.TenantIDFromRequest(req)
+	if ok {
+		t.Errorf("expected ok=false with no tenant in context, got ok=true tid=%s", tid)
+	}
+}
+
+// TestES_TenantID_DefaultTenant is the cleat#2183 regression case:
+// authenticated as the seeded default tenant, whose ID IS uuid.Nil, must
+// read as ok=true -- not be conflated with "no tenant in context" the way
+// comparing the UUID to uuid.Nil does.
+func TestES_TenantID_DefaultTenant(t *testing.T) {
+	ctx := auth.WithTenantID(context.Background(), uuid.Nil)
+	req := httptest.NewRequest("GET", "/events/foo", nil).WithContext(ctx)
+	tid, ok := auth.TenantIDFromRequest(req)
+	if !ok {
+		t.Errorf("expected ok=true for the default tenant (uuid.Nil), got ok=false")
+	}
 	if tid != uuid.Nil {
-		t.Errorf("expected nil UUID when no tenant in context, got %s", tid)
+		t.Errorf("expected tid=uuid.Nil, got %s", tid)
 	}
 }
 

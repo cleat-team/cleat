@@ -117,6 +117,21 @@ versus a single named tenant) closely enough that a reviewer reading one
 ledger's diff should not have to also read the other's scanner to know it is
 complete.
 
+### C17 — a tenant lookup's `ok` is used, not discarded in favor of comparing to `uuid.Nil`
+
+**Guard:** `TestNoTenantOkIsDiscardedWithoutDeclaration`
+(`plugin/a_tenant_ok_is_not_discarded_test.go`)
+
+`auth.TenantIDFromContext`/`auth.TenantIDFromRequest` return `(uuid.UUID,
+bool)`: a tenant ID and whether one was actually set. Discarding `ok` and
+comparing the UUID to `uuid.Nil` instead — the shape 17 plugins' HTTP routes
+used — cannot tell "no tenant authenticated" apart from "authenticated as
+the seeded default tenant", whose ID literally IS `uuid.Nil`. Every route
+built that way rejected the default tenant's own valid API key with a 401,
+for as long as the pattern existed (cleat#2183). Every discarding call site
+must appear in `tenantOkDiscardLedger`, checked bidirectionally the same way
+C2's and C15/C16's ledgers are.
+
 ---
 
 ## Storage and dialects

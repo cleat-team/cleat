@@ -151,13 +151,16 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // tenantID extracts the tenant UUID from the OAuth session in the request
-// context. Returns the zero UUID if no session is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
+// context, and whether a session was present. A session's TenantID can
+// legitimately be uuid.Nil -- the seeded default tenant -- so callers must
+// check ok, not compare the UUID to uuid.Nil, to tell "no session" apart
+// from "authenticated as the default tenant".
+func (p *Plugin) tenantID(r *http.Request) (uuid.UUID, bool) {
 	info, ok := SessionFromContext(r.Context())
 	if !ok {
-		return uuid.Nil
+		return uuid.Nil, false
 	}
-	return info.TenantID
+	return info.TenantID, true
 }
 
 func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider string) (*oauthConfigRow, error) {
@@ -262,8 +265,8 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get tenant ID from context (main auth middleware) or query param.
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := p.tenantID(r)
+	if !ok {
 		tidStr := r.URL.Query().Get("tenant_id")
 		if tidStr != "" {
 			var err error
@@ -272,9 +275,10 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 				p.writeError(w, http.StatusBadRequest, "invalid tenant_id")
 				return
 			}
+			ok = true
 		}
 	}
-	if tid == uuid.Nil {
+	if !ok {
 		p.writeError(w, http.StatusBadRequest, "tenant_id required")
 		return
 	}
