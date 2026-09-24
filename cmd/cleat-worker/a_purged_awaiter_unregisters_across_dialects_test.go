@@ -202,8 +202,7 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 				logger := slog.New(slog.NewTextHandler(&buf, nil))
 
 				pdb := &engine.SQLDBAdapter{DB: be.DB, Dialect: dialect}
-				var env *plugin.Environment
-				env = &plugin.Environment{
+				env := &plugin.Environment{
 					DB:      pdb,
 					Dialect: dialect,
 					Logger:  logger,

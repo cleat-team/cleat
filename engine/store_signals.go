@@ -216,6 +216,31 @@ func (s *PostgresStore) DeliverSignalIdempotent(ctx context.Context, workflowID,
 	return false, tx.Commit()
 }
 
+// isSignalsWorkflowFKViolationPG checks for a foreign-key violation
+// (SQLSTATE 23503) on workflow_signals' FK to workflow_instances(id)
+// (migrations/postgres/001_schema.sql). The FK is an inline column
+// constraint with no explicit name, so PostgreSQL auto-names it by its own
+// convention ("<table>_<column>_fkey") -- confirmed against a live schema
+// via `SELECT conname FROM pg_constraint WHERE conrelid =
+// 'workflow_signals'::regclass AND contype = 'f'`, which returns exactly
+// "workflow_signals_workflow_id_fkey". Checking the constraint name, not
+// just the SQLSTATE, matches the specificity of isSignalsWorkflowFKViolation
+// (MySQL, matched on the child table name) and
+// isMSSQLSignalsWorkflowFKViolation (SQL Server, matched on the fixed
+// constraint name) -- a bare 23503 would also match workflow_promises' own
+// FK to workflow_instances (same migration file), which is not the
+// violation this function exists to translate.
+func isSignalsWorkflowFKViolationPG(err error) bool {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return false
+	}
+	if pqErr.Code != "23503" {
+		return false
+	}
+	return pqErr.Constraint == "workflow_signals_workflow_id_fkey"
+}
+
 func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -287,8 +312,7 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = $1 AND tenant_id = $4)
 	`, workflowID, signalName, payload, tenantID)
 	if err != nil {
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && pqErr.Code == "23503" {
+		if isSignalsWorkflowFKViolationPG(err) {
 			return ErrWorkflowNotFound
 		}
 		return err
