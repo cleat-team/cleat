@@ -55,11 +55,11 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 // singleton per name). Keying by config id preserves that multi-config
 // capability with no product change. See migrations.go v4's own comment.
 //
-// EXPORTED, not package-private: cmd/cleatctl's migrate-plugin-secrets
-// backfill (cmd/cleatctl/migratepluginsecrets.go) imports this plugin
-// package to compute the exact same name it will later be read back under --
-// one function, not two copies of a naming scheme that must never drift
-// apart.
+// EXPORTED for symmetry with pagerdutyalert.PagerdutyRoutingKeySecretName,
+// which tests/plugin-harness does call cross-package (testdb.go's
+// SeedPluginSecrets) -- and so any future out-of-package caller that needs
+// to seed or verify a dd_config secret computes the name the same way,
+// rather than reimplementing the scheme.
 func DatadogAPIKeySecretName(id uuid.UUID) string {
 	return "datadogexport.api_key." + id.String()
 }

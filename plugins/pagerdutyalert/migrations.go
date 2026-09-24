@@ -71,18 +71,11 @@ func (p *Plugin) Migrations() []plugin.Migration {
 		{
 			// pd_config.routing_key moves into tenant secrets. cleat#1992.
 			// Same shape and same reasoning as datadogexport's v4
-			// (plugins/datadogexport/migrations.go): this migration only
-			// drops the column, because moving the data needs
-			// engine.SecretStore's Go-level envelope encryption, which
-			// plugin.Migration.Up (plain SQL, no function hook) cannot reach.
-			//
-			// BEFORE upgrading to a worker binary carrying this migration, an
-			// operator must run
-			// `cleatctl migrate-plugin-secrets --plugin=pagerduty-alert`
-			// against the OLD schema -- see CHANGELOG.md's upgrade notes and
-			// datadogexport's v4 comment for why the two steps cannot be
-			// merged into one without risking the plaintext key being dropped
-			// before it is ever read.
+			// (plugins/datadogexport/migrations.go): no backfill step,
+			// because cleat#2058 (owner decision 3) settled that 0.3.0
+			// requires a fresh database with no upgrade path from v0.2.0 --
+			// so no deployment ever has a routing_key value that needs to
+			// survive this DROP.
 			//
 			// PER-CONFIG NAMING: pd_config is not one row per tenant either
 			// (own id, name per config, same as dd_config), so the secret

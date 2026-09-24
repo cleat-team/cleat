@@ -23,24 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Admin routes are unchanged (`POST`/`PUT .../configs` still take `api_key`/`routing_key` in the
   request body, and responses still redact it) — only where the value lives has changed.
 
-  Each plugin's migration that drops the plaintext column (`datadog-export` v4, `pagerduty-alert`
-  v3) has no function hook to move existing data itself — `plugin.Migration.Up` is plain SQL.
-  **Run `cleatctl migrate-plugin-secrets --plugin <name>` against the OLD schema, before
-  deploying a build that carries the column-dropping migration:**
-
-  ```
-  cleatctl --db "$DSN" migrate-plugin-secrets --plugin datadog-export --dry-run
-  cleatctl --db "$DSN" migrate-plugin-secrets --plugin datadog-export
-  cleatctl --db "$DSN" migrate-plugin-secrets --plugin pagerduty-alert --dry-run
-  cleatctl --db "$DSN" migrate-plugin-secrets --plugin pagerduty-alert
-  ```
-
-  It needs `CLEAT_SECRET_MASTER_KEY` (the same key the workers use) and is idempotent — safe to
-  re-run, including after a partial failure. **Once the column-dropping migration has run, the
-  plaintext value is gone with no recovery path** — this command reads nothing that is not
-  there, so the order above is not optional. An operator who upgrades without running it first
-  loses every existing API key and routing key; sends and sweeps for those configs then fail with
-  "secret not found" until the key is re-entered through the admin route.
+  No migration procedure is needed: **0.3.0 requires a fresh database, with no upgrade path
+  from v0.2.0** (cleat#2058, owner decision 3). A fresh database never has a plaintext
+  `api_key`/`routing_key` row to move, so `datadog-export`'s v4 migration and `pagerduty-alert`'s
+  v3 migration simply drop the columns (`plugin.Migration.Up`, plain SQL) with nothing to carry
+  forward.
 
 - **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
   (cleat#2046)

@@ -118,27 +118,14 @@ func (p *Plugin) Migrations() []plugin.Migration {
 		{
 			// dd_config.api_key moves into tenant secrets. cleat#1992.
 			//
-			// BREAKING, AND DELIBERATELY SEQUENCED. This migration only drops
-			// the column -- it cannot also move the data, because
-			// engine.SecretStore's PutSecret does envelope encryption with a
-			// Go-held master key/KeyRing, and plugin.Migration.Up is plain SQL
-			// with no function hook (there is nothing here to call PutSecret
-			// with). Moving the data is a separate, Go-level, OPERATOR-RUN
-			// step: `cleatctl migrate-plugin-secrets --plugin=datadog-export`
-			// (cmd/cleatctl/migrateplugin secrets.go), which reads every
-			// existing dd_config row and writes api_key into tenant secrets
-			// under DatadogAPIKeySecretName(id) BEFORE this migration ever
-			// runs.
-			//
-			// The two cannot be one step: plugin.RunMigrations applies every
-			// plugin's schema migrations, across the whole fleet, before any
-			// plugin's Init (where env.Secrets first becomes reachable) is
-			// called. So doing the backfill in Init would already be too late
-			// on the same deploy that carries this DROP COLUMN -- the column
-			// would be gone before Init ever ran. See CHANGELOG.md's upgrade
-			// notes: an operator MUST run the cleatctl command against the OLD
-			// schema before upgrading to a worker binary carrying this
-			// migration, or the plaintext key is lost with no recovery path.
+			// No backfill step: cleat#2058 (owner decision 3) settled that
+			// 0.3.0 requires a fresh database, with no upgrade path from
+			// v0.2.0. There is therefore no deployment where this column
+			// holds a value that needs to survive the DROP -- a fresh
+			// database never populates api_key in the first place. An
+			// earlier version of this comment described a two-step,
+			// operator-run migration procedure; that no longer applies and
+			// would be actively wrong advice against a fresh install.
 			//
 			// PER-CONFIG, NOT PER-TENANT NAMING. dd_config is not one row per
 			// tenant -- a tenant can have several named Datadog configs (own

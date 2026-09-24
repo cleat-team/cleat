@@ -52,6 +52,12 @@ var secretsForTenantLedger = map[string]bool{
 	// same reasoning as the plugin.ForTenant(ctx, cfg.TenantID) call two
 	// lines above it in the same function, for the SQL side.
 	"plugins/datadogexport/background.go:(*Plugin).exportForConfig": true,
+
+	// cleat#1992: tests/plugin-harness's SeedPluginSecrets writes the
+	// pagerduty-alert routing key pd_config's seed row needs, from harness
+	// setup rather than any request -- there is no tenant-scoped ctx to
+	// inherit at that point, same shape as the background loop above.
+	"tests/plugin-harness/testdb.go:SeedPluginSecrets": true,
 }
 
 // secretsForTenantSite is one Secrets.ForTenant-shaped call, located by

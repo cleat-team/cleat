@@ -154,8 +154,6 @@ func main() {
 		runSetSecret(ctx, db, d, args[1:])
 	case "retire-secret":
 		runRetireSecret(ctx, db, d, args[1:])
-	case "migrate-plugin-secrets":
-		runMigratePluginSecrets(ctx, db, d, args[1:])
 	case "queue":
 		runQueue(ctx, db, d, *dsn, args[1:])
 	case "reseal-payloads":

@@ -51,11 +51,10 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 // (plugins/datadogexport/routes.go): pd_config is not one row per tenant
 // either. See migrations.go v3's own comment.
 //
-// EXPORTED, not package-private: cmd/cleatctl's migrate-plugin-secrets
-// backfill (cmd/cleatctl/migratepluginsecrets.go) imports this plugin
-// package to compute the exact same name it will later be read back under --
-// one function, not two copies of a naming scheme that must never drift
-// apart.
+// EXPORTED, not package-private: tests/plugin-harness imports this plugin
+// package (testdb.go's SeedPluginSecrets) to compute the exact same name
+// triggerIncident will later read it back under -- one function, not two
+// copies of a naming scheme that must never drift apart.
 func PagerdutyRoutingKeySecretName(id uuid.UUID) string {
 	return "pagerdutyalert.routing_key." + id.String()
 }

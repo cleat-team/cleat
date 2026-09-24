@@ -347,7 +347,13 @@ func SeedPluginSecrets(t *testing.T, ctx context.Context, secrets plugin.Secrets
 
 	name := pagerdutyalert.PagerdutyRoutingKeySecretName(pdConfigID)
 	if err := secrets.ForTenant(defaultTenant).Put(ctx, name, "test-routing-key"); err != nil {
-		t.Logf("SeedPluginSecrets: %s: %v (pagerduty-alert tests needing a real routing key will fail)", name, err)
+		// Fatalf, not Logf: unlike SeedPluginConfig's "the plugin migration
+		// hasn't run yet" case, there is no legitimate reason for this write to
+		// fail against a freshly migrated test database. Logging it here would
+		// surface as a confusing "routing key not found" failure in whichever
+		// pagerduty-alert test happens to run next, pointing at the wrong
+		// place -- this IS the place. cleat-review, reviewing this PR.
+		t.Fatalf("SeedPluginSecrets: %s: %v", name, err)
 	}
 }
 
