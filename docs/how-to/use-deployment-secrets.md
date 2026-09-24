@@ -19,9 +19,33 @@ Converted to read from here, live, on every call:
 |---|---|
 | `email-notify` | `email.sendgrid_api_key` |
 | `llm` | `llm.providers.<provider>.api_key`, one per **enabled**, non-`ollama` provider that has not opted out (below) |
+| `slack-notify` | `slacknotify.signing_secret` |
 
-Both refuse to start the worker if their required name is missing or cannot
-be opened — see "Fail-closed at boot" below.
+`email-notify` and `llm` refuse to start the worker if their required name is
+missing or cannot be opened — see "Fail-closed at boot" below.
+
+**`slack-notify` is conditional, not unconditional like the other two — and
+not off the boot check entirely either.** A `slack-notify` deployment with no
+history of `/slack/interactive` usage starts fine with no signing secret set
+at all, and answers every outgoing Slack webhook normally; the interactive
+callback route just refuses, with a 401, on every request until one is
+configured. It refuses unconditionally at the request level: missing,
+unreadable, empty, or retired all take the same path, and there is no config
+that makes it accept an unsigned request (cleat#2172). `--require-auth` does
+not gate this route either: `/slack/interactive` is on cleat's
+hand-maintained public-route list (`cmd/cleat-worker/main.go`, next to
+`/ingest/{source_id}` and the OAuth callback) because Slack's own request
+carries no cleat API key, so the signature check is the only gate once a
+request reaches the handler.
+
+**But if `--plugin-config` still carries the legacy `slack_signing_secret`
+field, `slacknotify.signing_secret` becomes required at boot, the same as
+`email-notify`'s and `llm`'s names.** That field's presence is the signal
+that this deployment used `/slack/interactive` before cleat#2172 moved the
+secret out of `--plugin-config` — upgrading it with no replacement secret set
+would otherwise go from "button clicks accepted" to "button clicks silently
+401" with nothing at boot saying why. A deployment that has never set
+`slack_signing_secret` — outbound-only, or new — is never asked for one.
 
 **`email-notify` needs `"email_enabled": true` in its `--plugin-config`
 section, not just a non-empty file.** Every plugin's `Init` receives the
@@ -37,12 +61,15 @@ enough, since it is legitimately optional.
 provider. Omitted, it defaults to `true`, today's behavior for every
 enabled provider except `ollama`.
 
-**A leftover `sendgrid_api_key` or `providers.*.api_key` in `--plugin-config`
-does nothing** — neither struct has a field for it anymore. What a worker
-does about a leftover one differs by plugin:
+**A leftover `sendgrid_api_key`, `providers.*.api_key`, or
+`slack_signing_secret` in `--plugin-config` does nothing** — none of the
+three structs has a field for it anymore. What a worker does about a
+leftover one differs by plugin:
 
-- `llm` always logs a WARN naming the dead field and the
-  `set-deployment-secret` command to use instead, at boot.
+- `llm` and `slack-notify` always log a WARN naming the dead field and the
+  `set-deployment-secret` command to use instead, at boot. `slack-notify`
+  ALSO refuses to start if `slacknotify.signing_secret` cannot be resolved
+  in this case — see above.
 - `email-notify` WARNs the same way, but **only if `email_enabled: true` is
   also set.** A leftover `sendgrid_api_key` with `email_enabled` still
   absent (or explicitly `false`) instead **refuses to start the worker** —
@@ -54,12 +81,17 @@ does about a leftover one differs by plugin:
 
 **Not yet converted**, and still read from `--plugin-config` at `Init` the way
 every plugin's credentials used to be: `blobstore` (its S3 key pair),
-`scheduledbackup` (its backup-target DSN), `slacknotify` (its request-signing
-secret). Each is tracked as a checklist item on cleat#1992. Do not write
-`blobstore.access_key_id`, `scheduledbackup.dsn` or `slacknotify.signing_secret`
+`scheduledbackup` (its backup-target DSN). Each is tracked as a checklist item
+on cleat#1992. Do not write `blobstore.access_key_id` or `scheduledbackup.dsn`
 here yet — nothing reads them from this table until that plugin's own
-conversion lands, and the fixed-name list above is the one actually checked by
-`checkRequiredDeploymentSecrets` at boot.
+conversion lands.
+
+`checkRequiredDeploymentSecrets` (below) consults `plugin.HasRequiredDeploymentSecrets`
+per plugin rather than a single fixed list — `email-notify` and `llm`
+implement it unconditionally, `slack-notify` implements it conditionally (see
+above), and `blobstore`/`scheduledbackup` do not implement it at all yet,
+which is a separate fact from whether they are converted to read from this
+table.
 
 ## Set up a master key, once
 
@@ -144,10 +176,15 @@ The alternative is a worker that starts fine and then fails every call that
 plugin serves, one at a time, with an error that does not say why.
 
 A plugin declares what it needs by implementing
-`plugin.HasRequiredDeploymentSecrets`; `email-notify` and `llm` do today. A
+`plugin.HasRequiredDeploymentSecrets`; `email-notify` and `llm` do
+unconditionally, `slack-notify` conditionally (only when the legacy
+`slack_signing_secret` field is present in `--plugin-config` — see above). A
 plugin with no config section at all is not enabled, and this check never
 runs against it — the same `plugin.ErrNotConfigured` gate that already
-decides whether a plugin's ordinary `Init` runs.
+decides whether a plugin's ordinary `Init` runs. `slack-notify` has no such
+gate of its own (its `Config` carries no enablement flag), so it is always
+"enabled" once loaded, and `RequiredDeploymentSecrets` is what carries the
+conditional logic instead of `Init` refusing to run at all.
 
 ## What is not covered
 

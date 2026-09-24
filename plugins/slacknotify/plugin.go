@@ -38,13 +38,35 @@ type Plugin struct {
 	config     Config
 	dialect    plugin.Dialect
 
-	signalWorkflow     func(ctx context.Context, workflowID, signalName, payload string) error
-	slackSigningSecret string
+	signalWorkflow    func(ctx context.Context, workflowID, signalName, payload string) error
+	deploymentSecrets plugin.DeploymentSecrets
 }
 
 // Config holds optional configuration for the slack-notify plugin.
-type Config struct {
-	SlackSigningSecret string `json:"slack_signing_secret,omitempty"`
+//
+// SlackSigningSecret lived here until cleat#2172 moved it to a deployment
+// secret ("slacknotify.signing_secret", cleat#1992 part 1) so it can be
+// rotated with `cleatctl set-deployment-secret` and take effect without a
+// worker restart. See handleInteractiveCallback (interactive.go) for the
+// per-request lookup that replaced the cached slackSigningSecret field this
+// struct used to carry.
+type Config struct{}
+
+// legacySlackConfig catches slack_signing_secret left over in
+// --plugin-config from before cleat#2172. json.Unmarshal ignores fields a
+// target struct does not declare, so once Config dropped the field a
+// leftover value there silently stopped doing anything -- no error, no log,
+// just quietly wrong. This is unmarshaled from the same bytes purely to
+// detect that and WARN; Config above no longer has anywhere to put the
+// value even if this found one.
+//
+// plugin.Secret, not string: TestPluginCredentialFieldsUseTheSecretType
+// flags any credential-shaped field held as a plain string. This field
+// never round-trips through a handler -- it is read once, at Init, purely
+// to decide whether to WARN -- but the guard is name-driven rather than
+// reachability-driven, and Secret costs nothing here.
+type legacySlackConfig struct {
+	SlackSigningSecret plugin.Secret `json:"slack_signing_secret"`
 }
 
 // Info returns plugin metadata for discovery and documentation.
@@ -82,26 +104,49 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		if err := json.Unmarshal(env.Config, &p.config); err != nil {
 			return fmt.Errorf("slack-notify: invalid config: %w", err)
 		}
+		var legacy legacySlackConfig
+		if err := json.Unmarshal(env.Config, &legacy); err == nil && legacy.SlackSigningSecret != "" {
+			p.logger.Warn("slack-notify: slack_signing_secret in --plugin-config is no longer read " +
+				"(cleat#2172); it has no effect. Use " +
+				"`cleatctl set-deployment-secret --name slacknotify.signing_secret` instead.")
+		}
 	}
 
 	p.signalWorkflow = env.SignalWorkflow
-	p.slackSigningSecret = p.config.SlackSigningSecret
-
-	if p.slackSigningSecret == "" {
-		// interactive.go only verifies the Slack signature when this is set --
-		// existing behaviour, not new here. Flagged at WARN rather than left
-		// silent so an operator who forgot the secret can see it at boot.
-		//
-		// States the PRESENT truth, not only the future one: an earlier
-		// version of this wording said only what cleat#2172 will do, which a
-		// reader could take as "nothing is wrong yet". What is true right
-		// now is the worse half -- /slack/interactive accepts every request
-		// unsigned, verifying nothing -- and cleat#2172 (owner decision,
-		// option A) is what changes that to a refusal. Found in
-		// cleat-review's #2202 pass.
-		p.logger.Warn("slack-notify: no signing secret configured -- /slack/interactive currently ACCEPTS unsigned requests; cleat#2172 will make it refuse them")
-	}
+	p.deploymentSecrets = env.DeploymentSecrets
 
 	p.logger.Info("slack-notify: initialized")
 	return nil
+}
+
+// RequiredDeploymentSecrets implements plugin.HasRequiredDeploymentSecrets.
+//
+// Conditional, unlike email's and llm's unconditional requirement: slack-notify
+// also serves outbound webhook notifications that need no signing secret at
+// all, so a bare enabled slack-notify must not be forced to have one -- the
+// same reasoning that already keeps it off checkRequiredDeploymentSecrets'
+// unconditional list.
+//
+// The owner's call on cleat#2172 (relayed on #2231's review) is that this
+// cannot stay unconditional-OFF either: a deployment whose --plugin-config
+// still carries the legacy slack_signing_secret has, by definition, used
+// /slack/interactive before -- Init's leftover-key WARN a few lines up keys
+// on exactly the same signal. For that deployment, upgrading with no
+// slacknotify.signing_secret set would go from "button clicks accepted" to
+// "button clicks silently 401" with nothing at boot saying why. Requiring
+// the secret ONLY in that case reuses checkRequiredDeploymentSecrets
+// (cmd/cleat-worker/setup.go) rather than a second boot-time check: this
+// plugin's Init never needs to look the secret up itself.
+func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
+	var legacy legacySlackConfig
+	if err := json.Unmarshal(config, &legacy); err == nil && legacy.SlackSigningSecret != "" {
+		return []string{"slacknotify.signing_secret"}, nil
+	}
+	return nil, nil
+}
+
+// DeploymentSecretPrefix implements plugin.HasDeploymentSecretPrefix:
+// slack-notify only ever reads "slacknotify.signing_secret".
+func (p *Plugin) DeploymentSecretPrefix() string {
+	return "slacknotify."
 }

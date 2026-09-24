@@ -2150,16 +2150,27 @@ func main() {
 
 		// Wrap with auth middleware if --require-auth is true.
 		if *requireAuth {
-			// S6: these two plugin endpoints are meant to be called by
+			// S6: these plugin endpoints are meant to be called by
 			// parties who cannot present a cleat API key -- an external
 			// webhook sender (plugins/webhookingest, verifies its own
-			// HMAC signature) and a third-party IdP's OAuth redirect
-			// (plugins/oauthprovider) -- so they must stay reachable
-			// without one even though --require-auth wraps the same
-			// mux/plugHandler every other plugin route goes through. See
-			// auth.Middleware's doc comment for why this is a
+			// HMAC signature), a third-party IdP's OAuth redirect
+			// (plugins/oauthprovider), and Slack's own interactive-callback
+			// POST (plugins/slacknotify, cleat#2172) -- so they must stay
+			// reachable without one even though --require-auth wraps the
+			// same mux/plugHandler every other plugin route goes through.
+			// See auth.Middleware's doc comment for why this is a
 			// hand-maintained list rather than something plugins declare
 			// themselves.
+			//
+			// Slack carries no cleat API key and no Host binding either, so
+			// /slack/interactive needs both exemptions below, the same
+			// shape as ingest and the OAuth callback -- and with this
+			// route now reachable, its own HMAC verification against
+			// "slacknotify.signing_secret" (interactive.go) becomes the
+			// ONLY gate. That check refuses unconditionally (missing,
+			// unreadable, or retired secret; missing or bad signature) --
+			// there is no path here that accepts an unsigned request, which
+			// is what makes exempting it from cleat's own auth safe.
 			// The resolver is built on `db` -- the connection the DSN
 			// names -- and NOT on `store`, which is
 			// factory.OpenStore(ctx, defaultTenantID, ...) and therefore
@@ -2199,12 +2210,14 @@ func main() {
 				handler = auth.HostBindingMiddleware(authResolver,
 					"POST /ingest/{source_id}",
 					"GET /oauth/{provider}/callback",
+					"POST /slack/interactive",
 				)(handler)
 			}
 
 			handler = auth.Middleware(authResolver, true,
 				"POST /ingest/{source_id}",
 				"GET /oauth/{provider}/callback",
+				"POST /slack/interactive",
 			)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.

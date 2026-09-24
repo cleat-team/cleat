@@ -110,16 +110,20 @@ func TestPluginCredentialFieldsUseTheSecretType(t *testing.T) {
 		// endpoint -- which is why they are not part of the leak this change
 		// fixes.
 		//
-		// email.Config.SendGridAPIKey and llm.ProviderConfig.APIKey are GONE
-		// from this list, not converted: cleat#1992 part 1 removed both
-		// fields from Config/ProviderConfig entirely, moving the credential to
-		// a deployment secret. What remains in --plugin-config is
-		// legacyEmailConfig.SendGridAPIKey and legacyProviderConfig.APIKey,
-		// read once at Init purely to WARN or refuse to boot on a leftover
-		// value -- and those ARE plugin.Secret (cleat-review's #2202
-		// re-check), not allowlisted, since converting them cost nothing
-		// (neither is built from a marshaled Config struct in any test
-		// helper the way the two removed entries were).
+		// email.Config.SendGridAPIKey, llm.ProviderConfig.APIKey and
+		// slacknotify.Config.SlackSigningSecret are GONE from this list,
+		// not converted: cleat#1992 part 1 removed the first two fields from
+		// Config/ProviderConfig, and cleat#2172 (part 1b) removed the third
+		// from slacknotify's Config the same way -- each moving its
+		// credential to a deployment secret. What remains in --plugin-config
+		// is legacyEmailConfig.SendGridAPIKey, legacyProviderConfig.APIKey
+		// and legacySlackConfig.SlackSigningSecret, read once at Init purely
+		// to WARN or refuse to boot on a leftover value -- and those ARE
+		// plugin.Secret (cleat-review's #2202 re-check for the first two,
+		// the same convention followed for the third), not allowlisted,
+		// since converting them cost nothing (none is built from a
+		// marshaled Config struct in any test helper the way the three
+		// removed entries were).
 		//
 		// blobstore.Config.SecretAccessKey is still worth converting, for the
 		// logging path rather than the response path. That was attempted here
@@ -131,7 +135,6 @@ func TestPluginCredentialFieldsUseTheSecretType(t *testing.T) {
 		// test churn belongs to its own change rather than riding along with a
 		// security fix. Tracked in tiers.yaml under the plugins entry.
 		"blobstore.Config.SecretAccessKey":          {reason: "process config; never returned by an endpoint (tracked)"},
-		"slacknotify.Config.SlackSigningSecret":     {reason: "process config; never returned by an endpoint (tracked)"},
 		"oauthprovider.oauthConfigRow.ClientSecret": {reason: "internal row struct; handleListSessions never selects it (tracked)"},
 
 		// CANNOT REACH A CALLER, the same shape as llm.ProviderConfig.APIKey
