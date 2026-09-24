@@ -14,7 +14,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sendgrid/rest"
-	"github.com/sendgrid/sendgrid-go"
 
 	"github.com/cleat-team/cleat/plugin"
 )
@@ -116,13 +115,25 @@ func setupTestStatusServer(t *testing.T, statusCode int, responseBody string) *h
 }
 
 // newTestPlugin creates a Plugin instance configured for testing.
+// fakeDeploymentSecrets is a plugin.DeploymentSecrets that answers "test-api-key"
+// for email.sendgrid_api_key and ErrDeploymentSecretNotFound for anything else.
+type fakeDeploymentSecrets struct {
+	values map[string]string
+}
+
+func (f *fakeDeploymentSecrets) Get(ctx context.Context, name string) (string, error) {
+	if v, ok := f.values[name]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("fakeDeploymentSecrets: %q not set", name)
+}
+
 func newTestPlugin(t *testing.T) *Plugin {
 	t.Helper()
 	return &Plugin{
-		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		httpClient: &http.Client{},
-		client:     sendgrid.NewSendClient("test-api-key"),
-		apiKey:     "test-api-key",
+		logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient:        &http.Client{},
+		deploymentSecrets: &fakeDeploymentSecrets{values: map[string]string{"email.sendgrid_api_key": "test-api-key"}},
 	}
 }
 
@@ -144,37 +155,37 @@ func TestInfo(t *testing.T) {
 
 // ---- Init tests ----
 
+// TestInit checks that a present config section enables the plugin and wires
+// env.DeploymentSecrets through -- Init no longer reads or validates an API
+// key itself (cleat#1992 part 1 moved that to a per-call lookup, see
+// TestSendFetchesAPIKeyPerCall below).
 func TestInit(t *testing.T) {
 	p := &Plugin{}
+	secrets := &fakeDeploymentSecrets{values: map[string]string{"email.sendgrid_api_key": "test-key"}}
 	env := &plugin.Environment{
-		Config: []byte(`{"sendgrid_api_key":"test-key"}`),
+		Config:            []byte(`{}`),
+		DeploymentSecrets: secrets,
 	}
 	err := p.Init(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Init() returned error: %v", err)
 	}
-	if p.client == nil {
-		t.Error("expected client to be set")
-	}
 	if p.logger == nil {
 		t.Error("expected logger to be set")
 	}
-	if p.apiKey != "test-key" {
-		t.Errorf("expected apiKey 'test-key', got %q", p.apiKey)
+	if p.deploymentSecrets == nil {
+		t.Error("expected deploymentSecrets to be set from env.DeploymentSecrets")
 	}
 }
 
 func TestInitWithConfig(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		Config: []byte(`{"sendgrid_api_key":"key123","default_from":"noreply@example.com"}`),
+		Config: []byte(`{"default_from":"noreply@example.com"}`),
 	}
 	err := p.Init(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Init() returned error: %v", err)
-	}
-	if p.apiKey != "key123" {
-		t.Errorf("expected apiKey 'key123', got %q", p.apiKey)
 	}
 	if p.defaultFrom != "noreply@example.com" {
 		t.Errorf("expected defaultFrom 'noreply@example.com', got %q", p.defaultFrom)
@@ -189,28 +200,6 @@ func TestInitInvalidConfig(t *testing.T) {
 	err := p.Init(context.Background(), env)
 	if err == nil {
 		t.Fatal("expected error for invalid config, got nil")
-	}
-}
-
-func TestInitMissingAPIKey(t *testing.T) {
-	p := &Plugin{}
-	env := &plugin.Environment{
-		Config: []byte(`{}`),
-	}
-	err := p.Init(context.Background(), env)
-	if err == nil {
-		t.Fatal("expected error for missing api key, got nil")
-	}
-	if !strings.Contains(err.Error(), "sendgrid_api_key is required") {
-		t.Errorf("expected error about missing api key, got: %v", err)
-	}
-	// This is a MISCONFIGURATION, not an absent one -- cleat#2070. A config
-	// section is present ("{}"), it is simply missing the required field, so
-	// this must NOT be reported as plugin.ErrNotConfigured: that would tell
-	// the worker to log it as a quiet INFO line, and an operator who wrote a
-	// config section with a typo'd or blank key needs to see ERROR.
-	if errors.Is(err, plugin.ErrNotConfigured) {
-		t.Errorf("a present-but-invalid config must not report ErrNotConfigured: %v", err)
 	}
 }
 

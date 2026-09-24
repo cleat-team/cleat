@@ -11,8 +11,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sendgrid/sendgrid-go"
-
 	"github.com/cleat-team/cleat/plugin"
 )
 
@@ -34,17 +32,21 @@ func New() plugin.Plugin {
 
 // Plugin implements SendGrid email sending for workflows.
 type Plugin struct {
-	logger      *slog.Logger
-	httpClient  *http.Client
-	client      *sendgrid.Client
-	apiKey      string
-	defaultFrom string
+	logger            *slog.Logger
+	httpClient        *http.Client
+	deploymentSecrets plugin.DeploymentSecrets
+	defaultFrom       string
 }
 
 // Config holds optional configuration for the email plugin.
+//
+// SendGridAPIKey lived here until cleat#1992 part 1 moved it to a deployment
+// secret ("email.sendgrid_api_key") so it can be rotated with
+// `cleatctl set-deployment-secret` and take effect without a worker restart.
+// See sendGridAPIKey (host_functions.go) for the per-call lookup that
+// replaced the cached apiKey field this struct used to carry.
 type Config struct {
-	SendGridAPIKey string `json:"sendgrid_api_key"`
-	DefaultFrom    string `json:"default_from,omitempty"`
+	DefaultFrom string `json:"default_from,omitempty"`
 }
 
 // Info returns plugin metadata for discovery and documentation.
@@ -57,8 +59,17 @@ func (p *Plugin) Info() plugin.PluginInfo {
 	}
 }
 
-// Init initializes the plugin with the given environment. It reads the
-// SendGrid API key from the plugin config and creates a SendGrid client.
+// Init initializes the plugin with the given environment.
+//
+// It no longer reads a SendGrid API key: that moved to a deployment secret
+// (cleat#1992 part 1), fetched fresh on every call by sendGridAPIKey in
+// host_functions.go rather than cached here. Enablement is still decided by
+// config-section presence, exactly as before -- a worker with no "email"
+// section in its plugin config never touches this plugin, and
+// plugin.ErrNotConfigured is how it says so quietly rather than logging
+// ERROR on every stock start. Whether the deployment secret itself is set is
+// checked separately, at worker boot, by the fail-closed check setup.go
+// runs over every enabled plugin's RequiredDeploymentSecrets.
 func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	if env.Logger != nil {
 		p.logger = env.Logger
@@ -75,29 +86,36 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		Timeout:   30 * time.Second,
 	}
 
-	// Parse optional config.
-	if len(env.Config) > 0 {
-		var cfg Config
-		if err := json.Unmarshal(env.Config, &cfg); err != nil {
-			return fmt.Errorf("email: invalid config: %w", err)
-		}
-		p.apiKey = cfg.SendGridAPIKey
-		p.defaultFrom = cfg.DefaultFrom
-	}
+	p.deploymentSecrets = env.DeploymentSecrets
 
-	if p.apiKey == "" {
-		if len(env.Config) == 0 {
-			// No config section at all -- most deployments never touch this
-			// plugin. Disable it quietly rather than logging ERROR on every
-			// stock worker start. A config section that IS present but omits
-			// the key falls through to the line below, and stays ERROR.
-			return fmt.Errorf("email: %w", plugin.ErrNotConfigured)
-		}
-		return fmt.Errorf("email: sendgrid_api_key is required in plugin config")
+	if len(env.Config) == 0 {
+		// No config section at all -- most deployments never touch this
+		// plugin. Disable it quietly rather than logging ERROR on every
+		// stock worker start.
+		return fmt.Errorf("email: %w", plugin.ErrNotConfigured)
 	}
-
-	p.client = sendgrid.NewSendClient(p.apiKey)
+	var cfg Config
+	if err := json.Unmarshal(env.Config, &cfg); err != nil {
+		return fmt.Errorf("email: invalid config: %w", err)
+	}
+	p.defaultFrom = cfg.DefaultFrom
 
 	p.logger.Info("email: initialized", "has_default_from", p.defaultFrom != "")
 	return nil
+}
+
+// sendGridAPIKey fetches the current SendGrid API key. Called at the moment
+// of use -- send, sendTemplate, checkStatus -- rather than cached, so a key
+// rotated with `cleatctl set-deployment-secret` takes effect on the next
+// call without a worker restart (plugin.DeploymentSecrets' own doc comment,
+// "PER-USE, NOT PER-Init").
+func (p *Plugin) sendGridAPIKey(ctx context.Context) (string, error) {
+	if p.deploymentSecrets == nil {
+		return "", fmt.Errorf("email: no deployment secret store configured")
+	}
+	key, err := p.deploymentSecrets.Get(ctx, "email.sendgrid_api_key")
+	if err != nil {
+		return "", fmt.Errorf("email: sendgrid_api_key: %w", err)
+	}
+	return key, nil
 }

@@ -77,6 +77,11 @@ var portedOn = map[string][]string{
 	// admin login (cleat#2123 records why an unscoped read cannot see the table).
 	"reseal-secrets": {"postgres", "mysql", "mssql"},
 
+	// reseal-deployment-secrets, cleat#1992 part 1: all three, same reasoning
+	// as reseal-secrets -- deployment_secrets exists on all three and carries
+	// no tenant dimension to route a read around (engine/deployment_secrets.go).
+	"reseal-deployment-secrets": {"postgres", "mysql", "mssql"},
+
 	// Not ported. These carry unqualified `admin.` SQL, which is correct on
 	// PostgreSQL and SQL Server and wrong on MySQL, plus $N placeholders that
 	// have not been routed through plugin.Rebind.

@@ -259,3 +259,22 @@ func (p *pluginPayloads) Open(ctx context.Context, sealed []byte) ([]byte, error
 	}
 	return p.enc.OpenForPlugin(tid.String(), sealed)
 }
+
+// pluginDeploymentSecrets adapts *DeploymentSecretStore to
+// plugin.DeploymentSecrets. Unlike pluginSecrets/pluginPayloads, no ctx
+// tenant marking applies -- there is no tenant, and no cross-tenant bypass
+// to refuse -- so this is a thin, direct wrapper.
+type pluginDeploymentSecrets struct {
+	store *DeploymentSecretStore
+}
+
+// NewPluginDeploymentSecrets wraps store for use as a
+// plugin.Environment.DeploymentSecrets value. A nil store is valid input,
+// same convention as NewPluginSecrets/NewPluginPayloads.
+func NewPluginDeploymentSecrets(store *DeploymentSecretStore) plugin.DeploymentSecrets {
+	return &pluginDeploymentSecrets{store: store}
+}
+
+func (d *pluginDeploymentSecrets) Get(ctx context.Context, name string) (string, error) {
+	return d.store.GetDeploymentSecret(ctx, name)
+}

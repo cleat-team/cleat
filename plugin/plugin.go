@@ -164,6 +164,13 @@ type Environment struct {
 	// cannot catch here, same as it cannot for those either.
 	Secrets  Secrets
 	Payloads Payloads
+
+	// DeploymentSecrets gives a plugin access to credentials that belong to
+	// the whole deployment rather than to a tenant (cleat#1992 part 1) -- see
+	// secrets.go's DeploymentSecrets doc comment for the fixed names and why
+	// a plugin must call Get per use rather than cache it from Config. Nil
+	// under the same convention as Secrets/Payloads.
+	DeploymentSecrets DeploymentSecrets
 }
 
 // StartRequest is everything a plugin must supply to start a workflow.
