@@ -42,6 +42,7 @@ type webhookSourceRow struct {
 	signalName       string
 	createdAt        time.Time
 	updatedAt        time.Time
+	deleted          bool
 }
 
 type webhookEventRow struct {
@@ -141,7 +142,13 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execUpdateEventProcessed(args)
 	case strings.Contains(query, "UPDATE webhook_events"):
 		return c.execUpdateEvent(args)
-	case strings.Contains(query, "DELETE FROM webhook_sources"):
+	// cleat#2199: soft delete (UPDATE ... SET enabled = false, deleted_at =
+	// ...), not a real DELETE -- the production query's literal SET clause
+	// distinguishes it from every other webhook_sources UPDATE this fake
+	// could see (there are none today, but matching a literal substring
+	// specific to this statement rather than the bare table name is the same
+	// discipline the SELECT routing below already needs).
+	case strings.Contains(query, "UPDATE webhook_sources") && strings.Contains(query, "deleted_at"):
 		return c.execDeleteSource(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Exec query: %s", query)
@@ -189,7 +196,13 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
 	case strings.Contains(query, "SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at"):
-		if strings.Contains(query, "WHERE id = $1 AND") {
+		// "WHERE id = $1 AND" used to be specific to handleGetSource's
+		// two-argument query (id, tenant_id). cleat#2199 added
+		// "AND deleted_at IS NULL" to handleIngestWebhook's one-argument
+		// (id only) query too, so both now contain that substring --
+		// matched on "tenant_id = $2" instead, which only handleGetSource's
+		// query has.
+		if strings.Contains(query, "WHERE id = $1 AND tenant_id = $2") {
 			c.store.mu.RLock()
 			defer c.store.mu.RUnlock()
 			return c.queryGetSource(args)
@@ -390,19 +403,25 @@ func (c *fakeConn) execUpdateEvent(args []driver.NamedValue) (driver.Result, err
 	return c.execUpdateEventProcessed(args)
 }
 
+// execDeleteSource is cleat#2199's soft delete: production's
+// `UPDATE webhook_sources SET enabled = false, deleted_at = $1 WHERE id = $2
+// AND tenant_id = $3 AND deleted_at IS NULL` -- $1 is the deletion
+// timestamp, not an id, matching the argument order a hand-typed
+// falsification of this file would get wrong first.
 func (c *fakeConn) execDeleteSource(args []driver.NamedValue) (driver.Result, error) {
-	id, err := argString(args, 1)
+	id, err := argString(args, 2)
 	if err != nil {
 		return nil, err
 	}
-	tid, err := argString(args, 2)
+	tid, err := argString(args, 3)
 	if err != nil {
 		return nil, err
 	}
 
 	for i, src := range c.store.sources {
-		if src.id == id && src.tenantID == tid {
-			c.store.sources = append(c.store.sources[:i], c.store.sources[i+1:]...)
+		if src.id == id && src.tenantID == tid && !src.deleted {
+			c.store.sources[i].deleted = true
+			c.store.sources[i].enabled = false
 			return &fakeResult{rowsAffected: 1}, nil
 		}
 	}
@@ -437,7 +456,7 @@ func (c *fakeConn) queryListSources(args []driver.NamedValue, corrupt bool) (dri
 
 	var results []webhookSourceRow
 	for _, s := range c.store.sources {
-		if s.tenantID == tid {
+		if s.tenantID == tid && !s.deleted {
 			results = append(results, s)
 		}
 	}
@@ -465,7 +484,7 @@ func (c *fakeConn) querySourceByID(args []driver.NamedValue) (driver.Rows, error
 	}
 
 	for _, s := range c.store.sources {
-		if s.id == id {
+		if s.id == id && !s.deleted {
 			return &fakeRows{
 				columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"},
 				data: [][]driver.Value{{
@@ -490,7 +509,7 @@ func (c *fakeConn) queryGetSource(args []driver.NamedValue) (driver.Rows, error)
 	}
 
 	for _, s := range c.store.sources {
-		if s.id == id && s.tenantID == tid {
+		if s.id == id && s.tenantID == tid && !s.deleted {
 			return &fakeRows{
 				columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"},
 				data: [][]driver.Value{{
@@ -1577,6 +1596,12 @@ func TestAwaitWebhookNoEvents(t *testing.T) {
 }
 
 // TestSourceDelete verifies deleting a webhook source.
+//
+// cleat#2199: this is a SOFT delete -- the row stays in the store (marked
+// deleted, disabled), it does not vanish from it. See
+// a_deleted_source_stays_gone_but_keeps_its_events_multidb_test.go for the
+// end-to-end pin, against real databases, of what soft-delete is for: an
+// event ingested before the delete has to survive it.
 func TestSourceDelete(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
@@ -1601,9 +1626,29 @@ func TestSourceDelete(t *testing.T) {
 
 	store.mu.RLock()
 	count := len(store.sources)
+	var deleted, enabled bool
+	if count == 1 {
+		deleted = store.sources[0].deleted
+		enabled = store.sources[0].enabled
+	}
 	store.mu.RUnlock()
-	if count != 0 {
-		t.Errorf("expected 0 sources after delete, got %d", count)
+	if count != 1 {
+		t.Fatalf("expected 1 source after a soft delete (the row is marked, not removed), got %d", count)
+	}
+	if !deleted {
+		t.Errorf("source row after delete: deleted=false, want true")
+	}
+	if enabled {
+		t.Errorf("source row after delete: enabled=true, want false")
+	}
+
+	// And it is unreachable through the API, which is the half of
+	// soft-delete that has to look like a real delete to a caller.
+	getReq := authedRequest("GET", "/ingest/sources/"+id, nil)
+	getRec := httptest.NewRecorder()
+	handler.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusNotFound {
+		t.Errorf("GET after delete: expected 404, got %d", getRec.Code)
 	}
 }
 
