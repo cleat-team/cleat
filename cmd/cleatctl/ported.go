@@ -122,6 +122,17 @@ var portedOn = map[string][]string{
 	"set-tenant-setting": {"postgres"},
 	"deploy":             {"postgres"},
 	"versions":           {"postgres"},
+
+	// slack, cleat#2230: all three, from the start. slack_workspace carries
+	// no admin.-qualified SQL of its own (unlike drop-tenant) and no
+	// row-level security to route a connection around (unlike quota) --
+	// migrations/postgres/104's own header explains why: the interactive
+	// callback resolves a tenant FROM team_id, so there is no tenant
+	// already in context to scope a policy by. Every statement here is
+	// $N-shaped and rewritten through d.rebind, the same convention
+	// TestSlackWorkspaceStatementsRebindPerDialect pins for quota's own
+	// statements.
+	"slack": {"postgres", "mysql", "mssql"},
 }
 
 // requirePortedFor exits with a clear message when cmd has not been written for

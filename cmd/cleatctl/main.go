@@ -168,6 +168,8 @@ func main() {
 		runRetireDeploymentSecret(ctx, db, d, args[1:])
 	case "reseal-deployment-secrets":
 		runResealDeploymentSecrets(ctx, db, d, args[1:])
+	case "slack":
+		runSlack(ctx, db, d, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -216,6 +218,10 @@ Commands:
                                   write one deployment-wide credential, encrypted
   retire-deployment-secret --name <name> [--dry-run]  stop a deployment secret resolving
   reseal-deployment-secrets [--dry-run]  re-encrypt deployment secrets under the current master key
+  slack map-workspace --team <team_id> --tenant <uuid> [--reassign]
+                                  map a Slack workspace to a tenant (operator-only)
+  slack list-workspaces          list every Slack workspace -> tenant mapping
+  slack unmap-workspace --team <team_id>  remove a mapping
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)
