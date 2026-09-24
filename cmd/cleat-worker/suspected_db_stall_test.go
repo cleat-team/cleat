@@ -202,6 +202,19 @@ func TestStallSuppressionEpisodeSuppressesUntilTheReclaimBoundElapses(t *testing
 // fraction wobbles above and below the gate tick to tick must not win a
 // fresh grace period on every dip below it. Only true quiescence (Stale
 // reaching zero) may reset the clock -- see evaluate's own doc comment.
+//
+// CHANGED 2026-09-24 (cleat-review, cleat#2006 round 2): the dip tick used
+// to assert the zero decision (Suppress=false) here, on the theory that
+// "not suspected this tick" was itself enough reason to stop suppressing.
+// It is not -- that is exactly the recovery-tail bug cleat-review found:
+// dip.Stale stays 3, meaning three rows are still individually reclaim-
+// eligible, and un-suppressing on a tick that merely stopped LOOKING
+// suspected reclaims them on the strength of whatever made the ratio dip
+// (e.g. one worker's heartbeat landing first). evaluate is now sticky --
+// an open episode with Stale > 0 keeps suppressing on its existing clock
+// regardless of whether this particular tick is itself suspected -- so the
+// dip tick now asserts Suppress=true, matching the fix rather than the bug
+// it used to pin.
 func TestStallSuppressionEpisodeDoesNotResetOnAMereRatioDip(t *testing.T) {
 	const reclaimAfter = 100 * time.Millisecond
 	t0 := time.Unix(1_700_000_000, 0)
@@ -214,12 +227,15 @@ func TestStallSuppressionEpisodeDoesNotResetOnAMereRatioDip(t *testing.T) {
 
 	// Tick 2: ratio dips under the fraction gate (not suspected), but the
 	// stale set is not empty -- e.g. a worker or two came back briefly.
-	// This must not reset the episode clock.
+	// This must not reset the episode clock, AND -- the recovery-tail fix --
+	// must not un-suppress the still-stale rows either: sticky suppression
+	// keeps this tick suppressed on the ORIGINAL clock, well inside its
+	// reclaimAfter window.
 	dip := healthyShape()
 	dip.Stale = 3 // still nonzero: not true quiescence
 	d = e.evaluate(dip, reclaimAfter, t0.Add(10*time.Millisecond))
-	if d.Suppress || d.BoundHit {
-		t.Fatalf("dip tick: got %+v, want the zero decision (not suspected this tick)", d)
+	if !d.Suppress || d.BoundHit {
+		t.Fatalf("dip tick: got %+v, want Suppress=true BoundHit=false -- sticky suppression must hold while Stale > 0, even on a tick that is not itself suspected", d)
 	}
 
 	// Tick 3: suspected again, exactly at the ORIGINAL bound from t0. If
@@ -260,6 +276,65 @@ func TestStallSuppressionEpisodeResetsOnTrueQuiescence(t *testing.T) {
 	d = e.evaluate(stallShapedShape(), reclaimAfter, t0.Add(reclaimAfter))
 	if !d.Suppress || d.BoundHit {
 		t.Fatalf("first tick of the new episode: got %+v, want Suppress=true BoundHit=false -- quiescence must have reset the episode clock", d)
+	}
+}
+
+// TestStallSuppressionEpisodeStaysStickyThroughTheRecoveryTail is
+// cleat-review's exact round-2 finding on cleat#2006 (2026-09-24), the "S3"
+// case: a stall does not end for every worker at once, and the FIRST
+// heartbeat to land un-suspects the whole shape before the laggards'
+// heartbeats catch up.
+//
+//	tick 1 (t0):      3 workers, all stale, suspected -- episode opens.
+//	tick 2 (t0+1s):   worker a's heartbeat lands. NoRecentHeartbeat flips
+//	                  false (suspectedDBStall stops firing) but b and c
+//	                  are still individually stale (Stale=2). Pre-fix,
+//	                  this was the zero decision -- unsuppressed -- and
+//	                  reapOnce would reclaim b and c on a's heartbeat
+//	                  alone, at 1s into a reclaimAfter window this test
+//	                  sets to 10s. Fixed: sticky suppression holds.
+//	tick 3 (t0+10s):  the original bound. Genuinely suspected again (b
+//	                  and c's laggard heartbeats have not landed either)
+//	                  is not required -- Stale is still nonzero and the
+//	                  clock from tick 1 has now elapsed, so this reaches
+//	                  the bound via the SAME episode, not a fresh one.
+//
+// This is the sweep test's own documented blind spot, named directly in
+// cleat-review's finding: simulateStaleSetShape only ticks while
+// tickOffset < D, so it never observes a tick where the FLEET has recovered
+// (NoRecentHeartbeat false) while individual ROWS have not (Stale > 0).
+// That gap is why the sweep read "0 wrongful reclaims at every offset"
+// while this exact case still reclaimed two live rows.
+func TestStallSuppressionEpisodeStaysStickyThroughTheRecoveryTail(t *testing.T) {
+	const reclaimAfter = 10 * time.Second
+	t0 := time.Unix(1_700_000_000, 0)
+	e := &stallSuppressionEpisode{}
+
+	allStale := engine.StaleSetShape{
+		Running: 3, MissedBeat: 3, MissedBeatDistinctAssignedTo: 3,
+		Stale: 3, NoRecentHeartbeat: true, DistinctAssignedTo: 3,
+	}
+	d := e.evaluate(allStale, reclaimAfter, t0)
+	if !d.Suppress || d.BoundHit {
+		t.Fatalf("tick 1: got %+v, want Suppress=true BoundHit=false (episode opens)", d)
+	}
+
+	// a's heartbeat landed; b and c have not caught up yet.
+	aRecovered := engine.StaleSetShape{
+		Running: 3, MissedBeat: 2, MissedBeatDistinctAssignedTo: 2,
+		Stale: 2, NoRecentHeartbeat: false, DistinctAssignedTo: 3,
+	}
+	d = e.evaluate(aRecovered, reclaimAfter, t0.Add(1*time.Second))
+	if !d.Suppress || d.BoundHit {
+		t.Fatalf("recovery-tail tick (a back, b/c still stale): got %+v, want Suppress=true BoundHit=false -- "+
+			"one survivor's heartbeat must not un-suppress the laggards still inside their reclaimAfter window", d)
+	}
+
+	// b and c still have not caught up; the bound from tick 1 arrives.
+	d = e.evaluate(aRecovered, reclaimAfter, t0.Add(reclaimAfter))
+	if d.Suppress || !d.BoundHit {
+		t.Fatalf("tick at the original bound, still mid-recovery: got %+v, want Suppress=false BoundHit=true -- "+
+			"the episode clock from tick 1 must govern, not a fresh one started by the recovery-tail tick", d)
 	}
 }
 

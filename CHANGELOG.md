@@ -715,6 +715,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window), degrading to none by about 33s** (one more reaper tick, the
   worst case for when the stall is first observed) — see
   `stallProtectionLower`/`stallProtectionUpper` in `cmd/cleat-worker`.
+  Suppression is sticky once an episode opens: a tick where one worker's
+  heartbeat lands first — un-suspecting the shape while its siblings are
+  still individually stale — keeps suppressing on the same episode clock
+  rather than releasing the laggards on that survivor's heartbeat alone.
+  This protection is per-episode, not per-row: a reaper that never
+  observed the stall's opening tick has no episode to be sticky about, and
+  can still reclaim a laggard within about `missedBeatSlack` (~1s) of one
+  worker's heartbeat landing while its siblings' have not — the gap
+  between one worker's recovery and the rest is not itself modeled here.
 
   **Worst case, a genuinely dead worker's run now takes up to about 39s to
   reclaim at the default `--heartbeat`** (twice the ~14.5s reclaim window

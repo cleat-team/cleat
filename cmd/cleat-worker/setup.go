@@ -3867,19 +3867,56 @@ func stallProtectionUpper(heartbeat, reclaimAfter time.Duration) time.Duration {
 // heartbeat default this is 2*14.5s + 10s = 39s -- worse than the pre-#2006
 // R alone, and deliberately so: the alternative is reclaiming a run that is
 // still alive, which #2166 exists to prevent.
+//
+// THE RECOVERY TAIL (cleat-review on cleat#2006, round 2, 2026-09-24). A
+// stall does not end for every worker at once: one worker's heartbeat can
+// land before its siblings', and the moment it does, shape.NoRecentHeartbeat
+// flips false -- suspectedDBStall stops firing -- while the siblings' rows
+// are still individually stale and still eligible under reclaimAfter alone.
+// Un-suppressing on THAT tick reclaims the siblings on the strength of one
+// survivor's heartbeat, which is the exact wrongful reclaim this whole
+// mechanism exists to prevent; it is just reached through the un-suspected
+// branch instead of the suspected one. So suppression is STICKY: once an
+// episode is open, a tick that stops looking suspected but still has
+// reclaim-eligible rows (shape.Stale > 0) keeps suppressing on the SAME
+// clock, exactly as if it were still suspected. Only true quiescence
+// (shape.Stale == 0 -- nothing left that reclaimAfter alone would take)
+// resets the episode; a tick with no episode open (since == 0) and nothing
+// suspected has nothing to stay suppressed on behalf of, and reclaims
+// normally, which is what keeps a genuinely non-suspected stale set (a
+// single dead worker, TestReapOnceDoesNotSuppressAHealthyStaleSet)
+// unaffected.
+//
+// A reaper that starts up (or whose episode map is otherwise empty) mid-tail
+// -- after the stall was suspected but before this reaper ever observed
+// it -- has no episode to be sticky about, and reclaims the still-stale
+// laggards as soon as they individually cross reclaimAfter. That window is
+// bounded by missedBeatSlack (~1s): the gap between one worker's heartbeat
+// landing and the rest following is not itself something this suppression
+// models or protects.
 func (e *stallSuppressionEpisode) evaluate(shape engine.StaleSetShape, reclaimAfter time.Duration, now time.Time) stallSuppressionDecision {
 	suspected := suspectedDBStall(shape)
-	if !suspected {
-		// Reset ONLY on true quiescence (nothing even reclaim-eligible
-		// remains) -- not merely "this tick saw one fresh heartbeat". A
-		// mass death with one flickering survivor must not get a fresh
-		// bound every tick that survivor happens to write.
-		if shape.Stale == 0 {
-			e.since.Store(0)
-			e.alerted.Store(false)
-		}
+	if !suspected && shape.Stale == 0 {
+		// True quiescence: nothing even reclaim-eligible remains. Reset,
+		// so the NEXT suspected episode gets its own full grace period
+		// rather than inheriting elapsed time from a stall that already
+		// ended.
+		e.since.Store(0)
+		e.alerted.Store(false)
 		return stallSuppressionDecision{}
 	}
+	if !suspected && e.since.Load() == 0 {
+		// Not suspected, and no episode is open to be sticky about --
+		// ordinary dead-worker staleness (or the reaper missed the stall
+		// entirely, see the recovery-tail doc above). Reclaim normally.
+		return stallSuppressionDecision{}
+	}
+	// Either genuinely suspected this tick, or sticky: an episode is
+	// already open and reclaim-eligible rows remain even though this
+	// particular tick no longer looks suspected (the recovery tail).
+	// Both share the same clock and bound -- a survivor's heartbeat must
+	// not buy the laggards a fresh window, and must not cut their existing
+	// one short either.
 	sinceNano := e.since.Load()
 	if sinceNano == 0 {
 		e.since.Store(now.UnixNano())
