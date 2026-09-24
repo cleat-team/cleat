@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -107,13 +108,11 @@ func TestBlobstore_S3(t *testing.T) {
 	RunPluginMigrations(t, db, plugin.DialectPostgres, loaded)
 
 	cfg, err := json.Marshal(map[string]any{
-		"backend":           "s3",
-		"bucket":            bucket,
-		"region":            "us-east-1",
-		"endpoint":          host,
-		"access_key_id":     accessKey,
-		"secret_access_key": secretKey,
-		"secure":            secure,
+		"backend":  "s3",
+		"bucket":   bucket,
+		"region":   "us-east-1",
+		"endpoint": host,
+		"secure":   secure,
 	})
 	if err != nil {
 		t.Fatalf("marshal blobstore config: %v", err)
@@ -122,6 +121,17 @@ func TestBlobstore_S3(t *testing.T) {
 		DB:      &engine.SQLDBAdapter{DB: db},
 		Dialect: plugin.DialectPostgres,
 		Config:  cfg,
+		// access_key_id/secret_access_key moved to deployment secrets under
+		// cleat#1992 part 1b -- see plugins/blobstore/backend.go's
+		// deploymentSecretsCredentialsProvider. Passing them in Config (as
+		// this test did before that conversion) now does nothing but log a
+		// WARN; blobstore/put failed here with "no deployment secret store
+		// configured" until this fake was wired in (IMPROVEMENT-PLAN
+		// 3.31x).
+		DeploymentSecrets: &fakeS3DeploymentSecrets{
+			accessKeyID:     accessKey,
+			secretAccessKey: secretKey,
+		},
 	}); err != nil {
 		t.Fatalf("blobstore Init with the s3 backend: %v", err)
 	}
@@ -243,5 +253,27 @@ func TestBlobstore_S3(t *testing.T) {
 	}
 	if !strings.HasPrefix(getOut.ContentType, "application/octet-stream") {
 		t.Errorf("get reported content type %q, want application/octet-stream", getOut.ContentType)
+	}
+}
+
+// fakeS3DeploymentSecrets is a plugin.DeploymentSecrets stand-in that
+// answers the two names blobstore's S3 backend reads
+// (deploymentSecretsCredentialsProvider, plugins/blobstore/backend.go) from
+// the CLEAT_TEST_S3_ACCESS_KEY/SECRET_KEY values this test already read,
+// rather than standing up a real deployment_secrets table and master key
+// for a harness test that already has its own throwaway schema.
+type fakeS3DeploymentSecrets struct {
+	accessKeyID     string
+	secretAccessKey string
+}
+
+func (f *fakeS3DeploymentSecrets) Get(ctx context.Context, name string) (string, error) {
+	switch name {
+	case "blobstore.access_key_id":
+		return f.accessKeyID, nil
+	case "blobstore.secret_access_key":
+		return f.secretAccessKey, nil
+	default:
+		return "", fmt.Errorf("fakeS3DeploymentSecrets: %q not set", name)
 	}
 }

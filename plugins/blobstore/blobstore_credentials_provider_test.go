@@ -97,8 +97,8 @@ func TestDeploymentSecretsCredentialsProvider_IsExpiredStartsTrue(t *testing.T) 
 
 // TestDeploymentSecretsCredentialsProvider_TTLRotation proves rotation
 // reaches minio-go's own credentials.Credentials cache, not just this
-// package's provider: two Get()s through the SAME *credentials.Credentials,
-// with the underlying secret changed and the TTL forced to have elapsed in
+// package's provider: two GetWithContext calls through the SAME
+// *credentials.Credentials, with the underlying secret changed and the TTL forced to have elapsed in
 // between, return two different Values. Forcing expiresAt directly rather
 // than sleeping deploymentSecretsCredentialsTTL -- a wall-clock wait in a
 // test is exactly what CLAUDE.md's "Is this result real?" section warns
@@ -108,7 +108,7 @@ func TestDeploymentSecretsCredentialsProvider_TTLRotation(t *testing.T) {
 	p := newDeploymentSecretsCredentialsProvider(secrets)
 	creds := credentials.New(p)
 
-	v1, err := creds.Get()
+	v1, err := creds.GetWithContext(nil)
 	if err != nil {
 		t.Fatalf("first Get: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestDeploymentSecretsCredentialsProvider_TTLRotation(t *testing.T) {
 	// Still within the TTL: the cache must NOT call Retrieve again, so
 	// changing the fake's answer must not yet be visible.
 	secrets.accessKeyID = "AKIANEW"
-	v2, err := creds.Get()
+	v2, err := creds.GetWithContext(nil)
 	if err != nil {
 		t.Fatalf("second Get (still cached): %v", err)
 	}
@@ -133,7 +133,7 @@ func TestDeploymentSecretsCredentialsProvider_TTLRotation(t *testing.T) {
 	p.expiresAt = time.Now().Add(-time.Second)
 	p.mu.Unlock()
 
-	v3, err := creds.Get()
+	v3, err := creds.GetWithContext(nil)
 	if err != nil {
 		t.Fatalf("third Get (post-TTL): %v", err)
 	}
@@ -145,15 +145,15 @@ func TestDeploymentSecretsCredentialsProvider_TTLRotation(t *testing.T) {
 // TestDeploymentSecretsCredentialsProvider_RetiredSecretFailsRatherThanFallingBack
 // is the coordinator's explicit requirement, proven through minio-go's own
 // wrapper: once the TTL elapses and the deployment secret has been retired
-// (Get now errors), credentials.Credentials.Get() must return that error --
-// never a stale cached Value and never a zero-value Value that minio-go
-// would sign as an empty (i.e. effectively anonymous) credential.
+// (Get now errors), credentials.Credentials.GetWithContext must return that
+// error -- never a stale cached Value and never a zero-value Value that
+// minio-go would sign as an empty (i.e. effectively anonymous) credential.
 func TestDeploymentSecretsCredentialsProvider_RetiredSecretFailsRatherThanFallingBack(t *testing.T) {
 	secrets := &fakeBlobstoreSecrets{accessKeyID: "AKIAOLD", secretAccessKey: "old-secret"}
 	p := newDeploymentSecretsCredentialsProvider(secrets)
 	creds := credentials.New(p)
 
-	if _, err := creds.Get(); err != nil {
+	if _, err := creds.GetWithContext(nil); err != nil {
 		t.Fatalf("first Get: %v", err)
 	}
 
@@ -162,7 +162,7 @@ func TestDeploymentSecretsCredentialsProvider_RetiredSecretFailsRatherThanFallin
 	p.mu.Unlock()
 	secrets.fail = true
 
-	if _, err := creds.Get(); err == nil {
+	if _, err := creds.GetWithContext(nil); err == nil {
 		t.Fatal("expected the retired secret's error to surface through credentials.Credentials.Get, got nil")
 	}
 }

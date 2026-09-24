@@ -102,10 +102,20 @@ plugin:
   remove `sendgrid_api_key` from `--plugin-config`.
 
 - `blobstore` WARNs the same way as `llm`/`slack-notify` -- naming both
-  `access_key_id` and `secret_access_key` if either is still present -- but
-  implements no boot check at all yet (see below). A leftover key pair here
-  has no effect regardless of `backend` or `use_iam_credentials`; the WARN
-  fires on the raw `--plugin-config` bytes before either is parsed.
+  `access_key_id` and `secret_access_key` if either is still present -- and
+  the WARN itself fires on the raw `--plugin-config` bytes before `backend`
+  or `use_iam_credentials` is even consulted, so it appears regardless of
+  either. **The boot refusal that follows is narrower than the WARN.** A
+  leftover key pair only makes `blobstore.access_key_id` and
+  `blobstore.secret_access_key` required at boot when `backend` is `"s3"`
+  and `use_iam_credentials` is not set -- the same shape as `slack-notify`'s
+  conditional above, gated on the config this plugin's `Init` has already
+  parsed rather than on the raw bytes. A leftover pair alongside the default
+  memory backend, or alongside `use_iam_credentials: true`, was already dead
+  before this conversion (neither path ever read it), so refusing to boot
+  over it would be a false positive with no matching upgrade hazard behind
+  it -- fix the WARN by removing the leftover fields either way, but only
+  the S3-without-IAM case blocks startup.
 
 **`blobstore`'s S3 client is built once at `Init`, not fetched per call like
 every other row in this table** — a `minio-go` `credentials.Provider`
@@ -120,10 +130,11 @@ env-var/instance-profile/task-role chain instead.
 
 `checkRequiredDeploymentSecrets` (below) consults `plugin.HasRequiredDeploymentSecrets`
 per plugin rather than a single fixed list — `email-notify` and `llm`
-implement it unconditionally, `slack-notify` and `scheduled-backup` implement
-it conditionally (see above), and `blobstore` does not implement it at all
-yet, which is a separate fact from whether a plugin is converted to read
-from this table.
+implement it unconditionally, and `slack-notify`, `scheduled-backup` and
+`blobstore` all implement it conditionally, gated on a leftover legacy field
+in `--plugin-config` (see above) — `blobstore`'s condition also checks
+`backend`/`use_iam_credentials`, which `slack-notify` and `scheduled-backup`
+have no equivalent of.
 
 ## Set up a master key, once
 
@@ -209,14 +220,18 @@ plugin serves, one at a time, with an error that does not say why.
 
 A plugin declares what it needs by implementing
 `plugin.HasRequiredDeploymentSecrets`; `email-notify` and `llm` do
-unconditionally, `slack-notify` and `scheduled-backup` conditionally (only
-when the legacy `slack_signing_secret`/`dsn` field is present in
-`--plugin-config` — see above). A plugin with no config section at all is
-not enabled, and this check never runs against it — the same
-`plugin.ErrNotConfigured` gate that already decides whether a plugin's
-ordinary `Init` runs. Neither `slack-notify` nor `scheduled-backup` has such
-a gate of its own (neither `Config` carries an enablement flag), so each is
-always "enabled" once loaded, and `RequiredDeploymentSecrets` is what
+unconditionally, `slack-notify`, `scheduled-backup` and `blobstore`
+conditionally — `slack-notify` only when the legacy `slack_signing_secret`
+field is present in `--plugin-config`, `scheduled-backup` only when the
+legacy `dsn` field is, `blobstore` only when a leftover `access_key_id`/
+`secret_access_key` pair is present AND `backend` is `"s3"` with
+`use_iam_credentials` unset (see above for all three). A plugin with no
+config section at all is not enabled, and this check never runs against it —
+the same `plugin.ErrNotConfigured` gate that already decides whether a
+plugin's ordinary `Init` runs. None of the three has such a gate of its own
+(none of their `Config` structs carries an enablement flag — `blobstore`
+defaults to the memory backend rather than refusing to start), so all three
+are always "enabled" once loaded, and `RequiredDeploymentSecrets` is what
 carries the conditional logic instead of `Init` refusing to run at all.
 
 ## What is not covered

@@ -55,12 +55,12 @@ type Plugin struct {
 // in backend.go, which fetches them per S3 request rather than caching them
 // here.
 type Config struct {
-	Backend           string `json:"backend"`                      // "s3" or "memory"; defaults to "memory"
-	Bucket            string `json:"bucket"`                       // S3 bucket name (for s3 backend)
-	Region            string `json:"region"`                       // AWS region (for s3 backend)
-	Endpoint          string `json:"endpoint,omitempty"`           // custom S3 endpoint (for MinIO/GCS)
-	Secure            bool   `json:"secure"`                       // use HTTPS (default true, set false for local MinIO)
-	MaxBlobSize       int64  `json:"max_blob_size"`                // max blob bytes; default 10 MB
+	Backend           string `json:"backend"`                       // "s3" or "memory"; defaults to "memory"
+	Bucket            string `json:"bucket"`                        // S3 bucket name (for s3 backend)
+	Region            string `json:"region"`                        // AWS region (for s3 backend)
+	Endpoint          string `json:"endpoint,omitempty"`            // custom S3 endpoint (for MinIO/GCS)
+	Secure            bool   `json:"secure"`                        // use HTTPS (default true, set false for local MinIO)
+	MaxBlobSize       int64  `json:"max_blob_size"`                 // max blob bytes; default 10 MB
 	UseIAMCredentials bool   `json:"use_iam_credentials,omitempty"` // see doc comment on newS3Backend in backend.go
 }
 
@@ -108,9 +108,14 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		if err := json.Unmarshal(env.Config, &legacy); err == nil &&
 			(legacy.AccessKeyID != "" || legacy.SecretAccessKey != "") {
 			p.logger.Warn("blobstore: access_key_id/secret_access_key in --plugin-config " +
-				"are no longer read (cleat#1992 part 1b); they have no effect. Use " +
-				"`cleatctl set-deployment-secret --name blobstore.access_key_id` and " +
-				"`--name blobstore.secret_access_key` instead.")
+				"are no longer read (cleat#1992 part 1b). For an s3 backend not using " +
+				"use_iam_credentials, this now makes blobstore.access_key_id and " +
+				"blobstore.secret_access_key required at boot -- see " +
+				"RequiredDeploymentSecrets. Run `cleatctl set-deployment-secret " +
+				"--name blobstore.access_key_id` and `--name blobstore.secret_access_key`, " +
+				"then remove access_key_id/secret_access_key from --plugin-config -- " +
+				"removing the keys is what stops this WARN and the boot requirement, not " +
+				"just setting the new secrets.")
 		}
 	}
 	if p.config.Backend == "" {
@@ -142,4 +147,35 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 // "blobstore.secret_access_key".
 func (p *Plugin) DeploymentSecretPrefix() string {
 	return "blobstore."
+}
+
+// RequiredDeploymentSecrets implements plugin.HasRequiredDeploymentSecrets.
+// Conditional, the same shape as slacknotify's and scheduledbackup's
+// (cleat#2172 GAP 2, owner decision 1A): a leftover access_key_id/
+// secret_access_key pair in --plugin-config is what makes BOTH
+// blobstore.access_key_id and blobstore.secret_access_key required at boot
+// -- not an unconditional requirement on every deployment that merely has
+// this plugin loaded (plugin.Discover loads every registered plugin
+// unconditionally -- see CLAUDE.md -- so an unconditional requirement here
+// would refuse to boot any worker that has never used the s3 backend at
+// all).
+//
+// Gated on p.config.Backend == "s3" && !p.config.UseIAMCredentials -- both
+// already parsed by Init before this runs, since checkRequiredDeploymentSecrets
+// (cmd/cleat-worker/setup.go) calls this only on an already-Init'd, healthy
+// plugin. A leftover key pair on a memory-backend deployment, or one that
+// has already opted into use_iam_credentials, is genuinely never read by
+// anything (newS3Backend's own doc comment explains the two credential
+// models are deliberately not chained), and refusing to boot over it would
+// be a false positive rather than catching a real upgrade hazard.
+func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
+	if p.config.Backend != "s3" || p.config.UseIAMCredentials {
+		return nil, nil
+	}
+	var legacy legacyBlobstoreConfig
+	if err := json.Unmarshal(config, &legacy); err == nil &&
+		(legacy.AccessKeyID != "" || legacy.SecretAccessKey != "") {
+		return []string{"blobstore.access_key_id", "blobstore.secret_access_key"}, nil
+	}
+	return nil, nil
 }

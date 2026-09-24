@@ -160,14 +160,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. See `docs/how-to/use-deployment-secrets.md`.
 
   **Who is affected:** any deployment running `blobstore` with `"backend":"s3"` and a static
-  `access_key_id`/`secret_access_key` in `--plugin-config`. Unlike `email-notify`/`llm`/
-  `slack-notify`, there is no boot-time check yet — an unmigrated deployment starts fine and every
-  S3 call then fails at request time until `blobstore.access_key_id`/`blobstore.secret_access_key`
-  are set with `cleatctl set-deployment-secret`. A leftover key pair in `--plugin-config` otherwise
-  does nothing and logs a WARN at boot naming the replacement commands. A deployment using IAM/
-  instance-profile credentials already (no static keys in `--plugin-config`) is unaffected only if
-  it also sets `"use_iam_credentials": true` — without it, the default credential source is now
-  the (unset) deployment secret store, not the IAM chain.
+  `access_key_id`/`secret_access_key` in `--plugin-config`. As with `slack-notify`, the worker now
+  refuses to start rather than boot and fail every S3 call later: a leftover key pair with
+  `"backend":"s3"` and no `"use_iam_credentials": true` makes
+  `blobstore.access_key_id`/`blobstore.secret_access_key` required at boot, the same fail-closed
+  check `email-notify`/`llm` already had. Set both with `cleatctl set-deployment-secret` before
+  upgrading such a deployment. A leftover key pair alongside the default memory backend, or
+  alongside `"use_iam_credentials": true`, was already unused before this conversion and does not
+  block startup — it still logs a WARN at boot naming the replacement commands, but is not treated
+  as an upgrade hazard. A deployment using IAM/instance-profile credentials already (no static keys
+  in `--plugin-config`) is unaffected only if it also sets `"use_iam_credentials": true` — without
+  it, the default credential source is now the deployment secret store, not the IAM chain.
 
 - **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
   (cleat#2046)

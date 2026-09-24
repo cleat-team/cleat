@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -896,6 +897,104 @@ func TestBlobstoreInitNoWarnWithoutLeftoverKeys(t *testing.T) {
 	}
 	if got := buf.String(); strings.Contains(got, "no longer read") {
 		t.Errorf("did not expect a leftover-key WARN with neither field in config, got: %q", got)
+	}
+}
+
+// TestBlobstoreRequiredDeploymentSecrets_NoLegacyKey is the "ordinary
+// deployment" case, mirroring slacknotify's and scheduledbackup's own pairs:
+// no legacy access_key_id/secret_access_key anywhere in --plugin-config must
+// not require blobstore.access_key_id/blobstore.secret_access_key, even on
+// an s3 backend -- a fresh s3 deployment that has always used deployment
+// secrets must still boot with none of this legacy WARN machinery firing.
+func TestBlobstoreRequiredDeploymentSecrets_NoLegacyKey(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"backend":"s3","bucket":"b","region":"us-east-1"}`)
+	if err := p.Init(context.Background(), &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: cfg,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("RequiredDeploymentSecrets(no legacy key) = %v, want none", names)
+	}
+}
+
+// TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_S3 is the upgrade
+// case that matters: an s3 backend, not using use_iam_credentials, whose
+// --plugin-config still carries access_key_id/secret_access_key from before
+// cleat#1992 part 1b -- proof this deployment was actually uploading blobs
+// to S3 before the upgrade. Without this, blobstore.access_key_id/
+// blobstore.secret_access_key being unset would let the worker boot and
+// then fail every blobstore/put and blobstore/get at request time.
+func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_S3(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"backend":"s3","bucket":"b","region":"us-east-1","access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`)
+	if err := p.Init(context.Background(), &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: cfg,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	want := []string{"blobstore.access_key_id", "blobstore.secret_access_key"}
+	if len(names) != len(want) || names[0] != want[0] || names[1] != want[1] {
+		t.Errorf("RequiredDeploymentSecrets(legacy key present, s3) = %v, want %v", names, want)
+	}
+}
+
+// TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_MemoryBackend is
+// the false-positive guard: a leftover key pair alongside the DEFAULT
+// (memory) backend must not require anything -- those keys were already
+// unused before this conversion (the memory backend never read them), so
+// refusing to boot over them would be a new failure mode with no matching
+// upgrade hazard behind it.
+func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_MemoryBackend(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`)
+	if err := p.Init(context.Background(), &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: cfg,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("RequiredDeploymentSecrets(legacy key present, memory backend) = %v, want none", names)
+	}
+}
+
+// TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_UseIAMCredentials
+// is the other false-positive guard: a leftover key pair alongside
+// use_iam_credentials must not require anything either -- that flag opts the
+// deployment out of the deployment-secrets table entirely, in favor of the
+// EnvAWS/IAM chain, so blobstore.access_key_id/blobstore.secret_access_key
+// are never read regardless of what --plugin-config still carries.
+func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_UseIAMCredentials(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"backend":"s3","bucket":"b","region":"us-east-1","use_iam_credentials":true,"access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`)
+	if err := p.Init(context.Background(), &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: cfg,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("RequiredDeploymentSecrets(legacy key present, use_iam_credentials) = %v, want none", names)
 	}
 }
 
