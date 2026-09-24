@@ -101,8 +101,8 @@ var jsonbContains = plugin.Query{
 	MSSQL:   `EXISTS (SELECT 1 FROM OPENJSON(i.tags) AS t1 INNER JOIN OPENJSON($1) AS t2 ON t1.[key] = t2.[key] AND t1.value = t2.value)`,
 }
 
-// staleWorkflowRefs deletes the references held by workflows that are no longer
-// in flight.
+// staleWorkflowRefs deletes the references held by workflows that are no
+// longer in flight, on the two dialects where one statement can say so.
 //
 // THE POSTGRES ARM DOES NOT READ workflow_instances DIRECTLY, and that is the
 // whole of cleat#1528. That table's policy is 001_schema.sql's inline
@@ -116,17 +116,22 @@ var jsonbContains = plugin.Query{
 // no arguments and returns ids, so the exemption is bounded by the body rather
 // than by what a caller asks for.
 //
-// MySQL and SQL Server keep the direct subquery: neither has row-level security
-// on workflow_instances, so neither ever had the problem, and mirroring the
-// function would mean maintaining it in three dialects to fix one.
+// MySQL keeps the direct subquery: it has no row-level security, so it never
+// had the problem.
+//
+// SQL SERVER HAS NO ARM HERE AT ALL, cleat#2125, and that is deliberate --
+// see sweepStaleWorkflowRefsMSSQL in background.go for why one statement
+// cannot express this on that dialect (dbo.fn_tenant_filter does not read
+// AcrossAllTenants's marker, and workflow_blob_refs itself carries no
+// tenant_id for a per-tenant loop to scope). This field is left absent
+// rather than set to something reached by a stale branch: plugin.Query.For
+// falls back to Default when MSSQL is empty, but sweepStaleWorkflowRefs
+// branches on the dialect before ever calling For, so Default is never
+// reached on that dialect either.
 var staleWorkflowRefs = plugin.Query{
 	Default: `DELETE FROM workflow_blob_refs
 WHERE workflow_id NOT IN (SELECT id FROM admin.in_flight_workflow_ids())`,
 	MySQL: `DELETE FROM workflow_blob_refs
-WHERE workflow_id NOT IN (
-	SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
-)`,
-	MSSQL: `DELETE FROM workflow_blob_refs
 WHERE workflow_id NOT IN (
 	SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
 )`,

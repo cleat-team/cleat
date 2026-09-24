@@ -71,6 +71,22 @@ with **no BLOCK predicates**, and MySQL has none. See
 `docs/reference/multi-tenancy.md`. C1–C5 are the layer that actually enforces
 the boundary on every dialect.
 
+### C15 — every `AllTenantIDs` per-tenant loop site is declared
+
+**Guard:** `TestEveryPerTenantLoopIsDeclared`
+(`plugin/a_per_tenant_loop_is_declared_test.go`)
+
+A per-tenant loop — `plugin.AllTenantIDs` plus `plugin.ForTenant` per id, the
+shape cleat#2125/#2141 introduced for SQL Server — must run on a context that
+carries no `AcrossAllTenants` marker, or `ForTenant` silently no-ops and every
+"per-tenant" statement runs under the bypass instead (see `plugin.IsCrossTenant`'s
+doc, `plugin/crosstenant.go`). Numbered after C14 because it was added later,
+not because it belongs outside tenant isolation — it is C2's counterpart for the
+loop shape rather than the single bypass call: every `plugin.AllTenantIDs` call
+site must appear in `perTenantLoopLedger`, checked bidirectionally the same way
+C2's ledger is — an undeclared site is a new, unreviewed loop; a stale ledger
+entry is a grant covering nothing.
+
 ---
 
 ## Storage and dialects

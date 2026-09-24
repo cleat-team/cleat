@@ -83,6 +83,29 @@ func AcrossAllTenants(ctx context.Context, reason string) context.Context {
 	return tenantctx.WithCrossTenant(ctx, reason)
 }
 
+// IsCrossTenant reports whether ctx already carries the AcrossAllTenants
+// marker.
+//
+// WHY THIS EXISTS. A per-tenant loop -- AllTenantIDs plus ForTenant per id,
+// the shape cleat#2125/#2141 introduced for SQL Server -- must run on an
+// UNMARKED context, never on the one Run() built for its own AcrossAllTenants
+// statements. beginTenantTx checks the cross-tenant bypass before it checks
+// for a tenant (see ForTenant's own doc), so ForTenant layered on top of an
+// already-marked ctx is a silent no-op: every "per-tenant" statement would in
+// fact run under the bypass, against every tenant, on every iteration. A
+// one-token slip in a caller -- passing ctx instead of baseCtx -- reintroduces
+// the exact bug #2125 fixed, and every existing test stays green, because a
+// test that builds its own baseCtx directly never exercises the mistake.
+//
+// Callers of a per-tenant loop should check this at the top and fail loudly
+// instead of letting ForTenant's no-op stand in for a real fence. See
+// plugins/jobqueue/background.go's sweepAbandonedJobsPerTenant and
+// plugins/blobstore/background.go's allInFlightWorkflowIDsMSSQL.
+func IsCrossTenant(ctx context.Context) bool {
+	_, ok := tenantctx.CrossTenant(ctx)
+	return ok
+}
+
 // ForTenant marks ctx as acting for one specific tenant, so that statements run
 // with it see that tenant's rows and no others.
 //

@@ -58,14 +58,27 @@ func (p *Plugin) runReaper(ctx context.Context) int {
 // dead-lettered by a path other than FinalizeWorkflowSegment) and no
 // ObserveFinalize write-back ever arrived to say what happened. cleat#1715.
 //
-// SAME THREE-DIALECT SHAPE AS plugins/blobstore/queries.go's staleWorkflowRefs,
-// reused rather than reinvented: admin.in_flight_workflow_ids() (migration
-// 073) on PostgreSQL, because workflow_instances there carries RLS that a
+// SAME SHAPE AS plugins/blobstore/queries.go's staleWorkflowRefs on the two
+// dialects that share its arm: admin.in_flight_workflow_ids() (migration 073)
+// on PostgreSQL, because workflow_instances there carries RLS that a
 // tenant-less background sweep cannot satisfy directly and that function is
 // the SECURITY DEFINER, no-argument, RLS-exempt escape hatch built for
-// exactly this. MySQL and SQL Server read workflow_instances directly --
-// neither has RLS on that table, so neither needed the function in the first
-// place.
+// exactly this. MySQL reads workflow_instances directly -- it has no RLS on
+// that table, so it never needed the function.
+//
+// SQL SERVER TAKES MYSQL'S SHAPE, NOT POSTGRES'S, cleat#2125 -- unlike
+// staleWorkflowRefs, not because no single statement can express it, but
+// because task_queue (unlike workflow_blob_refs) IS declared TenantScoped.
+// sweepAbandonedJobsPerTenant below loops this same statement once per
+// tenant instead of impersonating a bypass principal: task_queue's own
+// row-level security scopes the UPDATE, and dbo.fn_tenant_filter scopes the
+// subquery, to the SAME tenant each time round, so nothing here needs
+// gathering across tenants first the way blobstore's does -- and with a
+// tenant in SESSION_CONTEXT for every call, reading workflow_instances
+// directly is exactly as safe here as MySQL's arm already is, which has no
+// RLS to work around in the first place. This is not the mistake
+// staleWorkflowRefs's doc warns about: that one read under
+// AcrossAllTenants, which sets no tenant at all.
 //
 // Marked ABANDONED, not "failed" and not "completed" -- see plugin.go's
 // design note (cleat#1715's design decision) for why: this sweep has no
@@ -82,7 +95,7 @@ SET status = 'abandoned', completed_at = now()
 WHERE status = 'dispatched'
   AND run_id NOT IN (SELECT id FROM workflow_instances WHERE status IN ('ready', 'running'))`,
 	MSSQL: `UPDATE task_queue
-SET status = 'abandoned', completed_at = now()
+SET status = 'abandoned', completed_at = SYSUTCDATETIME()
 WHERE status = 'dispatched'
   AND run_id NOT IN (SELECT id FROM workflow_instances WHERE status IN ('ready', 'running'))`,
 }
@@ -96,8 +109,19 @@ WHERE status = 'dispatched'
 // without error" and "the reaper reaped anything" are different claims, and
 // only a caller that engineers a real abandoned row and checks the count
 // went to 1 can tell them apart. See background_test.go.
+//
+// ctx must carry NO AcrossAllTenants marker on SQL Server: this loops
+// plugin.ForTenant per tenant there, and ForTenant on top of an
+// already-cross-tenant ctx is a no-op (beginTenantTx checks the bypass
+// first). Run passes its unmarked base context here for exactly that
+// reason, even though every other call in this file gets the marked one.
 func (p *Plugin) sweepAbandonedJobs(ctx context.Context) int {
-	n, err := p.db.Exec(ctx, plugin.Rebind(abandonedJobsQuery.For(p.dialect), p.dialect))
+	if p.dialect == plugin.DialectMSSQL {
+		return p.sweepAbandonedJobsPerTenant(ctx)
+	}
+	across := plugin.AcrossAllTenants(ctx,
+		"jobqueue abandonment sweep: run_id visibility spans every tenant")
+	n, err := p.db.Exec(across, plugin.Rebind(abandonedJobsQuery.For(p.dialect), p.dialect))
 	if err != nil {
 		p.logger.Error("jobqueue: abandonment sweep failed",
 			"plugin", p.Info().Name,
@@ -106,6 +130,53 @@ func (p *Plugin) sweepAbandonedJobs(ctx context.Context) int {
 		return -1
 	}
 	return int(n)
+}
+
+// sweepAbandonedJobsPerTenant is SQL Server's half of cleat#2125. See
+// abandonedJobsQuery's doc for why a per-tenant loop is safe here in a way it
+// is not for blobstore's staleWorkflowRefs: task_queue is TenantScoped, so
+// looping the whole statement scopes both the UPDATE and its subquery to one
+// tenant at a time, with nothing left unscoped in between.
+//
+// ctx MUST NOT carry AcrossAllTenants's marker -- see plugin.IsCrossTenant's
+// doc for why a marked ctx makes every ForTenant below a silent no-op that
+// runs each "per-tenant" statement under the bypass instead, against every
+// tenant. Checked here rather than trusted, because the failure is a
+// one-token slip in a caller (ctx instead of baseCtx) that every test using a
+// correctly-built context would miss. cleat#2141,
+// TestSweepAbandonedJobsPerTenant_RejectsACrossTenantContext.
+func (p *Plugin) sweepAbandonedJobsPerTenant(ctx context.Context) int {
+	if plugin.IsCrossTenant(ctx) {
+		p.logger.Error("jobqueue: abandonment sweep: ctx is cross-tenant-marked; "+
+			"ForTenant on top of it would be a silent no-op and every tenant's "+
+			"statement would run under the bypass instead",
+			"plugin", p.Info().Name)
+		return -1
+	}
+	tenants, err := plugin.AllTenantIDs(ctx, p.db, p.dialect)
+	if err != nil {
+		p.logger.Error("jobqueue: abandonment sweep: list tenants failed",
+			"plugin", p.Info().Name, "error", err)
+		return -1
+	}
+	total := 0
+	for _, tid := range tenants {
+		id, perr := uuid.Parse(tid)
+		if perr != nil {
+			p.logger.Error("jobqueue: abandonment sweep: tenant id is not a UUID",
+				"plugin", p.Info().Name, "tenant_id", tid, "error", perr)
+			return -1
+		}
+		tctx := plugin.ForTenant(ctx, id)
+		n, err := p.db.Exec(tctx, plugin.Rebind(abandonedJobsQuery.For(p.dialect), p.dialect))
+		if err != nil {
+			p.logger.Error("jobqueue: abandonment sweep failed for tenant",
+				"plugin", p.Info().Name, "tenant_id", tid, "error", err)
+			return -1
+		}
+		total += int(n)
+	}
+	return total
 }
 
 // Run starts the background worker goroutine. It polls the task_queue for
@@ -118,6 +189,13 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return nil
 	}
 
+	// baseCtx carries no tenant marker at all -- kept for sweepAbandonedJobs,
+	// which on SQL Server (cleat#2125) layers plugin.ForTenant on top of it
+	// per tenant. beginTenantTx checks for a cross-tenant marker before it
+	// checks for a tenant, so ForTenant on top of the AcrossAllTenants-marked
+	// ctx below would be a no-op: the bypass wins.
+	baseCtx := ctx
+
 	// Mark the whole background loop cross-tenant. cleat#1278.
 	//
 	// task_queue became tenant-scoped in migration version 3, and that policy
@@ -129,10 +207,12 @@ func (p *Plugin) Run(ctx context.Context) error {
 	//
 	// Marked ONCE here rather than at the six call sites it covers, because
 	// every statement reachable from this function is cross-tenant for the
-	// same reason. The four handlers in routes.go are deliberately NOT marked:
-	// they run on r.Context(), which carries the request's tenant, and marking
-	// them would silently widen a per-tenant read to every tenant -- the exact
-	// class of answer this mechanism exists to make impossible.
+	// same reason -- except sweepAbandonedJobs's SQL Server arm, which takes
+	// baseCtx instead and marks (or scopes) its own statements itself. The
+	// four handlers in routes.go are deliberately NOT marked: they run on
+	// r.Context(), which carries the request's tenant, and marking them would
+	// silently widen a per-tenant read to every tenant -- the exact class of
+	// answer this mechanism exists to make impossible.
 	ctx = plugin.AcrossAllTenants(ctx,
 		"jobqueue background worker: the poller and the stuck-job reaper both operate on every tenant's queue")
 
@@ -155,7 +235,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 	// Same ticker, a second sweep. cleat#1715 asked for the abandonment
 	// sweep to extend the reaper rather than add a goroutine -- this is
 	// that: no new ticker, no new mechanism, one more statement per cycle.
-	if n := p.sweepAbandonedJobs(ctx); n >= 0 {
+	if n := p.sweepAbandonedJobs(baseCtx); n >= 0 {
 		p.logger.Info("jobqueue: initial abandonment sweep completed",
 			"plugin", p.Info().Name,
 			"jobs_abandoned", n,
@@ -195,7 +275,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 					"jobs_reset", n,
 				)
 			}
-			if n := p.sweepAbandonedJobs(ctx); n >= 0 {
+			if n := p.sweepAbandonedJobs(baseCtx); n >= 0 {
 				p.logger.Info("jobqueue: abandonment sweep completed",
 					"plugin", p.Info().Name,
 					"duration_ms", time.Since(start).Milliseconds(),

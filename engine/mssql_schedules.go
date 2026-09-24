@@ -1202,8 +1202,3 @@ func (s *MSSQLStore) ClaimDueSchedule(ctx context.Context, name string, expected
 	}
 	return n == 1, nil
 }
-
-// The two values admin.rls_predicate_form can hold. They are spelled here and
-// in migrations/mssql/075 and migrations/mssql/optional/cross_tenant_claim.sql,
-// and the table's own CHECK constraint refuses anything else -- so a typo in a
-// migration fails at apply time rather than reading as "not admin" here.

@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/cleat-team/cleat/migration"
 )
 
 const (
@@ -42,6 +44,20 @@ const (
 var (
 	mssqlAdminMu    sync.Mutex
 	mssqlAdminPools = map[string]*sql.DB{}
+	// mssqlAdminRefs counts live callers of MSSQLAdminDB per DSN. cleat#2125:
+	// applyMSSQLCrossTenantOptIn flips the WHOLE DATABASE's predicate form
+	// from 'plain' to 'admin', and nothing used to flip it back -- so the
+	// first test in a package (or a whole `go test` process) to call
+	// MSSQLAdminDB left every later test, in every later package sharing the
+	// same CLEAT_TEST_MSSQL, running against a predicate no default deployment
+	// installs. Refcounted rather than restored on the first Cleanup: several
+	// tests (including parallel ones) can hold the admin pool at once, and
+	// restoring while any of them is still mid-test would pull the form out
+	// from under it. Only the caller whose Cleanup drops the count to zero
+	// restores 'plain' and evicts the cached pool, so the next caller
+	// re-establishes 'admin' from scratch rather than reusing a pool that
+	// authenticates fine but now grants nothing (cleat#1541's failure mode).
+	mssqlAdminRefs = map[string]int{}
 )
 
 // mssqlHasSecurityPolicies reports whether this database enforces RLS at all.
@@ -77,6 +93,8 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 	mssqlAdminMu.Lock()
 	defer mssqlAdminMu.Unlock()
 	if pool, ok := mssqlAdminPools[baseDSN]; ok {
+		mssqlAdminRefs[baseDSN]++
+		t.Cleanup(func() { mssqlReleaseAdminDB(t, baseDSN) })
 		return pool
 	}
 
@@ -138,7 +156,88 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 	}
 
 	mssqlAdminPools[baseDSN] = pool
+	mssqlAdminRefs[baseDSN]++
+	t.Cleanup(func() { mssqlReleaseAdminDB(t, baseDSN) })
 	return pool
+}
+
+// mssqlReleaseAdminDB is the Cleanup counterpart of every MSSQLAdminDB call
+// that flipped or reused the admin predicate form. When the count for baseDSN
+// reaches zero, no live caller still needs 'admin', so it restores 'plain'
+// (migration 075 is idempotent -- see restoreMSSQLPlainPredicate) and evicts
+// the cached pool, so the next MSSQLAdminDB call re-provisions and
+// re-verifies rather than handing back a pool that now authenticates into a
+// predicate it never checked.
+//
+// Takes baseDSN only, not the caller's plain db -- see
+// restoreMSSQLPlainPredicate's own comment for why db cannot be used here:
+// every StoreBackend.Setup in this package hands back a teardown the test
+// body defers, and that defer closes db before this Cleanup ever runs.
+func mssqlReleaseAdminDB(t *testing.T, baseDSN string) {
+	t.Helper()
+	mssqlAdminMu.Lock()
+	defer mssqlAdminMu.Unlock()
+
+	mssqlAdminRefs[baseDSN]--
+	if mssqlAdminRefs[baseDSN] > 0 {
+		return
+	}
+	delete(mssqlAdminRefs, baseDSN)
+
+	pool, ok := mssqlAdminPools[baseDSN]
+	if !ok {
+		// Already restored and evicted by a concurrent last-releaser, or this
+		// DSN's database has no security policies (MSSQLAdminDB returned db
+		// unchanged and never incremented the refcount in the first place, in
+		// which case this function is never registered as a Cleanup at all).
+		return
+	}
+	delete(mssqlAdminPools, baseDSN)
+
+	restoreMSSQLPlainPredicate(t, baseDSN)
+	if err := pool.Close(); err != nil {
+		t.Logf("closing the administrative SQL Server pool: %v", err)
+	}
+}
+
+// restoreMSSQLPlainPredicate re-applies
+// migrations/mssql/075_the_admin_bypass_is_opt_in.sql, which is idempotent
+// and restores exactly what a real, fully-migrated, not-opted-in deployment
+// has -- migration.Runner never re-runs an already-applied file, so this
+// helper is the only path back to 075's form once a test has opted in.
+//
+// cleat#2125 briefly pointed this at a since-deleted migration 102 instead,
+// which carried a cleat_dispatcher exemption on the same predicate. That
+// design (an OR-disjunct added to dbo.fn_tenant_filter) was dropped after
+// cleat-review measured it turning index seeks into scans on every table
+// sharing the predicate, not just workflow_instances -- see
+// plugins/blobstore/background.go's sweepStaleWorkflowRefsMSSQL for the
+// per-tenant replacement. 075 was never touched by that migration and never
+// needed to be.
+//
+// Takes baseDSN, not the caller's plain db, and opens its OWN connection --
+// store_backends_test.go's mssqlRowDisappearanceReporter already documents
+// exactly why, for the identical shape of bug, one comment above where this
+// function is called from: "the test's `defer teardown()` closes db first"
+// runs BEFORE any t.Cleanup callback, defers in a test body being ordinary
+// Go defers that fire as the test function returns, ahead of the testing
+// package's own Cleanup machinery. Every StoreBackend.Setup in this package
+// returns exactly that shape -- teardown calls db.Close() directly, and the
+// test body says `defer teardown()` -- so by the time THIS function's own
+// t.Cleanup fires, db is already closed and db.Begin() fails with "sql:
+// database is closed" (measured: every registeredBackends-driven mssql test
+// in the package failed this way the first time this used db instead).
+func restoreMSSQLPlainPredicate(t *testing.T, baseDSN string) {
+	t.Helper()
+	restoreDB, err := sql.Open("sqlserver", baseDSN)
+	if err != nil {
+		t.Fatalf("open a connection to restore the plain predicate: %v", err)
+	}
+	defer restoreDB.Close()
+
+	path := filepath.Join(repoRootForMSSQLTestutil(t), "migrations", "mssql",
+		"075_the_admin_bypass_is_opt_in.sql")
+	execMSSQLBatchFile(t, restoreDB, path)
 }
 
 // AdminDB returns the handle a test should use when it needs to see or change
@@ -260,21 +359,67 @@ func isMSSQLAlreadyExists(err error) bool {
 // pool per DSN and calls this before provisioning.
 func applyMSSQLCrossTenantOptIn(t *testing.T, db *sql.DB) {
 	t.Helper()
-
 	path := filepath.Join(repoRootForMSSQLTestutil(t), "migrations", "mssql", "optional", "cross_tenant_claim.sql")
+	execMSSQLBatchFile(t, db, path)
+}
+
+// execMSSQLBatchFile runs a .sql file's GO-separated batches over db, in
+// order. Shared by applyMSSQLCrossTenantOptIn and restoreMSSQLPlainPredicate,
+// which switch dbo.fn_tenant_filter between its two forms.
+//
+// Uses migration.SplitMSSQL -- the same splitter migration.Runner applies to
+// every shipped migration -- rather than a bare strings.Split(raw, "\nGO\n").
+// That simpler form is what this function used until cleat#2125: it requires
+// an exact "\nGO\n" and 075_the_admin_bypass_is_opt_in.sql's GO lines carry no
+// guarantee of that exact spacing, so a batch boundary was missed and the
+// #cleat_bound_policies temp table 075 creates in one batch and reads in a
+// later one came apart into two separate batches sent as one -- "Invalid
+// object name '#cleat_bound_policies'", the temp table having gone out of
+// scope with the batch that never actually ended where this function thought
+// it did. migration.SplitMSSQL matches GO case-insensitively and tolerates
+// trailing whitespace, which is what the real migration Runner has always
+// required this exact file to survive.
+func execMSSQLBatchFile(t *testing.T, db *sql.DB, path string) {
+	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read the cross-tenant opt-in migration: %v", err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 
-	// GO is a client directive, not T-SQL; database/sql rejects it.
-	for _, batch := range strings.Split(string(raw), "\nGO\n") {
+	// A single *sql.Tx, not db.Exec in a loop -- #cleat_bound_policies (this
+	// file's own #temp table, and cross_tenant_claim.sql's) is SESSION-scoped,
+	// and database/sql's pool does not guarantee two Exec calls on the plain
+	// *sql.DB land on the same underlying connection. migration.Runner pins
+	// one connection per file for exactly this reason (see its own comment on
+	// applyMigration, and 075's header: "The captured policy set survives the
+	// batch boundary because it is a #temp table: those live for the session,
+	// and migration.Runner.applyMigration runs every batch of a file on one
+	// connection inside one transaction"). This function used to loop
+	// db.Exec() directly and got away with it only because an otherwise-idle
+	// pool tends to hand back its one most-recently-released connection --
+	// not a guarantee, and it broke the first time this helper ran 075 from a
+	// pool that already had more than one connection open (cleat#2125): batch
+	// 1 created and populated the temp table on one connection, a later batch
+	// reading it landed on another, and SQL Server reported "Invalid object
+	// name '#cleat_bound_policies'" for a table that very much existed --
+	// just not on the connection asking.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin transaction for %s: %v", path, err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	for _, batch := range migration.SplitMSSQL(string(raw)) {
 		if strings.TrimSpace(batch) == "" {
 			continue
 		}
-		if _, err := db.Exec(batch); err != nil {
-			t.Fatalf("applying the cross-tenant opt-in: %v", err)
+		if _, err := tx.Exec(batch); err != nil {
+			t.Fatalf("applying %s: %v", path, err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit %s: %v", path, err)
 	}
 }
 
