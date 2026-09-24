@@ -303,8 +303,21 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 	// rows2 is fully drained before the reset is issued, which is required
 	// (see the comment above the old inline placement this replaced) to
 	// avoid deadlocking the connection against its own unread response.
+	//
+	// THIS DEFER CANNOT BE THE ONLY RESET, though (cleat#2148). Two of this
+	// function's exits end tx explicitly before returning -- the no-rows
+	// tx.Rollback() below, and finishClaim's tx.Commit() -- so by the time
+	// this defer runs on those two paths, tx is already finished and
+	// ExecContext fails with sql.ErrTxDone. That is what "every claim tick
+	// that reaches Step 4" was logging as an Error: not a real failure, a
+	// reset arriving after its own transaction. resetLockTimeoutMSSQL is
+	// called explicitly on both of those paths, while tx is still open, and
+	// this defer stays as the safety net for every OTHER exit (the scan
+	// error, a cancelled ctx, anything added later) -- so ErrTxDone here now
+	// means "already reset by one of the explicit calls", not a bug, and is
+	// not logged as one.
 	defer func() {
-		if _, resetErr := tx.ExecContext(ctx, "SET LOCK_TIMEOUT -1"); resetErr != nil {
+		if resetErr := resetLockTimeoutMSSQL(ctx, tx); resetErr != nil && !errors.Is(resetErr, sql.ErrTxDone) {
 			s.log().Error("claim: failed to reset LOCK_TIMEOUT on a pooled connection",
 				"error", resetErr, "worker_id", workerID)
 		}
@@ -426,10 +439,32 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 	}
 
 	if len(wfs) == 0 {
+		// Explicit, not left to the defer above: tx.Rollback() ends the
+		// transaction on this line, and the deferred reset would run AFTER
+		// it, on a transaction that is already done (cleat#2148).
+		if resetErr := resetLockTimeoutMSSQL(ctx, tx); resetErr != nil {
+			s.log().Error("claim: failed to reset LOCK_TIMEOUT on a pooled connection",
+				"error", resetErr, "worker_id", workerID)
+		}
 		tx.Rollback()
 		return nil, nil
 	}
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
+}
+
+// resetLockTimeoutMSSQL clears the per-connection LOCK_TIMEOUT
+// claimWorkflowsOnce sets for its Step 4 UPDATE (cleat#1963). LOCK_TIMEOUT is
+// session state, not transaction state -- it outlives Commit and Rollback
+// alike -- so it must be issued on tx WHILE tx IS STILL OPEN, before
+// whichever of Commit or Rollback ends it. A call after that point fails
+// with sql.ErrTxDone, which is exactly the bug this function exists to make
+// impossible to reintroduce by accident: every caller either issues this
+// before ending tx (claimWorkflowsOnce's no-rows path, finishClaim before
+// its Commit) or relies on the deferred fallback in claimWorkflowsOnce,
+// which only reaches an open tx by construction. cleat#2148.
+func resetLockTimeoutMSSQL(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, "SET LOCK_TIMEOUT -1")
+	return err
 }
 
 func (s *MSSQLStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, cands []claimCandidate) (map[string]registeredQueueLimits, error) {
@@ -1816,6 +1851,16 @@ func (s *MSSQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkfl
 // enforceClaimLimit in claim_limit.go for why.
 func (s *MSSQLStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID string, limit int, wfs []*WorkflowInstance) ([]*WorkflowInstance, error) {
 	keep, excess := enforceClaimLimit(ctx, s.log(), "mssql", workerID, limit, wfs)
+	// Before Commit, not after: LOCK_TIMEOUT is session state that outlives
+	// the transaction, and a reset issued once tx is committed fails with
+	// sql.ErrTxDone (cleat#2148). Both of finishClaim's callers reach here
+	// with tx still open; claimStickyWorkflowsOnce never sets LOCK_TIMEOUT in
+	// the first place, so this is a harmless no-op on that path, not a
+	// second dialect-specific case to reason about.
+	if resetErr := resetLockTimeoutMSSQL(ctx, tx); resetErr != nil && !errors.Is(resetErr, sql.ErrTxDone) {
+		s.log().Error("claim: failed to reset LOCK_TIMEOUT on a pooled connection",
+			"error", resetErr, "worker_id", workerID)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
