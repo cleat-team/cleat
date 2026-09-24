@@ -188,7 +188,7 @@ func TestMSSQLStore_WithReadRedactionDisabled(t *testing.T) {
 func TestMSSQLStore_WithEncryption(t *testing.T) {
 	store := NewMSSQLStore(nil)
 
-	enc := &PayloadEncryption{key: make([]byte, 32)}
+	enc := &PayloadEncryption{}
 	encrypted := store.WithEncryption(enc, true)
 
 	if encrypted.encryption != enc {
