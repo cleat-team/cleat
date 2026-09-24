@@ -200,7 +200,9 @@ def verify_export():
         verify-export [--require-full] [--expect-head SEQ:HASH] [--expect-floor SEQ:HASH]
                       [--expect-after SEQ:HASH] [--expect-unchained N]
 
-    Exit status: 0 verified, 1 a break, 2 incomplete, unreadable, or a contradictory command line.
+    Exit status: 0 verified, 1 a break, 2 could not establish it: an incomplete or unreadable stream, a
+    contradictory command line, or INCONCLUSIVE (a head/floor anchor was given and none matched a record
+    in the file).
 
     WHAT THE FILE PROVES BY ITSELF. Every chained event hashes to its own `hash` from its own
     fields and `prev_hash`; event ids are unique; chained `seq` values strictly increase and
@@ -230,7 +232,8 @@ def verify_export():
       --expect-after S:H     kind resumed with after_seq == S; the first chained event is seq
                              S+1 linking to hash H (the last record of the part you already
                              hold, which is what makes the join checkable)
-      --expect-unchained N   exactly N unchained events. Kind full, or resumed with --expect-after
+      --expect-unchained N   at most N unchained events (none are ever added; retention removes old
+                             ones, so fewer is a NOTE). Kind full, or resumed with --expect-after
                              (then N=0). Record N from the checkpoint's `unchained` when you record
                              the head and floor, NOT from `GET /audit/verify` later: retention removes
                              old unchained rows, so today's count is not an earlier export's
@@ -244,6 +247,15 @@ def verify_export():
     it) is RETIRED: it verified nothing, a NOTE says so, and it is not a failure. A range, which
     has no such rules, is refused as DOWNGRADED whenever an anchor is given. The join of a resumed
     export is checked directly: nothing in the file says what precedes its first record.
+
+    An anchor is VERIFIED only by a record PRESENT in the file with the anchored hash. At least one
+    --expect-head/--expect-floor anchor must be, or the run is INCONCLUSIVE (exit 2), because retirement
+    and the export's start are decided by the checkpoint, which whoever edits the file also chooses:
+    a cut, or a forged floor, would otherwise turn every anchor into a note. A retired anchor
+    alongside a verified one is exit 0 with a NOTE: that is every honest sweep. Refresh the head
+    anchor more often than retention_days. A prefix cut BELOW the highest verified anchor is
+    byte-identical to an honest sweep offline; compare the checkpoint's floor_seq/floor_hash with
+    the database's (`cleatctl audit verify --json`) to tell them apart.
 
     THE CHAIN IS UNKEYED. Anyone who can edit the file can recompute every hash, so deleting or
     editing a record and re-hashing what follows gives a file that is consistent with itself. Only
@@ -368,8 +380,9 @@ def verify_export():
             "starts in the chained part and so has none" % (unchained, after))
     if cp.get("unchained") is not None and int(cp["unchained"]) != unchained:
         brk("UNCHAINED COUNT: the checkpoint says %s unchained event(s) and the file has %d" % (cp["unchained"], unchained))
-    if expect_unchained is not None and unchained != expect_unchained:
-        brk("UNCHAINED COUNT: the export has %d unchained event(s), the caller expected %d" % (unchained, expect_unchained))
+    if expect_unchained is not None and unchained > expect_unchained:
+        brk("UNCHAINED COUNT: the export has %d unchained event(s), the caller recorded at most %d. None are "
+            "ever added once the chain exists, so this one was" % (unchained, expect_unchained))
     head_seq, floor_seq = int(cp["head_seq"]), int(cp["floor_seq"])
 
     prev = None
@@ -419,10 +432,11 @@ def verify_export():
     by_seq = {seq: h for seq, _, h in chained}
     start_seq = floor_seq if after is None else after   # the last seq BEFORE this export's records
     bound_to = None                                     # the highest seq an anchor verified
+    verified = False                                    # a head/floor anchor matched a RECORD in this file
     retired = []
 
     def passes_through(flag, eseq, ehash):
-        nonlocal bound_to
+        nonlocal bound_to, verified
         if eseq > head_seq:
             brk("ANCHOR MISMATCH: %s is seq %d, and this export's head is seq %d: the chain was cut back, or "
                 "this export is older than the anchor" % (flag, eseq, head_seq))
@@ -432,6 +446,7 @@ def verify_export():
                     "below it were changed" % (eseq, by_seq[eseq][:12], flag, ehash[:12]))
             else:
                 bound_to = max(bound_to or 0, eseq)
+                verified = True
         elif eseq == start_seq:
             have_hash = cp["floor_hash"] if after is None else expect.get("--expect-after", (None, None))[1]
             if have_hash is None:
@@ -439,8 +454,9 @@ def verify_export():
             elif have_hash != ehash:
                 brk("ANCHOR MISMATCH: %s says seq %d is %s, and this export starts after it with hash %s" % (
                     flag, eseq, ehash[:12], have_hash[:12]))
-            else:
-                bound_to = max(bound_to or 0, eseq)
+            # A match here does NOT count as verification: it compares the anchor with the
+            # CHECKPOINT's own floor hash, which binds the first record's link and no record's content,
+            # and whoever edits the file chooses the checkpoint's floor.
         elif eseq < start_seq:
             retired.append((flag, eseq, "this export starts after seq %d (retention has removed it, or it is in "
                                         "the part you already hold)" % start_seq))
@@ -463,8 +479,11 @@ def verify_export():
     # NOTEs say what the run did NOT establish, so an exit 0 is not read as more than it is.
     if unchained:
         print("NOTE: %d unchained event(s): %s Their CONTENTS are covered by nothing (no hash), whatever is passed." % (
-            unchained, "their number was checked." if expect_unchained is not None else
+            unchained, "their number was checked against the most the caller recorded." if expect_unchained is not None else
             "their number was not checked (pass --expect-unchained N, recorded from an export's checkpoint)."))
+    if expect_unchained is not None and unchained < expect_unchained:
+        print("NOTE: %d unchained event(s) present, %d recorded: the missing ones cannot be told apart from a "
+              "retention sweep, which removes old unchained rows." % (unchained, expect_unchained))
     rewrite = ("The chain is unkeyed: whoever can edit the file can rewrite and re-hash every record above "
                "the highest anchored seq, and only an anchor binds the records at or below it.")
     for flag, eseq, why in retired:
@@ -488,6 +507,16 @@ def verify_export():
         if want_kind == "a full export" and "--expect-floor" not in expect:
             print("NOTE: the start is not anchored: pass --expect-floor SEQ:HASH to check it for as long as the floor has "
                   "not moved. A cut of the first records is otherwise indistinguishable from a retention sweep.")
+    content_anchors = [f for f in ("--expect-floor", "--expect-head") if f in expect]
+    if content_anchors and not verified and not breaks:
+        print("INCONCLUSIVE: %s given, and no anchor matched a record in this file: each was above the head "
+              "(no), at the export's start (which compares the checkpoint's own floor hash, not a record), or "
+              "below it (retired). Nothing but the unsigned checkpoint binds any record. This is a failure of "
+              "the check to establish anything, not a finding about the file: record a newer head anchor." % (
+                  " and ".join(content_anchors) + (" was" if len(content_anchors) == 1 else " were")))
+        print("%d events (%d chained checked, %d unchained not covered), %s, %d breaks, INCONCLUSIVE" % (
+            events, len(chained), unchained, have, breaks))
+        sys.exit(2)
     print("%d events (%d chained checked, %d unchained not covered), %s, %d breaks" % (events, len(chained), unchained, have, breaks))
     sys.exit(1 if breaks else 0)
 

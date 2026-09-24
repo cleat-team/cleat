@@ -7,7 +7,12 @@ anchor recorded elsewhere disagrees with it. chain_export_matrix_test.go uses th
 case in the table using the reference implementation's OWN row_hash, so the forger and the
 verifier cannot share a mistake with the Go code.
 
-    audit_chain_forge.py [--drop SEQ] [--edit-path SEQ TEXT] [--renumber] < export.jsonl
+    audit_chain_forge.py [--drop SEQ] [--edit-path SEQ TEXT] [--renumber]
+                         [--cut-below SEQ [--floor-hash HEX]] < export.jsonl
+
+--cut-below SEQ drops every chained record at or below SEQ and moves the checkpoint's floor to SEQ
+(with the dropped record's hash, or --floor-hash if given): what an editor does to make a cut look
+like a retention sweep. The first remaining record's prev_hash follows the floor hash.
 
 Reads an export from stdin and writes the forged one to stdout. After the edits it recomputes
 `prev_hash` and `hash` for every chained record in order (a record whose predecessor in the file
@@ -44,6 +49,8 @@ def main():
     drop = None
     edit = None
     renumber = False
+    cut_below = None
+    floor_hash = None
     argv = sys.argv[1:]
     while argv:
         flag = argv.pop(0)
@@ -53,6 +60,10 @@ def main():
             edit = (int(argv.pop(0)), argv.pop(0))
         elif flag == "--renumber":
             renumber = True
+        elif flag == "--cut-below":
+            cut_below = int(argv.pop(0))
+        elif flag == "--floor-hash":
+            floor_hash = argv.pop(0)
         else:
             sys.exit("unknown argument %r" % flag)
 
@@ -66,6 +77,17 @@ def main():
         if edit and r["seq"] is not None and int(r["seq"]) == edit[0]:
             r["path"] = edit[1]
         kept.append(r)
+
+    if cut_below is not None:
+        dropped = [r for r in kept if r["seq"] is not None and int(r["seq"]) <= cut_below]
+        kept = [r for r in kept if r["seq"] is None or int(r["seq"]) > cut_below]
+        at = [r for r in dropped if int(r["seq"]) == cut_below]
+        cp["floor_seq"] = _Num(str(cut_below))
+        cp["floor_hash"] = floor_hash or (at[0]["hash"] if at else cp["floor_hash"])
+        for r in kept:
+            if r["seq"] is not None:
+                r["prev_hash"] = cp["floor_hash"]
+                break
 
     prev_seq, prev_hash, next_seq = None, None, None
     for r in kept:

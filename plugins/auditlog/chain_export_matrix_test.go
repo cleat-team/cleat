@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
 
@@ -39,6 +40,7 @@ const (
 	mME  = "MISSING END"
 	mMS  = "MISSING START"
 	mJM  = "JOIN MISMATCH"
+	mIN  = "INCONCLUSIVE"
 	mNA  = "n/a"
 )
 
@@ -65,13 +67,14 @@ var matrixTampers = []string{
 }
 
 // matrixWant[kind][option][tamper]. Read a row as "with these options, what does each tamper do".
+// INCONCLUSIVE is exit 2: a head or floor anchor was given and none matched a record in the file.
 var matrixWant = map[string][11][13]string{
 	"full": {
 		//               none  del-first del-mid del-last relabel fake-tail fake-front fake-mid del-last* del-first* rewrite edit+rehash fake-front*
 		/* (none)     */ {mOK, mOK, mGAP, mOK, mOK, mUA, mOK, mUA, mME, mMS, mOK, mOK, mUC},
 		/* req-full   */ {mOK, mOK, mGAP, mOK, mDG, mUA, mOK, mUA, mME, mMS, mOK, mOK, mUC},
 		/* head       */ {mOK, mOK, mGAP, mAM, mDG, mUA, mOK, mUA, mME, mMS, mAM, mAM, mUC},
-		/* floor      */ {mOK, mOK, mGAP, mOK, mDG, mUA, mOK, mUA, mME, mMS, mOK, mOK, mUC},
+		/* floor      */ {mIN, mIN, mGAP, mIN, mDG, mUA, mIN, mUA, mME, mMS, mIN, mIN, mUC},
 		/* after      */ {mDG, mDG, mGAP, mDG, mDG, mUA, mDG, mUA, mME, mMS, mDG, mDG, mUC},
 		/* head+floor */ {mOK, mOK, mGAP, mAM, mDG, mUA, mOK, mUA, mME, mMS, mAM, mAM, mUC},
 		/* head+after */ {mDG, mDG, mGAP, mDG, mDG, mUA, mDG, mUA, mME, mMS, mDG, mDG, mUC},
@@ -287,8 +290,11 @@ func TestTheOfflineVerifierMatrix(t *testing.T) {
 					want := matrixWant[kind][oi][ti]
 					got, out := runVerifyExport(t, py, stream, opts[oi]...)
 					wantCode := 1
-					if want == mOK {
+					switch want {
+					case mOK:
 						wantCode = 0
+					case mIN:
+						wantCode = 2
 					}
 					text := want
 					if want == mOK {
@@ -334,8 +340,8 @@ func TestTheOfflineVerifierMatrix(t *testing.T) {
 		if _, out := runVerifyExport(t, py, full); !strings.Contains(out, "the checkpoint is unsigned") {
 			t.Errorf("a whole export with no options must say its ends are the checkpoint's own:\n%s", out)
 		}
-		if _, out := runVerifyExport(t, py, full, "--expect-floor", floor); !strings.Contains(out, "record(s) above seq 0 are bound only by the checkpoint") {
-			t.Errorf("--expect-floor alone must say every record is bound only by the checkpoint:\n%s", out)
+		if _, out := runVerifyExport(t, py, full, "--expect-floor", floor); !strings.Contains(out, "no anchor verified any record") {
+			t.Errorf("--expect-floor alone must say no record was verified:\n%s", out)
 		}
 		if _, out := runVerifyExport(t, py, full, "--expect-head", head); !strings.Contains(out, "the start is not anchored") {
 			t.Errorf("--expect-head alone must say the start is not anchored:\n%s", out)
@@ -480,18 +486,26 @@ func TestAnAnchorRecordedEarlierStillVerifiesAnHonestLaterExport(t *testing.T) {
 		// The chain grows by 7 rows: the anchors are now 7 rows behind.
 		e.record(p, tenant, 7)
 		grown, _, hg := export()
-		for name, args := range map[string][]string{
-			"the head recorded 7 rows ago":  {"--expect-head", head0},
-			"a floor recorded before then":  {"--expect-floor", floor0},
-			"a mid-chain anchor":            {"--expect-head", mid0},
-			"the head and the floor":        {"--expect-head", head0, "--expect-floor", floor0},
-			"the head, floor and unchained": {"--expect-head", head0, "--expect-floor", floor0, "--expect-unchained", "0"},
+		for name, tc := range map[string]struct {
+			args []string
+			code int
+		}{
+			"the head recorded 7 rows ago":  {[]string{"--expect-head", head0}, 0},
+			"a mid-chain anchor":            {[]string{"--expect-head", mid0}, 0},
+			"the head and the floor":        {[]string{"--expect-head", head0, "--expect-floor", floor0}, 0},
+			"the head, floor and unchained": {[]string{"--expect-head", head0, "--expect-floor", floor0, "--expect-unchained", "0"}, 0},
+			// The floor anchor alone compares the checkpoint's own floor hash and no record, and
+			// the checkpoint is whatever the editor of the file says: it verifies nothing.
+			"a floor recorded before then, alone": {[]string{"--expect-floor", floor0}, 2},
 		} {
-			code, out := runVerifyExport(t, py, grown, args...)
-			if code != 0 {
-				t.Errorf("%s vs an honest export after growth: exit %d, want 0\n%s", name, code, out)
+			code, out := runVerifyExport(t, py, grown, tc.args...)
+			if code != tc.code {
+				t.Errorf("%s vs an honest export after growth: exit %d, want %d\n%s", name, code, tc.code, out)
 			}
-			if strings.Contains(args[0], "head") && !strings.Contains(out, "record(s) above seq") {
+			if tc.code == 2 && !strings.Contains(out, "INCONCLUSIVE") {
+				t.Errorf("%s: exit 2 must say INCONCLUSIVE:\n%s", name, out)
+			}
+			if strings.Contains(tc.args[0], "head") && !strings.Contains(out, "record(s) above seq") {
 				t.Errorf("%s: the 7 newer records are bound only by the checkpoint, and the run must say so:\n%s", name, out)
 			}
 		}
@@ -515,17 +529,29 @@ func TestAnAnchorRecordedEarlierStillVerifiesAnHonestLaterExport(t *testing.T) {
 		if cps.FloorSeq != 6 {
 			t.Fatalf("the floor is seq %d after the sweep, want 6", cps.FloorSeq)
 		}
+		// Both anchors are below the moved floor: nothing left to compare either with. That is
+		// INCONCLUSIVE, not a pass: a cut file would look exactly like this.
+		// The database says the same floor and head as the file's checkpoint: that comparison, at or after
+		// the export, is how a file cut to look like a sweep is told from a real one.
+		rep, err := VerifyChain(context.Background(), p.db, e.d.dialect, tenant, VerifyOptions{})
+		if err != nil || rep.FloorSeq != cps.FloorSeq || rep.FloorHash != cps.FloorHash || rep.HeadSeq != cps.HeadSeq || rep.HeadHash != cps.HeadHash {
+			t.Errorf("the verify report says floor %d %q and head %d %q, the export's checkpoint floor %d %q head %d %q (%v)",
+				rep.FloorSeq, rep.FloorHash, rep.HeadSeq, rep.HeadHash, cps.FloorSeq, cps.FloorHash, cps.HeadSeq, cps.HeadHash, err)
+		}
 		code, out := runVerifyExport(t, py, swept, "--expect-floor", floor0, "--expect-head", mid0)
-		if code != 0 || strings.Count(out, "verified NOTHING") != 2 {
-			t.Errorf("anchors below the moved floor must be reported retired, not failed: exit %d\n%s", code, out)
+		if code != 2 || strings.Count(out, "verified NOTHING") != 2 || !strings.Contains(out, "INCONCLUSIVE") {
+			t.Errorf("every anchor retired must be INCONCLUSIVE (exit 2): exit %d\n%s", code, out)
 		}
-		// The head anchor that is still inside the export still binds it.
-		if code, out := runVerifyExport(t, py, swept, "--expect-head", head0); code != 0 || strings.Contains(out, "verified NOTHING") {
-			t.Errorf("a head anchor inside the swept export: exit %d\n%s", code, out)
+		// One anchor still inside the export verifies it, and a retired floor beside it is only a NOTE:
+		// that is every honest sweep.
+		code, out = runVerifyExport(t, py, swept, "--expect-floor", floor0, "--expect-head", head0)
+		if code != 0 || strings.Count(out, "verified NOTHING") != 1 {
+			t.Errorf("a retired floor beside a verified head must be exit 0 with one NOTE: exit %d\n%s", code, out)
 		}
-		// The seq the floor now sits at is checked against the checkpoint's floor hash.
-		if code, out := runVerifyExport(t, py, swept, "--expect-floor", fmt.Sprintf("6:%s", hg[6])); code != 0 {
-			t.Errorf("an anchor at the new floor: exit %d\n%s", code, out)
+		// The seq the floor now sits at is compared with the checkpoint's floor hash, and that
+		// alone verifies nothing (a wrong hash there is still a finding: a finding beats INCONCLUSIVE).
+		if code, out := runVerifyExport(t, py, swept, "--expect-floor", fmt.Sprintf("6:%s", hg[6])); code != 2 || !strings.Contains(out, "INCONCLUSIVE") {
+			t.Errorf("an anchor at the new floor, alone: exit %d\n%s", code, out)
 		}
 		if code, out := runVerifyExport(t, py, swept, "--expect-floor", "6:"+strings.Repeat("ab", 32)); code != 1 || !strings.Contains(out, "ANCHOR MISMATCH") {
 			t.Errorf("a wrong hash at the new floor: exit %d\n%s", code, out)
@@ -533,6 +559,98 @@ func TestAnAnchorRecordedEarlierStillVerifiesAnHonestLaterExport(t *testing.T) {
 		// Rolled back: the export is older than an anchor recorded after it.
 		if code, out := runVerifyExport(t, py, swept, "--expect-head", fmt.Sprintf("%d:%s", cps.HeadSeq+5, strings.Repeat("cd", 32))); code != 1 || !strings.Contains(out, "cut back") {
 			t.Errorf("an anchor above the export's head: exit %d\n%s", code, out)
+		}
+	})
+}
+
+// Retirement and "the export starts here" are decided by the checkpoint, which whoever edits the
+// file also writes. So an anchor that matches no RECORD verifies nothing, and a file edited to cut
+// below every anchor must not read as verified (cleat-review on #2191, five measured forgeries).
+func TestAFileCutBelowEveryAnchorIsInconclusiveNotVerified(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatalf("python3 is not installed, so the reference verifier cannot run: %v", err)
+	}
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		e.record(p, tenant, 15)
+		_, body := e.get(p, tenant, "/audit/export")
+		evs, cp, _ := exportLines(t, body)
+		hashOf := func(seq int64) string {
+			for _, ev := range evs {
+				if ev.Seq != nil && *ev.Seq == seq {
+					return *ev.Hash
+				}
+			}
+			t.Fatalf("no seq %d", seq)
+			return ""
+		}
+		// The anchors cleat-review used: the head at seq 10 and the genesis floor.
+		anchors := []string{"--expect-head", fmt.Sprintf("10:%s", hashOf(10)), "--expect-floor", fmt.Sprintf("0:%s", cp.FloorHash)}
+		if code, out := runVerifyExport(t, py, body, anchors...); code != 0 {
+			t.Fatalf("the honest export with both anchors: exit %d\n%s", code, out)
+		}
+		for name, forge := range map[string][]string{
+			"a cut of 1..10 with the floor moved to 10":         {"--cut-below", "10"},
+			"a cut of 1..12 with the floor moved to 12":         {"--cut-below", "12"},
+			"a cut past every anchor":                           {"--cut-below", "11"},
+			"one wholly forged record and a forged floor":       {"--cut-below", "14", "--floor-hash", strings.Repeat("ee", 32)},
+			"a cut of 1..10 and 11..15 rewritten and re-hashed": {"--cut-below", "10", "--edit-path", "12", "/forged"},
+		} {
+			forged := runForge(t, py, body, forge...)
+			code, out := runVerifyExport(t, py, forged, anchors...)
+			if code != 2 || !strings.Contains(out, "INCONCLUSIVE") {
+				t.Errorf("%s: exit %d, want 2 INCONCLUSIVE (a green here is a forgery that verified)\n%s", name, code, out)
+			}
+		}
+		// The documented residual: a cut BELOW the highest verified anchor is byte-identical, offline, to
+		// an honest sweep, and verifies. The database's floor (verify --json) is what tells them apart.
+		cutBelowAnchor := runForge(t, py, body, "--cut-below", "5")
+		if code, out := runVerifyExport(t, py, cutBelowAnchor, anchors...); code != 0 || !strings.Contains(out, "verified NOTHING") {
+			t.Errorf("a cut below the verified head anchor: exit %d, want 0 with the retired floor noted\n%s", code, out)
+		}
+	})
+}
+
+// Retention removes old unchained rows, so a count recorded earlier is a ceiling and not an
+// equality: an honest later export after a routine sweep has FEWER (cleat-review on #2191).
+func TestAnUnchainedCountRecordedEarlierIsACeilingAcrossASweep(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatalf("python3 is not installed, so the reference verifier cannot run: %v", err)
+	}
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		e.record(p, tenant, 6)
+		e.legacyRow(tenant, 200)
+		e.legacyRow(tenant, 100)
+		_, before := e.get(p, tenant, "/audit/export")
+		_, cp0, _ := exportLines(t, before)
+		if cp0.Unchained != 2 {
+			t.Fatalf("the checkpoint counts %d unchained, want 2", cp0.Unchained)
+		}
+		head := fmt.Sprintf("%d:%s", cp0.HeadSeq, cp0.HeadHash)
+		// A sweep removes the older legacy row only.
+		cutoff := time.Now().Add(-150 * 24 * time.Hour).UnixMicro()
+		if n, err := e.plugin().retainUnchained(plugin.ForTenant(context.Background(), tenant), tenant, cutoff); err != nil || n != 1 {
+			t.Fatalf("the sweep removed %d unchained rows, %v; want 1", n, err)
+		}
+		_, after := e.get(p, tenant, "/audit/export")
+		if code, out := runVerifyExport(t, py, after, "--expect-head", head, "--expect-unchained", "2"); code != 0 || !strings.Contains(out, "cannot be told apart from a retention sweep") {
+			t.Errorf("an honest export after a sweep against the count recorded before it: exit %d\n%s", code, out)
+		}
+		// Rows added after the chain exists never happen in production; the ceiling is what catches them.
+		e.legacyRow(tenant, 50)
+		_, more := e.get(p, tenant, "/audit/export")
+		if code, out := runVerifyExport(t, py, more, "--expect-head", head, "--expect-unchained", "2"); code != 0 {
+			t.Fatalf("2 present against at most 2: exit %d\n%s", code, out) // 1 (kept) + 1 (new) = 2: still within
+		}
+		e.legacyRow(tenant, 40)
+		_, tooMany := e.get(p, tenant, "/audit/export")
+		if code, out := runVerifyExport(t, py, tooMany, "--expect-head", head, "--expect-unchained", "2"); code != 1 || !strings.Contains(out, "UNCHAINED COUNT") {
+			t.Errorf("3 present against at most 2: exit %d\n%s", code, out)
 		}
 	})
 }

@@ -128,7 +128,8 @@ else it requires depends on the kind of export the checkpoint says it is:
 | resumed (`after_seq`) | no gaps; the first is `after_seq + 1`; the last is the head; **no unchained records** (a resume starts in the chained part). The join to the part before the cursor cannot be checked without an anchor |
 | range (`from` or `to`) | nothing about coverage: a range has gaps by design, and a record deleted from inside one is not detectable |
 
-Exit `0` verified, `1` a break, `2` incomplete, unreadable, or a contradictory command line.
+Exit `0` verified, `1` a break, `2` could not establish it: an incomplete or unreadable stream, a contradictory
+command line, or `INCONCLUSIVE` (below).
 
 **The checkpoint is not signed**, and it says which kind of export the file is, so an edit can delete
 records and relabel the file as a range, or move an end to match. From the file alone that is not
@@ -142,7 +143,7 @@ is `DOWNGRADED`) and is checked against the **records**, not against the checkpo
 | `--expect-floor SEQ:HASH` | full | the chain passes through `SEQ` with `HASH` (normally the floor: then the first chained record is `SEQ + 1` linking to it) |
 | `--expect-head SEQ:HASH` | full, or resumed with `--expect-after` | the chain passes through `SEQ` with `HASH`, `SEQ` at most the export's head |
 | `--expect-after SEQ:HASH` | resumed, with `after_seq == SEQ` | the first chained record is `SEQ + 1` linking to `HASH`: the join to the part you already hold |
-| `--expect-unchained N` | full, or resumed with `--expect-after` (then `N` is 0) | exactly `N` unchained records: record `N` from the checkpoint's `unchained` when you record the head and floor |
+| `--expect-unchained N` | full, or resumed with `--expect-after` (then `N` is 0) | **at most** `N` unchained records: record `N` from the checkpoint's `unchained` when you record the head and floor |
 
 **An anchor is a point the chain passes through**, not the end of the export. The record at `SEQ` must be
 in the export with `HASH`; a hash depends on every record before it, so the anchor binds every record at or
@@ -153,16 +154,30 @@ unsigned checkpoint, and the run prints how many. Record the newest head you hav
 - An anchor **above** the export's head means the chain was cut back, or the export is older than the
   anchor: `ANCHOR MISMATCH`.
 - An anchor **below** the export's start has been retired by retention (or, for a resumed export, is in the
-  part you already hold): the verifier has nothing to compare it with, prints `NOTE ... verified NOTHING`,
-  and does not fail. An export can therefore pass with every anchor retired; read the notes, and keep a
-  newer anchor.
+  part you already hold): the verifier has nothing to compare it with and prints `NOTE ... verified NOTHING`.
+- An anchor **at** the export's start (the floor) is compared with the checkpoint's own `floor_hash`. That
+  binds the first record's link and no record's content, and whoever edits the file also writes the
+  checkpoint, so it does **not** count as verification.
+
+**An anchor is verified only by a record present in the file with the anchored hash, and at least one
+`--expect-head` / `--expect-floor` anchor must be, or the run is `INCONCLUSIVE` (exit 2).** Retirement and
+"the export starts here" are both decided by the checkpoint, which the editor of a file also chooses: cut
+records 1 to 10, move the floor to 10, and a head anchor at 10 matches the forged floor, while an older floor
+anchor is retired. Without this rule every anchor becomes a note and the file exits 0. A retired floor anchor
+**beside a verified head anchor** is exit 0 with a note: that is every honest sweep. So **refresh the head
+anchor more often than `retention_days`**, or an honest export will be inconclusive too.
+
 - **The chain is unkeyed.** Anyone who can edit the file can recompute every hash, so deleting or editing a
   record and re-hashing what follows makes a file that is consistent with itself. Only an anchor at or above
   the edit disagrees with it. `--expect-floor` at the floor binds where the export starts and what it links
   to and **nothing else**: every record after it can have been rewritten.
-- **A cut of the first records looks exactly like a retention sweep** to an offline check, so no anchor can
-  catch it: an anchor below the new start is simply retired. Whether the floor moved because retention
-  expired those rows is a question for the database, and `cleatctl audit verify --retention-days` asks it.
+- **A cut of the first records below your highest verified anchor looks exactly like a retention sweep**
+  to an offline check, so no anchor can catch it. What tells them apart is the database: the floor only moves
+  forward, so a file whose checkpoint `floor_seq` is **ahead of** the database's was cut. Compare the
+  checkpoint's `floor_seq` and `floor_hash` (and `head_seq`, `head_hash`) with `cleatctl audit verify --json`,
+  at or after the time of the export. `cleatctl audit verify --retention-days` checks the database's own floor
+  against the retention period; it cannot see a cut made to a file. A consumer with no database access has
+  only their anchors.
 
 `--expect-after` cannot be combined with `--require-full` or `--expect-floor`. For a whole export give
 `--expect-head` with the newest head you have recorded: that is what binds the records. `--expect-floor` adds
@@ -171,9 +186,11 @@ a check at the start for as long as the floor has not moved. For a resumed one g
 
 **`--expect-unchained` exists because an unchained record has no hash.** The chain cannot say that one was
 added, and one added at the front of the file looks like the rows written before the chain existed. One
-added after a chained record is refused without any option; one at the front is caught only by a count you
-recorded earlier from a checkpoint (or the checkpoint's own `unchained`, which an editor can change to match,
-so the recorded value is what counts). Their **contents** are covered by nothing, whatever is passed.
+added after a chained record is refused without any option. The count is a **ceiling**: none are ever added
+once the chain exists, but retention removes old ones, so a later honest export has fewer, and the run notes
+that a removal cannot be told apart from a sweep. Record the count from the checkpoint's `unchained` (an
+editor can change the checkpoint to match, so the recorded value is what counts). Their **contents** are
+covered by nothing, whatever is passed.
 
 With no option a downgraded file verifies (exit `0`, with the note). That is the limit of the file alone, and
 `chain_export_matrix_test.go` pins it: the whole grid of export kinds, option sets and edits, with the exit

@@ -75,8 +75,14 @@ type ChainReport struct {
 	// FloorSeq is the seq retention has removed through: the chain is verified from
 	// FloorSeq+1. Zero means nothing has been removed.
 	FloorSeq int64 `json:"floor_seq"`
+	// FloorHash and HeadHash are the hashes recorded with the floor and the head. An export
+	// file's checkpoint states its own; comparing them with these, at or after the time of
+	// the export, is how a file cut to look like a retention sweep is told from a real one
+	// (the floor only moves forward, so a file floor ahead of this one was cut).
+	FloorHash string `json:"floor_hash"`
 	// HeadSeq is the seq the head row records as newest.
-	HeadSeq int64 `json:"head_seq"`
+	HeadSeq  int64  `json:"head_seq"`
+	HeadHash string `json:"head_hash"`
 	// Unchained is how many rows have no seq: written before the chain existed, and not
 	// covered by it.
 	Unchained int64 `json:"unchained"`
@@ -194,6 +200,7 @@ func verifyOnce(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect,
 		return rep, err
 	}
 	rep.HeadSeq, rep.FloorSeq = head.seq, head.floorSeq
+	rep.HeadHash, rep.FloorHash = head.hash, head.floorHash
 
 	if err := db.QueryRow(ctx, plugin.Rebind(
 		`SELECT COUNT(*) FROM audit_events WHERE tenant_id = $1 AND seq IS NULL`, dialect), tenant).Scan(&rep.Unchained); err != nil {
