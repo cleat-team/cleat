@@ -49,10 +49,16 @@ func TestMSSQLClaim_ReturnsTenantIDAsCanonicalUUIDText(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store := NewMSSQLStore(db)
-			store.tenantID = tid
+			// A properly connectored store, not NewMSSQLStore(db) with
+			// tenantID set by hand -- see mssql_schedule_tenant_id_test.go's
+			// identical comment. StartNewRun and the claim paths below open
+			// their transactions with a plain s.db.BeginTx and rely on the
+			// connector to have set SESSION_CONTEXT; cleat#2205's block
+			// predicates refuse a write on a connection where it was never
+			// set.
 			ctx := context.Background()
 			testutil.CleanupMSSQLTestData(t, db)
+			store := openMSSQLTenantStore(t, tid)
 			setupTestData(t, store)
 
 			wfID := "tid-" + tc.name

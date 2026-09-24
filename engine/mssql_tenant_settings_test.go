@@ -36,6 +36,17 @@ func TestMSSQLTenantSettingsAreIsolatedByTheSecurityPolicy(t *testing.T) {
 	t.Cleanup(func() { adminDB.Close() })
 	testutil.SetupMSSQLFullSchema(t, adminDB)
 
+	// admin, not adminDB, for the seeding below: cleat#2205's migration 103
+	// put an AFTER INSERT block predicate on dbo.tenant_settings, checked
+	// against SESSION_CONTEXT('tenant_id'), and the seed below writes rows
+	// for TWO tenants in one statement -- no single session context could
+	// satisfy a per-tenant check for both at once. testutil.MSSQLAdminDB
+	// applies the admin-bypass predicate (cross_tenant_claim.sql, IS_ROLEMEMBER
+	// ('cleat_admin')) and authenticates as a member of that role, which
+	// satisfies the block predicate regardless of session context or how
+	// many distinct tenant_id values one statement writes.
+	admin := testutil.MSSQLAdminDB(t, adminDB)
+
 	const (
 		tenantA = "eeeeeeee-eeee-4eee-eeee-eeeeeeeeeeee"
 		tenantB = "ffffffff-ffff-4fff-ffff-ffffffffffff"
@@ -45,23 +56,23 @@ func TestMSSQLTenantSettingsAreIsolatedByTheSecurityPolicy(t *testing.T) {
 	// after this function's deferred closes, so it would delete through a
 	// closed pool. The PostgreSQL sibling learned that the expensive way.
 	for _, id := range []string{tenantA, tenantB} {
-		if _, err := adminDB.ExecContext(ctx,
+		if _, err := admin.ExecContext(ctx,
 			`DELETE FROM dbo.tenant_settings WHERE tenant_id = @p1`, id); err != nil {
 			t.Fatalf("clearing settings for %s: %v", id, err)
 		}
-		if _, err := adminDB.ExecContext(ctx,
+		if _, err := admin.ExecContext(ctx,
 			`DELETE FROM admin.tenants WHERE tenant_id = @p1`, id); err != nil {
 			t.Fatalf("clearing tenant %s: %v", id, err)
 		}
 	}
 	for i, id := range []string{tenantA, tenantB} {
-		if _, err := adminDB.ExecContext(ctx,
+		if _, err := admin.ExecContext(ctx,
 			`INSERT INTO admin.tenants (tenant_id, name, display_name) VALUES (@p1, @p2, @p2)`,
 			id, "settings-mssql-"+string(rune('a'+i))); err != nil {
 			t.Fatalf("seeding tenant %s: %v", id, err)
 		}
 	}
-	if _, err := adminDB.ExecContext(ctx, `
+	if _, err := admin.ExecContext(ctx, `
 		INSERT INTO dbo.tenant_settings (tenant_id, wasm_wall_clock_ceiling_ms)
 		VALUES (@p1, 5000), (@p2, 7000)`, tenantA, tenantB); err != nil {
 		t.Fatalf("seeding settings rows: %v", err)

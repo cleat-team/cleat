@@ -312,10 +312,26 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 		setInstanceStatus(t, storeA, cpWorkflowA, unscopedTenantA, "suspended")
 		before := instanceField(t, storeA, "next_wake_at", cpWorkflowA, unscopedTenantA)
 
-		// Succeeds, and writes a row under tenant B that tenant B alone can see.
+		// Succeeds, and writes NOTHING -- not even an orphan row under B.
+		// Before cleat#2218 the INSERT carried no existence check at all, so a
+		// cross-tenant id wrote an orphan under the CALLER's own tenant that
+		// only the caller could see. 2218 gates the INSERT on
+		// `EXISTS (... id = ? AND tenant_id = <caller>)`, closing an
+		// existence oracle a nonexistent id had via an FK error the orphan
+		// path never hit -- and the same predicate is what makes a foreign
+		// id (this case) write nothing too, since cpWorkflowA does not exist
+		// under B's tenant either. "Writes an orphan" and "writes nothing"
+		// are indistinguishable from the caller's side either way -- nil, no
+		// row of the caller's own -- which is the point: the two cases must
+		// stay indistinguishable from EVERY side, not just the victim's.
 		if err := storeB.DeliverSignal(ctx, cpWorkflowA, sig, `{"from":"tenant-b"}`); err != nil {
-			t.Fatalf("cross-tenant delivery should now be an ordinary insert under "+
-				"the caller's own tenant, not an error: %v", err)
+			t.Fatalf("cross-tenant delivery must still be an ordinary no-op, not an error: %v", err)
+		}
+		if _, ok, err := storeB.PollSignal(ctx, cpWorkflowA, sig); err != nil {
+			t.Fatalf("tenant B PollSignal(cpWorkflowA): %v", err)
+		} else if ok {
+			t.Errorf("tenant B's own cross-tenant delivery left a row IT can see -- " +
+				"cleat#2218's EXISTS gate did not fire")
 		}
 
 		d, ok, err := storeA.PollSignal(ctx, cpWorkflowA, sig)
@@ -368,6 +384,25 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 		}
 		if !strings.Contains(own.Payload, "tenant-b") {
 			t.Errorf("tenant B's own signal payload is %q, want it to carry \"tenant-b\"", own.Payload)
+		}
+	})
+
+	// cleat#2218. workflow_signals carries fk_signals_workflow, a real FK to
+	// workflow_instances(id): before the EXISTS gate on the INSERT, a
+	// NONEXISTENT id threw a foreign-key error here while the DeliverSignal
+	// case above (a foreign id that DOES exist, just under the other tenant)
+	// returned nil -- error-versus-nil told an attacker which was true. The
+	// two must answer identically: nil, and nothing written, either way.
+	t.Run("DeliverSignalNonexistentID", func(t *testing.T) {
+		const noSuchID = "cp-tenant-does-not-exist"
+		if err := storeB.DeliverSignal(ctx, noSuchID, "approve", `{"from":"tenant-b"}`); err != nil {
+			t.Fatalf("DeliverSignal on a nonexistent id returned an error instead of a silent "+
+				"no-op -- this is cleat#2218's existence oracle: %v", err)
+		}
+		if _, ok, err := storeB.PollSignal(ctx, noSuchID, "approve"); err != nil {
+			t.Fatalf("PollSignal(noSuchID): %v", err)
+		} else if ok {
+			t.Errorf("a nonexistent id left a row the caller can see -- the EXISTS gate did not fire")
 		}
 	})
 }

@@ -46,9 +46,6 @@ import (
 func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		t.Run(be.Name, func(t *testing.T) {
-			fixtureDB := be.CrossTenantConn(t, context.Background(),
-				"blobstore stale-workflow-refs fixture: seeds workflow_instances "+
-					"and workflow_blob_refs rows for workflows it invents")
 			defer be.Cleanup()
 			// baseCtx carries no tenant marker: cleanupExpired's second
 			// parameter, used only by SQL Server's per-tenant sweep, which
@@ -65,12 +62,18 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 			// The ENGINE schema, not just the plugin's own -- staleWorkflowRefs
 			// joins workflow_instances, a core table no plugin migration
 			// creates. See blobstore_expiry_decrement_multidb_test.go's own
-			// comment on this same requirement.
+			// comment on this same requirement. It must also run before
+			// CrossTenantConn: on MSSQL that now routes through MSSQLAdminDB,
+			// which Fatals if core RLS is enforced but migration 012's
+			// cleat_admin role does not exist yet. cleat#2226.
 			testutil.SetupMinimalSchema(t, be.DB, be.Dialect)
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("blobstore migrations on %s: %v", be.Name, err)
 			}
+			fixtureDB := be.CrossTenantConn(t, context.Background(),
+				"blobstore stale-workflow-refs fixture: seeds workflow_instances "+
+					"and workflow_blob_refs rows for workflows it invents")
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: dialect}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 

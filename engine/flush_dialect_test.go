@@ -138,8 +138,22 @@ func countEventsSQL(dialect testutil.Dialect) string {
 // seedWorkflowInstance inserts the parent row event_history's foreign key
 // requires. Written per dialect rather than through a store so that the test
 // exercises the flush path and nothing else.
+//
+// On SQL Server, db is a plain sql.Open pool with no per-connection
+// sp_set_session_context (that is what NewMSSQLStoreFactory's connector is
+// for, and this helper deliberately writes raw SQL instead of going through a
+// store). Since cleat#2205's migration 103, every table this function writes
+// carries AFTER INSERT / AFTER UPDATE block predicates, and a block predicate
+// checks SESSION_CONTEXT('tenant_id') regardless of what tenant_id value the
+// statement itself names -- so an INSERT or UPDATE on a connection with no
+// session context is refused outright, not merely filtered. A plain
+// db.Exec/db.ExecContext call may land on a different pooled connection each
+// time, so the fix is a single pinned *sql.Conn carrying the context, used for
+// every INSERT/UPDATE below. DELETE is unaffected (103 adds no DELETE block
+// predicate; FILTER already governs which rows a DELETE can see).
 func seedWorkflowInstance(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID string) {
 	t.Helper()
+	ctx := context.Background()
 
 	// workflow_instances has a foreign key to workflow_defs on SQL Server, so
 	// the definition row has to exist first. Harmless where it does not.
@@ -155,9 +169,6 @@ func seedWorkflowInstance(t *testing.T, db *sql.DB, dialect testutil.Dialect, wf
 		defStmt = `INSERT INTO workflow_defs (name, version, wasm_bytes, tenant_id)
 		           VALUES ('flush-dialect', 1, '', '` + DefaultTenantUUID + `')`
 	}
-	if _, err := db.Exec(defStmt); err != nil && !isDuplicateKey(err) {
-		t.Fatalf("seeding workflow_defs on %s: %v", dialect, err)
-	}
 
 	var stmt string
 	switch dialect {
@@ -170,6 +181,50 @@ func seedWorkflowInstance(t *testing.T, db *sql.DB, dialect testutil.Dialect, wf
 	default:
 		stmt = `INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id)
 		        VALUES ($1, 'flush-dialect', 1, 'running', '{}', '` + DefaultTenantUUID + `')`
+	}
+
+	if dialect == testutil.DialectMSSQL {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("pin a connection for %s: %v", dialect, err)
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(ctx,
+			`EXEC sp_set_session_context @key=N'tenant_id', @value=N'`+DefaultTenantUUID+`'`,
+		); err != nil {
+			t.Fatalf("set the tenant session context on %s: %v", dialect, err)
+		}
+
+		if _, err := conn.ExecContext(ctx, defStmt); err != nil && !isDuplicateKey(err) {
+			t.Fatalf("seeding workflow_defs on %s: %v", dialect, err)
+		}
+		// Re-runs against a persistent local database are ordinary; a row left
+		// by the previous run is not a failure, and deleting the whole table
+		// would take other suites' rows with it (see tests/crash, which needed
+		// its own database for exactly this reason).
+		if _, err := conn.ExecContext(ctx, stmt, wfID); err != nil && !isDuplicateKey(err) {
+			t.Fatalf("seeding workflow_instances on %s: %v", dialect, err)
+		}
+		if _, err := conn.ExecContext(ctx, deleteEventsSQL(dialect), wfID); err != nil {
+			t.Fatalf("clearing prior events on %s: %v", dialect, err)
+		}
+		// Start from a known state. These databases are long-lived locally,
+		// and the row survives between runs: leaving event_count as the
+		// previous run left it makes TestPerStepFlushDoesNotDoubleCountEvents
+		// pass or fail depending on history rather than on the code. This is
+		// an UPDATE, so it is block-predicate-gated too.
+		if _, err := conn.ExecContext(ctx, resetEventCountSQL(dialect), wfID); err != nil {
+			t.Fatalf("resetting event_count on %s: %v", dialect, err)
+		}
+
+		t.Cleanup(func() {
+			_, _ = db.Exec(deleteEventsSQL(dialect), wfID)
+		})
+		return
+	}
+
+	if _, err := db.Exec(defStmt); err != nil && !isDuplicateKey(err) {
+		t.Fatalf("seeding workflow_defs on %s: %v", dialect, err)
 	}
 
 	// Re-runs against a persistent local database are ordinary; a row left by

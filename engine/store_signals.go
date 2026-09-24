@@ -235,14 +235,27 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 // lines apart, and only one of them decided anything (cleat#1213).
 func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, signalName, payload string) error {
 	payload = encodeJSONPayload(payload)
-	// A plain INSERT. It carried ON CONFLICT (workflow_id, signal_name) DO
-	// UPDATE until 3.215, which discarded the earlier payload with no error --
-	// so a workflow collecting one approval per reviewer saw only the last.
-	// The conflict is gone because the key is gone: the table's primary key is
-	// now a surrogate id and every delivery is its own row.
+	// It carried ON CONFLICT (workflow_id, signal_name) DO UPDATE until 3.215,
+	// which discarded the earlier payload with no error -- so a workflow
+	// collecting one approval per reviewer saw only the last. The conflict is
+	// gone because the key is gone: the table's primary key is now a
+	// surrogate id and every delivery is its own row.
+	//
+	// Gated on EXISTS rather than a plain VALUES INSERT -- cleat#2218. A
+	// cross-tenant workflowID already wrote nothing that mattered (the row
+	// landed tagged under the CALLER's own tenant, invisible to the target,
+	// per the contract on the UPDATE below). A NONEXISTENT workflowID is a
+	// different case on MSSQL specifically: workflow_signals there carries
+	// fk_signals_workflow, a real FK to workflow_instances(id), so that INSERT
+	// throws instead of writing an orphan row -- an existence oracle by
+	// error-versus-nil, reachable over HTTP through webhookingest's processed
+	// flag. Gating every dialect's INSERT on the same EXISTS predicate makes
+	// "foreign tenant" and "does not exist" take the identical path on all
+	// three: the condition is false either way, nothing is written, no error.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
-		VALUES ($1, $2, $3, $4)
+		SELECT $1, $2, $3, $4
+		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = $1 AND tenant_id = $4)
 	`, workflowID, signalName, payload, tenantID); err != nil {
 		return err
 	}
@@ -262,18 +275,20 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	// No RowsAffected check here, and that is deliberate, not an oversight:
 	// RLS's USING clause filters this UPDATE by session the same way it
 	// filters a SELECT, so a tenantID that does not match the row's own
-	// tenant matches zero rows -- and that is the ESTABLISHED, tested
-	// contract for a cross-tenant or nonexistent-id delivery
-	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal case,
-	// IMPROVEMENT-PLAN 3.215): it succeeds as a harmless orphan INSERT under
-	// the caller's own tenant, not an error, specifically so that
-	// success-versus-failure cannot be used as a cross-tenant existence
-	// oracle. cleat#2209's actual defect was that SignalWorkflow ran on a
-	// store scoped to the WRONG tenant for a REAL, correctly-owned target --
+	// tenant matches zero rows silently. Combined with the EXISTS-gated
+	// INSERT above, both a cross-tenant and a nonexistent workflowID now
+	// write nothing and return nil, by the same mechanism, on every
+	// statement in this function -- no existence oracle, unconditionally
+	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal and
+	// DeliverSignalNonexistentID cases; IMPROVEMENT-PLAN 3.215; cleat#2218).
+	// cleat#2209's actual defect was that SignalWorkflow ran on a store
+	// scoped to the WRONG tenant for a REAL, correctly-owned target --
 	// scopeToTenant (cmd/cleat-worker/main.go, signalPluginWorkflow) is what
 	// fixes that, by ensuring this UPDATE runs under the target's own
 	// tenant, where it matches. Erroring here on n==0 was tried and reverted
-	// (cleat#2207) after it broke that established contract in CI.
+	// (cleat#2207) after it broke the harmless-orphan-write half of this
+	// contract in CI; cleat#2218 closes the remaining gap (the INSERT's FK,
+	// on the dialects that have one) without reintroducing that.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,

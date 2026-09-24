@@ -66,18 +66,34 @@ carry **21 tenant-bearing tables**.
 | tenant-bearing tables | 21 | 21 | 21 |
 | RLS / filter predicates | **17** (`ENABLE` + `FORCE`) | **14** | **0** |
 | policies | 18 | 14 | — |
-| **write-blocking predicates** | n/a (`FORCE` covers writes) | **0** | 0 |
+| **write-blocking predicates** | n/a (`FORCE` covers writes) | **14** (3 each: `AFTER INSERT`, `AFTER UPDATE`, `BEFORE UPDATE`) | 0 |
 | backstop active for an admin connection | no (`FORCE` applies to the owner) | **no** | — |
 
 Three things that table is meant to make impossible to miss:
 
-**SQL Server has no `BLOCK` predicates — none.** A `FILTER` predicate removes
-other tenants' rows from reads. It does **not** stop a write from placing a row
-outside the caller's tenant, or from moving one out of it. So on SQL Server the
-backstop is read-side only. This is consistent with the threat model in
-`SECURITY.md` — the database is a trusted component, and cleat's own SQL never
-issues such a statement because the statement-level gate above forbids it — but
-it means the backstop does not catch a write that the gate missed.
+**SQL Server had no `BLOCK` predicates until cleat#2205 (migration
+`103_a_filtered_write_is_a_blocked_write.sql`, 2026-09-24).** Before it, a
+`FILTER` predicate removed other tenants' rows from reads but did **not** stop
+a write from placing a row outside the caller's tenant, or from moving one out
+of it — so the backstop was read-side only. 103 adds `BLOCK` predicates,
+reusing the same `dbo.fn_tenant_filter` predicate function FILTER already
+uses, to every one of the 14 FILTER-bound tables: `AFTER INSERT` and
+`AFTER UPDATE` refuse a write whose new row fails the predicate, `BEFORE
+UPDATE` refuses one whose old row does. Re-derive the live count with:
+
+```sql
+SELECT COUNT(DISTINCT target_object_id) FROM sys.security_predicates
+WHERE predicate_definition LIKE '%fn_tenant_filter%' AND predicate_type_desc = 'BLOCK';
+```
+
+This is still consistent with the threat model in `SECURITY.md` — the database
+is a trusted component, and cleat's own SQL never issues a cross-tenant write
+because the statement-level gate above forbids it — but the backstop no longer
+depends on that gate alone. It carries the same admin-bypass property FILTER
+does: `dbo.cleat_admin` connections under the optional
+`--claim-across-tenants` predicate form (`migrations/mssql/optional/
+cross_tenant_claim.sql`) bypass BLOCK exactly as they bypass FILTER, since both
+share the one predicate function.
 
 **PostgreSQL's 16 of 20 is deliberate, not partial.** The four without RLS are
 the tenant registry itself — `admin.tenants`, `admin.tenant_api_keys`,

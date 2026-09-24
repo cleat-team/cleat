@@ -58,8 +58,6 @@ func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
 			continue // the race is specific to sweepStaleWorkflowRefsMSSQL's two-read shape
 		}
 		t.Run(be.Name, func(t *testing.T) {
-			fixtureDB := be.CrossTenantConn(t, context.Background(),
-				"blobstore race fixture: seeds a tenant and a workflow the hook writes into")
 			defer be.Cleanup()
 			baseCtx := context.Background()
 			ctx := plugin.AcrossAllTenants(baseCtx,
@@ -67,11 +65,19 @@ func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
 			dialect := plugin.Dialect(string(be.Dialect))
 			p := &Plugin{dialect: dialect}
 
+			// SetupMinimalSchema (core: workflow_defs, workflow_instances) must
+			// run before CrossTenantConn: on MSSQL that call now routes through
+			// MSSQLAdminDB, which Fatals if RLS is enforced on the core tables
+			// but the cleat_admin role migration 012 creates does not exist yet
+			// -- true of this database until the schema below has applied.
+			// cleat#2226.
 			testutil.SetupMinimalSchema(t, be.DB, be.Dialect)
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("blobstore migrations on %s: %v", be.Name, err)
 			}
+			fixtureDB := be.CrossTenantConn(t, context.Background(),
+				"blobstore race fixture: seeds a tenant and a workflow the hook writes into")
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: dialect}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -181,18 +187,19 @@ func TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkflowsRef(t *tes
 			continue // the race is specific to sweepStaleWorkflowRefsMSSQL, MSSQL-only
 		}
 		t.Run(be.Name, func(t *testing.T) {
-			fixtureDB := be.CrossTenantConn(t, context.Background(), "review fixture")
-			writerDB := be.CrossTenantConn(t, context.Background(), "review writer")
 			defer be.Cleanup()
 			baseCtx := context.Background()
 			ctx := plugin.AcrossAllTenants(baseCtx, "review: sweep as Run does")
 			dialect := plugin.Dialect(string(be.Dialect))
 			p := &Plugin{dialect: dialect}
+			// Schema before CrossTenantConn -- see the sibling test above.
 			testutil.SetupMinimalSchema(t, be.DB, be.Dialect)
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("blobstore migrations on %s: %v", be.Name, err)
 			}
+			fixtureDB := be.CrossTenantConn(t, context.Background(), "review fixture")
+			writerDB := be.CrossTenantConn(t, context.Background(), "review writer")
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: dialect}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
