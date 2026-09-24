@@ -121,6 +121,15 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	if p.config.Backend == "" {
 		p.config.Backend = "memory" // safe default for dev/testing
 	}
+	if p.config.MaxBlobSize <= 0 {
+		// cleat#2232: this was a documented-but-unenforced field until now --
+		// RegisterRoutes declares it as the PUT route's request-body ceiling
+		// via plugin.MaxBody, so a zero value here would mean "no limit at
+		// all" rather than "use the default" once that wiring lands.
+		// Host-function enforcement (a WASM guest calling the blob-write host
+		// call directly, bypassing HTTP) is a separate follow-up.
+		p.config.MaxBlobSize = 10 * 1024 * 1024 // default 10 MiB, per the struct's own doc comment
+	}
 
 	p.deploymentSecrets = env.DeploymentSecrets
 
