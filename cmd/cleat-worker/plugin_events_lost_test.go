@@ -43,7 +43,7 @@ func healthzOf(t *testing.T, api *apiServer) (int, map[string]any) {
 	return rec.Code, body
 }
 
-// A plugin that has lost events degrades the worker; it does not fail it. A 503 would have an
+// A plugin that has lost events degrades the worker; it does not fail it, and the body says so by code only. A 503 would have an
 // orchestrator restart a worker whose only fault is an audit table that stalled, which turns the
 // audit log's trouble into the API's outage.
 func TestHealthzReportsAnUnhealthyPluginAsDegradedAnd200(t *testing.T) {
@@ -60,9 +60,16 @@ func TestHealthzReportsAnUnhealthyPluginAsDegradedAnd200(t *testing.T) {
 	if body["ok"] != true || body["degraded"] != true || body["reason"] != "plugin_unhealthy" {
 		t.Errorf("body = %v, want ok:true degraded:true reason:plugin_unhealthy", body)
 	}
-	plugins, _ := body["plugins"].(map[string]any)
-	if len(plugins) != 1 || !strings.Contains(plugins["audit-log"].(string), "lost 3") {
-		t.Errorf("plugins = %v, want only audit-log, with its message", plugins)
+	// /healthz needs no credential, so the body is the reason code and nothing that names the plugin or
+	// quotes what it said (the owner's #2168 wording: a reason code, no names).
+	if len(body) != 3 {
+		t.Errorf("body = %v: want exactly ok, degraded and reason", body)
+	}
+	raw, _ := json.Marshal(body)
+	for _, leak := range []string{"audit-log", "lost 3", "plugins"} {
+		if strings.Contains(string(raw), leak) {
+			t.Errorf("the unauthenticated /healthz body contains %q: %s", leak, raw)
+		}
 	}
 
 	// Healthy, and a plugin that does not implement HasHealth, are the plain answer.

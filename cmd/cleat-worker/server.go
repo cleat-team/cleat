@@ -424,12 +424,15 @@ func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// A plugin that reports itself unhealthy (plugin.HasHealth) degrades the worker and does not fail it:
 	// a lost audit event is something an operator must see, and a reason for the host to stop serving would
 	// turn the audit log's trouble into the API's outage. 200, like memory_pressure. cleat#2168.
-	if unhealthy := s.worker.unhealthyPlugins(); len(unhealthy) > 0 {
+	//
+	// The body carries the reason CODE only. /healthz is reachable without a credential, so it must not
+	// name the plugin or repeat its message; those are in the plugin's own Error log and in the
+	// plugin label of cleat_plugin_events_lost_total.
+	if len(s.worker.unhealthyPlugins()) > 0 {
 		s.writeJSON(w, 200, map[string]any{
 			"ok":       true,
 			"degraded": true,
 			"reason":   "plugin_unhealthy",
-			"plugins":  unhealthy,
 		})
 		return
 	}
