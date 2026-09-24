@@ -38,9 +38,19 @@ provider. Omitted, it defaults to `true`, today's behavior for every
 enabled provider except `ollama`.
 
 **A leftover `sendgrid_api_key` or `providers.*.api_key` in `--plugin-config`
-does nothing** — neither struct has a field for it anymore — and a worker
-that still has one logs a WARN naming it and the `set-deployment-secret`
-command to use instead, at boot.
+does nothing** — neither struct has a field for it anymore. What a worker
+does about a leftover one differs by plugin:
+
+- `llm` always logs a WARN naming the dead field and the
+  `set-deployment-secret` command to use instead, at boot.
+- `email-notify` WARNs the same way, but **only if `email_enabled: true` is
+  also set.** A leftover `sendgrid_api_key` with `email_enabled` still
+  absent (or explicitly `false`) instead **refuses to start the worker** —
+  that shape means a deployment was sending email before this table existed
+  and would otherwise silently stop, rather than merely fail to notice a
+  dead config field. Fix: add `"email_enabled": true`, move the key with
+  `cleatctl set-deployment-secret --name email.sendgrid_api_key`, then
+  remove `sendgrid_api_key` from `--plugin-config`.
 
 **Not yet converted**, and still read from `--plugin-config` at `Init` the way
 every plugin's credentials used to be: `blobstore` (its S3 key pair),

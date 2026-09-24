@@ -239,6 +239,17 @@ func (s *DeploymentSecretStore) DeploymentSecretMeta(ctx context.Context, name s
 		return false, sql.NullTime{}, ErrNoDeploymentSecretDB
 	}
 	name = normalizeDeploymentSecretName(name)
+	if !validSecretName(name) {
+		// Same "not found" shape as a genuine miss below, not an error: an
+		// invalid name can never match a stored row, so there is nothing
+		// distinct to report. Load-bearing on SQL Server specifically --
+		// its default collation is PAD SPACE, so a name with trailing
+		// whitespace would otherwise reach the query below and MATCH the
+		// real row with the whitespace trimmed for comparison purposes,
+		// which is exactly the bug this guards (see RetireDeploymentSecret's
+		// doc comment). cleat-review's #2202 re-check.
+		return false, sql.NullTime{}, nil
+	}
 	err = s.db.QueryRowContext(ctx, deploymentSecretMetaStmt(s.dialect), name).Scan(&disabledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, sql.NullTime{}, nil
@@ -251,11 +262,26 @@ func (s *DeploymentSecretStore) DeploymentSecretMeta(ctx context.Context, name s
 
 // RetireDeploymentSecret sets disabled_at, mirroring RetireSecret. No master
 // key is needed: retiring is a metadata change.
+//
+// Validates name after normalizing, the same as Put/Get, rather than letting
+// an invalid name reach the query -- found by cleat-review's #2202 re-check
+// as a real bug on SQL Server, whose default collation is PAD SPACE: trailing
+// whitespace is insignificant in a `WHERE name = @p1` comparison there (not
+// on PostgreSQL or MySQL's usual collations), so
+// RetireDeploymentSecret(ctx, "email.sendgrid_api_key ") -- a name with a
+// trailing space, never a name anything could have PUT -- matched and
+// retired the REAL row on mssql instead of affecting nothing. validSecretName
+// rejects the space, so this now returns (0, nil): the same "no such secret"
+// shape a genuine non-match already returns, since an invalid name can never
+// correspond to a stored one.
 func (s *DeploymentSecretStore) RetireDeploymentSecret(ctx context.Context, name string) (rowsAffected int64, err error) {
 	if s == nil || s.db == nil {
 		return 0, ErrNoDeploymentSecretDB
 	}
 	name = normalizeDeploymentSecretName(name)
+	if !validSecretName(name) {
+		return 0, nil
+	}
 	res, err := s.db.ExecContext(ctx, retireDeploymentSecretStmt(s.dialect), name)
 	if err != nil {
 		return 0, err

@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -85,5 +86,66 @@ func TestASharedPluginConfigNamingEmailEnabledDoesEnableEmail(t *testing.T) {
 	if err := email.Init(context.Background(), env); err != nil {
 		t.Fatalf("email-notify.Init() against a config naming both llm's section and "+
 			"email_enabled: %v, want nil", err)
+	}
+}
+
+// TestCheckRequiredDeploymentSecretsOverTheFullDiscoverSetDoesNotTripOnAnotherPluginsSharedConfig
+// is GAP 1 from cleat-review's #2202 re-check: the two tests above call only
+// email's own Init, so they would miss a DIFFERENT plugin's
+// RequiredDeploymentSecrets tripping on this same shared config -- the exact
+// shape of bug BROKEN 1 was, one level up. This instead runs the REAL boot
+// probe: Discover() every registered plugin, Init all of them against the
+// SAME llm-only config main.go's shared envCopy.Config gives every plugin,
+// then run checkRequiredDeploymentSecrets over the result exactly as main.go
+// does after the Init loop. A regression in any HasRequiredDeploymentSecrets
+// plugin -- not just email -- that misreads a shared config as "enabled"
+// fails this test, because it would appear Healthy and then demand a
+// deployment secret this config never asked for.
+func TestCheckRequiredDeploymentSecretsOverTheFullDiscoverSetDoesNotTripOnAnotherPluginsSharedConfig(t *testing.T) {
+	loaded, err := plugin.Discover()
+	if err != nil {
+		t.Fatalf("discovering registered plugins: %v", err)
+	}
+
+	llmOnlyConfig := []byte(`{"providers":{"openai":{"enabled":true}}}`)
+	for _, lp := range loaded {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					lp.Healthy = false
+					lp.Error = fmt.Errorf("panic during Init: %v", r)
+				}
+			}()
+			env := &plugin.Environment{Config: llmOnlyConfig}
+			if err := lp.Plugin.Init(context.Background(), env); err != nil {
+				lp.Healthy = false
+				lp.Error = err
+				return
+			}
+			lp.Healthy = true
+		}()
+	}
+
+	// llm IS genuinely enabled by this config and DOES require a deployment
+	// key for its one enabled provider -- that is not the bug under test, so
+	// the fake store supplies it. If checkRequiredDeploymentSecrets still
+	// errors below, the error names which OTHER plugin tripped.
+	store := &fakeDeploymentSecretGetter{values: map[string]string{
+		"llm.providers.openai.api_key": "sk-real",
+	}}
+	if err := checkRequiredDeploymentSecrets(context.Background(), loaded, llmOnlyConfig, store); err != nil {
+		t.Fatalf("checkRequiredDeploymentSecrets over every registered plugin, llm-only config: %v -- "+
+			"a plugin other than llm read this shared config as enabling it", err)
+	}
+
+	// email specifically must not have ended up Healthy -- belt and braces
+	// with the assertion above, pinpointing WHICH plugin would have caused
+	// it rather than relying solely on checkRequiredDeploymentSecrets'
+	// generic error text.
+	email := findPlugin(t, loaded, "email-notify")
+	for _, lp := range loaded {
+		if lp.Plugin == email && lp.Healthy {
+			t.Error("email-notify ended up Healthy against an llm-only shared config")
+		}
 	}
 }

@@ -73,8 +73,13 @@ type Config struct {
 // as email's legacyEmailConfig: json.Unmarshal silently drops a field
 // ProviderConfig no longer declares, so a leftover key here does nothing and
 // says nothing unless something goes looking for it on purpose.
+//
+// plugin.Secret, not string, for the same reason as legacyEmailConfig:
+// TestPluginCredentialFieldsUseTheSecretType is name-driven and flags any
+// credential-shaped field held as a plain string. Found in cleat-review's
+// #2202 re-check.
 type legacyProviderConfig struct {
-	APIKey string `json:"api_key"`
+	APIKey plugin.Secret `json:"api_key"`
 }
 
 // Plugin implements the LLM provider plugin.

@@ -321,10 +321,10 @@ var knownUnreadableStatements = map[string]string{
 	"deployment_secrets.go:201": "putDeploymentSecretUpdateStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
 	"deployment_secrets.go:210": "putDeploymentSecretInsertStmt(s.dialect): INSERT INTO deployment_secrets, no tenant_id column, not an RLS table",
 	"deployment_secrets.go:225": "getDeploymentSecretStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
-	"deployment_secrets.go:242": "deploymentSecretMetaStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
-	"deployment_secrets.go:259": "retireDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
-	"deployment_secrets.go:364": "listDeploymentSecretsForResealStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
-	"deployment_secrets.go:409": "resealDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
+	"deployment_secrets.go:253": "deploymentSecretMetaStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
+	"deployment_secrets.go:285": "retireDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
+	"deployment_secrets.go:390": "listDeploymentSecretsForResealStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
+	"deployment_secrets.go:435": "resealDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
 }
 
 // receiversWithoutRLS are store types whose backends have no row-level

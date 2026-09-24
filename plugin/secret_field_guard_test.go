@@ -105,23 +105,32 @@ func TestPluginCredentialFieldsUseTheSecretType(t *testing.T) {
 			reason: "outbound body to PagerDuty; redacting it would break authentication",
 		},
 
-		// CANNOT REACH A CALLER. These five are process configuration,
-		// unmarshaled from a deployment file into a Config struct and never
-		// returned by any endpoint -- which is why they are not part of the
-		// leak this change fixes.
+		// CANNOT REACH A CALLER. Process configuration, unmarshaled from a
+		// deployment file into a Config struct and never returned by any
+		// endpoint -- which is why they are not part of the leak this change
+		// fixes.
 		//
-		// They are still credentials and still worth converting, for the
+		// email.Config.SendGridAPIKey and llm.ProviderConfig.APIKey are GONE
+		// from this list, not converted: cleat#1992 part 1 removed both
+		// fields from Config/ProviderConfig entirely, moving the credential to
+		// a deployment secret. What remains in --plugin-config is
+		// legacyEmailConfig.SendGridAPIKey and legacyProviderConfig.APIKey,
+		// read once at Init purely to WARN or refuse to boot on a leftover
+		// value -- and those ARE plugin.Secret (cleat-review's #2202
+		// re-check), not allowlisted, since converting them cost nothing
+		// (neither is built from a marshaled Config struct in any test
+		// helper the way the two removed entries were).
+		//
+		// blobstore.Config.SecretAccessKey is still worth converting, for the
 		// logging path rather than the response path. That was attempted here
 		// and backed out: plugin.Secret does not round-trip through
-		// json.Marshal by design, and six llm test helpers build their
+		// json.Marshal by design, and test helpers build their
 		// Environment.Config by marshaling a Config struct. Production never
 		// does that -- PluginLoader.DeployPlugin marshals a map[string]any
 		// parsed from deployment JSON -- so the conversion is safe, but the
 		// test churn belongs to its own change rather than riding along with a
 		// security fix. Tracked in tiers.yaml under the plugins entry.
 		"blobstore.Config.SecretAccessKey":          {reason: "process config; never returned by an endpoint (tracked)"},
-		"email.Config.SendGridAPIKey":               {reason: "process config; never returned by an endpoint (tracked)"},
-		"llm.ProviderConfig.APIKey":                 {reason: "process config; never returned by an endpoint (tracked)"},
 		"slacknotify.Config.SlackSigningSecret":     {reason: "process config; never returned by an endpoint (tracked)"},
 		"oauthprovider.oauthConfigRow.ClientSecret": {reason: "internal row struct; handleListSessions never selects it (tracked)"},
 

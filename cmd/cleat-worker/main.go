@@ -173,6 +173,36 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 	return runID, err
 }
 
+// deploymentSecretsForPlugin returns the plugin.DeploymentSecrets value a
+// plugin's Environment should carry: a scoped adapter refusing any name
+// outside its own declared prefix if it implements
+// plugin.HasDeploymentSecretPrefix, else nil.
+//
+// Default-deny, not the unscoped adapter every plugin used to share
+// regardless of whether it read deployment secrets at all -- cleat-review's
+// #2202 re-check GAP 2, found after the first version of
+// plugin.HasDeploymentSecretPrefix left every non-declaring plugin (all but
+// email and llm) able to read email's and llm's secrets through the one
+// adapter they all still received.
+//
+// Extracted to its own function -- rather than left inline in main()'s
+// per-plugin Init loop -- so it has a call site a test can exercise directly
+// against the REAL registered plugins (plugin.Discover()), per GAP 3: the
+// wiring itself was untested, and deleting this decision (or either
+// email's/llm's DeploymentSecretPrefix method) left every test green.
+// TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix and
+// TestDeploymentSecretsForPluginDefaultsToNilForAPluginThatDeclaresNoPrefix
+// (a_deployment_secrets_wiring_test.go) exercise this function; a third test
+// there, TestMainWiresDeploymentSecretsForPlugin, asserts main() still calls
+// it -- extracting the DECISION into a function a test can call does not by
+// itself prove anything calls that function.
+func deploymentSecretsForPlugin(p plugin.Plugin, unscoped plugin.DeploymentSecrets) plugin.DeploymentSecrets {
+	if dsp, ok := p.(plugin.HasDeploymentSecretPrefix); ok {
+		return engine.NewScopedPluginDeploymentSecrets(unscoped, dsp.DeploymentSecretPrefix())
+	}
+	return nil
+}
+
 func main() {
 	flag.Parse()
 
@@ -1282,13 +1312,7 @@ func main() {
 			continue
 		}
 		envCopy := *pluginEnv
-		// cleat#1992 part 1, cleat-review's #2202 pass: a plugin that
-		// declares its own deployment-secret prefix gets a DeploymentSecrets
-		// that refuses to Get anything outside it, rather than the one
-		// unscoped adapter every plugin otherwise shares.
-		if dsp, ok := lp.Plugin.(plugin.HasDeploymentSecretPrefix); ok {
-			envCopy.DeploymentSecrets = engine.NewScopedPluginDeploymentSecrets(pluginEnv.DeploymentSecrets, dsp.DeploymentSecretPrefix())
-		}
+		envCopy.DeploymentSecrets = deploymentSecretsForPlugin(lp.Plugin, pluginEnv.DeploymentSecrets)
 		switch lp.Plugin.Info().DatabaseAccess {
 		case plugin.DatabaseAccessNone:
 			envCopy.DB = nil
@@ -1323,9 +1347,18 @@ func main() {
 			if err := lp.Plugin.Init(ctx, &envCopy); err != nil {
 				lp.Healthy = false
 				lp.Error = err
-				if errors.Is(err, plugin.ErrNotConfigured) {
+				switch {
+				case errors.Is(err, plugin.ErrNotConfigured):
 					logger.InfoContext(context.Background(), "plugin not configured, disabled", "worker_id", workerID, "plugin", lp.Plugin.Info().Name)
-				} else {
+				case errors.Is(err, plugin.ErrFatalMisconfiguration):
+					// Same severity as checkRequiredDeploymentSecrets below:
+					// this is not "disable and continue", it is "the
+					// deployment is broken in a way nobody should be allowed
+					// to not notice". See ErrFatalMisconfiguration's doc
+					// comment (plugin/plugin.go).
+					logger.ErrorContext(context.Background(), "refusing to start: "+err.Error(), "worker_id", workerID, "plugin", lp.Plugin.Info().Name)
+					os.Exit(1)
+				default:
 					logger.ErrorContext(context.Background(), "plugin init failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", err)
 				}
 			}

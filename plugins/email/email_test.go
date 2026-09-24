@@ -306,6 +306,51 @@ func TestInitNoWarnWithoutLeftoverSendGridAPIKey(t *testing.T) {
 	}
 }
 
+// TestInitRefusesToBootWithLeftoverKeyAndEmailNotEnabled is BROKEN 2 from
+// cleat-review's #2202 re-check: the legacy-key check used to sit AFTER the
+// !cfg.Enabled return, so a pre-upgrade config -- sendgrid_api_key present,
+// email_enabled not yet added -- disabled email through the ordinary
+// ErrNotConfigured path with only an INFO log, and a deployment that was
+// clearly sending email would silently stop. Now it must refuse to boot the
+// whole worker instead (plugin.ErrFatalMisconfiguration), not merely
+// disable itself.
+func TestInitRefusesToBootWithLeftoverKeyAndEmailNotEnabled(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"sendgrid_api_key":"SG.leftover-plaintext"}`),
+	}
+	err := p.Init(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected an error when sendgrid_api_key is present but email_enabled is not")
+	}
+	if errors.Is(err, plugin.ErrNotConfigured) {
+		t.Errorf("expected plugin.ErrFatalMisconfiguration, not the quiet-disable ErrNotConfigured: %v", err)
+	}
+	if !errors.Is(err, plugin.ErrFatalMisconfiguration) {
+		t.Errorf("expected errors.Is(err, plugin.ErrFatalMisconfiguration), got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "email_enabled") || !strings.Contains(err.Error(), "sendgrid_api_key") {
+		t.Errorf("expected the error to name both the missing field and the leftover key, got: %v", err)
+	}
+}
+
+// TestInitRefusesToBootWithLeftoverKeyAndEmailExplicitlyDisabled pins the
+// explicit-false case separately, the same way
+// TestInitEmailEnabledFalseReportsErrNotConfigured does for the ordinary
+// disable path: an explicit "email_enabled": false must refuse to boot here
+// too, not just an absent field, since a bool carries no distinct state for
+// "never set" versus "set to false".
+func TestInitRefusesToBootWithLeftoverKeyAndEmailExplicitlyDisabled(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"email_enabled":false,"sendgrid_api_key":"SG.leftover-plaintext"}`),
+	}
+	err := p.Init(context.Background(), env)
+	if !errors.Is(err, plugin.ErrFatalMisconfiguration) {
+		t.Errorf("expected errors.Is(err, plugin.ErrFatalMisconfiguration), got: %v", err)
+	}
+}
+
 // ---- Plugin registration test ----
 
 func TestPluginRegistration(t *testing.T) {

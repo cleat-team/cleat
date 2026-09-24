@@ -207,6 +207,76 @@ func TestPutDeploymentSecretNormalizesNameCaseAcrossDialects(t *testing.T) {
 	}
 }
 
+// TestRetireDeploymentSecretRejectsANameWithTrailingWhitespace is a real bug
+// found by cleat-review's #2202 re-check: DeploymentSecretMeta and
+// RetireDeploymentSecret normalized (lowercased) their name argument but
+// never ran it through validSecretName the way Put/Get already do. SQL
+// Server's default collation is PAD SPACE -- trailing whitespace is
+// insignificant in a `WHERE name = @p1` comparison there, unlike PostgreSQL's
+// or MySQL's usual collations -- so a name with a trailing space, which
+// validSecretName rejects and nothing could ever have PUT, matched the real
+// row anyway and RetireDeploymentSecret retired it. Run on all three
+// dialects: the fix (validating in both functions) is dialect-agnostic, even
+// though only mssql could exhibit the original bug.
+func TestRetireDeploymentSecretRejectsANameWithTrailingWhitespace(t *testing.T) {
+	for _, dialect := range []testutil.Dialect{testutil.DialectPostgres, testutil.DialectMySQL, testutil.DialectMSSQL} {
+		t.Run(string(dialect), func(t *testing.T) {
+			s, db := deploymentStoreForTest(t, dialect)
+			ctx := t.Context()
+			const name = "email.sendgrid_api_key"
+
+			// ResealDeploymentSecrets scans the whole table unconditionally --
+			// see deploymentStoreForTest's callers above for why a row left
+			// behind here has to go, regardless of which assertion below fails.
+			deleteRow := map[testutil.Dialect]string{
+				testutil.DialectPostgres: `DELETE FROM deployment_secrets WHERE name = $1`,
+				testutil.DialectMySQL:    `DELETE FROM deployment_secrets WHERE name = ?`,
+				testutil.DialectMSSQL:    `DELETE FROM deployment_secrets WHERE name = @p1`,
+			}[dialect]
+			t.Cleanup(func() {
+				db.Exec(deleteRow, name) //nolint:errcheck // best-effort cleanup
+			})
+
+			if err := s.PutDeploymentSecret(ctx, name, "sk-real"); err != nil {
+				t.Fatalf("PutDeploymentSecret: %v", err)
+			}
+
+			badName := name + " "
+			n, err := s.RetireDeploymentSecret(ctx, badName)
+			if err != nil {
+				t.Fatalf("RetireDeploymentSecret(%q): %v", badName, err)
+			}
+			if n != 0 {
+				t.Errorf("RetireDeploymentSecret(%q) affected %d row(s), want 0 -- "+
+					"it matched the real row despite the trailing space", badName, n)
+			}
+
+			exists, disabledAt, err := s.DeploymentSecretMeta(ctx, name)
+			if err != nil {
+				t.Fatalf("DeploymentSecretMeta: %v", err)
+			}
+			if !exists {
+				t.Fatal("the real secret is gone")
+			}
+			if disabledAt.Valid {
+				t.Error("the real secret was retired by the trailing-space name")
+			}
+
+			// cleatctl's retire-deployment-secret command calls Meta FIRST and
+			// only calls Retire if Meta reports exists=true -- so Meta is the
+			// gate that actually protects that command, and must refuse the
+			// invalid name on its own.
+			existsInvalid, _, err := s.DeploymentSecretMeta(ctx, badName)
+			if err != nil {
+				t.Fatalf("DeploymentSecretMeta(%q): %v", badName, err)
+			}
+			if existsInvalid {
+				t.Errorf("DeploymentSecretMeta(%q) reported exists=true", badName)
+			}
+		})
+	}
+}
+
 func TestResealDeploymentSecretsConvergesAndPreservesPlaintext(t *testing.T) {
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	t.Cleanup(func() { db.Close() })
