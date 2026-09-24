@@ -64,7 +64,7 @@ func TestTheThreeStoredFormsAreAllReadableAndClassified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPayloadEncryption: %v", err)
 	}
-	master := pe.key
+	master := pe.ring.Current().Key
 	tc, err := pe.forTenant(tenantA)
 	if err != nil {
 		t.Fatalf("forTenant: %v", err)
@@ -141,7 +141,7 @@ func TestEachTenantGetsADifferentPayloadKey(t *testing.T) {
 			"tenant's ciphertext decrypts the other's -- which is the whole point " +
 			"of cleat#1793")
 	}
-	if bytes.Equal(a.derived, pe.key) {
+	if bytes.Equal(a.derived, pe.ring.Current().Key) {
 		t.Error("the derived key IS the master key, so nothing was derived")
 	}
 	if len(a.derived) != 32 {
@@ -183,7 +183,7 @@ func TestAPayloadKeyIsNotATenantSecretKey(t *testing.T) {
 
 	// The same construction tenant_secrets.go uses, with ITS info string.
 	secretKey := make([]byte, 32)
-	r := hkdf.New(sha256.New, pe.key, []byte(tenantA), []byte("cleat-tenant-secret-v1"))
+	r := hkdf.New(sha256.New, pe.ring.Current().Key, []byte(tenantA), []byte("cleat-tenant-secret-v1"))
 	if _, err := io.ReadFull(r, secretKey); err != nil {
 		t.Fatalf("derive secret key: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestAPayloadKeyIsNotATenantSecretKey(t *testing.T) {
 	// the inequality above is about the info string and not about this test
 	// deriving something unrelated.
 	same := make([]byte, 32)
-	r2 := hkdf.New(sha256.New, pe.key, []byte(tenantA), []byte(payloadKeyInfo))
+	r2 := hkdf.New(sha256.New, pe.ring.Current().Key, []byte(tenantA), []byte(payloadKeyInfo))
 	if _, err := io.ReadFull(r2, same); err != nil {
 		t.Fatalf("re-derive: %v", err)
 	}

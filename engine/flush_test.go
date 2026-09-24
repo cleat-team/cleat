@@ -404,7 +404,7 @@ func TestFlushEvent_EncryptGeneralFailure(t *testing.T) {
 	// complaint, so without it the derivation would produce a valid key from an
 	// empty master and the seal would SUCCEED. This test and
 	// TestAdaptiveFlusher_PrepareEntry_EncryptionError are what caught that.
-	engine.encryption = &PayloadEncryption{key: nil}
+	engine.encryption = &PayloadEncryption{ring: nil}
 	engine.encryptSensitivePayloads = true
 
 	rec := EventRecord{

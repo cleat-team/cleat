@@ -42,14 +42,28 @@ import (
 // (main.go:742), the encryptor is attached behind a type assertion to
 // *engine.PostgresStoreFactory, and the encrypting write path's INSERT is
 // Postgres syntax. The portedOn entry states it.
+//
+// --from-key-file (cleat#1992) is the same command's answer to a KEY rotation,
+// not just a form upgrade: without it, this command could re-seal a row into
+// the newest FORM under the key it already had, but had no way to move a row
+// off an old key entirely, because it only ever built a PayloadEncryption
+// around one key. It now builds a two-key ring -- current = --encryption-
+// key-file, one previous = --from-key-file -- so resealValue's existing
+// classify-then-reseal loop also converts "opened under the previous key"
+// (engine.PayloadFormPreviousKey) the same way it already converts the two
+// legacy on-disk forms. No new code path; the ring is what changed.
 
 const resealPayloadsUsage = `usage: cleatctl reseal-payloads --encryption-key-file <path> [flags]
 
 Re-seals payload ciphertexts written before cleat#1776 so that each is bound to
-the tenant whose row it sits in.
+the tenant whose row it sits in, and (cleat#1992) moves values off a retired
+key onto the current one.
 
-  --encryption-key-file <path>   base64 payload key, same file the worker reads
-  --dry-run                     report what would change, write nothing
+  --encryption-key-file <path>   base64 payload key -- values move TO this key
+  --from-key-file <path>         base64 payload key -- values move FROM this
+                                  key (cleat#1992); omit when only upgrading
+                                  form under a single key, as before
+  --dry-run                      report what would change, write nothing
 
 Exit status is non-zero if anything was left unconverted, so this can be run to
 completion in a loop and its exit code trusted.
@@ -260,6 +274,25 @@ func resealValue(enc *engine.PayloadEncryption, tenant, stored string) (string, 
 	return next, valueConverted, nil
 }
 
+// readPayloadKeyFile reads and decodes one base64 payload key file, naming
+// the flag it came from in every error -- an operator holding two of these
+// (--encryption-key-file and --from-key-file) needs to know which one is
+// wrong, not just that one is.
+func readPayloadKeyFile(path, flagName string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s: read: %w", flagName, err)
+	}
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+	if err != nil {
+		return nil, fmt.Errorf("%s: not valid base64: %w", flagName, err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("%s: key must decode to 32 bytes, got %d", flagName, len(key))
+	}
+	return key, nil
+}
+
 func quoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 func quoteIdents(ss []string) []string {
 	out := make([]string, len(ss))
@@ -274,7 +307,8 @@ func runResealPayloads(ctx context.Context, db *sql.DB, args []string) {
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprintf(os.Stderr, "%s", resealPayloadsUsage) }
 
-	keyFile := fs.String("encryption-key-file", "", "file holding the base64 payload key")
+	keyFile := fs.String("encryption-key-file", "", "file holding the base64 payload key -- values move TO this key")
+	fromKeyFile := fs.String("from-key-file", "", "file holding the base64 payload key values move FROM (cleat#1992)")
 	dryRun := fs.Bool("dry-run", false, "report what would change, write nothing")
 
 	if err := fs.Parse(args); err != nil {
@@ -286,13 +320,34 @@ func runResealPayloads(ctx context.Context, db *sql.DB, args []string) {
 		osExit(2)
 		return
 	}
-	keyBytes, err := os.ReadFile(*keyFile)
+	currentKey, err := readPayloadKeyFile(*keyFile, "--encryption-key-file")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: read key file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		osExit(1)
 		return
 	}
-	enc, err := engine.NewPayloadEncryption(strings.TrimSpace(string(keyBytes)))
+
+	// current = version 2, previous (if any) = version 1 -- arbitrary and
+	// never persisted (event_history carries no key_version column; see
+	// PayloadEncryption's doc comment in engine/encryption.go), kept only so
+	// engine.NewKeyRing has something to key its own dedup checks on.
+	versioned := []engine.VersionedKey{{Version: 2, Key: currentKey}}
+	if *fromKeyFile != "" {
+		fromKey, ferr := readPayloadKeyFile(*fromKeyFile, "--from-key-file")
+		if ferr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", ferr)
+			osExit(1)
+			return
+		}
+		versioned = append(versioned, engine.VersionedKey{Version: 1, Key: fromKey})
+	}
+	ring, err := engine.NewKeyRing(versioned[0], versioned[1:]...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		osExit(1)
+		return
+	}
+	enc, err := engine.NewPayloadEncryptionWithRing(ring)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		osExit(1)

@@ -47,8 +47,19 @@ import (
 // nothing about its tenant, so it can still be substituted across tenants for
 // as long as one exists. Binding new writes does not retroactively bind old
 // ones, and eliminating them is a re-seal, not a flag.
+//
+// # Rotation (cleat#1992) reuses engine.KeyRing rather than a bare key
+//
+// The single key became a ring: one current key that seals every new write,
+// and any number of previous keys that are read-only. See KeyRing's own doc
+// comment (keyring.go) -- it was built generic for exactly this reuse. UNLIKE
+// tenant secrets, no column on event_history carries a key_version: the GCM
+// tag already discriminates which key opened a value (the three PayloadForm
+// forms below), so no schema change was needed. A previous key's Version is
+// therefore bookkeeping for KeyRing's own dedup checks, never read back from a
+// row -- see NewPayloadEncryptionWithRing.
 type PayloadEncryption struct {
-	key []byte
+	ring *KeyRing
 }
 
 // tenantForAAD resolves the tenant a row's ciphertext must be bound to.
@@ -109,11 +120,12 @@ const payloadKeyInfo = "cleat-payload-v1"
 // sentence did not transfer; the measurement is why.
 type tenantCipher struct {
 	tenantID string
-	derived  []byte // HKDF(master, tenantID, payloadKeyInfo)
-	master   []byte // kept for the two legacy forms below
+	derived  []byte   // HKDF(current key, tenantID, payloadKeyInfo)
+	master   []byte   // current key, kept for the two legacy forms below
+	ring     *KeyRing // for trying previous keys on read; nil write paths never touch it
 }
 
-// forTenant derives this tenant's payload key.
+// forTenant derives this tenant's payload key, under the ring's CURRENT key.
 //
 // PER TENANT, so that a key recovered from one tenant's ciphertext -- by
 // cryptanalysis, by a bug, by a disclosed plaintext -- does not decrypt
@@ -125,8 +137,9 @@ func (pe *PayloadEncryption) forTenant(tenantID string) (*tenantCipher, error) {
 	if tenantID == "" {
 		return nil, ErrNoTenantForEncryption
 	}
-	// A 32-byte master is an invariant NewPayloadEncryption enforces, and it has
-	// to be re-checked HERE because the derivation silently tolerates a bad one.
+	// A 32-byte current key is an invariant NewPayloadEncryption and
+	// NewPayloadEncryptionWithRing both enforce, and it has to be re-checked
+	// HERE because the derivation silently tolerates a bad one.
 	//
 	// MEASURED, AND IT WAS A REGRESSION THIS CHANGE INTRODUCED. Before
 	// cleat#1793 a zero-value PayloadEncryption failed at aes.NewCipher(nil) on
@@ -137,15 +150,33 @@ func (pe *PayloadEncryption) forTenant(tenantID string) (*tenantCipher, error) {
 	// the seal succeeded. A misconfigured encryptor would have written
 	// ciphertext keyed off an empty master and reported success. Those two tests
 	// caught it; without them the loud failure would have become a silent one.
-	if len(pe.key) != 32 {
-		return nil, fmt.Errorf("payload encryption: master key is %d bytes, want 32", len(pe.key))
+	//
+	// A nil ring reads the same as a zero-value key (len 0) -- pe.currentKey
+	// handles both a nil *PayloadEncryption's ring and a ring with no current
+	// key configured, so this one check covers "never configured" and "half
+	// configured" identically.
+	cur, curLen := pe.currentKey()
+	if curLen != 32 {
+		return nil, fmt.Errorf("payload encryption: master key is %d bytes, want 32", curLen)
 	}
 	derived := make([]byte, 32)
-	r := hkdf.New(sha256.New, pe.key, []byte(tenantID), []byte(payloadKeyInfo))
+	r := hkdf.New(sha256.New, cur, []byte(tenantID), []byte(payloadKeyInfo))
 	if _, err := io.ReadFull(r, derived); err != nil {
 		return nil, fmt.Errorf("payload encryption: derive tenant key: %w", err)
 	}
-	return &tenantCipher{tenantID: tenantID, derived: derived, master: pe.key}, nil
+	return &tenantCipher{tenantID: tenantID, derived: derived, master: cur, ring: pe.ring}, nil
+}
+
+// currentKey returns the ring's current key and its length, or (nil, 0) if no
+// ring is configured at all -- kept as one function so every caller that needs
+// "is this thing configured" asks it the same way pe.ring == nil would answer,
+// without repeating the nil check.
+func (pe *PayloadEncryption) currentKey() ([]byte, int) {
+	if pe == nil || pe.ring == nil {
+		return nil, 0
+	}
+	cur := pe.ring.Current()
+	return cur.Key, len(cur.Key)
 }
 
 // seal always writes the newest form.
@@ -195,6 +226,11 @@ var ErrNoTenantForEncryption = errors.New("payload encryption: refusing to seal 
 
 // NewPayloadEncryption creates a PayloadEncryption from a base64-encoded
 // key string. The decoded key must be exactly 32 bytes (AES-256).
+//
+// Treats the key as key ring version 1, unconditionally -- the same rule
+// NewSecretStore uses for tenant secrets' single-key constructor, and for the
+// same reason: every pre-rotation deployment has exactly one key, and it has
+// no other version to be.
 func NewPayloadEncryption(keyBase64 string) (*PayloadEncryption, error) {
 	key, err := base64.StdEncoding.DecodeString(keyBase64)
 	if err != nil {
@@ -203,7 +239,22 @@ func NewPayloadEncryption(keyBase64 string) (*PayloadEncryption, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("payload encryption: key must be exactly 32 bytes after base64 decode, got %d", len(key))
 	}
-	return &PayloadEncryption{key: key}, nil
+	ring, err := NewKeyRing(VersionedKey{Version: 1, Key: key})
+	if err != nil {
+		return nil, err
+	}
+	return &PayloadEncryption{ring: ring}, nil
+}
+
+// NewPayloadEncryptionWithRing builds a PayloadEncryption around a full key
+// ring: a current key that seals every new write, and any number of previous
+// keys that are read-only (cleat#1992). See PayloadEncryption's own doc
+// comment for why a previous key's Version is never persisted anywhere.
+func NewPayloadEncryptionWithRing(ring *KeyRing) (*PayloadEncryption, error) {
+	if ring == nil {
+		return nil, fmt.Errorf("payload encryption: a key ring is required")
+	}
+	return &PayloadEncryption{ring: ring}, nil
 }
 
 // Encrypt seals plaintext under the tenant, returning nonce || ciphertext.
@@ -256,9 +307,18 @@ const (
 	// nothing -- it decrypts in any tenant's row.
 	PayloadFormLegacy
 
-	// PayloadFormUnreadable is none of the above under this key: plaintext
-	// that happens to be valid base64, a row sealed under a different key, or
-	// corruption. Reported, never rewritten.
+	// PayloadFormPreviousKey (cleat#1992) opened under one of the ring's
+	// PREVIOUS keys rather than its current one -- in whichever of the three
+	// (derived, bound, legacy) shapes that previous key was written in. The
+	// sweep doesn't need to know which shape: every previous-key value needs
+	// re-sealing under the current key regardless, the same as Bound and
+	// Legacy do under a single-key ring.
+	PayloadFormPreviousKey
+
+	// PayloadFormUnreadable is none of the above under any configured key:
+	// plaintext that happens to be valid base64, a row sealed under a key this
+	// ring holds neither as current nor previous, or corruption. Reported,
+	// never rewritten.
 	PayloadFormUnreadable
 )
 
@@ -270,6 +330,8 @@ func (f PayloadForm) String() string {
 		return "bound"
 	case PayloadFormLegacy:
 		return "legacy"
+	case PayloadFormPreviousKey:
+		return "previous-key"
 	default:
 		return "unreadable"
 	}
@@ -292,12 +354,14 @@ func (pe *PayloadEncryption) OpenAndClassify(tenantID string, data []byte) ([]by
 	return tc.openClassify(data)
 }
 
-// openClassify is the three attempts, in one place.
+// openClassify is the three attempts under the CURRENT key, then (cleat#1992)
+// the same three attempts under each PREVIOUS key in the ring, in one place.
 //
 // Both entry points come through here -- OpenAndClassify for the sweep, which
 // needs the form, and open for the read paths, which do not. One implementation
-// because the ORDER is the contract: newest first, so a converted row costs one
-// GCM open, and a form added later has exactly one place to be added.
+// because the ORDER is the contract: current key first and newest form first
+// within it, so a fully converted row costs one GCM open and only a row still
+// under an old key or an old form pays for the extra attempts.
 func (tc *tenantCipher) openClassify(data []byte) ([]byte, PayloadForm, error) {
 	if pt, err := openGCM(tc.derived, data, []byte(tc.tenantID)); err == nil {
 		return pt, PayloadFormDerived, nil
@@ -309,7 +373,57 @@ func (tc *tenantCipher) openClassify(data []byte) ([]byte, PayloadForm, error) {
 	if err == nil {
 		return pt, PayloadFormLegacy, nil
 	}
+	if pt, perr := tc.openUnderPreviousKeys(data); perr == nil {
+		return pt, PayloadFormPreviousKey, nil
+	}
+	// Report the newest attempt's error -- see Decrypt's doc for why: every
+	// form fails with the same "message authentication failed" for a wrong
+	// tenant, so the first is the one describing what the caller actually
+	// asked for, not whichever previous key happened to run last.
 	return nil, PayloadFormUnreadable, err
+}
+
+// openUnderPreviousKeys is cleat#1992's read half of rotation: mid-rotation, a
+// row sealed under a key the operator has since retired to "previous" must
+// still open, in whichever of the three shapes it was written in. Tries every
+// version the ring holds except the current one -- KeyRing.Versions() already
+// guarantees no two carry the same key, so trying them in any order reaches
+// the right one; which order costs nothing but a handful of failed GCM opens
+// on data that predates the CURRENT key, which is by construction the
+// uncommon case once reseal-payloads has run.
+func (tc *tenantCipher) openUnderPreviousKeys(data []byte) ([]byte, error) {
+	if tc.ring == nil {
+		return nil, errors.New("payload encryption: no key ring")
+	}
+	curVersion := tc.ring.Current().Version
+	var lastErr error = errors.New("payload encryption: no previous key configured")
+	for _, v := range tc.ring.Versions() {
+		if v == curVersion {
+			continue
+		}
+		vk, ok := tc.ring.Key(v)
+		if !ok {
+			continue
+		}
+		derived := make([]byte, 32)
+		r := hkdf.New(sha256.New, vk.Key, []byte(tc.tenantID), []byte(payloadKeyInfo))
+		if _, err := io.ReadFull(r, derived); err != nil {
+			lastErr = err
+			continue
+		}
+		if pt, err := openGCM(derived, data, []byte(tc.tenantID)); err == nil {
+			return pt, nil
+		}
+		if pt, err := openGCM(vk.Key, data, []byte(tc.tenantID)); err == nil {
+			return pt, nil
+		}
+		if pt, err := openGCM(vk.Key, data, nil); err == nil {
+			return pt, nil
+		} else {
+			lastErr = err
+		}
+	}
+	return nil, lastErr
 }
 
 // open is openClassify for callers that only want the plaintext.
