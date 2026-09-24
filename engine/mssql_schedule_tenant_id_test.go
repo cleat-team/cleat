@@ -43,8 +43,15 @@ func TestMSSQLSchedules_TenantIDSurvivesTheRoundTripToStartNewRun(t *testing.T) 
 	const tid = "11111111-1111-1111-1111-111111111111"
 	ctx := context.Background()
 
-	seed := NewMSSQLStore(db)
-	seed.tenantID = tid
+	// A properly connectored store, not NewMSSQLStore(db) with tenantID set
+	// by hand: cleat#2205's migration 103 added block predicates that check
+	// SESSION_CONTEXT('tenant_id') on every write, and StartNewRun (unlike
+	// DeployWorkflowDef) opens its transaction with a plain s.db.BeginTx,
+	// relying entirely on the connector -- see openMSSQLTenantStore's own
+	// comment. A raw pool never sets that context, so setupTestData's
+	// StartNewRun call would be refused outright before this test could get
+	// to the property it is about.
+	seed := openMSSQLTenantStore(t, tid)
 	setupTestData(t, seed)
 	if err := seed.CreateSchedule(ctx, Schedule{
 		Name:           "tenant-id-round-trip",

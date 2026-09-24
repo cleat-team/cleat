@@ -100,9 +100,20 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	// answered yes, off the INSERT column list, which says nothing about the
 	// row a MERGE MATCHES. That is why the gate 3.86 describes needs a
 	// position-aware check rather than a substring one.
+	//
+	// Gated on EXISTS rather than a plain VALUES INSERT -- cleat#2218.
+	// workflow_signals carries fk_signals_workflow, a real FK to
+	// workflow_instances(id), so a NONEXISTENT workflowID threw instead of
+	// writing an orphan row, while a workflowID that exists under a
+	// DIFFERENT tenant satisfied the FK and wrote one silently -- an
+	// existence oracle by error-versus-nil, reachable over HTTP through
+	// webhookingest's processed flag. "Foreign tenant" and "does not exist"
+	// now take the identical path: the EXISTS is false either way, nothing
+	// is written, no error.
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
-		VALUES (@p1, @p2, @p3, @p4)
+		SELECT @p1, @p2, @p3, @p4
+		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = @p1 AND tenant_id = @p4)
 	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID)
 	if err != nil {
 		return err
@@ -114,19 +125,21 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	//
 	// No RowsAffected check here, and that is deliberate, not an oversight:
 	// the explicit "AND tenant_id = @p2" excludes a mismatched row SILENTLY,
-	// on purpose -- that is the ESTABLISHED, tested contract for a
-	// cross-tenant or nonexistent-id delivery
-	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal and
-	// DeliverSignalWake cases, IMPROVEMENT-PLAN 3.86/3.215): it succeeds as
-	// a harmless orphan INSERT under the caller's own tenant, not an error,
-	// specifically so that success-versus-failure cannot be used as a
-	// cross-tenant existence oracle. cleat#2209's actual defect was that
-	// SignalWorkflow ran on a store scoped to the WRONG tenant for a REAL,
-	// correctly-owned target -- scopeToTenant (cmd/cleat-worker/main.go,
-	// signalPluginWorkflow) is what fixes that, by ensuring this UPDATE runs
-	// under the target's own tenant, where it matches. Erroring here on
-	// RowsAffected()==0 was tried and reverted (cleat#2207) after it broke
-	// that established contract in CI.
+	// on purpose. Combined with the EXISTS-gated INSERT above, both a
+	// cross-tenant and a nonexistent workflowID now write nothing and
+	// return nil, by the same mechanism, on every statement in this
+	// function -- no existence oracle, unconditionally
+	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal,
+	// DeliverSignalWake, and DeliverSignalNonexistentID cases;
+	// IMPROVEMENT-PLAN 3.86/3.215; cleat#2218). cleat#2209's actual defect
+	// was that SignalWorkflow ran on a store scoped to the WRONG tenant for
+	// a REAL, correctly-owned target -- scopeToTenant
+	// (cmd/cleat-worker/main.go, signalPluginWorkflow) is what fixes that,
+	// by ensuring this UPDATE runs under the target's own tenant, where it
+	// matches. Erroring here on RowsAffected()==0 was tried and reverted
+	// (cleat#2207) after it broke the harmless-orphan-write half of this
+	// contract in CI; cleat#2218 closes the remaining gap without
+	// reintroducing that.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,

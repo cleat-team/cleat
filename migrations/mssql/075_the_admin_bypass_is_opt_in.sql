@@ -100,12 +100,26 @@ IF @fn IS NULL
 IF OBJECT_ID(N'tempdb..#cleat_bound_policies') IS NOT NULL DROP TABLE #cleat_bound_policies;
 CREATE TABLE #cleat_bound_policies (policy_name SYSNAME, target_schema SYSNAME, target_name SYSNAME);
 
+-- FILTER predicates only. Before cleat#2205 (migration 103) every table bound
+-- to fn_tenant_filter carried exactly one predicate row, so this query and
+-- the CREATE loop below (which has no DISTINCT of its own) returned one row
+-- per table by construction. 103 adds three BLOCK predicates per table on
+-- the same function, so the unfiltered query now returns four rows per
+-- table -- and the CREATE loop, run once per row, does
+-- `CREATE SECURITY POLICY dbo.TenantFilter_X` a second time and fails with
+-- "There is already an object named ...". Restricting the capture to FILTER
+-- restores "one row per table" regardless of how many BLOCK predicates that
+-- table also carries. Reproduced against a database with 103 applied before
+-- this line existed; see the BLOCK predicate re-creation below for the other
+-- half of the fix -- capturing only FILTER here would otherwise silently
+-- drop 103's protection the moment this file runs.
 INSERT INTO #cleat_bound_policies (policy_name, target_schema, target_name)
 SELECT sp.name, SCHEMA_NAME(o.schema_id), o.name
   FROM sys.security_predicates AS pred
   JOIN sys.security_policies   AS sp ON sp.object_id = pred.object_id
   JOIN sys.objects             AS o  ON o.object_id  = pred.target_object_id
- WHERE pred.predicate_definition LIKE N'%fn_tenant_filter%';
+ WHERE pred.predicate_definition LIKE N'%fn_tenant_filter%'
+   AND pred.predicate_type_desc = N'FILTER';
 
 -- A zero here would silently produce a database with NO row-level security and
 -- a migration that reported success. 001 binds eight on a fresh install, so
@@ -152,6 +166,28 @@ SELECT @sql = @sql
      + N' WITH (STATE = ON);' + CHAR(10)
   FROM #cleat_bound_policies;
 EXEC sp_executesql @sql;
+
+-- cleat#2205 (migration 103): every policy this file just recreated may have
+-- carried BLOCK predicates before the DROP above, and CREATE SECURITY POLICY
+-- starts a policy with none. Re-add the same three, on the same function,
+-- unconditionally -- a fresh install applies 075 before 103 exists, where
+-- this is simply a no-op-sized statement over zero tables' worth of nothing
+-- yet to preserve; an operator re-running 075 after 103 to reverse
+-- cross_tenant_claim.sql is exactly the case this exists for, and it must not
+-- silently trade cleat#2205's write protection away as the price of
+-- returning to the plain predicate.
+SET @sql = N'';
+SELECT @sql = @sql
+     + N'ALTER SECURITY POLICY dbo.' + QUOTENAME(policy_name)
+     + N' ADD BLOCK PREDICATE dbo.fn_tenant_filter(tenant_id) ON '
+     + QUOTENAME(target_schema) + N'.' + QUOTENAME(target_name) + N' AFTER INSERT,'
+     + N' ADD BLOCK PREDICATE dbo.fn_tenant_filter(tenant_id) ON '
+     + QUOTENAME(target_schema) + N'.' + QUOTENAME(target_name) + N' AFTER UPDATE,'
+     + N' ADD BLOCK PREDICATE dbo.fn_tenant_filter(tenant_id) ON '
+     + QUOTENAME(target_schema) + N'.' + QUOTENAME(target_name) + N' BEFORE UPDATE;' + CHAR(10)
+  FROM #cleat_bound_policies;
+IF LEN(@sql) > 0
+    EXEC sp_executesql @sql;
 
 MERGE admin.rls_predicate_form AS t
 USING (SELECT 1 AS only_row, N'plain' AS form) AS s

@@ -337,15 +337,33 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 	// Create workflow instances in various states for testing
 	now := time.Now()
 
+	// runner is store, except on SQL Server when store's own tenant is not
+	// DefaultTenantUUID. The two StartNewRun calls below deliberately write
+	// for DefaultTenantUUID regardless of what tenant store carries (see the
+	// comment above) -- fine for the write's own row, but unlike
+	// DeployWorkflowDef, StartNewRun sets no SESSION_CONTEXT of its own
+	// (mssql_lifecycle.go's startNewRunOnce opens a plain s.db.BeginTx and
+	// relies entirely on the connector). So when store's pool is
+	// connectored for a DIFFERENT tenant, cleat#2205's block predicate
+	// refuses the write outright: the row names DefaultTenantUUID, the
+	// connection's session context names store's own tenant. A store
+	// connectored for DefaultTenantUUID specifically is opened here for
+	// exactly these two calls, the same way the deploy above already
+	// handles the identical mismatch for DeployWorkflowDef.
+	runner := store
+	if st, ok := store.(*MSSQLStore); ok && st.tenantID != DefaultTenantUUID {
+		runner = openMSSQLTenantStore(t, DefaultTenantUUID)
+	}
+
 	// A "ready" workflow instance
-	readyWfID, _, err := store.StartNewRun(context.Background(), "", "test-workflow", 1,
+	readyWfID, _, err := runner.StartNewRun(context.Background(), "", "test-workflow", 1,
 		json.RawMessage(`{"key":"value"}`), "setup-ready-1", DefaultTenantUUID, 0)
 	if err != nil {
 		t.Fatalf("setupTestData: StartNewRun ready: %v", err)
 	}
 
 	// A "running" workflow instance
-	_, _, err = store.StartNewRun(context.Background(), "", "test-workflow", 1,
+	_, _, err = runner.StartNewRun(context.Background(), "", "test-workflow", 1,
 		json.RawMessage(`{"key":"running"}`), "setup-running-1", DefaultTenantUUID, 0)
 	if err != nil {
 		t.Fatalf("setupTestData: StartNewRun running: %v", err)
@@ -562,6 +580,36 @@ func TestCascadeDelete(t *testing.T) {
 			// no longer see is the failure mode this handle exists to remove.
 			verify := testutil.AdminDB(t, db, d.dialect)
 
+			// The seeding handle. On SQL Server, cleat#2205's migration 103
+			// added AFTER INSERT / AFTER UPDATE block predicates to every
+			// table this test writes, and a block predicate checks
+			// SESSION_CONTEXT('tenant_id') regardless of the tenant_id value a
+			// statement names -- so an INSERT on db (a plain pool with no
+			// session context) is refused outright, not merely filtered.
+			// sp_set_session_context is connection-scoped and
+			// database/sql's ResetSession clears it between pool checkouts
+			// (see mssql_double_claim_test.go), so a plain db.Exec cannot
+			// carry it: one dedicated *sql.Conn is pinned instead, matching
+			// what every row this test seeds relies on by default
+			// (tenant_id DEFAULT '00000000-0000-0000-0000-000000000000', i.e.
+			// DefaultTenantUUID). The other two dialects have no such
+			// requirement, so seed is just db there.
+			var seed dbExecer = db
+			if d.dialect == testutil.DialectMSSQL {
+				cascadeCtx := context.Background()
+				conn, err := db.Conn(cascadeCtx)
+				if err != nil {
+					t.Fatalf("pin a connection for seeding: %v", err)
+				}
+				defer conn.Close()
+				if _, err := conn.ExecContext(cascadeCtx,
+					`EXEC sp_set_session_context @key=N'tenant_id', @value=N'`+DefaultTenantUUID+`'`,
+				); err != nil {
+					t.Fatalf("set the tenant session context: %v", err)
+				}
+				seed = pinnedConnExecer{conn}
+			}
+
 			// Insert a workflow def so workflow_instances FK is satisfied.
 			// The DELETE is what makes a re-run possible, so it goes through
 			// verify: on db it would match nothing on SQL Server and the
@@ -575,7 +623,7 @@ func TestCascadeDelete(t *testing.T) {
 			default:
 				emptyBlob = "'\\x'" // Postgres/MySQL accept hex string
 			}
-			_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes) VALUES ('cascade-test-def', 1, ` + emptyBlob + `)`)
+			_, err := seed.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes) VALUES ('cascade-test-def', 1, ` + emptyBlob + `)`)
 			if err != nil {
 				t.Fatalf("insert workflow_defs: %v", err)
 			}
@@ -583,10 +631,10 @@ func TestCascadeDelete(t *testing.T) {
 			wfID := "cascade-test-001"
 
 			// Insert workflow instance.
-			insertWorkflowInstance(t, db, d.dialect, wfID)
+			insertWorkflowInstance(t, seed, d.dialect, wfID)
 
 			// Insert child rows in all 5 tables.
-			insertChildRows(t, db, d.dialect, wfID)
+			insertChildRows(t, seed, d.dialect, wfID)
 
 			// Delete the workflow instance - cascade should clean up children.
 			res, err := verify.Exec(`DELETE FROM workflow_instances WHERE id = '` + wfID + `'`)
@@ -769,8 +817,30 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 	}
 }
 
+// dbExecer is satisfied by both *sql.DB and pinnedConnExecer, so
+// TestCascadeDelete's SQL Server arm can hand insertWorkflowInstance and
+// insertChildRows a single dedicated connection (see pinnedConnExecer)
+// without those two functions needing to know which dialect they got.
+type dbExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// pinnedConnExecer adapts a *sql.Conn -- which has no Exec, only
+// ExecContext -- to dbExecer. It exists for cleat#2205: on SQL Server,
+// sp_set_session_context is connection-scoped and does not survive
+// database/sql's ResetSession between pool checkouts (see
+// mssql_double_claim_test.go's identical need), so a write gated by one of
+// migration 103's block predicates has to run on the SAME *sql.Conn the
+// session context was set on, not on a plain *sql.DB that may hand back a
+// different pooled connection per call.
+type pinnedConnExecer struct{ conn *sql.Conn }
+
+func (p pinnedConnExecer) Exec(query string, args ...any) (sql.Result, error) {
+	return p.conn.ExecContext(context.Background(), query, args...)
+}
+
 // insertWorkflowInstance inserts a single workflow_instances row for cascade testing.
-func insertWorkflowInstance(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID string) {
+func insertWorkflowInstance(t *testing.T, db dbExecer, dialect testutil.Dialect, wfID string) {
 	t.Helper()
 
 	switch dialect {
@@ -793,7 +863,7 @@ func insertWorkflowInstance(t *testing.T, db *sql.DB, dialect testutil.Dialect, 
 }
 
 // insertChildRows inserts one row into each of the 5 child tables for cascade testing.
-func insertChildRows(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID string) {
+func insertChildRows(t *testing.T, db dbExecer, dialect testutil.Dialect, wfID string) {
 	t.Helper()
 
 	// event_history
@@ -847,7 +917,17 @@ func insertChildRows(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID st
 			t.Fatalf("insert workflow_promises (mysql): %v", err)
 		}
 	case testutil.DialectMSSQL:
-		_, err := db.Exec(`INSERT INTO workflow_promises (workflow_id, promise_id, promise_name, tenant_id) VALUES (@p1, 'promise-1', 'test-promise', '')`, wfID)
+		// tenant_id, not '': the column is NVARCHAR(255), but
+		// TenantFilter_Promises binds it through dbo.fn_tenant_filter(@tenant_id
+		// UNIQUEIDENTIFIER) same as every other table this migration protects,
+		// so SQL Server converts the stored value to UNIQUEIDENTIFIER to
+		// evaluate the predicate -- on INSERT since cleat#2205's migration 103,
+		// and already on any policy-enforced SELECT before it. '' is not a
+		// UUID, so it fails that conversion outright now rather than merely
+		// being unreadable later. seed (above, this test's dbExecer) already
+		// runs as DefaultTenantUUID's session context, so this value has to
+		// match it.
+		_, err := db.Exec(`INSERT INTO workflow_promises (workflow_id, promise_id, promise_name, tenant_id) VALUES (@p1, 'promise-1', 'test-promise', '`+DefaultTenantUUID+`')`, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_promises (mssql): %v", err)
 		}

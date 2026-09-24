@@ -247,27 +247,34 @@ func trimForLog(s string) string {
 	return s
 }
 
-// TestAnInvisibleRowIsNotAMissingRow proves the second question can be asked.
+// TestAnInvisibleRowIsNotAMissingRow used to prove the second question could
+// be asked: a row inserted through a connection with no tenant session
+// context was accepted -- workflow_instances carried a FILTER predicate and
+// no BLOCK predicate, so nothing refused the write -- and was then invisible
+// to every subsequent read, including the one that wrote it. That produced
+// cleat#982's exact symptom with no deleter to find, which is why a deletion
+// audit alone would have answered "nothing deleted it" and been right and
+// useless.
 //
-// A row inserted through a connection with no tenant session context is
-// accepted -- workflow_instances carries a FILTER predicate and no BLOCK
-// predicate, so nothing refuses the write -- and is then invisible to every
-// subsequent read, including the one that wrote it and including the blanket
-// DELETE that would otherwise remove it.
-//
-// That produces cleat#982's exact symptom with no deleter to find, which is why
-// a deletion audit alone would have answered "nothing deleted it" and been
-// right and useless.
+// cleat#2205's migration 103_a_filtered_write_is_a_blocked_write.sql closed
+// exactly that door: workflow_instances now carries an AFTER INSERT block
+// predicate checking SESSION_CONTEXT('tenant_id'), so the write this test
+// used to manufacture a physically-present-but-invisible row is refused
+// before it lands, on every run, rather than landing invisibly. There is no
+// longer a way to reach the "PRESENT BUT INVISIBLE" state through an INSERT
+// on a context-free connection -- this test proves that refusal instead,
+// permanently, rather than skipping around a precondition that can no longer
+// be constructed. See the disappearance-report mechanism's other proof,
+// TestTheDeletionAuditNamesWhoRemovedTheRow, above -- that one still
+// exercises the report through a real DELETE, on a properly connectored
+// store, which migration 103 does not touch.
 func TestAnInvisibleRowIsNotAMissingRow(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
 		t.Skip("CLEAT_TEST_MSSQL not set")
 	}
 	raw := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, raw)
-	admin := testutil.MSSQLAdminDB(t, raw)
 	testutil.CleanupMSSQLTestData(t, raw)
-
-	testutil.ReportMSSQLRowDisappearanceOnFailure(t, raw, raw)
 
 	ctx := context.Background()
 	store := openMSSQLTenantStore(t, DefaultTenantUUID)
@@ -283,66 +290,31 @@ func TestAnInvisibleRowIsNotAMissingRow(t *testing.T) {
 	// and go-mssqldb answers database/sql's ResetSession with
 	// sp_reset_connection, which clears any that was set. The engine's own
 	// pools re-apply it on every recycle (tenantSessionConn.ResetSession,
-	// IMPROVEMENT-PLAN 2.71); this one cannot.
+	// IMPROVEMENT-PLAN 2.71); this one cannot -- which is exactly the
+	// connection shape the block predicate exists to refuse a write from.
 	const hidden = "wf-invisible-to-its-own-writer"
-	if _, err := raw.Exec(`INSERT INTO dbo.workflow_instances (id, def_name, def_version, tenant_id)
-		VALUES (@p1, @p2, 1, @p3)`, hidden, def, DefaultTenantUUID); err != nil {
-		t.Fatalf("insert through a context-free pool: %v.\n\n"+
-			"If this is a block-predicate refusal then this database refuses the write "+
-			"that the measurement depends on, and the invisibility mechanism does not "+
-			"apply here -- which is a finding, not a failure. Say so rather than "+
-			"widening the test.", err)
+	_, err := raw.Exec(`INSERT INTO dbo.workflow_instances (id, def_name, def_version, tenant_id)
+		VALUES (@p1, @p2, 1, @p3)`, hidden, def, DefaultTenantUUID)
+	if err == nil {
+		t.Fatal("an INSERT through a context-free connection succeeded -- " +
+			"workflow_instances' AFTER INSERT block predicate (cleat#2205, migration 103) " +
+			"did not fire, so a row could once again land physically present and invisible " +
+			"to its own writer (cleat#982)")
+	}
+	if !isMSSQLBlockPredicateError(err) {
+		t.Fatalf("the INSERT failed, but not with a block-predicate error: %v", err)
 	}
 
-	physical, visible, err := testutil.PhysicalAndVisibleMSSQLRowCount(raw, raw, "workflow_instances")
-	if err != nil {
-		t.Fatalf("count workflow_instances through the raw pool: %v", err)
-	}
-	if physical == 0 {
-		t.Fatalf("the insert reported success and the table holds no rows at all "+
-			"(physical=%d visible=%d). Nothing below is measured.", physical, visible)
-	}
-	// NOT A SKIP, though it reads like an environmental precondition. The
-	// shipped migrations install the filter predicate and SetupMSSQLFullSchema
-	// ran them, so on any database built the way this test builds one the row
-	// IS hidden -- the condition is always satisfiable here, which makes a skip
-	// the wrong verdict for it. A database where it does not hold is a database
-	// whose policies are missing, and skipping would report that as a pass on
-	// the one measurement that cannot be taken without them.
-	if physical <= visible {
-		t.Fatalf("physical=%d visible=%d: this database is not filtering "+
-			"workflow_instances for the connecting principal, so nothing here is "+
-			"measured.\n\n"+
-			"The shipped migrations install the predicate and SetupMSSQLFullSchema "+
-			"applied them, so this is a database that lost its security policies "+
-			"rather than an optional feature. Drop and recreate it (see "+
-			"assertMSSQLPoliciesPresent, IMPROVEMENT-PLAN 2.71).", physical, visible)
-	}
-
-	// The whole point, in one assertion: the row is there, and the writer's own
-	// connection reports it missing.
+	// No row was ever created, so there is nothing left to find and nothing
+	// to clean up.
 	var found int
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM dbo.workflow_instances WHERE id = @p1`,
 		hidden).Scan(&found); err != nil {
-		t.Fatalf("look for the row we just wrote: %v", err)
+		t.Fatalf("confirm the refused row does not exist: %v", err)
 	}
 	if found != 0 {
-		t.Fatalf("physical=%d visible=%d says a row is hidden, but the row we wrote is "+
-			"visible. The discriminator and the direct read disagree; do not trust "+
-			"either until they are reconciled.", physical, visible)
-	}
-
-	report := testutil.MSSQLRowDisappearanceReport(raw, raw)
-	if !strings.Contains(report, "PRESENT BUT INVISIBLE") {
-		t.Errorf("the report does not name the condition it just measured "+
-			"(physical=%d visible=%d):\n%s", physical, visible, report)
-	}
-	t.Logf("cleat#982's symptom with no deleter to find:\n%s", report)
-
-	// Leave nothing behind: the blanket cleanup cannot see this row either, so
-	// it would sit in the table for every later test in this database.
-	if _, err := admin.Exec(`DELETE FROM dbo.workflow_instances WHERE id = @p1`, hidden); err != nil {
-		t.Logf("removing the hidden row through the admin pool: %v", err)
+		t.Fatalf("the INSERT was refused, but the row exists anyway (count=%d) -- "+
+			"the refusal and the table disagree", found)
 	}
 }
 

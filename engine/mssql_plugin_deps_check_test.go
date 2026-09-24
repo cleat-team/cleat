@@ -36,16 +36,34 @@ func TestPluginDepsRejectsNonJSON(t *testing.T) {
 
 	ctx := context.Background()
 
+	// A pinned connection with the default tenant's session context set,
+	// not db.ExecContext directly: cleat#2205's migration 103 put an AFTER
+	// INSERT block predicate on workflow_defs, checked against
+	// SESSION_CONTEXT('tenant_id'), and db is a plain pool that never sets
+	// it. sp_set_session_context is connection-scoped and does not survive
+	// database/sql's pool checkout reset (see mssql_double_claim_test.go),
+	// so this has to be the same *sql.Conn for both inserts below.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin a connection: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx,
+		`EXEC sp_set_session_context @key=N'tenant_id', @value=N'`+DefaultTenantUUID+`'`,
+	); err != nil {
+		t.Fatalf("set the tenant session context: %v", err)
+	}
+
 	// Control: valid JSON is accepted. Without it, a schema that rejected
 	// everything would pass the negative case below.
-	if _, err := db.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO workflow_defs (name, version, wasm_bytes, min_version, abi_version, plugin_deps, tenant_id)
 		 VALUES ('deps-check-ok', 1, 0x0061736d, 1, 1, @p1, @p2)`,
 		`{"llm":"1.2.0"}`, DefaultTenantUUID); err != nil {
 		t.Fatalf("valid plugin_deps was rejected: %v", err)
 	}
 
-	_, err := db.ExecContext(ctx,
+	_, err = conn.ExecContext(ctx,
 		`INSERT INTO workflow_defs (name, version, wasm_bytes, min_version, abi_version, plugin_deps, tenant_id)
 		 VALUES ('deps-check-bad', 1, 0x0061736d, 1, 1, @p1, @p2)`,
 		"not json at all", DefaultTenantUUID)

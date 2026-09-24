@@ -10192,3 +10192,86 @@ the evidence to tidy a number.
 
 Files: `scripts/check-required-contexts.py`, `tiers.yaml`, `.github/required-checks.txt`,
 `docs/project/release-process.md`, nine files under `.github/workflows/`.
+
+### 3.340 SQL Server's row-level security gets a write side, and DeliverSignal loses its existence oracle — ✅ **FIXED 2026-09-24** (cleat#2205, cleat#2218)
+
+**cleat#2205.** SQL Server's tenant RLS had `FILTER` predicates only. A `FILTER` predicate
+restricts what `SELECT`/`UPDATE`/`DELETE` can *see* — it says nothing about what a write
+*leaves behind*. Measured on a real database, connected as an ordinary login holding tenant A's
+session context:
+
+    INSERT INTO dbo.tenant_domains (..., tenant_id, ...) VALUES (..., B, ...)   succeeds, stamped B
+    UPDATE dbo.tenant_domains SET tenant_id = B WHERE hostname = <A's own row>  succeeds, row moves to B
+
+PostgreSQL does not have this gap — its policies carry `WITH CHECK`, enforced on the post-image
+of every write. `migrations/mssql/103_a_filtered_write_is_a_blocked_write.sql` is the SQL Server
+equivalent: it adds `BLOCK` predicates (`AFTER INSERT`, `AFTER UPDATE`, `BEFORE UPDATE`) to every
+table already carrying a `FILTER` predicate on `dbo.fn_tenant_filter`, reusing the same function
+rather than a second one so the admin-bypass form (`migrations/mssql/optional/
+cross_tenant_claim.sql`) keeps identical latitude on writes that it already has on reads. The
+table set is derived live from `sys.security_predicates`, not hand-listed, for the reason 075
+gives for doing the same. `engine/mssql_block_predicates_test.go` proves it two ways: a live
+guard (`TestEveryMSSQLFilterPredicateHasAMatchingBlockPredicate`) that fails if any FILTER-bound
+table is missing one of the three BLOCK operations, and a real-store test
+(`TestMSSQLBlockPredicatesRejectCrossTenantWrites`) proving a cross-tenant INSERT is refused, a
+tenant-moving UPDATE is refused, and legitimate same-tenant writes still succeed.
+
+**The blast radius was the finding, not the fix.** BLOCK evaluates `SESSION_CONTEXT('tenant_id')`
+on every write regardless of the caller's own tenant field, deterministically rather than only
+sometimes (FILTER let a query-optimizer short-circuit mask some cases). 34 pre-existing MSSQL
+tests relied on the exact write-side loophole this closes — raw/unscoped connections writing
+tenant-scoped rows with no session context, or a `*sql.DB` pool whose `sp_set_session_context`
+does not survive `database/sql`'s connection-checkout reset. Fixed across 9 test files by pinning
+a `*sql.Conn` and setting session context once per connection (the established pattern from
+`mssql_double_claim_test.go`), or by routing genuinely cross-tenant seeding through the
+`cleat_admin`-role admin-bypass pool where a single tenant's session context cannot satisfy a
+multi-tenant write. One latent bug surfaced in the same sweep: `workflow_promises.tenant_id`
+(`NVARCHAR(255)`, not `UNIQUEIDENTIFIER`) was seeded with `''` in a cascade-delete fixture, which
+FILTER's optimizer-masked evaluation never reached but BLOCK's unconditional one does
+(`CAST` of `''` to `UNIQUEIDENTIFIER` fails outright) — fixed to a real tenant UUID.
+
+One test, `TestAnInvisibleRowIsNotAMissingRow` (cleat#982's proof that a filtered write is not an
+invisible write), could no longer *produce* the invisible row it was written to detect — the
+INSERT it relies on is now refused outright. Converting its `t.Skip` to a permanent assertion
+would have been a skip that fires on every run, which `scripts/check-skips.sh` correctly flags
+as not a skip at all (CLAUDE.md, "a skip that hides a crash is not a skip"). Rewritten instead
+into a positive, permanent regression test: the INSERT must fail with a block-predicate error,
+and the row must not exist afterward — proving cleat#2205 closed the exact gap cleat#982 was
+about, rather than skipping past it.
+
+**cleat#2218.** `DeliverSignal` had an existence oracle, independent of the BLOCK predicates
+above and present on every dialect: `workflow_signals` carries a real FK to
+`workflow_instances(id)` (MySQL, MSSQL) — a nonexistent workflow id threw an FK error, while a
+workflow id that exists under a *different* tenant satisfied the FK and wrote an orphan row under
+the caller's own tenant, returning nil. Error-versus-nil told a caller which was true, reachable
+over HTTP through webhookingest's processed flag. Closed identically on Postgres, MySQL and SQL
+Server by gating the INSERT itself: `INSERT ... SELECT ... WHERE EXISTS (SELECT 1 FROM
+workflow_instances WHERE id = ? AND tenant_id = <caller>)`. A nonexistent id and a foreign-tenant
+id now take the identical path — the `EXISTS` is false either way, nothing is written, no error —
+so the two cases are indistinguishable from every side, not just the victim's.
+`engine/mssql_admin_login_control_plane_tenant_test.go`'s `DeliverSignal`/`DeliverSignalNonexistentID`
+cases prove it under SQL Server's `cleat_admin` bypass role specifically; a new dialect-independent
+test, `TestDeliverSignalToAnIDTheCallerCannotTouchWritesNothing`
+(`engine/a_signal_to_an_id_the_caller_cannot_touch_writes_nothing_test.go`), proves the same
+ForeignID/NonexistentID/OwnID trio through the ordinary tenant-scoped store on all three
+registered backends via `MultiTenantStoreBackend`. The doc comments on the interface and both
+dialect implementations (`engine/store_signals.go`, `engine/mssql_signals_promises.go`,
+`engine/mysql_store.go`) state the no-existence-oracle guarantee unconditionally now — no
+"except when" caveat survives.
+
+Re-derive the BLOCK predicate count live:
+
+    SELECT COUNT(DISTINCT target_object_id) FROM sys.security_predicates
+    WHERE predicate_definition LIKE '%fn_tenant_filter%' AND predicate_type_desc = 'BLOCK';
+
+Full `go test ./engine/... -count=1 -p 1` against a live SQL Server: run twice, zero test-level
+and zero package-level failures both times (one single-occurrence failure on the first full run,
+`TestACompletedRunReportsWhenItFinished/mssql`, did not reproduce across 5 isolated retries nor
+across a full second run — a flake, not a regression from this change).
+
+Files: `migrations/mssql/103_a_filtered_write_is_a_blocked_write.sql`,
+`migrations/mssql/075_the_admin_bypass_is_opt_in.sql`, `migrations/mssql/optional/cross_tenant_claim.sql`,
+`engine/mssql_block_predicates_test.go`, `engine/a_signal_to_an_id_the_caller_cannot_touch_writes_nothing_test.go`,
+`engine/store_signals.go`, `engine/mysql_store.go`, `engine/mssql_signals_promises.go`,
+`engine/a_deleted_row_and_an_invisible_row_are_told_apart_test.go`, `docs/reference/multi-tenancy.md`,
+and the nine other MSSQL test files whose fixtures needed a pinned, session-context-set connection.

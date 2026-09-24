@@ -29,6 +29,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,6 +41,35 @@ import (
 
 	"github.com/cleat-team/cleat/engine/testutil"
 )
+
+// mssqlExecAsTenant runs stmt on a dedicated connection with
+// sp_set_session_context set to tenant first.
+//
+// Both seed closures below insert directly into tables cleat#2205's
+// migration 103 protects with AFTER INSERT block predicates. Before 103,
+// "these inserts go in on the admin connection which has no tenant" (the
+// comment each seed closure still carries) worked because a FILTER
+// predicate restricts what a read can see, not what a write can write. Now
+// a block predicate checks SESSION_CONTEXT('tenant_id') against the row
+// being written, and adminDB is a plain pool that never sets it -- so the
+// seed has to claim the tenant it is seeding, per call, on one connection
+// (session context is connection-scoped and does not survive
+// database/sql's pool checkout reset -- see mssql_double_claim_test.go).
+func mssqlExecAsTenant(ctx context.Context, t *testing.T, db *sql.DB, tenant, stmt string, args ...any) error {
+	t.Helper()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("pin a connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx,
+		`EXEC sp_set_session_context @key=N'tenant_id', @value=@p1`, tenant,
+	); err != nil {
+		return fmt.Errorf("set the tenant session context: %w", err)
+	}
+	_, err = conn.ExecContext(ctx, stmt, args...)
+	return err
+}
 
 var (
 	mssqlFilterFnRe = regexp.MustCompile(`(?s)CREATE OR ALTER FUNCTION dbo\.fn_tenant_filter.*?;`)
@@ -221,13 +251,13 @@ func TestMSSQLTenantIsolation_UnderRealSecurityPolicies(t *testing.T) {
 	seed := func(tenant, suffix string) string {
 		t.Helper()
 		defName := "rls-def-" + run + "-" + suffix
-		if _, err := adminDB.ExecContext(ctx, `
+		if err := mssqlExecAsTenant(ctx, t, adminDB, tenant, `
 			INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, tenant_id)
 			VALUES (@p1, 1, 0x0061736d, 1, 1, @p2)`, defName, tenant); err != nil {
 			t.Fatalf("seed workflow_def for %s: %v", suffix, err)
 		}
 		wfID := "rls-wf-" + run + "-" + suffix
-		if _, err := adminDB.ExecContext(ctx, `
+		if err := mssqlExecAsTenant(ctx, t, adminDB, tenant, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
 			VALUES (@p1, @p2, 1, 'ready', DATEADD(DAY, -1, SYSUTCDATETIME()), '{}', 'default', @p3)`,
 			wfID, defName, tenant); err != nil {
@@ -370,13 +400,13 @@ func TestMSSQLTenantIsolation_WorkflowPromises_UnderRealSecurityPolicies(t *test
 	seed := func(tenant, suffix string) string {
 		t.Helper()
 		defName := "rls-promise-def-" + run + "-" + suffix
-		if _, err := adminDB.ExecContext(ctx, `
+		if err := mssqlExecAsTenant(ctx, t, adminDB, tenant, `
 			INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, tenant_id)
 			VALUES (@p1, 1, 0x0061736d, 1, 1, @p2)`, defName, tenant); err != nil {
 			t.Fatalf("seed workflow_def for %s: %v", suffix, err)
 		}
 		wfID := "rls-promise-wf-" + run + "-" + suffix
-		if _, err := adminDB.ExecContext(ctx, `
+		if err := mssqlExecAsTenant(ctx, t, adminDB, tenant, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
 			VALUES (@p1, @p2, 1, 'ready', DATEADD(DAY, -1, SYSUTCDATETIME()), '{}', 'default', @p3)`,
 			wfID, defName, tenant); err != nil {
