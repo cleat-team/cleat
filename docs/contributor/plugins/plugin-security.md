@@ -161,6 +161,45 @@ Two differences from the PostgreSQL arm are worth knowing, both measured:
   tenant and this one names the right one on a connection that has not said who
   it is.
 
+### The same BLOCK predicates now cover the core tables too
+
+Until cleat#2205 (migration `103_a_filtered_write_is_a_blocked_write.sql`,
+2026-09-24) the asymmetry above was worse on the **core** `dbo.*` tables than on
+plugin ones: `dbo.fn_tenant_filter` carried a `FILTER PREDICATE` only, so an
+`INSERT` or `UPDATE` on `workflow_instances`, `workflow_defs`, and the other
+core tenant-scoped tables could stamp or move a row into the *wrong* tenant
+with no refusal at all — plugin tables had had `BLOCK` predicates on
+`fn_plugin_tenant_filter` since cleat#1552, and core tables did not. 103 closes
+that gap the same way: `AFTER INSERT`, `AFTER UPDATE` and `BEFORE UPDATE` on
+`fn_tenant_filter`, derived live from `sys.security_predicates` against every
+table that already carries the `FILTER` predicate, so a table a later
+migration adds is covered automatically with no edit to 103 itself.
+
+**This changes what a migration is allowed to do.** Before 103, a migration
+connecting as a plain login with no `SESSION_CONTEXT` set could freely
+`INSERT`/`UPDATE` a `tenant_id`-bearing row on a core table — SQL Server does
+not exempt `sa` or `sysadmin` from RLS the way PostgreSQL exempts a superuser
+or table owner, but there was simply nothing to refuse it. There is now: with
+no session context, `SESSION_CONTEXT(N'tenant_id')` is `NULL`, and
+`@tenant_id = NULL` is never true, so `BLOCK` refuses the write outright.
+
+**If your migration or backfill writes a `tenant_id`-bearing row to a
+core table that carries this policy, it must do one of:**
+
+* run as a login that is a member of the `cleat_admin` role, with
+  `migrations/mssql/optional/cross_tenant_claim.sql`'s admin-bypass predicate
+  form installed (it bypasses `BLOCK` exactly as it bypasses `FILTER`, since
+  both share `fn_tenant_filter`); or
+* call `EXEC sp_set_session_context @key=N'tenant_id', @value=<tenant>` on its
+  own connection, per tenant, before the write — the same pattern
+  `engine`'s tenant-scoped stores and tests already use, since
+  `sp_set_session_context` is connection-scoped and does not survive a pooled
+  connection's `sp_reset_connection`.
+
+As of 2026-09-24 no migration after `002_defaults.sql` does either — 103 lands
+after the only migration that writes such data, so nothing existing needed
+either accommodation. The next migration that backfills a core table will.
+
 Dropping a tenant works on both dialects. `admin.drop_tenant` on SQL Server is
 `migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql`, and it finds
 tenant-owned tables by asking `sys.columns` which ones carry a `tenant_id`

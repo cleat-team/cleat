@@ -1,5 +1,22 @@
 -- cleat migration 103 (mssql): BLOCK predicates alongside every FILTER predicate
 --
+-- FOR THE AUTHOR OF THE NEXT MIGRATION: from here on, ANY migration or
+-- backfill that INSERTs or UPDATEs a tenant_id-bearing row on a table this
+-- file covers (see its live derivation below -- 14 as of this writing, and
+-- growing) must either run as a login in the cleat_admin role with
+-- migrations/mssql/optional/cross_tenant_claim.sql's admin-bypass predicate
+-- form installed, or call
+-- `EXEC sp_set_session_context @key=N'tenant_id', @value=<tenant>` on its own
+-- connection, per tenant, before writing. With neither, SESSION_CONTEXT
+-- (N'tenant_id') is NULL, `@tenant_id = NULL` is never true, and the BLOCK
+-- predicate below refuses the write outright -- SQL Server does not exempt
+-- sa or sysadmin from RLS the way PostgreSQL exempts a superuser or table
+-- owner. See docs/contributor/plugins/plugin-security.md, "The same BLOCK
+-- predicates now cover the core tables too", for the full explanation. As of
+-- 2026-09-24 no migration after 002_defaults.sql writes such a row, so
+-- nothing existing needed either accommodation; the next one that backfills
+-- a core table will.
+--
 -- cleat#2205. SQL Server's row-level security on this schema has FILTER
 -- predicates only. A FILTER predicate silently restricts what SELECT, UPDATE
 -- and DELETE can SEE -- it is applied to the statement's WHERE clause the way
