@@ -153,8 +153,22 @@ func TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant(t *testing.T) {
 	// The rejected attempt must not leave a phantom signal row behind:
 	// deliverSignalTx's INSERT and its UPDATE run in one transaction, and
 	// the UPDATE failing must roll back the INSERT with it.
-	if _, found, err := storeB.PollSignal(ctx, runB, "sig-from-a"); err != nil {
-		t.Fatalf("PollSignal(sig-from-a): %v", err)
+	//
+	// Polled as tenant A, not tenant B: the INSERT above (if the rollback
+	// did not happen) is tagged with the CALLER's tenant -- s.tenantID inside
+	// deliverSignalTx, which for this negative control is A -- not the
+	// target workflow's own tenant B. storeB is scoped to B, so RLS would
+	// hide a phantom row tagged A from it regardless of whether the rollback
+	// worked, and the assertion would pass either way. storeA is scoped to
+	// the tenant the row would actually be tagged with, so it is the only
+	// store that can tell "rolled back" apart from "wrote it, then hid it".
+	storeA, closerA, err := factory.OpenStore(ctx, tenantA.String(), "default")
+	if err != nil {
+		t.Fatalf("OpenStore(A): %v", err)
+	}
+	defer closerA.Close()
+	if _, found, err := storeA.PollSignal(ctx, runB, "sig-from-a"); err != nil {
+		t.Fatalf("PollSignal(sig-from-a) as tenant A: %v", err)
 	} else if found {
 		t.Error("a signal tenant A could not deliver still left a row in workflow_signals -- the " +
 			"failed delivery was not rolled back atomically")
@@ -430,8 +444,16 @@ func TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant(t *testing.T) {
 		t.Error("tenant A was able to signal into tenant B's run on MSSQL -- cleat#2209 unfixed, " +
 			"or the fail-loud check on zero rows affected regressed")
 	}
-	if _, found, err := storeB.PollSignal(ctx, runB, "sig-from-a"); err != nil {
-		t.Fatalf("PollSignal(sig-from-a): %v", err)
+	// Polled as tenant A, not B -- see the identical comment in the
+	// PostgreSQL test above. A phantom row here would carry s.tenantID from
+	// deliverSignalTx, i.e. A, and a store scoped to B cannot see it.
+	storeA, closerA, err := factory.OpenStore(ctx, tenantA.String(), "default")
+	if err != nil {
+		t.Fatalf("OpenStore(A): %v", err)
+	}
+	defer closerA.Close()
+	if _, found, err := storeA.PollSignal(ctx, runB, "sig-from-a"); err != nil {
+		t.Fatalf("PollSignal(sig-from-a) as tenant A: %v", err)
 	} else if found {
 		t.Error("a signal tenant A could not deliver still left a row in workflow_signals -- the " +
 			"failed delivery was not rolled back atomically")
@@ -453,5 +475,99 @@ func TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant(t *testing.T) {
 	if len(callers) != 1 || callers[0] != "caller-b" {
 		t.Errorf("GetAllowedSignalCallers via a store scoped to B = %v, want [caller-b] -- read the "+
 			"wrong tenant's row", callers)
+	}
+}
+
+// TestSignalPluginWorkflowWithAuth_OnlyAnAllowedCallerCanSignal exercises
+// signalPluginWorkflowWithAuth itself, not signalPluginWorkflow.
+//
+// Every other test in this file calls signalPluginWorkflow -- the
+// --require-signal-auth wrapper installed in main() calls
+// signalPluginWorkflowWithAuth instead, and nothing above goes through it.
+// A signalPluginWorkflowWithAuth that forgot to scope its own store (using
+// `store` where it should use `scoped`) would stay green against every test
+// above, because none of them exercise this function.
+//
+// The failure mode an unscoped helper produces here is not "wrong tenant's
+// row" the way the plain-signal tests catch it -- it is a LEGITIMATE,
+// allowed caller getting denied: GetAllowedSignalCallers on the wrong
+// tenant's scope reads no row for runB, PostgresStore.GetAllowedSignalCallers
+// treats that as sql.ErrNoRows and returns an empty list with no error (see
+// its doc comment in engine/store_signals.go), and signalCallerAllowed(nil,
+// anything) is always false. So it fails CLOSED, silently, which is worse
+// than failing open: nothing crashes, nothing logs "denied wrongly", a
+// legitimate webhook caller just stops being able to signal.
+func TestSignalPluginWorkflowWithAuth_OnlyAnAllowedCallerCanSignal(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
+		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2209 test")
+	}
+	db := testutil.SuiteTestDB(t, "cleat_worker")
+	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
+	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
+	ctx := context.Background()
+
+	tenantDefault := engine.DefaultTenantUUID
+	tenantB := uuid.New()
+
+	// The process-wide store, opened for the default tenant -- exactly what
+	// main()'s --require-signal-auth closure closes over, same as the other
+	// tests in this file.
+	processStore, processCloser, err := factory.OpenStore(ctx, tenantDefault, "default")
+	if err != nil {
+		t.Fatalf("OpenStore(default): %v", err)
+	}
+	defer processCloser.Close()
+
+	storeB, closerB, err := factory.OpenStore(ctx, tenantB.String(), "default")
+	if err != nil {
+		t.Fatalf("OpenStore(B): %v", err)
+	}
+	defer closerB.Close()
+
+	if err := storeB.DeployWorkflowDef(ctx, &engine.WorkflowDef{
+		Name: "signal-2209-auth", Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1, MinVersion: 1,
+	}); err != nil {
+		t.Fatalf("deploy def: %v", err)
+	}
+	runB, _, err := storeB.StartNewRun(ctx, "", "signal-2209-auth", 1, json.RawMessage(`{}`),
+		"start-auth-"+tenantB.String(), tenantB.String(), 0)
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if err := storeB.SetAllowedSignalCallers(ctx, runB, []string{"good-plugin"}); err != nil {
+		t.Fatalf("SetAllowedSignalCallers: %v", err)
+	}
+
+	authCtx := plugin.ForTenant(ctx, tenantB)
+
+	// THE FIX under test: through the SAME process-wide store still opened
+	// for the default tenant, with ctx carrying tenant B -- exactly how
+	// main()'s --require-signal-auth closure calls
+	// signalPluginWorkflowWithAuth. An allowed caller naming B's own run
+	// must succeed.
+	if err := signalPluginWorkflowWithAuth(authCtx, processStore, runB, "sig-allowed", `{"ok":true}`,
+		"good-plugin"); err != nil {
+		t.Fatalf("signalPluginWorkflowWithAuth for the allowed caller failed: %v -- the helper is "+
+			"not scoping to tenant B, or the auth check regressed", err)
+	}
+	if _, found, err := storeB.PollSignal(ctx, runB, "sig-allowed"); err != nil {
+		t.Fatalf("PollSignal(sig-allowed): %v", err)
+	} else if !found {
+		t.Error("the allowed caller's signal did not reach tenant B's run")
+	}
+
+	// A caller NOT in allowed_signals must be denied, even naming the same
+	// (correctly-scoped) workflow the allowed caller just succeeded against
+	// -- so a scoping bug that denied everyone cannot be mistaken for this
+	// case passing.
+	err = signalPluginWorkflowWithAuth(authCtx, processStore, runB, "sig-denied", `{}`, "other-plugin")
+	if err == nil {
+		t.Error("signalPluginWorkflowWithAuth allowed a caller not in allowed_signals")
+	}
+	if _, found, err := storeB.PollSignal(ctx, runB, "sig-denied"); err != nil {
+		t.Fatalf("PollSignal(sig-denied): %v", err)
+	} else if found {
+		t.Error("a denied caller's signal still reached tenant B's run")
 	}
 }
