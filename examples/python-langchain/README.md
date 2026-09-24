@@ -73,7 +73,7 @@ property of a *deployed* workflow, started through a worker:
 ```bash
 # Terminal 1: Start Postgres and the worker (prints an API key on first
 # start -- export it as CLEAT_API_KEY below)
-cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080
+cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080 --migrate-on-start
 
 # Deploy the built WASM, then start a run
 cleat deploy --db "$CLEAT_DATABASE_URL" --name research-agent langchain_research_agent.wasm
@@ -90,7 +90,7 @@ kill -9 $(pgrep cleat-worker)
 # Dashboard will show recorded events from completed steps
 
 # Restart the worker — the agent resumes from the last checkpoint
-cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080
+cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080 --migrate-on-start
 ```
 
 ## Architecture

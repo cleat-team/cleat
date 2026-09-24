@@ -44,6 +44,26 @@ services:
       - "5432:5432"
     restart: unless-stopped
 
+  # The schema migration, as a one-shot deploy step (cleat#2117). A worker no longer
+  # migrates the database when it starts: it verifies the schema and refuses, with the
+  # remediation in its message, if a migration is not applied. So the workers below
+  # wait for this to finish. `--migrate-only` is idempotent and uses the owner role.
+  migrate:
+    image: cleat-worker:latest
+    container_name: cleat-migrate
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - "--migrate-only"
+      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - cleat-cluster
+    restart: "no"
+
   worker-1:
     image: cleat-worker:latest
     container_name: cleat-worker-1
@@ -61,6 +81,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/healthz"]
       interval: 5s
@@ -88,6 +110,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/healthz"]
       interval: 5s
@@ -115,6 +139,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/healthz"]
       interval: 5s
@@ -142,6 +168,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/healthz"]
       interval: 5s

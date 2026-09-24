@@ -117,11 +117,37 @@ func (c *migrationTestConn) ExecContext(ctx context.Context, query string, args 
 
 // QueryContext implements driver.QueryerContext.
 func (c *migrationTestConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	// The MySQL and SQL Server migration lock (cleat#2117) is session setup like the
+	// PostgreSQL advisory lock: recorded in lockCalls, not queryCalls, and answered
+	// the way the server answers (1 = granted / released, and a non-negative
+	// sp_getapplock code).
+	for _, lock := range []string{"GET_LOCK", "RELEASE_LOCK", "sp_getapplock", "sp_releaseapplock"} {
+		if strings.Contains(query, lock) {
+			c.lockCalls = append(c.lockCalls, query)
+			return &singleIntRow{value: 1}, nil
+		}
+	}
 	c.queryCalls = append(c.queryCalls, query)
 	if c.queryErr != nil {
 		return nil, c.queryErr
 	}
 	return &singleBoolRow{value: c.existsResult}, nil
+}
+
+type singleIntRow struct {
+	value int64
+	done  bool
+}
+
+func (r *singleIntRow) Columns() []string { return []string{"r"} }
+func (r *singleIntRow) Close() error      { return nil }
+func (r *singleIntRow) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = r.value
+	return nil
 }
 
 type singleBoolRow struct {
@@ -562,10 +588,13 @@ func TestRunMigrations_PostgresSessionSetup(t *testing.T) {
 	for _, tc := range []struct {
 		dialect Dialect
 		wantPG  bool
+		// take and release are the dialect's OWN lock (cleat#2117), for the two
+		// dialects that used to have none.
+		take, release string
 	}{
-		{DialectPostgres, true},
-		{DialectMySQL, false},
-		{DialectMSSQL, false},
+		{DialectPostgres, true, "", ""},
+		{DialectMySQL, false, "GET_LOCK", "RELEASE_LOCK"},
+		{DialectMSSQL, false, "sp_getapplock", "sp_releaseapplock"},
 	} {
 		t.Run(string(tc.dialect), func(t *testing.T) {
 			db, conn := newTestMigrationDB(t)
@@ -574,8 +603,18 @@ func TestRunMigrations_PostgresSessionSetup(t *testing.T) {
 			}
 			joined := strings.Join(conn.lockCalls, " | ")
 			if !tc.wantPG {
-				if len(conn.lockCalls) != 0 {
-					t.Errorf("%s: sent PostgreSQL-only session setup: %s", tc.dialect, joined)
+				// Never the PostgreSQL-only setup: neither dialect has advisory
+				// locks, search_path or lock_timeout.
+				for _, pgOnly := range []string{"pg_advisory_", "search_path", "lock_timeout"} {
+					if strings.Contains(joined, pgOnly) {
+						t.Errorf("%s: sent PostgreSQL-only session setup %q: %s", tc.dialect, pgOnly, joined)
+					}
+				}
+				// Its own lock, taken first and released last.
+				if len(conn.lockCalls) != 2 ||
+					!strings.Contains(conn.lockCalls[0], tc.take) || !strings.Contains(conn.lockCalls[1], tc.release) {
+					t.Errorf("%s: want %s taken first and %s released last, got: %s",
+						tc.dialect, tc.take, tc.release, joined)
 				}
 				return
 			}

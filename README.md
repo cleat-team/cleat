@@ -67,7 +67,8 @@ make setup
 go install github.com/cleat-team/cleat/cmd/cleat@latest
 
 # 2. Start Postgres and apply the schema. `cleat-worker` (step 5) also
-#    applies migrations/postgres/*.sql automatically on boot, but `cleat
+#    applies migrations/postgres/*.sql when started with --migrate-on-start
+#    (step 5), but `cleat
 #    deploy` (step 4) does not, and deploy runs first in this walkthrough --
 #    so the schema has to exist before that. See
 #    docs/explanation/postgresql-schema.md for the full procedure.
@@ -87,8 +88,11 @@ cleat build -o ./out ./testdata/basic/
 cleat deploy --db "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" \
     --name place_order ./out/cancel_order.wasm
 
-# 5. Start the worker daemon
-cleat-worker --db "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable"
+# 5. Start the worker daemon. --migrate-on-start applies the schema itself, which is
+#    right for one node on a fresh database; a fleet migrates once, as a deploy step
+#    (`cleat-worker --migrate-only`) -- see docs/operations/upgrading.md.
+cleat-worker --db "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" \
+    --migrate-on-start
 
 # 6. Trigger a workflow (via REST API) -- POST .../<name>/start, not POST
 #    .../workflows (that route is GET-only and returns 405 on POST)

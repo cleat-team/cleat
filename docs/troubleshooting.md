@@ -8,6 +8,26 @@ organised by symptom with diagnosis steps and fixes.
 
 ---
 
+
+## "the database schema is behind this worker"
+
+A worker refused to start because the database has not been migrated to the version
+of the binary. A worker no longer migrates on start (cleat#2117). Run the migration as
+a deploy step and start the worker again:
+
+```bash
+cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL" [--migrate-db "$MIGRATOR_DATABASE_URL"]
+```
+
+The message says how many migrations are missing and which. "the database has no
+schema_migrations table" means the database has never been migrated. A message naming
+a plugin ("the database's plugin schema is behind") is the same problem for a plugin's
+tables, and the same fix. For a single node or development, `--migrate-on-start` makes
+the worker migrate itself. If a `--migrate-only` run is already in progress, wait for it.
+
+The opposite case is not an error: a schema *ahead* of the binary starts, with a
+warning, so that a rolling upgrade does not wedge on the workers it is replacing.
+
 ## Table of Contents
 
 1. [WASM Build Failures](#1-wasm-build-failures)

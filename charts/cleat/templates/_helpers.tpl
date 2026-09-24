@@ -46,3 +46,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $sslmode := .Values.postgres.sslmode }}
 postgres://{{ $username }}:{{ $password }}@{{ $host }}:{{ $port }}/{{ $database }}?sslmode={{ $sslmode }}
 {{- end }}
+
+{{- /* The DSN of the migration hook Job (cleat#2117): postgres.* unless migration.username / migration.password name a DDL-capable role. */ -}}
+{{- define "cleat.migrationDatabaseURL" -}}
+{{- $username := default .Values.postgres.username .Values.migration.username -}}
+{{- $password := default .Values.postgres.password .Values.migration.password -}}
+{{- printf "postgres://%s:%s@%s:%v/%s?sslmode=%s" $username $password .Values.postgres.host .Values.postgres.port .Values.postgres.database .Values.postgres.sslmode -}}
+{{- end }}

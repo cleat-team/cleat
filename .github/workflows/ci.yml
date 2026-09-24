@@ -2007,15 +2007,23 @@ jobs:
       # exit non-zero shortly after start; what this checks is that it GOT
       # to run (a log line from the worker itself, not a systemd unit error
       # like "bad configuration" or "permission denied").
+      #
+      # The unit runs `cleat-worker --migrate-only` as ExecStartPre (cleat#2117),
+      # and that fails against this unreachable database, so `systemctl start`
+      # itself now exits non-zero. That is the expected outcome here, not the
+      # thing under test, so it is tolerated. The assertion is a line the BINARY
+      # wrote -- journald tags it `cleat-worker[<pid>]:` -- because the old
+      # `grep -i cleat` also matched systemd's own "Starting cleat-worker.service",
+      # which is printed whether or not the binary ever ran.
       - name: Enabling and starting the unit actually invokes the binary
         run: |
           set -euo pipefail
           echo 'CLEAT_DATABASE_URL=postgres://cleat:cleat@127.0.0.1:1/nonexistent?connect_timeout=1'             | sudo tee /etc/cleat/cleat-worker.env >/dev/null
-          sudo systemctl enable --now cleat-worker.service
+          sudo systemctl enable --now cleat-worker.service || true
           sleep 3
           sudo journalctl -u cleat-worker.service --no-pager | tail -40
-          sudo journalctl -u cleat-worker.service --no-pager | grep -qi 'cleat' || {
-            echo "::error::no cleat-worker output in the journal -- systemd never ran the binary"
+          sudo journalctl -u cleat-worker.service --no-pager | grep -Eq 'cleat-worker\[[0-9]+\]:' || {
+            echo "::error::no line written by the cleat-worker binary in the journal -- systemd never ran it"
             exit 1
           }
           sudo systemctl disable --now cleat-worker.service

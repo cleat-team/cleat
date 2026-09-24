@@ -3,11 +3,13 @@ package plugin
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"log"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Dialect identifies the SQL dialect of the backing database.
@@ -163,13 +165,14 @@ type migrationSession interface {
 //     configuration cleat ships. The core migration files pin this the same
 //     way; see the header of 001_schema.sql.
 //
-// PostgreSQL only, deliberately: MySQL and SQL Server have lock equivalents
-// (GET_LOCK, sp_getapplock) and no schema of this shape, but cleat ships no
-// multi-worker topology for them and untested code here would be worse than
-// none. There this returns the pool unchanged.
+// MySQL and SQL Server are serialised too (pluginLockedSession). This comment used
+// to say they were not, deliberately -- "cleat ships no multi-worker topology for
+// them" -- and cleat#2117 measured what that cost: concurrent migrators on an
+// empty database failed three in four on both (see migration/runner.go), and
+// migration is now a deploy step run alongside straggling workers.
 func pluginMigrationSession(ctx context.Context, db *sql.DB, dialect Dialect, schema string) (migrationSession, func(), error) {
 	if dialect != DialectPostgres {
-		return db, func() {}, nil
+		return pluginLockedSession(ctx, db, dialect)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -242,6 +245,192 @@ func pluginMigrationSession(ctx context.Context, db *sql.DB, dialect Dialect, sc
 		// And the lock bound, for the same reason as the pin above it.
 		_, _ = conn.ExecContext(free, "RESET lock_timeout")
 		_, _ = conn.ExecContext(free, "SELECT pg_advisory_unlock($1)", pluginMigrationsLockKey)
+		conn.Close()
+	}, nil
+}
+
+// PluginSchemaState is what VerifyMigrations found.
+type PluginSchemaState struct {
+	// TableMissing means plugin_migrations does not exist. That is only a finding
+	// if some healthy plugin ships a migration: with none, nothing needs it.
+	TableMissing bool
+	// Pending are "plugin vN" for every shipped migration of a healthy plugin that is
+	// not recorded as applied.
+	Pending []string
+}
+
+// Behind reports whether a plugin migration is not applied.
+func (s PluginSchemaState) Behind() bool { return len(s.Pending) > 0 }
+
+// PluginSchemaBehindError is what a worker start reports when Behind; the message is
+// the remediation, for the same reason as migration.SchemaBehindError.
+type PluginSchemaBehindError struct{ State PluginSchemaState }
+
+func (e *PluginSchemaBehindError) Error() string {
+	shown := strings.Join(e.State.Pending, ", ")
+	if len(e.State.Pending) > 4 {
+		shown = strings.Join(e.State.Pending[:4], ", ") + fmt.Sprintf(", ... (%d in all)", len(e.State.Pending))
+	}
+	return "the database's plugin schema is behind this worker: plugin migration(s) not applied: " + shown + ".\n" +
+		"A worker does not migrate the database on start. Run the migrations as a deploy step:\n\n" +
+		"    cleat-worker --migrate-only --db <dsn> [--migrate-db <owner dsn>]\n\n" +
+		"and then start the workers. (--migrate-on-start restores the old behaviour for a single-node install.)"
+}
+
+// VerifyMigrations reports whether every migration the healthy plugins ship is
+// recorded as applied, WITHOUT changing anything: no table is created, no lock taken,
+// nothing run. It is the plugin half of a normal worker start (cleat#2117); the same
+// healthy-plugin and HasMigrations rules as RunMigrations decide which migrations count.
+//
+// A migration with no arm for this dialect is recorded as applied when skipped
+// (see RunMigrations), so it is not reported pending here either.
+func VerifyMigrations(ctx context.Context, db *sql.DB, dialect Dialect, plugins []*LoadedPlugin, opts ...MigrationOption) (PluginSchemaState, error) {
+	var st PluginSchemaState
+	if db == nil {
+		return st, nil
+	}
+	var cfg migrationOptions
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if cfg.schema == "" {
+		cfg.schema = "public"
+	}
+	if !plainIdentifier.MatchString(cfg.schema) {
+		return st, fmt.Errorf("plugin: schema %q is not a plain identifier", cfg.schema)
+	}
+
+	type shipped struct {
+		name    string
+		version int
+	}
+	var want []shipped
+	for _, lp := range plugins {
+		if !lp.Healthy {
+			continue
+		}
+		p, ok := lp.Plugin.(HasMigrations)
+		if !ok {
+			continue
+		}
+		name := lp.Plugin.Info().Name
+		for _, m := range p.Migrations() {
+			want = append(want, shipped{name, m.Version})
+		}
+	}
+	if len(want) == 0 {
+		return st, nil
+	}
+
+	// One connection, so the search_path pin (PostgreSQL) covers the table lookup and
+	// the reads that follow it, and is reset before the connection goes back to the pool.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return st, fmt.Errorf("plugin: verify migrations: connection: %w", err)
+	}
+	defer conn.Close()
+	if dialect == DialectPostgres {
+		if _, err := conn.ExecContext(ctx, "SET search_path = "+cfg.schema+", pg_temp"); err != nil {
+			return st, fmt.Errorf("plugin: verify migrations: pin search_path: %w", err)
+		}
+		defer func() { _, _ = conn.ExecContext(context.WithoutCancel(ctx), "RESET search_path") }()
+	}
+
+	var n int
+	switch dialect {
+	case DialectMySQL:
+		err = conn.QueryRowContext(ctx, "SELECT count(*) FROM information_schema.tables "+
+			"WHERE table_schema = DATABASE() AND table_name = 'plugin_migrations'").Scan(&n)
+	case DialectMSSQL:
+		err = conn.QueryRowContext(ctx, "SELECT count(*) FROM sys.tables WHERE name = 'plugin_migrations'").Scan(&n)
+	default:
+		err = conn.QueryRowContext(ctx, "SELECT CASE WHEN to_regclass('plugin_migrations') IS NULL THEN 0 ELSE 1 END").Scan(&n)
+	}
+	if err != nil {
+		return st, fmt.Errorf("plugin: verify migrations: check for plugin_migrations: %w", err)
+	}
+	if n == 0 {
+		st.TableMissing = true
+		for _, w := range want {
+			st.Pending = append(st.Pending, fmt.Sprintf("%s v%d", w.name, w.version))
+		}
+		return st, nil
+	}
+
+	for _, w := range want {
+		var exists bool
+		if err := conn.QueryRowContext(ctx, checkPluginMigrationSQL(dialect), w.name, w.version).Scan(&exists); err != nil {
+			return st, fmt.Errorf("plugin: verify migrations: %s v%d: %w", w.name, w.version, err)
+		}
+		if !exists {
+			st.Pending = append(st.Pending, fmt.Sprintf("%s v%d", w.name, w.version))
+		}
+	}
+	return st, nil
+}
+
+// The plugin migration lock on MySQL and SQL Server. Same mechanism and the same
+// reasons as migration.Runner.lockedSession, which is the one to read: a
+// SESSION-scoped lock, so the connection is pinned and the release runs on it in a
+// defer, and a release that fails discards the connection so the lock cannot
+// outlive its holder. Duplicated rather than shared because migration's test
+// build imports this package, and the two names differ so core and plugin
+// migrations do not queue behind each other needlessly.
+const (
+	pluginMySQLLockPrefix = "cleat.plugin_migrations."
+	pluginMSSQLLock       = "cleat.plugin_migrations"
+	pluginLockWait        = 15 * time.Minute
+)
+
+func pluginLockedSession(ctx context.Context, db *sql.DB, dialect Dialect) (migrationSession, func(), error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("plugin: acquire migration lock: connection: %w", err)
+	}
+	secs := int(pluginLockWait / time.Second)
+	var release string
+	switch dialect {
+	case DialectMySQL:
+		var got sql.NullInt64
+		if err := conn.QueryRowContext(ctx,
+			"SELECT GET_LOCK(CONCAT('"+pluginMySQLLockPrefix+"', MD5(DATABASE())), ?)", secs).Scan(&got); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("plugin: acquire migration lock: GET_LOCK: %w", err)
+		}
+		if !got.Valid || got.Int64 != 1 {
+			conn.Close()
+			return nil, nil, fmt.Errorf("plugin: acquire migration lock: held elsewhere for %s "+
+				"(GET_LOCK returned %v); is a --migrate-only run stuck?", pluginLockWait, got)
+		}
+		release = "SELECT RELEASE_LOCK(CONCAT('" + pluginMySQLLockPrefix + "', MD5(DATABASE())))"
+	case DialectMSSQL:
+		var code int
+		if err := conn.QueryRowContext(ctx,
+			"DECLARE @r int; EXEC @r = sp_getapplock @Resource = N'"+pluginMSSQLLock+
+				"', @LockMode = N'Exclusive', @LockOwner = N'Session', @LockTimeout = @p1; SELECT @r",
+			secs*1000).Scan(&code); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("plugin: acquire migration lock: sp_getapplock: %w", err)
+		}
+		if code < 0 {
+			conn.Close()
+			return nil, nil, fmt.Errorf("plugin: acquire migration lock: sp_getapplock returned %d "+
+				"(-1 = timed out after %s: is a --migrate-only run stuck?)", code, pluginLockWait)
+		}
+		release = "DECLARE @r int; EXEC @r = sp_releaseapplock @Resource = N'" + pluginMSSQLLock +
+			"', @LockOwner = N'Session'; SELECT @r"
+	default:
+		conn.Close()
+		return nil, nil, fmt.Errorf("plugin: unsupported dialect %q", dialect)
+	}
+	return conn, func() {
+		free := context.WithoutCancel(ctx)
+		var out sql.NullInt64
+		if err := conn.QueryRowContext(free, release).Scan(&out); err != nil ||
+			(dialect == DialectMySQL && (!out.Valid || out.Int64 != 1)) ||
+			(dialect == DialectMSSQL && out.Int64 < 0) {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
 		conn.Close()
 	}, nil
 }

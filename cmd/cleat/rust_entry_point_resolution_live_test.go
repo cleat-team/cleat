@@ -117,6 +117,9 @@ func TestRustExampleEntryPointResolutionLive(t *testing.T) {
 	worker := exec.Command(workerBinary,
 		"--db="+dsn,
 		"--api-addr=:8080",
+		// A worker no longer migrates unless asked (cleat#2117), and this starts one on an
+		// empty database.
+		"--migrate-on-start",
 		"--require-auth=false",
 	)
 	worker.Dir = repoRoot

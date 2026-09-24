@@ -125,10 +125,10 @@ echo ""
 # ------------------------------------------------------------------
 echo -e "${GREEN}Step 5:${NC} Restarting worker..."
 # shellcheck disable=SC2016 # this is a display string showing the command, not code to expand
-echo '  $ cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080 &'
+echo '  $ cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080 --migrate-on-start &'
 echo ""
 
-cleat-worker --db "${CLEAT_DATABASE_URL:-}" --api-addr :8080 &
+cleat-worker --db "${CLEAT_DATABASE_URL:-}" --api-addr :8080 --migrate-on-start &
 WORKER_PID=$!
 sleep 3
 echo -e "  Worker PID: ${WORKER_PID}"

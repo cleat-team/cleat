@@ -1,0 +1,3 @@
+test-go/support	2	^TestConcurrentMigratorsAreSerialisedOnMySQLAndSQLServer/(mysql|mssql)$	dialect-gated per SUBTEST: PostgreSQL runs, MySQL and SQL Server skip in this PostgreSQL-only job -- two. Measured by NAME with only CLEAT_TEST_POSTGRES set.
+test-go/support	2	^TestConcurrentPluginMigratorsAreSerialisedOnMySQLAndSQLServer/(mysql|mssql)$	dialect-gated per SUBTEST: PostgreSQL runs, MySQL and SQL Server skip in this PostgreSQL-only job -- two. Measured by NAME with only CLEAT_TEST_POSTGRES set.
+test-go/commands	2	^TestMigrationIsADeployStepOnEveryDialect/(mysql|mssql)$	dialect-gated per SUBTEST: PostgreSQL runs, MySQL and SQL Server skip in this PostgreSQL-only job -- two. Measured by NAME with only CLEAT_TEST_POSTGRES set.

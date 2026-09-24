@@ -362,7 +362,7 @@ clew:
 		exit 1; \
 	fi
 	@echo "Starting cleat-worker against Neon (migrations run automatically)..."
-	./cleat-worker --db "$${CLEW_DATABASE_URL}" --api-addr=:8080
+	./cleat-worker --db "$${CLEW_DATABASE_URL}" --api-addr=:8080 --migrate-on-start
 
 # ---- tools ------------------------------------------------------------------
 

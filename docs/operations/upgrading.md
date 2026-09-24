@@ -4,6 +4,44 @@ This guide covers all upgrade scenarios for a cleat deployment: worker binary
 upgrades, database schema migrations, workflow definition version changes,
 rollback procedures, and PostgreSQL major version upgrades.
 
+## Migration is a deploy step
+
+**A worker does not migrate the database when it starts** (cleat#2117; this changed
+in 0.3.0). A normal start *verifies* that the schema is not behind the binary and
+refuses to start, with the remediation in its message, if it is. So every release
+migrates first, then rolls the workers:
+
+```bash
+# 1. Once per release, from anywhere that can reach the database. Use a role with
+#    DDL rights (--migrate-db), which the workers' runtime role should not have.
+cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL" [--migrate-db "$MIGRATOR_DATABASE_URL"]
+
+# 2. Then start or restart the workers (the rolling restart below).
+```
+
+`--migrate-only` applies the core and plugin migrations and exits `0`; any failure is
+non-zero. It is idempotent, needs no master key, and is safe if two run at once. How
+each deployment shape does step 1:
+
+| deployment | the migration step |
+|---|---|
+| Helm | a `pre-install`/`pre-upgrade` hook Job (`charts/cleat/templates/migrate-job.yaml`); `migration.*` values |
+| raw Kubernetes | apply `k8s/migrate-job.yaml`, `kubectl wait`, then apply the Deployment |
+| systemd / .deb | `ExecStartPre=cleat-worker --migrate-only` in the shipped unit |
+| docker compose | a one-shot `migrate` service the workers `depends_on` (`docker-compose.cluster.yml`) |
+| single node, development | `cleat-worker --migrate-on-start`: the worker migrates itself, as before |
+
+**A schema ahead of the binary starts.** During a rolling upgrade the migration job
+runs before the last old workers have been replaced; those workers see a schema newer
+than they know. They start, with a warning naming both versions, rather than refuse and
+wedge the rollout. This relies on migrations staying additive within a release line.
+A schema *behind* the binary is refused.
+
+**Before you upgrade from a release that migrated on start:** anything that started a
+worker against a fresh or older database and relied on it migrating now needs a
+`--migrate-only` step or `--migrate-on-start`. A worker started without either on an
+un-migrated database exits with the message above.
+
 ## Worker binary upgrade (rolling restart)
 
 Cleat workers are stateless and horizontally scalable, making rolling upgrades
@@ -91,39 +129,37 @@ database for 0.3.0; there is no cleat v0.7.0, and no version of cleat before
 0.3.0 to migrate from.
 
 The guidance below describes ordinary migrations between later releases,
-once those exist: the worker checks the schema version at startup and
-applies pending migrations automatically before entering the dispatch loop.
-No manual steps are needed:
+once those exist: migrate as a deploy step (see
+[Migration is a deploy step](#migration-is-a-deploy-step)), then start the workers,
+which verify the schema at startup and refuse to start if it is behind:
 
 ```bash
-# Simply start the worker -- it applies migrations if needed
-cleat-worker --db "$CLEAT_DATABASE_URL"
+cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"
+cleat-worker --db "$CLEAT_DATABASE_URL"     # verifies; does not migrate
 ```
 
-The worker logs applied migrations:
+The migration run logs what it applies:
 
 ```
 INFO[0000] Applied schema migration 002_add_promises_table  duration=12ms
 INFO[0000] Schema is up to date at version 003
 ```
 
-### There is no separate migration command
+### The migration command
 
-**Migrations are applied by the worker at startup, and there is no other way to
-run them.** `cmd/cleat-worker/main.go` builds the runner and applies every
-pending migration before the worker begins claiming work.
-
-This section previously offered `cleat migrate up` and `cleat migrate status`.
-Neither exists — there is no `migrate` subcommand on `cleat` or on `cleatctl`
-(cleat#1315), and `cleat migrate --help` prints the usage text. Check the
-surface rather than trusting this paragraph:
+**Migrations are applied by `cleat-worker --migrate-only`** (cleat#2117), a deploy
+step described [above](#migration-is-a-deploy-step). It builds the same runner a worker
+used to run at startup, applies every pending migration (core, then plugin) and exits.
+There is still no `migrate` subcommand on `cleat` or on `cleatctl` (cleat#1315); an
+older version of this section offered `cleat migrate up` and `cleat migrate status`,
+which never existed. Check the surface rather than trusting this paragraph:
 
 ```bash
 cleat 2>&1 | grep 'Valid commands'
 ```
 
 Migrations are idempotent: the runner records each applied version in
-`schema_migrations` and skips it thereafter, so starting a worker repeatedly
+`schema_migrations` and skips it thereafter, so running `--migrate-only` repeatedly
 applies nothing twice.
 
 **To see what has been applied**, read the tracking table directly:
@@ -132,9 +168,8 @@ applies nothing twice.
 SELECT version, applied_at FROM schema_migrations ORDER BY version;
 ```
 
-**To apply migrations without starting a worker that takes work**, start one
-against an empty task queue and stop it once it is up; the migrations run
-before the claim loop does.
+**To see what a worker would refuse**, start it without `--migrate-on-start`: it
+verifies the schema, changes nothing, and if a migration is missing says which.
 
 ### Migration files
 
@@ -199,7 +234,7 @@ git diff --name-only <previous-tag>..<this-tag> -- migrations/ |
 - **Set the timeout on the connection the migration tool makes, not in a `psql`
   session.** This is the protection, not a supplement to one — and the
   distinction is the part that is easy to get wrong. Migrations are applied by
-  the worker at startup (`cleat-worker --db "$CLEAT_DATABASE_URL"`), which opens its
+  `cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"` (or by a `--migrate-on-start` worker), which opens its
   own connection from the DSN; a `SET lock_timeout = '5s';` you type into a
   separate `psql` session has no effect on it whatsoever. Put it in the DSN or
   the environment:
@@ -209,7 +244,7 @@ git diff --name-only <previous-tag>..<this-tag> -- migrations/ |
   # PGOPTIONS (connector.go: `Options string `postgres:"options" env:"PGOPTIONS"``).
   CLEAT_DATABASE_URL='postgres://.../cleat?options=-c%20lock_timeout%3D5s'
   # or, equivalently:
-  PGOPTIONS='-c lock_timeout=5s' cleat-worker --db "$CLEAT_DATABASE_URL"
+  PGOPTIONS='-c lock_timeout=5s' cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"
 
   # MySQL. go-sql-driver sends unrecognised DSN parameters as session
   # system variables on connect (dsn.go: `Params map[string]string`).

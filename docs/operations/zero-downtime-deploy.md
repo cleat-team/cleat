@@ -345,7 +345,7 @@ same database and execute workflows. The following must hold:
 | Component | Compatibility requirement |
 |-----------|--------------------------|
 | Worker binary | Same major version. Minor/patch differences are safe within a major version. |
-| Database schema | Must be compatible with the oldest worker in the pool. Migrate before starting the green pool. |
+| Database schema | Must be compatible with the oldest worker in the pool. Migrate before starting the green pool, with `cleat-worker --migrate-only`: a worker no longer migrates on start, and a blue worker on an older binary starts against the newer schema (with a warning) rather than refusing. |
 | WASM modules | WASM blobs are versioned in `workflow_defs`. Each instance runs the version recorded in `def_version`. The host call interface is backward compatible within a major version. |
 | CLI flags | New flags are ignored by old workers (they fail on unknown flags). Use a separate configuration for each pool if needed. |
 

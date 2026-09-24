@@ -541,6 +541,11 @@ func startWorkerOn(t *testing.T, dbName, bin, taskQueue, svcURL string, extraFla
 		"--bench-svc-url", svcURL,
 		"--poll", "200ms",
 		"--concurrency", "1",
+		// This suite exercises the worker's OWN migration step (see above), and a
+		// worker no longer migrates unless asked (cleat#2117). It also applies only
+		// the CORE migrations itself, so without this every worker would be refused
+		// for the plugin migrations it has not applied.
+		"--migrate-on-start",
 	}
 	args = append(args, extraFlags...)
 	//nolint:gosec // bin is built by this test from this repo.

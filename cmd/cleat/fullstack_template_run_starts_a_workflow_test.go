@@ -75,11 +75,12 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 
 	dsn, containerName := startSandboxPostgres(t)
 
-	// The worker applies migrations at boot (cmd/cleat-worker/main.go,
-	// migration.NewRunner(...).Run) -- there is no separate migrate step, in
-	// this template or otherwise. So it has to start, and become healthy,
-	// BEFORE `cleat deploy` writes a workflow_defs row into a schema that
-	// does not exist yet.
+	// The template's worker migrates the schema itself at start: its
+	// docker-compose.yml passes --migrate-on-start (cleat#2117; a worker no longer
+	// migrates unless asked, and a fleet uses `cleat-worker --migrate-only` as a
+	// deploy step). This test starts the same binary directly, with the same flag.
+	// So it has to start, and become healthy, BEFORE `cleat deploy` writes a
+	// workflow_defs row into a schema that does not exist yet.
 	//
 	// The scaffold hardcodes localhost:8080 in both the Makefile and
 	// web/index.html -- matching that rather than parameterizing the test
@@ -88,6 +89,7 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 		"--db="+dsn,
 		"--api-addr=:8080",
 		"--require-auth=false",
+		"--migrate-on-start",
 	)
 	// migration.NewRunner is given the literal relative path "migrations"
 	// (cmd/cleat-worker/main.go), resolved against the process's CWD -- not

@@ -8,6 +8,15 @@ and graceful shutdown for running cleat in production.
 > [egress-policy.md](egress-policy.md). An unconfigured tenant reaches nothing,
 > which is deliberate.
 
+## Migrate the schema first
+
+A worker does not migrate the database when it starts: a normal start verifies the
+schema and refuses to start if it is behind. Run `cleat-worker --migrate-only --db
+"$CLEAT_DATABASE_URL" [--migrate-db ...]` once, as part of the deploy, before the
+workers start. It is idempotent and safe to run concurrently. See
+[Upgrading](upgrading.md#migration-is-a-deploy-step) for how each deployment shape
+does it; `--migrate-on-start` is the opt-in for a single node.
+
 ## Configuration
 
 ### Database URL

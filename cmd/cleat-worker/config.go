@@ -440,6 +440,20 @@ var (
 			"restores the historical behaviour of waiting indefinitely, which is a real choice for a first migration "+
 			"onto a large busy table. PostgreSQL only: the other dialects have no pinned migration session to set it "+
 			"on, and setting it on a pooled handle would leak the bound into application traffic. See cleat#1775.")
+	migrateOnly = flag.Bool("migrate-only", false,
+		"Apply the core and plugin schema migrations and EXIT: 0 on success, non-zero on any failure, nothing else "+
+			"started. This is the deploy step -- a Kubernetes Job or Helm hook, a systemd ExecStartPre or one-shot unit, "+
+			"a compose service the workers depend on. Use --migrate-db for a DSN with DDL rights (default: --db). "+
+			"Idempotent: a second run on a migrated database changes nothing. Safe to run while another --migrate-only "+
+			"or a --migrate-on-start worker migrates the same database: they queue on a named lock on every dialect. "+
+			"Exits BEFORE the worker registers or reads the secrets, so it needs no master key. Plugin migrations follow "+
+			"the same rule, and a plugin migration that fails fails the run. cleat#2117")
+	migrateOnStart = flag.Bool("migrate-on-start", false,
+		"Let this worker apply pending migrations at startup, as every worker did before cleat#2117. Off by default: a "+
+			"normal start VERIFIES the schema and refuses to start, with the remediation in the message, if a migration "+
+			"this binary ships is not applied (a schema AHEAD of the binary starts, with a warning: a rolling upgrade "+
+			"migrates to N+1 while N workers are still running). For a single-node install or development, where there "+
+			"is no deploy step; a fleet should use --migrate-only instead. cleat#2117")
 	migrationsDir = flag.String("migrations-dir", "",
 		"Directory to read SQL migrations from (a dialect subdirectory -- postgres, mysql or mssql -- must exist "+
 			"inside it), overriding the migrations embedded in this binary. Empty (the default) uses the embedded "+
