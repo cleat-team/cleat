@@ -19,18 +19,62 @@ services:
       timeout: 5s
       retries: 10
 
+  # Schema migration, as a one-shot deploy step (cleat#2117): a worker no
+  # longer migrates itself at every start. Runs as the postgres superuser --
+  # DDL needs it, and migrations/postgres/005_app_role.sql is the file that
+  # creates the lesser role below, so nothing else can run first.
+  migrate:
+    image: ghcr.io/cleat-team/cleat-worker:latest
+    command:
+      - "--migrate-only"
+      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # migrations/postgres/005_app_role.sql creates cleat_app NOLOGIN and
+  # without a password, deliberately: a credential does not belong in a file
+  # that migrations commit and replay. This one-shot step supplies one for
+  # local development, once the migration above has created the role to
+  # receive it.
+  app-role:
+    image: postgres:16
+    environment:
+      PGPASSWORD: cleat
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - -h
+      - postgres
+      - -U
+      - cleat
+      - -d
+      - cleat
+      - -c
+      - "ALTER ROLE cleat_app LOGIN PASSWORD '${CLEAT_APP_PASSWORD:-cleat-app-local-dev}';"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
   cleat-worker:
     image: ghcr.io/cleat-team/cleat-worker:latest
     command:
-      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+      # NOT the postgres superuser above. Every tenant-scoped table has row-
+      # level security FORCEd, and PostgreSQL never applies RLS to a
+      # superuser -- see migrations/postgres/005_app_role.sql. --require-auth
+      # (on by default) refuses to start over a connection that is exempt
+      # from RLS, which is what catches this if it regresses.
+      - "--db=postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable"
+      # Used only for the startup schema-verification's error message; this
+      # worker does not migrate itself -- see the migrate service above.
+      - "--migrate-db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
       - "--api-addr=:8080"
-      # Single-node development: this worker applies the schema itself at start.
-      # A worker no longer migrates unless told to (cleat#2117) -- for a fleet, run
-      # `cleat-worker --migrate-only` as a deploy step and drop this flag.
-      - "--migrate-on-start"
       - "--concurrency=10"
     ports:
       - "8080:8080"
     depends_on:
-      postgres:
-        condition: service_healthy
+      app-role:
+        condition: service_completed_successfully
