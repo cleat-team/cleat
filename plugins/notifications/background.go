@@ -61,6 +61,18 @@ func (p *Plugin) Run(ctx context.Context) error {
 	// host_functions.go since cleat#1492 bridged the workflow's tenant at the
 	// PluginCall boundary. Marking any of them would widen a per-tenant read to
 	// every tenant.
+	//
+	// baseCtx keeps the PRE-bypass context alive. cleat#1992 moved the webhook
+	// secret into tenant Secrets, fetched once deliver() has read the config row
+	// and therefore knows the tenant -- but engine/plugin_secrets.go refuses
+	// every Secrets call, ForTenant's returned methods included, on a ctx that
+	// already carries the AcrossAllTenants marker (plugin/crosstenant.go: "a
+	// bypass already in scope wins, and this is silent"). The marked ctx below
+	// stays in use for webhook_config/webhook_delivery reads and writes, which
+	// need it -- webhook_delivery's write grant is scoped to the cleat_sweep
+	// role that marking switches to (migration v3). The Secrets.ForTenant call
+	// in deliver() must instead build its own per-tenant ctx from baseCtx.
+	baseCtx := ctx
 	ctx = plugin.AcrossAllTenants(ctx,
 		"notifications delivery loop: a due delivery does not know its tenant until its webhook_config row is read")
 
@@ -77,7 +89,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 		case <-ticker.C:
 			start := time.Now()
-			attempted, succeeded, failed, err := p.processDeliveries(ctx)
+			attempted, succeeded, failed, err := p.processDeliveries(ctx, baseCtx)
 			if err != nil {
 				p.logger.Error("notifications: delivery processing failed",
 					"plugin", p.Info().Name,
@@ -106,15 +118,23 @@ type deliveryRow struct {
 }
 
 // webhookConfigRow represents the webhook configuration needed for delivery.
+// It carries no secret -- cleat#1992 moved that into tenant secrets, keyed
+// per-webhook by WebhookSecretName(ID) (routes.go); deliver fetches it
+// separately, once it knows this row's tenant.
 type webhookConfigRow struct {
-	URL    string
-	Secret plugin.Secret
+	URL              string
+	TenantID         uuid.UUID
+	SecretConfigured bool
 }
 
 // processDeliveries queries for pending and retrying deliveries whose retry
 // time has elapsed, and attempts HTTP POST delivery for each.
 // Returns (attempted, succeeded, failed, error).
-func (p *Plugin) processDeliveries(ctx context.Context) (int, int, int, error) {
+//
+// baseCtx is ctx without the AcrossAllTenants marker Run applied -- see the
+// comment there. It is passed through unchanged to deliver, which is the
+// only place that needs it.
+func (p *Plugin) processDeliveries(ctx, baseCtx context.Context) (int, int, int, error) {
 	rows, err := p.db.Query(ctx, queryDueDeliveries.For(p.dialect))
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("query deliveries: %w", err)
@@ -141,7 +161,7 @@ func (p *Plugin) processDeliveries(ctx context.Context) (int, int, int, error) {
 		// item is what anyone asks about -- "why did this webhook fail" is a
 		// question for a trace; "how long did the sweep take" is one for a metric.
 		dctx := plugin.WithNewTrace(ctx)
-		outcome, err := p.deliver(dctx, d)
+		outcome, err := p.deliver(dctx, baseCtx, d)
 		if err != nil {
 			p.logger.Error("notifications: deliver", "delivery_id", d.ID, "error", err)
 			continue
@@ -160,19 +180,55 @@ func (p *Plugin) processDeliveries(ctx context.Context) (int, int, int, error) {
 // deliver attempts a single webhook delivery. It reads the webhook config,
 // builds and sends an HTTP POST with HMAC-SHA256 signing, and updates the
 // delivery status accordingly. Returns the outcome ("delivered", "retrying", "failed").
-func (p *Plugin) deliver(ctx context.Context, d deliveryRow) (string, error) {
+//
+// baseCtx is the pre-AcrossAllTenants context threaded from Run/processDeliveries
+// -- see Run's comment. It is used only to build the per-tenant ctx for the
+// Secrets.ForTenant call below; everything else in deliver keeps using ctx,
+// which carries the marking that webhook_config/webhook_delivery need.
+func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, error) {
 	// Look up the webhook config.
+	//
+	// plugin.ScanRow, not a bare .Scan: SQL Server returns UNIQUEIDENTIFIER
+	// (tenant_id) in mixed-endian byte order, which uuid.UUID's own Scan
+	// takes without error and turns into a DIFFERENT uuid -- see its doc
+	// comment. ScanRow substitutes plugin.GUID for any *uuid.UUID
+	// destination and swaps it back, the same correction routes.go's own
+	// scans in this package already get.
 	var cfg webhookConfigRow
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT url, secret FROM webhook_config WHERE id = $1
-		`, p.dialect), d.WebhookID).Scan(&cfg.URL, &cfg.Secret)
+	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
+			SELECT url, tenant_id, secret_configured FROM webhook_config WHERE id = $1
+		`, p.dialect), d.WebhookID), &cfg.URL, &cfg.TenantID, &cfg.SecretConfigured)
 	if err != nil {
 		return "", fmt.Errorf("lookup webhook config: %w", err)
 	}
 
+	// A signing secret is now REQUIRED on every webhook (cleat#1992/#2172,
+	// owner decision (b)): handleCreateWebhook refuses to create one without
+	// it and handleUpdateWebhook refuses to clear it, so secret_configured
+	// unset is refused here rather than read as "sign with an empty key" --
+	// there is no path today that produces such a row, but this is what
+	// makes that a failed delivery instead of an unsigned one if it is ever
+	// reached. The secret MUST be readable: Secrets.ForTenant, not the
+	// request-path Get, since this sweep has no request to inherit a tenant
+	// from and cfg.TenantID is what it just read above -- declared in
+	// plugin/a_secrets_for_tenant_is_declared_test.go's secretsForTenantLedger.
+	// ANY lookup failure here fails the delivery attempt outright rather than
+	// falling back to an empty-key signature nobody configured -- the same
+	// "a lookup failure must not read as unsigned" reasoning cleat#2172 needed
+	// for webhookingest's inbound verification, applied to this plugin's
+	// outbound one.
+	if !cfg.SecretConfigured {
+		return "", fmt.Errorf("webhook %s has no secret configured", d.WebhookID)
+	}
+	tenantCtx := plugin.ForTenant(baseCtx, cfg.TenantID)
+	secret, err := p.secrets.ForTenant(cfg.TenantID.String()).Get(tenantCtx, WebhookSecretName(d.WebhookID))
+	if err != nil {
+		return "", fmt.Errorf("get webhook secret: %w", err)
+	}
+
 	// Build the request body.
 	payloadBytes := []byte(d.Payload)
-	mac := hmac.New(sha256.New, []byte(cfg.Secret.Reveal()))
+	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(payloadBytes)
 	signature := hex.EncodeToString(mac.Sum(nil))
 

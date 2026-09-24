@@ -39,17 +39,29 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// WebhookSecretName is the tenant-secret name a webhook_config row's signing
+// secret is stored under. cleat#1992.
+//
+// PER-WEBHOOK, NOT PER-TENANT: a tenant can register more than one webhook
+// (own id, url, event filter), so a single fixed name would collide across a
+// tenant's own webhooks -- tenant secrets are keyed (tenant_id, name), a
+// singleton per name. Keying by webhook id preserves that with no product
+// change. Mirrors plugins/datadogexport/routes.go's DatadogAPIKeySecretName.
+func WebhookSecretName(id uuid.UUID) string {
+	return "notifications.webhook_secret." + id.String()
+}
+
 // ---- types ----
 
 type webhookConfigJSON struct {
-	ID        uuid.UUID     `json:"id"`
-	TenantID  uuid.UUID     `json:"tenant_id"`
-	URL       string        `json:"url"`
-	Secret    plugin.Secret `json:"secret"`
-	Events    []string      `json:"events"`
-	Enabled   bool          `json:"enabled"`
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
+	ID               uuid.UUID `json:"id"`
+	TenantID         uuid.UUID `json:"tenant_id"`
+	URL              string    `json:"url"`
+	SecretConfigured bool      `json:"secret_configured"`
+	Events           []string  `json:"events"`
+	Enabled          bool      `json:"enabled"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type createWebhookRequest struct {
@@ -109,6 +121,14 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	if req.Events == nil {
 		req.Events = []string{}
 	}
+	// A signing secret is REQUIRED, not optional. cleat#1992/#2172, owner
+	// decision (b): every webhook must sign the deliveries it sends, so the
+	// receiving end can verify them. An unsigned webhook can no longer be
+	// created.
+	if req.Secret.Reveal() == "" {
+		p.writeError(w, 400, "secret is required")
+		return
+	}
 
 	eventsJSON, err := json.Marshal(req.Events)
 	if err != nil {
@@ -119,13 +139,26 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 
 	id := uuid.New()
 	now := time.Now()
+	const secretConfigured = true
+
+	// The secret is written FIRST. If it fails, nothing else has happened --
+	// no orphaned config row. If the INSERT below fails after this succeeds,
+	// the secret is orphaned under a name no config row references; harmless
+	// (unreachable, never resolved by anything) but logged so it is not a
+	// silent leak of key material nobody can account for.
+	if err := p.secrets.Put(r.Context(), WebhookSecretName(id), req.Secret.Reveal()); err != nil {
+		p.logger.Error("notifications: store webhook secret", "error", err)
+		p.writeError(w, 500, "failed to store secret")
+		return
+	}
 
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
-			INSERT INTO webhook_config (tenant_id, id, url, secret, events, enabled, created_at, updated_at)
+			INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
-		`, p.dialect), tid, id, req.URL, req.Secret.Reveal(), string(eventsJSON), now)
+		`, p.dialect), tid, id, req.URL, secretConfigured, string(eventsJSON), now)
 	if err != nil {
-		p.logger.Error("notifications: create webhook", "error", err)
+		p.logger.Error("notifications: create webhook",
+			"error", err, "orphaned_secret_configured", secretConfigured)
 		p.writeError(w, 500, "failed to create webhook")
 		return
 	}
@@ -133,14 +166,14 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	p.logger.Info("notifications: webhook created", "id", id, "tenant", tid)
 
 	p.writeJSON(w, 201, webhookConfigJSON{
-		ID:        id,
-		TenantID:  tid,
-		URL:       req.URL,
-		Secret:    req.Secret,
-		Events:    req.Events,
-		Enabled:   true,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:               id,
+		TenantID:         tid,
+		URL:              req.URL,
+		SecretConfigured: secretConfigured,
+		Events:           req.Events,
+		Enabled:          true,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	})
 }
 
@@ -154,7 +187,7 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
-			SELECT id, url, secret, events, enabled, created_at, updated_at
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
 			WHERE tenant_id = $1
 			ORDER BY created_at DESC
@@ -172,7 +205,7 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 			c         webhookConfigJSON
 			eventsRaw []byte
 		)
-		if err := plugin.ScanRow(rows, &c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			p.logger.Error("notifications: scan webhook", "error", err)
 			continue
 		}
@@ -209,10 +242,10 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 		eventsRaw []byte
 	)
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT id, url, secret, events, enabled, created_at, updated_at
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid), &c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "webhook not found")
 		return
@@ -269,10 +302,13 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		args = append(args, *req.URL)
 		argIdx++
 	}
-	if req.Secret != nil {
-		setClauses = append(setClauses, fmt.Sprintf("secret = $%d", argIdx))
-		args = append(args, req.Secret.Reveal())
-		argIdx++
+	// A signing secret is REQUIRED, not optional (cleat#1992/#2172, owner
+	// decision (b)): PUT can ROTATE it but can no longer clear it back to
+	// unsigned, so secret_configured has nothing left to set to false and no
+	// longer needs its own SET clause -- true from creation onward, always.
+	if req.Secret != nil && req.Secret.Reveal() == "" {
+		p.writeError(w, 400, "secret cannot be cleared")
+		return
 	}
 	if req.Events != nil {
 		eventsJSON, err := json.Marshal(*req.Events)
@@ -291,7 +327,11 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		argIdx++
 	}
 
-	if len(setClauses) == 0 {
+	// A secret rotation carries no SET clause of its own any more -- it goes
+	// through p.secrets, not this UPDATE -- so it no longer counts toward
+	// setClauses, and the "nothing to update" check has to ask about it
+	// separately or a PUT that rotates only the secret would be rejected.
+	if len(setClauses) == 0 && req.Secret == nil {
 		p.writeError(w, 400, "no fields to update")
 		return
 	}
@@ -316,16 +356,30 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The secret write happens AFTER the row update confirms id belongs to
+	// tid -- so a request naming another tenant's (or no) webhook id never
+	// reaches p.secrets at all, rather than rotating a secret under the
+	// caller's own tenant for an id that is not theirs. req.Secret == nil
+	// means the field was omitted (no rotation); req.Secret.Reveal() == ""
+	// was already rejected above, so every reachable call here is a rotation.
+	if req.Secret != nil {
+		if err := p.secrets.Put(r.Context(), WebhookSecretName(id), req.Secret.Reveal()); err != nil {
+			p.logger.Error("notifications: rotate webhook secret", "error", err, "id", id)
+			p.writeError(w, 500, "failed to store secret")
+			return
+		}
+	}
+
 	// Return the updated webhook config.
 	var (
 		c         webhookConfigJSON
 		eventsRaw []byte
 	)
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT id, url, secret, events, enabled, created_at, updated_at
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid), &c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("notifications: re-fetch webhook", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated webhook")
@@ -366,6 +420,15 @@ func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 	if rows == 0 {
 		p.writeError(w, 404, "webhook not found")
 		return
+	}
+
+	// Best-effort: the config row is already gone, which is the operation
+	// the caller asked for and got. A failure here leaves a retired-but-not-
+	// yet-retired secret with no config row pointing at it -- inert, since
+	// nothing looks it up by an id that no longer exists -- so it is logged
+	// rather than turned into a 500 for an otherwise-successful delete.
+	if _, err := p.secrets.Retire(r.Context(), WebhookSecretName(id)); err != nil {
+		p.logger.Error("notifications: retire webhook secret after delete", "error", err, "id", id)
 	}
 
 	p.logger.Info("notifications: webhook deleted", "id", id, "tenant", tid)

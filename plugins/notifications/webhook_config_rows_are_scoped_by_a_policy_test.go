@@ -15,6 +15,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestWebhookConfigRowsAreScopedByAPolicyAndTheLoopSaysSo is cleat#1512.
@@ -80,11 +81,13 @@ func TestWebhookConfigRowsAreScopedByAPolicyAndTheLoopSaysSo(t *testing.T) {
 	// which happens on the failure path as well as the success one. The default
 	// client's timeout would make the arm's 20s deadline a race.
 	var logs bytes.Buffer
+	secrets := plugintest.NewFakeSecrets()
 	p := &Plugin{
 		db:         db,
 		dialect:    plugin.DialectPostgres,
 		logger:     slog.New(slog.NewTextHandler(&logs, nil)),
 		httpClient: &http.Client{Timeout: 500 * time.Millisecond},
+		secrets:    secrets,
 	}
 
 	// A URL UNIQUE TO THIS RUN, so the counts below are about rows this test
@@ -96,8 +99,8 @@ func TestWebhookConfigRowsAreScopedByAPolicyAndTheLoopSaysSo(t *testing.T) {
 
 	t.Run("no tenant in context is refused, not silently emptied", func(t *testing.T) {
 		_, err := db.Exec(context.Background(),
-			`INSERT INTO webhook_config (tenant_id, id, url, secret, events, enabled)
-			 VALUES ($1, $2, $3, '', '[]', true)`,
+			`INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled)
+			 VALUES ($1, $2, $3, true, '[]', true)`,
 			tenantA.String(), uuid.New().String(), url+"/unscoped")
 		if err == nil {
 			t.Fatal("an INSERT with no tenant in context succeeded.\n\n" +
@@ -120,12 +123,20 @@ func TestWebhookConfigRowsAreScopedByAPolicyAndTheLoopSaysSo(t *testing.T) {
 		id := uuid.New()
 		webhookOf[tenant] = id
 		c := auth.WithTenantID(context.Background(), tenant)
+		// secret_configured is true: cleat#1992/#2172, owner decision (b),
+		// made a signing secret mandatory, so every real row now carries one
+		// and deliver() would refuse a false row outright rather than sign
+		// with an empty key. The Plugin above carries a FakeSecrets, not a
+		// real store -- this test's focus is the RLS-scoped db.Query/Exec
+		// calls, not tenant_secrets, and a fake needs no DB round trip to
+		// let the last arm's delivery reach its HTTP attempt.
 		if _, err := db.Exec(c,
-			`INSERT INTO webhook_config (tenant_id, id, url, secret, events, enabled)
-			 VALUES ($1, $2, $3, 'sh', '[]', true)`,
+			`INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled)
+			 VALUES ($1, $2, $3, true, '[]', true)`,
 			tenant.String(), id.String(), url); err != nil {
 			t.Fatalf("seeding tenant %s: %v", tenant, err)
 		}
+		secrets.Seed(tenant.String(), WebhookSecretName(id), "test-secret")
 	}
 
 	t.Run("a tenant sees its own row and not the other tenant's", func(t *testing.T) {
@@ -149,9 +160,11 @@ func TestWebhookConfigRowsAreScopedByAPolicyAndTheLoopSaysSo(t *testing.T) {
 		// does not know its tenant. It is the one statement in the loop that
 		// needs the bypass -- queryDueDeliveries reads webhook_delivery, which
 		// has no policy and would run unmarked.
-		var got string
+		var gotURL, gotTenant string
+		var gotSecretConfigured bool
 		err := db.QueryRow(context.Background(),
-			`SELECT url FROM webhook_config WHERE id = $1`, webhookOf[tenantA].String()).Scan(&got)
+			`SELECT url, tenant_id, secret_configured FROM webhook_config WHERE id = $1`,
+			webhookOf[tenantA].String()).Scan(&gotURL, &gotTenant, &gotSecretConfigured)
 		if err == nil {
 			t.Fatal("deliver()'s config lookup succeeded with no tenant in context")
 		}

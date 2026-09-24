@@ -40,6 +40,7 @@ type Plugin struct {
 	dialect plugin.Dialect
 	config  Config
 	env     *plugin.Environment
+	secrets plugin.Secrets
 }
 
 // Config controls webhook-ingest plugin behaviour.
@@ -70,6 +71,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.mux = env.Mux
 	p.env = env
 	p.dialect = env.Dialect
+	p.secrets = env.Secrets
 
 	// Parse optional config.
 	if len(env.Config) > 0 {

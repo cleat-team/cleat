@@ -48,19 +48,34 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// WebhookIngestSecretName is the tenant-secret name a webhook_sources row's
+// signing secret is stored under. cleat#1992.
+//
+// PER-SOURCE, NOT PER-TENANT: a tenant can register more than one source (own
+// id, name, source_type), so a single fixed name would collide across a
+// tenant's own sources -- tenant secrets are keyed (tenant_id, name), a
+// singleton per name. Keying by source id preserves that with no product
+// change. Mirrors plugins/notifications/routes.go's WebhookSecretName.
+//
+// EXPORTED, not package-private: tests/plugin-harness may need the exact same
+// name a test seeds under to be readable back by handleIngestWebhook.
+func WebhookIngestSecretName(id uuid.UUID) string {
+	return "webhook-ingest.source_secret." + id.String()
+}
+
 // ---- types ----
 
 type webhookSourceJSON struct {
-	ID               uuid.UUID     `json:"id"`
-	TenantID         uuid.UUID     `json:"tenant_id"`
-	Name             string        `json:"name"`
-	SourceType       string        `json:"source_type"`
-	Secret           plugin.Secret `json:"secret"`
-	Enabled          bool          `json:"enabled"`
-	SignalWorkflowID string        `json:"signal_workflow_id,omitempty"`
-	SignalName       string        `json:"signal_name,omitempty"`
-	CreatedAt        time.Time     `json:"created_at"`
-	UpdatedAt        time.Time     `json:"updated_at"`
+	ID               uuid.UUID `json:"id"`
+	TenantID         uuid.UUID `json:"tenant_id"`
+	Name             string    `json:"name"`
+	SourceType       string    `json:"source_type"`
+	SecretConfigured bool      `json:"secret_configured"`
+	Enabled          bool      `json:"enabled"`
+	SignalWorkflowID string    `json:"signal_workflow_id,omitempty"`
+	SignalName       string    `json:"signal_name,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type createSourceRequest struct {
@@ -114,13 +129,23 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	discoverCtx := plugin.AcrossAllTenants(r.Context(),
 		"webhook ingest: the source id identifies the tenant, so there is none to scope by")
 
+	// COALESCE(signal_workflow_id, ''): the column is nullable with no
+	// default (migrations.go v3) and handleCreateSource writes NULL for a
+	// source created with no signal_workflow_id, but this scans into a plain
+	// Go string -- an uncoalesced NULL fails every ingest on such a source
+	// with "converting NULL to string is unsupported". background.go's
+	// queryUnprocessedWebhookEvents already coalesced this column; these
+	// three SELECTs (here, handleGetSource, handleListSources) had not.
+	// Found running handleCreateSource+handleIngestWebhook against a real
+	// database for the first time (cleat#1992's dialect coverage) -- the
+	// in-memory fake driver has no NULL to fail to scan.
 	var source webhookSourceJSON
 	err = plugin.ScanRow(p.db.QueryRow(discoverCtx, plugin.Rebind(`
-		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1
 	`, p.dialect), sourceID), &source.ID, &source.TenantID, &source.Name, &source.SourceType,
-		&source.Secret, &source.Enabled, &source.SignalWorkflowID, &source.SignalName,
+		&source.SecretConfigured, &source.Enabled, &source.SignalWorkflowID, &source.SignalName,
 		&source.CreatedAt, &source.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "source not found")
@@ -152,20 +177,50 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	// Verify HMAC-SHA256 signature if the source has a secret configured.
-	if source.Secret.Reveal() != "" {
-		sig := r.Header.Get("X-Hub-Signature-256")
-		if sig == "" {
-			p.writeError(w, 401, "missing signature")
-			return
-		}
-		mac := hmac.New(sha256.New, []byte(source.Secret.Reveal()))
-		mac.Write(body)
-		expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
-		if !hmac.Equal([]byte(expected), []byte(sig)) {
-			p.writeError(w, 401, "invalid signature")
-			return
-		}
+	// Verify HMAC-SHA256 signature. cleat#1992/#2172, owner decision (b): a
+	// signing secret is now REQUIRED on every source -- handleCreateSource
+	// refuses to create one without it -- so an unsigned request is never
+	// accepted, on any source, unconditionally.
+	//
+	// secret_configured is checked first rather than assumed true: it is the
+	// row's own record of what handleCreateSource actually enforced, and
+	// refusing here rather than proceeding to a lookup keeps this handler
+	// correct even against a row that somehow lacks one (there is no such
+	// path today, but the check is what makes that a refusal instead of a
+	// silent unsigned accept if one is ever introduced).
+	//
+	// The secret itself no longer lives on the row, so this cannot be read
+	// off source.Secret. It MUST be readable through the tenant-secrets
+	// store: a not-found, an empty value, or any other error all refuse the
+	// request rather than falling back to unsigned. A naive `Reveal() != ""`
+	// check on a value that failed to load reads as empty and would silently
+	// accept the payload unsigned -- exactly the gap this branch exists to
+	// close, and what pins it (see the regression test create-then-retire a
+	// secret and confirm ingest refuses).
+	if !source.SecretConfigured {
+		p.logger.Error("webhook-ingest: source has no secret configured",
+			"source_id", sourceID)
+		p.writeError(w, 503, "signing secret not configured")
+		return
+	}
+	secret, err := p.secrets.ForTenant(source.TenantID.String()).Get(tenantCtx, WebhookIngestSecretName(source.ID))
+	if err != nil || secret == "" {
+		p.logger.Error("webhook-ingest: signing secret unavailable",
+			"source_id", sourceID, "error", err)
+		p.writeError(w, 503, "signing secret unavailable")
+		return
+	}
+	sig := r.Header.Get("X-Hub-Signature-256")
+	if sig == "" {
+		p.writeError(w, 401, "missing signature")
+		return
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expected), []byte(sig)) {
+		p.writeError(w, 401, "invalid signature")
+		return
 	}
 
 	// Store request headers as JSON.
@@ -304,7 +359,7 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
-		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
@@ -320,7 +375,7 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var s webhookSourceJSON
 		if err := plugin.ScanRow(rows, &s.ID, &s.TenantID, &s.Name, &s.SourceType,
-			&s.Secret, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
+			&s.SecretConfigured, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
 			&s.CreatedAt, &s.UpdatedAt); err != nil {
 			p.logger.Error("webhook-ingest: scan source", "error", err)
 			continue
@@ -364,9 +419,19 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	if req.SourceType == "" {
 		req.SourceType = "generic"
 	}
+	// A signing secret is REQUIRED, not optional. cleat#1992/#2172, owner
+	// decision (b): every source must verify its inbound requests: an
+	// unsigned source can no longer be created, closing off the class of
+	// bug this PR's part (a) refuses at ingest time -- there, the row already
+	// existed unsigned; here, it is never allowed to.
+	if req.Secret.Reveal() == "" {
+		p.writeError(w, 400, "secret is required")
+		return
+	}
 
 	id := uuid.New()
 	now := time.Now()
+	const secretConfigured = true
 
 	var signalWorkflowID any
 	if req.SignalWorkflowID != "" {
@@ -377,12 +442,36 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		signalName = "webhook_received"
 	}
 
+	// The secret is written FIRST. If it fails, nothing else has happened --
+	// no orphaned source row. If the INSERT below fails after this succeeds,
+	// the secret is orphaned under a name no source row references; harmless
+	// (unreachable, never resolved by anything) but logged so it is not a
+	// silent leak of key material nobody can account for. cleat#1992, same
+	// shape as plugins/notifications/routes.go's handleCreateWebhook.
+	if err := p.secrets.Put(r.Context(), WebhookIngestSecretName(id), req.Secret.Reveal()); err != nil {
+		p.logger.Error("webhook-ingest: store source secret", "error", err)
+		p.writeError(w, 500, "failed to store secret")
+		return
+	}
+
+	// Every placeholder numbered once, strictly increasing: $6 named twice
+	// (for created_at and updated_at) would rebind to two SEPARATE "?" on
+	// MySQL, in TEXTUAL order -- plugin.Rebind replaces every $N occurrence
+	// positionally, not by its number (see CLAUDE.md's "MySQL binds `?` by
+	// APPEARANCE") -- while PostgreSQL and SQL Server bind by the number
+	// itself. The only ordering that satisfies both is one placeholder per
+	// argument, numbered in the same order the arguments are passed, so `now`
+	// is passed twice ($6 and $7) rather than reused. Found running this
+	// INSERT against real MySQL for the first time (cleat#1992's dialect
+	// coverage) -- the in-memory fake driver binds by Ordinal and cannot see
+	// this class of defect.
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
-		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret, enabled, created_at, updated_at, signal_workflow_id, signal_name)
-		VALUES ($1, $2, $3, $4, $5, true, $6, $6, $7, $8)
-	`, p.dialect), tid, id, req.Name, req.SourceType, req.Secret.Reveal(), now, signalWorkflowID, signalName)
+		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret_configured, enabled, created_at, updated_at, signal_workflow_id, signal_name)
+		VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9)
+	`, p.dialect), tid, id, req.Name, req.SourceType, secretConfigured, now, now, signalWorkflowID, signalName)
 	if err != nil {
-		p.logger.Error("webhook-ingest: create source", "error", err)
+		p.logger.Error("webhook-ingest: create source",
+			"error", err, "orphaned_secret_configured", secretConfigured)
 		p.writeError(w, 500, "failed to create source")
 		return
 	}
@@ -397,7 +486,7 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		"tenant_id":          tid,
 		"name":               req.Name,
 		"source_type":        req.SourceType,
-		"secret":             req.Secret,
+		"secret_configured":  secretConfigured,
 		"signal_workflow_id": req.SignalWorkflowID,
 		"signal_name":        signalName,
 		"enabled":            true,
@@ -425,11 +514,11 @@ func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
 
 	var s webhookSourceJSON
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
-		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND tenant_id = $2
 	`, p.dialect), id, tid), &s.ID, &s.TenantID, &s.Name, &s.SourceType,
-		&s.Secret, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
+		&s.SecretConfigured, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
 		&s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "source not found")
@@ -472,6 +561,17 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	if rows == 0 {
 		p.writeError(w, 404, "source not found")
 		return
+	}
+
+	// Best-effort: the source row is already gone, which is the operation
+	// the caller asked for and got. A failure here leaves a retired-but-not-
+	// yet-retired secret with no source row pointing at it -- inert, since
+	// nothing looks it up by an id that no longer exists -- so it is logged
+	// rather than turned into a 500 for an otherwise-successful delete.
+	// cleat#1992, same shape as plugins/notifications/routes.go's
+	// handleDeleteWebhook.
+	if _, err := p.secrets.Retire(r.Context(), WebhookIngestSecretName(id)); err != nil {
+		p.logger.Error("webhook-ingest: retire source secret after delete", "error", err, "id", id)
 	}
 
 	p.logger.Info("webhook-ingest: source deleted", "id", id, "tenant", tid)
