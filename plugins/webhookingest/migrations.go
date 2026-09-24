@@ -317,5 +317,66 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_sources DROP COLUMN secret_configured;
 			`,
 		},
+		{
+			// A deleted source is soft-deleted, not removed. cleat#2199:
+			// webhook_events.source_id REFERENCES webhook_sources(id) with no
+			// ON DELETE action, so a hard DELETE on webhook_sources 500s on
+			// PostgreSQL and SQL Server for any source with at least one event,
+			// and on MySQL succeeds while orphaning that source's
+			// webhook_events rows (InnoDB ignores an inline-column REFERENCES).
+			//
+			// Nothing is removed either way now -- handleDeleteSource sets
+			// enabled = false and deleted_at, so the FK is never exercised on
+			// any of the three dialects, and a source's ingested events (its
+			// audit trail) survive the source that received them, which
+			// matters most exactly when a source is deleted for a leaked
+			// secret: that is an incident, and the history of what was
+			// ingested during the compromise window is what an operator needs
+			// kept, not erased.
+			Version: 8,
+			Up: `
+					ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+				`,
+			// cleat-review on #2221: a bare `ALTER TABLE ... ADD COLUMN` here
+			// is not idempotent on MySQL the way the Postgres and MSSQL arms
+			// above are -- MySQL DDL is not transactional, so a crash between
+			// this ALTER and plugin_migrations recording version 8 leaves a
+			// worker that re-runs it on its next start and gets
+			// `ERROR 1060 (42S21): Duplicate column name 'deleted_at'` and
+			// never boots. Guarded through information_schema.columns, the
+			// same prepared-statement shape migrations/mysql/055 uses for the
+			// identical hazard on workflow_instances.started_at -- MySQL has
+			// no bare conditional DDL statement, so the ALTER itself has to be
+			// built as text and executed through PREPARE/EXECUTE rather than
+			// wrapped in a plain IF the way UpMSSQL's sys.columns check is.
+			UpMySQL: `
+					SET @col := (
+						SELECT COUNT(*) FROM information_schema.columns
+						WHERE table_schema = DATABASE()
+						  AND table_name = 'webhook_sources'
+						  AND column_name = 'deleted_at'
+					);
+					SET @ddl := IF(@col = 0,
+						'ALTER TABLE webhook_sources ADD COLUMN deleted_at TIMESTAMP(6) NULL',
+						'DO 0');
+					PREPARE stmt FROM @ddl;
+					EXECUTE stmt;
+					DEALLOCATE PREPARE stmt;
+				`,
+			UpMSSQL: `
+					IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'deleted_at')
+					ALTER TABLE webhook_sources ADD deleted_at DATETIMEOFFSET NULL;
+				`,
+			Down: `
+					ALTER TABLE webhook_sources DROP COLUMN IF EXISTS deleted_at;
+				`,
+			DownMySQL: `
+					ALTER TABLE webhook_sources DROP COLUMN deleted_at;
+				`,
+			DownMSSQL: `
+					IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'deleted_at')
+					ALTER TABLE webhook_sources DROP COLUMN deleted_at;
+				`,
+		},
 	}
 }
