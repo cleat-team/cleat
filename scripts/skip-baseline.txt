@@ -52,6 +52,7 @@ cmd/cleat-bench	TestHelperProcess	1
 cmd/cleat-gen-plugin	TestHelperProcess	1
 cmd/cleat-worker	TestABlockedStartIsAcceptedAndWaits	1
 cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow	1
+cmd/cleat-worker	TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun	4
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
 cmd/cleat-worker	TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP	1
 cmd/cleat-worker	TestMigrationIsADeployStepOnEveryDialect	2
@@ -123,6 +124,7 @@ engine	TestMSSQLStore_StartNewRun_TenantID	1
 engine	TestMSSQLTenantIsolation_UnderRealSecurityPolicies	2
 engine	TestMSSQLTenantIsolation_WorkflowPromises_UnderRealSecurityPolicies	2
 engine	TestMSSQLTenantSettingsAreIsolatedByTheSecurityPolicy	2
+engine	TestMySQLReapStaleInstancesDoesNotGhostCommitUnderInterpolateParams	1
 engine	TestMySQLStoreConfigOptions	1
 engine	TestMySQLStoreFactory	1
 engine	TestMySQLTenantSettings	1
@@ -168,6 +170,7 @@ engine	buildRustWasm	2
 engine	forEachBackend	1
 engine	mssqlDropTenantDB	2
 engine	mssqlTenantTestPool	2
+engine	mysqlDSNWithInterpolateParams	1
 engine	mysqlIntegrationStore	2
 engine	pythonDeferSegment	1
 engine	pythonDeterminismWasm	1
