@@ -255,3 +255,94 @@ jobs:
           git add Formula/cleat.rb
           git commit -m "cleat $VERSION"
           git push origin main
+
+  # cleat#2099: publish charts/cleat as an OCI artifact to ghcr.io, next to
+  # the cleat-worker image the goreleaser job above pushes, versioned with
+  # the release -- so a real tag always has a matching
+  # `helm install cleat oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z`.
+  #
+  # needs: goreleaser for the same reason as homebrew-bump: this job wants
+  # the release tag's other artifacts (here, specifically the cleat-worker
+  # image the chart's default image.tag will point at) to already exist.
+  helm-chart-publish:
+    name: Publish the Helm chart
+    needs: goreleaser
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: latest
+
+      - name: Compute the chart version and image tag
+        id: chart
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$VERSION' is not vX.Y.Z -- refusing to publish a chart version from it"
+            exit 1
+          fi
+          # Helm's chart `version` (and, by this chart's convention,
+          # `appVersion`) is strict SemVer -- no leading "v" -- while the
+          # cleat-worker image tag the goreleaser job above pushed keeps the
+          # "v". helm package's --version/--app-version override Chart.yaml
+          # at package time, so the tracked file is never edited for this.
+          echo "chart_version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # A bare `helm install` with no --set should deploy the cleat-worker
+      # this chart was versioned and tested against, not whatever "latest"
+      # happens to mean when the cluster next reconciles the image. Edited
+      # only in this ephemeral checkout, the same way goreleaser bakes a
+      # version into a binary without touching tracked source -- nothing
+      # here commits back to the repo.
+      - name: Pin the chart's default image tag to this release
+        env:
+          IMAGE_TAG: ${{ steps.chart.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          before="$(grep -c '^  tag: latest$' charts/cleat/values.yaml || true)"
+          if [ "$before" -ne 1 ]; then
+            echo "::error::expected exactly one '  tag: latest' line in charts/cleat/values.yaml, found $before -- values.yaml's shape changed, update this step"
+            exit 1
+          fi
+          sed -i "s/^  tag: latest\$/  tag: ${IMAGE_TAG}/" charts/cleat/values.yaml
+          grep -n '^  tag:' charts/cleat/values.yaml
+
+      - name: helm lint
+        run: helm lint charts/cleat
+
+      - name: Package the chart
+        env:
+          CHART_VERSION: ${{ steps.chart.outputs.chart_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-chart
+          helm package charts/cleat \
+            --version "$CHART_VERSION" \
+            --app-version "$CHART_VERSION" \
+            -d dist-chart
+          ls -la dist-chart
+
+      # Only reachable on a v* tag push (this whole workflow's trigger), same
+      # guard as goreleaser's own "Log in to ghcr.io" step.
+      - name: helm registry login ghcr.io
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+
+      # ghcr.io's package visibility (public/private) is a repository/org
+      # setting, same caveat as the cleat-worker image push above: until an
+      # owner makes ghcr.io/cleat-team/charts/cleat public, this push itself
+      # still succeeds with packages: write, but `helm install ... oci://...`
+      # 403s for anyone not authenticated to this org.
+      - name: Push the chart to ghcr.io
+        env:
+          CHART_VERSION: ${{ steps.chart.outputs.chart_version }}
+        run: helm push "dist-chart/cleat-${CHART_VERSION}.tgz" oci://ghcr.io/cleat-team/charts
