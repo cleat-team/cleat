@@ -265,18 +265,23 @@ func argOptionalString(args []driver.NamedValue, ordinal int) (*string, error) {
 	return nil, fmt.Errorf("arg %d not found", ordinal)
 }
 
-// argOptionalBytes returns nil when the value is nil (SQL NULL).
+// argOptionalBytes returns nil when the value is nil (SQL NULL), and accepts
+// either []byte or string -- plugin.JSONColumn (used for payload/input)
+// deliberately yields a string from Value(). See JSONColumn's doc comment in
+// plugin/query.go.
 func argOptionalBytes(args []driver.NamedValue, ordinal int) ([]byte, error) {
 	for _, a := range args {
 		if a.Ordinal == ordinal {
-			if a.Value == nil {
+			switch v := a.Value.(type) {
+			case nil:
 				return nil, nil
+			case []byte:
+				return v, nil
+			case string:
+				return []byte(v), nil
+			default:
+				return nil, fmt.Errorf("arg %d: want []byte, string or nil, got %T", ordinal, a.Value)
 			}
-			b, ok := a.Value.([]byte)
-			if !ok {
-				return nil, fmt.Errorf("arg %d: want []byte or nil, got %T", ordinal, a.Value)
-			}
-			return b, nil
 		}
 	}
 	return nil, fmt.Errorf("arg %d not found", ordinal)

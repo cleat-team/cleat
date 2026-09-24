@@ -404,6 +404,17 @@ jobs:
           scripts/check-plugin-table-namespace.py --self-test
           scripts/check-plugin-table-namespace.py
 
+      # SQL Server has no LIMIT clause; a query built with one 500s there
+      # outright -- "Incorrect syntax near 'LIMIT'". #2191 and #2198 fixed
+      # this class at several endpoints; #2206's own audit found it missed
+      # twice more (jobqueue's and blobstore's list endpoints). --self-test
+      # first: on a clean tree "no unguarded LIMIT" and "the scan matched
+      # nothing" print the same kind of success.
+      - name: Plugin SQL LIMIT portability guard
+        run: |
+          scripts/check-plugin-sql-limit-portability.py --self-test
+          scripts/check-plugin-sql-limit-portability.py
+
       # Three workstreams append sections to IMPROVEMENT-PLAN.md at once, each
       # picking the next free number against a develop that has already moved.
       # The collision exists only in the merge, and a duplicate heading renders

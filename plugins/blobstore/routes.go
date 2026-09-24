@@ -176,12 +176,17 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	var size int64
 	var expiresAt sql.NullTime
 
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+	// plugin.QuoteIdent, not a bare "i.key": key is a reserved word in MySQL
+	// and SQL Server both, and an unquoted reference 500ed on both backends
+	// ("Incorrect syntax near the keyword 'key'" on MSSQL) -- the same bug
+	// kvstore and featureflags already carry the fix for. See
+	// plugin.QuoteIdent. cleat#2206.
+	err := p.db.QueryRow(r.Context(), plugin.Rebind(fmt.Sprintf(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
-		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+		WHERE i.%s = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
+	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "blob not found")
 		return
@@ -234,12 +239,13 @@ func (p *Plugin) handleHead(w http.ResponseWriter, r *http.Request) {
 	var size int64
 	var expiresAt sql.NullTime
 
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+	// plugin.QuoteIdent: see handleGet's identical comment above. cleat#2206.
+	err := p.db.QueryRow(r.Context(), plugin.Rebind(fmt.Sprintf(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
-		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+		WHERE i.%s = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
+	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "blob not found")
 		return
@@ -279,10 +285,11 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 	// Soft delete: set deleted_at timestamp. Physical deletion is deferred
 	// to the TTL cleanup loop, which only removes bytes from S3 when no
 	// in-flight workflow references the blob.
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	// plugin.QuoteIdent: see handleGet's identical comment above. cleat#2206.
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(fmt.Sprintf(`
 		UPDATE blob_index SET deleted_at = now()
-		WHERE key = $1 AND tenant_id = $2 AND deleted_at IS NULL
-	`, p.dialect), key, tid)
+		WHERE %s = $1 AND tenant_id = $2 AND deleted_at IS NULL
+	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), key, tid)
 	if err != nil {
 		p.logger.Error("blobstore: soft delete", "key", key, "error", err)
 		p.writeError(w, 500, "failed to delete blob")
@@ -316,16 +323,19 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	query := `
-		SELECT i.key, i.sha256, i.size, i.content_type, i.tags, i.created_at, i.expires_at
+	// plugin.QuoteIdent, not a bare "i.key": see handleGet's identical
+	// comment above. cleat#2206.
+	quotedKey := plugin.QuoteIdent("key", p.dialect)
+	query := fmt.Sprintf(`
+		SELECT i.%s, i.sha256, i.size, i.content_type, i.tags, i.created_at, i.expires_at
 		FROM blob_index i
 		WHERE i.tenant_id = $1 AND i.deleted_at IS NULL
-		`
+		`, quotedKey)
 	args := []any{tid}
 	argIdx := 2
 
 	if prefix != "" {
-		query += fmt.Sprintf(" AND i.key LIKE $%d", argIdx)
+		query += fmt.Sprintf(" AND i.%s LIKE $%d", quotedKey, argIdx)
 		args = append(args, prefix+"%")
 		argIdx++
 	}
@@ -347,7 +357,11 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query += " ORDER BY i.created_at DESC"
-	query += " LIMIT " + fmt.Sprintf("$%d", argIdx)
+	// plugin.LimitClause, not a literal "LIMIT $N": SQL Server has no LIMIT,
+	// and this endpoint answered every list request with a 500,
+	// "Incorrect syntax near 'LIMIT'" -- the same bug #2191 and #2198 already
+	// fixed at the other list endpoints, missed here. cleat#2206.
+	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
