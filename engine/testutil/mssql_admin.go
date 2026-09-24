@@ -60,12 +60,31 @@ var (
 	mssqlAdminRefs = map[string]int{}
 )
 
-// mssqlHasSecurityPolicies reports whether this database enforces RLS at all.
-func mssqlHasSecurityPolicies(t *testing.T, db *sql.DB) bool {
+// mssqlHasCoreSecurityPolicies reports whether this database enforces RLS on
+// the CORE tables specifically -- a predicate bound to dbo.fn_tenant_filter,
+// the function migration 001 installs and migration 103 (cleat#2205) adds
+// BLOCK predicates to. That is deliberately narrower than "any security
+// policy exists": plugin/migration.go's applyTenantScopingMSSQL installs its
+// own policies, bound to dbo.fn_plugin_tenant_filter, on every plugin table,
+// and cleat_admin membership means nothing to that function -- it has no
+// IS_ROLEMEMBER branch at all (see CrossTenantConn's doc comment). Counting
+// ANY sys.security_policies row, as this used to, made a database with only
+// plugin policies applied -- which migrations/mssql/*.sql never reaches, since
+// core migrations are what add those -- read as "needs cleat_admin", and
+// migration 012 (which creates that role) never runs unless something
+// applied the core schema. Measured in cleat#2226's CI (Plugin Migrations
+// job): that job's MSSQL database only ever runs plugin.RunMigrations with
+// coreMigrations=nil, so it accumulates plugin policies and never
+// dbo.fn_tenant_filter or the cleat_admin role -- a fixture that only ever
+// touches plugin tables through CrossTenantConn does not need either, and
+// must not be made to Fatal over their absence.
+func mssqlHasCoreSecurityPolicies(t *testing.T, db *sql.DB) bool {
 	t.Helper()
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sys.security_policies`).Scan(&n); err != nil {
-		t.Fatalf("count security policies: %v", err)
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sys.security_predicates WHERE predicate_definition LIKE N'%fn_tenant_filter%'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count core (fn_tenant_filter) security predicates: %v", err)
 	}
 	return n > 0
 }
@@ -81,7 +100,7 @@ func mssqlHasSecurityPolicies(t *testing.T, db *sql.DB) bool {
 // pool each time would leave hundreds of them behind over a suite.
 func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 	t.Helper()
-	if !mssqlHasSecurityPolicies(t, db) {
+	if !mssqlHasCoreSecurityPolicies(t, db) {
 		return db
 	}
 

@@ -99,8 +99,6 @@ func cleanupTenant(t *testing.T, conn *sql.Conn, testDialect testutil.Dialect, t
 func TestSweepAbandonedJobs_MultiBackend(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		t.Run(be.Name, func(t *testing.T) {
-			fixtureDB := be.CrossTenantConn(t, context.Background(),
-				"jobqueue abandonment sweep fixture: seeds a row for a tenant it invents")
 			defer be.Cleanup()
 			// baseCtx carries no tenant marker: sweepAbandonedJobs's SQL
 			// Server arm loops plugin.ForTenant on top of it per
@@ -120,13 +118,18 @@ func TestSweepAbandonedJobs_MultiBackend(t *testing.T) {
 			// every dialect or the sweep's subquery has nothing to query and
 			// fails closed with "table does not exist" rather than proving
 			// anything about the statement's SYNTAX -- the actual subject of
-			// this file.
+			// this file. It also has to run before CrossTenantConn: on MSSQL
+			// that now routes through MSSQLAdminDB, which Fatals if core RLS
+			// is enforced but migration 012's cleat_admin role does not exist
+			// yet. cleat#2226.
 			testutil.SetupFullSchema(t, be.DB, be.Dialect)
 
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("jobqueue migrations on %s: %v", be.Name, err)
 			}
+			fixtureDB := be.CrossTenantConn(t, context.Background(),
+				"jobqueue abandonment sweep fixture: seeds a row for a tenant it invents")
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -193,9 +196,6 @@ func TestSweepAbandonedJobs_MultiBackend(t *testing.T) {
 func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		t.Run(be.Name, func(t *testing.T) {
-			fixtureDB := be.CrossTenantConn(t, context.Background(),
-				"jobqueue abandonment sweep fixture: seeds task_queue and workflow_instances "+
-					"rows for a tenant and run it invents")
 			defer be.Cleanup()
 			// baseCtx carries no tenant marker -- see the identical comment in
 			// TestSweepAbandonedJobs_MultiBackend above.
@@ -212,13 +212,19 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 			// every dialect or the sweep's subquery has nothing to query and
 			// fails closed with "table does not exist" rather than proving
 			// anything about the statement's SYNTAX -- the actual subject of
-			// this file.
+			// this file. It also has to run before CrossTenantConn: on MSSQL
+			// that now routes through MSSQLAdminDB, which Fatals if core RLS
+			// is enforced but migration 012's cleat_admin role does not exist
+			// yet. cleat#2226.
 			testutil.SetupFullSchema(t, be.DB, be.Dialect)
 
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("jobqueue migrations on %s: %v", be.Name, err)
 			}
+			fixtureDB := be.CrossTenantConn(t, context.Background(),
+				"jobqueue abandonment sweep fixture: seeds task_queue and workflow_instances "+
+					"rows for a tenant and run it invents")
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -307,18 +313,20 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 func TestObserveFinalize_MultiBackend(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		t.Run(be.Name, func(t *testing.T) {
-			fixtureDB := be.CrossTenantConn(t, context.Background(),
-				"jobqueue finalize-observer fixture: seeds a row for a tenant it invents")
 			defer be.Cleanup()
 			dialect := plugin.Dialect(string(be.Dialect))
 			p := &Plugin{dialect: dialect}
 
+			// Before CrossTenantConn -- see TestSweepAbandonedJobs_MultiBackend
+			// above.
 			testutil.SetupFullSchema(t, be.DB, be.Dialect)
 
 			if err := plugin.RunMigrations(context.Background(), be.DB, dialect, nil,
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("jobqueue migrations on %s: %v", be.Name, err)
 			}
+			fixtureDB := be.CrossTenantConn(t, context.Background(),
+				"jobqueue finalize-observer fixture: seeds a row for a tenant it invents")
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
