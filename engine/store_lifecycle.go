@@ -1615,6 +1615,48 @@ func (s *PostgresStore) PingDB(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// StaleSetShape satisfies DBStallDetector. Same RLS scoping and same
+// status='running' population as ReapStaleInstances, so the shape this
+// reports is the shape ReapStaleInstances would actually act on -- see
+// that method's doc for why 'running' is the whole population and why
+// nothing here should widen it.
+func (s *PostgresStore) StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var shape StaleSetShape
+	var oldest, newest sql.NullTime
+	err = tx.QueryRowContext(ctx, `
+		SELECT
+		    COUNT(*),
+		    COUNT(*) FILTER (WHERE heartbeat_at < now() - $1::interval),
+		    COUNT(DISTINCT assigned_to) FILTER (WHERE heartbeat_at < now() - $1::interval),
+		    MIN(heartbeat_at) FILTER (WHERE heartbeat_at < now() - $1::interval),
+		    MAX(heartbeat_at) FILTER (WHERE heartbeat_at < now() - $1::interval),
+		    COUNT(*) FILTER (WHERE heartbeat_at < now() - $2::interval),
+		    (CASE WHEN MAX(heartbeat_at) < now() - $1::interval THEN true ELSE false END),
+		    COUNT(DISTINCT assigned_to)
+		FROM workflow_instances
+		WHERE status = 'running'
+	`, fmt.Sprintf("%d milliseconds", missedBeatTimeout.Milliseconds()),
+		fmt.Sprintf("%d milliseconds", timeout.Milliseconds()),
+	).Scan(&shape.Running, &shape.MissedBeat, &shape.MissedBeatDistinctAssignedTo,
+		&oldest, &newest, &shape.Stale, &shape.NoRecentHeartbeat, &shape.DistinctAssignedTo)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: %w", err)
+	}
+	if oldest.Valid {
+		shape.MissedBeatOldest = oldest.Time
+	}
+	if newest.Valid {
+		shape.MissedBeatNewest = newest.Time
+	}
+	return shape, tx.Commit()
+}
+
 // ---- SignalStore interface implementation ----
 
 // DeliverSignal satisfies the SignalStore interface.

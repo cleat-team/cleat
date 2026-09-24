@@ -123,6 +123,32 @@ func (s *ShardedStore) getShard(key string) *Shard {
 	return s.shards[idx]
 }
 
+// ShardNames satisfies MultiShard, so a caller that needs a per-shard
+// decision (cleat#2006's stall detection: one shard's stall must not pause
+// reclaiming on a healthy sibling) can enumerate shards rather than treating
+// ReapStaleInstances's own aggregate as one unit.
+func (s *ShardedStore) ShardNames() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	names := make([]string, len(s.shards))
+	for i, shard := range s.shards {
+		names[i] = shard.Config.Name
+	}
+	return names
+}
+
+// ShardStore satisfies MultiShard: the WorkflowStore for one named shard.
+func (s *ShardedStore) ShardStore(name string) (WorkflowStore, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, shard := range s.shards {
+		if shard.Config.Name == name {
+			return shard.Store, true
+		}
+	}
+	return nil, false
+}
+
 // tryEachShard calls fn on every shard in order.  It returns as soon as fn
 // returns done=true (carrying fn's error back).  If no shard claims the
 // workflow and the last error is non-nil, it is returned.

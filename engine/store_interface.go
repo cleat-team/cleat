@@ -816,5 +816,90 @@ type DBPinger interface {
 	PingDB(ctx context.Context) error
 }
 
+// StaleSetShape is the raw shape of a store's currently-stale running set,
+// against two thresholds: a short one (missedBeatTimeout, "has this row
+// missed at least one expected heartbeat") used to DETECT a suspected
+// database stall quickly, and the reclaim threshold itself (timeout) used
+// only to know when the set has fully recovered. See DBStallDetector.
+type StaleSetShape struct {
+	// Running is every status='running' row in the store's scope -- the
+	// same population ReapStaleInstances sweeps.
+	Running int
+
+	// MissedBeat, MissedBeatDistinctAssignedTo, MissedBeatOldest and
+	// MissedBeatNewest describe the rows with heartbeat_at older than
+	// missedBeatTimeout -- NOT the reclaim threshold. This is the
+	// DETECTION population: cleat#2006 found that gating detection on the
+	// full reclaim threshold misses a whole-fleet stall shorter than that
+	// threshold, because individual rows cross it staggered rather than at
+	// once.
+	MissedBeat                   int
+	MissedBeatDistinctAssignedTo int
+	MissedBeatOldest             time.Time
+	MissedBeatNewest             time.Time
+
+	// Stale is the count with heartbeat_at older than the reclaim
+	// threshold (timeout) itself -- the population ReapStaleInstances will
+	// actually act on. Used only to know when the set has fully recovered
+	// (Stale == 0), not for detection.
+	Stale int
+
+	// NoRecentHeartbeat is true when NOT EVEN ONE running row in scope has
+	// a heartbeat newer than missedBeatTimeout -- i.e. the single freshest
+	// row in the WHOLE population is itself stale. Computed server-side,
+	// against the database's own clock, over every running row -- unlike
+	// MissedBeatNewest, which is MAX() taken only across the already-stale
+	// subset and so cannot answer "has anything recent happened at all":
+	// if every row happens to be stale, MissedBeatNewest reports the
+	// freshest of THOSE, which looks identical whether or not a live
+	// survivor exists outside the CASE WHEN filter that produced it.
+	//
+	// cleat-review on cleat#2006 (2026-09-24): the original fraction+spread
+	// criterion (suspectedStallStaleFraction) had a residual false-negative
+	// at the boundary -- 5 workers, the 4 oldest rows past missedBeat and
+	// the 5th (freshest) not yet, is 4/5 = 80%, and 80% is not > 80%. This
+	// field is what replaced it: cheaper to reason about, and it doesn't
+	// depend on staleness arriving within any particular spread window.
+	NoRecentHeartbeat bool
+
+	// DistinctAssignedTo is COUNT(DISTINCT assigned_to) over EVERY running
+	// row in scope, not just the missed-beat subset (contrast
+	// MissedBeatDistinctAssignedTo). See suspectedDBStall's doc for why a
+	// single-worker fleet must never trip suspicion regardless of
+	// NoRecentHeartbeat.
+	DistinctAssignedTo int
+}
+
+// DBStallDetector is implemented by a store that can report StaleSetShape,
+// for the suspected-database-stall-vs-dead-workers decision (cleat#2006).
+//
+// Deliberately its own interface, same reasoning as DBPinger: most test
+// doubles have no database behind them to answer this, and a caller checks
+// for it with a type assertion rather than every mock growing a new method.
+type DBStallDetector interface {
+	// StaleSetShape reports the shape of the running set. timeout is the
+	// reclaim threshold (what ReapStaleInstances would use); missedBeatTimeout
+	// is the shorter detection threshold. See StaleSetShape's doc for why
+	// both are needed.
+	StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error)
+}
+
+// MultiShard is implemented by a store that fans a single logical operation
+// out across independently-failing shards (ShardedStore). A caller that
+// wants a per-shard decision -- cleat#2006's stall detection, where one
+// shard's stall must not pause reclaiming on a healthy sibling -- type-
+// asserts for this instead of treating the store as one unit.
+//
+// A non-sharded store does not implement this; callers that get ok=false
+// treat the whole store as a single shard.
+type MultiShard interface {
+	// ShardNames returns the shard names, stable across calls for the
+	// life of the store.
+	ShardNames() []string
+
+	// ShardStore returns the WorkflowStore for one shard by name.
+	ShardStore(name string) (WorkflowStore, bool)
+}
+
 // DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.
 const DefaultTenantUUID = "00000000-0000-0000-0000-000000000000"

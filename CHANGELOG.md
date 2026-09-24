@@ -724,6 +724,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   happened. Postgres and SQL Server were already transactional here.
   cleat#2005.
 
+- **The reaper can no longer be fooled into reclaiming a live run by a
+  whole-fleet database stall, only by a genuinely dead worker.** #2166
+  covers a worker that itself observed database trouble; this covers the
+  complementary gap — a fleet-wide stall silences heartbeat *writes* while
+  reads keep working, so every running row ages past the reclaim threshold
+  together, and whichever worker's reaper reaches the database first after
+  recovery reclaims runs that are still alive, including its own, with no
+  trouble ever recorded on its own side.
+
+  A new optional `DBStallDetector` capability (implemented on all three
+  dialect stores) reports the shape of the currently-stale set: how many
+  running rows have missed at least one heartbeat, how many distinct
+  workers they belong to, and whether not even one running row anywhere in
+  scope has a heartbeat newer than the detection threshold. The reaper
+  suppresses reclaiming for one tick whenever no recent heartbeat has
+  landed anywhere, across more than one worker — a single fresh survivor
+  anywhere blocks suspicion outright — and keeps suppressing until either
+  the stale set genuinely clears or the full reclaim window elapses a
+  second time, at which point it reclaims anyway and logs once: a
+  persistent stall-shaped set is by then more likely a genuine mass
+  failure than a database outage. A sharded deployment evaluates and
+  suppresses each shard independently, so one stalled shard cannot pause
+  reclaiming on a healthy sibling. If the shape probe itself fails, that
+  shard's reclaim is skipped for the tick rather than proceeding
+  unsuppressed — a slow or failing read over the very table about to be
+  updated is itself stall-shaped, so "could not check" fails closed.
+
+  Detection deliberately uses a **shorter** threshold than reclaim
+  eligibility itself: gating suspicion on the same window `reclaimAfter()`
+  reclaims at would miss a fleet stall lasting somewhat less than that
+  window, because individual rows cross it staggered rather than all at
+  once, and each gets reclaimed the instant it does — precisely the harm
+  this exists to prevent. **Full protection holds for stalls up to about
+  23s at the default `--heartbeat` (detection latency plus the reclaim
+  window), degrading to none by about 33s** (one more reaper tick, the
+  worst case for when the stall is first observed) — see
+  `stallProtectionLower`/`stallProtectionUpper` in `cmd/cleat-worker`.
+  Suppression is sticky once an episode opens: a tick where one worker's
+  heartbeat lands first — un-suspecting the shape while its siblings are
+  still individually stale — keeps suppressing on the same episode clock
+  rather than releasing the laggards on that survivor's heartbeat alone.
+  This protection is per-episode, not per-row: a reaper that never
+  observed the stall's opening tick has no episode to be sticky about, and
+  can still reclaim a laggard within about `missedBeatSlack` (~1s) of one
+  worker's heartbeat landing while its siblings' have not — the gap
+  between one worker's recovery and the rest is not itself modeled here.
+
+  **Worst case, a genuinely dead worker's run now takes up to about 39s to
+  reclaim at the default `--heartbeat`** (twice the ~14.5s reclaim window
+  plus one reaper tick), up from that window alone, if its discovery
+  happens to coincide with an unrelated fleet-wide stall being suppressed.
+  New metric `cleat_suspected_db_stall_total`, labeled by shard, counts
+  every tick this suppression fires. cleat#2006.
+
 ## [0.2.0] - 2026-08-10
 
 ### UPGRADE NOTES — breaking

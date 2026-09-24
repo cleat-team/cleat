@@ -80,6 +80,7 @@ type Metrics struct {
 	backgroundLoops         metric.Int64Counter
 	backgroundLoopRestarts  metric.Int64Counter
 	reaperInstancesClaimed  metric.Int64Counter
+	suspectedDBStalls       metric.Int64Counter
 	httpRequests            metric.Int64Counter
 
 	// --- UpDownCounters (Int64UpDownCounter) ---
@@ -411,6 +412,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_reaper_instances_claimed_total: %w", err)
+	}
+
+	m.suspectedDBStalls, err = meter.Int64Counter(
+		"cleat_suspected_db_stall_total",
+		metric.WithDescription("Reaper ticks where the stale running set looked like a database stall rather than dead workers, and reclaiming was deferred"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_suspected_db_stall_total: %w", err)
 	}
 
 	m.httpRequests, err = meter.Int64Counter(
@@ -1119,6 +1128,15 @@ func (m *Metrics) RecordReaperInstancesClaimed(ctx context.Context, count int64,
 		return
 	}
 	m.reaperInstancesClaimed.Add(ctx, count, metric.WithAttributes(m.mergeAttrs(extraAttrs...)...))
+}
+
+// RecordSuspectedDBStall increments the suspected-database-stall counter.
+// cleat#2006: fired once per reaper tick where the stale running set looked
+// like a whole-fleet stall (nearly all running rows stale, across more than
+// one worker, clustered in time) rather than dead workers, so reclaiming
+// was deferred that tick.
+func (m *Metrics) RecordSuspectedDBStall(ctx context.Context, extraAttrs ...attribute.KeyValue) {
+	m.suspectedDBStalls.Add(ctx, 1, metric.WithAttributes(m.mergeAttrs(extraAttrs...)...))
 }
 
 // RecordHTTPRequest increments the HTTP requests counter.
