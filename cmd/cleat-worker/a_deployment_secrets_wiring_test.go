@@ -53,15 +53,20 @@ func (f *fakeUnscopedDeploymentSecrets) Get(ctx context.Context, name string) (s
 // implementing plugin.HasDeploymentSecretPrefix, so deploymentSecretsForPlugin
 // returns nil instead of a scoped adapter.
 //
-// scheduled-backup's own case is the one cleat-review's #2236 GAP flagged:
-// it does not implement plugin.HasRequiredDeploymentSecrets (deliberately --
-// see legacyScheduledBackupConfig's doc comment, plugins/scheduledbackup),
-// so nothing at boot ever fails if DeploymentSecretPrefix went missing --
-// backupDSN would just always error with "no deployment secret store
-// configured" in production, exactly as if p.deploymentSecrets were nil,
-// and every one of scheduledbackup's own package-level tests would stay
-// green regardless, since they construct Plugin directly rather than going
-// through this wiring. This test is what actually exercises it.
+// scheduled-backup's own case is the one cleat-review's #2236 GAP flagged.
+// It does implement plugin.HasRequiredDeploymentSecrets now, but only
+// CONDITIONALLY -- see legacyScheduledBackupConfig's doc comment,
+// plugins/scheduledbackup -- so that boot check runs, and could in
+// principle catch a missing DeploymentSecretPrefix too, ONLY on a
+// deployment whose --plugin-config still carries the legacy dsn field. On
+// the ordinary deployment (no legacy dsn), RequiredDeploymentSecrets
+// returns no required names regardless of whether DeploymentSecretPrefix is
+// wired, so nothing at boot fails if it went missing there -- backupDSN
+// would just always error with "no deployment secret store configured" in
+// production, exactly as if p.deploymentSecrets were nil, and every one of
+// scheduledbackup's own package-level tests would stay green regardless,
+// since they construct Plugin directly rather than going through this
+// wiring. This test is what actually exercises it, unconditionally.
 func TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix(t *testing.T) {
 	loaded, err := plugin.Discover()
 	if err != nil {

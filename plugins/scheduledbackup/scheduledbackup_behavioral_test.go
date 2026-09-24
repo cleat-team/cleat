@@ -261,6 +261,42 @@ func TestSB_InitNoWarnWithoutLeftoverDSN(t *testing.T) {
 	}
 }
 
+// TestSB_RequiredDeploymentSecrets_NoLegacyKey is the "ordinary deployment"
+// case, mirroring slacknotify's TestSN_RequiredDeploymentSecrets_NoLegacyKey:
+// no legacy dsn anywhere in --plugin-config (whether scheduled-backup has no
+// config section at all, or an empty one) must not require
+// scheduledbackup.dsn -- a deployment with no history of scheduled backups
+// must still boot with no DSN configured.
+func TestSB_RequiredDeploymentSecrets_NoLegacyKey(t *testing.T) {
+	p := &Plugin{}
+	for _, cfg := range [][]byte{nil, []byte(``), []byte(`{}`)} {
+		names, err := p.RequiredDeploymentSecrets(cfg)
+		if err != nil {
+			t.Fatalf("RequiredDeploymentSecrets(%q): %v", cfg, err)
+		}
+		if len(names) != 0 {
+			t.Errorf("RequiredDeploymentSecrets(%q) = %v, want none (no legacy key present)", cfg, names)
+		}
+	}
+}
+
+// TestSB_RequiredDeploymentSecrets_LegacyKeyPresent is the upgrade case:
+// --plugin-config still carries dsn from before cleat#1992 part 1b, proving
+// this deployment ran scheduled backups against a real database. Without
+// this, scheduledbackup.dsn being unset would let the worker boot and then
+// silently fail every backup attempt, with nothing at boot saying why.
+func TestSB_RequiredDeploymentSecrets_LegacyKeyPresent(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"dsn": "postgres://old-secret"}`)
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	if len(names) != 1 || names[0] != "scheduledbackup.dsn" {
+		t.Errorf("RequiredDeploymentSecrets(legacy key present) = %v, want [scheduledbackup.dsn]", names)
+	}
+}
+
 func TestSB_Init_InvalidConfig(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	env := &plugin.Environment{
