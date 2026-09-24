@@ -91,10 +91,22 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	// transaction would otherwise read the pre-delete row and succeed
 	// anyway. FOR SHARE makes the subquery block until that transaction
 	// commits or rolls back, then re-reads and sees the committed
-	// deleted_at. MySQL blocks a plain read against a row an open UPDATE
-	// holds by default, so FOR SHARE is added there too (harmless, and
-	// consistent regardless of which isolation level a given connection
-	// runs at).
+	// deleted_at.
+	//
+	// MySQL does NOT block a plain read here by default, and this used to say
+	// it did. A plain InnoDB SELECT never blocks -- it is always a
+	// non-locking consistent read. What actually closes the gap at MySQL's
+	// default REPEATABLE READ is narrower: this is an INSERT ... SELECT, and
+	// InnoDB takes shared next-key locks on the rows the SELECT half reads,
+	// but only at REPEATABLE READ -- at READ COMMITTED (which
+	// docs/reference/database-backends.md recommends for this dialect) it is
+	// a plain consistent read like any other and does not block. cleat#2243,
+	// mirroring cleat-review's #2242 finding: removing FOR SHARE stays green
+	// at REPEATABLE READ and races (a delivery inserted before the delete
+	// commits) at READ COMMITTED, which is what the "mysql" and
+	// "mysql_read_committed" subtests below pin. FOR SHARE is what forces
+	// the lock at either isolation level, so it stays unconditional for
+	// MySQL rather than being an isolation-dependent nicety.
 	//
 	// SQL Server does NOT get the same guarantee for free, and this used to
 	// say it did. That is true only with READ_COMMITTED_SNAPSHOT (RCSI) off.
@@ -103,10 +115,19 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	// the open UPDATE's lock -- so on the recommended configuration this
 	// subquery would read the pre-delete row and race exactly like the
 	// PostgreSQL case above, with no FOR SHARE syntax available to close it.
-	// WITH (READCOMMITTEDLOCK) forces the read to take and wait on a shared
-	// lock instead of using the snapshot, restoring the same blocking
-	// behaviour FOR SHARE gives PostgreSQL and MySQL. cleat-review measured
-	// this closes the gap on MSSQL with RCSI on.
+	//
+	// WITH (REPEATABLEREAD), not READCOMMITTEDLOCK: the hint this guard
+	// shipped with in #2233. cleat-review measured both over 1000+ jittered
+	// concurrent send_webhook/delete pairs with RCSI on, on webhookingest's
+	// identical guard shape (cleat#2237, cleat#2242): READCOMMITTEDLOCK
+	// raced 0 times but deadlocked 11-15 per 1000 -- it releases the shared
+	// lock right after the read, leaving a window where the insert's
+	// tenant/webhook check waits on the delete's exclusive lock while the
+	// delete's own cancel UPDATE waits on the insert's new delivery row, and
+	// SQL Server resolves that by killing the DELETE (a 500, source left
+	// live). REPEATABLEREAD holds the shared lock to the end of the
+	// statement -- the same semantics FOR SHARE gives PostgreSQL and MySQL
+	// -- and raced 0 times with 0 deadlocks over 2000 pairs. cleat#2243.
 	//
 	// The residual: a send_webhook call that reads and commits entirely
 	// before a delete's transaction begins is not a race at either isolation
@@ -116,7 +137,7 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	// attempted.
 	existsGuard := "SELECT 1 FROM webhook_config"
 	if p.dialect == plugin.DialectMSSQL {
-		existsGuard += " WITH (READCOMMITTEDLOCK)"
+		existsGuard += " WITH (REPEATABLEREAD)"
 	}
 	existsGuard += " WHERE id = $6 AND tenant_id = $7 AND deleted_at IS NULL"
 	if p.dialect != plugin.DialectMSSQL {
