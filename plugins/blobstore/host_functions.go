@@ -13,6 +13,26 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
+// blobstoreDeploymentSecretsUnavailableMessage is what a tenant's workflow
+// sees in place of the real error when an S3 call fails because
+// errDeploymentSecretsUnavailable is in its chain (backend.go). The real
+// error -- which S3 credential Get failed, or that the stored value was
+// empty -- names deployment-secret plumbing the tenant has no way to act on
+// and no business seeing; the operator sees it via p.logger.Error instead.
+// Same shape as scheduledbackup's DSN-unavailable substitution.
+//
+// gosec G101 reports this constant as "potential hardcoded credentials",
+// flagged for containing the word `secrets` in its own NAME. The value is a
+// generic, credential-free sentence; the finding lands on the constant that
+// exists specifically to avoid ever putting a real credential or its error
+// text in a tenant-visible string. Same shape as
+// cmd/cleatctl/revokeapikey.go's revokeAPIKeyUsage: the scanner flags the
+// documentation of the mitigation and has nothing to say about the
+// mitigation itself.
+//
+//nolint:gosec // G101: a generic message, not a credential -- see above.
+const blobstoreDeploymentSecretsUnavailableMessage = "blobstore: storage backend temporarily unavailable"
+
 // RegisterHostFunctions registers workflow-callable functions on the scoped
 // function registry. The plugin name is implicit -- each plugin gets its own
 // scope, so function names need not be globally unique.
@@ -105,6 +125,10 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 
 	// Store bytes via the selected backend.
 	if err := p.backend.Put(ctx, sha256Hex, input.Data, input.ContentType); err != nil {
+		if errors.Is(err, errDeploymentSecretsUnavailable) {
+			p.logger.Error("blobstore: put: deployment secrets unavailable", "error", err)
+			return "", errors.New(blobstoreDeploymentSecretsUnavailableMessage)
+		}
 		return "", fmt.Errorf("blobstore: store content: %w", err)
 	}
 
@@ -216,6 +240,10 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 	sha256Hex := hex.EncodeToString(sha256Bytes)
 	data, err := p.backend.Get(ctx, sha256Hex)
 	if err != nil {
+		if errors.Is(err, errDeploymentSecretsUnavailable) {
+			p.logger.Error("blobstore: get: deployment secrets unavailable", "error", err)
+			return "", errors.New(blobstoreDeploymentSecretsUnavailableMessage)
+		}
 		return "", fmt.Errorf("blobstore: get data: %w", err)
 	}
 

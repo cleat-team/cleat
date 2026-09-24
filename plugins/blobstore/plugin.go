@@ -150,32 +150,41 @@ func (p *Plugin) DeploymentSecretPrefix() string {
 }
 
 // RequiredDeploymentSecrets implements plugin.HasRequiredDeploymentSecrets.
-// Conditional, the same shape as slacknotify's and scheduledbackup's
-// (cleat#2172 GAP 2, owner decision 1A): a leftover access_key_id/
-// secret_access_key pair in --plugin-config is what makes BOTH
-// blobstore.access_key_id and blobstore.secret_access_key required at boot
-// -- not an unconditional requirement on every deployment that merely has
-// this plugin loaded (plugin.Discover loads every registered plugin
-// unconditionally -- see CLAUDE.md -- so an unconditional requirement here
-// would refuse to boot any worker that has never used the s3 backend at
-// all).
-//
 // Gated on p.config.Backend == "s3" && !p.config.UseIAMCredentials -- both
 // already parsed by Init before this runs, since checkRequiredDeploymentSecrets
 // (cmd/cleat-worker/setup.go) calls this only on an already-Init'd, healthy
-// plugin. A leftover key pair on a memory-backend deployment, or one that
-// has already opted into use_iam_credentials, is genuinely never read by
-// anything (newS3Backend's own doc comment explains the two credential
-// models are deliberately not chained), and refusing to boot over it would
-// be a false positive rather than catching a real upgrade hazard.
+// plugin. A memory-backend deployment, or one that has opted into
+// use_iam_credentials, genuinely never reads either secret (newS3Backend's
+// own doc comment explains the two credential models are deliberately not
+// chained), so excluding them is not a false negative.
+//
+// Unconditional within that gate -- NOT conditional on a leftover
+// access_key_id/secret_access_key pair in --plugin-config, which is what
+// this returned until it was found to be wrong. On develop, {"backend":"s3"}
+// with no access_key_id fell back silently to the AWS env/instance-profile
+// credential chain (see newS3Backend, pre-cleat#1992 part 1b): a deployment
+// with NO legacy key at all -- the common case for an IAM-role deployment --
+// used that chain by default and had nothing for a legacy-key scan to find.
+// This PR makes that opt-in via use_iam_credentials, so gating the
+// requirement on legacy-key presence would boot the far more common
+// IAM-role deployment successfully and then fail every single S3 call,
+// because deploymentSecretsCredentialsProvider (backend.go) has no fallback
+// to the env/instance-profile chain -- unlike newS3Backend's UseIAMCredentials
+// branch, it errors rather than falling back, by the same "a failed Retrieve
+// must fail the request, not fall back to a different identity" design. There
+// is no false positive from requiring the secrets whenever backend=="s3" &&
+// !use_iam_credentials: in that mode, every S3 call already fails without
+// them.
 func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
 	if p.config.Backend != "s3" || p.config.UseIAMCredentials {
 		return nil, nil
 	}
-	var legacy legacyBlobstoreConfig
-	if err := json.Unmarshal(config, &legacy); err == nil &&
-		(legacy.AccessKeyID != "" || legacy.SecretAccessKey != "") {
-		return []string{"blobstore.access_key_id", "blobstore.secret_access_key"}, nil
-	}
-	return nil, nil
+	return []string{"blobstore.access_key_id", "blobstore.secret_access_key"}, nil
+}
+
+// DeploymentSecretRemedyHint implements plugin.HasDeploymentSecretRemedyHint:
+// the boot refusal RequiredDeploymentSecrets triggers has a second fix
+// besides setting the two secrets it names -- opt out of them entirely.
+func (p *Plugin) DeploymentSecretRemedyHint() string {
+	return "alternatively, set use_iam_credentials: true in --plugin-config to use the AWS env/instance-profile credential chain instead of deployment secrets"
 }

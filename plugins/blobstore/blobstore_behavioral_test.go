@@ -627,6 +627,23 @@ func (b *failBackend) Delete(_ context.Context, _ string) error {
 	return fmt.Errorf("backend error")
 }
 
+// deploymentSecretsUnavailableBackend is a Backend that always fails with
+// errDeploymentSecretsUnavailable in its chain -- the shape a real s3Backend
+// produces when the deployment secrets it needs cannot be resolved (backend.go).
+type deploymentSecretsUnavailableBackend struct{}
+
+func (b *deploymentSecretsUnavailableBackend) Put(_ context.Context, _ string, _ []byte, _ string) error {
+	return fmt.Errorf("blobstore: s3 put: %w", errDeploymentSecretsUnavailable)
+}
+
+func (b *deploymentSecretsUnavailableBackend) Get(_ context.Context, _ string) ([]byte, error) {
+	return nil, fmt.Errorf("blobstore: s3 get: %w", errDeploymentSecretsUnavailable)
+}
+
+func (b *deploymentSecretsUnavailableBackend) Delete(_ context.Context, _ string) error {
+	return fmt.Errorf("blobstore: s3 delete: %w", errDeploymentSecretsUnavailable)
+}
+
 // selectiveErrorConn wraps a fakeConn and injects errors for SQL statements
 // matching the configured patterns; all other queries pass through.
 type selectiveErrorConn struct {
@@ -900,13 +917,19 @@ func TestBlobstoreInitNoWarnWithoutLeftoverKeys(t *testing.T) {
 	}
 }
 
-// TestBlobstoreRequiredDeploymentSecrets_NoLegacyKey is the "ordinary
-// deployment" case, mirroring slacknotify's and scheduledbackup's own pairs:
-// no legacy access_key_id/secret_access_key anywhere in --plugin-config must
-// not require blobstore.access_key_id/blobstore.secret_access_key, even on
-// an s3 backend -- a fresh s3 deployment that has always used deployment
-// secrets must still boot with none of this legacy WARN machinery firing.
-func TestBlobstoreRequiredDeploymentSecrets_NoLegacyKey(t *testing.T) {
+// TestBlobstoreRequiredDeploymentSecrets_S3RequiresBothUnconditionally is
+// the case that used to read the opposite way and was wrong: an s3 backend
+// not using use_iam_credentials must require BOTH
+// blobstore.access_key_id/blobstore.secret_access_key even with no legacy
+// access_key_id/secret_access_key anywhere in --plugin-config. On develop
+// this exact config -- {"backend":"s3"}, no static keys -- fell back
+// silently to the AWS env/instance-profile credential chain, so it is the
+// COMMON case, not an edge case: every IAM-role s3 deployment looks like
+// this. Requiring the secrets regardless of legacy-key presence is what
+// stops such a deployment from booting green and then failing every S3
+// call at request time (deploymentSecretsCredentialsProvider has no
+// fallback to that chain).
+func TestBlobstoreRequiredDeploymentSecrets_S3RequiresBothUnconditionally(t *testing.T) {
 	p := &Plugin{}
 	cfg := []byte(`{"backend":"s3","bucket":"b","region":"us-east-1"}`)
 	if err := p.Init(context.Background(), &plugin.Environment{
@@ -919,19 +942,21 @@ func TestBlobstoreRequiredDeploymentSecrets_NoLegacyKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequiredDeploymentSecrets: %v", err)
 	}
-	if len(names) != 0 {
-		t.Errorf("RequiredDeploymentSecrets(no legacy key) = %v, want none", names)
+	want := []string{"blobstore.access_key_id", "blobstore.secret_access_key"}
+	if len(names) != len(want) || names[0] != want[0] || names[1] != want[1] {
+		t.Errorf("RequiredDeploymentSecrets(s3, no legacy key) = %v, want %v", names, want)
 	}
 }
 
-// TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_S3 is the upgrade
-// case that matters: an s3 backend, not using use_iam_credentials, whose
-// --plugin-config still carries access_key_id/secret_access_key from before
-// cleat#1992 part 1b -- proof this deployment was actually uploading blobs
-// to S3 before the upgrade. Without this, blobstore.access_key_id/
-// blobstore.secret_access_key being unset would let the worker boot and
-// then fail every blobstore/put and blobstore/get at request time.
-func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_S3(t *testing.T) {
+// TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresenceDoesNotChangeOutcome
+// proves legacy-key presence is no longer the deciding factor: the SAME s3
+// config plus a leftover access_key_id/secret_access_key pair gets the SAME
+// answer as TestBlobstoreRequiredDeploymentSecrets_S3RequiresBothUnconditionally.
+// This is what remains of the old _LegacyKeyPresent_S3 test, which used to be
+// the ONLY case that required the two names -- that made it look like the
+// interesting case, when the interesting case was the one above it did not
+// cover.
+func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresenceDoesNotChangeOutcome(t *testing.T) {
 	p := &Plugin{}
 	cfg := []byte(`{"backend":"s3","bucket":"b","region":"us-east-1","access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`)
 	if err := p.Init(context.Background(), &plugin.Environment{
@@ -946,17 +971,14 @@ func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_S3(t *testing.T) {
 	}
 	want := []string{"blobstore.access_key_id", "blobstore.secret_access_key"}
 	if len(names) != len(want) || names[0] != want[0] || names[1] != want[1] {
-		t.Errorf("RequiredDeploymentSecrets(legacy key present, s3) = %v, want %v", names, want)
+		t.Errorf("RequiredDeploymentSecrets(s3, legacy key present) = %v, want %v", names, want)
 	}
 }
 
-// TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_MemoryBackend is
-// the false-positive guard: a leftover key pair alongside the DEFAULT
-// (memory) backend must not require anything -- those keys were already
-// unused before this conversion (the memory backend never read them), so
-// refusing to boot over them would be a new failure mode with no matching
-// upgrade hazard behind it.
-func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_MemoryBackend(t *testing.T) {
+// TestBlobstoreRequiredDeploymentSecrets_MemoryBackend is the exclusion
+// guard for the DEFAULT (memory) backend: it must not require anything,
+// legacy key or not, because the memory backend never reads either secret.
+func TestBlobstoreRequiredDeploymentSecrets_MemoryBackend(t *testing.T) {
 	p := &Plugin{}
 	cfg := []byte(`{"access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`)
 	if err := p.Init(context.Background(), &plugin.Environment{
@@ -970,17 +992,16 @@ func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_MemoryBackend(t *te
 		t.Fatalf("RequiredDeploymentSecrets: %v", err)
 	}
 	if len(names) != 0 {
-		t.Errorf("RequiredDeploymentSecrets(legacy key present, memory backend) = %v, want none", names)
+		t.Errorf("RequiredDeploymentSecrets(memory backend) = %v, want none", names)
 	}
 }
 
-// TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_UseIAMCredentials
-// is the other false-positive guard: a leftover key pair alongside
-// use_iam_credentials must not require anything either -- that flag opts the
-// deployment out of the deployment-secrets table entirely, in favor of the
-// EnvAWS/IAM chain, so blobstore.access_key_id/blobstore.secret_access_key
-// are never read regardless of what --plugin-config still carries.
-func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_UseIAMCredentials(t *testing.T) {
+// TestBlobstoreRequiredDeploymentSecrets_UseIAMCredentials is the exclusion
+// guard for use_iam_credentials: that flag opts the deployment out of the
+// deployment-secrets table entirely, in favor of the EnvAWS/IAM chain, so
+// blobstore.access_key_id/blobstore.secret_access_key are never read
+// regardless of what --plugin-config carries.
+func TestBlobstoreRequiredDeploymentSecrets_UseIAMCredentials(t *testing.T) {
 	p := &Plugin{}
 	cfg := []byte(`{"backend":"s3","bucket":"b","region":"us-east-1","use_iam_credentials":true,"access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`)
 	if err := p.Init(context.Background(), &plugin.Environment{
@@ -994,7 +1015,7 @@ func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresent_UseIAMCredentials(t
 		t.Fatalf("RequiredDeploymentSecrets: %v", err)
 	}
 	if len(names) != 0 {
-		t.Errorf("RequiredDeploymentSecrets(legacy key present, use_iam_credentials) = %v, want none", names)
+		t.Errorf("RequiredDeploymentSecrets(use_iam_credentials) = %v, want none", names)
 	}
 }
 
@@ -1216,6 +1237,91 @@ func TestBlobGetBackendError(t *testing.T) {
 	}
 
 	_ = store
+}
+
+// TestBlobPutDeploymentSecretsUnavailableIsGeneric is the coordinator/
+// cleat-review tenant-error-leak fix: a backend error carrying
+// errDeploymentSecretsUnavailable must reach the tenant's workflow as the
+// GENERIC blobstoreDeploymentSecretsUnavailableMessage, not the underlying
+// "deployment secrets unavailable: ..." text -- which names
+// deployment-secret plumbing that is none of the tenant's business and
+// nothing they can act on.
+func TestBlobPutDeploymentSecretsUnavailableIsGeneric(t *testing.T) {
+	p := &Plugin{
+		backend: &deploymentSecretsUnavailableBackend{},
+		logger:  slog.Default(),
+		config:  Config{Backend: "s3"},
+	}
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{Key: "leak-key", Data: []byte("data")}
+	inputJSON, _ := json.Marshal(input)
+
+	_, err := p.blobPut(ctx, string(inputJSON))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() != blobstoreDeploymentSecretsUnavailableMessage {
+		t.Errorf("got %q, want the generic message %q -- the tenant-facing error leaked deployment-secret plumbing",
+			err.Error(), blobstoreDeploymentSecretsUnavailableMessage)
+	}
+}
+
+// TestBlobGetDeploymentSecretsUnavailableIsGeneric is
+// TestBlobPutDeploymentSecretsUnavailableIsGeneric's Get counterpart.
+func TestBlobGetDeploymentSecretsUnavailableIsGeneric(t *testing.T) {
+	p, store, _ := setupHostFuncTest(t)
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{Key: "leak-get-key", Data: []byte("data")}
+	inputJSON, _ := json.Marshal(input)
+	if _, err := p.blobPut(ctx, string(inputJSON)); err != nil {
+		t.Fatalf("blobPut: %v", err)
+	}
+
+	p.backend = &deploymentSecretsUnavailableBackend{}
+
+	getInput := blobGetInput{Key: "leak-get-key"}
+	getInputJSON, _ := json.Marshal(getInput)
+	_, err := p.blobGet(ctx, string(getInputJSON))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() != blobstoreDeploymentSecretsUnavailableMessage {
+		t.Errorf("got %q, want the generic message %q -- the tenant-facing error leaked deployment-secret plumbing",
+			err.Error(), blobstoreDeploymentSecretsUnavailableMessage)
+	}
+
+	_ = store
+}
+
+// TestBlobPutBackendErrorMessageIsNotGeneric is the negative control for
+// TestBlobPutDeploymentSecretsUnavailableIsGeneric: an ORDINARY backend
+// error -- no errDeploymentSecretsUnavailable in its chain -- must NOT be
+// replaced by the generic message, or every backend failure would read the
+// same and an operator debugging a real S3 outage would lose the detail
+// TestHandlePutBackendError already asserts on ("failed to store content").
+func TestBlobPutBackendErrorMessageIsNotGeneric(t *testing.T) {
+	p := &Plugin{
+		backend: &failBackend{},
+		logger:  slog.Default(),
+		config:  Config{Backend: "memory"},
+	}
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{Key: "ordinary-fail-key", Data: []byte("data")}
+	inputJSON, _ := json.Marshal(input)
+
+	_, err := p.blobPut(ctx, string(inputJSON))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() == blobstoreDeploymentSecretsUnavailableMessage {
+		t.Error("an ordinary backend error must not be replaced by the deployment-secrets generic message")
+	}
+	if !strings.Contains(err.Error(), "store content") {
+		t.Errorf("expected 'store content' error, got: %v", err)
+	}
 }
 
 // ---------------------------------------------------------------------------

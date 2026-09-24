@@ -17,6 +17,17 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// errDeploymentSecretsUnavailable wraps every failure
+// RetrieveWithCredContext can return -- no store configured, a Get error on
+// either name, or an empty resolved value -- so a caller several layers up
+// (host_functions.go's blobPut/blobGet) can tell "the credential source is
+// broken" apart from any other S3 error via errors.Is, without needing to
+// parse error text. minio-go's credential-provider errors propagate
+// unwrapped through PutObject/GetObject/RemoveObject (confirmed by reading
+// api.go's executeMethod), so %w here survives all the way to a host
+// function's returned error.
+var errDeploymentSecretsUnavailable = errors.New("blobstore: deployment secrets unavailable")
+
 // Backend stores and retrieves blob bytes. Implementations must be safe for
 // concurrent use.
 type Backend interface {
@@ -71,6 +82,14 @@ func (*memoryBackend) Delete(_ context.Context, _ string) error {
 type s3Backend struct {
 	client *minio.Client
 	bucket string
+
+	// creds is nil when UseIAMCredentials is set -- expireCredsOnAuthError
+	// guards on that, since the env/instance-profile/task-role chain is not
+	// this plugin's to force a refresh of. Populated in newS3Backend's
+	// non-IAM branch, the same *credentials.Credentials passed to
+	// minio.Options.Creds, so calling Expire() here is calling it on the
+	// object minio-go itself consults on the next signing attempt.
+	creds *credentials.Credentials
 }
 
 // newS3Backend builds the S3 client's credential source from cfg.
@@ -142,34 +161,65 @@ func newS3Backend(ctx context.Context, cfg Config, secrets plugin.DeploymentSecr
 		return nil, fmt.Errorf("blobstore: create s3 client: %w", err)
 	}
 
-	return &s3Backend{
+	b := &s3Backend{
 		client: client,
 		bucket: cfg.Bucket,
-	}, nil
+	}
+	if !cfg.UseIAMCredentials {
+		b.creds = creds
+	}
+	return b, nil
+}
+
+// expireCredsOnAuthError forces the next S3 request to re-resolve
+// credentials rather than reuse the ones that just failed, when err is an
+// InvalidAccessKeyId or SignatureDoesNotMatch response from S3 -- the shape
+// a torn rotation (one of the pair updated, not the other) or an operator
+// revoking the old key immediately produces. Without this, a rotation is
+// invisible for up to deploymentSecretsCredentialsTTL: minio-go's
+// credentials.Credentials cache does not know a signing attempt failed, only
+// that its cached Value has not reached its own IsExpired yet.
+//
+// b.creds is nil in UseIAMCredentials mode -- the env/instance-profile/
+// task-role chain is not this plugin's cache to force a refresh of, so this
+// is a deliberate no-op there rather than a nil-pointer risk.
+func (b *s3Backend) expireCredsOnAuthError(err error) {
+	if b.creds == nil || err == nil {
+		return
+	}
+	switch minio.ToErrorResponse(err).Code {
+	case "InvalidAccessKeyId", "SignatureDoesNotMatch":
+		b.creds.Expire()
+	}
 }
 
 func (b *s3Backend) Put(ctx context.Context, sha256Str string, data []byte, contentType string) error {
 	_, err := b.client.PutObject(ctx, b.bucket, sha256Str, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
 		ContentType: contentType,
 	})
+	b.expireCredsOnAuthError(err)
 	return err
 }
 
 func (b *s3Backend) Get(ctx context.Context, sha256Str string) ([]byte, error) {
 	obj, err := b.client.GetObject(ctx, b.bucket, sha256Str, minio.GetObjectOptions{})
 	if err != nil {
+		b.expireCredsOnAuthError(err)
 		return nil, fmt.Errorf("blobstore: s3 get: %w", err)
 	}
 	defer obj.Close()
 	data, err := io.ReadAll(obj)
 	if err != nil {
+		b.expireCredsOnAuthError(err)
 		return nil, fmt.Errorf("blobstore: s3 read: %w", err)
 	}
 	return data, nil
 }
 
 func (b *s3Backend) Delete(ctx context.Context, sha256Str string) error {
-	return b.client.RemoveObject(ctx, b.bucket, sha256Str, minio.RemoveObjectOptions{})
+	err := b.client.RemoveObject(ctx, b.bucket, sha256Str, minio.RemoveObjectOptions{})
+	b.expireCredsOnAuthError(err)
+	return err
 }
 
 // deploymentSecretsCredentialsTTL bounds how long a resolved credential pair
@@ -223,7 +273,7 @@ func newDeploymentSecretsCredentialsProvider(secrets plugin.DeploymentSecrets) *
 // credential.
 func (p *deploymentSecretsCredentialsProvider) RetrieveWithCredContext(cc *credentials.CredContext) (credentials.Value, error) {
 	if p.secrets == nil {
-		return credentials.Value{}, fmt.Errorf("blobstore: no deployment secret store configured")
+		return credentials.Value{}, fmt.Errorf("%w: no deployment secret store configured", errDeploymentSecretsUnavailable)
 	}
 
 	ctx := context.Background()
@@ -233,11 +283,22 @@ func (p *deploymentSecretsCredentialsProvider) RetrieveWithCredContext(cc *crede
 
 	accessKeyID, err := p.secrets.Get(ctx, "blobstore.access_key_id")
 	if err != nil {
-		return credentials.Value{}, fmt.Errorf("blobstore: access_key_id: %w", err)
+		return credentials.Value{}, fmt.Errorf("%w: access_key_id: %v", errDeploymentSecretsUnavailable, err)
 	}
 	secretAccessKey, err := p.secrets.Get(ctx, "blobstore.secret_access_key")
 	if err != nil {
-		return credentials.Value{}, fmt.Errorf("blobstore: secret_access_key: %w", err)
+		return credentials.Value{}, fmt.Errorf("%w: secret_access_key: %v", errDeploymentSecretsUnavailable, err)
+	}
+
+	// An empty stored value must fail closed here, the same as
+	// slacknotify's signingSecret (interactive.go): treat it as
+	// unavailable rather than letting minio-go sign requests with an
+	// empty (i.e. effectively anonymous) access key or secret.
+	if accessKeyID == "" {
+		return credentials.Value{}, fmt.Errorf("%w: access_key_id: empty", errDeploymentSecretsUnavailable)
+	}
+	if secretAccessKey == "" {
+		return credentials.Value{}, fmt.Errorf("%w: secret_access_key: empty", errDeploymentSecretsUnavailable)
 	}
 
 	p.mu.Lock()
