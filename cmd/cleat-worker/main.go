@@ -158,7 +158,25 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 	if req.TenantID == "" {
 		return "", fmt.Errorf("start workflow %s: tenant id is required", req.DefName)
 	}
-	versions, err := store.ListVersions(ctx, req.DefName)
+
+	// store IS THE PROCESS-WIDE STORE -- opened once, for the default
+	// tenant, for the worker's whole lifetime (see main()). req.TenantID can
+	// legitimately name any tenant: every non-test caller derives it from a
+	// durable row it already owns (a schedule, an event subscription, a job
+	// queue entry), each stamped with its owning tenant under correctly
+	// scoped RLS when that row was created, so req.TenantID itself is
+	// trustworthy. The store is not scoped to it, though, and on Postgres
+	// and SQL Server tenant scoping is a property of the SESSION, not a
+	// query parameter: ListVersions and StartNewRun both decide what they
+	// can see and write from the store's own configured tenant. Without
+	// re-scoping, ListVersions silently answers about the DEFAULT tenant's
+	// deployed versions rather than req.TenantID's, and StartNewRun either
+	// gets rejected outright (Postgres: cleat#2187) or succeeds scoped to
+	// the wrong session (SQL Server: cleat#2204, cleat#2205 will make that a
+	// rejection too, so this must not rely on it staying permissive).
+	scoped := scopeToTenant(store, req.TenantID)
+
+	versions, err := scoped.ListVersions(ctx, req.DefName)
 	if err != nil {
 		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
 	}
@@ -169,9 +187,38 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 	if err != nil {
 		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
 	}
-	runID, _, err := store.StartNewRun(ctx, "", req.DefName, versions[0], in,
+	runID, _, err := scoped.StartNewRun(ctx, "", req.DefName, versions[0], in,
 		req.IdempotencyKey, req.TenantID, 0)
 	return runID, err
+}
+
+// scopeToTenant returns a copy of store re-scoped to tenantID, for the
+// dialects that support cheap, no-I/O per-call re-scoping (Postgres, SQL
+// Server, and a sharded Postgres store, via each store's own WithTenant).
+// WithTenant is deliberately not part of the engine.WorkflowStore interface
+// -- see PostgresStore.StartNewRunWithConcurrencyKey's doc comment for why:
+// it would touch every implementation and every test double for a
+// capability not all of them have.
+//
+// MySQL has no equivalent, and this is not an oversight: tenant isolation
+// there is which PHYSICAL DATABASE a connection targets, fixed when that
+// pool was opened, not a session-level value a later call can change --
+// and per tiers.yaml's D1 decision, MySQL is single-tenant only. A store's
+// own tenant is returned unchanged, and startPluginWorkflow above is
+// expected to fail for any req.TenantID other than the store's own on this
+// dialect; that is what TestStartPluginWorkflow_MySQLIsSingleTenantOnly
+// pins, not a gap this function is supposed to close.
+func scopeToTenant(store engine.WorkflowStore, tenantID string) engine.WorkflowStore {
+	switch s := store.(type) {
+	case *engine.PostgresStore:
+		return s.WithTenant(tenantID)
+	case *engine.MSSQLStore:
+		return s.WithTenant(tenantID)
+	case *engine.ShardedStore:
+		return s.WithTenant(tenantID)
+	default:
+		return store
+	}
 }
 
 func main() {
