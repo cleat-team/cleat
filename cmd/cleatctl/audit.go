@@ -44,7 +44,7 @@ import (
 // cleat's HTTP auth has no notion of a platform operator to gate that on. A tenant
 // verifies its own chain over HTTP (GET /audit/verify).
 
-const auditUsage = `Usage: cleatctl audit verify (--tenant <uuid> | --all-tenants) [--json]
+const auditUsage = `Usage: cleatctl audit verify (--tenant <uuid> | --all-tenants) [--json] [--retention-days N]
 
 Recomputes a tenant's audit-log hash chain and reports the first place it does not
 verify. Reads only.
@@ -54,6 +54,10 @@ Flags:
   --all-tenants     Verify every tenant that has a chain, including one whose head
                     row is missing.
   --json            Print the reports as a JSON array.
+  --retention-days N
+                    The audit-log plugin's retention_days. With it, a floor that covers
+                    rows too young to have expired is reported (floor_unexpired). Without
+                    it that is not checked, and a floor moved forward by hand passes.
 
 Exit status:
   0  every chain verified
@@ -83,6 +87,7 @@ func runAudit(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	tenantFlag := fs.String("tenant", "", "verify one tenant's chain")
 	all := fs.Bool("all-tenants", false, "verify every tenant that has a chain")
 	asJSON := fs.Bool("json", false, "print the reports as JSON")
+	retentionDays := fs.Int("retention-days", 0, "the audit-log plugin's retention_days; lets verify report a floor over unexpired rows")
 	if err := fs.Parse(args[1:]); err != nil {
 		osExit(2)
 		return
@@ -120,7 +125,7 @@ func runAudit(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		ok, broken, unmeasured int
 	)
 	for _, t := range tenants {
-		rep, err := auditVerifyChain(ctx, pdb, d.query, t)
+		rep, err := auditVerifyChain(ctx, pdb, d.query, t, auditlog.VerifyOptions{RetentionDays: *retentionDays})
 		if err != nil {
 			unmeasured++
 			fmt.Fprintf(os.Stderr, "UNMEASURED tenant %s: %v\n", t, err)

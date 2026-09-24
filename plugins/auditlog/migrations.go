@@ -135,7 +135,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// so its index is filtered to chained rows.
 			//
 			// audit_chain_heads has one row per tenant: the last seq and hash, and the
-			// floor. The head row is also the per-tenant lock (SELECT ... FOR UPDATE /
+			// floor (floor_ts is the UTC epoch-microsecond timestamp of the last row
+			// retention removed, so a floor that covers rows too young to have
+			// expired can be seen). The head row is also the per-tenant lock (SELECT ... FOR UPDATE /
 			// UPDLOCK), which is why it is a table and not an advisory lock: a chain
 			// alone cannot see that its last rows were deleted, and the head can.
 			// floor_seq / floor_hash record what retention removed, so that a deleted
@@ -154,10 +156,20 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					seq        BIGINT NOT NULL,
 					hash       CHAR(64) NOT NULL,
 					floor_seq  BIGINT NOT NULL DEFAULT 0,
-					floor_hash CHAR(64) NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+					floor_hash CHAR(64) NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
+					floor_ts   BIGINT NOT NULL DEFAULT 0
 				);
 			`,
+			// MySQL: the timestamp column becomes DATETIME(6), holding UTC wall-clock
+			// time. TIMESTAMP(6) overflows in 2038, and this is the version that
+			// touches the table anyway. DATETIME does no zone conversion, so a
+			// session's time_zone cannot change what a row holds. (Rows that already
+			// exist are converted from the migrating session's zone; on a fresh
+			// database there are none.)
 			UpMySQL: `
+				ALTER TABLE audit_events
+					MODIFY COLUMN ` + "`" + `timestamp` + "`" + ` DATETIME(6) NOT NULL DEFAULT (UTC_TIMESTAMP(6));
+
 				ALTER TABLE audit_events
 					ADD COLUMN seq BIGINT NULL,
 					ADD COLUMN prev_hash CHAR(64) NULL,
@@ -170,7 +182,8 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					seq        BIGINT NOT NULL,
 					hash       CHAR(64) NOT NULL,
 					floor_seq  BIGINT NOT NULL DEFAULT 0,
-					floor_hash CHAR(64) NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+					floor_hash CHAR(64) NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
+					floor_ts   BIGINT NOT NULL DEFAULT 0
 				);
 			`,
 			UpMSSQL: `
@@ -186,7 +199,8 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					seq        BIGINT NOT NULL,
 					hash       CHAR(64) NOT NULL,
 					floor_seq  BIGINT NOT NULL DEFAULT 0,
-					floor_hash CHAR(64) NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+					floor_hash CHAR(64) NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
+					floor_ts   BIGINT NOT NULL DEFAULT 0
 				);
 			`,
 			Down: `

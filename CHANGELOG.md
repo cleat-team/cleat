@@ -342,6 +342,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     serialise. Different tenants do not contend.
   - **Text that cannot be stored (invalid UTF-8, NUL) is replaced with U+FFFD instead of dropping the
     whole event.**
+  - **A value too long for its column is truncated with a `...[truncated]` marker instead of failing the
+    insert** (`path` 700 characters and 800 UTF-16 units, `method` 255, the free-text columns 4,096). On
+    MySQL and SQL Server an over-long path used to leave no audit row at all.
+  - **The MySQL `audit_events.timestamp` column becomes `DATETIME(6)` holding UTC** (it was
+    `TIMESTAMP(6)`, which stops at 2038).
+  - **`cleatctl audit verify --retention-days N`** also reports a retention floor that covers rows too
+    young to have expired.
 
 - **Tenant-secrets master-key rotation: a key ring and `cleatctl reseal-secrets`.** (cleat#1991)
 

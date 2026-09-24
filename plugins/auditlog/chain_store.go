@@ -58,17 +58,75 @@ func sanitizeText(s string) string {
 	return s
 }
 
+// Column widths the text has to fit, in the units each dialect counts. MySQL's method and
+// path are VARCHAR(255) and VARCHAR(700) (characters); SQL Server's are NVARCHAR(255) and
+// NVARCHAR(900) (UTF-16 code units) -- but SQL Server indexes the path, and a nonclustered
+// index key may not exceed 1,700 bytes: with the 16-byte tenant id that is 842 units, so
+// the usable limit is under the declared one (measured: a 900-unit path fails with error
+// 1946). PostgreSQL's are unbounded. The rule is the same on
+// all three, so one request makes the same row everywhere: a value is cut to satisfy every
+// dialect's limit at once, with a marker, BEFORE it is hashed and stored.
+//
+// A path is chosen by the caller: without this a 1,000-character path failed the insert on
+// MySQL and SQL Server, the failure was logged and not retried, and the request was simply
+// not in the log -- an attacker-chosen way to stay out of it.
+const (
+	maxMethodRunes, maxMethodUnits = 255, 255
+	maxPathRunes, maxPathUnits     = 700, 800
+	// The other text columns are unbounded TEXT or NVARCHAR(MAX), but a User-Agent is
+	// attacker-chosen and MySQL's TEXT holds 65,535 bytes, so they are capped too.
+	maxFreeTextRunes, maxFreeTextUnits = 4096, 8192
+	truncationMarker                   = "...[truncated]"
+)
+
+// fitText cuts s to at most maxRunes characters and maxUnits UTF-16 code units, ending in
+// truncationMarker when it had to cut. It never splits a character.
+func fitText(s string, maxRunes, maxUnits int) string {
+	runes, units := 0, 0
+	for _, r := range s {
+		u := 1
+		if r > 0xFFFF {
+			u = 2
+		}
+		runes, units = runes+1, units+u
+	}
+	if runes <= maxRunes && units <= maxUnits {
+		return s
+	}
+	keepRunes, keepUnits := maxRunes-len(truncationMarker), maxUnits-len(truncationMarker)
+	var b strings.Builder
+	runes, units = 0, 0
+	for _, r := range s {
+		u := 1
+		if r > 0xFFFF {
+			u = 2
+		}
+		if runes+1 > keepRunes || units+u > keepUnits {
+			break
+		}
+		b.WriteRune(r)
+		runes, units = runes+1, units+u
+	}
+	b.WriteString(truncationMarker)
+	return b.String()
+}
+
 // ---- per-dialect statements ----
 
 // epochMicrosExpr reads a timestamp column as microseconds since the Unix epoch. The
 // hash covers THIS, not the value the driver would hand back: a driver round trip goes
-// through a time zone (MySQL's session zone, measured 2026-09-24: a time.Time written in
-// a session at -04:00 or +05:30 reads back hours away), and a hash that depends on the
-// session zone would call an untouched row edited the day someone changes it.
+// through a time zone, and a hash that depends on one would call an untouched row edited
+// the day someone changed it.
+//
+// MySQL's column is DATETIME(6) holding UTC wall-clock time (migration 3), which does no
+// zone conversion on the way in or out. TIMESTAMPDIFF against the epoch's wall-clock
+// reading is therefore independent of the session's time_zone. UNIX_TIMESTAMP is not: it
+// interprets a DATETIME in the session zone (measured 2026-09-24 on the TIMESTAMP column
+// this replaced: a session at -04:00 or +05:30 read rows hours away).
 func epochMicrosExpr(d plugin.Dialect, col string) string {
 	switch d {
 	case plugin.DialectMySQL:
-		return "CAST(UNIX_TIMESTAMP(" + col + ") * 1000000 AS SIGNED)"
+		return "TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', " + col + ")"
 	case plugin.DialectMSSQL:
 		return "DATEDIFF_BIG(MICROSECOND, CAST('1970-01-01T00:00:00+00:00' AS DATETIMEOFFSET), " + col + ")"
 	default:
@@ -108,9 +166,8 @@ const insertChainedSQL = `INSERT INTO audit_events
 const moveHeadSQL = `UPDATE audit_chain_heads SET seq = $1, hash = $2 WHERE tenant_id = $3 AND seq = $4`
 
 // timestampArg is the value written to the timestamp column. PostgreSQL and SQL Server
-// take a time.Time and keep the instant. MySQL is given the UTC wall-clock text and the
-// session is forced to UTC around the write (see withUTCSession), because a time.Time is
-// formatted by the driver and interpreted by the server in the SESSION zone.
+// take a time.Time and keep the instant. MySQL is given the UTC wall-clock text: its
+// column is DATETIME(6), which stores what it is given, so no session zone is involved.
 func timestampArg(d plugin.Dialect, ts time.Time) any {
 	if d == plugin.DialectMySQL {
 		return ts.UTC().Format("2006-01-02 15:04:05.000000")
@@ -118,36 +175,15 @@ func timestampArg(d plugin.Dialect, ts time.Time) any {
 	return ts.UTC()
 }
 
-// withUTCSession runs fn with the MySQL session's time zone set to UTC and restores it,
-// on the same connection, before the transaction ends. A pooled connection that kept a
-// changed zone would change how its next user reads and writes every TIMESTAMP.
-func withUTCSession(ctx context.Context, tx plugin.PluginTx, d plugin.Dialect, fn func() error) error {
-	if d != plugin.DialectMySQL {
-		return fn()
-	}
-	if _, err := tx.Exec(ctx, `SET @cleat_audit_tz = @@session.time_zone`); err != nil {
-		return fmt.Errorf("audit chain: read session time zone: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `SET time_zone = '+00:00'`); err != nil {
-		return fmt.Errorf("audit chain: force UTC session: %w", err)
-	}
-	ferr := fn()
-	// A fresh context: the caller's is often what has just been cancelled.
-	rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := tx.Exec(rctx, `SET time_zone = @cleat_audit_tz`); err != nil && ferr == nil {
-		ferr = fmt.Errorf("audit chain: restore session time zone: %w", err)
-	}
-	return ferr
-}
-
 // ---- the append ----
 
 // appendChained adds one event to its tenant's chain. ctx must carry the tenant
 // (plugin.ForTenant): the head and the row are both row-level-secured.
 func (p *Plugin) appendChained(ctx context.Context, e chainEvent) error {
-	e.method, e.path = sanitizeText(e.method), sanitizeText(e.path)
-	e.userID, e.ipAddress, e.userAgent = sanitizeText(e.userID), sanitizeText(e.ipAddress), sanitizeText(e.userAgent)
+	e.method, e.path = fitText(sanitizeText(e.method), maxMethodRunes, maxMethodUnits), fitText(sanitizeText(e.path), maxPathRunes, maxPathUnits)
+	e.userID = fitText(sanitizeText(e.userID), maxFreeTextRunes, maxFreeTextUnits)
+	e.ipAddress = fitText(sanitizeText(e.ipAddress), maxFreeTextRunes, maxFreeTextUnits)
+	e.userAgent = fitText(sanitizeText(e.userAgent), maxFreeTextRunes, maxFreeTextUnits)
 
 	if err := p.ensureHead(ctx, e.tenantID); err != nil {
 		return err
@@ -226,15 +262,12 @@ func (p *Plugin) appendOnce(ctx context.Context, e chainEvent) (err error) {
 	}
 	rowHash := hex.EncodeToString(sum[:])
 
-	err = withUTCSession(ctx, tx, p.dialect, func() error {
-		// Every value is passed as the type the column holds, and the id is supplied
-		// rather than defaulted: see the note on recordAudit.
-		_, err := tx.Exec(ctx, plugin.Rebind(insertChainedSQL, p.dialect),
-			rec.ID.String(), rec.TenantID, timestampArg(p.dialect, ts), rec.Method, rec.Path,
-			rec.StatusCode.Int64, rec.UserID.String, rec.IPAddress.String, rec.UserAgent.String, rec.DurationMs.Int64,
-			rec.Metadata.String, rec.Seq, strings.ToLower(hex.EncodeToString(prev[:])), rowHash)
-		return err
-	})
+	// Every value is passed as the type the column holds, and the id is supplied rather
+	// than defaulted: see the note on recordAudit.
+	_, err = tx.Exec(ctx, plugin.Rebind(insertChainedSQL, p.dialect),
+		rec.ID.String(), rec.TenantID, timestampArg(p.dialect, ts), rec.Method, rec.Path,
+		rec.StatusCode.Int64, rec.UserID.String, rec.IPAddress.String, rec.UserAgent.String, rec.DurationMs.Int64,
+		rec.Metadata.String, rec.Seq, strings.ToLower(hex.EncodeToString(prev[:])), rowHash)
 	if err != nil {
 		return fmt.Errorf("audit chain: insert row: %w", err)
 	}

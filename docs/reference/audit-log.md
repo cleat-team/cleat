@@ -20,6 +20,14 @@ attacker chooses, and PostgreSQL refuses invalid UTF-8 and NUL bytes. Both are r
 U+FFFD before the row is hashed and before it is stored, so the two agree. Before this change
 such a request was not recorded at all.
 
+A value too long for its column is cut, with the marker `...[truncated]`, before it is hashed
+and stored, for the same reason: a 1,000-character path used to fail the insert on MySQL and
+SQL Server, and the request was simply not in the log. The limits are the same on every
+dialect, so one request makes the same row everywhere: `method` 255 characters, `path` 700
+characters and 800 UTF-16 code units (SQL Server cannot index more), and `user_id`,
+`ip_address` and `user_agent` 4,096 characters. The MySQL `timestamp` column is `DATETIME(6)`
+holding UTC, not `TIMESTAMP(6)`, which stops at 2038.
+
 ## The chain
 
 Each tenant has its own chain and its own head row in `audit_chain_heads`. An append is one
@@ -66,6 +74,15 @@ row is missing, which is itself a break. It needs the same kind of `--db` role a
 A run that could not read some tenant exits `2` even when others verified, and prints how many
 it did read (`verified 2 of 3 tenant chain(s)`), so a partial run cannot be read as a clean one.
 
+Verification is safe on a live log. It bounds its scan by the head it read at the start, so rows
+appended meanwhile are not reported as extra rows, and it repeats an attempt whose floor moved
+under it (a retention sweep) or that was chosen as a deadlock victim. If the chain keeps
+changing faster than it can be read, verify gives up with exit `2`, never with a finding.
+
+Pass `--retention-days N` (the plugin's `retention_days`) to also check that the floor covers only
+rows old enough to have expired. See "What a clean result means" for what that does and does not
+catch.
+
 | break | what it means |
 |---|---|
 | `edited` | a row's stored hash is not the hash of its own contents |
@@ -76,6 +93,7 @@ it did read (`verified 2 of 3 tenant chain(s)`), so a partial run cannot be read
 | `head_missing` | chained rows exist and the head row that anchors them does not |
 | `head_mismatch` | every row verifies, but the head records a different hash for the newest row |
 | `unreadable` | a row could not be hashed at all |
+| `floor_unexpired` | the floor covers a row younger than the retention window, or has no recorded timestamp. Only checked when the retention period is supplied; raising `retention_days` later reports floors set under the shorter value |
 
 ## What a clean result means, and what it does not
 
@@ -87,11 +105,24 @@ without also rewriting the head, the floor, and every later row would be caught.
 crashed, the buffer was full, or an insert failed, leaves no gap in the chain. The chain proves
 the integrity of what was recorded, not that everything was recorded.
 
-**It does not protect against a database administrator.** The hash is not keyed, and nothing
-outside the database anchors it. Someone who can write to `audit_events` and `audit_chain_heads`
-can rewrite a whole chain and its head consistently, and verification will pass. If you need that
-guarantee, copy the head hash to somewhere the database's administrators cannot write, on a
-schedule, and compare.
+**It does not protect against anyone who can write these tables.** The hash is not keyed, and
+nothing outside the database anchors it. That is not only a database administrator: the
+credential the workers run with can write `audit_events` and `audit_chain_heads`, so a worker, or
+any plugin running in it, can rewrite a whole chain and its head consistently, and verification
+will pass.
+
+The floor is a second place to hide a deletion, and the head hash alone does not cover it.
+Deleting the first rows and moving the floor over them (`floor_seq`, `floor_hash`) leaves a chain
+that verifies and a head hash that has not changed, looking like retention. Retention records the
+timestamp of the row it removed (`floor_ts`), and `verify --retention-days N` reports a floor whose
+timestamp is inside the retention window. That catches a floor moved carelessly or by code that
+did not record one. It cannot catch a floor written with a false timestamp, because nothing
+outside the database says what the timestamp should be.
+
+If you need the guarantee against a writer, copy `head_seq`, `head_hash`, `floor_seq`, `floor_hash`
+and `floor_ts` for each tenant to somewhere the workers' credential cannot write, on a schedule,
+and compare: the head must only move forward and the floor must only move forward, at the pace
+retention would move it.
 
 **It does not cover rows written before the chain existed.** Migration `3` of the plugin adds the
 chain columns and does not backfill them: older rows have no `seq`, are counted as `unchained` in

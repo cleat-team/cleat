@@ -117,7 +117,7 @@ func TestAuditVerifyExitStatusesAreDistinct(t *testing.T) {
 	for {
 		reps := 0
 		for _, tenant := range []uuid.UUID{good, bad} {
-			if r, err := auditlog.VerifyChain(ctx, pdb, plugin.DialectPostgres, tenant); err == nil && r.Checked == n {
+			if r, err := auditlog.VerifyChain(ctx, pdb, plugin.DialectPostgres, tenant, auditlog.VerifyOptions{}); err == nil && r.Checked == n {
 				reps++
 			}
 		}
@@ -160,11 +160,11 @@ func TestAuditVerifyExitStatusesAreDistinct(t *testing.T) {
 	// are still printed, so the operator loses nothing but the certainty.
 	realVerify := auditVerifyChain
 	defer func() { auditVerifyChain = realVerify }()
-	auditVerifyChain = func(ctx context.Context, db plugin.PluginDB, d plugin.Dialect, tenant uuid.UUID) (auditlog.ChainReport, error) {
+	auditVerifyChain = func(ctx context.Context, db plugin.PluginDB, d plugin.Dialect, tenant uuid.UUID, o auditlog.VerifyOptions) (auditlog.ChainReport, error) {
 		if tenant == good {
 			return auditlog.ChainReport{}, fmt.Errorf("simulated read failure")
 		}
-		return realVerify(ctx, db, d, tenant)
+		return realVerify(ctx, db, d, tenant, o)
 	}
 	code, stdout, stderr = runAuditCapturing(t, db, "verify", "--all-tenants")
 	if code != 2 || !strings.Contains(stderr, "UNMEASURED tenant "+good.String()) ||

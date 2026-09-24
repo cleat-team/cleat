@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -83,20 +84,28 @@ func (p *Plugin) retainTenant(ctx context.Context, tenant uuid.UUID, cutoff time
 		return 0, nil
 	}
 
-	// The hash of the last row to go is the new floor. If that row is already gone (the
-	// chain was tampered with), moving the floor over it would erase the evidence, so
-	// leave the tenant alone: the verifier reports the gap and an operator decides.
+	// The hash and timestamp of the last row to go are the new floor. If that row is
+	// already gone (the chain was tampered with), moving the floor over it would erase the
+	// evidence, so leave the tenant alone: the verifier reports the gap and an operator
+	// decides. The timestamp is recorded so that a floor which covers rows too young to have
+	// expired can be told apart from retention (see VerifyChain).
 	var floorHash string
-	if upTo == headSeq {
-		floorHash = headHash
-	} else if err := plugin.ScanRow(tx.QueryRow(ctx, plugin.Rebind(
-		`SELECT row_hash FROM audit_events WHERE tenant_id = $1 AND seq = $2`, p.dialect), tenant, upTo), &floorHash); err != nil {
+	var floorTS int64
+	if err := plugin.ScanRow(tx.QueryRow(ctx, plugin.Rebind(fmt.Sprintf(
+		`SELECT row_hash, %s FROM audit_events WHERE tenant_id = $1 AND seq = $2`,
+		epochMicrosExpr(p.dialect, "timestamp")), p.dialect), tenant, upTo), &floorHash, &floorTS); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			p.logger.Warn("audit-log: retention skipped a tenant whose chain has a missing row; run cleatctl audit verify",
 				"tenant", tenant, "seq", upTo)
 			return 0, nil
 		}
 		return 0, fmt.Errorf("audit retention: read the new floor for tenant %s: %w", tenant, err)
+	}
+	floorHash = strings.TrimSpace(floorHash)
+	if upTo == headSeq && floorHash != strings.TrimSpace(headHash) {
+		p.logger.Warn("audit-log: retention skipped a tenant whose head does not match its newest row; run cleatctl audit verify",
+			"tenant", tenant, "seq", upTo)
+		return 0, nil
 	}
 
 	n, err := tx.Exec(ctx, plugin.Rebind(
@@ -114,8 +123,8 @@ func (p *Plugin) retainTenant(ctx context.Context, tenant uuid.UUID, cutoff time
 		return 0, nil
 	}
 	if _, err := tx.Exec(ctx, plugin.Rebind(
-		`UPDATE audit_chain_heads SET floor_seq = $1, floor_hash = $2 WHERE tenant_id = $3`, p.dialect),
-		upTo, floorHash, tenant); err != nil {
+		`UPDATE audit_chain_heads SET floor_seq = $1, floor_hash = $2, floor_ts = $3 WHERE tenant_id = $4`, p.dialect),
+		upTo, floorHash, floorTS, tenant); err != nil {
 		return 0, fmt.Errorf("audit retention: move the floor for tenant %s: %w", tenant, err)
 	}
 	if err := tx.Commit(); err != nil {

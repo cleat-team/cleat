@@ -200,7 +200,7 @@ func (e *chainEnv) scan(tenant uuid.UUID, query string, args []any, dest ...any)
 func (e *chainEnv) verify(tenant uuid.UUID) ChainReport {
 	e.t.Helper()
 	p := e.plugin()
-	rep, err := VerifyChain(context.Background(), p.db, e.d.dialect, tenant)
+	rep, err := VerifyChain(context.Background(), p.db, e.d.dialect, tenant, VerifyOptions{})
 	if err != nil {
 		e.t.Fatalf("VerifyChain: %v", err)
 	}
@@ -483,6 +483,13 @@ func TestTheChainDoesNotDependOnTheMySQLSessionTimeZone(t *testing.T) {
 		p.db = &engine.SQLDBAdapter{DB: db, Dialect: plugin.DialectMySQL}
 		return p
 	}
+	// The column is DATETIME(6): TIMESTAMP(6) overflows in 2038, and DATETIME does no zone
+	// conversion, which is what makes the rest of this test hold.
+	var colType string
+	if err := e.owner.QueryRow(`SELECT DATA_TYPE FROM information_schema.columns
+		WHERE table_schema = DATABASE() AND table_name = 'audit_events' AND column_name = 'timestamp'`).Scan(&colType); err != nil || colType != "datetime" {
+		t.Fatalf("audit_events.timestamp is %q (err %v) on MySQL, want datetime", colType, err)
+	}
 	tenant := uuid.New()
 	for _, zone := range []string{"-04:00", "+05:30", "America/New_York", "+00:00"} {
 		p := withZone(zone)
@@ -493,7 +500,7 @@ func TestTheChainDoesNotDependOnTheMySQLSessionTimeZone(t *testing.T) {
 		}
 	}
 	for _, zone := range []string{"-04:00", "+05:30", "America/New_York", "+00:00", "SYSTEM"} {
-		rep, err := VerifyChain(context.Background(), withZone(zone).db, plugin.DialectMySQL, tenant)
+		rep, err := VerifyChain(context.Background(), withZone(zone).db, plugin.DialectMySQL, tenant, VerifyOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
