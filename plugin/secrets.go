@@ -21,8 +21,21 @@ import "context"
 //
 // So these methods take the tenant from ctx instead -- the same tenant
 // plugin.ForTenant already marks a context with before a plugin runs its own
-// tenant-scoped SQL (oauthprovider's getConfig is one example). There is
-// nothing left to pass wrong, because there is nothing left to pass.
+// tenant-scoped SQL (oauthprovider's getConfig is one example).
+//
+// THIS REMOVES ONE FAILURE MODE, NOT EVERY ONE, and cleat-review's #2163
+// review is worth stating plainly rather than eliding: plugin.ForTenant(ctx,
+// A) can RE-MARK an already-authenticated request context to name a
+// DIFFERENT tenant A, and Secrets.Get on that re-marked ctx would then read
+// A's value. That is not new here -- it is the same thing that already lets
+// a plugin's own tenant-scoped SQL run against the wrong tenant if it calls
+// plugin.ForTenant a second time on a ctx that already named its caller's
+// tenant -- and Secrets inherits it rather than introducing it, because it
+// reads the same ctx. What this design removes is a plugin PASSING the
+// wrong tenant as a Get/Put/Retire ARGUMENT; it does not remove a plugin
+// RE-MARKING ctx before calling them. The two are worth keeping distinct in
+// review: an argument is visible at the call site that misuses it, a re-mark
+// is visible at whatever earlier call built the ctx being passed down.
 //
 // Get returns ErrSecretNotFound (via the underlying store) for a name this
 // tenant has not set. Put stores or replaces one secret; Retire disables one
@@ -48,13 +61,27 @@ type Secrets interface {
 	//     plugin/a_cross_tenant_bypass_is_declared_test.go's crossTenantLedger
 	//     for the taxonomy. Nothing here is that shape: every ForTenant call
 	//     still names exactly one tenant, so it is not tracked in that
-	//     ledger, the same way plugin.ForTenant's own call sites are not;
+	//     ledger, the same way plugin.ForTenant's own call sites are not.
+	//     It IS tracked in a sibling ledger, though, for the same reason
+	//     cleat#2141 tracks plugin.AllTenantIDs call sites in
+	//     perTenantLoopLedger rather than crossTenantLedger: a per-tenant
+	//     loop is a second way to act on every tenant, distinct from a
+	//     single cross-tenant statement, and a reviewer asking "does this
+	//     plugin touch every tenant" needs both ledgers to get a complete
+	//     answer. See plugin/a_secrets_for_tenant_is_declared_test.go's
+	//     secretsForTenantLedger;
 	//   - an unauthenticated request that NAMES a tenant as its own subject
 	//     rather than discovering one (oauthprovider's handleLogin, which
 	//     reads ?tenant_id= because a login has no session yet to derive one
 	//     from -- the tenant here is not attacker-supplied in a way that
 	//     matters, because the whole call is "fetch config for the tenant
 	//     this request says it is logging into").
+	//
+	// A ctx already marked by plugin.AcrossAllTenants is refused outright by
+	// every method here, request-path and ForTenant alike, rather than
+	// silently mis-scoped or bypassed -- see engine's
+	// checkNotCrossTenant/errCrossTenantContext (engine/plugin_secrets.go)
+	// for the per-dialect failure modes that refusal replaces.
 	//
 	// A SEPARATE, NAMED METHOD rather than an optional argument on Get/Put/
 	// Retire, for the same reason plugin.AcrossAllTenants is a distinct call

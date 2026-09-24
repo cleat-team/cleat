@@ -181,6 +181,30 @@ nicety, and wrong for two plugins that are each independently optional.
 add a row there when writing a plugin that reads a value another plugin's
 middleware sets.
 
+### C15 — every `Secrets.ForTenant` call site is declared
+
+**Guard:** `TestEverySecretsForTenantCallIsDeclared`
+(`plugin/a_secrets_for_tenant_is_declared_test.go`)
+
+`plugin.Secrets`/`plugin.Payloads` (cleat#1992) take no `tenantID` parameter
+on the request-path methods — the tenant comes from `ctx` instead, so there
+is no argument for a plugin bug to pass wrong. `Secrets.ForTenant` is the one
+place a plugin still names a tenant directly: a background loop with no
+request to derive one from (mirroring `plugin.ForTenant` on the SQL side,
+cleat#2125), or an unauthenticated request naming its own tenant as its
+subject. Neither is `crossTenantLedger`'s shape — every `ForTenant` call
+still names exactly one tenant, never a bypass spanning all of them — so a
+reviewer checking only that ledger for "does this plugin act on a tenant
+outside its own request" gets an incomplete answer. This ledger is that
+question's counterpart for the `Secrets`/`Payloads` surface, checked
+bidirectionally the same way `crossTenantLedger` is: an undeclared site is a
+new, unreviewed tenant-naming call; a stale entry is a grant covering
+nothing.
+
+(Numbered independently of any sibling ledger cleat#2141 adds for
+`plugin.AllTenantIDs` call sites — reconcile the two files if both land, per
+this guard's own file-level comment.)
+
 ---
 
 ## Two obligations with no clause of their own
