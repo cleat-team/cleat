@@ -137,9 +137,14 @@ func (p *Plugin) effectiveAPIKey(ctx context.Context, requestKey, provider strin
 // (cleat#1992 part 1), so a key rotated with `cleatctl set-deployment-secret`
 // takes effect on the next call without a worker restart. ollama needs no
 // key at all -- OllamaChat/OllamaChatStream take none -- so it is excluded
-// here rather than made to look up a secret that will never be set.
+// here rather than made to look up a secret that will never be set. A
+// provider explicitly marked "requires_deployment_key": false is treated the
+// same way: a keyless self-hosted base_url has nothing to look up, and a
+// BYOK-only provider is reached through effectiveAPIKey's req.APIKey branch
+// before providerAPIKey is ever called for it in the first place -- this
+// only matters for the caller that supplies no request-level key at all.
 func (p *Plugin) providerAPIKey(ctx context.Context, provider string) (string, error) {
-	if provider == "ollama" {
+	if provider == "ollama" || !p.config.Providers[provider].requiresDeploymentKey() {
 		return "", nil
 	}
 	if p.deploymentSecrets == nil {

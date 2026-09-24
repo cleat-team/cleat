@@ -1282,6 +1282,13 @@ func main() {
 			continue
 		}
 		envCopy := *pluginEnv
+		// cleat#1992 part 1, cleat-review's #2202 pass: a plugin that
+		// declares its own deployment-secret prefix gets a DeploymentSecrets
+		// that refuses to Get anything outside it, rather than the one
+		// unscoped adapter every plugin otherwise shares.
+		if dsp, ok := lp.Plugin.(plugin.HasDeploymentSecretPrefix); ok {
+			envCopy.DeploymentSecrets = engine.NewScopedPluginDeploymentSecrets(pluginEnv.DeploymentSecrets, dsp.DeploymentSecretPrefix())
+		}
 		switch lp.Plugin.Info().DatabaseAccess {
 		case plugin.DatabaseAccessNone:
 			envCopy.DB = nil

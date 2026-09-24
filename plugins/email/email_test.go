@@ -1,6 +1,7 @@
 package email
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -165,7 +166,7 @@ func TestInit(t *testing.T) {
 	p := &Plugin{}
 	secrets := &fakeDeploymentSecrets{values: map[string]string{"email.sendgrid_api_key": "test-key"}}
 	env := &plugin.Environment{
-		Config:            []byte(`{}`),
+		Config:            []byte(`{"email_enabled":true}`),
 		DeploymentSecrets: secrets,
 	}
 	err := p.Init(context.Background(), env)
@@ -183,7 +184,7 @@ func TestInit(t *testing.T) {
 func TestInitWithConfig(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		Config: []byte(`{"default_from":"noreply@example.com"}`),
+		Config: []byte(`{"email_enabled":true,"default_from":"noreply@example.com"}`),
 	}
 	err := p.Init(context.Background(), env)
 	if err != nil {
@@ -217,6 +218,91 @@ func TestInitNoConfigReportsErrNotConfigured(t *testing.T) {
 	}
 	if !errors.Is(err, plugin.ErrNotConfigured) {
 		t.Errorf("expected errors.Is(err, plugin.ErrNotConfigured), got: %v", err)
+	}
+}
+
+// TestInitConfigPresentButNotForEmailReportsErrNotConfigured is the direct
+// regression test for cleat-review's BROKEN finding on #2202: env.Config is
+// the SAME raw --plugin-config bytes every plugin's Init receives, so a
+// worker configured only for some other plugin -- llm here, but any plugin
+// with no email_enabled field would do -- must not make email read itself as
+// enabled merely because SOME config section is present. Before the fix,
+// len(env.Config) == 0 was the only signal, so this exact config (non-empty,
+// no email_enabled at all) satisfied it and refused the whole worker at
+// startup over a missing email.sendgrid_api_key nobody asked for.
+func TestInitConfigPresentButNotForEmailReportsErrNotConfigured(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"providers":{"openai":{"enabled":true}}}`),
+	}
+	err := p.Init(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected error when the config section is for another plugin, got nil")
+	}
+	if !errors.Is(err, plugin.ErrNotConfigured) {
+		t.Errorf("expected errors.Is(err, plugin.ErrNotConfigured), got: %v", err)
+	}
+}
+
+// TestInitEmailEnabledFalseReportsErrNotConfigured pins the explicit-false
+// case separately from "field absent": Config.Enabled's zero value and an
+// explicit `"email_enabled": false` must behave identically, since a bool
+// (unlike llm's RequiresDeploymentKey) carries no nil state to distinguish
+// them.
+func TestInitEmailEnabledFalseReportsErrNotConfigured(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"email_enabled":false,"default_from":"noreply@example.com"}`),
+	}
+	err := p.Init(context.Background(), env)
+	if !errors.Is(err, plugin.ErrNotConfigured) {
+		t.Errorf("expected errors.Is(err, plugin.ErrNotConfigured), got: %v", err)
+	}
+}
+
+// TestInitWarnsOnLeftoverSendGridAPIKey covers legacyEmailConfig's WARN: a
+// sendgrid_api_key left over in --plugin-config from before cleat#1992 part 1
+// does nothing (Config has no field for it any more) and used to do so
+// silently. This proves the WARN actually fires, naming the dead field and
+// the replacement command, and that it fires only when the legacy key is
+// actually present.
+func TestInitWarnsOnLeftoverSendGridAPIKey(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"email_enabled":true,"sendgrid_api_key":"SG.leftover-plaintext"}`),
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "sendgrid_api_key") {
+		t.Errorf("expected a WARN naming the leftover sendgrid_api_key, got log output: %q", got)
+	}
+	if !strings.Contains(got, "set-deployment-secret") {
+		t.Errorf("expected the WARN to name the replacement command, got log output: %q", got)
+	}
+	if !strings.Contains(got, "level=WARN") {
+		t.Errorf("expected the leftover-key message at WARN level, got log output: %q", got)
+	}
+}
+
+// TestInitNoWarnWithoutLeftoverSendGridAPIKey is the negative control for the
+// WARN above: a config with no sendgrid_api_key field at all must not
+// mention it, so the WARN is not simply unconditional.
+func TestInitNoWarnWithoutLeftoverSendGridAPIKey(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"email_enabled":true}`),
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "sendgrid_api_key") {
+		t.Errorf("did not expect a sendgrid_api_key WARN with no leftover key present, got log output: %q", got)
 	}
 }
 

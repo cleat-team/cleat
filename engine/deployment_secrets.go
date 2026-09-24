@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -158,6 +159,26 @@ func (s *DeploymentSecretStore) open(name, stored string, keyVersion int) (strin
 	return string(pt), nil
 }
 
+// normalizeDeploymentSecretName lowercases name before it touches the
+// database, on every dialect -- not only the two that need it. MySQL and SQL
+// Server default to case-INSENSITIVE collation, so `WHERE name = ?` with
+// "EMAIL.sendgrid_api_key" matches the row stored as "email.sendgrid_api_key"
+// on those two dialects but not PostgreSQL, and PutDeploymentSecret's
+// UPDATE-then-INSERT upsert then takes the UPDATE branch: it reseals the
+// EXISTING row's ciphertext, still keyed by the correct row, but with AAD
+// bound to the WRONGLY-CASED name argument (seal(name, ...) uses the caller's
+// name verbatim). The real secret is not lost from the table, but it stops
+// opening under the lowercase name every plugin actually looks up --
+// GetDeploymentSecret(ctx, "email.sendgrid_api_key") then fails decryption,
+// and the fail-closed startup check refuses the worker. All five fixed names
+// (docs/how-to/use-deployment-secrets.md) are lowercase, so normalizing here
+// costs a correctly-cased caller nothing and makes every dialect behave
+// alike rather than only the two whose collation happens to hide the bug on
+// PostgreSQL. Found in cleat-review's #2202 pass.
+func normalizeDeploymentSecretName(name string) string {
+	return strings.ToLower(name)
+}
+
 // PutDeploymentSecret stores or replaces one deployment secret.
 //
 // cleatctl-only by convention, same as PutSecret: nothing on the worker's
@@ -168,6 +189,7 @@ func (s *DeploymentSecretStore) PutDeploymentSecret(ctx context.Context, name, v
 	if s == nil || s.db == nil {
 		return ErrNoDeploymentSecretDB
 	}
+	name = normalizeDeploymentSecretName(name)
 	if !validSecretName(name) {
 		return fmt.Errorf("deployment secret name %q must match [A-Za-z0-9_.-]{1,128}", name)
 	}
@@ -194,6 +216,7 @@ func (s *DeploymentSecretStore) GetDeploymentSecret(ctx context.Context, name st
 	if s == nil || s.db == nil {
 		return "", ErrNoDeploymentSecretDB
 	}
+	name = normalizeDeploymentSecretName(name)
 	if !validSecretName(name) {
 		return "", ErrDeploymentSecretNotFound
 	}
@@ -215,6 +238,7 @@ func (s *DeploymentSecretStore) DeploymentSecretMeta(ctx context.Context, name s
 	if s == nil || s.db == nil {
 		return false, sql.NullTime{}, ErrNoDeploymentSecretDB
 	}
+	name = normalizeDeploymentSecretName(name)
 	err = s.db.QueryRowContext(ctx, deploymentSecretMetaStmt(s.dialect), name).Scan(&disabledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, sql.NullTime{}, nil
@@ -231,6 +255,7 @@ func (s *DeploymentSecretStore) RetireDeploymentSecret(ctx context.Context, name
 	if s == nil || s.db == nil {
 		return 0, ErrNoDeploymentSecretDB
 	}
+	name = normalizeDeploymentSecretName(name)
 	res, err := s.db.ExecContext(ctx, retireDeploymentSecretStmt(s.dialect), name)
 	if err != nil {
 		return 0, err

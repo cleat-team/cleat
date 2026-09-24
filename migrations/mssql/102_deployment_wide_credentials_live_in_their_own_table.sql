@@ -20,7 +20,19 @@
 -- own mssql migration (073) gives: SQL Server has no regexp in a CHECK, and
 -- the guarantee is Go-level (engine.validSecretName), which every write goes
 -- through.
+--
+-- GUARDED BY OBJECT EXISTENCE, unlike 073's CREATE TABLE. cleat#2117's
+-- deploy-step test (cmd/cleat-worker/a_migration_is_a_deploy_step_test.go,
+-- landed 2026-09-24) exercises "the NEWEST migration's tracking row is
+-- missing, --migrate-only repairs it" against whichever migration happens to
+-- be highest-numbered -- 102 on this dialect, as of this writing -- so this
+-- CREATE must tolerate running a second time against a database where the
+-- table already exists (the DDL already applied; only the schema_migrations
+-- row was removed), the same as PostgreSQL's and MySQL's IF NOT EXISTS
+-- already do. Found by that test failing on mssql only, after cleat-review's
+-- #2202 pass: "There is already an object named 'deployment_secrets'."
 
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.deployment_secrets') AND type = N'U')
 CREATE TABLE dbo.deployment_secrets (
     name        NVARCHAR(128)    NOT NULL,
     ciphertext  NVARCHAR(MAX)    NOT NULL,

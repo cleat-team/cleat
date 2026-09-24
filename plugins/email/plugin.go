@@ -45,8 +45,37 @@ type Plugin struct {
 // `cleatctl set-deployment-secret` and take effect without a worker restart.
 // See sendGridAPIKey (host_functions.go) for the per-call lookup that
 // replaced the cached apiKey field this struct used to carry.
+//
+// Enabled is new, and load-bearing for enablement now in a way DefaultFrom
+// never was. env.Config is the SAME raw --plugin-config bytes every plugin's
+// Init receives (cmd/cleat-worker/main.go builds one Environment and copies
+// it per plugin, Config included) -- there is no per-plugin section, only a
+// flat object every plugin's own Config struct picks its own field names out
+// of. Before cleat#1992, "config non-empty" WAS an email-specific signal,
+// because a non-empty config with no sendgrid_api_key was a hard error
+// ("sendgrid_api_key is required"), so an llm-only deployment simply never
+// set one. Once the key moved out of Config entirely, that fell away: any
+// worker with ANY --plugin-config -- for llm, for any other plugin, for
+// nothing email cares about -- made len(env.Config) == 0 false, so email
+// read itself as configured and checkRequiredDeploymentSecrets then refused
+// to start the whole worker over a missing email.sendgrid_api_key nobody
+// asked for. Found in cleat-review's #2202 pass. A prefixed name, not a bare
+// "enabled": this struct is unmarshaled from the SAME shared blob every
+// other plugin's Config is, so a bare field name is one any other plugin
+// could also define and collide with by accident.
 type Config struct {
+	Enabled     bool   `json:"email_enabled"`
 	DefaultFrom string `json:"default_from,omitempty"`
+}
+
+// legacyEmailConfig catches sendgrid_api_key left over in --plugin-config
+// from before cleat#1992 part 1. json.Unmarshal ignores fields a target
+// struct does not declare, so once Config dropped the field a leftover value
+// there silently stopped doing anything -- no error, no log, just quietly
+// wrong. This is unmarshaled from the same bytes purely to WARN; Config
+// above no longer has anywhere to put the value even if this found one.
+type legacyEmailConfig struct {
+	SendGridAPIKey string `json:"sendgrid_api_key"`
 }
 
 // Info returns plugin metadata for discovery and documentation.
@@ -63,13 +92,14 @@ func (p *Plugin) Info() plugin.PluginInfo {
 //
 // It no longer reads a SendGrid API key: that moved to a deployment secret
 // (cleat#1992 part 1), fetched fresh on every call by sendGridAPIKey in
-// host_functions.go rather than cached here. Enablement is still decided by
-// config-section presence, exactly as before -- a worker with no "email"
-// section in its plugin config never touches this plugin, and
-// plugin.ErrNotConfigured is how it says so quietly rather than logging
-// ERROR on every stock start. Whether the deployment secret itself is set is
-// checked separately, at worker boot, by the fail-closed check setup.go
-// runs over every enabled plugin's RequiredDeploymentSecrets.
+// host_functions.go rather than cached here. Enablement is decided by
+// Config.Enabled ("email_enabled" in --plugin-config), not by config-section
+// presence -- see Config's doc comment for why len(env.Config) == 0 alone
+// stopped being a safe signal once sendgrid_api_key left this struct.
+// plugin.ErrNotConfigured is how a disabled email says so quietly rather
+// than logging ERROR on every stock start. Whether the deployment secret
+// itself is set is checked separately, at worker boot, by the fail-closed
+// check setup.go runs over every enabled plugin's RequiredDeploymentSecrets.
 func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	if env.Logger != nil {
 		p.logger = env.Logger
@@ -98,7 +128,21 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	if err := json.Unmarshal(env.Config, &cfg); err != nil {
 		return fmt.Errorf("email: invalid config: %w", err)
 	}
+	if !cfg.Enabled {
+		// A config file is present -- for email, for some other plugin, or
+		// both -- but it does not name email_enabled. Same quiet disable as
+		// no config at all; see Config's doc comment for why config
+		// presence alone can no longer mean "this is for email".
+		return fmt.Errorf("email: %w", plugin.ErrNotConfigured)
+	}
 	p.defaultFrom = cfg.DefaultFrom
+
+	var legacy legacyEmailConfig
+	if err := json.Unmarshal(env.Config, &legacy); err == nil && legacy.SendGridAPIKey != "" {
+		p.logger.Warn("email: sendgrid_api_key in --plugin-config is no longer read " +
+			"(cleat#1992 part 1); it has no effect. Use " +
+			"`cleatctl set-deployment-secret --name email.sendgrid_api_key` instead.")
+	}
 
 	p.logger.Info("email: initialized", "has_default_from", p.defaultFrom != "")
 	return nil
@@ -126,4 +170,10 @@ func (p *Plugin) sendGridAPIKey(ctx context.Context) (string, error) {
 // SendGrid key, so there is no enabled-but-key-optional case to encode here.
 func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
 	return []string{"email.sendgrid_api_key"}, nil
+}
+
+// DeploymentSecretPrefix implements plugin.HasDeploymentSecretPrefix: email
+// only ever reads "email.sendgrid_api_key".
+func (p *Plugin) DeploymentSecretPrefix() string {
+	return "email."
 }

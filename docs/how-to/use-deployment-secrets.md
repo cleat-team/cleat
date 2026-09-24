@@ -18,10 +18,29 @@ Converted to read from here, live, on every call:
 | plugin | name |
 |---|---|
 | `email-notify` | `email.sendgrid_api_key` |
-| `llm` | `llm.providers.<provider>.api_key`, one per **enabled**, non-`ollama` provider |
+| `llm` | `llm.providers.<provider>.api_key`, one per **enabled**, non-`ollama` provider that has not opted out (below) |
 
 Both refuse to start the worker if their required name is missing or cannot
 be opened — see "Fail-closed at boot" below.
+
+**`email-notify` needs `"email_enabled": true` in its `--plugin-config`
+section, not just a non-empty file.** Every plugin's `Init` receives the
+SAME raw `--plugin-config` bytes — there is no per-plugin section — so a
+worker configured only for `llm`, or for any other plugin, would otherwise
+have no way to tell "no config for me" from "a config file that happens to
+exist". `email_enabled` is the explicit signal; `default_from` alone is not
+enough, since it is legitimately optional.
+
+**An `llm` provider that needs no deployment key** — a keyless self-hosted
+`base_url` (vLLM, LM Studio), or one used only with a request-level
+`api_key` (BYOK) — sets `"requires_deployment_key": false` on that
+provider. Omitted, it defaults to `true`, today's behavior for every
+enabled provider except `ollama`.
+
+**A leftover `sendgrid_api_key` or `providers.*.api_key` in `--plugin-config`
+does nothing** — neither struct has a field for it anymore — and a worker
+that still has one logs a WARN naming it and the `set-deployment-secret`
+command to use instead, at boot.
 
 **Not yet converted**, and still read from `--plugin-config` at `Init` the way
 every plugin's credentials used to be: `blobstore` (its S3 key pair),
@@ -52,12 +71,22 @@ printf %s "$SENDGRID_KEY" | cleatctl --db "$DSN" set-deployment-secret --name em
 ```
 
 The value is read from **stdin**, or `--from-file` — never a flag, for the
-same reason `set-secret`'s value is not one. Writes are **operator-only**:
-migration 103 (PostgreSQL) additionally revokes `cleat_app`'s INSERT/UPDATE/
-DELETE on this table, so a worker's own database role cannot write here even
-if something reachable through it tried. MySQL and SQL Server have no
-equivalent role split to revoke from; encryption at rest is what protects the
-table on those two.
+same reason `set-secret`'s value is not one.
+
+**Writes are operator-only on PostgreSQL, not on MySQL or SQL Server.**
+Migration 103 (PostgreSQL) revokes `cleat_app`'s INSERT/UPDATE/DELETE on this
+table, so a worker's own database role cannot write here even if something
+reachable through it tried. MySQL and SQL Server have **no equivalent role
+split to revoke from** — there is one login per database on MySQL, and no
+`cleat_app`-equivalent application role on SQL Server at all (unlike
+`tenant_secrets`, which uses SQL Server's security-policy mechanism instead;
+this table carries no `tenant_id` for that mechanism to key a predicate on).
+So on those two dialects, **the serving login keeps full read/write access to
+this table**, and encryption at rest — the master key never touches the
+database on any dialect — is what actually protects it, not a database-level
+write restriction. Owner decision 4A, recorded on #1992: a separate,
+least-privilege login for MySQL and SQL Server is deferred to #2203, not
+built here.
 
 ## Retire a secret
 

@@ -1,6 +1,7 @@
 package slacknotify
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -40,6 +41,30 @@ func TestInit(t *testing.T) {
 	}
 	if p.logger == nil {
 		t.Error("expected logger to be set")
+	}
+}
+
+// TestInitWarnsThatUnsignedRequestsAreCurrentlyAccepted is cleat-review's
+// #2202 pass: the WARN logged when no signing secret is configured must
+// state the PRESENT truth (/slack/interactive accepts every request
+// unsigned right now), not only cleat#2172's future refusal -- an earlier
+// wording said only the latter, which a reader could mistake for "nothing is
+// wrong yet".
+func TestInitWarnsThatUnsignedRequestsAreCurrentlyAccepted(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "currently ACCEPTS unsigned requests") {
+		t.Errorf("expected the WARN to state the present-tense truth, got log output: %q", got)
+	}
+	if !strings.Contains(got, "level=WARN") {
+		t.Errorf("expected the missing-signing-secret message at WARN level, got log output: %q", got)
 	}
 }
 

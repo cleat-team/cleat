@@ -576,3 +576,19 @@ type HasRequiredDeploymentSecrets interface {
 	Plugin
 	RequiredDeploymentSecrets(config []byte) ([]string, error)
 }
+
+// HasDeploymentSecretPrefix: plugin declares the name prefix its own
+// deployment secrets carry (e.g. "email.", "llm.providers."), so the worker
+// can hand it a DeploymentSecrets that refuses to Get anything outside that
+// prefix. Least privilege, cheap: every plugin currently shares ONE
+// DeploymentSecretStore connection wrapped in one adapter, so without this a
+// bug in any plugin using DeploymentSecrets (reachable through a workflow's
+// own HostCall arguments, not just plugin-author error) could read a
+// SIBLING plugin's credential -- llm reading email.sendgrid_api_key, say.
+// Optional, unlike HasRequiredDeploymentSecrets: a plugin that does not
+// implement this gets the unscoped adapter, exactly as before this existed.
+// Found in cleat-review's #2202 pass.
+type HasDeploymentSecretPrefix interface {
+	Plugin
+	DeploymentSecretPrefix() string
+}

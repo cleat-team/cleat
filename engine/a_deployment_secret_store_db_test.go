@@ -131,6 +131,82 @@ func TestDeploymentSecretStorePutGetRetireRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPutDeploymentSecretNormalizesNameCaseAcrossDialects is the regression
+// test for the corruption normalizeDeploymentSecretName's doc comment
+// (deployment_secrets.go) describes: MySQL and SQL Server default to
+// case-INSENSITIVE collation, so a differently-cased Put of an existing name
+// used to take the UPDATE arm of the upsert -- reseal the RIGHT row, but bind
+// AAD to the WRONG-CASE name argument -- leaving the secret undecryptable
+// under the lowercase name every plugin actually looks up. Run on all three
+// dialects, though the corruption itself is MySQL/MSSQL-only: falsified by
+// hand (2026-09-24, normalizeDeploymentSecretName made a no-op), MySQL and
+// MSSQL fail this test by decryption error -- the exact corruption above --
+// while PostgreSQL's case-sensitive collation fails it differently and more
+// benignly, by never merging the two writes into one row at all (the second
+// Put takes the INSERT arm, not UPDATE, so nothing is corrupted, the
+// lowercase name just never sees the update). This test does not need to
+// distinguish those failures to do its job: it only asserts the one property
+// that must hold on every dialect -- a Put under any casing of a name is
+// visible, with its latest value, under every other casing of that name --
+// and PostgreSQL's own (benign) failure without normalization is exactly why
+// it is included here rather than skipped as "not the vulnerable dialect".
+func TestPutDeploymentSecretNormalizesNameCaseAcrossDialects(t *testing.T) {
+	for _, dialect := range []testutil.Dialect{testutil.DialectPostgres, testutil.DialectMySQL, testutil.DialectMSSQL} {
+		t.Run(string(dialect), func(t *testing.T) {
+			s, db := deploymentStoreForTest(t, dialect)
+			ctx := t.Context()
+			const lower = "cleat-1992-case-norm.api_key"
+
+			deleteRow := map[testutil.Dialect]string{
+				testutil.DialectPostgres: `DELETE FROM deployment_secrets WHERE name = $1`,
+				testutil.DialectMySQL:    `DELETE FROM deployment_secrets WHERE name = ?`,
+				testutil.DialectMSSQL:    `DELETE FROM deployment_secrets WHERE name = @p1`,
+			}[dialect]
+			t.Cleanup(func() {
+				db.Exec(deleteRow, lower) //nolint:errcheck // best-effort cleanup
+			})
+
+			// Insert under the lowercase name every plugin actually looks up.
+			if err := s.PutDeploymentSecret(ctx, lower, "first-value"); err != nil {
+				t.Fatalf("PutDeploymentSecret (lowercase insert): %v", err)
+			}
+
+			// Write again under a DIFFERENTLY-CASED spelling of the same
+			// name. Pre-fix on MySQL/MSSQL this silently reseals the
+			// existing row with AAD bound to "CLEAT-1992-CASE-NORM.API_KEY"
+			// instead of lower -- so it would corrupt, not error.
+			mixedCase := "CLEAT-1992-CASE-NORM.API_KEY"
+			if err := s.PutDeploymentSecret(ctx, mixedCase, "second-value"); err != nil {
+				t.Fatalf("PutDeploymentSecret (mixed-case update): %v", err)
+			}
+
+			// The only query that matters: does the name every plugin
+			// actually calls GetDeploymentSecret with still open, and with
+			// the LATEST value -- not ErrDeploymentSecretNotFound, and not a
+			// decryption failure from a mismatched AAD.
+			got, err := s.GetDeploymentSecret(ctx, lower)
+			if err != nil {
+				t.Fatalf("GetDeploymentSecret(%q) after a mixed-case write to the same name: %v -- "+
+					"this is the exact corruption normalizeDeploymentSecretName exists to prevent", lower, err)
+			}
+			if got != "second-value" {
+				t.Fatalf("GetDeploymentSecret(%q) = %q, want %q (the mixed-case write's value)", lower, got, "second-value")
+			}
+
+			// And the mixed-case spelling itself resolves too, to the same
+			// row -- proving both names are normalized to the one row
+			// rather than each landing on a dialect-dependent different one.
+			got, err = s.GetDeploymentSecret(ctx, mixedCase)
+			if err != nil {
+				t.Fatalf("GetDeploymentSecret(%q) (mixed-case lookup): %v", mixedCase, err)
+			}
+			if got != "second-value" {
+				t.Fatalf("GetDeploymentSecret(%q) = %q, want %q", mixedCase, got, "second-value")
+			}
+		})
+	}
+}
+
 func TestResealDeploymentSecretsConvergesAndPreservesPlaintext(t *testing.T) {
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	t.Cleanup(func() { db.Close() })
