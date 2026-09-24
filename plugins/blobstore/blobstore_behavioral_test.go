@@ -1324,6 +1324,88 @@ func TestBlobPutBackendErrorMessageIsNotGeneric(t *testing.T) {
 	}
 }
 
+// TestBlobPutSentinelWrapReachesGenericMessageThroughRealProvider is
+// TestBlobPutDeploymentSecretsUnavailableIsGeneric's real-path counterpart --
+// cleat-review's finding was that the fake-backend tests above leave the
+// %w errDeploymentSecretsUnavailable wrap in RetrieveWithCredContext
+// (backend.go) unpinned: removing it would leave every test in this file
+// green, because none of them go through the real provider.
+//
+// This one does: newS3Backend builds a REAL s3Backend around a REAL
+// deploymentSecretsCredentialsProvider wired to a fakeBlobstoreSecrets that
+// fails every Get, so p.blobPut here drives minio-go's PutObject ->
+// RetrieveWithCredContext's actual %w wrap -> blobPut's errors.Is check,
+// with no fake standing in for any of those three. No mock HTTP transport
+// is needed: credential retrieval fails before minio-go signs or sends
+// anything, so this never reaches the network.
+func TestBlobPutSentinelWrapReachesGenericMessageThroughRealProvider(t *testing.T) {
+	backend, err := newS3Backend(context.Background(),
+		Config{Backend: "s3", Bucket: "test-bucket", Region: "us-east-1"},
+		&fakeBlobstoreSecrets{fail: true})
+	if err != nil {
+		t.Fatalf("newS3Backend: %v", err)
+	}
+
+	p := &Plugin{
+		backend: backend,
+		logger:  slog.Default(),
+		config:  Config{Backend: "s3"},
+	}
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{Key: "real-provider-put-key", Data: []byte("data")}
+	inputJSON, _ := json.Marshal(input)
+
+	_, err = p.blobPut(ctx, string(inputJSON))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() != blobstoreDeploymentSecretsUnavailableMessage {
+		t.Errorf("got %q, want the generic message %q -- either RetrieveWithCredContext's sentinel wrap or blobPut's errors.Is check is broken",
+			err.Error(), blobstoreDeploymentSecretsUnavailableMessage)
+	}
+}
+
+// TestBlobGetSentinelWrapReachesGenericMessageThroughRealProvider is
+// TestBlobPutSentinelWrapReachesGenericMessageThroughRealProvider's Get
+// counterpart, and blobGet's real-path analogue of
+// TestBlobGetDeploymentSecretsUnavailableIsGeneric.
+func TestBlobGetSentinelWrapReachesGenericMessageThroughRealProvider(t *testing.T) {
+	p, store, _ := setupHostFuncTest(t)
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	// Seed a real blob_index/blob_content row via the memory backend --
+	// blobGet looks the key up in the database before ever calling
+	// p.backend.Get, so the S3 credential failure below is the only thing
+	// under test.
+	input := blobPutInput{Key: "real-provider-get-key", Data: []byte("data")}
+	inputJSON, _ := json.Marshal(input)
+	if _, err := p.blobPut(ctx, string(inputJSON)); err != nil {
+		t.Fatalf("blobPut: %v", err)
+	}
+
+	backend, err := newS3Backend(context.Background(),
+		Config{Backend: "s3", Bucket: "test-bucket", Region: "us-east-1"},
+		&fakeBlobstoreSecrets{fail: true})
+	if err != nil {
+		t.Fatalf("newS3Backend: %v", err)
+	}
+	p.backend = backend
+
+	getInput := blobGetInput{Key: "real-provider-get-key"}
+	getInputJSON, _ := json.Marshal(getInput)
+	_, err = p.blobGet(ctx, string(getInputJSON))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() != blobstoreDeploymentSecretsUnavailableMessage {
+		t.Errorf("got %q, want the generic message %q -- either RetrieveWithCredContext's sentinel wrap or blobGet's errors.Is check is broken",
+			err.Error(), blobstoreDeploymentSecretsUnavailableMessage)
+	}
+
+	_ = store
+}
+
 // ---------------------------------------------------------------------------
 // Tag handling
 // ---------------------------------------------------------------------------

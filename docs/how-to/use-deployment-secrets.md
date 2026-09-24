@@ -133,16 +133,22 @@ static keys at all out of this table entirely, using the original
 env-var/instance-profile/task-role chain instead.
 
 **Rotate the pair in this order: write the new secrets, wait at least 60s
-(the TTL above), then retire the old ones.** Writing both new secrets before
-retiring the old pair means a request that resolves mid-rotation still gets
-a matching, valid pair — either the old one or the new one, never one name
-from each. Retiring the old pair before the 60s TTL has elapsed risks a torn
-pair for whatever's left of that window. Two things bound the outage if the
-order above is not followed, but neither replaces it: a 403 from S3
-(`InvalidAccessKeyId` or `SignatureDoesNotMatch`) forces an immediate
-re-resolve rather than waiting out the rest of the TTL (`expireCredsOnAuthError`,
-`plugins/blobstore/backend.go`), and every failed resolve fails the S3
-request outright rather than proceeding unsigned or under a torn pair.
+(the TTL above), then retire the old ones.** `set-deployment-secret` writes
+one name at a time, so a torn pair -- one name resolving new, the other
+still resolving old -- CAN happen for the moment between the two writes,
+even following this order; it is not something the order alone prevents.
+What the order (writing both before retiring either) buys is that a torn
+pair during that moment is still one valid credential paired with one
+*not-yet-retired* one, rather than one valid credential paired with one
+already-dead: `expireCredsOnAuthError` (`plugins/blobstore/backend.go`)
+turns a 403 from S3 (`InvalidAccessKeyId` or `SignatureDoesNotMatch`) into
+an immediate re-resolve rather than waiting out the rest of the TTL, so a
+torn pair self-heals on its own next request -- measured at 7ms for the torn
+pair itself and 123ms end-to-end against a real worker and MinIO. Retiring
+the old pair before the new one has had a chance to be read at all removes
+the credential the self-heal would have recovered onto, so the order above
+still matters; it bounds the outage rather than the possibility of a torn
+pair occurring in the first place.
 
 **A credential refresh can hold up an S3 call past its own context
 deadline.** minio-go's `credentials.Credentials` holds one mutex across the

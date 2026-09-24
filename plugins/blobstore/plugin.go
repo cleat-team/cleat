@@ -109,13 +109,13 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 			(legacy.AccessKeyID != "" || legacy.SecretAccessKey != "") {
 			p.logger.Warn("blobstore: access_key_id/secret_access_key in --plugin-config " +
 				"are no longer read (cleat#1992 part 1b). For an s3 backend not using " +
-				"use_iam_credentials, this now makes blobstore.access_key_id and " +
-				"blobstore.secret_access_key required at boot -- see " +
+				"use_iam_credentials, blobstore.access_key_id and " +
+				"blobstore.secret_access_key are required at boot regardless -- see " +
 				"RequiredDeploymentSecrets. Run `cleatctl set-deployment-secret " +
 				"--name blobstore.access_key_id` and `--name blobstore.secret_access_key`, " +
 				"then remove access_key_id/secret_access_key from --plugin-config -- " +
-				"removing the keys is what stops this WARN and the boot requirement, not " +
-				"just setting the new secrets.")
+				"removing the keys is what stops THIS WARN, but the boot requirement is " +
+				"unconditional and stays regardless of --plugin-config.")
 		}
 	}
 	if p.config.Backend == "" {
