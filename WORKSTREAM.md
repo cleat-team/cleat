@@ -341,6 +341,12 @@ a red develop is fixed at once:
 - Whoever sees develop go red says so to the coordinator. The author of the most recent merge,
   or the coordinator if that author is busy, **reverts that merge first** (`gh pr revert`, a
   normal PR through the queue) and investigates afterwards, on the reverted branch.
+- **Exception, a known flake** (owner 1A, 2026-09-24). If every failing test is named in an open
+  flake issue (for example #2033), re-run the failed jobs once instead of reverting, and post the
+  run on that issue. If the re-run is green, develop is green. If it fails again, or any failing
+  test is not a known flake, revert as above. The first case happened on 2026-09-23: run
+  35921827006 went red on #2033 after #2102 merged, #2102 was innocent, and the next push run was
+  green.
 - No stream enqueues anything else until develop is green again, because everything queued
   behind a red develop is tested against a broken base.
 - A red `engine-race.yml` run opens a tracking issue on its own. A real `WARNING: DATA RACE` is
