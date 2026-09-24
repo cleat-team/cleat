@@ -42,6 +42,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   v3 migration simply drop the columns (`plugin.Migration.Up`, plain SQL) with nothing to carry
   forward.
 
+- **`webhook_sources.secret` and `webhook_config.secret_configured`'s underlying secret move into
+  tenant secrets, and a signing secret is now REQUIRED, not optional, on both plugins.**
+  (cleat#1992, cleat#2172, owner decision (b))
+
+  `webhook-ingest` and `notifications` follow the same `plugin.Secrets` envelope-encryption move
+  as `dd_config`/`pd_config` above, under `webhook-ingest.source_secret.<source-id>` and
+  `notifications.webhook_secret.<webhook-id>` respectively. **Unlike that change, this one also
+  changes behaviour, not just storage:**
+
+  - `POST /ingest/sources` (webhook-ingest) and `POST /webhooks` (notifications) now **reject a
+    request with no `secret`** (400). Previously the secret was optional, and a source/webhook
+    created without one accepted unsigned deliveries.
+  - `POST /ingest/{source_id}` (webhook-ingest's public, auth-exempt ingest route) now refuses
+    **every** request that lacks a valid `X-Hub-Signature-256` header (401), or whose secret
+    cannot be read from the tenant secrets store — not found, retired, or any other lookup
+    error (503). A lookup failure is never treated as "no secret configured."
+  - `notifications`' outbound delivery loop applies the same rule in the other direction: a
+    webhook whose secret cannot be read fails that delivery attempt (retried, then eventually
+    marked failed) rather than sending an unsigned payload.
+  - `PUT /webhooks/{id}` (notifications) can still **rotate** a secret, but can no longer
+    **clear** one back to empty — `{"secret":""}` on an existing webhook is now rejected (400).
+    `webhook-ingest` has no update route for sources, so this half does not apply there.
+
+  **Who is affected:** any caller that created a source/webhook with no secret, or that relied on
+  ingest/delivery accepting unsigned payloads — none can exist on a fresh 0.3.0 database, since
+  creation without a secret is now refused at the door, but an integration built against the
+  0.2.0 API contract (secret optional) will need to start sending one. See
+  `docs/playbooks/integration-hub.md`, "Webhook ingest now requires a signing secret," for the
+  operational detail.
+
+  No migration procedure is needed for the same reason as `dd_config`/`pd_config`: **0.3.0
+  requires a fresh database, with no upgrade path from v0.2.0** (cleat#2058, owner decision 3).
+
 - **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
   (cleat#2046)
 

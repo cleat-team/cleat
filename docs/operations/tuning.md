@@ -340,6 +340,7 @@ Per pool, with the gate each sits behind (cleat#1470):
 | core | `--concurrency + 5` | **15** | always |
 | plugin | `--max-plugin-connections` | **10** | that flag `> 0` |
 | adaptive flusher | `--batch-flush-max-connections` | **50** | unless `--batch-flush-disabled` *or* `--no-per-step-flush` |
+| heartbeat | `--heartbeat-max-connections` | **3** | that flag `> 0`, and not on a sharded deployment |
 | shard | 15 **per shard** | — | only when sharding is configured |
 | migrate | 2 | — | only with `--migrate-db`, and only at boot |
 | tenant | `--tenant-pool-max-conns` **per tenant** | 25 × *T*<sub>active</sub> | **always** on SQL Server and MySQL; on PostgreSQL only with `--tenant-isolation=role` |
@@ -357,14 +358,22 @@ because each tenant has its own database.
 
 ```
 default single-node worker, no sharding, no --migrate-db:
-    15 (core) + 10 (plugin) + 50 (flusher) = 75
+    15 (core) + 10 (plugin) + 50 (flusher) + 3 (heartbeat) = 78
 ```
 
 **The adaptive flusher's 50 is default-on and is two thirds of that.** Both of
 its gates — `--batch-flush-disabled` and `--no-per-step-flush` — default to
 `false`, so it reads like an opt-in feature and is not one. If you size for
-`concurrency + 5` you will be short by 60 per worker, and the symptom is
+`concurrency + 5` you will be short by 63 per worker, and the symptom is
 connection exhaustion under load.
+
+**The heartbeat pool is small on purpose.** cleat#2009: a saturated core pool
+(long-held connections claiming or deferring workflows) can starve a heartbeat
+write, and a missed heartbeat is what triggers reclaim -- so pool exhaustion
+under load looked like a dead worker. Three reserved connections cost little
+against PgBouncer's `default_pool_size` and remove that failure mode; set
+`--heartbeat-max-connections 0` to opt back out and share the core pool as
+before.
 
 **The tenant pool is unbounded in tenant count, and reaped.** A worker opens a
 pool per tenant it touches, from either of two sources — `--tenant-isolation=role`

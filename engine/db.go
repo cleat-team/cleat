@@ -2111,6 +2111,11 @@ type PostgresStoreFactory struct {
 	idempotencyKeyTTL time.Duration
 	notifyChannel     string // PostgreSQL NOTIFY channel; empty = disabled
 
+	// dsn is set only by WithDSN, and only OpenIsolatedStore reads it: db
+	// above is an already-open pool with no DSN of its own to hand back, and
+	// every other caller shares that one pool rather than opening a second.
+	dsn string
+
 	encryption               *PayloadEncryption
 	encryptSensitivePayloads bool
 	metrics                  *prometheus.Metrics
@@ -2126,6 +2131,14 @@ type PostgresStoreFactory struct {
 // WithSyncCommitOff sets synchronous_commit = off for finalize transactions.
 func (f *PostgresStoreFactory) WithSyncCommitOff(v bool) *PostgresStoreFactory {
 	f.syncCommitOff = v
+	return f
+}
+
+// WithDSN records the DSN OpenIsolatedStore should open a fresh pool
+// against. Optional: nothing else on this factory needs it, since every
+// other store shares f.db.
+func (f *PostgresStoreFactory) WithDSN(dsn string) *PostgresStoreFactory {
+	f.dsn = dsn
 	return f
 }
 
@@ -2221,6 +2234,40 @@ func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, t
 	}
 	store.syncCommitOff = f.syncCommitOff
 	return store, nopCloser{}, nil
+}
+
+// OpenIsolatedStore is OpenStore's shape, on a pool of its own -- for a
+// caller (cleat#2009's heartbeat pool) that wants to guarantee its writes
+// cannot queue behind execution traffic on f.db. Every tenant already shares
+// f.db (RLS via cleat.tenant_id, not a physical database), so "isolated"
+// here means only "its own connections", not a different database -- unlike
+// OpenIsolatedStore on the MySQL and MSSQL factories, which also carry
+// per-tenant/per-connection scoping this dialect does not need.
+//
+// Requires WithDSN to have been called; a factory built without one refuses
+// rather than silently falling back to f.db, which would defeat the whole
+// point of a caller asking for isolation.
+func (f *PostgresStoreFactory) OpenIsolatedStore(ctx context.Context, tenantID string, maxConns int, taskQueues ...string) (WorkflowStore, io.Closer, error) {
+	if f.dsn == "" {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: WithDSN was never called on this factory", tenantID)
+	}
+	isolatedDB, err := sql.Open("postgres", f.dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: %w", tenantID, err)
+	}
+	isolatedDB.SetMaxOpenConns(maxConns)
+	isolatedDB.SetMaxIdleConns(maxConns)
+	isolatedDB.SetConnMaxLifetime(5 * time.Minute)
+	if err := isolatedDB.PingContext(ctx); err != nil {
+		isolatedDB.Close()
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: ping: %w", tenantID, err)
+	}
+
+	store := NewPostgresStore(isolatedDB, taskQueues...)
+	store.tenantID = tenantID
+	store = store.WithLogger(f.logger)
+	store.syncCommitOff = f.syncCommitOff
+	return store, isolatedDB, nil
 }
 
 // DriverName returns "postgres".

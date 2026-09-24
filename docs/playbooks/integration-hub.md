@@ -60,7 +60,7 @@ every one of those adjectives.
 
 | Concern | Component | Hitch point |
 |---|---|---|
-| Inbound events from customers | `webhookingest`: `await_webhook`, HMAC ingest route | host function + routes |
+| Inbound events from customers | `webhookingest`: `await_webhook`, HMAC ingest route — signing secret required as of 0.3.0 (cleat#1992/#2172) | host function + routes |
 | Event subscription and filtering | `eventtriggers` — subscribe via HTTP, filter expressions, auto-start matching workflows | host function + routes + loop |
 | Outbound webhooks | `notifications`: `send_webhook` — HMAC-SHA256 signed, with retry and delivery tracking | host function + routes + loop |
 | Kafka publish and consume | `kafkaconnect`: `produce`, plus a consumer loop | host function + routes + loop |
@@ -226,6 +226,15 @@ downstream, and make re-drive an operator decision rather than an automatic swee
 overwrite a client-supplied tenant header on it. See
 [`docs/multi-tenant-serving-design.md`](../multi-tenant-serving-design.md), open question 1, before
 exposing it.
+
+**Webhook ingest now requires a signing secret.** As of 0.3.0 (cleat#1992/#2172), `POST
+/ingest/sources` rejects a request with no `secret` (400), and `POST /ingest/{source_id}` refuses
+every request with no valid `X-Hub-Signature-256` (401) or whose secret cannot be read from the
+tenant secrets store (503) — an unsigned source, and an unsigned request to a signed one, are both
+gone. This is a breaking change from 0.2.0, where a source with no secret accepted unsigned
+payloads; see `CHANGELOG.md`'s breaking-changes entry for the migration note. `notifications`'
+outbound `send_webhook` delivery got the same requirement the same PR: `POST /webhooks` also
+rejects a missing secret, and `PUT /webhooks/{id}` can rotate one but can no longer clear it.
 
 **Schema drift in a customer's system.** Nothing detects it. Your integration fails, lands in the
 dead-letter queue with the offending payload recorded, and someone reads it — which is the good

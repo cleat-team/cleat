@@ -98,6 +98,38 @@ func (s *ShardedStore) Shards() []*Shard {
 	return out
 }
 
+// WithTenant returns a shallow copy of ShardedStore whose every shard's
+// underlying store is re-scoped to tenantID via that store's own WithTenant.
+// EVERY shard, not just the one StartNewRun eventually routes to: a
+// fan-out method like ListVersions merges results from every shard, and a
+// shard hosting the destination tenant's own workflow_defs row is invisible
+// to a session scoped to a different tenant -- RLS included -- so scoping
+// only the routed-to shard would leave the others silently answering about
+// the wrong tenant (cleat#2187).
+//
+// Mirrors PostgresStore.WithTenant: a cheap, no-I/O view for the duration of
+// one call, not a new set of connections. Sharding is Postgres-only today
+// (shardedStoreFactory only ever builds *PostgresStore shards), so a shard
+// whose store is some other concrete type is left unscoped rather than
+// guessed at.
+//
+// The returned ShardedStore does not own the underlying pools -- its Close
+// is a no-op (each scoped Shard carries no Close func); only the
+// ShardedStore this was derived from closes the real connections.
+func (s *ShardedStore) WithTenant(tenantID string) *ShardedStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	scoped := make([]*Shard, len(s.shards))
+	for i, shard := range s.shards {
+		store := shard.Store
+		if ps, ok := store.(*PostgresStore); ok {
+			store = ps.WithTenant(tenantID)
+		}
+		scoped[i] = &Shard{Config: shard.Config, Store: store}
+	}
+	return &ShardedStore{shards: scoped}
+}
+
 // stripChildSuffix returns the root ancestor UUID portion of a workflow ID.
 // Child IDs have the form "rootUUID.c{step}" — stripping from ".c" onward
 // yields the root ancestor. Regular UUIDs without ".c" are returned unchanged.

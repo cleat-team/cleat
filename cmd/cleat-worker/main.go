@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"log/slog"
@@ -49,6 +50,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/migrations"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
@@ -157,7 +159,25 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 	if req.TenantID == "" {
 		return "", fmt.Errorf("start workflow %s: tenant id is required", req.DefName)
 	}
-	versions, err := store.ListVersions(ctx, req.DefName)
+
+	// store IS THE PROCESS-WIDE STORE -- opened once, for the default
+	// tenant, for the worker's whole lifetime (see main()). req.TenantID can
+	// legitimately name any tenant: every non-test caller derives it from a
+	// durable row it already owns (a schedule, an event subscription, a job
+	// queue entry), each stamped with its owning tenant under correctly
+	// scoped RLS when that row was created, so req.TenantID itself is
+	// trustworthy. The store is not scoped to it, though, and on Postgres
+	// and SQL Server tenant scoping is a property of the SESSION, not a
+	// query parameter: ListVersions and StartNewRun both decide what they
+	// can see and write from the store's own configured tenant. Without
+	// re-scoping, ListVersions silently answers about the DEFAULT tenant's
+	// deployed versions rather than req.TenantID's, and StartNewRun either
+	// gets rejected outright (Postgres: cleat#2187) or succeeds scoped to
+	// the wrong session (SQL Server: cleat#2204, cleat#2205 will make that a
+	// rejection too, so this must not rely on it staying permissive).
+	scoped := scopeToTenant(store, req.TenantID)
+
+	versions, err := scoped.ListVersions(ctx, req.DefName)
 	if err != nil {
 		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
 	}
@@ -168,7 +188,7 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 	if err != nil {
 		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
 	}
-	runID, _, err := store.StartNewRun(ctx, "", req.DefName, versions[0], in,
+	runID, _, err := scoped.StartNewRun(ctx, "", req.DefName, versions[0], in,
 		req.IdempotencyKey, req.TenantID, 0)
 	return runID, err
 }
@@ -203,6 +223,96 @@ func deploymentSecretsForPlugin(p plugin.Plugin, unscoped plugin.DeploymentSecre
 	return nil
 }
 
+// scopeToTenant returns a copy of store re-scoped to tenantID, for the
+// dialects that support cheap, no-I/O per-call re-scoping (Postgres, SQL
+// Server, and a sharded Postgres store, via each store's own WithTenant).
+// WithTenant is deliberately not part of the engine.WorkflowStore interface
+// -- see PostgresStore.StartNewRunWithConcurrencyKey's doc comment for why:
+// it would touch every implementation and every test double for a
+// capability not all of them have.
+//
+// MySQL has no equivalent, and this is not an oversight: tenant isolation
+// there is which PHYSICAL DATABASE a connection targets, fixed when that
+// pool was opened, not a session-level value a later call can change --
+// and per tiers.yaml's D1 decision, MySQL is single-tenant only. A store's
+// own tenant is returned unchanged, and startPluginWorkflow above is
+// expected to fail for any req.TenantID other than the store's own on this
+// dialect; that is what TestStartPluginWorkflow_MySQLIsSingleTenantOnly
+// pins, not a gap this function is supposed to close.
+func scopeToTenant(store engine.WorkflowStore, tenantID string) engine.WorkflowStore {
+	switch s := store.(type) {
+	case *engine.PostgresStore:
+		return s.WithTenant(tenantID)
+	case *engine.MSSQLStore:
+		return s.WithTenant(tenantID)
+	case *engine.ShardedStore:
+		return s.WithTenant(tenantID)
+	case *engine.MySQLStore:
+		// No per-call scoping exists or is needed -- see the doc comment above.
+		return s
+	default:
+		// A store type this function does not recognize. Returning it
+		// unscoped without saying so would repeat cleat#2187/#2204 for
+		// whatever dialect or wrapper this is the first time anyone adds
+		// one -- log it so the gap is visible before an incident finds it.
+		slog.Default().Warn("scopeToTenant: unrecognized store type, returning it unscoped",
+			"type", fmt.Sprintf("%T", store), "tenant_id", tenantID)
+		return store
+	}
+}
+
+// signalPluginWorkflow delivers a signal from a plugin to a specific
+// workflow run, scoped to the tenant workflowID's own run belongs to.
+//
+// store is the same process-wide, default-tenant store startPluginWorkflow
+// above re-scopes per call -- see its doc comment for why that matters on
+// Postgres and SQL Server. The tenant comes from ctx rather than a request
+// field: every real caller already carries one there. webhookingest's HTTP
+// handler and retry loop, and eventtriggers' publish path, each wrap ctx
+// with plugin.ForTenant before calling env.SignalWorkflow. Without this,
+// DeliverSignal ran on the default tenant's session regardless of which
+// tenant's workflow was named -- on Postgres and SQL Server that wrote the
+// signal row under the default tenant and updated zero rows of the actual
+// target, silently, so webhookingest and eventtriggers both marked the
+// triggering event completed with the signal never delivered (cleat#2209).
+//
+// No tenant in ctx is left unscoped rather than treated as an error -- the
+// same pass-through convention tenantctx.From's other callers in this
+// package use (see dbServiceCaller.resolveSecrets,
+// hostPluginRegistryAdapter.withSecrets): a caller with no tenant to give
+// has no wrong tenant to guard against either, and DeliverSignal now fails
+// loudly on its own if the workflow it names cannot be found under
+// whatever session it ran under.
+func signalPluginWorkflow(ctx context.Context, store engine.WorkflowStore, workflowID, signalName, payload string) error {
+	scoped := store
+	if tid, ok := tenantctx.From(ctx); ok {
+		scoped = scopeToTenant(store, tid.String())
+	}
+	return scoped.DeliverSignal(ctx, workflowID, signalName, payload)
+}
+
+// signalPluginWorkflowWithAuth is signalPluginWorkflow plus the
+// --require-signal-auth check: pluginName must appear (or "*" must appear)
+// in the target workflow's own allowed_signals. Scoped once, so the
+// authorization check and the delivery it gates read the SAME tenant's row
+// -- checking one tenant's allowed_signals and then delivering under
+// another's would make the check meaningless, not merely wrong (cleat#2209:
+// GetAllowedSignalCallers ran unscoped here exactly like DeliverSignal did).
+func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStore, workflowID, signalName, payload, pluginName string) error {
+	scoped := store
+	if tid, ok := tenantctx.From(ctx); ok {
+		scoped = scopeToTenant(store, tid.String())
+	}
+	callers, err := scoped.GetAllowedSignalCallers(ctx, workflowID)
+	if err != nil {
+		return err
+	}
+	if !signalCallerAllowed(callers, pluginName) {
+		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
+	}
+	return scoped.DeliverSignal(ctx, workflowID, signalName, payload)
+}
+
 func main() {
 	flag.Parse()
 
@@ -211,6 +321,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := validateHeartbeat(*heartbeatInterval); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := validateHeartbeatMaxConnections(*heartbeatMaxConnections); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -606,6 +720,8 @@ func main() {
 	var store engine.WorkflowStore
 	var db *sql.DB
 	var pluginDB *sql.DB
+	var heartbeatCloser io.Closer
+	var heartbeatStore engine.WorkflowStore
 	var tenantPools *plugin.TenantPools
 	// shardPoolCount is captured here rather than read from shardDBs, which is
 	// scoped to the sharded branch below. The connection census (cleat#1486)
@@ -732,6 +848,12 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		}
+		// heartbeatStore is intentionally left nil here. cleat#2009's reserved
+		// heartbeat pool is not wired for the sharded path: HeartbeatBatchFenced
+		// would need to run per-shard, against each shard's own connection
+		// pool, and no shard-aware heartbeat routing exists yet. Every shard
+		// falls back to heartbeating through its own store, same as before
+		// this change -- a known scope limit, not a silent gap.
 		// Start idempotency key cleanup on each shard. Sharding is a
 		// PostgreSQL configuration -- shardDBs come from the postgres
 		// connection strings above -- so the driver is named explicitly rather
@@ -775,7 +897,8 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(max(10, *concurrency/2))
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel).WithLogger(logger)
+			pgFactory := engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel).WithLogger(logger).WithDSN(dbDSN)
+			factory = pgFactory
 
 			// PER-TENANT POOLS, WHEN --tenant-isolation=role. cleat#1307.
 			//
@@ -841,6 +964,30 @@ func main() {
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
+
+			// Create a reserved connection pool for heartbeat writes, isolated
+			// from the execution pool. cleat#2009: a saturated execution pool
+			// (long-held connections claiming/deferring workflows) starves
+			// heartbeats on the shared pool, and a missed heartbeat is what
+			// triggers reclaim -- so pool exhaustion looks like a dead worker.
+			//
+			// Built through the factory, not a bare sql.Open: Postgres isolates
+			// tenants with RLS set per-transaction rather than baked into the
+			// pool, so this arm was already safe with a bare pool -- but MySQL
+			// is not (see the mysql arm below), and going through
+			// OpenIsolatedStore keeps all three dialects on one reviewed path
+			// instead of three hand-rolled ones that can silently diverge.
+			if *heartbeatMaxConnections > 0 {
+				hs, closer, err := pgFactory.OpenIsolatedStore(context.Background(), defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatCloser = closer
+				defer heartbeatCloser.Close()
+				heartbeatStore = hs
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
+			}
 		case "mysql":
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
@@ -851,7 +998,8 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL)).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			myFactory := engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL)).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			factory = myFactory
 
 			// Create plugin-dedicated connection pool.
 			if *maxPluginConnections > 0 {
@@ -867,8 +1015,32 @@ func main() {
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
+
+			// Reserved heartbeat connection pool. cleat#2009.
+			//
+			// MUST go through the factory, unlike a bare sql.Open: MySQL has no
+			// RLS and isolates tenants by PHYSICAL DATABASE
+			// (MySQLTenantDatabaseName), selected by the DATABASE NAME COMPONENT
+			// OF THE DSN. A bare sql.Open(sqlDriver, *dbURL) connects to the base
+			// database -- same schema, zero rows for any tenant -- so every
+			// heartbeat this pool wrote landed somewhere the reaper could never
+			// see, and every run got fenced out and cancelled at its first
+			// heartbeat. OpenIsolatedStore opens its own pool on the tenant DSN,
+			// the same path OpenStore uses.
+			if *heartbeatMaxConnections > 0 {
+				hs, closer, err := myFactory.OpenIsolatedStore(context.Background(), defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatCloser = closer
+				defer heartbeatCloser.Close()
+				heartbeatStore = hs
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
+			}
 		case "mssql":
-			factory = engine.NewMSSQLStoreFactory(*dbURL).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			mssqlFactory := engine.NewMSSQLStoreFactory(*dbURL).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			factory = mssqlFactory
 			// Open a connection to verify and for plugin/migration use.
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
@@ -893,6 +1065,28 @@ func main() {
 				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
+			}
+
+			// Reserved heartbeat connection pool. cleat#2009.
+			//
+			// Built through the factory rather than a bare sql.Open, for the
+			// same reason as the postgres and mysql arms above: one reviewed
+			// path for all three dialects rather than three that can silently
+			// diverge. MSSQL sets its RLS session context per-transaction
+			// (beginTxWithContext), independent of the pool's own connector, so
+			// this arm was not exposed to the mysql arm's bug -- but it shares
+			// the fix regardless, and gets the tenantID/logger wiring OpenStore
+			// already gives every other store.
+			if *heartbeatMaxConnections > 0 {
+				hs, closer, err := mssqlFactory.OpenIsolatedStore(context.Background(), defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatCloser = closer
+				defer heartbeatCloser.Close()
+				heartbeatStore = hs
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
 			}
 		default:
 			logger.ErrorContext(context.Background(), "invalid driver", "worker_id", workerID, "driver", *driver)
@@ -1099,7 +1293,7 @@ func main() {
 		},
 
 		SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
-			return store.DeliverSignal(ctx, workflowID, signalName, payload)
+			return signalPluginWorkflow(ctx, store, workflowID, signalName, payload)
 		},
 
 		// cleat#1992. Both adapters are safe on a nil target -- secretStore is
@@ -1326,14 +1520,7 @@ func main() {
 		if *requireSignalAuth {
 			pluginName := lp.Plugin.Info().Name
 			envCopy.SignalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
-				callers, err := store.GetAllowedSignalCallers(ctx, workflowID)
-				if err != nil {
-					return err
-				}
-				if !signalCallerAllowed(callers, pluginName) {
-					return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
-				}
-				return store.DeliverSignal(ctx, workflowID, signalName, payload)
+				return signalPluginWorkflowWithAuth(ctx, store, workflowID, signalName, payload, pluginName)
 			}
 		}
 		func() {
@@ -1621,6 +1808,12 @@ func main() {
 	if *migrateDBURL != "" {
 		budget.Migrate = migratePoolMaxConns
 	}
+	// --heartbeat-max-connections has no effect on a sharded deployment yet
+	// (see its flag doc), so counting it there would charge the budget for a
+	// pool that was never opened.
+	if *heartbeatMaxConnections > 0 && *shardsFile == "" {
+		budget.Heartbeat = *heartbeatMaxConnections
+	}
 	// WHO ACTUALLY HAS A POOL PER TENANT, asked rather than assumed.
 	//
 	// This used to read `if tenantPools == nil { budget.TenantPerPool = 0 }`,
@@ -1723,6 +1916,7 @@ func main() {
 		id:                               workerID,
 		logger:                           logger,
 		store:                            store,
+		heartbeatStore:                   heartbeatStore,
 		storeTenantID:                    defaultTenantID,
 		storeFactory:                     factory,
 		taskQueues:                       taskQueues,

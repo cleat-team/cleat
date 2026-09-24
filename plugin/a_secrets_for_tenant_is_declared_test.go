@@ -58,6 +58,28 @@ var secretsForTenantLedger = map[string]bool{
 	// setup rather than any request -- there is no tenant-scoped ctx to
 	// inherit at that point, same shape as the background loop above.
 	"tests/plugin-harness/testdb.go:SeedPluginSecrets": true,
+
+	// cleat#1992: webhook_config.secret moved into tenant secrets. deliver
+	// runs in notifications' own delivery retry loop, reached from a timer
+	// tick with no request in scope -- Run marks its ctx AcrossAllTenants
+	// before deliver's config lookup even knows which tenant a delivery
+	// belongs to, so a second, never-marked ctx (baseCtx, threaded from Run)
+	// is what deliver's Secrets.ForTenant call scopes to once it has read
+	// cfg.TenantID off the config row. Same shape as exportForConfig above.
+	"plugins/notifications/background.go:(*Plugin).deliver": true,
+
+	// cleat#1992: webhook_sources.secret moved into tenant secrets.
+	// handleIngestWebhook serves POST /ingest/{source_id}, one of the two
+	// routes cmd/cleat-worker exempts from auth (main.go) -- the caller is
+	// the external system sending the webhook and holds no cleat credential,
+	// so r.Context() carries no tenant. The source id in the URL is how the
+	// handler learns the tenant, read via a NAMED cross-tenant bypass
+	// (discoverCtx, cleat#1538) before it exists to name to a ForTenant call.
+	// tenantCtx is built from r.Context() (not discoverCtx) once the row's
+	// tenant_id is known, the same call that already scopes the rest of the
+	// handler's SQL -- reused here for Secrets.ForTenant rather than a
+	// second, differently-built context.
+	"plugins/webhookingest/routes.go:(*Plugin).handleIngestWebhook": true,
 }
 
 // secretsForTenantSite is one Secrets.ForTenant-shaped call, located by

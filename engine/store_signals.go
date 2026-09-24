@@ -258,6 +258,22 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	// unconditionally, in this transaction, so the counter and the delivery
 	// become visible together: a reader that can see the row can see the
 	// bump (cleat#953).
+	//
+	// No RowsAffected check here, and that is deliberate, not an oversight:
+	// RLS's USING clause filters this UPDATE by session the same way it
+	// filters a SELECT, so a tenantID that does not match the row's own
+	// tenant matches zero rows -- and that is the ESTABLISHED, tested
+	// contract for a cross-tenant or nonexistent-id delivery
+	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal case,
+	// IMPROVEMENT-PLAN 3.215): it succeeds as a harmless orphan INSERT under
+	// the caller's own tenant, not an error, specifically so that
+	// success-versus-failure cannot be used as a cross-tenant existence
+	// oracle. cleat#2209's actual defect was that SignalWorkflow ran on a
+	// store scoped to the WRONG tenant for a REAL, correctly-owned target --
+	// scopeToTenant (cmd/cleat-worker/main.go, signalPluginWorkflow) is what
+	// fixes that, by ensuring this UPDATE runs under the target's own
+	// tenant, where it matches. Erroring here on n==0 was tried and reverted
+	// (cleat#2207) after it broke that established contract in CI.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,

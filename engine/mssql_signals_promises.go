@@ -108,15 +108,31 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 		return err
 	}
 
-	// Scoped for the same reason as the MERGE above: without it, delivering a
-	// signal to an id belonging to another tenant woke that tenant's workflow.
-	_, err = tx.ExecContext(ctx, `
+	// Scoped for the same reason as the INSERT above: without it, delivering
+	// a signal to an id belonging to another tenant woke that tenant's
+	// workflow.
+	//
+	// No RowsAffected check here, and that is deliberate, not an oversight:
+	// the explicit "AND tenant_id = @p2" excludes a mismatched row SILENTLY,
+	// on purpose -- that is the ESTABLISHED, tested contract for a
+	// cross-tenant or nonexistent-id delivery
+	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal and
+	// DeliverSignalWake cases, IMPROVEMENT-PLAN 3.86/3.215): it succeeds as
+	// a harmless orphan INSERT under the caller's own tenant, not an error,
+	// specifically so that success-versus-failure cannot be used as a
+	// cross-tenant existence oracle. cleat#2209's actual defect was that
+	// SignalWorkflow ran on a store scoped to the WRONG tenant for a REAL,
+	// correctly-owned target -- scopeToTenant (cmd/cleat-worker/main.go,
+	// signalPluginWorkflow) is what fixes that, by ensuring this UPDATE runs
+	// under the target's own tenant, where it matches. Erroring here on
+	// RowsAffected()==0 was tried and reverted (cleat#2207) after it broke
+	// that established contract in CI.
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,
 		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN SYSUTCDATETIME() ELSE next_wake_at END
 		WHERE id = @p1 AND tenant_id = @p2
-	`, workflowID, s.tenantID)
-	if err != nil {
+	`, workflowID, s.tenantID); err != nil {
 		return err
 	}
 	return nil
@@ -151,9 +167,24 @@ func (s *MSSQLStore) PollCancellation(ctx context.Context, workflowID string) (b
 	return s.CheckCancellation(ctx, workflowID)
 }
 
+// GetAllowedSignalCallers is a plain s.db query on every other dialect, but
+// on MSSQL beginTxWithContext, not s.db.QueryRowContext -- matching
+// DeliverSignal, ListVersions and GetWorkflowByID (cleat#2187, cleat#2204).
+// This is the --require-signal-auth check (cleat#2209): a plain query here
+// would run under the pool's ambient, connect-time SESSION_CONTEXT rather
+// than a WithTenant copy's own tenantID, so a re-scoped store's auth check
+// would read the WRONG workflow's allowed_signals -- either denying a
+// legitimate caller or, if the two tenants' rows happen to differ some
+// other way, approving on the wrong evidence.
 func (s *MSSQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var raw sql.NullString
-	err := s.db.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT allowed_signals FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`,
 		workflowID, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {

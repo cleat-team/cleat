@@ -75,12 +75,16 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 
 	dsn, containerName := startSandboxPostgres(t)
 
-	// The template's worker migrates the schema itself at start: its
-	// docker-compose.yml passes --migrate-on-start (cleat#2117; a worker no longer
-	// migrates unless asked, and a fleet uses `cleat-worker --migrate-only` as a
-	// deploy step). This test starts the same binary directly, with the same flag.
-	// So it has to start, and become healthy, BEFORE `cleat deploy` writes a
-	// workflow_defs row into a schema that does not exist yet.
+	// The scaffold's docker-compose.yml migrates the schema in a separate
+	// one-shot `--migrate-only` step (cleat#2117), run as the postgres
+	// superuser, before the serving worker starts as the unprivileged
+	// cleat_app role and only VERIFIES the schema (cleat#2067 break 2: the
+	// serving connection must not be a superuser, or PostgreSQL exempts it
+	// from row-level security). This test starts one binary directly rather
+	// than reproducing that two-step split, so it uses --migrate-on-start
+	// instead -- equivalent for a single process. So it has to start, and
+	// become healthy, BEFORE `cleat deploy` writes a workflow_defs row into
+	// a schema that does not exist yet.
 	//
 	// The scaffold hardcodes localhost:8080 in both the Makefile and
 	// web/index.html -- matching that rather than parameterizing the test
