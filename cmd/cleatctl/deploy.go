@@ -186,10 +186,13 @@ func deployPlugin(ctx context.Context, db *sql.DB, args []string) {
 
 	hash := sha256.Sum256(wasmBytes)
 
-	// DeployPlugin upserts on (name, version): redeploying a version replaces
-	// its bytes and clears `deprecated`, and a new version adds a row rather
-	// than overwriting the old one. The command this replaces had one row per
-	// NAME, which is the model plugin_defs deliberately does not use.
+	// A new version adds a row rather than overwriting the old one -- the
+	// command this replaces had one row per NAME, which is the model
+	// plugin_defs deliberately does not use. Versions are IMMUTABLE
+	// (cleat#2135): redeploying an existing (name, version) with the same
+	// bytes is a no-op, and with different bytes is refused, naming both
+	// checksums. There is no override for that refusal -- publish a new
+	// version instead.
 	if err := engine.NewPluginLoader(db, nil).DeployPlugin(ctx, name, version, wasmBytes, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "error deploying plugin %s v%s: %v\n", name, version, err)
 		osExit(1)

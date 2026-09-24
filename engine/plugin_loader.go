@@ -3,7 +3,9 @@ package engine
 import (
 	"container/list"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -353,33 +355,86 @@ func (l *PluginLoader) SetLimits(limits plugin.CapabilityLimits) {
 }
 
 // DeployPlugin inserts a new plugin definition into the database.
-// If the definition already exists, it is updated (upsert semantics).
+//
+// Versions are immutable (cleat#2135): deploying a (name, version) that
+// already exists is a no-op if the WASM bytes are byte-identical to what is
+// already stored -- nothing is written, so config, created_at and deprecated
+// are all left exactly as they were, and a reinstall of a deprecated version
+// does NOT silently un-deprecate it. If the bytes differ, the deploy is
+// refused and the error names both checksums. Publishing different code at
+// an existing version is not supported by design; a change needs a new
+// version string. There is no override (no "--force"): neither `cleat
+// plugin install` nor `cleatctl deploy plugin`, the only two callers, have
+// ever had one, so this adds no missing escape hatch -- see cleat#2135.
+//
+// Before this, DeployPlugin upserted unconditionally
+// (`ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = ...`), which
+// replaced a version's code in place on every redeploy. That is what
+// docs/contributor/plugins/plugin-security.md used to promise the opposite
+// of (fixed doc in #2074, behaviour fixed here).
+//
+// Today this only ever runs against PostgreSQL. cmd/cleat's DB-touching
+// subcommands -- including `plugin install`/`uninstall`, the only other
+// caller of DeployPlugin besides cleatctl -- refuse every non-Postgres DSN
+// (cmd/cleat/db.go's openPostgresDB), and cmd/cleatctl's `deploy` subcommand
+// is restricted to postgres in its own portedOn map
+// (cmd/cleatctl/ported.go). Nothing else in the tree constructs a
+// PluginLoader (`grep -rn NewPluginLoader --include="*.go" .`). If a future
+// caller reaches this on another dialect, the $N placeholders and the
+// ON CONFLICT clause below need a Rebind pass first -- their presence here
+// is not evidence this was ever ported.
 //
 //	sql: INSERT INTO plugin_defs (name, version, wasm_bytes, config)
 //	     VALUES ($1, $2, $3, $4)
-//	     ON CONFLICT (name, version) DO UPDATE SET
-//	       wasm_bytes = $3, config = $4, deprecated = false, created_at = now()
+//	     ON CONFLICT (name, version) DO NOTHING
+//	 -- 0 rows affected means (name, version) already exists; then:
+//	     SELECT wasm_bytes FROM plugin_defs WHERE name = $1 AND version = $2
+//	 -- and compare its checksum to the bytes just offered.
 func (l *PluginLoader) DeployPlugin(ctx context.Context, name string, version string, wasmBytes []byte, config map[string]any) error {
 	configJSON, err := json.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("deploy plugin %s v%s: marshal config: %w", name, version, err)
 	}
 
-	_, err = l.db.ExecContext(ctx, `
+	res, err := l.db.ExecContext(ctx, `
 		INSERT INTO plugin_defs (name, version, wasm_bytes, config)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (name, version) DO UPDATE SET
-			wasm_bytes = EXCLUDED.wasm_bytes,
-			config = EXCLUDED.config,
-			deprecated = false,
-			created_at = now()
+		ON CONFLICT (name, version) DO NOTHING
 	`, name, version, wasmBytes, configJSON)
 	if err != nil {
 		return fmt.Errorf("deploy plugin %s v%s: %w", name, version, err)
 	}
 
-	slog.InfoContext(ctx, "plugin deployed", "name", name, "version", version, "size_bytes", len(wasmBytes))
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("deploy plugin %s v%s: rows affected: %w", name, version, err)
+	}
+	if n > 0 {
+		slog.InfoContext(ctx, "plugin deployed", "name", name, "version", version, "size_bytes", len(wasmBytes))
+		return nil
+	}
+
+	// (name, version) already exists. Versions are immutable: succeed as a
+	// no-op if the stored bytes checksum identically to what was offered,
+	// refuse otherwise.
+	var existing []byte
+	err = l.db.QueryRowContext(ctx, `
+		SELECT wasm_bytes FROM plugin_defs WHERE name = $1 AND version = $2
+	`, name, version).Scan(&existing)
+	if err != nil {
+		return fmt.Errorf("deploy plugin %s v%s: read existing version to compare checksums: %w", name, version, err)
+	}
+
+	newSum := sha256.Sum256(wasmBytes)
+	oldSum := sha256.Sum256(existing)
+	if newSum == oldSum {
+		slog.InfoContext(ctx, "plugin already deployed at this checksum, no-op", "name", name, "version", version)
+		return nil
+	}
+
+	return fmt.Errorf("deploy plugin %s v%s: refused: this version is already deployed with different bytes "+
+		"(installed checksum %s, offered checksum %s) -- plugin versions are immutable, publish a new version",
+		name, version, hex.EncodeToString(oldSum[:]), hex.EncodeToString(newSum[:]))
 }
 
 // DeployPluginWithCapabilities is like DeployPlugin but additionally validates
