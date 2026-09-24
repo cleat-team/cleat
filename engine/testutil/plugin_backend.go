@@ -118,33 +118,45 @@ func NewPluginTestBackends(t *testing.T) []PluginTestBackend {
 // just move the problem. A per-tenant variant was written first and deleted
 // unused -- every fixture that needed anything needed this one.
 //
-// THE cross_tenant SESSION KEY BELOW HAS NEVER BEEN A BYPASS, AND THE COMMENT
-// HERE IMPLIED OTHERWISE UNTIL cleat#2205. dbo.fn_tenant_filter has never in
-// its shipped history read a key called cross_tenant: 001 and 012 check only
-// SESSION_CONTEXT('tenant_id') and IS_ROLEMEMBER('cleat_admin'), and 075 made
-// even that disjunct opt-in, off by default. Measured directly against a
-// migrated CLEAT_TEST_MSSQL database, connected as sa exactly as
-// MSSQLTestDB connects: `SELECT IS_ROLEMEMBER(N'cleat_admin')` returns 0 and
-// admin.rls_predicate_form reads 'plain'. So a plain sa connection setting
-// only the cross_tenant key was never exempt from FILTER either, and every
-// fixture that used this function for a SELECT or DELETE spanning more than
-// its own single seeded tenant was reading or deleting less than it assumed,
-// silently, for as long as this function has existed -- the same failure
-// mode its own doc comment above describes, just not fully closed by the fix
-// that comment credits. The `EXEC sp_set_session_context @key =
-// N'cross_tenant', ...` call below is kept only as a human-readable label on
-// the session, visible in sys.dm_exec_sessions during a hung test; it must
-// not be relied on for access.
+// THE cross_tenant SESSION KEY IS NOT A BYPASS ON CORE (dbo.fn_tenant_filter)
+// TABLES, AND THE COMMENT HERE IMPLIED OTHERWISE UNTIL cleat#2205 -- BUT IT IS
+// THE REAL BYPASS ON PLUGIN TABLES, AND THAT HALF WAS ALREADY TRUE. Two
+// different predicate functions read two different things. dbo.fn_tenant_filter
+// (the core tables: workflow_defs, workflow_instances, tenant_secrets, ...) has
+// never in its shipped history read a key called cross_tenant: 001 and 012
+// check only SESSION_CONTEXT('tenant_id') and IS_ROLEMEMBER('cleat_admin'), and
+// 075 made even that disjunct opt-in, off by default. Measured directly against
+// a migrated CLEAT_TEST_MSSQL database, connected as sa exactly as MSSQLTestDB
+// connects: `SELECT IS_ROLEMEMBER(N'cleat_admin')` returns 0 and
+// admin.rls_predicate_form reads 'plain'. So on a CORE table, a plain sa
+// connection setting only the cross_tenant key was never exempt from FILTER
+// either.
 //
-// So for MSSQL this now routes the connection through MSSQLAdminDB, which is
-// the real mechanism: it applies migrations/mssql/optional/cross_tenant_claim.sql
-// (switching dbo.fn_tenant_filter to the IS_ROLEMEMBER('cleat_admin') form,
-// refcounted and restored per mssql_admin.go's file comment so it does not
-// leak into a deployment-shaped test elsewhere in the suite) and returns a
-// pool authenticated as a member of that role. Since migration 103 binds its
-// BLOCK predicates to the SAME dbo.fn_tenant_filter, IS_ROLEMEMBER admits
-// writes exactly as it already admitted reads and deletes -- no second,
-// independently-drifting exemption.
+// dbo.fn_plugin_tenant_filter (every plugin-owned table: workflow_blob_refs,
+// kv_store, task_queue, ...) is a SEPARATE function, and it DOES read this key
+// -- `OR CAST(SESSION_CONTEXT(N'cross_tenant') AS NVARCHAR(4000)) <> N''`,
+// plugin/migration.go's applyTenantScopingMSSQL. It is not a test-only
+// convenience: plugin.markCrossTenantOnTx sets the identical key in production,
+// and every plugin's AcrossAllTenants sweep (blobstore's stale-ref sweep among
+// them) depends on it to see every tenant's rows in one pass. So the `EXEC
+// sp_set_session_context @key = N'cross_tenant', ...` call below is exactly
+// the bypass a fixture touching a PLUGIN table needs, and is the same
+// mechanism the code under test uses -- keep it wired for anything that reads,
+// writes, or deletes a plugin table through this connection.
+//
+// What it is NOT is a way to write a CORE table across the block predicates
+// cleat#2205 (migration 103) added to dbo.fn_tenant_filter. For MSSQL this now
+// ALSO routes the connection through MSSQLAdminDB: it applies
+// migrations/mssql/optional/cross_tenant_claim.sql (switching
+// dbo.fn_tenant_filter to the IS_ROLEMEMBER('cleat_admin') form, refcounted and
+// restored per mssql_admin.go's file comment so it does not leak into a
+// deployment-shaped test elsewhere in the suite) and returns a pool
+// authenticated as a member of that role, which migration 103's BLOCK
+// predicates admit on a core table exactly as IS_ROLEMEMBER already admitted
+// FILTER reads and deletes there. It changes nothing for a plugin table:
+// fn_plugin_tenant_filter has no IS_ROLEMEMBER branch at all, so a fixture's
+// access to a plugin table continues to run on cross_tenant alone, whichever
+// login holds the connection.
 //
 // It is a no-op on PostgreSQL and MySQL, and the connection is released by
 // t.Cleanup. Returning it to the pool clears the session context (go-mssqldb
