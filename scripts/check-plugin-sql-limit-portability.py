@@ -72,15 +72,47 @@ import sys
 
 LIMIT_WORD = re.compile(r"\bLIMIT\b")
 
-# plugin.Query{ ... } literals, paired on the closing brace at the start of
-# its own line (whatever the indent -- plugins/datadogexport/background.go
-# nests four of these inside an outer struct literal, each closing on its
-# own "\t}," rather than a column-0 "}"). Pair the braces first; only then
-# ask whether the body contains LIMIT or MSSQL -- the same "pair first,
-# filter after" rule CLAUDE.md gives for backtick literals, applied to
-# braces. Non-greedy, so each open pairs with its OWN nearest close rather
-# than a later one four fields down.
-QUERY_STRUCT = re.compile(r"plugin\.Query\{(.*?)\n[ \t]*\}", re.S)
+QUERY_OPEN = re.compile(r"plugin\.Query\{")
+
+
+def find_query_struct_spans(src: str) -> list[tuple[int, int]]:
+    """(body_start, body_end) character offsets for every plugin.Query{...}
+    literal in `src`, found by counting brace depth rather than matching a
+    closing brace with a regex.
+
+    A regex closer anchored on "the next line that is just a closing brace"
+    (this guard's first version) pairs a ONE-LINE plugin.Query{...} literal
+    -- one whose own "}" sits on the same line as its fields, with no
+    following newline before it -- with some LATER, unrelated standalone
+    "}", swallowing everything in between (including any bare LIMIT out
+    there) into what looks like "covered by a Query{} struct". No one-line
+    literal exists in this tree today, so it never fired, but cleat-review
+    found it by inspection while reviewing #2256: it is a real gap, not a
+    hypothetical one. cleat#2257.
+
+    Depth-counting closes on the FIRST brace that brings the count back to
+    zero, whatever line it is on, so a one-liner, a multi-liner, and an
+    indented close (plugins/datadogexport/background.go nests four of these
+    inside an outer struct literal, each closing on its own "\\t},") are all
+    handled the same way, with no assumption about where the closer sits.
+    """
+    spans = []
+    for m in QUERY_OPEN.finditer(src):
+        depth = 1
+        i = m.end()  # just past the opening "{"
+        while i < len(src) and depth > 0:
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+            i += 1
+        if depth == 0:
+            spans.append((m.end(), i - 1))
+        # depth > 0 here means an unterminated literal (unbalanced source);
+        # nothing to pair it with, so it is left uncovered rather than
+        # guessed at -- any LIMIT in it still gets caught by the bare-LIMIT
+        # pass below.
+    return spans
 
 # Directories with no MSSQL story at all. See the module docstring for why
 # pgvector is here. Keep this list short and explained; a plugin belongs on
@@ -110,20 +142,20 @@ def find_bug_lines(path: str, src: str) -> list[str]:
         return src.count("\n", 0, offset) + 1
 
     covered = []  # (start, end) character spans belonging to some Query{}
-    for m in QUERY_STRUCT.finditer(src):
-        body = m.group(1)
-        covered.append((m.start(1), m.end(1)))
+    for body_start, body_end in find_query_struct_spans(src):
+        body = src[body_start:body_end]
+        covered.append((body_start, body_end))
         has_mssql = re.search(r'MSSQL:\s*`[^`]+`', body) is not None
         if not has_mssql:
             for lm in LIMIT_WORD.finditer(body):
-                bug_lines.add(line_of(m.start(1) + lm.start()))
+                bug_lines.add(line_of(body_start + lm.start()))
         else:
             # Even WITH an MSSQL arm, LIMIT inside that arm itself is wrong
             # on its own terms -- MSSQL has no LIMIT clause regardless of
             # which struct field carries it.
             for mssql_m in re.finditer(r'MSSQL:\s*`([^`]*)`', body):
                 for lm in LIMIT_WORD.finditer(mssql_m.group(1)):
-                    bug_lines.add(line_of(m.start(1) + mssql_m.start(1) + lm.start()))
+                    bug_lines.add(line_of(body_start + mssql_m.start(1) + lm.start()))
 
     def inside_covered(offset: int) -> bool:
         return any(s <= offset < e for s, e in covered)
@@ -228,6 +260,31 @@ def self_test() -> int:
         ["plugins/widget/queries.go:3"],
     )
 
+    # KNOWN-POSITIVE, and the exact gap cleat-review found reviewing #2256
+    # (cleat#2257): a ONE-LINE plugin.Query{} literal -- its own closing "}"
+    # on the same line as its fields, no newline before it -- followed by an
+    # unrelated bare LIMIT later in the file. The first version of this
+    # guard paired braces with a regex anchored on "the next line that is
+    # just a closing brace", so a one-liner's "}" (mid-line, not matched)
+    # made the pairing skip past it and grab the NEXT standalone "}" instead
+    # -- here, the end of an unrelated function -- swallowing the real LIMIT
+    # in between into what looked like "covered by a Query{} struct with an
+    # MSSQL arm". Depth-counting closes each Query{} on its own matching
+    # brace regardless of what line it is on, so the one-liner covers only
+    # itself and the later LIMIT is still checked as the bare literal it is.
+    check(
+        "a one-line plugin.Query{} literal does not swallow a later LIMIT",
+        "plugins/widget/queries.go",
+        "var q = plugin.Query{Default: `SELECT * FROM widgets ORDER BY id LIMIT 10`, "
+        "MSSQL: `SELECT TOP 10 * FROM widgets ORDER BY id`}\n"
+        "\n"
+        "func other() {\n"
+        "\tquery := `SELECT * FROM other_table ORDER BY id LIMIT $1`\n"
+        "\t_ = query\n"
+        "}\n",
+        ["plugins/widget/queries.go:4"],
+    )
+
     # KNOWN-NEGATIVE: the jobqueue/background.go shape -- a complete
     # plugin.Query{} struct with a real, non-empty MSSQL arm using TOP.
     check(
@@ -295,7 +352,7 @@ def self_test() -> int:
         for f in failures:
             print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
         return 1
-    print("self-test passed: 10 cases (three known-positive, five known-negative, "
+    print("self-test passed: 11 cases (four known-positive, five known-negative, "
           "one documented gap, one vacuity)")
     return 0
 

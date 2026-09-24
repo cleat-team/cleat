@@ -176,10 +176,18 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 	events := []eventEntry{}
 	for rows.Next() {
 		var e eventEntry
-		if err := rows.Scan(&e.Sequence, &e.Event, &e.CreatedAt); err != nil {
+		// plugin.JSONColumn, not &e.Event directly: json.RawMessage is a
+		// named []byte type, and database/sql's convertAssign fast path
+		// doesn't convert a driver string into one -- go-mssqldb returns
+		// NVARCHAR as string, so every row failed to scan and this endpoint
+		// returned an empty list on SQL Server. See plugin.JSONColumn.
+		// cleat#2257.
+		var eventCol plugin.JSONColumn
+		if err := rows.Scan(&e.Sequence, &eventCol, &e.CreatedAt); err != nil {
 			p.logger.Error("eventstore: scan row", "error", err)
 			continue
 		}
+		e.Event = eventCol.Raw
 		events = append(events, e)
 	}
 
@@ -255,11 +263,14 @@ func (p *Plugin) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 			for rows.Next() {
 				var seq int64
-				var event json.RawMessage
-				if err := rows.Scan(&seq, &event); err != nil {
+				// plugin.JSONColumn: see handleGet's identical comment above.
+				// cleat#2257.
+				var eventCol plugin.JSONColumn
+				if err := rows.Scan(&seq, &eventCol); err != nil {
 					p.logger.Error("eventstore: sse scan", "error", err)
 					continue
 				}
+				event := eventCol.Raw
 
 				payload, _ := json.Marshal(map[string]any{
 					"sequence": seq,
