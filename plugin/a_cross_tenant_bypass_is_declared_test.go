@@ -119,7 +119,9 @@ var crossTenantLedger = map[string]bypassKind{
 	"plugins/pagerdutyalert/plugin.go:(*Plugin).Health": kindDeploymentQuestion,
 
 	// Cutoffs that belong to no tenant.
-	"plugins/auditlog/background.go:(*Plugin).cleanupRetention":     kindGlobalSweep,
+	// cleat#2047: retention became a per-tenant loop, so the DELETEs no longer cross
+	// tenants; only the list of tenants that have an expired row does.
+	"plugins/auditlog/background.go:(*Plugin).expiredTenants":       kindGlobalSweep,
 	"plugins/blobstore/background.go:(*Plugin).Run":                 kindGlobalSweep,
 	"plugins/eventstore/background.go:(*Plugin).Run":                kindGlobalSweep,
 	"plugins/ratelimiter/background.go:(*Plugin).pruneRateCounters": kindGlobalSweep,
@@ -146,7 +148,11 @@ var crossTenantLedger = map[string]bypassKind{
 	// Config read across tenants; the per-tenant work that follows is scoped.
 	"plugins/datadogexport/background.go:(*Plugin).exportMetrics": kindDiscovery,
 	"plugins/kafkaconnect/background.go:(*Plugin).pollConfigs":    kindDiscovery,
-	"plugins/ratelimiter/background.go:(*Plugin).reload":          kindDiscovery,
+	// cleat#2047: which tenants have an audit chain to verify. Operator-only
+	// (cleatctl audit verify --all-tenants); it reads ids, and each tenant's chain is
+	// then verified under that tenant's own context.
+	"plugins/auditlog/verify.go:ChainedTenants":          kindDiscovery,
+	"plugins/ratelimiter/background.go:(*Plugin).reload": kindDiscovery,
 
 	// The tenant is the value being looked up. Not sweeps.
 	"plugins/notifications/background.go:(*Plugin).Run":             kindTenantIsTheLookup,

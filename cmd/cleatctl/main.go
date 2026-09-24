@@ -158,6 +158,8 @@ func main() {
 		runQueue(ctx, db, d, *dsn, args[1:])
 	case "reseal-payloads":
 		runResealPayloads(ctx, db, args[1:])
+	case "audit":
+		runAudit(ctx, db, d, args[1:])
 	case "reseal-secrets":
 		runResealSecrets(ctx, db, d, args[1:])
 	default:
@@ -201,6 +203,8 @@ Commands:
   queue enable <tenant> <name>    put a retired queue back
   reseal-payloads --encryption-key-file <path> [--dry-run]
                                   bind pre-cleat#1776 payload ciphertexts to their tenant
+  audit verify (--tenant <id> | --all-tenants) [--json]
+                                  recompute the audit-log hash chain; exit 1 on a break, 2 if unmeasured
   reseal-secrets [--dry-run]      re-encrypt tenant secrets under the current master key
 
 Environment:

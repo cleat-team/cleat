@@ -80,31 +80,18 @@ func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, userID, me
 
 	durationMs := int(duration.Milliseconds())
 
-	// The id is supplied here rather than defaulted by the database, because the
-	// three dialects do not agree about generating one:
-	//
-	//	postgres   id UUID PRIMARY KEY DEFAULT gen_random_uuid()
-	//	mssql      id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID()
-	//	mysql      id CHAR(36) NOT NULL          -- no default
-	//
-	// So every insert on MySQL failed with
-	// `Error 1364 (HY000): Field 'id' doesn't have a default value`, and the
-	// audit table had never held a row on that dialect (cleat#958). The error
-	// was logged and swallowed -- the request succeeded, the worker carried on
-	// -- so the only symptom was an empty table, which is indistinguishable
-	// from an audit log for a quiet system. That is the one failure mode audit
-	// logging exists not to have: the absence of an entry reads as evidence the
-	// event did not happen.
-	//
-	// A MySQL-side default was the other option and is the narrower fix.
-	// Generating here removes the class instead: three databases no longer have
-	// to agree about UUID generation for one statement to work, and it needs no
-	// MySQL 8.0.13+ for `DEFAULT (uuid())`. It is also what a fourth dialect
-	// would need on day one.
-	_, err := p.db.Exec(insertCtx, plugin.Rebind(`
-			INSERT INTO audit_events (id, tenant_id, method, path, status_code, user_id, ip_address, user_agent, duration_ms)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		`, p.dialect), uuid.NewString(), tenantID, method, path, statusCode, userID, ipAddress, userAgent, durationMs)
+	// The insert is a chain append (chain_store.go): it needs the tenant's previous
+	// hash, so it cannot be a bare INSERT any more. The id is still supplied by the
+	// application rather than defaulted by the database, for the reason cleat#958
+	// gave -- MySQL has no default for a CHAR(36) key, and every insert there failed
+	// with `Error 1364 (HY000): Field 'id' doesn't have a default value` while the
+	// error was logged and swallowed and the only symptom was an empty table, which
+	// reads as evidence that nothing happened. A hash over the row needs the id
+	// before the insert in any case.
+	err := p.appendChained(insertCtx, chainEvent{
+		tenantID: tenantID, userID: userID, method: method, path: path,
+		statusCode: statusCode, ipAddress: ipAddress, userAgent: userAgent, durationMs: durationMs,
+	})
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		p.logger.Error("audit-log: record event", "error", err)
 	}

@@ -707,7 +707,7 @@ So the contract is:
   |---|---|
   | `blob_index.tags` | queried with `JSON_CONTAINS`, so it cannot be text without rewriting the read — degraded, like `workflow_instances.query_state` |
   | `webhook_config.events`, `webhook_events.headers` | `[]string` and `map[string]string`; they cannot carry a number |
-  | `audit_events.metadata` | never written by any statement — it holds its default |
+  | `audit_events.metadata` | only ever `{}`: the chained insert writes it explicitly so the hash covers the stored value |
 
   One column is beyond a migration's reach: `ingested_events.event_data`
   arrives through `map[string]any`, and Go's decoder turns a JSON number into a

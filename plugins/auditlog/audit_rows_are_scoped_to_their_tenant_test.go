@@ -89,6 +89,8 @@ func TestAuditRowsAreScopedToTheirTenant(t *testing.T) {
 	for _, g := range []string{
 		`GRANT USAGE ON SCHEMA ` + schema + ` TO ` + testutil.PostgresRLSTestRole,
 		`GRANT SELECT, INSERT, DELETE ON ` + schema + `.audit_events TO ` + testutil.PostgresRLSTestRole,
+		// The chain's head row, which every append locks and moves (cleat#2047).
+		`GRANT SELECT, INSERT, UPDATE ON ` + schema + `.audit_chain_heads TO ` + testutil.PostgresRLSTestRole,
 	} {
 		if _, err := su.ExecContext(ctx, g); err != nil {
 			t.Fatalf("granting the RLS role access: %v\n  %s", err, g)
@@ -124,6 +126,12 @@ func TestAuditRowsAreScopedToTheirTenant(t *testing.T) {
 	// row it did not write.
 	if _, err := su.ExecContext(ctx, `DELETE FROM `+schema+`.audit_events`); err != nil {
 		t.Fatalf("clearing audit_events before seeding: %v", err)
+	}
+	// The heads too. A head that outlives its rows (this database persists between
+	// runs) describes a chain with missing rows, and retention rightly refuses to
+	// sweep a tenant whose chain has a gap.
+	if _, err := su.ExecContext(ctx, `DELETE FROM `+schema+`.audit_chain_heads`); err != nil {
+		t.Fatalf("clearing audit_chain_heads before seeding: %v", err)
 	}
 
 	// THE NEGATIVE CONTROL IS SEEDED FIRST, and it is the other tenant's row.
@@ -195,12 +203,13 @@ func TestAuditRowsAreScopedToTheirTenant(t *testing.T) {
 			"arm 3 below proves nothing either.", seen)
 	}
 
-	// ARM 3 -- THE NAMED BYPASS. Retention is global: the cutoff is a
-	// timestamp and no tenant owns it. cleanupRetention marks its context with
-	// plugin.AcrossAllTenants, so the policy lifts and the sweep reaches both
-	// tenants' rows. Without the marking this errors rather than under-deleting,
-	// which is the failure mode worth having -- but arm 2 is what makes the
-	// success meaningful.
+	// ARM 3 -- RETENTION REACHES BOTH TENANTS WITHOUT A BYPASS. The cutoff is a
+	// timestamp and no tenant owns it, so the sweep visits every tenant, one at a
+	// time, each under its own tenant context (cleat#2047: it used to lift the
+	// policy with plugin.AcrossAllTenants and no longer needs to). Arm 2 is what
+	// makes the success meaningful. These rows were inserted raw and carry no seq,
+	// so this arm exercises the unchained path; chain_retention_test.go covers the
+	// chained one.
 	if _, err := su.ExecContext(ctx,
 		`UPDATE `+schema+`.audit_events SET timestamp = now() - interval '30 days'`); err != nil {
 		t.Fatalf("ageing both rows past the retention cutoff: %v", err)
