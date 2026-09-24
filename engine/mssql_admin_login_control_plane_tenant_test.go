@@ -219,12 +219,13 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 	// The reachable path this comment described used to be a signal name the
 	// victim does NOT hold, so the MERGE fell through to its INSERT branch and
 	// the wake was the only statement left standing between the caller and the
-	// victim's row. That path no longer exists: cleat#2227's EXISTS-gated
-	// INSERT (deliverSignalTx, mssql_signals_promises.go) now returns
-	// ErrWorkflowNotFound and writes nothing whenever the target is not
-	// visible under the CALLER's own tenant, before the wake UPDATE runs at
-	// all -- so a cross-tenant call can no longer reach the wake statement
-	// regardless of which signal name it uses. The case is kept anyway,
+	// victim's row. That path no longer exists: cleat#2218's EXISTS-gated
+	// INSERT (deliverSignalTx, mssql_signals_promises.go) already writes
+	// nothing whenever the target is not visible under the CALLER's own
+	// tenant, before the wake UPDATE runs at all, and cleat#2227 made that
+	// case return ErrWorkflowNotFound instead of nil -- so a cross-tenant call
+	// can no longer reach the wake statement regardless of which signal name
+	// it uses. The case is kept anyway,
 	// because "the wake predicate is unreachable from outside the tenant" is
 	// itself the property worth asserting, and because the positive control
 	// below still needs an unheld name to prove the wake fires on a genuine

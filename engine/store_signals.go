@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
@@ -245,13 +247,28 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	// cross-tenant workflowID already wrote nothing that mattered (the row
 	// landed tagged under the CALLER's own tenant, invisible to the target,
 	// per the contract on the UPDATE below). A NONEXISTENT workflowID is a
-	// different case on MSSQL specifically: workflow_signals there carries
-	// fk_signals_workflow, a real FK to workflow_instances(id), so that INSERT
-	// throws instead of writing an orphan row -- an existence oracle by
+	// different case on every dialect: workflow_signals carries a real FK to
+	// workflow_instances(id) here too (REFERENCES ... ON DELETE CASCADE,
+	// migrations/postgres/001_schema.sql), so an ungated INSERT throws
+	// instead of writing an orphan row -- an existence oracle by
 	// error-versus-nil, reachable over HTTP through webhookingest's processed
 	// flag. Gating every dialect's INSERT on the same EXISTS predicate makes
 	// "foreign tenant" and "does not exist" take the identical path on all
 	// three: the condition is false either way, nothing is written.
+	//
+	// THE EXISTS PREDICATE IS ALSO A PLAIN, NON-LOCKING READ HERE, and
+	// PostgreSQL's own FK trigger re-checks against the LATEST committed data
+	// rather than this statement's own snapshot (READ COMMITTED takes a fresh
+	// snapshot per sub-query, and an AFTER ROW RI trigger's own SELECT ... FOR
+	// KEY SHARE is one such sub-query) -- so the same purge-races-a-signal
+	// window MySQL (error 1452) and SQL Server (error 547) can hit is
+	// reachable here too, as SQLSTATE 23503, if DeleteCompletedWorkflows'
+	// DELETE commits in the gap between this EXISTS check and the FK
+	// trigger's own re-check. Mapped below for the identical reason those two
+	// are: an unmapped foreign_key_violation would reach the caller as a raw
+	// driver error indistinguishable from an unrelated database failure, and
+	// eventtriggers.signalAwaiters would retry it forever against a workflow
+	// that is never coming back rather than unregistering the awaiter.
 	//
 	// RowsAffected()==0 now returns ErrWorkflowNotFound rather than nil --
 	// cleat#2227, reversing cleat#2218's choice to make this silent. #2218
@@ -270,6 +287,10 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = $1 AND tenant_id = $4)
 	`, workflowID, signalName, payload, tenantID)
 	if err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23503" {
+			return ErrWorkflowNotFound
+		}
 		return err
 	}
 	if n, err := res.RowsAffected(); err != nil {
@@ -304,9 +325,14 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	// by ensuring this UPDATE runs under the target's own tenant, where it
 	// matches. Erroring on n==0 HERE, on the UPDATE, was tried and reverted
 	// (cleat#2207) after it broke the harmless-orphan-write half of this
-	// contract in CI -- that revert is still correct, and is not the case
-	// cleat#2227 revisits: that one gated the INSERT's own EXISTS predicate,
-	// above, not this UPDATE.
+	// contract in CI: the INSERT was ungated back then, so a foreign id
+	// still wrote an orphan row under the caller's own tenant before this
+	// UPDATE ran, and erroring here landed on top of a write that had
+	// already happened. That revert is still correct, and is not the case
+	// cleat#2227 revisits: cleat#2218 already gates the INSERT above on its
+	// own EXISTS predicate, so cleat#2227's RowsAffected()==0 check on THAT
+	// statement, not this UPDATE, means nothing was written at all -- an
+	// all-or-nothing failure, not one layered on a completed write.
 	//
 	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal and
 	// DeliverSignalNonexistentID cases; IMPROVEMENT-PLAN 3.86/3.215;
@@ -362,7 +388,12 @@ func (s *PostgresStore) PollCancellation(ctx context.Context, workflowID string)
 }
 
 // GetAllowedSignalCallers returns the allowed_signals list for a workflow.
-// Returns nil when allowed_signals is NULL or the target workflow doesn't exist.
+// Returns nil, with no error, when the workflow exists but allowed_signals
+// is NULL or empty (deny-all semantics). Returns ErrWorkflowNotFound when no
+// workflow with this id is visible to the calling store's tenant -- see that
+// error's doc comment for why the two cases it does not distinguish, and why
+// this getter answers the same way SetAllowedSignalCallers does now, rather
+// than silently as it did before this fix.
 
 func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -376,7 +407,10 @@ func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID 
 		`SELECT allowed_signals FROM workflow_instances WHERE id = $1 AND tenant_id = $2`,
 		workflowID, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, tx.Commit()
+		if cerr := tx.Commit(); cerr != nil {
+			return nil, cerr
+		}
+		return nil, ErrWorkflowNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get allowed signal callers: %w", err)
@@ -391,15 +425,30 @@ func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID 
 	return callers, tx.Commit()
 }
 
-// ErrWorkflowNotFound is returned by SetAllowedSignalCallers when no workflow
-// with the given id is visible to the calling store's tenant.
+// ErrWorkflowNotFound is returned by SetAllowedSignalCallers, and by
+// GetAllowedSignalCallers, when no workflow with the given id is visible to
+// the calling store's tenant.
 //
 // It deliberately does not distinguish "no such workflow" from "another
 // tenant's workflow". Splitting them would make the endpoint an existence
 // oracle: a caller could enumerate ids and learn which ones belong to someone
-// else from the difference in the error. The getter has the same property by
-// construction -- it returns nil for both -- and this keeps the writer honest
-// about the same boundary.
+// else from the difference in the error.
+//
+// The getter returned nil silently for both cases, with no error, until this
+// fix: with --require-signal-auth on, signalPluginWorkflowWithAuth
+// (cmd/cleat-worker/main.go) read that nil as "the workflow exists and has
+// no allowed callers configured" and denied the signal with the ordinary
+// "signal auth denied" a real but unauthorized caller gets -- indistinguishable
+// from a workflow that exists, and different from what the SAME id got through
+// signalPluginWorkflow with auth off, which reported not-found. A caller could
+// tell whether --require-signal-auth was on from the shape of the error alone.
+// And unlike DeliverSignal's own not-found case (cleat#2218, cleat#2227), this
+// one was never fixed by either: cleat#2218's nil only ever reached
+// deliverSignalTx, not this getter, so eventtriggers.signalAwaiters -- which
+// unregisters on ErrWorkflowNotFound but not on an ordinary error -- kept
+// treating a not-found target as an ordinary "signal auth denied" failure on
+// this path and never unregistered it. cleat#2213's leak was live here,
+// continuously, until this fix.
 var ErrWorkflowNotFound = errors.New("workflow not found")
 
 // ErrRoutingRuleNotFound is returned by RemoveRoutingRule when no rule with

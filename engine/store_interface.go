@@ -736,7 +736,9 @@ type WorkflowStore interface {
 	GetEventCount(ctx context.Context, workflowID string) (int, error)
 
 	// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
-	// Returns nil when allowed_signals is NULL or empty (deny-all semantics).
+	// Returns nil, with no error, when allowed_signals is NULL or empty
+	// (deny-all semantics). Returns ErrWorkflowNotFound when no workflow
+	// with this id is visible to the calling store's tenant.
 	GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error)
 
 	// SetAllowedSignalCallers replaces the allowed_signals list for a workflow.

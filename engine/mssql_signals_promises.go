@@ -116,12 +116,26 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	// (engine/store_signals.go) for why: it is loud again without reopening
 	// the oracle, because "foreign tenant" and "does not exist" still cannot
 	// be told apart here.
+	//
+	// The EXISTS predicate itself is a plain, non-locking read -- it takes no
+	// share lock on the workflow_instances row it checks, under RCSI. So a
+	// hard delete of the target, in the caller's own tenant, racing this
+	// signal can commit in the gap between the EXISTS check and this INSERT's
+	// own FK enforcement: the predicate was true when read, the row is gone
+	// by the time fk_signals_workflow is checked, and the INSERT fails with
+	// an FK violation instead of RowsAffected()==0. isMSSQLSignalsWorkflowFKViolation
+	// catches that shape and reports it the same way -- see its own doc
+	// comment for why the race exists and who depends on the two being
+	// indistinguishable.
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		SELECT @p1, @p2, @p3, @p4
 		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = @p1 AND tenant_id = @p4)
 	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID)
 	if err != nil {
+		if isMSSQLSignalsWorkflowFKViolation(err) {
+			return ErrWorkflowNotFound
+		}
 		return err
 	}
 	if n, err := res.RowsAffected(); err != nil {
@@ -149,9 +163,15 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	// by ensuring this UPDATE runs under the target's own tenant, where it
 	// matches. Erroring on RowsAffected()==0 HERE, on the UPDATE, was tried
 	// and reverted (cleat#2207) after it broke the harmless-orphan-write
-	// half of this contract in CI -- that revert is still correct, and is
-	// not the case cleat#2227 revisits: that one gated the INSERT's own
-	// EXISTS predicate, above.
+	// half of this contract in CI: the INSERT was ungated back then, so a
+	// foreign id still wrote an orphan row under the caller's own tenant
+	// before this UPDATE ran, and erroring here landed on top of a write
+	// that had already happened. That revert is still correct, and is not
+	// the case cleat#2227 revisits: cleat#2218 already gates the INSERT
+	// above on its own EXISTS predicate, so cleat#2227's RowsAffected()==0
+	// check on THAT statement, not this UPDATE, means nothing was written
+	// at all -- an all-or-nothing failure, not one layered on a completed
+	// write.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,
@@ -201,6 +221,11 @@ func (s *MSSQLStore) PollCancellation(ctx context.Context, workflowID string) (b
 // would read the WRONG workflow's allowed_signals -- either denying a
 // legitimate caller or, if the two tenants' rows happen to differ some
 // other way, approving on the wrong evidence.
+//
+// Returns nil, with no error, when the workflow exists but allowed_signals
+// is NULL or empty (deny-all semantics). Returns ErrWorkflowNotFound when no
+// workflow with this id is visible to the calling store's tenant -- see that
+// error's doc comment (engine/store_signals.go).
 func (s *MSSQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
@@ -213,7 +238,7 @@ func (s *MSSQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID str
 		`SELECT allowed_signals FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`,
 		workflowID, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, ErrWorkflowNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get allowed signal callers: %w", err)

@@ -11,21 +11,28 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// cleat#2227. Before it, plugin.Environment.SignalWorkflow returned nil for
-// EVERY case where the target workflow was not visible under the caller's
-// own tenant -- foreign, nonexistent, and purged were indistinguishable from
-// a genuine delivery (cleat#2218's fix for DeliverSignal's existence
-// oracle). signalAwaiters only unregistered an awaiter on that nil, so an
-// awaiter whose workflow had been purged looked exactly like one that had
-// just been served, and stayed registered forever -- cleat#2213's leak.
+// cleat#2227. Before cleat#2218, plugin.Environment.SignalWorkflow returned a
+// plain, non-nil error when the target workflow was not visible under the
+// caller's own tenant (an FK violation, on the engine dialects that have
+// one) -- indistinguishable from a genuine delivery failure. signalAwaiters
+// treated every non-nil error as transient and did NOT unregister, so an
+// awaiter whose workflow had been purged kept failing the identical way on
+// every future publish and stayed registered forever -- cleat#2213's leak.
+//
+// cleat#2218's fix for DeliverSignal's existence oracle changed that same
+// case to return nil instead, which stopped the leak as a side effect --
+// signalAwaiters already unregisters on nil, on the success path -- but at
+// the cost of logging a delivery that never happened: nil could not be told
+// apart from a real one.
 //
 // cleat#2227 makes SignalWorkflow return the typed plugin.ErrWorkflowNotFound
 // for that case instead of nil, and this test proves signalAwaiters reacts
-// to it specifically: unregistering on ErrWorkflowNotFound, same as it
-// already did on success, and NOT on an ordinary delivery failure -- the
-// control below, without which "unregister on any error" would pass this
-// test just as well and reintroduce a different bug (an awaiter dropped
-// after a transient failure, never getting the delivery it registered for).
+// to it specifically: unregistering on ErrWorkflowNotFound, same outcome as
+// the success path always had, but through its own branch and its own log
+// line, and NOT on an ordinary delivery failure -- the control below,
+// without which "unregister on any error" would pass this test just as well
+// and reintroduce a different bug (an awaiter dropped after a transient
+// failure, never getting the delivery it registered for).
 func TestANotFoundAwaiterUnregistersInsteadOfLeaking(t *testing.T) {
 	t.Run("ErrWorkflowNotFound unregisters the awaiter", func(t *testing.T) {
 		db := newRecordingDB(t)

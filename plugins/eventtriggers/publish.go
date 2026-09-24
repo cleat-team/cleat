@@ -332,15 +332,28 @@ func signalAwaiters(
 		if err := env.SignalWorkflow(ctx, wfID, signalName, eventData); err != nil {
 			if errors.Is(err, plugin.ErrWorkflowNotFound) {
 				// The awaiter's own workflow is gone -- purged, or the row
-				// was already stale -- not a delivery failure. Before
-				// cleat#2227, SignalWorkflow returned nil for exactly this
-				// case, indistinguishable from a real delivery, so this
-				// branch could never be reached and the awaiter row was
-				// never cleaned up here: it leaked until something else
-				// swept event_awaiters (cleat#2213). Unregister it now,
-				// same as the success path below, instead of leaving it to
-				// fail the identical way on every future publish of this
-				// event type.
+				// was already stale -- not a delivery failure.
+				//
+				// Before cleat#2218, SignalWorkflow returned a plain error
+				// for this case (an FK violation, on the dialects that have
+				// one), which this function had no branch for: it fell to
+				// the generic failure path below, logged a WARN, and did
+				// NOT unregister -- so the awaiter leaked forever, because
+				// a permanently-gone workflow produces the identical error
+				// on every future publish (cleat#2213). cleat#2218 changed
+				// this same case to return nil instead, closing an
+				// existence oracle -- and, as a side effect, that already
+				// stopped the leak: nil fell to the SUCCESS path below,
+				// which unregisters unconditionally. What #2218 did not fix
+				// is that the success path also logs "signal delivered to
+				// awaiter", which was false for this case -- the workflow
+				// never received anything.
+				//
+				// cleat#2227 gives "not found" its own path instead of
+				// relying on that accident: same outcome as before
+				// (unregister), but honestly, with a log line that says
+				// what actually happened rather than claiming a delivery
+				// that did not occur.
 				logger.Info("event-triggers: awaiter's workflow no longer exists, unregistering",
 					"workflow_id", wfID,
 					"signal", signalName,

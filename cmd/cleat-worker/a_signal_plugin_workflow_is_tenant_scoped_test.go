@@ -61,13 +61,17 @@ import (
 // this file's boundary), identically for a foreign id and a nonexistent
 // one, so a genuinely cross-tenant call DOES now return an error -- see
 // IMPROVEMENT-PLAN 3.341 for why this is not the same case cleat#2207
-// reverted: that revert was about the UPDATE going from silent-success to
-// error when the row was ALREADY known to exist under the caller (a
-// scoping bug); this is the INSERT going from silent-success to
-// ErrWorkflowNotFound when the row does NOT exist under the caller (by
-// design, not a bug). Every negative-control section below now asserts
-// BOTH: the returned error, and that the other tenant's real workflow is
-// untouched.
+// reverted: that revert was about erroring on the UPDATE's
+// RowsAffected()==0 AFTER the INSERT -- ungated before cleat#2218 -- had
+// already written an orphan row under the CALLER's own tenant for a
+// genuinely foreign id, so the error landed on top of a write that had
+// already happened, breaking the harmless-no-op contract the admin-login
+// test pins. cleat#2227's check runs on the INSERT itself, which cleat#2218
+// had already gated on EXISTS: RowsAffected()==0 there means nothing was
+// written at all, so the error is now all-or-nothing rather than layered
+// on top of a completed write. Every negative-control section below now
+// asserts BOTH: the returned error, and that the other tenant's real
+// workflow is untouched.
 //
 // What a cross-tenant call WRITES changed under cleat#2218, and every
 // negative control below was updated with it: the INSERT into
@@ -620,12 +624,14 @@ func TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant(t *testing.T) {
 // The failure mode an unscoped helper produces here is not "wrong tenant's
 // row" the way the plain-signal tests catch it -- it is a LEGITIMATE,
 // allowed caller getting denied: GetAllowedSignalCallers on the wrong
-// tenant's scope reads no row for runB, PostgresStore.GetAllowedSignalCallers
-// treats that as sql.ErrNoRows and returns an empty list with no error (see
-// its doc comment in engine/store_signals.go), and signalCallerAllowed(nil,
-// anything) is always false. So it fails CLOSED, silently, which is worse
-// than failing open: nothing crashes, nothing logs "denied wrongly", a
-// legitimate webhook caller just stops being able to signal.
+// tenant's scope reads no row for runB, and PostgresStore.GetAllowedSignalCallers
+// treats that as sql.ErrNoRows and returns engine.ErrWorkflowNotFound (see
+// its doc comment in engine/store_signals.go) -- translated to
+// plugin.ErrWorkflowNotFound at this function's boundary, same as a
+// genuinely missing workflow. So it fails CLOSED, and does so
+// indistinguishably from "this workflow does not exist": nothing crashes,
+// nothing logs "denied wrongly", a legitimate webhook caller just stops
+// being able to signal, and the error it gets back does not say why.
 func TestSignalPluginWorkflowWithAuth_OnlyAnAllowedCallerCanSignal(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2209 test")

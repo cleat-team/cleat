@@ -44,6 +44,37 @@ func isDeadlockError(err error) bool {
 	return false
 }
 
+// isSignalsWorkflowFKViolation checks for a foreign-key violation (error
+// 1452) on workflow_signals' FK to workflow_instances(id)
+// (migrations/mysql/001_schema.sql). MySQL auto-names this constraint
+// rather than carrying a fixed one, so it is identified by the CHILD table
+// -- "workflow_signals" -- which a 1452 message always includes and which
+// this table's schema references in exactly one FK, rather than by a name
+// that depends on creation order and could change across a schema rebuild.
+//
+// deliverSignalTx's EXISTS-gated INSERT (this file) reads
+// workflow_instances as a plain, non-locking SELECT: the EXISTS predicate
+// can be true when it is evaluated and false by the time the INSERT's own
+// FK check runs a moment later, if the target is hard-deleted in between --
+// a purge racing a signal, in the caller's own tenant. When that race is
+// lost, the INSERT fails HERE instead of the EXISTS predicate simply being
+// false, and without this check the raw FK error would reach the caller
+// unwrapped, indistinguishable from an unrelated database failure and
+// invisible to a caller checking errors.Is(err, ErrWorkflowNotFound) --
+// including eventtriggers.signalAwaiters, which unregisters on that
+// specifically and would otherwise treat this race as a transient failure
+// and retry it forever against a workflow that is never coming back.
+func isSignalsWorkflowFKViolation(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) {
+		return false
+	}
+	if mysqlErr.Number != 1452 {
+		return false
+	}
+	return strings.Contains(mysqlErr.Message, "workflow_signals")
+}
+
 // ---------------------------------------------------------------------------
 // MySQLStore
 // ---------------------------------------------------------------------------
@@ -564,12 +595,25 @@ func (s *MySQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	// (engine/store_signals.go) for why: it is loud again without reopening
 	// the oracle, because "foreign tenant" and "does not exist" still cannot
 	// be told apart here.
+	//
+	// The EXISTS predicate above is a plain, non-locking read: it takes no
+	// lock on the workflow_instances row it checks. A hard delete of the
+	// target, in the caller's own tenant, racing this signal can commit in
+	// the gap between that read and this INSERT's own FK enforcement -- the
+	// predicate was true when read, the row is gone by the time the FK is
+	// checked, and the INSERT fails with a foreign-key violation instead of
+	// RowsAffected()==0. isSignalsWorkflowFKViolation catches that shape and
+	// reports it the same way -- see its own doc comment for why the race
+	// exists and who depends on the two being indistinguishable.
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		SELECT ?, ?, ?, ?
 		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = ? AND tenant_id = ?)
 	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID, workflowID, s.tenantID)
 	if err != nil {
+		if isSignalsWorkflowFKViolation(err) {
+			return ErrWorkflowNotFound
+		}
 		return err
 	}
 	if n, err := res.RowsAffected(); err != nil {
@@ -624,13 +668,17 @@ func (s *MySQLStore) PollCancellation(ctx context.Context, workflowID string) (b
 }
 
 // GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+// Returns nil, with no error, when the workflow exists but allowed_signals
+// is NULL or empty (deny-all semantics). Returns ErrWorkflowNotFound when no
+// workflow with this id is visible to the calling store's tenant -- see that
+// error's doc comment (engine/store_signals.go).
 func (s *MySQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
 	var raw sql.NullString
 	err := s.db.QueryRowContext(ctx,
 		`SELECT allowed_signals FROM workflow_instances WHERE id = ? AND tenant_id = ?`,
 		workflowID, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, ErrWorkflowNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get allowed signal callers: %w", err)

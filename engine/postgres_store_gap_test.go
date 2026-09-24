@@ -218,8 +218,13 @@ func TestGap_GetAllowedSignalCallers_ErrNoRows(t *testing.T) {
 
 	store := NewPostgresStore(db)
 	callers, err := store.GetAllowedSignalCallers(testCtx, "wf-1")
-	if err != nil {
-		t.Fatalf("GetAllowedSignalCallers (no rows): %v", err)
+	// cleat#2227: a missing row now returns ErrWorkflowNotFound, matching
+	// DeliverSignal's own contract, instead of the (nil, nil) this test
+	// asserted before -- the getter and the setter now agree on what a
+	// missing workflow means. See store_signals.go's doc comment on
+	// GetAllowedSignalCallers.
+	if !errors.Is(err, ErrWorkflowNotFound) {
+		t.Fatalf("GetAllowedSignalCallers (no rows) err = %v, want ErrWorkflowNotFound", err)
 	}
 	if callers != nil {
 		t.Errorf("expected nil callers, got %v", callers)

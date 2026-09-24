@@ -85,13 +85,19 @@ var ErrFatalMisconfiguration = errors.New("plugin: fatal misconfiguration")
 // one to the other, since plugins/* cannot import engine to compare
 // against its sentinel directly.
 //
-// Before cleat#2227, SignalWorkflow returned nil for all three cases,
-// which meant a signal to a since-purged workflow -- routine, not a bug --
-// was indistinguishable from any other kind of failure and from success.
-// eventtriggers used the nil to mean "delivered", so a signal that
-// silently found nothing left its awaiter registered forever (cleat#2213).
-// A caller that wants to react specifically to "not found" -- as
-// plugins/eventtriggers now does, to unregister the awaiter -- uses
+// Before cleat#2218, this case returned a plain, non-nil error (an FK
+// violation on the engine dialects that have one), and a signal to a
+// since-purged workflow -- routine, not a bug -- was indistinguishable from
+// a genuine delivery failure. eventtriggers treated every non-nil error the
+// same, as transient and worth retrying, so an awaiter for a permanently
+// gone workflow never unregistered and leaked forever (cleat#2213).
+// cleat#2218 changed this case to return nil instead -- fixing that leak as
+// a side effect, since eventtriggers unregisters on nil too, but leaving it
+// indistinguishable from a real delivery: a caller had no way to log or
+// react to "not found" specifically, only to treat it as success. This
+// error restores that distinction. A caller that wants to react
+// specifically to "not found" -- as plugins/eventtriggers now does, to log
+// and unregister the awaiter honestly rather than by accident -- uses
 // errors.Is(err, plugin.ErrWorkflowNotFound), not string matching.
 var ErrWorkflowNotFound = errors.New("plugin: workflow not found")
 

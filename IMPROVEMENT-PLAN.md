@@ -10250,12 +10250,6 @@ workflow_instances WHERE id = ? AND tenant_id = <caller>)`. A nonexistent id and
 id now take the identical path — the `EXISTS` is false either way, nothing is written, no error —
 so the two cases are indistinguishable from every side, not just the victim's.
 
-**"No error" did not survive review.** §3.341/cleat#2227, merged the same day, replaces it with
-a typed `ErrWorkflowNotFound`, identical for both cases, so the sentence above describes this
-PR's original mechanism rather than today's error contract — the oracle it closes is unaffected;
-what changed is only whether "not found" is silent or loud. See §3.341 before citing this
-paragraph's "no error" as current.
-
 `engine/mssql_admin_login_control_plane_tenant_test.go`'s `DeliverSignal`/`DeliverSignalNonexistentID`
 cases prove it under SQL Server's `cleat_admin` bypass role specifically; a new dialect-independent
 test, `TestDeliverSignalToAnIDTheCallerCannotTouchWritesNothing`
@@ -10276,6 +10270,12 @@ and zero package-level failures both times (one single-occurrence failure on the
 `TestACompletedRunReportsWhenItFinished/mssql`, did not reproduce across 5 isolated retries nor
 across a full second run — a flake, not a regression from this change).
 
+**"No error" did not survive review.** §3.341/cleat#2227, merged the same day, replaces it with
+a typed `ErrWorkflowNotFound`, identical for both cases, so the "no error" sentence above
+describes this PR's original mechanism rather than today's error contract — the oracle it
+closes is unaffected; what changed is only whether "not found" is silent or loud. See §3.341
+before citing this section's "no error" as current.
+
 Files: `migrations/mssql/103_a_filtered_write_is_a_blocked_write.sql`,
 `migrations/mssql/075_the_admin_bypass_is_opt_in.sql`, `migrations/mssql/optional/cross_tenant_claim.sql`,
 `engine/mssql_block_predicates_test.go`, `engine/a_signal_to_an_id_the_caller_cannot_touch_writes_nothing_test.go`,
@@ -10291,12 +10291,17 @@ answer identically: `RowsAffected()==0` on the EXISTS-gated INSERT returned nil,
 That is correct for the oracle question -- a caller still learns nothing about *which* is true --
 but it also means a signal to a workflow that is genuinely gone, in the CALLER'S OWN tenant
 (purged, or never existed), is now indistinguishable from a signal that landed. Two real
-consumers depend on telling those apart: webhookingest's retry/dead-letter loop
-(`plugins/webhookingest/background.go`) treats nil as delivered and never dead-letters an event
-whose target does not exist, and eventtriggers' awaiter cleanup
-(`plugins/eventtriggers/publish.go`'s `signalAwaiters`) only unregisters on the success path, so
-a nil for "not found" left the awaiter registered forever -- cleat#2213's leak, reopened by the
-fix for cleat#2218's oracle.
+consumers depend on telling those apart, in two different ways. webhookingest's retry/dead-letter
+loop (`plugins/webhookingest/background.go`) treats nil as delivered and never dead-letters an
+event whose target does not exist -- a live bug, unaffected by cleat#2218's timing, that #2227
+fixes. eventtriggers' awaiter cleanup (`plugins/eventtriggers/publish.go`'s `signalAwaiters`)
+unregisters on the success path -- so a nil for "not found" was ALREADY being unregistered there,
+as a side effect of cleat#2218, not left registered: the actual `cleat#2213` leak predates
+cleat#2218 (a plain, non-nil error for "not found" before it, which the failure path does not
+unregister for) and was fixed by cleat#2218's nil by accident, at the cost of logging a delivery
+that never happened. cleat#2227 does not reopen or refix a leak here; it gives "not found" its
+own path so the SAME outcome (unregister) happens honestly, with its own log line, instead of by
+being mistaken for a delivery.
 
 **The fix is `ErrWorkflowNotFound` on `RowsAffected()==0`, on all three dialects**
 (`engine/store_signals.go`, `engine/mysql_store.go`, `engine/mssql_signals_promises.go`), loud
