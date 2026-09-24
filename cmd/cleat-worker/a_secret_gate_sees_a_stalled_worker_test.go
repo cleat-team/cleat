@@ -310,7 +310,14 @@ func TestTheWorkersGapIsNeverShorterThanTheWritersGap(t *testing.T) {
 	if dbGap < 3 {
 		t.Fatalf("the database's gap is %.2fs: the row was not stamped before the delayed reply, so the scenario did not happen", dbGap)
 	}
-	if ourGap < dbGap {
+	// A tolerance, because the two gaps come from different clocks: the database's is its wall clock
+	// (now() minus a stamp it took), ours is this host's monotonic clock. Recorded before the round
+	// trip, ours is the larger by the two queries' latency, a few milliseconds, and a clock-rate
+	// difference over a 4s window (an NTP slew, a container's virtual clock under load) is the same
+	// size: with no tolerance this failed on an idle machine's 4.01s against 4.01s (cleat#2225). The
+	// defect this test guards is the reply's whole latency, 4s here, so 250ms cannot hide it.
+	const clockNoise = 0.25
+	if ourGap < dbGap-clockNoise {
 		t.Fatalf("this worker's gap (%.2fs) is SHORTER than the writer's (%.2fs) by %.2fs: the beat was recorded after the round trip, "+
 			"so a stall can be past the writers' window while the worker still calls it fresh (cleat#2167)", ourGap, dbGap, dbGap-ourGap)
 	}
