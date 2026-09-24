@@ -21,6 +21,7 @@ go 1.26.0
 require (
 	github.com/cleat-team/cleat v0.2.0
 	github.com/cleat-team/cleat/cleat v0.0.0
+	github.com/google/uuid v1.6.0
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/tetratelabs/wazero v1.12.0
 )
@@ -36,7 +37,6 @@ require (
 	github.com/go-sql-driver/mysql v1.10.1 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
