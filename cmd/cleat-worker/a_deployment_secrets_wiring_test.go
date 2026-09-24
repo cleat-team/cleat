@@ -45,13 +45,28 @@ func (f *fakeUnscopedDeploymentSecrets) Get(ctx context.Context, name string) (s
 	return "", errors.New("deployment secret not found")
 }
 
-// TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix proves email and
-// llm -- the two plugins that read deployment secrets today -- each get a
-// DeploymentSecrets that resolves their OWN prefix and refuses the other's.
-// Deleting email's or llm's DeploymentSecretPrefix method makes the
-// corresponding half of this test fail: the plugin stops implementing
-// plugin.HasDeploymentSecretPrefix, so deploymentSecretsForPlugin returns
-// nil instead of a scoped adapter.
+// TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix proves email, llm
+// and scheduled-backup -- the plugins that declare a deployment-secret prefix
+// today -- each get a DeploymentSecrets that resolves their OWN prefix and
+// refuses the others'. Deleting any one plugin's DeploymentSecretPrefix
+// method makes the corresponding block of this test fail: the plugin stops
+// implementing plugin.HasDeploymentSecretPrefix, so deploymentSecretsForPlugin
+// returns nil instead of a scoped adapter.
+//
+// scheduled-backup's own case is the one cleat-review's #2236 GAP flagged.
+// It does implement plugin.HasRequiredDeploymentSecrets now, but only
+// CONDITIONALLY -- see legacyScheduledBackupConfig's doc comment,
+// plugins/scheduledbackup -- so that boot check runs, and could in
+// principle catch a missing DeploymentSecretPrefix too, ONLY on a
+// deployment whose --plugin-config still carries the legacy dsn field. On
+// the ordinary deployment (no legacy dsn), RequiredDeploymentSecrets
+// returns no required names regardless of whether DeploymentSecretPrefix is
+// wired, so nothing at boot fails if it went missing there -- backupDSN
+// would just always error with "no deployment secret store configured" in
+// production, exactly as if p.deploymentSecrets were nil, and every one of
+// scheduledbackup's own package-level tests would stay green regardless,
+// since they construct Plugin directly rather than going through this
+// wiring. This test is what actually exercises it, unconditionally.
 func TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix(t *testing.T) {
 	loaded, err := plugin.Discover()
 	if err != nil {
@@ -59,10 +74,12 @@ func TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix(t *testing.T) {
 	}
 	email := findPlugin(t, loaded, "email-notify")
 	llm := findPlugin(t, loaded, "llm")
+	scheduledBackup := findPlugin(t, loaded, "scheduled-backup")
 
 	unscoped := &fakeUnscopedDeploymentSecrets{values: map[string]string{
 		"email.sendgrid_api_key":       "sg-real",
 		"llm.providers.openai.api_key": "sk-real",
+		"scheduledbackup.dsn":          "postgres://real",
 	}}
 
 	got := deploymentSecretsForPlugin(email, unscoped)
@@ -91,6 +108,20 @@ func TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix(t *testing.T) {
 	}
 	if v, err := got2.Get(context.Background(), "llm.providers.openai.api_key"); err != nil || v != "sk-real" {
 		t.Errorf("llm's own prefix should still resolve: got %q, %v", v, err)
+	}
+
+	got3 := deploymentSecretsForPlugin(scheduledBackup, unscoped)
+	if got3 == nil {
+		t.Fatal("scheduled-backup declares plugin.HasDeploymentSecretPrefix; " +
+			"deploymentSecretsForPlugin returned nil instead of a scoped adapter -- " +
+			"either the wiring in main.go or scheduledbackup's DeploymentSecretPrefix method is gone")
+	}
+	if _, err := got3.Get(context.Background(), "email.sendgrid_api_key"); err == nil {
+		t.Error("scheduled-backup's scoped DeploymentSecrets let it read email's own key -- " +
+			"prefix scoping is not actually enforced")
+	}
+	if v, err := got3.Get(context.Background(), "scheduledbackup.dsn"); err != nil || v != "postgres://real" {
+		t.Errorf("scheduled-backup's own prefix should still resolve: got %q, %v", v, err)
 	}
 }
 

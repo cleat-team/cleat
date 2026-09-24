@@ -65,15 +65,23 @@ var dueBackupsQuery = plugin.Query{
 // atomic rename is what makes that safe -- an interrupted backup never
 // produces a file at its final name and is never recorded as completed. So
 // Run returning does not mean every backup it dispatched has finished.
+//
+// This used to also exit early -- parking on <-ctx.Done() like the p.db==nil
+// case still does -- when p.config.DSN was empty at boot. cleat#1992 part 1b
+// moved the DSN to a deployment secret fetched per attempt (backupDSN,
+// plugin.go), so there is no longer a value to check here: the whole point
+// of a deployment secret is that setting one after the worker has already
+// started takes effect without a restart, and caching "unset" at Run's
+// start would have defeated that for exactly this plugin. The scheduler
+// plugin's own Run (plugins/scheduler/background.go) is the precedent this
+// follows -- it gates only on p.db==nil and polls unconditionally, letting
+// "nothing to do" fall out of an empty due-backups query rather than being
+// special-cased at startup. An unresolvable DSN now surfaces per attempt,
+// in executeScheduledBackup, recorded in backup_history like any other
+// pg_dump failure.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
 		p.logger.Warn("scheduledbackup: no database, background loop disabled")
-		<-ctx.Done()
-		return nil
-	}
-
-	if p.config.DSN == "" {
-		p.logger.Warn("scheduledbackup: no DSN configured, background loop disabled")
 		<-ctx.Done()
 		return nil
 	}
@@ -236,6 +244,29 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 		return
 	}
 
+	// Fetched per attempt, not cached -- see backupDSN's doc comment
+	// (plugin.go) and Run's, above, for why this can no longer be a
+	// precondition checked once at Run's start.
+	//
+	// No call to p.updateNextRun here, deliberately: runDueBackups already
+	// stamped last_run_at/next_run_at for this config inside its claim
+	// transaction, via updateNextRunTx, before this goroutine was even
+	// dispatched -- so the schedule has already advanced and will retry on
+	// its own. Calling updateNextRun a second time here would not just be
+	// redundant: nextRun always searches forward from the NEXT full minute
+	// after the time it's given (cron.go), so a second call using this
+	// (later) failure-time now() can compute a LATER slot than the one
+	// already committed if the two calls straddle a minute boundary --
+	// silently skipping one legitimate run rather than merely repeating the
+	// same computation.
+	dsn, err := p.backupDSN(bookkeepCtx)
+	if err != nil {
+		p.logger.Error("scheduledbackup: refusing scheduled backup",
+			"config_id", configID, "history_id", historyID, "error", err)
+		p.markBackupFailed(tenantID, historyID, backupDSNUnavailableMessage)
+		return
+	}
+
 	// Execute pg_dump.
 	//
 	// SafeDumpPath rather than a bare Join (cleat#1305). This path never passes
@@ -259,7 +290,7 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 	// sweep in cleanupOrphanedHistory if even that update is lost).
 	tmpPath := dumpPath + ".partial"
 	var stderr bytes.Buffer
-	dumpErr := runPgDump(ctx, p.config.DSN.Reveal(), tmpPath, &stderr)
+	dumpErr := runPgDump(ctx, dsn, tmpPath, &stderr)
 	if dumpErr == nil {
 		if renameErr := os.Rename(tmpPath, dumpPath); renameErr != nil {
 			dumpErr = fmt.Errorf("rename partial dump to final name: %w", renameErr)

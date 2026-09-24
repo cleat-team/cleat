@@ -210,7 +210,7 @@ func TestSB_Init_WithConfig(t *testing.T) {
 		DB:     nil,
 		Mux:    http.NewServeMux(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Config: json.RawMessage(`{"dsn":"postgres://...", "dump_dir":"/tmp/my-backups"}`),
+		Config: json.RawMessage(`{"dump_dir":"/tmp/my-backups"}`),
 	}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -218,8 +218,82 @@ func TestSB_Init_WithConfig(t *testing.T) {
 	if p.config.DumpDir != "/tmp/my-backups" {
 		t.Errorf("got dump dir %q", p.config.DumpDir)
 	}
-	if p.config.DSN != "postgres://..." {
-		t.Errorf("got DSN %q", p.config.DSN)
+}
+
+// TestSB_InitWarnsOnLeftoverDSN is the mirror of slacknotify's
+// TestSN_InitWarnsOnLeftoverSigningSecret: a dsn left over in
+// --plugin-config from before cleat#1992 part 1b no longer does anything --
+// Config has no field for it -- so Init must WARN naming the dead field and
+// the replacement command, rather than silently ignoring it.
+func TestSB_InitWarnsOnLeftoverDSN(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		Config: json.RawMessage(`{"dsn":"postgres://old-secret", "dump_dir":"/tmp/my-backups"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "dsn") || !strings.Contains(got, "no longer read") {
+		t.Errorf("expected a WARN naming the dead dsn field, got log output: %q", got)
+	}
+	if !strings.Contains(got, "set-deployment-secret") {
+		t.Errorf("expected the WARN to name the replacement command, got: %q", got)
+	}
+}
+
+// TestSB_InitNoWarnWithoutLeftoverDSN is the negative control: a config with
+// no dsn field at all (or none) must not log the leftover-key WARN.
+func TestSB_InitNoWarnWithoutLeftoverDSN(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		Config: json.RawMessage(`{"dump_dir":"/tmp/my-backups"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "no longer read") {
+		t.Errorf("did not expect a leftover-dsn WARN with no dsn field in config, got: %q", got)
+	}
+}
+
+// TestSB_RequiredDeploymentSecrets_NoLegacyKey is the "ordinary deployment"
+// case, mirroring slacknotify's TestSN_RequiredDeploymentSecrets_NoLegacyKey:
+// no legacy dsn anywhere in --plugin-config (whether scheduled-backup has no
+// config section at all, or an empty one) must not require
+// scheduledbackup.dsn -- a deployment with no history of scheduled backups
+// must still boot with no DSN configured.
+func TestSB_RequiredDeploymentSecrets_NoLegacyKey(t *testing.T) {
+	p := &Plugin{}
+	for _, cfg := range [][]byte{nil, []byte(``), []byte(`{}`)} {
+		names, err := p.RequiredDeploymentSecrets(cfg)
+		if err != nil {
+			t.Fatalf("RequiredDeploymentSecrets(%q): %v", cfg, err)
+		}
+		if len(names) != 0 {
+			t.Errorf("RequiredDeploymentSecrets(%q) = %v, want none (no legacy key present)", cfg, names)
+		}
+	}
+}
+
+// TestSB_RequiredDeploymentSecrets_LegacyKeyPresent is the upgrade case:
+// --plugin-config still carries dsn from before cleat#1992 part 1b, proving
+// this deployment ran scheduled backups against a real database. Without
+// this, scheduledbackup.dsn being unset would let the worker boot and then
+// silently fail every backup attempt, with nothing at boot saying why.
+func TestSB_RequiredDeploymentSecrets_LegacyKeyPresent(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"dsn": "postgres://old-secret"}`)
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	if len(names) != 1 || names[0] != "scheduledbackup.dsn" {
+		t.Errorf("RequiredDeploymentSecrets(legacy key present) = %v, want [scheduledbackup.dsn]", names)
 	}
 }
 
@@ -1101,14 +1175,41 @@ func sbHistoryRowToValues(row *sbHistoryRow) []driver.Value {
 // Helpers
 // =====================================================================
 
+// testBackupDSN is the value newSBPlugin's default fakeBackupDeploymentSecrets
+// answers for "scheduledbackup.dsn" -- matching what every pre-cleat#1992-part-1b
+// test in this file set directly via p.config.DSN. Tests exercising the
+// missing/failing-lookup path override p.deploymentSecrets (or clear it)
+// after newSBPlugin returns.
+const testBackupDSN = "postgres://test"
+
+// fakeBackupDeploymentSecrets is a plugin.DeploymentSecrets that answers one
+// fixed value for "scheduledbackup.dsn" and an error for anything else, or
+// always errors if errOnGet is set -- the same shape as email's, llm's and
+// slacknotify's fakeDeploymentSecrets test doubles.
+type fakeBackupDeploymentSecrets struct {
+	dsn      string
+	errOnGet error
+}
+
+func (f *fakeBackupDeploymentSecrets) Get(ctx context.Context, name string) (string, error) {
+	if f.errOnGet != nil {
+		return "", f.errOnGet
+	}
+	if name == "scheduledbackup.dsn" {
+		return f.dsn, nil
+	}
+	return "", fmt.Errorf("fakeBackupDeploymentSecrets: %q not set", name)
+}
+
 func newSBPlugin(t *testing.T) (*Plugin, *sbDB, *sql.DB) {
 	t.Helper()
 	fdb := newSBDB()
 	rawDB := sql.OpenDB(&sbConnector{db: fdb})
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: rawDB},
-		mux:    http.NewServeMux(),
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:                &engine.SQLDBAdapter{DB: rawDB},
+		mux:               http.NewServeMux(),
+		logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		deploymentSecrets: &fakeBackupDeploymentSecrets{dsn: testBackupDSN},
 	}
 	// A real dump directory, which this harness never set (cleat#1305).
 	//
@@ -2013,23 +2114,82 @@ func TestSB_Run_NilDB(t *testing.T) {
 	}
 }
 
-func TestSB_Run_NoDSN(t *testing.T) {
-	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: &sql.DB{}},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+// TestSB_Run_PollsEvenWithNoDeploymentSecretsWired is the replacement for
+// what used to be TestSB_Run_NoDSN. Before cleat#1992 part 1b, Run refused
+// to start its loop at all when p.config.DSN was empty at boot -- parking on
+// <-ctx.Done() exactly like the p.db==nil case still does a few lines up.
+// That gate is gone (see Run's own doc comment for why): setting a DSN via
+// `cleatctl set-deployment-secret` after the worker has already started must
+// take effect on the very next attempt, which an early exit here would have
+// defeated. So Run must now poll unconditionally, and a due backup with an
+// unresolvable DSN must fail per-attempt -- recorded in backup_history --
+// rather than the whole loop going quiet.
+//
+// This is the known-positive for that: p.deploymentSecrets is nil, so
+// backupDSN can only error, and Run's own "run once immediately on startup"
+// call is what proves the loop was entered at all -- no need to wait for the
+// 60-second ticker.
+func TestSB_Run_PollsEvenWithNoDeploymentSecretsWired(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+	p.deploymentSecrets = nil
+
+	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
+	cfgID := "00000000-0000-0000-0000-0000000000fe"
+	past := time.Now().Add(-time.Hour)
+	fdb.mu.Lock()
+	fdb.configs[cfgID] = &sbConfigRow{
+		id: cfgID, tenantID: tid, name: "no-secrets-test", cron: "0 9 * * *",
+		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
+		nextRunAt: &past, createdAt: past, updatedAt: past,
 	}
+	fdb.mu.Unlock()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
-	time.Sleep(10 * time.Millisecond)
+
+	// Run's own goroutine, not this test's, is what calls runDueBackups -- so
+	// wait for the history row to actually land rather than racing
+	// waitForBgBackups against Run's startup, which could observe
+	// p.bgBackups at its zero value before Run has claimed anything.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fdb.mu.RLock()
+		n := len(fdb.history)
+		fdb.mu.RUnlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for Run's immediate on-startup pass to record a history entry")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	cancel()
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Errorf("Run with no DSN: want nil, got %v", err)
+			t.Errorf("Run with no deployment secrets wired: want nil, got %v", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Run did not stop after cancel")
+	}
+
+	fdb.mu.RLock()
+	defer fdb.mu.RUnlock()
+	if len(fdb.history) == 0 {
+		t.Fatal("expected Run's immediate on-startup pass to attempt the due backup and record a history entry")
+	}
+	for _, h := range fdb.history {
+		if h.status != "failed" {
+			t.Errorf("expected the due backup to fail cleanly with no deployment secret store, got status %q", h.status)
+		}
+		if h.errorMessage == nil || *h.errorMessage != backupDSNUnavailableMessage {
+			t.Errorf("expected the generic tenant-facing message %q, got: %v",
+				backupDSNUnavailableMessage, h.errorMessage)
+		}
 	}
 }
 
@@ -2115,7 +2275,6 @@ func TestSB_Run_Cancel(t *testing.T) {
 
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
 	p.config.DumpDir = t.TempDir()
 
 	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
@@ -2208,7 +2367,6 @@ func TestSB_ExecuteScheduledBackup_KilledMidway_LeavesNoFinalArtifactAndNoSucces
 
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
 	p.config.DumpDir = t.TempDir()
 
 	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001")
@@ -2255,7 +2413,6 @@ func TestSB_ExecuteScheduledBackup_KilledMidway_LeavesNoFinalArtifactAndNoSucces
 func TestSB_RunDueBackups(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
 	p.config.DumpDir = t.TempDir()
 
 	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
@@ -2295,7 +2452,6 @@ func TestSB_RunDueBackups(t *testing.T) {
 func TestSB_ExecuteScheduledBackup_Error(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
 	p.config.DumpDir = t.TempDir()
 
 	tidStr := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
@@ -2406,7 +2562,6 @@ func TestSB_UpdateNextRun_NoMatch(t *testing.T) {
 func TestSB_RunBackupAsync_Error(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
 	p.config.DumpDir = t.TempDir()
 
 	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
@@ -2441,6 +2596,55 @@ func TestSB_RunBackupAsync_Error(t *testing.T) {
 	}
 	if h.errorMessage == nil || *h.errorMessage == "" {
 		t.Error("expected non-empty error message after failed pg_dump")
+	}
+}
+
+// TestSB_RunBackupAsync_NoDeploymentSecrets is runBackupAsync's own
+// known-positive for the backupDSN refusal, distinct from
+// TestSB_RunBackupAsync_Error above (which fails downstream at pg_dump, with
+// a resolvable DSN). This is the manually-triggered counterpart to
+// TestSB_Run_PollsEvenWithNoDeploymentSecretsWired -- routes.go and
+// background.go each fetch the DSN at their own call site (see backupDSN's
+// doc comment, plugin.go), so each needs its own proof the refusal actually
+// fires there rather than only being read as reachable by inspection.
+func TestSB_RunBackupAsync_NoDeploymentSecrets(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+	p.deploymentSecrets = nil
+
+	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
+	cfgID := uuid.MustParse("00000000-0000-0000-0000-000000000334")
+	historyID := uuid.New()
+	now := time.Now()
+
+	fdb.mu.Lock()
+	fdb.configs[cfgID.String()] = &sbConfigRow{
+		id: cfgID.String(), tenantID: tid, name: "async-no-secrets-test", cron: "0 9 * * *",
+		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
+		createdAt: now, updatedAt: now,
+	}
+	fdb.history[historyID.String()] = &sbHistoryRow{
+		id: historyID.String(), configID: cfgID.String(), tenantID: tid,
+		filename: "async_no_secrets_test.dump", status: "running",
+		startedAt: now, createdAt: now,
+	}
+	fdb.mu.Unlock()
+
+	p.runBackupAsync(cfgID, historyID, uuid.MustParse(tid), "async_no_secrets_test.dump")
+
+	fdb.mu.RLock()
+	h, ok := fdb.history[historyID.String()]
+	fdb.mu.RUnlock()
+
+	if !ok {
+		t.Fatal("history entry should exist after runBackupAsync")
+	}
+	if h.status != "failed" {
+		t.Errorf("want status 'failed', got %q", h.status)
+	}
+	if h.errorMessage == nil || *h.errorMessage != backupDSNUnavailableMessage {
+		t.Errorf("expected the generic tenant-facing message %q, got: %v",
+			backupDSNUnavailableMessage, h.errorMessage)
 	}
 }
 
@@ -2951,7 +3155,6 @@ func TestSB_RunDueBackups_QueryError(t *testing.T) {
 func TestSB_ExecuteScheduledBackup_InsertError(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
 	p.config.DumpDir = t.TempDir()
 
 	tidStr := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()

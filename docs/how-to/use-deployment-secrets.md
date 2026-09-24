@@ -20,6 +20,7 @@ Converted to read from here, live, on every call:
 | `email-notify` | `email.sendgrid_api_key` |
 | `llm` | `llm.providers.<provider>.api_key`, one per **enabled**, non-`ollama` provider that has not opted out (below) |
 | `slack-notify` | `slacknotify.signing_secret` |
+| `scheduled-backup` | `scheduledbackup.dsn` |
 
 `email-notify` and `llm` refuse to start the worker if their required name is
 missing or cannot be opened — see "Fail-closed at boot" below.
@@ -47,6 +48,25 @@ would otherwise go from "button clicks accepted" to "button clicks silently
 401" with nothing at boot saying why. A deployment that has never set
 `slack_signing_secret` — outbound-only, or new — is never asked for one.
 
+**`scheduled-backup` follows the same conditional shape, by the owner's
+`slack-notify` precedent (cleat#2172 1A), extended here on cleat-review's
+#2236 finding.** A `scheduled-backup` deployment with no history of DSN
+configuration boots cleanly with no `scheduledbackup.dsn` set at all, and its
+background loop polls unconditionally regardless — see `Run`'s own doc
+comment (`plugins/scheduledbackup/background.go`). An unresolvable DSN then
+surfaces per backup attempt, recorded as a `failed` row in `backup_history`
+with a generic tenant-facing message, exactly like a `pg_dump` failure would
+be.
+
+**But if `--plugin-config` still carries the legacy `dsn` field,
+`scheduledbackup.dsn` becomes required at boot, the same as `slack-notify`'s
+`slack_signing_secret`.** That field's presence is proof this deployment ran
+scheduled backups against a real database before upgrading — a fresh
+database does not reset an operator's `--plugin-config` — so a missing
+`scheduledbackup.dsn` would otherwise fail every backup attempt silently
+(into `backup_history`, not the operator's face) until someone happens to
+need a restore and finds nothing there.
+
 **`email-notify` needs `"email_enabled": true` in its `--plugin-config`
 section, not just a non-empty file.** Every plugin's `Init` receives the
 SAME raw `--plugin-config` bytes — there is no per-plugin section — so a
@@ -61,15 +81,16 @@ enough, since it is legitimately optional.
 provider. Omitted, it defaults to `true`, today's behavior for every
 enabled provider except `ollama`.
 
-**A leftover `sendgrid_api_key`, `providers.*.api_key`, or
-`slack_signing_secret` in `--plugin-config` does nothing** — none of the
-three structs has a field for it anymore. What a worker does about a
-leftover one differs by plugin:
+**A leftover `sendgrid_api_key`, `providers.*.api_key`, `slack_signing_secret`,
+or `dsn` in `--plugin-config` does nothing** — none of the four structs has a
+field for it anymore. What a worker does about a leftover one differs by
+plugin:
 
-- `llm` and `slack-notify` always log a WARN naming the dead field and the
-  `set-deployment-secret` command to use instead, at boot. `slack-notify`
-  ALSO refuses to start if `slacknotify.signing_secret` cannot be resolved
-  in this case — see above.
+- `llm` always logs a WARN naming the dead field and the
+  `set-deployment-secret` command to use instead, at boot.
+- `slack-notify` and `scheduled-backup` WARN the same way, and EACH also
+  refuses to start if its own name — `slacknotify.signing_secret` or
+  `scheduledbackup.dsn` — cannot be resolved in this case; see above.
 - `email-notify` WARNs the same way, but **only if `email_enabled: true` is
   also set.** A leftover `sendgrid_api_key` with `email_enabled` still
   absent (or explicitly `false`) instead **refuses to start the worker** —
@@ -80,18 +101,21 @@ leftover one differs by plugin:
   remove `sendgrid_api_key` from `--plugin-config`.
 
 **Not yet converted**, and still read from `--plugin-config` at `Init` the way
-every plugin's credentials used to be: `blobstore` (its S3 key pair),
-`scheduledbackup` (its backup-target DSN). Each is tracked as a checklist item
-on cleat#1992. Do not write `blobstore.access_key_id` or `scheduledbackup.dsn`
-here yet — nothing reads them from this table until that plugin's own
-conversion lands.
+every plugin's credentials used to be: `blobstore` (its S3 key pair). Tracked
+as a checklist item on cleat#1992. Do not write `blobstore.access_key_id` or
+`blobstore.secret_access_key` here yet — nothing reads them from this table
+until that plugin's own conversion lands. Unlike the others, blobstore's S3
+client is built once at `Init` from a `minio-go` static-credential provider,
+not fetched per call — converting it needs either a custom
+`credentials.Provider` or reconstructing the client per use, which is why it
+has not landed alongside the rest of this table.
 
 `checkRequiredDeploymentSecrets` (below) consults `plugin.HasRequiredDeploymentSecrets`
 per plugin rather than a single fixed list — `email-notify` and `llm`
-implement it unconditionally, `slack-notify` implements it conditionally (see
-above), and `blobstore`/`scheduledbackup` do not implement it at all yet,
-which is a separate fact from whether they are converted to read from this
-table.
+implement it unconditionally, `slack-notify` and `scheduled-backup` implement
+it conditionally (see above), and `blobstore` does not implement it at all
+yet, which is a separate fact from whether a plugin is converted to read
+from this table.
 
 ## Set up a master key, once
 
@@ -177,14 +201,15 @@ plugin serves, one at a time, with an error that does not say why.
 
 A plugin declares what it needs by implementing
 `plugin.HasRequiredDeploymentSecrets`; `email-notify` and `llm` do
-unconditionally, `slack-notify` conditionally (only when the legacy
-`slack_signing_secret` field is present in `--plugin-config` — see above). A
-plugin with no config section at all is not enabled, and this check never
-runs against it — the same `plugin.ErrNotConfigured` gate that already
-decides whether a plugin's ordinary `Init` runs. `slack-notify` has no such
-gate of its own (its `Config` carries no enablement flag), so it is always
-"enabled" once loaded, and `RequiredDeploymentSecrets` is what carries the
-conditional logic instead of `Init` refusing to run at all.
+unconditionally, `slack-notify` and `scheduled-backup` conditionally (only
+when the legacy `slack_signing_secret`/`dsn` field is present in
+`--plugin-config` — see above). A plugin with no config section at all is
+not enabled, and this check never runs against it — the same
+`plugin.ErrNotConfigured` gate that already decides whether a plugin's
+ordinary `Init` runs. Neither `slack-notify` nor `scheduled-backup` has such
+a gate of its own (neither `Config` carries an enablement flag), so each is
+always "enabled" once loaded, and `RequiredDeploymentSecrets` is what
+carries the conditional logic instead of `Init` refusing to run at all.
 
 ## What is not covered
 
