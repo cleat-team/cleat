@@ -248,7 +248,7 @@ func (p *Plugin) sweepStaleWorkflowRefs(ctx, baseCtx context.Context) (int64, er
 // the very sweep that should have protected it. On a 200-tenant SQL Server
 // run with a live writer racing the sweep for 8s, this lost 48 of 1201 newly
 // started workflows' refs (4%); a 1-tenant run lost 3 of 771. See
-// TestReview2141_ConcurrentNewWorkflowKeepsItsRef.
+// TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkflowsRef.
 //
 // Reading candidates FIRST closes that window: anything that starts after
 // the candidate read is not a candidate this round (it will be one next
@@ -258,21 +258,27 @@ func (p *Plugin) sweepStaleWorkflowRefs(ctx, baseCtx context.Context) (int64, er
 // correctly identified as stale either way -- this is not a race for that
 // case, since a finished workflow does not un-finish.
 //
-// THE RETRYWORKFLOW WINDOW IS NOT NEW HERE, AND IS NOT MSSQL-SPECIFIC.
-// Between a dead-lettered workflow's refs being read as stale and the DELETE
-// that removes them, RetryWorkflow could move it back to 'ready' --
-// dead-lettered is not in-flight by this sweep's own definition ('ready',
-// 'running'), so its refs are a legitimate deletion candidate right up until
-// someone retries it. All three stores implement RetryWorkflow as a bare
-// status UPDATE that does NOT recreate workflow_blob_refs rows
-// (engine/store_lifecycle.go, engine/mysql_lifecycle.go,
-// engine/mssql_lifecycle.go), so a retry landing in that window permanently
-// loses the workflow's blob references on every dialect, not only this one.
+// THE RETRYWORKFLOW LOSS IS NOT NEW HERE, AND IS NOT MSSQL-SPECIFIC.
+// Dead-lettered is not in-flight by this sweep's own definition ('ready',
+// 'running'), so a dead-lettered run's refs are a legitimate deletion
+// candidate from the moment it dead-letters. A dead-lettered run's refs are
+// removed by the FIRST sweep that runs after that, WHATEVER the retry
+// timing turns out to be -- nothing here waits for, or checks, a pending
+// retry. All three stores implement RetryWorkflow as a bare status UPDATE
+// that does NOT recreate workflow_blob_refs rows (engine/store_lifecycle.go,
+// engine/mysql_lifecycle.go, engine/mssql_lifecycle.go), so a run retried
+// only after that first sweep has already run permanently loses its blob
+// references, on every dialect, not only this one.
+//
 // staleWorkflowRefs (queries.go) reads the identical in-flight set from
 // Postgres's admin.in_flight_workflow_ids() and MySQL's direct subquery, in
-// one statement each, and carries the same candidate-then-retried exposure --
-// this function's two separate reads widen the window in wall-clock terms
-// but do not change its kind. It is therefore reviewed as a pre-existing
+// one statement each, and has the same exposure: a dead-lettered run is only
+// safe from that sweep if it is retried before that ONE statement runs, and
+// unsafe from the instant it is captured onward. This function's
+// candidate-before-in-flight read order (see above) moves the point past
+// which a retry is too late slightly EARLIER in wall-clock terms, to the
+// candidate read rather than the in-flight read -- it widens the window,
+// it does not create a new one. It is therefore reviewed as a pre-existing
 // property of the retry/sweep relationship, not a defect this redesign
 // introduced, and is left as-is rather than engineered around: closing it on
 // any dialect would mean re-checking in-flight status from inside the DELETE
