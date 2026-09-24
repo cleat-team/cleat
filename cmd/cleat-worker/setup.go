@@ -1645,6 +1645,25 @@ type Worker struct {
 	// it has had any chance to prove otherwise.
 	lastHeartbeatOK atomic.Int64
 
+	// lastDBTrouble is the UnixNano of this worker's most recent database
+	// round trip -- on the heartbeat OR the reaper path -- that failed or
+	// did not return before dbCallDeadline. The reaper's own counterpart to
+	// lastHeartbeatOK above, guarding a different decision with the OPPOSITE
+	// default. heartbeatPresumedLost defaults optimistic (false, from
+	// lastHeartbeatOK seeded to now): a delayed refusal to accept new work
+	// is recoverable, and presuming loss too early costs nothing but idle
+	// capacity. This defaults pessimistic instead: reclaiming a run out from
+	// under a worker that is actually still alive is not recoverable by
+	// trying again later, so a worker that has not yet PROVEN a full
+	// reclaimAfter() window of clean database contact must not act on
+	// anyone else's staleness. Seeded to the worker's own start time (see
+	// newWorker and the test constructors), not the zero value, for exactly
+	// that reason: a freshly started worker has demonstrated nothing about
+	// its own database contact yet, and must earn the same window any other
+	// worker's heartbeat would have to lapse before being called dead.
+	// cleat#2005.
+	lastDBTrouble atomic.Int64
+
 	scheduleMu       sync.Mutex
 	scheduleInterval time.Duration
 
@@ -3132,20 +3151,43 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 func (w *Worker) heartbeatLoop() {
 	defer w.wg.Done()
 	w.healthTracker.setInterval("heartbeat", w.heartbeatInterval)
-	ticker := time.NewTicker(w.heartbeatInterval)
-	defer ticker.Stop()
+
+	// A Timer, not a Ticker, re-armed by hand each iteration: on a failed or
+	// troubled call this reschedules soon rather than waiting out the full
+	// interval -- "heartbeat immediately on reconnect" (cleat#2005). The
+	// sooner this worker's own heartbeat lands again after a stall, the
+	// sooner reapingIsSafe() -- on this worker's own reaper, and via
+	// heartbeat_at on every OTHER worker's -- trusts it again. See
+	// heartbeatRetryInterval's doc for the bound.
+	timer := time.NewTimer(w.heartbeatInterval)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-w.getLoopCtx("heartbeat").Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			w.healthTracker.recordRun("heartbeat")
 			hbStart := time.Now()
-			w.heartbeatAndFenceInFlight()
+			ok := w.heartbeatAndFenceInFlight()
 			w.Metrics.SetBackgroundLoopDuration(w.ctx, "heartbeat", time.Since(hbStart).Seconds())
+			if ok {
+				timer.Reset(w.heartbeatInterval)
+			} else {
+				timer.Reset(w.heartbeatRetryInterval())
+			}
 		}
 	}
+}
+
+// heartbeatRetryInterval is how soon heartbeatLoop retries after a failed or
+// troubled call, rather than waiting out the full --heartbeat interval.
+// Capped at one second: short enough that a worker recovering from a stall
+// re-proves itself quickly, and never longer than heartbeatInterval itself
+// (an operator running with --heartbeat below one second gets no slower a
+// retry than their own normal cadence). cleat#2005.
+func (w *Worker) heartbeatRetryInterval() time.Duration {
+	return min(w.heartbeatInterval, time.Second)
 }
 
 // heartbeatAndFenceInFlight heartbeats every run this worker's OWN goroutines
@@ -3161,7 +3203,12 @@ func (w *Worker) heartbeatLoop() {
 // w.inflight (executeWorkflow's own deferred Delete) in the same moment it
 // leaves status='running' (FinalizeWorkflowSegment always changes one when it
 // changes the other), so the two have never had a gap to close.
-func (w *Worker) heartbeatAndFenceInFlight() {
+// heartbeatAndFenceInFlight's bool return is "did this call land" -- used
+// only by heartbeatLoop to decide whether to retry immediately rather than
+// wait out the full interval. cleat#2005: see the loop's own comment on why
+// that matters for how soon this worker's own reaper (and every other
+// worker's) trusts it again after a stall.
+func (w *Worker) heartbeatAndFenceInFlight() bool {
 	var runs []engine.GenerationKey
 	w.inflight.Range(func(key, value any) bool {
 		wf, ok := value.(*engine.WorkflowInstance)
@@ -3174,11 +3221,19 @@ func (w *Worker) heartbeatAndFenceInFlight() {
 	if len(runs) == 0 {
 		w.lastHeartbeatOK.Store(time.Now().UnixNano())
 		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
-		return
+		return true
 	}
 
-	lost, err := w.store.HeartbeatBatchFenced(w.ctx, w.id, runs)
+	// Bounded so a stalled connection is recorded as trouble instead of
+	// silently outliving the stall -- see dbCallDeadline's doc. A database
+	// that merely delays rather than refuses (cleat#2005's docker-pause
+	// reproduction) never returns a connection error at all; only a
+	// deadline catches that shape.
+	hbCtx, cancel := context.WithTimeout(w.ctx, w.dbCallDeadline())
+	lost, err := w.store.HeartbeatBatchFenced(hbCtx, w.id, runs)
+	cancel()
 	if err != nil {
+		w.recordDBTrouble()
 		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
 		if isConnectionError(err) {
 			w.logger.WarnContext(w.ctx, "HeartbeatBatchFenced failed: DB appears down", "worker_id", w.id)
@@ -3190,7 +3245,7 @@ func (w *Worker) heartbeatAndFenceInFlight() {
 		// stop every in-flight execution on a single transient DB blip.
 		// cleat#2008 decision 2 (stand down after sustained failure) is the
 		// deliberately separate, slower response to this case.
-		return
+		return false
 	}
 	w.lastHeartbeatOK.Store(time.Now().UnixNano())
 	w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
@@ -3226,6 +3281,7 @@ func (w *Worker) heartbeatAndFenceInFlight() {
 		w.fencedRuns.Store(id, struct{}{})
 		cancel()
 	}
+	return true
 }
 
 // reclaimAfter is how long a run may go without a heartbeat before another
@@ -3285,6 +3341,64 @@ func (w *Worker) runIsFenced(workflowID string) bool {
 	return ok
 }
 
+// recordDBTrouble marks this worker's own database contact as having just
+// had trouble: a connection error, or a round trip that did not return
+// before dbCallDeadline. Called from the heartbeat and reaper loops alike,
+// because both are the same question asked from two directions -- can THIS
+// worker currently reach the database at all? A worker that cannot has no
+// basis for trusting a stale heartbeat_at as evidence that some OTHER
+// worker died, rather than evidence that an outage silenced every worker's
+// writes at once, itself included. See lastDBTrouble and reapingIsSafe.
+// cleat#2005.
+func (w *Worker) recordDBTrouble() {
+	w.lastDBTrouble.Store(time.Now().UnixNano())
+}
+
+// reapingIsSafe reports whether this worker's own database contact has gone
+// at least reclaimAfter() without a recorded failure or slow round trip.
+//
+// THIS IS NOT heartbeatPresumedLost, DESPITE SHARING reclaimAfter() AS THE
+// THRESHOLD. That one asks whether ANOTHER worker might legitimately have
+// reclaimed one of THIS worker's own runs by now, so THIS worker should
+// refuse to start new durable calls. This one asks the mirror question for
+// the reaper: can THIS worker trust what it is about to read well enough to
+// reclaim someone ELSE's run? A database stall answers both at once --
+// which is why a single stall reported in the reproduction (cleat#2005) had
+// this worker reclaim ITS OWN run: nothing was asking this question at all.
+//
+// See lastDBTrouble's doc for why this defaults pessimistic (false) rather
+// than optimistic, the opposite of heartbeatPresumedLost's default.
+func (w *Worker) reapingIsSafe() bool {
+	last := time.Unix(0, w.lastDBTrouble.Load())
+	return time.Since(last) >= w.reclaimAfter()
+}
+
+// dbCallDeadline bounds a single heartbeat or reaper database round trip.
+//
+// WHY THIS HAS TO EXIST AT ALL, not just recordDBTrouble/reapingIsSafe. A
+// call issued with no deadline can be in flight from BEFORE a stall began,
+// and a stall that merely delays a connection (rather than severing it)
+// lets that call return SUCCESS the moment the database responds -- which,
+// per ReapStaleInstances' own predicate, is exactly when a heartbeat_at
+// written before the stall looks old enough to reclaim. reapingIsSafe
+// cannot protect against a call that was already past its own gate check
+// before the stall was detectable. Bounding the call is what turns "hangs
+// silently for the whole stall, then succeeds" into "fails partway through,
+// repeatedly, keeping lastDBTrouble current until the stall genuinely
+// clears" -- see cleat#2005's issue body for the reproduction this closes.
+//
+// Comfortably shorter than reclaimAfter(), so trouble is recorded well
+// before the window it must stay clear of is even close to elapsing, and no
+// longer than heartbeatInterval, so a bound call cannot itself desynchronize
+// the loop that issues it from its own ticker.
+func (w *Worker) dbCallDeadline() time.Duration {
+	d := w.heartbeatInterval / 2
+	if d <= 0 {
+		return 5 * time.Second
+	}
+	return d
+}
+
 // reclaimWindow is reclaimAfter's arithmetic, as a function of its two inputs.
 //
 // Split out so that startup advice which has to reason about the window --
@@ -3314,53 +3428,85 @@ func (w *Worker) reaperLoop() {
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("reaper")
-			reaperStart := time.Now()
-			staleTimeout := w.reclaimAfter()
-			reaped, err := w.store.ReapStaleInstances(w.ctx, staleTimeout, w.maxReclaimPerTick)
-			if err != nil {
-				if isConnectionError(err) {
-					w.logger.WarnContext(w.ctx, "Reaper: DB appears down", "worker_id", w.id)
-				} else {
-					w.logger.ErrorContext(w.ctx, "Reaper error", "worker_id", w.id, "error", err)
-				}
-				w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "error")
-				w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
-				continue
-			}
-			if reaped > 0 {
-				w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
-				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "reaper", int64(reaped))
-				// The fleet-wide reclaim counter. It had NO call site until
-				// now, so cleat_reaper_instances_claimed_total has never
-				// emitted a sample -- despite migration 052 and
-				// engine/reclaim_count_records_reclaims_only_test.go both
-				// describing it as an existing counter that "counts every row
-				// it takes". cleat#1317.
-				//
-				// Fed here rather than inside ReapStaleInstances: the store
-				// has no Metrics handle, and this is the one funnel every
-				// dialect's reaper returns through.
-				w.Metrics.RecordReaperInstancesClaimed(w.ctx, int64(reaped))
-			}
-			// A full tick is the signal worth surfacing, and it is the only
-			// place this is observable: the sweep bounded at the limit looks
-			// exactly like a sweep that found precisely that many. An
-			// ordinary failure does not fill a tick -- 200 is twenty workers'
-			// worth at the default concurrency -- so this means either a
-			// stall aged the whole running set past the threshold at once, or
-			// there is more to reclaim than one tick can carry. Both want an
-			// operator's attention, and neither is visible from the count
-			// alone. cleat#1320.
-			if w.maxReclaimPerTick > 0 && reaped >= w.maxReclaimPerTick {
-				w.logger.WarnContext(w.ctx, "Reaper: hit the per-tick reclaim limit; more instances remain stale",
-					"worker_id", w.id, "count", reaped, "limit", w.maxReclaimPerTick,
-					"hint", "a whole-set stall (a boot migration holding a lock, a failover, a paused volume) ages every heartbeat at once; recovery continues on later ticks")
-			}
-			w.expireDeferPhases()
-			w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "ok")
-			w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
+			w.reapOnce()
 		}
 	}
+}
+
+// reapOnce is one reaper tick, extracted from reaperLoop so a test can drive
+// it directly without a ticker. cleat#2005.
+func (w *Worker) reapOnce() {
+	reaperStart := time.Now()
+
+	// THE GRACE PERIOD. A stale heartbeat_at only proves a run's holder is
+	// dead if THIS worker could have seen a fresh one arrive -- see
+	// reapingIsSafe's doc. Skipping here, before ever calling
+	// ReapStaleInstances, is what cleat#2005's reproduction had nothing
+	// doing: the reaper reclaimed its own worker's live run 56ms after a
+	// database stall ended, because nothing distinguished "the holder died"
+	// from "my own observation of every worker just went dark, briefly,
+	// including of myself".
+	if !w.reapingIsSafe() {
+		w.logger.WarnContext(w.ctx, "Reaper: skipping this tick -- recent database trouble on this worker, waiting out the recovery grace period before trusting a stale heartbeat",
+			"worker_id", w.id, "reclaim_after", w.reclaimAfter())
+		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "skipped")
+		w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
+		return
+	}
+
+	// Bounded for the same reason heartbeatAndFenceInFlight's call is: a
+	// call already in flight from before a stall began would otherwise
+	// return SUCCESS the moment the database responds, with the stale
+	// predicate satisfied by the stall's own duration -- see
+	// dbCallDeadline's doc. The gate above cannot protect against a call
+	// that passed it before the stall was detectable; this can.
+	reapCtx, cancel := context.WithTimeout(w.ctx, w.dbCallDeadline())
+	staleTimeout := w.reclaimAfter()
+	reaped, err := w.store.ReapStaleInstances(reapCtx, staleTimeout, w.maxReclaimPerTick)
+	cancel()
+	if err != nil {
+		w.recordDBTrouble()
+		if isConnectionError(err) {
+			w.logger.WarnContext(w.ctx, "Reaper: DB appears down", "worker_id", w.id)
+		} else {
+			w.logger.ErrorContext(w.ctx, "Reaper error", "worker_id", w.id, "error", err)
+		}
+		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "error")
+		w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
+		return
+	}
+	if reaped > 0 {
+		w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
+		w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "reaper", int64(reaped))
+		// The fleet-wide reclaim counter. It had NO call site until
+		// now, so cleat_reaper_instances_claimed_total has never
+		// emitted a sample -- despite migration 052 and
+		// engine/reclaim_count_records_reclaims_only_test.go both
+		// describing it as an existing counter that "counts every row
+		// it takes". cleat#1317.
+		//
+		// Fed here rather than inside ReapStaleInstances: the store
+		// has no Metrics handle, and this is the one funnel every
+		// dialect's reaper returns through.
+		w.Metrics.RecordReaperInstancesClaimed(w.ctx, int64(reaped))
+	}
+	// A full tick is the signal worth surfacing, and it is the only
+	// place this is observable: the sweep bounded at the limit looks
+	// exactly like a sweep that found precisely that many. An
+	// ordinary failure does not fill a tick -- 200 is twenty workers'
+	// worth at the default concurrency -- so this means either a
+	// stall aged the whole running set past the threshold at once, or
+	// there is more to reclaim than one tick can carry. Both want an
+	// operator's attention, and neither is visible from the count
+	// alone. cleat#1320.
+	if w.maxReclaimPerTick > 0 && reaped >= w.maxReclaimPerTick {
+		w.logger.WarnContext(w.ctx, "Reaper: hit the per-tick reclaim limit; more instances remain stale",
+			"worker_id", w.id, "count", reaped, "limit", w.maxReclaimPerTick,
+			"hint", "a whole-set stall (a boot migration holding a lock, a failover, a paused volume) ages every heartbeat at once; recovery continues on later ticks")
+	}
+	w.expireDeferPhases()
+	w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "ok")
+	w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
 }
 
 // expireDeferPhases bounds the number of ATTEMPTS a defer phase gets, which is

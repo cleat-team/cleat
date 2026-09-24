@@ -1736,6 +1736,11 @@ func main() {
 	// lost from the instant it starts, before heartbeatLoop has ticked even
 	// once.
 	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	// cleat#2005: also seed to now, but for the OPPOSITE reason -- see
+	// lastDBTrouble's doc. A fresh worker has not yet PROVEN a clean window
+	// of database contact either, and its reaper must not act on anyone
+	// else's staleness until it has.
+	w.lastDBTrouble.Store(time.Now().UnixNano())
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
