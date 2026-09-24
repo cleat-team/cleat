@@ -186,19 +186,29 @@ no session context, `SESSION_CONTEXT(N'tenant_id')` is `NULL`, and
 **If your migration or backfill writes a `tenant_id`-bearing row to a
 core table that carries this policy, it must do one of:**
 
+* disable the table's policy for the backfill's duration —
+  `ALTER SECURITY POLICY dbo.<policy> WITH (STATE = OFF)`, the backfill, then
+  `WITH (STATE = ON)` inside a `BEGIN TRY`/`BEGIN CATCH` that re-enables it on
+  failure too. This turns off `FILTER` and `BLOCK` together, needs no optional
+  migration installed, and is the **only** option available to a *shipped*
+  migration, which cannot assume `cross_tenant_claim.sql` has been applied.
+  `migrations/mssql/077_every_entity_records_when_it_last_changed.sql` and
+  `078_two_entities_record_when_they_were_created.sql` already use exactly
+  this pattern; or
 * run as a login that is a member of the `cleat_admin` role, with
   `migrations/mssql/optional/cross_tenant_claim.sql`'s admin-bypass predicate
   form installed (it bypasses `BLOCK` exactly as it bypasses `FILTER`, since
-  both share `fn_tenant_filter`); or
+  both share `fn_tenant_filter`) — available to an operator's own backfill
+  script, not to a shipped migration; or
 * call `EXEC sp_set_session_context @key=N'tenant_id', @value=<tenant>` on its
   own connection, per tenant, before the write — the same pattern
   `engine`'s tenant-scoped stores and tests already use, since
   `sp_set_session_context` is connection-scoped and does not survive a pooled
   connection's `sp_reset_connection`.
 
-As of 2026-09-24 no migration after `002_defaults.sql` does either — 103 lands
-after the only migration that writes such data, so nothing existing needed
-either accommodation. The next migration that backfills a core table will.
+As of 2026-09-24, 077 and 078 are the only migrations after `002_defaults.sql`
+that write to one of these tables, and both predate 103 — the `STATE = OFF/ON`
+pattern they already use is exactly what the next one needs too.
 
 Dropping a tenant works on both dialects. `admin.drop_tenant` on SQL Server is
 `migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql`, and it finds
