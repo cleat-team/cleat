@@ -27,13 +27,20 @@ func TestInfo(t *testing.T) {
 
 func TestInit(t *testing.T) {
 	p := &Plugin{}
-	cfg := `{"providers": {"openai": {"api_key": "sk-test", "enabled": true}}}`
-	env := &plugin.Environment{Config: []byte(cfg)}
+	// The API key no longer lives in this JSON config (cleat#1992 part 1) --
+	// see ProviderConfig's doc comment -- so this only checks the fields that
+	// still do.
+	cfg := `{"providers": {"openai": {"enabled": true}}}`
+	secrets := newFakeProviderKeys(map[string]string{"openai": "sk-test"})
+	env := &plugin.Environment{Config: []byte(cfg), DeploymentSecrets: secrets}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() returned error: %v", err)
 	}
 	if p.httpClient == nil {
 		t.Error("expected httpClient to be set")
+	}
+	if p.deploymentSecrets == nil {
+		t.Error("expected deploymentSecrets to be set from env.DeploymentSecrets")
 	}
 	openaiCfg, ok := p.config.Providers["openai"]
 	if !ok {
@@ -41,9 +48,6 @@ func TestInit(t *testing.T) {
 	}
 	if !openaiCfg.Enabled {
 		t.Error("expected openai to be enabled")
-	}
-	if openaiCfg.APIKey != "sk-test" {
-		t.Errorf("expected APIKey 'sk-test', got %q", openaiCfg.APIKey)
 	}
 }
 

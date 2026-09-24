@@ -28,8 +28,15 @@ func New() plugin.Plugin {
 }
 
 // ProviderConfig holds configuration for a single LLM provider.
+//
+// APIKey lived here until cleat#1992 part 1 moved it to a deployment secret
+// ("llm.providers.<provider>.api_key") so it can be rotated with
+// `cleatctl set-deployment-secret` and take effect without a worker restart.
+// See (*Plugin).providerAPIKey (host_functions.go) for the per-call lookup
+// that replaced this field. ollama needs no key at all -- it is excluded
+// there rather than here, since this struct still describes every provider
+// uniformly.
 type ProviderConfig struct {
-	APIKey       string `json:"api_key"`
 	BaseURL      string `json:"base_url,omitempty"`
 	DefaultModel string `json:"default_model,omitempty"`
 	Enabled      bool   `json:"enabled"`
@@ -42,10 +49,11 @@ type Config struct {
 
 // Plugin implements the LLM provider plugin.
 type Plugin struct {
-	db         plugin.PluginDB
-	logger     *slog.Logger
-	httpClient *http.Client
-	config     Config
+	db                plugin.PluginDB
+	logger            *slog.Logger
+	httpClient        *http.Client
+	config            Config
+	deploymentSecrets plugin.DeploymentSecrets
 }
 
 // Info returns plugin metadata.
@@ -69,6 +77,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.db = env.DB
 	// cleat#1565: every outbound request goes through the egress guard.
 	p.httpClient = &http.Client{Timeout: 60 * time.Second, Transport: env.HTTPTransport}
+	p.deploymentSecrets = env.DeploymentSecrets
 
 	if len(env.Config) > 0 {
 		if err := json.Unmarshal(env.Config, &p.config); err != nil {

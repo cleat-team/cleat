@@ -121,15 +121,35 @@ func normalizeOutput(out *providers.ChatOutput) {
 // ${secret:NAME} keeps the reference in event history rather than the value,
 // which is a fact about what THEY write, not something enforced against a
 // workflow that chooses not to.
-func effectiveAPIKey(requestKey string, cfg ProviderConfig) (string, error) {
+func (p *Plugin) effectiveAPIKey(ctx context.Context, requestKey, provider string) (string, error) {
 	if requestKey == "" {
-		return cfg.APIKey, nil
+		return p.providerAPIKey(ctx, provider)
 	}
 	if strings.Contains(requestKey, "${secret:") {
 		return "", fmt.Errorf("llm: api_key contains an unresolved secret reference " +
 			"(no tenant context, or no master key configured on the worker)")
 	}
 	return requestKey, nil
+}
+
+// providerAPIKey fetches the current API key for one provider from
+// deployment secrets, at the moment of use rather than cached at Init
+// (cleat#1992 part 1), so a key rotated with `cleatctl set-deployment-secret`
+// takes effect on the next call without a worker restart. ollama needs no
+// key at all -- OllamaChat/OllamaChatStream take none -- so it is excluded
+// here rather than made to look up a secret that will never be set.
+func (p *Plugin) providerAPIKey(ctx context.Context, provider string) (string, error) {
+	if provider == "ollama" {
+		return "", nil
+	}
+	if p.deploymentSecrets == nil {
+		return "", fmt.Errorf("llm: no deployment secret store configured")
+	}
+	key, err := p.deploymentSecrets.Get(ctx, "llm.providers."+provider+".api_key")
+	if err != nil {
+		return "", fmt.Errorf("llm: providers.%s.api_key: %w", provider, err)
+	}
+	return key, nil
 }
 
 func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
@@ -151,7 +171,7 @@ func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 		return "", fmt.Errorf("llm: provider %q not configured or disabled", req.Provider)
 	}
 
-	apiKey, err := effectiveAPIKey(req.APIKey, cfg)
+	apiKey, err := p.effectiveAPIKey(ctx, req.APIKey, req.Provider)
 	if err != nil {
 		return "", err
 	}
@@ -224,17 +244,21 @@ func (p *Plugin) embed(ctx context.Context, inputJSON string) (string, error) {
 		req.Model = cfg.DefaultModel
 	}
 
+	apiKey, err := p.providerAPIKey(ctx, req.Provider)
+	if err != nil {
+		return "", err
+	}
+
 	input := providers.EmbedInput{Model: req.Model, Input: req.Input}
 
 	var output providers.EmbedOutput
-	var err error
 
 	switch req.Provider {
 	case "openai":
-		output, err = providers.OpenAIEmbed(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.OpenAIEmbed(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	default:
 		// Try OpenAI-compatible path for other providers
-		output, err = providers.OpenAIEmbed(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.OpenAIEmbed(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	}
 	if err != nil {
 		output.Error = err.Error()
@@ -333,7 +357,7 @@ func (p *Plugin) chatStream(ctx context.Context, inputJSON string) (<-chan plugi
 		return nil, fmt.Errorf("llm: provider %q not configured or disabled", req.Provider)
 	}
 
-	apiKey, err := effectiveAPIKey(req.APIKey, cfg)
+	apiKey, err := p.effectiveAPIKey(ctx, req.APIKey, req.Provider)
 	if err != nil {
 		return nil, err
 	}

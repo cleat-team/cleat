@@ -129,28 +129,34 @@ func (r *testStreamRegistry) RegisterStream(opts plugin.FuncOptions, fn plugin.P
 
 func setupStreamPlugin(t *testing.T, serverURL, provider string, apiKey string) *Plugin {
 	t.Helper()
-	p := &Plugin{}
 	if apiKey == "" {
 		apiKey = "sk-test"
 	}
 	cfg := Config{
 		Providers: map[string]ProviderConfig{
-			provider: {APIKey: apiKey, BaseURL: serverURL, Enabled: true, DefaultModel: "test-model"},
+			provider: {BaseURL: serverURL, Enabled: true, DefaultModel: "test-model"},
 		},
 	}
-	cfgJSON, _ := json.Marshal(cfg)
-	env := &plugin.Environment{Config: cfgJSON}
-	if err := p.Init(context.Background(), env); err != nil {
-		t.Fatalf("Init() failed: %v", err)
-	}
-	return p
+	return setupCustomPluginWithKeys(t, cfg, map[string]string{provider: apiKey})
 }
 
 func setupCustomPlugin(t *testing.T, cfg Config) *Plugin {
 	t.Helper()
+	return setupCustomPluginWithKeys(t, cfg, nil)
+}
+
+// setupCustomPluginWithKeys is setupCustomPlugin plus a fake deployment-secret
+// store seeded with one API key per provider name -- the replacement for the
+// ProviderConfig.APIKey field cleat#1992 part 1 removed (see ProviderConfig's
+// doc comment in plugin.go).
+func setupCustomPluginWithKeys(t *testing.T, cfg Config, byProvider map[string]string) *Plugin {
+	t.Helper()
 	p := &Plugin{}
 	cfgJSON, _ := json.Marshal(cfg)
-	env := &plugin.Environment{Config: cfgJSON}
+	env := &plugin.Environment{
+		Config:            cfgJSON,
+		DeploymentSecrets: newFakeProviderKeys(byProvider),
+	}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
@@ -207,7 +213,7 @@ func TestLLM_ChatStream_DisabledProvider(t *testing.T) {
 	p := &Plugin{}
 	p.config = Config{
 		Providers: map[string]ProviderConfig{
-			"openai": {APIKey: "sk-test", Enabled: false},
+			"openai": {Enabled: false},
 		},
 	}
 	req := chatRequest{Provider: "openai", Messages: []providers.Message{{Role: "user", Content: "hello"}}}
@@ -225,7 +231,7 @@ func TestLLM_ChatStream_UnknownProvider(t *testing.T) {
 	p := &Plugin{}
 	p.config = Config{
 		Providers: map[string]ProviderConfig{
-			"openai": {APIKey: "sk-test", Enabled: true},
+			"openai": {Enabled: true},
 		},
 	}
 	req := chatRequest{Provider: "nonexistent", Messages: []providers.Message{{Role: "user", Content: "hello"}}}
@@ -335,17 +341,11 @@ func TestLLM_ChatStream_Anthropic(t *testing.T) {
 	srv := fakeAnthropicStreamServer(t)
 	defer srv.Close()
 
-	p := &Plugin{}
-	cfg := Config{
+	p := setupCustomPluginWithKeys(t, Config{
 		Providers: map[string]ProviderConfig{
-			"anthropic": {APIKey: "sk-ant-test", BaseURL: srv.URL, Enabled: true, DefaultModel: "claude-sonnet-4-6"},
+			"anthropic": {BaseURL: srv.URL, Enabled: true, DefaultModel: "claude-sonnet-4-6"},
 		},
-	}
-	cfgJSON, _ := json.Marshal(cfg)
-	env := &plugin.Environment{Config: cfgJSON}
-	if err := p.Init(context.Background(), env); err != nil {
-		t.Fatalf("Init() failed: %v", err)
-	}
+	}, map[string]string{"anthropic": "sk-ant-test"})
 
 	req := chatRequest{
 		Provider: "anthropic",
@@ -437,9 +437,9 @@ func TestLLM_ChatStream_Groq(t *testing.T) {
 	srv := fakeOpenAIStreamServer(t)
 	defer srv.Close()
 
-	p := setupStreamPlugin(t, srv.URL, "groq", "gsk-test")
+	p := setupStreamPlugin(t, srv.URL, "groq", "sk-test")
 	p.config.Providers["groq"] = ProviderConfig{
-		APIKey: "sk-test", BaseURL: srv.URL, Enabled: true, DefaultModel: "llama-3.3-70b",
+		BaseURL: srv.URL, Enabled: true, DefaultModel: "llama-3.3-70b",
 	}
 
 	req := chatRequest{
@@ -477,7 +477,7 @@ func TestLLM_ChatStream_DefaultModel(t *testing.T) {
 
 	p := setupStreamPlugin(t, srv.URL, "openai", "sk-test")
 	p.config.Providers["openai"] = ProviderConfig{
-		APIKey: "sk-test", BaseURL: srv.URL, Enabled: true, DefaultModel: "gpt-4o",
+		BaseURL: srv.URL, Enabled: true, DefaultModel: "gpt-4o",
 	}
 
 	// Empty model should fall back to DefaultModel
@@ -545,10 +545,11 @@ func TestLLM_HealthEndpoint(t *testing.T) {
 	p := &Plugin{}
 	p.config = Config{
 		Providers: map[string]ProviderConfig{
-			"openai":    {APIKey: "sk-test", Enabled: true, DefaultModel: "gpt-4o"},
-			"anthropic": {APIKey: "sk-ant-test", Enabled: false, DefaultModel: "claude-sonnet-4-6"},
+			"openai":    {Enabled: true, DefaultModel: "gpt-4o"},
+			"anthropic": {Enabled: false, DefaultModel: "claude-sonnet-4-6"},
 		},
 	}
+	p.deploymentSecrets = newFakeProviderKeys(map[string]string{"openai": "sk-test"})
 
 	mux := http.NewServeMux()
 	if err := p.RegisterRoutes(mux); err != nil {
@@ -718,7 +719,7 @@ func TestLLM_Embed_DisabledProvider(t *testing.T) {
 	p := &Plugin{}
 	p.config = Config{
 		Providers: map[string]ProviderConfig{
-			"openai": {APIKey: "sk-test", Enabled: false},
+			"openai": {Enabled: false},
 		},
 	}
 	_, err := p.embed(streamTenantCtx(), `{"provider":"openai","model":"text-embedding-3-small","input":["hello"]}`)
@@ -776,11 +777,11 @@ func TestLLM_Embed_UnknownProvider(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := setupCustomPlugin(t, Config{
+	p := setupCustomPluginWithKeys(t, Config{
 		Providers: map[string]ProviderConfig{
-			"custom": {APIKey: "sk-test", BaseURL: srv.URL, Enabled: true, DefaultModel: "text-embedding-3-small"},
+			"custom": {BaseURL: srv.URL, Enabled: true, DefaultModel: "text-embedding-3-small"},
 		},
-	})
+	}, map[string]string{"custom": "sk-test"})
 
 	req := embedRequest{
 		Provider: "custom",
@@ -822,7 +823,7 @@ func TestLLM_Chat_DefaultModel(t *testing.T) {
 
 	p := setupStreamPlugin(t, srv.URL, "openai", "sk-test")
 	p.config.Providers["openai"] = ProviderConfig{
-		APIKey: "sk-test", BaseURL: srv.URL, Enabled: true, DefaultModel: "gpt-4o",
+		BaseURL: srv.URL, Enabled: true, DefaultModel: "gpt-4o",
 	}
 
 	// Empty model should use DefaultModel
