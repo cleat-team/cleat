@@ -260,13 +260,37 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	eventID := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.Exec(tenantCtx, plugin.Rebind(`
+	// INSERT ... SELECT ... WHERE EXISTS, not a plain INSERT. cleat-review on
+	// #2221: the source lookup above and this INSERT are two separate
+	// statements, so a delete landing in between them -- the caller already
+	// past the lookup, secret verified, signature checked -- would otherwise
+	// still write the event. Guarding the write itself, rather than trusting
+	// the read done a few lines up, closes that window regardless of how
+	// wide it is.
+	//
+	// $8, not a second $2: MySQL's Rebind turns each $N occurrence into a `?`
+	// bound by textual position, not by its number (see CLAUDE.md's "MySQL
+	// binds `?` by APPEARANCE" and the identical fix already applied to this
+	// package's handleCreateSource and notifications' handleCreateWebhook).
+	// Reusing $2 for the EXISTS clause would work on PostgreSQL and SQL
+	// Server, which bind by number, and silently misalign every MySQL
+	// argument after it. sourceID is passed twice, once per placeholder.
+	rowsInserted, err := p.db.Exec(tenantCtx, plugin.Rebind(`
 		INSERT INTO webhook_events (id, source_id, tenant_id, event_type, headers, payload, received_at, processed)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, false)
-	`, p.dialect), eventID, sourceID, source.TenantID, eventType, string(headersJSON), string(payloadJSON), now)
+		SELECT $1, $2, $3, $4, $5, $6, $7, false
+		WHERE EXISTS (SELECT 1 FROM webhook_sources WHERE id = $8 AND deleted_at IS NULL)
+	`, p.dialect), eventID, sourceID, source.TenantID, eventType, string(headersJSON), string(payloadJSON), now, sourceID)
 	if err != nil {
 		p.logger.Error("webhook-ingest: store event", "error", err)
 		p.writeError(w, 500, "failed to store event")
+		return
+	}
+	if rowsInserted == 0 {
+		// The source was deleted after the lookup above and before this
+		// statement ran. Same response as if it had never been found --
+		// the caller asked to send a webhook to a source that, by the time
+		// the write actually happened, no longer accepts one.
+		p.writeError(w, 404, "source not found")
 		return
 	}
 
@@ -578,18 +602,66 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	// pre-#2199 behaviour for a repeat delete, so this is not a new
 	// idempotency contract, just one that no longer depends on the row
 	// having been physically removed.
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	//
+	// BOTH UPDATES BELOW SHARE ONE TRANSACTION. cleat-review on #2221: an
+	// event ingested before the delete, whose inline signal failed (the
+	// SignalWorkflow call in handleIngestWebhook), was left processed=false,
+	// status='pending' -- and nothing about the delete stopped the background
+	// retry sweep (background.go's processBatch) from later delivering it.
+	// Measured on all three dialects: a source with one such event, deleted,
+	// then swept, produced one new signal delivery for event_type
+	// 'completed' -- a forged event accepted during exactly the compromise
+	// window the delete is meant to shut off still reached the workflow.
+	// Doing this in the same transaction as the soft-delete means the two
+	// statements can never observably disagree: no reader can see the source
+	// marked deleted while a pending event for it is still eligible for
+	// retry, or the reverse.
+	tx, err := p.db.Begin(r.Context())
+	if err != nil {
+		p.logger.Error("webhook-ingest: begin delete source", "error", err)
+		p.writeError(w, 500, "failed to delete source")
+		return
+	}
+
+	rows, err := tx.Exec(r.Context(), plugin.Rebind(`
 		UPDATE webhook_sources
 		SET enabled = false, deleted_at = $1
 		WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL
 	`, p.dialect), time.Now(), id, tid)
 	if err != nil {
+		tx.Rollback()
 		p.logger.Error("webhook-ingest: delete source", "error", err)
 		p.writeError(w, 500, "failed to delete source")
 		return
 	}
 	if rows == 0 {
+		tx.Rollback()
 		p.writeError(w, 404, "source not found")
+		return
+	}
+
+	// processed = true, same as every other terminal status this table has
+	// ('completed', 'dead_letter') -- 'cancelled' joins them as a third.
+	// cleat-review took the open question below to the owner, who chose (A):
+	// a delete stops an event reaching an awaiting workflow too, not only the
+	// background PUSH retry. host_functions.go's awaitWebhook now filters on
+	// this the same way processBatch's query does, so this UPDATE closes off
+	// both delivery paths, not just the one this fix started from.
+	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
+		UPDATE webhook_events
+		SET status = 'cancelled', processed = true, error_msg = 'source deleted'
+		WHERE source_id = $1 AND tenant_id = $2 AND processed = false
+		  AND (status = 'pending' OR status IS NULL)
+	`, p.dialect), id, tid); err != nil {
+		tx.Rollback()
+		p.logger.Error("webhook-ingest: cancel pending events on delete", "error", err)
+		p.writeError(w, 500, "failed to delete source")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		p.logger.Error("webhook-ingest: commit delete source", "error", err)
+		p.writeError(w, 500, "failed to delete source")
 		return
 	}
 

@@ -201,6 +201,18 @@ func (p *Plugin) markRetryFailed(ctx context.Context, eventID uuid.UUID, current
 // So this statement failed on MySQL and on SQL Server, on every tick of the
 // background loop, and neither failure fails an assertion anywhere: the errors
 // go to the worker log, which is not in the CI console.
+//
+// `s.deleted_at IS NULL` is a SECOND guard, not the primary fix. cleat-review
+// on #2221: handleDeleteSource (routes.go) now cancels a source's own
+// pending/retrying events (status = 'cancelled') in the same transaction as
+// the soft-delete, which is what stops an event that was already sitting
+// unprocessed at delete time. This clause exists for anything that fix does
+// not reach -- chiefly the race handleIngestWebhook's own EXISTS-guarded
+// INSERT closes at the write, but a second, independent guard here means a
+// future write path that forgets the cancellation still cannot deliver to a
+// deleted source, because this query would no longer select its rows either
+// way. True for every source that was never deleted, since deleted_at IS NULL
+// then too -- this narrows nothing for the ordinary case.
 var queryUnprocessedWebhookEvents = plugin.Query{
 	Default: `SELECT e.id, e.tenant_id, e.source_id, e.event_type, e.payload, e.received_at,
        COALESCE(s.signal_workflow_id, ''), COALESCE(s.signal_name, 'webhook_received'),
@@ -209,6 +221,7 @@ FROM webhook_events e
 LEFT JOIN webhook_sources s ON e.source_id = s.id
 WHERE NOT e.processed
   AND (e.status = 'pending' OR e.status IS NULL)
+  AND s.deleted_at IS NULL
   AND e.received_at < NOW() - INTERVAL '10 seconds'
 ORDER BY e.received_at
 LIMIT 100`,
@@ -219,6 +232,7 @@ FROM webhook_events e
 LEFT JOIN webhook_sources s ON e.source_id = s.id
 WHERE NOT e.processed
   AND (e.status = 'pending' OR e.status IS NULL)
+  AND s.deleted_at IS NULL
   AND e.received_at < NOW() - INTERVAL 10 SECOND
 ORDER BY e.received_at
 LIMIT 100`,
@@ -229,6 +243,7 @@ FROM webhook_events e
 LEFT JOIN webhook_sources s ON e.source_id = s.id
 WHERE e.processed = 0
   AND (e.status = 'pending' OR e.status IS NULL)
+  AND s.deleted_at IS NULL
   AND e.received_at < DATEADD(second, -10, SYSUTCDATETIME())
 ORDER BY e.received_at
 OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,
