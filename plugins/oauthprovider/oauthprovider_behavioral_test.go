@@ -667,7 +667,7 @@ func TestOA_Middleware_SkipsOAuthPaths(t *testing.T) {
 	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
 	}))
-	for _, path := range []string{"/oauth/login", "/oauth/callback", "/healthz"} {
+	for _, path := range []string{"/oauth/login", "/oauth/callback", "/healthz", "/livez", "/readyz", "/metrics"} {
 		nextCalled = false
 		req := httptest.NewRequest("GET", path, nil)
 		rec := httptest.NewRecorder()

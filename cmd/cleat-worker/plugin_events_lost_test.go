@@ -73,8 +73,8 @@ func TestHealthzReportsAnUnhealthyPluginAsDegradedAnd200(t *testing.T) {
 	}
 	// /healthz needs no credential, so the body is the reason code and nothing that names the plugin or
 	// quotes what it said (the owner's #2168 wording: a reason code, no names).
-	if len(body) != 3 {
-		t.Errorf("body = %v: want exactly ok, degraded and reason", body)
+	if len(body) != 4 {
+		t.Errorf("body = %v: want exactly ok, degraded, reason and reasons", body)
 	}
 	raw, _ := json.Marshal(body)
 	for _, leak := range []string{"audit-log", "lost 3", "plugins"} {

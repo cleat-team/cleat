@@ -188,7 +188,7 @@ X-Cleat-API-Key: cleat_sk_abc123...
 
 **Open endpoints** (no auth required):
 
-- `/healthz` -- health check
+- `/livez`, `/readyz` (and `/healthz`, an alias of `/livez`) -- liveness and readiness. The bodies carry only `ok`, `degraded` and reason codes; the detail is on `GET /api/admin/health`, which needs a key. See [Health, readiness and telling a database incident from a worker incident](../operations/health-and-incidents.md)
 - `/metrics` -- Prometheus metrics
 - Internal worker-to-database operations (not HTTP)
 

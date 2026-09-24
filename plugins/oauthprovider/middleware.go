@@ -30,11 +30,11 @@ func SessionFromContext(ctx context.Context) (*SessionInfo, bool) {
 
 // Middleware validates the OAuth session token from the Authorization header
 // and injects session info into the request context. It skips /oauth/ and
-// /healthz paths.
+// the infrastructure paths (auth.IsInfrastructurePath: /healthz, /livez, /readyz, /metrics).
 func (p *Plugin) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if strings.HasPrefix(path, "/oauth/") || path == "/healthz" {
+		if strings.HasPrefix(path, "/oauth/") || auth.IsInfrastructurePath(path) {
 			next.ServeHTTP(w, r)
 			return
 		}

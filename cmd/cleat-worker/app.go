@@ -26,7 +26,11 @@ import (
 // asking for a missing endpoint got HTML and a parse error naming nothing,
 // rather than a 404 naming the path.
 func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
+	// /healthz is /livez under its old name (cleat#2007); the other two are the split it was standing in for.
+	mux.HandleFunc("/livez", api.handleLivez)
+	mux.HandleFunc("/readyz", api.handleReadyz)
 	mux.HandleFunc("/healthz", api.handleHealthz)
+	mux.HandleFunc("/api/admin/health", api.handleAdminHealth)
 	mux.HandleFunc("/metrics", handleMetrics)
 	mux.HandleFunc("/api/admin/drain", api.handleDrain)
 	mux.HandleFunc("/api/admin/retention/sweep", api.handleRetentionSweep)

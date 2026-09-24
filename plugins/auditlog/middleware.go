@@ -47,6 +47,16 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter { return rw.ResponseWrite
 // Middleware wraps every request and records an audit event.
 func (p *Plugin) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The infrastructure paths (/healthz, /livez, /readyz, /metrics: auth.IsInfrastructurePath) are
+		// not recorded. They are polled by kubelets, load balancers and scrapers with no credential, every
+		// few seconds, from every replica, so they would be most of the log and each row costs a chain
+		// append under the tenant's head lock. The list is fixed and not configurable, and it is the same
+		// list that is answered without authentication, so a path cannot be exempt from one and not the
+		// other. /api/admin/health needs a credential and IS recorded. cleat#2007.
+		if auth.IsInfrastructurePath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(rw, r)

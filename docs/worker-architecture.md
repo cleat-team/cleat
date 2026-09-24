@@ -10,7 +10,7 @@ long-lived daemon. Startup flow:
 2. Generate a random 8-hex-char worker ID.
 3. Open a database connection (single DB or sharded).
 4. Load plugins, run migrations, register host functions.
-5. Start an optional HTTP API server (`/healthz`, `/metrics`,
+5. Start an optional HTTP API server (`/livez`, `/readyz`, `/healthz`, `/metrics`,
    `/api/workflows/...`, `/api/schedules/...`).
 6. Call `w.Run()` which starts six background goroutines.
 

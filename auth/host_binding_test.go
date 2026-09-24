@@ -133,6 +133,8 @@ func TestHostBindingSkipsPathsWithNoTenantUrlToPresent(t *testing.T) {
 
 	for _, tc := range []struct{ name, method, path string }{
 		{"healthz", http.MethodGet, "/healthz"},
+		{"livez", http.MethodGet, "/livez"},
+		{"readyz", http.MethodGet, "/readyz"},
 		{"metrics", http.MethodGet, "/metrics"},
 		{"a public pattern", http.MethodPost, "/ingest/stripe"},
 	} {

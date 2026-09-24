@@ -80,9 +80,15 @@ type Metrics struct {
 	backgroundLoops         metric.Int64Counter
 	backgroundLoopRestarts  metric.Int64Counter
 	pluginEventsLost        metric.Int64Counter
-	reaperInstancesClaimed  metric.Int64Counter
-	suspectedDBStalls       metric.Int64Counter
-	httpRequests            metric.Int64Counter
+
+	// Database reachability (cleat#2007), fed by the worker's deadline-bounded probes.
+	dbReachable            metric.Int64Gauge
+	dbLastSuccess          metric.Float64Gauge
+	dbConsecutiveFailures  metric.Int64Gauge
+	dbProbeDuration        metric.Float64Histogram
+	reaperInstancesClaimed metric.Int64Counter
+	suspectedDBStalls      metric.Int64Counter
+	httpRequests           metric.Int64Counter
 
 	// --- UpDownCounters (Int64UpDownCounter) ---
 	workflowsActive                metric.Int64UpDownCounter
@@ -413,6 +419,38 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_plugin_events_lost_total: %w", err)
+	}
+
+	m.dbReachable, err = meter.Int64Gauge(
+		"cleat_db_reachable",
+		metric.WithDescription("1 if this worker's latest deadline-bounded database call succeeded within its deadline, 0 if it failed or ran past it. All workers at 0 is a database incident; one worker at 0 is that worker's connectivity"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_reachable: %w", err)
+	}
+	m.dbLastSuccess, err = meter.Float64Gauge(
+		"cleat_db_last_success_timestamp_seconds",
+		metric.WithDescription("Unix time of this worker's last database call that succeeded within its deadline"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_last_success_timestamp_seconds: %w", err)
+	}
+	m.dbConsecutiveFailures, err = meter.Int64Gauge(
+		"cleat_db_consecutive_failures",
+		metric.WithDescription("Database calls in a row that failed or ran past their deadline; 0 once one succeeds"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_consecutive_failures: %w", err)
+	}
+	m.dbProbeDuration, err = meter.Float64Histogram(
+		"cleat_db_probe_duration_seconds",
+		metric.WithDescription("How long the worker's deadline-bounded database calls took (heartbeat, idle ping, reaper). A slow database shows here before it is unreachable"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000, 10.000),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_probe_duration_seconds: %w", err)
 	}
 
 	m.reaperInstancesClaimed, err = meter.Int64Counter(
@@ -1124,6 +1162,24 @@ func (m *Metrics) RecordPluginEventsLost(ctx context.Context, pluginName, reason
 		attribute.String("reason", reason),
 	}, extraAttrs...)...)
 	m.pluginEventsLost.Add(ctx, count, metric.WithAttributes(attrs...))
+}
+
+// RecordDBProbe records one deadline-bounded database call: how long it took and whether it counts
+// as reachable (it returned without error and inside its deadline). consecutiveFailures is the run
+// of failed calls ending with this one (0 after a success); lastSuccess is the time of the latest
+// good call, the zero time if there has been none. cleat#2007.
+func (m *Metrics) RecordDBProbe(ctx context.Context, dialect string, elapsed time.Duration, reachable bool, consecutiveFailures int64, lastSuccess time.Time) {
+	attrs := m.mergeAttrs(attribute.String("dialect", dialect))
+	var up int64
+	if reachable {
+		up = 1
+	}
+	m.dbReachable.Record(ctx, up, metric.WithAttributes(attrs...))
+	m.dbConsecutiveFailures.Record(ctx, consecutiveFailures, metric.WithAttributes(attrs...))
+	m.dbProbeDuration.Record(ctx, elapsed.Seconds(), metric.WithAttributes(attrs...))
+	if !lastSuccess.IsZero() {
+		m.dbLastSuccess.Record(ctx, float64(lastSuccess.UnixNano())/1e9, metric.WithAttributes(attrs...))
+	}
 }
 
 // RecordBackgroundLoopRestart increments the background-loop-restarts counter.

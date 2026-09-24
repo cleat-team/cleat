@@ -645,6 +645,20 @@ jobs:
       - name: Dead-export code guard
         run: scripts/check-dead-exports.sh
 
+      # cleat#2007. Two checks, and both are needed: `check` is syntax, and it passes a rule that can
+      # never fire. `test rules` runs alerts_test.yml, which feeds synthetic series through the rules and
+      # asserts that the SAME evidence pages as a database incident when every worker reports
+      # cleat_db_reachable 0 and as a worker incident when only one does, and that a reclaim the outage
+      # explains is suppressed. Removing the suppression, or turning max() into min(), fails it (verified
+      # by hand when it was written). The image is pinned: the rule language moves.
+      - name: Alert rules (promtool check and unit tests)
+        run: |
+          set -euo pipefail
+          p() { docker run --rm --entrypoint promtool -v "$PWD/monitoring/prometheus:/p:ro" prom/prometheus:v3.14.0 "$@"; }
+          p check config /p/prometheus.yml
+          p check rules /p/alerts.yml
+          p test rules /p/alerts_test.yml
+
       # Third sibling, and it closes the one shape the other two structurally
       # cannot see. U1000 skips EXPORTED identifiers -- correct for a library,
       # meaningless for `package main`, where nothing can import the package and

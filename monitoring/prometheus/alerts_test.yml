@@ -1,0 +1,79 @@
+# Unit tests for alerts.yml, run by `promtool test rules` (CI, and locally with the same image):
+#
+#   docker run --rm --entrypoint promtool -v "$PWD/monitoring/prometheus:/p:ro" prom/prometheus:latest \
+#     test rules /p/alerts_test.yml
+#
+# They prove the point of the file: the same evidence pages as a DATABASE incident when every worker
+# reports the database unreachable, and as a WORKER incident when only one does; and a reclaim that the
+# outage explains does not page as a worker fault.
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---- every worker reports 0: a database incident, and only that ----
+  - name: all workers unreachable is a database incident
+    interval: 1m
+    input_series:
+      - series: 'cleat_db_reachable{instance="w1",dialect="postgres"}'
+        values: '1 1 0 0 0 0 0 0'
+      - series: 'cleat_db_reachable{instance="w2",dialect="postgres"}'
+        values: '1 1 0 0 0 0 0 0'
+      - series: 'cleat_db_reachable{instance="w3",dialect="postgres"}'
+        values: '1 1 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: CleatDatabaseUnreachable
+        exp_alerts:
+          - exp_labels: {dialect: postgres, severity: critical, incident: database}
+            exp_annotations:
+              summary: "Every cleat worker reports its database unreachable (postgres)"
+              description: "All workers' latest deadline-bounded database call failed or ran past its deadline for at least a minute. This is a database or network incident, not a worker incident: restarting workers will not help (cleat's /livez stays 200 and /readyz returns 503, so no traffic is routed to them). Worker-down and reclaimed-run alerts are suppressed while this fires."
+      - eval_time: 6m
+        alertname: CleatWorkerCannotReachDatabase
+        exp_alerts: []   # all of them are down, so this is not one worker's problem
+
+  # ---- one worker reports 0, its peers 1: that worker's incident ----
+  - name: one unreachable worker among reachable peers is a worker incident
+    interval: 1m
+    input_series:
+      - series: 'cleat_db_reachable{instance="w1",dialect="postgres"}'
+        values: '1 1 1 1 1 1 1 1'
+      - series: 'cleat_db_reachable{instance="w2",dialect="postgres"}'
+        values: '1 1 0 0 0 0 0 0'
+      - series: 'cleat_db_reachable{instance="w3",dialect="postgres"}'
+        values: '1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: CleatDatabaseUnreachable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: CleatWorkerCannotReachDatabase
+        exp_alerts:
+          - exp_labels: {instance: w2, dialect: postgres, severity: warning, incident: worker}
+            exp_annotations:
+              summary: "w2 cannot reach the database while its peers can"
+              description: "This worker's database calls are failing or running past their deadline, and at least one other worker's are not: a network path, a connection limit, or credentials for this worker. Check GET /api/admin/health on the worker for the error text (it is not on /readyz)."
+
+  # ---- the reaper's echo of an outage is not a worker fault ----
+  - name: reclaims during and just after a database outage are suppressed, later ones are not
+    interval: 1m
+    input_series:
+      # reachable for 5m, down for 10m (minutes 5-14), reachable again from minute 15
+      - series: 'cleat_db_reachable{instance="w1",dialect="postgres"}'
+        values: '1x4 0x9 1x40'
+      - series: 'cleat_reaper_instances_claimed_total{instance="w1"}'
+        # a reclaim burst when the workers recover (minute 15), and a genuine one at minute 40
+        values: '0x14 5x24 9x30'
+    alert_rule_test:
+      - eval_time: 16m   # just after recovery: inside the 10-minute tail
+        alertname: CleatRunsReclaimedByTheReaper
+        exp_alerts: []
+      - eval_time: 45m   # a reclaim with the database reachable and no outage in the last 10 minutes
+        alertname: CleatRunsReclaimedByTheReaper
+        exp_alerts:
+          - exp_labels: {instance: w1, severity: warning, incident: worker}
+            exp_annotations:
+              summary: "Runs were reclaimed from a stale worker while the database was reachable"
+              description: "The reaper reclaimed workflow runs, and no database outage explains it. A worker stopped heartbeating while its peers could still reach the database: a worker incident."

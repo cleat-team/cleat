@@ -1605,7 +1605,12 @@ type Worker struct {
 
 	// pluginHealth is what /healthz reports about plugins, refreshed off the request path by
 	// pluginHealthLoop. pluginHealthRunning holds the names whose Health() call is still running.
-	pluginHealth        atomic.Pointer[map[string]string]
+	pluginHealth atomic.Pointer[map[string]string]
+
+	// dbReach is whether the database answers, as seen by every bounded call this worker makes; dbDialect
+	// labels the metrics. cleat#2007.
+	dbReach             dbReachability
+	dbDialect           string
 	pluginHealthRunning sync.Map
 	wg                  sync.WaitGroup
 
@@ -1952,6 +1957,14 @@ func (w *Worker) Run() {
 	// Starting them before the worker loops launch keeps that ordering as close
 	// to what it was as the health tracker allows. cleat#1347.
 	w.startPluginBackground()
+
+	// One database probe before any loop, so /readyz has an answer as soon as the first probe returns
+	// instead of waiting a whole heartbeat interval, and a database that is down at boot is reported
+	// (`database unreachable`) rather than silent. A store with no DBPinger (test doubles only) has no
+	// probe, and /readyz reports it as "starting": nothing here can prove it reachable. cleat#2007.
+	if pinger, ok := w.store.(engine.DBPinger); ok {
+		_ = w.probeBoundedCall(pinger.PingDB)
+	}
 
 	initLoopCtx := w.initLoopCtx
 	initLoopCtx("heartbeat")
@@ -3510,15 +3523,33 @@ func (w *Worker) recordDBContactOK() {
 // the round trip actually raced a stall, so it is treated the same as an
 // explicit failure rather than trusted.
 func (w *Worker) probeBoundedCall(fn func(ctx context.Context) error) error {
-	ctx, cancel := context.WithTimeout(w.ctx, w.dbCallDeadline())
+	deadline := w.dbCallDeadline()
+	ctx, cancel := context.WithTimeout(w.ctx, deadline)
 	start := time.Now()
+
+	// THE DEADLINE IS ENFORCED HERE, NOT ONLY OFFERED TO fn. lib/pq and go-mssqldb ignore a cancelled
+	// context while the database is paused, so fn may not return for as long as the stall lasts, and a
+	// worker that reports only when the call returns reports nothing until the outage is over. Measured
+	// against a real `docker pause` (cleat#2007): cleat_db_reachable stayed 1 for the whole 25 seconds and
+	// flipped only at unpause. The timer records the failure at the deadline; the call is left running
+	// (it cannot be stopped) and its eventual return is not reported a second time.
+	late := time.AfterFunc(deadline, func() {
+		w.observeDBProbe(deadline, fmt.Errorf("call has not returned within its %v deadline: %w", deadline, context.DeadlineExceeded))
+	})
 	err := fn(ctx)
 	cancel()
-	if err == nil {
-		if elapsed := time.Since(start); elapsed > w.dbCallDeadline() {
-			return fmt.Errorf("call returned success after %v, past its %v deadline -- not trusted", elapsed, w.dbCallDeadline())
+	elapsed := time.Since(start)
+	if !late.Stop() {
+		// The timer fired, so the deadline was already reported for this call.
+		if err == nil {
+			err = fmt.Errorf("call returned success after %v, past its %v deadline -- not trusted: %w", elapsed, deadline, context.DeadlineExceeded)
 		}
+		return err
 	}
+	if err == nil && elapsed > deadline {
+		err = fmt.Errorf("call returned success after %v, past its %v deadline -- not trusted: %w", elapsed, deadline, context.DeadlineExceeded)
+	}
+	w.observeDBProbe(elapsed, err)
 	return err
 }
 

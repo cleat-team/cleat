@@ -549,9 +549,11 @@ func (c *Client) CallPlugin(ctx context.Context, pluginName, functionName, input
 	return string(body), nil
 }
 
-// Health checks the cleat worker health endpoint.
+// Health reports whether the worker is ready to serve: GET /readyz answers 200 (its database answered
+// and it is not draining). A worker that is alive but not ready is reported false. It was /healthz, which
+// is now /livez under its old name and says nothing about the database. cleat#2007.
 func (c *Client) Health(ctx context.Context) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/healthz", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/readyz", nil)
 	if err != nil {
 		return false, fmt.Errorf("create request: %w", err)
 	}

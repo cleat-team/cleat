@@ -250,7 +250,7 @@ func (p *Plugin) Health() error {
 }
 ```
 
-Return nil if healthy, error if not. Reported on `/healthz` and `/api/plugins`.
+Return nil if healthy, error if not. The worker calls it every 10 seconds, off the request path, and never for a plugin whose `Init` failed, so it may run a query but must return within a few seconds (a call that does not answer in 5s keeps the last answer). An error shows as the reason code `plugin_unhealthy` (200, `degraded`) on `/livez`, `/readyz` and `/healthz`, and with its message on the authenticated `GET /api/admin/health`. It never makes the worker not ready: a degraded plugin is reported, not fatal.
 
 ### Stoppable — cleanup
 

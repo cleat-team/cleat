@@ -10,6 +10,11 @@ describe the log to an auditor.
 
 ## What is recorded
 
+Every API request is recorded **except the infrastructure probes**: `/healthz`, `/livez`, `/readyz` and
+`/metrics` (the paths answered without authentication, so kubelets, load balancers and scrapers can poll them). They
+would be most of the log, and each row costs a chain append. The list is fixed and not configurable, and it is the
+same list that is exempt from authentication. `GET /api/admin/health` needs a credential and is recorded.
+
 `method`, `path`, `status_code`, `user_id` (the OAuth subject when the request carried one, else
 empty), `ip_address`, `user_agent`, `duration_ms` and `timestamp`, plus the chain columns
 `seq`, `prev_hash` and `row_hash`. `metadata` is always `{}` today; it is part of the hash so a

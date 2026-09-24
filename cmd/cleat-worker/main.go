@@ -2031,6 +2031,7 @@ func main() {
 		pluginStreamRegistry:             pluginStreamRegistry,
 		streamHub:                        streamHub,
 		plugList:                         plugList,
+		dbDialect:                        string(factory.Dialect()),
 		tenantPools:                      tenantPools,
 		memorySampleRetention:            *memorySampleRetention,
 		retentionDays:                    *retentionDays,
