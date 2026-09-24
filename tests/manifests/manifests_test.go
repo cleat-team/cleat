@@ -189,15 +189,20 @@ func contains(haystack []string, needle string) bool {
 // list fails here rather than shipping without an answer.
 func TestEveryWorkerLaunchSiteSaysHowItsSchemaGetsMigrated(t *testing.T) {
 	want := map[string]string{
-		// A deploy step exists for these.
-		"docker-compose.cluster.yml":              "--migrate-only",
-		"charts/cleat/templates/migrate-job.yaml": "--migrate-only",
-		"k8s/migrate-job.yaml":                    "--migrate-only",
-		"packaging/systemd/cleat-worker.service":  "--migrate-only",
-		// Single-node development and scaffolds: the worker migrates itself.
-		"cmd/cleat/templates/agent/docker-compose.yml":     "--migrate-on-start",
-		"cmd/cleat/templates/fullstack/docker-compose.yml": "--migrate-on-start",
-		"cmd/cleat/templates/workflow/docker-compose.yml":  "--migrate-on-start",
+		// A deploy step exists for these. The three scaffolds moved into this
+		// group in cleat#2067 break 2: the serving worker's connection must not
+		// be the postgres superuser (PostgreSQL never applies row-level security
+		// to one), so each now migrates through a separate one-shot
+		// `--migrate-only` service running as the superuser, and the serving
+		// worker only verifies.
+		"docker-compose.cluster.yml":                       "--migrate-only",
+		"charts/cleat/templates/migrate-job.yaml":          "--migrate-only",
+		"k8s/migrate-job.yaml":                             "--migrate-only",
+		"packaging/systemd/cleat-worker.service":           "--migrate-only",
+		"cmd/cleat/templates/agent/docker-compose.yml":     "--migrate-only",
+		"cmd/cleat/templates/fullstack/docker-compose.yml": "--migrate-only",
+		"cmd/cleat/templates/workflow/docker-compose.yml":  "--migrate-only",
+		// Single-node development: the worker migrates itself.
 		"Makefile": "--migrate-on-start",
 	}
 	for path, flag := range want {
