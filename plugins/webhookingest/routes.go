@@ -268,23 +268,35 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// the read done a few lines up, closes that window regardless of how
 	// wide it is.
 	//
-	// FOR SHARE on the EXISTS subquery on PostgreSQL and MySQL, not on SQL
-	// Server. cleat-review's re-check found the guard above NARROWED the
-	// race rather than closing it on PostgreSQL: at its default READ
-	// COMMITTED isolation, an uncommitted UPDATE is invisible to a plain
-	// read, so an ingest whose EXISTS subquery ran while a delete's
-	// transaction was still open (UPDATE applied, not yet committed) saw the
-	// pre-delete row -- 201, inserted, signalled inline -- and only then did
-	// the delete commit. Measured: one signal delivered, event
-	// 'completed'. FOR SHARE makes this subquery a locking read: against a
-	// row an open UPDATE already holds, it BLOCKS until that transaction
-	// ends, then re-reads under READ COMMITTED's per-statement snapshot
-	// rule and sees the committed deleted_at. MySQL and SQL Server were
-	// never affected -- both already block a plain read against a
-	// row an open UPDATE holds, which is the same effect FOR SHARE adds to
-	// PostgreSQL explicitly -- so this is added there too, where it is a
-	// harmless restatement of what already happens, but left off SQL Server,
-	// which has no FOR SHARE syntax at all.
+	// FOR SHARE on the EXISTS subquery on PostgreSQL and MySQL. cleat-review's
+	// re-check found the guard above NARROWED the race rather than closing it
+	// on PostgreSQL: at its default READ COMMITTED isolation, an uncommitted
+	// UPDATE is invisible to a plain read, so an ingest whose EXISTS subquery
+	// ran while a delete's transaction was still open (UPDATE applied, not
+	// yet committed) saw the pre-delete row -- 201, inserted, signalled
+	// inline -- and only then did the delete commit. Measured: one signal
+	// delivered, event 'completed'. FOR SHARE makes this subquery a locking
+	// read: against a row an open UPDATE already holds, it BLOCKS until that
+	// transaction ends, then re-reads under READ COMMITTED's per-statement
+	// snapshot rule and sees the committed deleted_at. MySQL blocks a plain
+	// read against a row an open UPDATE holds by default, so FOR SHARE is
+	// added there too, where it is a harmless restatement of what already
+	// happens.
+	//
+	// SQL Server does NOT get the same guarantee for free, and this used to
+	// say it did. That is true only with READ_COMMITTED_SNAPSHOT (RCSI) off.
+	// docs/reference/database-backends.md recommends RCSI ON, and under RCSI
+	// a plain SELECT reads a row-versioned snapshot instead of blocking on
+	// the open UPDATE's lock -- so on the recommended configuration this
+	// subquery would read the pre-delete row and race exactly like the
+	// PostgreSQL case above, with no FOR SHARE syntax available to close it.
+	// cleat#2233/cleat-review measured the identical guard shape in
+	// notifications' sendWebhook: RCSI on, no hint -> blocks only on the FK
+	// check, then inserts for the deleted parent; RCSI on, WITH
+	// (READCOMMITTEDLOCK) -> blocks, then correctly sees nothing. That hint
+	// forces the read to take and wait on a shared lock instead of using the
+	// snapshot, restoring the same blocking behaviour FOR SHARE gives
+	// PostgreSQL and MySQL. cleat#2237.
 	//
 	// The residual: an ingest that reads and commits ENTIRELY before the
 	// delete's transaction begins is not a race at either isolation level --
@@ -298,7 +310,11 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// Reusing $2 for the EXISTS clause would work on PostgreSQL and SQL
 	// Server, which bind by number, and silently misalign every MySQL
 	// argument after it. sourceID is passed twice, once per placeholder.
-	existsGuard := "SELECT 1 FROM webhook_sources WHERE id = $8 AND deleted_at IS NULL"
+	existsGuard := "SELECT 1 FROM webhook_sources"
+	if p.dialect == plugin.DialectMSSQL {
+		existsGuard += " WITH (READCOMMITTEDLOCK)"
+	}
+	existsGuard += " WHERE id = $8 AND deleted_at IS NULL"
 	if p.dialect != plugin.DialectMSSQL {
 		existsGuard += " FOR SHARE"
 	}
