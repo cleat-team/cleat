@@ -475,26 +475,34 @@ func (c *fakeConn) execMarkCompleted(args []driver.NamedValue, hasRunID bool) (d
 
 // execMarkDispatched handles the dispatch-success write:
 //
-//	UPDATE task_queue SET status = 'dispatched', run_id = $4
-//	WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
+//	UPDATE task_queue SET status = 'dispatched', run_id = $1
+//	WHERE job_id = $2 AND tenant_id = $3 AND queue_name = $4
 //
 // cleat#1715: this used to be the "completed" write. It no longer claims an
 // outcome -- only that the workflow was started. ObserveFinalize (below)
 // writes the real outcome back later.
+//
+// run_id is $1 here, ahead of the WHERE clause's $2-$4: cleat#2257 found
+// this statement scrambling every bound argument on MySQL when it was
+// numbered the other way (run_id last, matching the WHERE clause's more
+// natural reading order) -- MySQL's "?" binds by TEXT APPEARANCE, not by
+// number, and Rebind's MySQL arm does not renumber (CLAUDE.md). These
+// ordinals track background.go's actual Go call order, not the WHERE
+// clause's reading order; keep them in sync with it.
 func (c *fakeConn) execMarkDispatched(args []driver.NamedValue) (driver.Result, error) {
-	jobID, err := argString(args, 1)
+	runID, err := argString(args, 1)
 	if err != nil {
 		return nil, err
 	}
-	tid, err := argString(args, 2)
+	jobID, err := argString(args, 2)
 	if err != nil {
 		return nil, err
 	}
-	queueName, err := argString(args, 3)
+	tid, err := argString(args, 3)
 	if err != nil {
 		return nil, err
 	}
-	runID, err := argString(args, 4)
+	queueName, err := argString(args, 4)
 	if err != nil {
 		return nil, err
 	}

@@ -92,11 +92,21 @@ func TestPollPendingDispatchesOnEveryDialect(t *testing.T) {
 			if err != nil {
 				t.Fatalf("pollPending on %s: %v", be.Name, err)
 			}
-			if claimed != 1 {
-				t.Errorf("pollPending on %s: claimed = %d, want 1 -- the row was never scanned", be.Name, claimed)
+			// claimed is NOT asserted == 1: pollPending is deliberately
+			// cross-tenant (AcrossAllTenants above, matching Run), and this
+			// package's other real-DB tests -- TestAJobListWorksOnEveryDialect
+			// enqueues two jobs to prove handleEnqueue/handleListJobs and
+			// never dispatches or removes them, by design -- can leave their
+			// own pending rows sitting in this same shared database. Those
+			// get claimed here too. What this test actually pins is scoped to
+			// its own job below (defName, input, and the row's own status),
+			// which ambient rows from sibling tests cannot satisfy by
+			// coincidence.
+			if claimed < 1 {
+				t.Errorf("pollPending on %s: claimed = %d, want at least 1 -- the row was never scanned", be.Name, claimed)
 			}
-			if dispatched != 1 {
-				t.Errorf("pollPending on %s: dispatched = %d, want 1", be.Name, dispatched)
+			if dispatched < 1 {
+				t.Errorf("pollPending on %s: dispatched = %d, want at least 1", be.Name, dispatched)
 			}
 			if failed != 0 {
 				t.Errorf("pollPending on %s: failed = %d, want 0", be.Name, failed)
@@ -105,25 +115,33 @@ func TestPollPendingDispatchesOnEveryDialect(t *testing.T) {
 			fakeEnv.mu.Lock()
 			calls := fakeEnv.wfCalls
 			fakeEnv.mu.Unlock()
-			if len(calls) != 1 {
-				t.Fatalf("pollPending on %s: StartWorkflow called %d times, want 1", be.Name, len(calls))
+			// Found by def_name, not calls[0]: ambient rows from sibling
+			// tests (see the claimed comment above) can add their own
+			// StartWorkflow calls to this same fake environment.
+			var ourCall *startWorkflowCall
+			for i := range calls {
+				if calls[i].defName == defName {
+					ourCall = &calls[i]
+					break
+				}
 			}
-			if calls[0].defName != defName {
-				t.Errorf("pollPending on %s: dispatched def_name = %q, want %q", be.Name, calls[0].defName, defName)
+			if ourCall == nil {
+				t.Fatalf("pollPending on %s: no StartWorkflow call for def_name %q among %d calls",
+					be.Name, defName, len(calls))
 			}
 			// Compared as parsed JSON, not raw bytes: Postgres's jsonb column
 			// re-serializes on the way back out (a space after ":"), which is
 			// a real, harmless reformatting -- not the bug this test pins.
 			var gotParsed, wantParsed any
-			if err := json.Unmarshal(calls[0].input, &gotParsed); err != nil {
-				t.Fatalf("pollPending on %s: dispatched input %q is not valid JSON: %v", be.Name, calls[0].input, err)
+			if err := json.Unmarshal(ourCall.input, &gotParsed); err != nil {
+				t.Fatalf("pollPending on %s: dispatched input %q is not valid JSON: %v", be.Name, ourCall.input, err)
 			}
 			if err := json.Unmarshal([]byte(wantInput), &wantParsed); err != nil {
 				t.Fatalf("invalid wantInput: %v", err)
 			}
 			if !reflect.DeepEqual(gotParsed, wantParsed) {
 				t.Errorf("pollPending on %s: dispatched input = %s, want %s -- this is exactly "+
-					"the scan this test pins", be.Name, calls[0].input, wantInput)
+					"the scan this test pins", be.Name, ourCall.input, wantInput)
 			}
 
 			var status string
