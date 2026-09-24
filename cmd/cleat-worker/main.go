@@ -1335,6 +1335,7 @@ func main() {
 		Logger:        slog.Default(),
 		Done:          ctx.Done(),
 		Dialect:       plugin.Dialect(factory.Dialect()),
+		EventsLost:    pluginEventsLostHook(metricsInstance),
 		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			return startPluginWorkflow(ctx, store, req)
 		},
@@ -1640,15 +1641,7 @@ func main() {
 	// concluded plugin middleware did NOT reach core routes, which the
 	// `mux := plugMux` line contradicts.
 	if plugMux != nil {
-		plugHandler = plugMux
-		for _, lp := range plugList {
-			if !lp.Healthy {
-				continue
-			}
-			if p, ok := lp.Plugin.(plugin.HasMiddleware); ok {
-				plugHandler = p.Middleware(plugHandler)
-			}
-		}
+		plugHandler = wrapPluginMiddleware(plugMux, plugList)
 	}
 
 	for _, lp := range plugList {

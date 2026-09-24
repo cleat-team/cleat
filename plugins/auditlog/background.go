@@ -9,8 +9,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// Run starts the background goroutine. It periodically drains the audit
-// event buffer and runs retention cleanup. Returns when ctx is cancelled.
+// Run starts the background work: the pool that appends queued audit events to their chains, and
+// hourly retention cleanup. On ctx cancellation it drains what is queued, within shutdown_drain,
+// counts whatever is left as lost, and returns.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
 		p.logger.Warn("audit-log: no database, retention cleanup disabled")
@@ -21,14 +22,14 @@ func (p *Plugin) Run(ctx context.Context) error {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 
-	drainTicker := time.NewTicker(1 * time.Second)
-	defer drainTicker.Stop()
+	// The pool drains the queue continuously. It used to drain 100 events per one-second tick, so
+	// a sustained 100 requests a second filled the buffer and dropped the rest.
+	p.startWorkers(ctx)
+	defer p.shutdown()
 
-	defer func() {
-		p.drainBuffer()
-	}()
-
-	p.logger.Info("audit-log: background started, retention=1h, drain=1s")
+	p.logger.Info("audit-log: background started",
+		"retention", "1h", "workers", p.config.workers(), "buffer", cap(p.buffer),
+		"enqueue_wait", p.config.enqueueWait(), "retry_deadline", p.config.retryDeadline())
 
 	for {
 		select {
@@ -51,30 +52,6 @@ func (p *Plugin) Run(ctx context.Context) error {
 				"duration_ms", time.Since(start).Milliseconds(),
 				"deleted_events", affected,
 			)
-
-		case <-drainTicker.C:
-			p.drainBuffer()
-		}
-	}
-}
-
-// drainBuffer drains queued audit events from the buffer and records them.
-// It processes up to 100 events per call and returns early when the
-// buffer is empty.
-func (p *Plugin) drainBuffer() {
-	if p.buffer == nil {
-		return
-	}
-	for i := 0; i < 100; i++ {
-		select {
-		case evt := <-p.buffer:
-			p.recordAudit(context.Background(),
-				evt.tenantID, evt.userID, evt.method, evt.path,
-				evt.statusCode, evt.ipAddress, evt.userAgent,
-				evt.duration,
-			)
-		default:
-			return
 		}
 	}
 }

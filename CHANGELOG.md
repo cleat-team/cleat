@@ -411,6 +411,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`GET /api/workflows/{id}/stream` answered 500 "streaming not supported by this server" on every default build.** (cleat#2254)
+
+  Every plugin middleware wraps the core mux, and the audit-log's response-writer wrapper embedded
+  `http.ResponseWriter` without a `Flush()`, so every handler behind it that asks for an
+  `http.Flusher` was refused: the workflow stream route, eventstore's SSE route and the audit NDJSON
+  export. The wrappers in audit-log, tenant-quota and backendkit now pass `Flush` and `Unwrap` through.
+  A test serves a real request through the real plugin middleware chain, and another fails the build
+  for any type that embeds `http.ResponseWriter` without both methods. The stream tests never met a
+  wrapper before, because they call the handler directly with a recorder that has a `Flush`.
+
+- **The audit log no longer drops events silently when the database is slow or down.** (cleat#2168)
+
+  A request that finds the audit buffer full now waits up to 1s for room (`audit_enqueue_wait_ms`), and an
+  event whose insert fails is retried with backoff until `audit_retry_deadline_ms` (60s) instead of being
+  discarded on the first error. A retry checks by event id that the first attempt did not commit before
+  appending, so a lost commit acknowledgement does not record the event twice. What is still given up is
+  counted, logged at Error (at most once a second per reason), and reported: the new metric
+  `cleat_plugin_events_lost_total{plugin,reason}` (reasons `buffer_full`, `insert_failed`, `shutdown`,
+  `shutdown_inflight`, with a Grafana panel), and `/healthz` answers `200` with `"degraded": true, "reason":
+  "plugin_unhealthy"` (a reason code only; the endpoint is unauthenticated) for five minutes after a loss (not
+  503: a stalled audit table must not restart the worker). Plugin health is computed by a background loop and
+  cached, so a probe never runs plugin code. Four workers now drain the buffer, and shutdown drains it for up
+  to 10s on a timer that does not wait for a database call the driver will not cancel: what is queued is
+  counted `shutdown`, and what is inside such a call is counted `shutdown_inflight` (an upper bound, since it
+  may still commit).
+  A row's timestamp is now the time of the request rather than of the append, so **chain order (seq) may
+  differ from timestamp order**; the chain follows commit order and verifies either way. Anything that polls
+  `/audit/events` or `/audit/export` by time can miss a retried row and should follow `seq`. There is still
+  no durable spool: a killed process loses what is in its buffer. The five config keys are prefixed
+  (`audit_buffer_size`, `audit_workers`, `audit_enqueue_wait_ms`, `audit_retry_deadline_ms`,
+  `audit_shutdown_drain_ms`), because the plugin config is one flat object; zero or negative means the
+  default, and buffer 1,000,000, 64 workers, enqueue wait 30s, retry deadline 1h and shutdown drain 25s are
+  the caps. New public surface: `plugin.Environment.EventsLost`, the metric, and the `/healthz` shape.
+
 - **A worker with no `CLEAT_SECRET_MASTER_KEY` now refuses to start on PostgreSQL and SQL Server when the
   database holds secrets, as it always did on MySQL.** (cleat#2123)
 

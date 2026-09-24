@@ -1602,7 +1602,12 @@ type Worker struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	draining atomic.Bool
-	wg       sync.WaitGroup
+
+	// pluginHealth is what /healthz reports about plugins, refreshed off the request path by
+	// pluginHealthLoop. pluginHealthRunning holds the names whose Health() call is still running.
+	pluginHealth        atomic.Pointer[map[string]string]
+	pluginHealthRunning sync.Map
+	wg                  sync.WaitGroup
 
 	inflight    sync.Map // map[workflowID]*engine.WorkflowInstance
 	execEngines sync.Map // map[workflowID]*engine.Engine
@@ -1958,6 +1963,7 @@ func (w *Worker) Run() {
 	initLoopCtx("dispatch")
 	initLoopCtx("schedule")
 	initLoopCtx("memory_reload")
+	initLoopCtx("plugin_health")
 	initLoopCtx("memory_cleanup")
 	initLoopCtx("retention")
 	// version_gc is launched unconditionally below but no-ops when
@@ -2054,6 +2060,10 @@ func (w *Worker) Run() {
 	// Cron schedule loop.
 	w.registerLoopFunc("schedule", w.scheduleLoop)
 	w.launchLoop("schedule", w.scheduleLoop)
+
+	// Plugin health cache for /healthz (cleat#2168): Health() runs here, never on a request.
+	w.registerLoopFunc("plugin_health", w.pluginHealthLoop)
+	w.launchLoop("plugin_health", w.pluginHealthLoop)
 
 	// Memory estimate reload loop.
 	w.registerLoopFunc("memory_reload", w.memoryReloadLoop)

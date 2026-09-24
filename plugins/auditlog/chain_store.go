@@ -43,7 +43,22 @@ type chainEvent struct {
 	ipAddress  string
 	userAgent  string
 	durationMs int
+
+	// id and ts are fixed when the request finished, not when the append runs: with a queue
+	// and retries the two can be seconds apart, the row should say when the request happened,
+	// and a retry has to be able to ask "did attempt one commit after all?" by id. Zero means
+	// "choose now" (a direct caller, a test).
+	id uuid.UUID
+	ts time.Time
+	// retry is set from the second attempt on. It makes the append look for e.id under the
+	// head's lock first, so an attempt whose commit succeeded but whose acknowledgement was
+	// lost (a dropped connection, a client timeout) is not appended a second time.
+	retry bool
 }
+
+// errAlreadyRecorded reports that a retry found its own event already committed. It is a
+// success, and only a caller that retries ever sees it.
+var errAlreadyRecorded = errors.New("audit event already recorded")
 
 // sanitizeText makes s storable and reproducible. PostgreSQL refuses invalid UTF-8 and
 // NUL bytes, so an event carrying one (a User-Agent is attacker-chosen bytes) was never
@@ -241,11 +256,32 @@ func (p *Plugin) appendOnce(ctx context.Context, e chainEvent) (err error) {
 	var prev [chainHashLen]byte
 	copy(prev[:], prevBytes)
 
-	ts := time.Now().UTC().Truncate(time.Microsecond)
+	// The head's lock is held, so nothing else can commit for this tenant between this read
+	// and the insert: if the event is not here now it is not going to appear.
+	if e.retry && e.id != uuid.Nil {
+		var one int
+		switch err := plugin.ScanRow(tx.QueryRow(ctx, plugin.Rebind(
+			`SELECT 1 FROM audit_events WHERE tenant_id = $1 AND id = $2`, p.dialect), e.tenantID, e.id.String()), &one); {
+		case err == nil:
+			return errAlreadyRecorded
+		case !errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("audit chain: look for an earlier attempt: %w", err)
+		}
+	}
+
+	ts := e.ts
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	ts = ts.UTC().Truncate(time.Microsecond)
+	id := e.id
+	if id == uuid.Nil {
+		id = uuid.New()
+	}
 	rec := chainRecord{
 		TenantID:   e.tenantID,
 		Seq:        head.seq + 1,
-		ID:         uuid.New(),
+		ID:         id,
 		Timestamp:  ts,
 		Method:     e.method,
 		Path:       e.path,
