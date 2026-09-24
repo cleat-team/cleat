@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -329,6 +330,24 @@ func signalAwaiters(
 	signalName := "__evt:" + eventType
 	for _, wfID := range workflowIDs {
 		if err := env.SignalWorkflow(ctx, wfID, signalName, eventData); err != nil {
+			if errors.Is(err, plugin.ErrWorkflowNotFound) {
+				// The awaiter's own workflow is gone -- purged, or the row
+				// was already stale -- not a delivery failure. Before
+				// cleat#2227, SignalWorkflow returned nil for exactly this
+				// case, indistinguishable from a real delivery, so this
+				// branch could never be reached and the awaiter row was
+				// never cleaned up here: it leaked until something else
+				// swept event_awaiters (cleat#2213). Unregister it now,
+				// same as the success path below, instead of leaving it to
+				// fail the identical way on every future publish of this
+				// event type.
+				logger.Info("event-triggers: awaiter's workflow no longer exists, unregistering",
+					"workflow_id", wfID,
+					"signal", signalName,
+				)
+				unregisterAwaiter(ctx, db, logger, wfID, eventType)
+				continue
+			}
 			logger.Warn("event-triggers: signal awaiter failed",
 				"workflow_id", wfID,
 				"signal", signalName,

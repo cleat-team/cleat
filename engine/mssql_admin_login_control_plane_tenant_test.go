@@ -216,19 +216,27 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 	// every assertion above green. Measured, not reasoned: that is exactly what
 	// the falsification pass reported, and this case exists because of it.
 	//
-	// The reachable path is a signal name the victim does NOT hold. Then the
-	// MERGE matches nothing, the INSERT succeeds under the CALLER's tenant
-	// (a harmless orphan row the victim's own polls will never see), and the
-	// wake is the only statement left touching the victim -- which without a
-	// tenant predicate scheduled another tenant's suspended workflow to run.
+	// The reachable path this comment described used to be a signal name the
+	// victim does NOT hold, so the MERGE fell through to its INSERT branch and
+	// the wake was the only statement left standing between the caller and the
+	// victim's row. That path no longer exists: cleat#2227's EXISTS-gated
+	// INSERT (deliverSignalTx, mssql_signals_promises.go) now returns
+	// ErrWorkflowNotFound and writes nothing whenever the target is not
+	// visible under the CALLER's own tenant, before the wake UPDATE runs at
+	// all -- so a cross-tenant call can no longer reach the wake statement
+	// regardless of which signal name it uses. The case is kept anyway,
+	// because "the wake predicate is unreachable from outside the tenant" is
+	// itself the property worth asserting, and because the positive control
+	// below still needs an unheld name to prove the wake fires on a genuine
+	// same-tenant delivery.
 	t.Run("DeliverSignalWake", func(t *testing.T) {
 		const unheld = "not-a-signal-tenant-a-holds"
 		const marker = "2020-01-01T00:00:00"
 		setInstanceStatus(t, storeA, cpWorkflowA, unscopedTenantA, "suspended")
 		setInstanceNextWake(t, storeA, cpWorkflowA, unscopedTenantA, marker)
 
-		if err := storeB.DeliverSignal(ctx, cpWorkflowA, unheld, `{"from":"tenant-b"}`); err != nil {
-			t.Fatalf("DeliverSignal of an unheld name across tenants: %v", err)
+		if err := storeB.DeliverSignal(ctx, cpWorkflowA, unheld, `{"from":"tenant-b"}`); !errors.Is(err, ErrWorkflowNotFound) {
+			t.Fatalf("DeliverSignal of an unheld name across tenants = %v, want ErrWorkflowNotFound (cleat#2227)", err)
 		}
 		got := instanceField(t, storeA, "next_wake_at", cpWorkflowA, unscopedTenantA)
 		if !strings.HasPrefix(got, marker[:10]) {
@@ -301,9 +309,12 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 	//
 	// And one thing is gained: the existence oracle the previous comment flagged
 	// is closed. Error-versus-success no longer tells tenant B whether a
-	// workflow id exists in some other tenant, because both cases now succeed
-	// identically. The new assertion is that A cannot SEE what B wrote, which is
-	// the property that actually matters and which the old shape never checked.
+	// workflow id exists in some other tenant -- cleat#2227 made both cases
+	// return the identical ErrWorkflowNotFound, rather than the identical nil
+	// cleat#2218 gave them; what stays constant across both changes is that
+	// "foreign" and "nonexistent" are indistinguishable from each other. The
+	// new assertion is that A cannot SEE what B wrote, which is the property
+	// that actually matters and which the old shape never checked.
 	t.Run("DeliverSignal", func(t *testing.T) {
 		const sig = "approve"
 		if err := storeA.DeliverSignal(ctx, cpWorkflowA, sig, `{"from":"tenant-a"}`); err != nil {
@@ -312,20 +323,23 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 		setInstanceStatus(t, storeA, cpWorkflowA, unscopedTenantA, "suspended")
 		before := instanceField(t, storeA, "next_wake_at", cpWorkflowA, unscopedTenantA)
 
-		// Succeeds, and writes NOTHING -- not even an orphan row under B.
-		// Before cleat#2218 the INSERT carried no existence check at all, so a
-		// cross-tenant id wrote an orphan under the CALLER's own tenant that
-		// only the caller could see. 2218 gates the INSERT on
-		// `EXISTS (... id = ? AND tenant_id = <caller>)`, closing an
-		// existence oracle a nonexistent id had via an FK error the orphan
-		// path never hit -- and the same predicate is what makes a foreign
-		// id (this case) write nothing too, since cpWorkflowA does not exist
-		// under B's tenant either. "Writes an orphan" and "writes nothing"
-		// are indistinguishable from the caller's side either way -- nil, no
-		// row of the caller's own -- which is the point: the two cases must
-		// stay indistinguishable from EVERY side, not just the victim's.
-		if err := storeB.DeliverSignal(ctx, cpWorkflowA, sig, `{"from":"tenant-b"}`); err != nil {
-			t.Fatalf("cross-tenant delivery must still be an ordinary no-op, not an error: %v", err)
+		// Fails with ErrWorkflowNotFound, and writes NOTHING -- not even an
+		// orphan row under B. Before cleat#2218 the INSERT carried no
+		// existence check at all, so a cross-tenant id wrote an orphan under
+		// the CALLER's own tenant that only the caller could see. 2218 gated
+		// the INSERT on `EXISTS (... id = ? AND tenant_id = <caller>)`,
+		// closing an existence oracle a nonexistent id had via an FK error
+		// the orphan path never hit -- and the same predicate is what made a
+		// foreign id (this case) write nothing too, since cpWorkflowA does
+		// not exist under B's tenant either, but it also made both cases
+		// return the SAME nil, indistinguishable from an ordinary successful
+		// delivery. cleat#2227 keeps that predicate and changes only what
+		// RowsAffected()==0 returns: ErrWorkflowNotFound now, identically for
+		// this case and for DeliverSignalNonexistentID below -- loud again,
+		// but still no oracle, because the two remain indistinguishable from
+		// EACH OTHER, not from success.
+		if err := storeB.DeliverSignal(ctx, cpWorkflowA, sig, `{"from":"tenant-b"}`); !errors.Is(err, ErrWorkflowNotFound) {
+			t.Fatalf("cross-tenant delivery = %v, want ErrWorkflowNotFound (cleat#2227)", err)
 		}
 		if _, ok, err := storeB.PollSignal(ctx, cpWorkflowA, sig); err != nil {
 			t.Fatalf("tenant B PollSignal(cpWorkflowA): %v", err)
@@ -392,12 +406,14 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 	// NONEXISTENT id threw a foreign-key error here while the DeliverSignal
 	// case above (a foreign id that DOES exist, just under the other tenant)
 	// returned nil -- error-versus-nil told an attacker which was true. The
-	// two must answer identically: nil, and nothing written, either way.
+	// two must answer IDENTICALLY -- cleat#2227 makes that answer
+	// ErrWorkflowNotFound rather than nil, and nothing written, either way.
 	t.Run("DeliverSignalNonexistentID", func(t *testing.T) {
 		const noSuchID = "cp-tenant-does-not-exist"
-		if err := storeB.DeliverSignal(ctx, noSuchID, "approve", `{"from":"tenant-b"}`); err != nil {
-			t.Fatalf("DeliverSignal on a nonexistent id returned an error instead of a silent "+
-				"no-op -- this is cleat#2218's existence oracle: %v", err)
+		if err := storeB.DeliverSignal(ctx, noSuchID, "approve", `{"from":"tenant-b"}`); !errors.Is(err, ErrWorkflowNotFound) {
+			t.Fatalf("DeliverSignal on a nonexistent id = %v, want ErrWorkflowNotFound (cleat#2227) -- "+
+				"identical to the DeliverSignal case above, or the FK-error existence oracle "+
+				"cleat#2218 closed reopens as an error-shape difference instead", err)
 		}
 		if _, ok, err := storeB.PollSignal(ctx, noSuchID, "approve"); err != nil {
 			t.Fatalf("PollSignal(noSuchID): %v", err)

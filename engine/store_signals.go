@@ -251,13 +251,31 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	// error-versus-nil, reachable over HTTP through webhookingest's processed
 	// flag. Gating every dialect's INSERT on the same EXISTS predicate makes
 	// "foreign tenant" and "does not exist" take the identical path on all
-	// three: the condition is false either way, nothing is written, no error.
-	if _, err := tx.ExecContext(ctx, `
+	// three: the condition is false either way, nothing is written.
+	//
+	// RowsAffected()==0 now returns ErrWorkflowNotFound rather than nil --
+	// cleat#2227, reversing cleat#2218's choice to make this silent. #2218
+	// closed the existence oracle by making a nonexistent id as quiet as a
+	// foreign one; the cost, found in review, was that a signal to a run that
+	// is genuinely gone (purged, or simply never existed) in the CALLER'S OWN
+	// tenant went silent too -- webhookingest marked the event delivered with
+	// nothing sent, and eventtriggers left a dead awaiter registered forever
+	// (cleat#2213). ErrWorkflowNotFound restores the loud failure without
+	// reopening the oracle: it is identical for "foreign tenant" and "does
+	// not exist" -- neither this check nor anything upstream of it can tell
+	// them apart -- so a caller still learns nothing about which is true.
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		SELECT $1, $2, $3, $4
 		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = $1 AND tenant_id = $4)
-	`, workflowID, signalName, payload, tenantID); err != nil {
+	`, workflowID, signalName, payload, tenantID)
+	if err != nil {
 		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("deliver signal: rows affected: %w", err)
+	} else if n == 0 {
+		return ErrWorkflowNotFound
 	}
 	// Two writes, two different windows, and neither replaces the other.
 	//
@@ -273,22 +291,26 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	// bump (cleat#953).
 	//
 	// No RowsAffected check here, and that is deliberate, not an oversight:
-	// RLS's USING clause filters this UPDATE by session the same way it
-	// filters a SELECT, so a tenantID that does not match the row's own
-	// tenant matches zero rows silently. Combined with the EXISTS-gated
-	// INSERT above, both a cross-tenant and a nonexistent workflowID now
-	// write nothing and return nil, by the same mechanism, on every
-	// statement in this function -- no existence oracle, unconditionally
-	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal and
-	// DeliverSignalNonexistentID cases; IMPROVEMENT-PLAN 3.215; cleat#2218).
-	// cleat#2209's actual defect was that SignalWorkflow ran on a store
-	// scoped to the WRONG tenant for a REAL, correctly-owned target --
-	// scopeToTenant (cmd/cleat-worker/main.go, signalPluginWorkflow) is what
-	// fixes that, by ensuring this UPDATE runs under the target's own
-	// tenant, where it matches. Erroring here on n==0 was tried and reverted
+	// this UPDATE only runs once the INSERT above has already proven the
+	// EXISTS predicate true, under this same tenant, in this same
+	// transaction -- so a caller reaching this line is signalling its OWN
+	// workflow, and the row this UPDATE names cannot have gone missing
+	// between the two statements. RLS's USING clause still filters it by
+	// session, the same way it filters a SELECT, but that is a second,
+	// redundant guard, not the one doing the work. cleat#2209's actual
+	// defect was that SignalWorkflow ran on a store scoped to the WRONG
+	// tenant for a REAL, correctly-owned target -- scopeToTenant
+	// (cmd/cleat-worker/main.go, signalPluginWorkflow) is what fixes that,
+	// by ensuring this UPDATE runs under the target's own tenant, where it
+	// matches. Erroring on n==0 HERE, on the UPDATE, was tried and reverted
 	// (cleat#2207) after it broke the harmless-orphan-write half of this
-	// contract in CI; cleat#2218 closes the remaining gap (the INSERT's FK,
-	// on the dialects that have one) without reintroducing that.
+	// contract in CI -- that revert is still correct, and is not the case
+	// cleat#2227 revisits: that one gated the INSERT's own EXISTS predicate,
+	// above, not this UPDATE.
+	//
+	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal and
+	// DeliverSignalNonexistentID cases; IMPROVEMENT-PLAN 3.86/3.215;
+	// cleat#2218, cleat#2227.)
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,

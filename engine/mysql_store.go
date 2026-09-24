@@ -557,15 +557,30 @@ func (s *MySQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	// tenant satisfies the FK and writes one silently -- an existence oracle
 	// by error-versus-nil. MySQL has no RLS, so the WHERE clause is the only
 	// tenant check there is; adding it here (rather than only on the UPDATE
-	// below) makes "foreign tenant" and "does not exist" the same outcome:
-	// nothing written, no error, on the identical path.
-	if _, err := tx.ExecContext(ctx, `
+	// below) makes "foreign tenant" and "does not exist" the same outcome.
+	//
+	// RowsAffected()==0 now returns ErrWorkflowNotFound rather than nil --
+	// cleat#2227. See the identical comment on PostgresStore's deliverSignalTx
+	// (engine/store_signals.go) for why: it is loud again without reopening
+	// the oracle, because "foreign tenant" and "does not exist" still cannot
+	// be told apart here.
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		SELECT ?, ?, ?, ?
 		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = ? AND tenant_id = ?)
-	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID, workflowID, s.tenantID); err != nil {
+	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID, workflowID, s.tenantID)
+	if err != nil {
 		return err
 	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("deliver signal: rows affected: %w", err)
+	} else if n == 0 {
+		return ErrWorkflowNotFound
+	}
+	// This UPDATE only runs once the INSERT above has proven the EXISTS
+	// predicate true, under this same tenant, in this same transaction, so
+	// the explicit "AND tenant_id = ?" here is a second, redundant guard --
+	// the row cannot have gone missing between the two statements.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,

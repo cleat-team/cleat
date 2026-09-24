@@ -109,8 +109,14 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	// existence oracle by error-versus-nil, reachable over HTTP through
 	// webhookingest's processed flag. "Foreign tenant" and "does not exist"
 	// now take the identical path: the EXISTS is false either way, nothing
-	// is written, no error.
-	_, err := tx.ExecContext(ctx, `
+	// is written.
+	//
+	// RowsAffected()==0 now returns ErrWorkflowNotFound rather than nil --
+	// cleat#2227. See the identical comment on PostgresStore's deliverSignalTx
+	// (engine/store_signals.go) for why: it is loud again without reopening
+	// the oracle, because "foreign tenant" and "does not exist" still cannot
+	// be told apart here.
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		SELECT @p1, @p2, @p3, @p4
 		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = @p1 AND tenant_id = @p4)
@@ -118,28 +124,34 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	if err != nil {
 		return err
 	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("deliver signal: rows affected: %w", err)
+	} else if n == 0 {
+		return ErrWorkflowNotFound
+	}
 
 	// Scoped for the same reason as the INSERT above: without it, delivering
 	// a signal to an id belonging to another tenant woke that tenant's
 	// workflow.
 	//
 	// No RowsAffected check here, and that is deliberate, not an oversight:
-	// the explicit "AND tenant_id = @p2" excludes a mismatched row SILENTLY,
-	// on purpose. Combined with the EXISTS-gated INSERT above, both a
-	// cross-tenant and a nonexistent workflowID now write nothing and
-	// return nil, by the same mechanism, on every statement in this
-	// function -- no existence oracle, unconditionally
+	// this UPDATE only runs once the INSERT above has already proven the
+	// EXISTS predicate true, under this same tenant, in this same
+	// transaction, so the explicit "AND tenant_id = @p2" is a second,
+	// redundant guard -- the row cannot have gone missing between the two
+	// statements
 	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal,
 	// DeliverSignalWake, and DeliverSignalNonexistentID cases;
-	// IMPROVEMENT-PLAN 3.86/3.215; cleat#2218). cleat#2209's actual defect
-	// was that SignalWorkflow ran on a store scoped to the WRONG tenant for
-	// a REAL, correctly-owned target -- scopeToTenant
+	// IMPROVEMENT-PLAN 3.86/3.215; cleat#2218, cleat#2227). cleat#2209's
+	// actual defect was that SignalWorkflow ran on a store scoped to the
+	// WRONG tenant for a REAL, correctly-owned target -- scopeToTenant
 	// (cmd/cleat-worker/main.go, signalPluginWorkflow) is what fixes that,
 	// by ensuring this UPDATE runs under the target's own tenant, where it
-	// matches. Erroring here on RowsAffected()==0 was tried and reverted
-	// (cleat#2207) after it broke the harmless-orphan-write half of this
-	// contract in CI; cleat#2218 closes the remaining gap without
-	// reintroducing that.
+	// matches. Erroring on RowsAffected()==0 HERE, on the UPDATE, was tried
+	// and reverted (cleat#2207) after it broke the harmless-orphan-write
+	// half of this contract in CI -- that revert is still correct, and is
+	// not the case cleat#2227 revisits: that one gated the INSERT's own
+	// EXISTS predicate, above.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,

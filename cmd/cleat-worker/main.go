@@ -335,7 +335,13 @@ func signalPluginWorkflow(ctx context.Context, store engine.WorkflowStore, workf
 	if tid, ok := tenantctx.From(ctx); ok {
 		scoped = scopeToTenant(store, tid.String())
 	}
-	return scoped.DeliverSignal(ctx, workflowID, signalName, payload)
+	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			return plugin.ErrWorkflowNotFound
+		}
+		return err
+	}
+	return nil
 }
 
 // signalPluginWorkflowWithAuth is signalPluginWorkflow plus the
@@ -357,7 +363,13 @@ func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStor
 	if !signalCallerAllowed(callers, pluginName) {
 		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
 	}
-	return scoped.DeliverSignal(ctx, workflowID, signalName, payload)
+	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			return plugin.ErrWorkflowNotFound
+		}
+		return err
+	}
+	return nil
 }
 
 func main() {
