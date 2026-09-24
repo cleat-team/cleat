@@ -16,7 +16,7 @@ import (
 )
 
 // RegisterRoutes registers the job queue HTTP handlers on the given mux.
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("jobqueue: nil mux")
 	}

@@ -59,7 +59,7 @@ type rateLimitEntry struct {
 //	GET    /rate-limits        — list rate limits for the tenant
 //	PUT    /rate-limits/{key}  — create or update a rate limit
 //	DELETE /rate-limits/{key}  — remove a rate limit
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return nil
 	}

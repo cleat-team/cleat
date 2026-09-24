@@ -16,7 +16,7 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("blobstore: nil mux")
 	}

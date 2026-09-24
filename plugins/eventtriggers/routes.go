@@ -15,7 +15,7 @@ import (
 )
 
 // RegisterRoutes registers HTTP handlers for the event-triggers plugin.
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("event-triggers: nil mux")
 	}
