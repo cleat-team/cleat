@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
+  (cleat#2046)
+
+  `enforce` used to default to `false` on a fresh row, whether written by `cleatctl` or by the
+  column's own SQL default: a quota counted and reported but never refused a run. `quota set
+  --tenant X --limit-count N --window-seconds N` with no `--enforce` flag now creates the row
+  with `enforce=true`, and the `tenant_quota.enforce` column's SQL default changes from
+  `FALSE`/`0` to `TRUE`/`1` on all three dialects (a new plugin migration,
+  `plugins/tenantquota/migrations.go` v3).
+
+  **Who is affected: an operator who runs `quota set` on a tenant/resource that has no row
+  yet, without passing `--enforce`.** That command now enforces the limit it creates, where it
+  previously only tracked it. Pass `--enforce=false` to keep the old soft-tracking behaviour for
+  a new row. **Existing rows are untouched** — the migration changes only the column default,
+  which SQL applies solely to a row that omits the value, and `cleatctl` always supplies
+  `enforce` explicitly; an `UPDATE` (an existing row, `quota set` with no `--enforce`) keeps
+  whatever the row already had. A tenant with no `tenant_quota` row still has no limit at all —
+  there is no tenant-creation hook that writes one (`cleatctl --create-tenant` is Postgres-only,
+  cleat#1114, and unrelated to this).
+
 - **A worker no longer migrates the database when it starts; migration is a deploy step.**
   (cleat#2117)
 
@@ -187,6 +207,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `create_schedule` calls carry `inp=` on a continuation line, and a
     line-oriented count reports them as input-less, which inflates the
     omission count in the alarming direction.
+
+### Added
+
+- **`cleatctl quota get|set|list`, the operator surface for `tenant-quota`.** (cleat#2046)
+
+  `quota get --tenant X [--resource R]` reads a tenant's quota row(s); `quota set --tenant X
+  --resource R --limit-count N --window-seconds N [--enforce=true|false]` creates or updates
+  one; `quota list [--tenant X]` lists rows for one tenant (every dialect) or every tenant
+  (Postgres and MySQL — refused on SQL Server, where `tenant_quota`'s row-level security policy
+  has no cross-tenant bypass, so an unscoped connection would read back an empty table rather
+  than an honest error). All three work on Postgres, MySQL and SQL Server.
+
+  **Stale-write refusal, mirroring `set-tenant-setting`.** `quota set` reads the current row
+  first; a concurrent writer's change since that read refuses the write (`409`-shaped, not a
+  silent overwrite) rather than clobbering it, and says so with a re-read command.
 
 ### Changed
 

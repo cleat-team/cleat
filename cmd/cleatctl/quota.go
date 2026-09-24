@@ -464,6 +464,13 @@ func runSetQuota(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	}
 	if enforceFlag != "" {
 		next.enforce = enforceFlag == "true"
+	} else if !current.existed {
+		// cleat#2046, owner decision A: enforce defaults to TRUE for a row
+		// this command is creating. An UPDATE with no --enforce falls
+		// through to the plain `next := current` above and keeps whatever
+		// the existing row already had -- only a brand-new row reaches this
+		// branch, since current.enforce is otherwise already what's wanted.
+		next.enforce = true
 	}
 
 	if err := writeQuota(ctx, exec, d, tenantID, resource, current, next); err != nil {

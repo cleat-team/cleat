@@ -196,6 +196,69 @@ func TestQuotaCommandWorksOnEveryDialect(t *testing.T) {
 	}
 }
 
+// TestQuotaSetWithoutEnforceDefaultsToEnforcedOnACreate is the known-positive
+// cleat#2046 owner decision A asked for: "add a test that a set without
+// --enforce is enforced on the next start." A brand-new row created by
+// `quota set` with no --enforce flag must come out enforce=true.
+//
+// This goes through runSetQuota itself, not writeQuota directly: the
+// column's SQL DEFAULT changed by tenantquota's v3 migration exists for any
+// OTHER writer, but cleatctl's own INSERT always supplies enforce
+// explicitly (writeQuota's argument list) -- so the SQL default alone would
+// prove nothing here, and the behaviour under test has to come from
+// runSetQuota's own logic.
+//
+// KNOWN-POSITIVE, checked by hand: reverting runSetQuota's
+// `else if !current.existed { next.enforce = true }` branch (leaving only
+// the `enforceFlag != ""` branch) makes this fail with enforce=false on
+// every dialect.
+func TestQuotaSetWithoutEnforceDefaultsToEnforcedOnACreate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		td   testutil.Dialect
+		d    dialect
+	}{
+		{"postgres", testutil.DialectPostgres, dialectPostgres},
+		{"mysql", testutil.DialectMySQL, dialectMySQL},
+		{"mssql", testutil.DialectMSSQL, dialectMSSQL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.TestDB(t, tc.td)
+			ctx := context.Background()
+
+			loaded := []*plugin.LoadedPlugin{{Plugin: tenantquota.New(), Healthy: true}}
+			if err := plugin.RunMigrations(ctx, db, tc.d.query, nil, loaded); err != nil {
+				t.Fatalf("apply tenantquota migrations on %s: %v", tc.name, err)
+			}
+
+			tenant := uuid.New().String()
+			const resource = "workflow_starts"
+
+			runSetQuota(ctx, db, tc.d, []string{
+				"--tenant", tenant,
+				"--limit-count", "100",
+				"--window-seconds", "3600",
+			})
+
+			exec, closeExec, err := quotaConnFor(ctx, db, tc.d, tenant)
+			if err != nil {
+				t.Fatalf("quotaConnFor: %v", err)
+			}
+			defer closeExec()
+			got, err := readQuota(ctx, exec, tc.d, tenant, resource)
+			if err != nil {
+				t.Fatalf("reading after set: %v", err)
+			}
+			if !got.existed {
+				t.Fatalf("quota set with no --enforce did not create a row at all")
+			}
+			if !got.enforce {
+				t.Errorf("quota set with no --enforce created a row with enforce=%v, want true (cleat#2046 owner decision A)", got.enforce)
+			}
+		})
+	}
+}
+
 // TestQuotaFlags_AcceptsAnyOrder mirrors
 // flags_work_after_the_tenant_argument_test.go's coverage for the rest of the
 // package: parseQuotaFlags scans rather than uses flag.FlagSet, so this
