@@ -136,6 +136,10 @@ the last row deleted), in the same transaction, under the head's lock. The verif
 `floor_seq + 1` and requires the first surviving row to link to `floor_hash`. Rows removed
 without the floor moving are reported as `missing`.
 
+Retention does not re-verify what it deletes. An expired row that had been tampered with can be
+removed by a sweep, after which the chain verifies clean from the new floor: the deleted prefix is
+no longer verifiable, and that is inherent.
+
 Retention refuses to move the floor over a gap. If rows between the old floor and the new one are
 already gone, it rolls back and logs a warning telling an operator to run `audit verify`, because
 recording the gap as a floor would turn a finding into a fact.

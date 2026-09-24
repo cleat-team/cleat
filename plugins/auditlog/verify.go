@@ -117,11 +117,12 @@ var errChainMoved = errors.New("the chain's floor moved during verification")
 //   - The scan is BOUNDED by the head's seq as read at the start. Rows appended after are
 //     not extra rows, they are newer than the head this run started from. (Rows beyond
 //     even the CURRENT head are extra: see the end of an attempt.)
-//   - An attempt whose floor moved while it ran is thrown away and repeated, because a
-//     sweep that removed rows the scan had not reached shows up as a gap that is not one.
-//     A deadlock victim is repeated the same way. After verifyAttempts the chain is
-//     changing faster than it can be read, which is an error (the check could not be made),
-//     never a finding.
+//   - A finding measured against a floor that has since moved, and lying at or below the
+//     new floor, is thrown away and the attempt repeated: a sweep that removed rows the
+//     scan had not reached shows up as a gap that is not one. A chain with no finding is
+//     accepted however the floor moved. A deadlock victim is repeated the same way. After
+//     verifyAttempts the chain is changing faster than it can be read, which is an error
+//     (the check could not be made), never a finding.
 func VerifyChain(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect, tenant uuid.UUID, opts VerifyOptions) (ChainReport, error) {
 	ctx = plugin.ForTenant(ctx, tenant)
 	var lastErr error
@@ -292,34 +293,41 @@ scan:
 	if err != nil {
 		return rep, err
 	}
-	// Whatever this attempt saw was measured against a floor that has since moved, or
-	// before the tenant's first append created the head, and none of it can be trusted.
-	// (A head that VANISHED is not a move: nothing appends a head away, and it is reported.)
-	moved := haveHead2 && (!haveHead || head2.floorSeq != head.floorSeq || head2.floorHash != head.floorHash)
-	if moved {
-		return rep, errChainMoved
+	// A finding is only as good as the floor it was measured against. Retention removes a
+	// PREFIX, so a floor that moved while the scan ran can only manufacture findings at or
+	// below the new floor (rows the scan had not reached were deleted, and read as a gap).
+	// Such a finding is thrown away and the attempt repeated from the new floor. A chain
+	// with no finding needs no repeat however the floor moved: every row the scan read was
+	// contiguous and linked when it was read. A finding ABOVE the new floor is real.
+	// (A head that appeared since the first read is a different hazard: everything read
+	// before it looked headless.)
+	finding := rep.Break
+	if finding == nil {
+		switch {
+		case !haveHead && rep.Checked > 0:
+			finding = &ChainBreak{Seq: lastSeq, Kind: BreakHeadMissing,
+				Detail: fmt.Sprintf("%d chained rows exist but the head row that anchors them does not", rep.Checked)}
+		case haveHead && rep.Checked == 0 && rep.HeadSeq > rep.FloorSeq:
+			finding = &ChainBreak{Seq: rep.FloorSeq + 1, Kind: BreakTruncatedTail,
+				Detail: fmt.Sprintf("the head records seq %d and floor %d, and no chained rows remain", rep.HeadSeq, rep.FloorSeq)}
+		case haveHead && rep.Checked > 0 && lastSeq < rep.HeadSeq:
+			finding = &ChainBreak{Seq: lastSeq + 1, Kind: BreakTruncatedTail,
+				Detail: fmt.Sprintf("the head records seq %d but the newest row is seq %d: rows %d through %d are gone", rep.HeadSeq, lastSeq, lastSeq+1, rep.HeadSeq)}
+		case haveHead && maxBeyond.Valid && maxBeyond.Int64 > head2.seq:
+			finding = &ChainBreak{Seq: head2.seq + 1, Kind: BreakExtraRows,
+				Detail: fmt.Sprintf("rows exist beyond the head (head seq %d, newest row %d)", head2.seq, maxBeyond.Int64)}
+		case haveHead && rep.Checked > 0 && lastHash != head.hash:
+			finding = &ChainBreak{Seq: lastSeq, Kind: BreakHeadMismatch,
+				Detail: "the newest row's hash is not the hash the head records"}
+		}
 	}
-	if rep.Break != nil {
-		return rep, nil
+	if finding != nil {
+		floorMoved := haveHead && haveHead2 && (head2.floorSeq != head.floorSeq || head2.floorHash != head.floorHash)
+		if (floorMoved && finding.Seq <= head2.floorSeq) || (!haveHead && haveHead2) {
+			return rep, errChainMoved
+		}
 	}
-
-	switch {
-	case !haveHead && rep.Checked > 0:
-		rep.Break = &ChainBreak{Seq: lastSeq, Kind: BreakHeadMissing,
-			Detail: fmt.Sprintf("%d chained rows exist but the head row that anchors them does not", rep.Checked)}
-	case haveHead && rep.Checked == 0 && rep.HeadSeq > rep.FloorSeq:
-		rep.Break = &ChainBreak{Seq: rep.FloorSeq + 1, Kind: BreakTruncatedTail,
-			Detail: fmt.Sprintf("the head records seq %d and floor %d, and no chained rows remain", rep.HeadSeq, rep.FloorSeq)}
-	case haveHead && rep.Checked > 0 && lastSeq < rep.HeadSeq:
-		rep.Break = &ChainBreak{Seq: lastSeq + 1, Kind: BreakTruncatedTail,
-			Detail: fmt.Sprintf("the head records seq %d but the newest row is seq %d: rows %d through %d are gone", rep.HeadSeq, lastSeq, lastSeq+1, rep.HeadSeq)}
-	case haveHead && maxBeyond.Valid && maxBeyond.Int64 > head2.seq:
-		rep.Break = &ChainBreak{Seq: head2.seq + 1, Kind: BreakExtraRows,
-			Detail: fmt.Sprintf("rows exist beyond the head (head seq %d, newest row %d)", head2.seq, maxBeyond.Int64)}
-	case haveHead && rep.Checked > 0 && lastHash != head.hash:
-		rep.Break = &ChainBreak{Seq: lastSeq, Kind: BreakHeadMismatch,
-			Detail: "the newest row's hash is not the hash the head records"}
-	}
+	rep.Break = finding
 	return rep, nil
 }
 

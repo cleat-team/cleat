@@ -180,6 +180,29 @@ func TestAuditVerifyExitStatusesAreDistinct(t *testing.T) {
 		t.Errorf("--json: exit %d, stdout %s", code, stdout)
 	}
 
+	// 5c. A FLOOR. Move it over the first two of `good`'s rows, recording their true
+	// timestamp (minutes old). Without --retention-days that verifies, and says out loud that
+	// the floor was not checked; with it, the floor over unexpired rows is a finding.
+	var h2 string
+	var ts2 int64
+	if err := pdb.QueryRow(plugin.ForTenant(ctx, good), `SELECT row_hash, (EXTRACT(EPOCH FROM timestamp) * 1000000)::bigint FROM audit_events WHERE tenant_id = $1 AND seq = 2`, good).Scan(&h2, &ts2); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := pdb.Exec(plugin.ForTenant(ctx, good), `DELETE FROM audit_events WHERE tenant_id = $1 AND seq <= 2`, good); err != nil || n != 2 {
+		t.Fatalf("removed %d rows (err %v), want 2", n, err)
+	}
+	if n, err := pdb.Exec(plugin.ForTenant(ctx, good), `UPDATE audit_chain_heads SET floor_seq = 2, floor_hash = $1, floor_ts = $2 WHERE tenant_id = $3`, strings.TrimSpace(h2), ts2, good); err != nil || n != 1 {
+		t.Fatalf("moved the floor on %d rows (err %v)", n, err)
+	}
+	code, stdout, stderr = runAuditCapturing(t, db, "verify", "--tenant", good.String())
+	if code != 0 || !strings.Contains(stdout, "OK") || !strings.Contains(stderr, "NOTE tenant "+good.String()) || !strings.Contains(stderr, "was not checked") {
+		t.Errorf("a floor with no --retention-days: exit %d\nstdout: %s\nstderr: %s\nwant OK and a NOTE that the floor was not checked", code, stdout, stderr)
+	}
+	code, stdout, stderr = runAuditCapturing(t, db, "verify", "--tenant", good.String(), "--retention-days", "90")
+	if code != 1 || !strings.Contains(stdout, "floor_unexpired") || strings.Contains(stderr, "NOTE") {
+		t.Errorf("a floor over unexpired rows with --retention-days 90: exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
 	// 6. USAGE is status 2, never 0: no flags, both flags, a non-UUID, another verb.
 	for _, args := range [][]string{
 		{"verify"},

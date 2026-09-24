@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
 
@@ -107,20 +108,25 @@ func TestVerifyDuringARetentionSweepReportsNoBreak(t *testing.T) {
 
 		p := e.plugin()
 		var falses []string
-		for i := 0; i < 40; i++ {
+		// At least 40 verifications, and until the floor and the head have both been seen
+		// moving: a fixed count can finish before a slow sweeper has done a batch, and then
+		// it has measured nothing. The deadline keeps a wedged sweeper from hanging the run.
+		deadline := time.Now().Add(90 * time.Second)
+		runs := 0
+		for ; runs < 40 || swept.Load() < 6 || written.Load() < 5; runs++ {
+			if time.Now().After(deadline) {
+				t.Fatalf("UNMEASURED: after %d verifications the sweeper had removed %d rows and the writer added %d; the floor and the head were not both moving", runs, swept.Load(), written.Load())
+			}
 			rep, err := VerifyChain(context.Background(), p.db, e.d.dialect, tenant, VerifyOptions{})
 			if err != nil {
-				t.Fatalf("verify %d: %v", i, err)
+				t.Fatalf("verify %d: %v", runs, err)
 			}
 			if !rep.OK() {
 				falses = append(falses, fmt.Sprintf("%s at seq %d (%s)", rep.Break.Kind, rep.Break.Seq, rep.Break.Detail))
 			}
 		}
 		if len(falses) > 0 {
-			t.Fatalf("%d of 40 verifications during a retention sweep reported a break; the first: %s", len(falses), falses[0])
-		}
-		if swept.Load() < 6 || written.Load() < 5 {
-			t.Fatalf("swept %d, written %d: the floor and the head were not both moving, so this measured nothing", swept.Load(), written.Load())
+			t.Fatalf("%d of %d verifications during a retention sweep reported a break; the first: %s", len(falses), runs, falses[0])
 		}
 	})
 }
@@ -256,4 +262,76 @@ func TestOnlyADeadlockVictimIsRepeated(t *testing.T) {
 			t.Errorf("isTransientDBError(%q) = %v, want %v", msg, got, want)
 		}
 	}
+}
+
+// hookDB runs fn before the n-th query.
+type hookDB struct {
+	plugin.PluginDB
+	n, at int
+	fn    func()
+}
+
+func (h *hookDB) Query(ctx context.Context, q string, a ...any) (plugin.Rows, error) {
+	if h.n++; h.n == h.at {
+		h.fn()
+	}
+	return h.PluginDB.Query(ctx, q, a...)
+}
+
+// The deterministic form of the race above: a sweep removes the first rows AFTER verify
+// read the head and BEFORE it reads any row. The scan then finds row 6 where the old floor
+// says row 1 should be -- a gap that is an artefact of the sweep, not a break. It must be
+// repeated from the new floor and come out clean; and a real gap must still be reported.
+func TestAGapCreatedByASweepDuringVerifyIsNotReported(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		e.record(p, tenant, 12)
+		cutoff := e.tsOf(tenant, 6).Add(time.Microsecond) // rows 1..6 are expired
+		sweeper := e.plugin()
+
+		v := e.plugin()
+		v.db = &hookDB{PluginDB: v.db, at: 1, fn: func() {
+			if n, err := sweeper.retainTenant(context.Background(), tenant, cutoff); err != nil || n != 6 {
+				t.Errorf("the sweep removed %d rows, %v; want 6", n, err)
+			}
+		}}
+		rep, err := VerifyChain(context.Background(), v.db, e.d.dialect, tenant, VerifyOptions{})
+		if err != nil || !rep.OK() {
+			t.Fatalf("verify across a sweep: %+v, %v (break %+v), want a clean chain", rep, err, rep.Break)
+		}
+		if rep.Checked != 6 || rep.FloorSeq != 6 {
+			t.Errorf("verified %d rows from floor %d, want the 6 that remain, from the floor the sweep recorded", rep.Checked, rep.FloorSeq)
+		}
+
+		// A real gap above the floor is still a gap, however the floor moved.
+		e.mustChange(tenant, `DELETE FROM audit_events WHERE tenant_id = $1 AND seq = 9`, tenant.String())
+		rep, err = VerifyChain(context.Background(), p.db, e.d.dialect, tenant, VerifyOptions{})
+		if err != nil || rep.OK() || rep.Break.Kind != BreakMissing || rep.Break.Seq != 9 {
+			t.Fatalf("a real gap: %+v, %v, want missing at seq 9", rep, err)
+		}
+	})
+}
+
+// A tenant's first append creates its head. A verifier that read "no head" just before it,
+// and then found rows, would call a healthy new chain headless.
+func TestAHeadCreatedDuringVerifyIsNotReportedMissing(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		tenant := uuid.New()
+		writer := e.plugin()
+		v := e.plugin()
+		v.db = &hookDB{PluginDB: v.db, at: 1, fn: func() { e.record(writer, tenant, 3) }}
+		rep, err := VerifyChain(context.Background(), v.db, e.d.dialect, tenant, VerifyOptions{})
+		if err != nil || !rep.OK() || rep.Checked != 3 {
+			t.Fatalf("a chain whose first rows landed during verify: %+v, %v (break %+v), want 3 rows, clean", rep, err, rep.Break)
+		}
+		// And a headless chain that is not a race is still reported.
+		orphan := uuid.New()
+		e.record(writer, orphan, 2)
+		e.mustChange(orphan, `DELETE FROM audit_chain_heads WHERE tenant_id = $1`, orphan.String())
+		rep, err = VerifyChain(context.Background(), writer.db, e.d.dialect, orphan, VerifyOptions{})
+		if err != nil || rep.OK() || rep.Break.Kind != BreakHeadMissing {
+			t.Fatalf("rows with no head: %+v, %v, want %s", rep, err, BreakHeadMissing)
+		}
+	})
 }

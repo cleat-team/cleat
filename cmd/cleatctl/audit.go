@@ -132,6 +132,10 @@ func runAudit(ctx context.Context, db *sql.DB, d dialect, args []string) {
 			continue
 		}
 		reports = append(reports, rep)
+		if rep.FloorSeq > 0 && *retentionDays == 0 {
+			// Say so, rather than let the check that was not made read as one that passed.
+			fmt.Fprintf(os.Stderr, "NOTE tenant %s: retention has moved the floor to seq %d and --retention-days was not given, so whether the floor covers only expired rows was not checked\n", t, rep.FloorSeq)
+		}
 		if rep.OK() {
 			ok++
 		} else {
