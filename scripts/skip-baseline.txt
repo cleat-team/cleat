@@ -182,6 +182,9 @@ engine	pythonDeferSegment	1
 engine	pythonDeterminismWasm	1
 engine	requireDialectDSN	1
 engine	setupMSSQLIntegrationTest	2
+engine	testHeartbeatReservedPoolSeesARealClaimedRunMSSQL	2
+engine	testHeartbeatReservedPoolSeesARealClaimedRunMySQL	2
+engine	testHeartbeatReservedPoolSeesARealClaimedRunPostgres	1
 engine	withWasmtimeBackend	1
 engine/testutil	MSSQLTestDB	1
 engine/testutil	MySQLTestDB	1

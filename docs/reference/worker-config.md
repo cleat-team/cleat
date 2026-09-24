@@ -220,6 +220,35 @@ without noticing.
 
 ---
 
+### --heartbeat-max-connections
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `3` | Database connections reserved for heartbeat writes |
+
+Opens a small connection pool used only for heartbeat writes, isolated from the
+execution pool. cleat#2009: a saturated execution pool (long-held connections
+claiming or deferring workflows) can starve a heartbeat on the shared pool, and
+a missed heartbeat is what triggers reclaim -- so pool exhaustion under load
+looked like a dead worker. Reserving a few connections up front removes the
+contention.
+
+Set to `0` to disable the reserved pool and share the execution pool as before.
+Negative values are refused at startup.
+
+Counted in the worker's connection budget census (`--connection-budget`) as its
+own `heartbeat=N` term.
+
+**Not yet supported on a sharded deployment (`--shards-file`).** A sharded
+worker's heartbeat stays on the execution pool regardless of this flag.
+
+A heartbeat that succeeds through this pool still records the worker's database
+contact as OK (`recordDBContactOK`), the same signal an idle worker's DB ping
+records -- so the DB-health gate cleat#2166 added does not distinguish which
+pool answered, only whether the database is reachable.
+
+---
+
 ### --poll
 
 | Type | Default | Description |

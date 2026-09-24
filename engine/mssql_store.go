@@ -384,6 +384,59 @@ func (f *MSSQLStoreFactory) OpenStore(ctx context.Context, tenantID string, task
 	return store, lease, nil
 }
 
+// OpenIsolatedStore is OpenStore's shape, on a connector-wrapped pool of its
+// own rather than the tenant's shared leased pool -- for a caller
+// (cleat#2009's heartbeat pool) that wants a pool EvictIdle cannot reclaim
+// out from under it and that does not compete with execution traffic for
+// f.tenantDBs' connections.
+//
+// MSSQLStore itself sets SESSION_CONTEXT per transaction (see
+// beginTxWithContext), not through the connector, so unlike MySQL a bare
+// pool on this DSN is not silently wrong here -- but going through
+// tenantSessionConnector anyway keeps this store's connections consistent
+// with every other MSSQL pool in the process, rather than relying on every
+// call site remembering to use the context-setting transaction helper.
+//
+// The returned closer owns this pool outright and closes it -- unlike
+// OpenStore's lease, there is nothing shared here for EvictIdle to reclaim.
+func (f *MSSQLStoreFactory) OpenIsolatedStore(ctx context.Context, tenantID string, maxConns int, taskQueues ...string) (WorkflowStore, io.Closer, error) {
+	if _, err := uuid.Parse(tenantID); err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: invalid tenant ID: %w", tenantID, err)
+	}
+
+	baseDB, err := sql.Open("sqlserver", f.connStr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: open base mssql connection: %w", tenantID, err)
+	}
+	d := baseDB.Driver()
+	baseDB.Close()
+
+	dc, ok := d.(driver.DriverContext)
+	if !ok {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: mssql driver does not implement DriverContext", tenantID)
+	}
+	connector, err := dc.OpenConnector(f.connStr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: open mssql connector: %w", tenantID, err)
+	}
+	wrapped := &tenantSessionConnector{Connector: connector, tenantID: tenantID}
+
+	isolatedDB := sql.OpenDB(wrapped)
+	isolatedDB.SetMaxOpenConns(maxConns)
+	isolatedDB.SetMaxIdleConns(maxConns)
+	isolatedDB.SetConnMaxLifetime(5 * time.Minute)
+	if err := isolatedDB.PingContext(ctx); err != nil {
+		isolatedDB.Close()
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: ping: %w", tenantID, err)
+	}
+
+	store := NewMSSQLStore(isolatedDB, taskQueues...)
+	store.tenantID = tenantID
+	store = store.WithIdempotencyKeyTTL(f.idempotencyKeyTTL)
+	store = store.WithLogger(f.logger)
+	return store, isolatedDB, nil
+}
+
 // getOrCreateTenantPool returns a *sql.DB pool for the given tenant.
 // The pool uses a wrapped connector that sets sp_set_session_context
 // on every new connection, so RLS is enforced automatically.
