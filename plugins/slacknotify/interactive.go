@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cleat-team/cleat/auth"
 )
 
 // interactiveMaxBodySize bounds POST /slack/interactive, whose payloads are a
@@ -38,12 +40,15 @@ type slackInteractivePayload struct {
 
 // slackBlockAction is one element of a block_actions payload's "actions"
 // array -- the shape Slack actually sends for a Block Kit button click.
-// Only the three fields the routing convention can live in are decoded;
-// the rest (type, action_ts, text, style, ...) are ignored.
+// Only the fields this plugin forwards are decoded; the rest (type, text,
+// style, ...) are ignored. Value and BlockID are decoded even though
+// routing no longer reads them (see extractCallbackRoute) because both are
+// still part of the scoped payload a workflow receives.
 type slackBlockAction struct {
 	ActionID string `json:"action_id"`
 	BlockID  string `json:"block_id"`
 	Value    string `json:"value"`
+	ActionTS string `json:"action_ts"`
 }
 
 // parseCallbackRoute extracts a workflow ID and signal name from a string
@@ -63,41 +68,106 @@ func parseCallbackRoute(s string) (wfID, sigName string, ok bool) {
 }
 
 // extractCallbackRoute finds a wf:<id>:sig:<name> route in a Slack
-// interactive payload, trying every place a workflow author could have put
-// it. The legacy top-level callback_id is checked first for backward
-// compatibility with callers that already relied on it (Slack's older
-// "attachment" interactive_message payloads still carry one), but the
-// plugin's OWN button-sending path (sendMessage's opaque Blocks
-// json.RawMessage, host_functions.go) never populates that field -- a
-// Block Kit message's routing has nowhere to live except inside the block
-// itself, so a real click on a button this plugin sent arrives as a
+// interactive payload: buttons only, first action only, route in
+// actions[0].action_id (Slack bounds action_id to 255 characters) -- and,
+// for backward compatibility with Slack's older "attachment"
+// interactive_message payloads, the legacy top-level callback_id.
+//
+// The plugin's OWN button-sending path (sendMessage's opaque Blocks
+// json.RawMessage, host_functions.go) never populates callback_id -- a
+// Block Kit message's routing has nowhere to live except inside the
+// block itself, so a real click on a button this plugin sent arrives as a
 // block_actions payload with an EMPTY top-level callback_id and the route
-// embedded in the clicked action instead. cleat#2230(a): today's handler
-// read only callback_id, which is exactly the field the plugin's own
-// buttons never carry, so a click on a real button silently routed
-// nowhere. actions[].action_id is checked first (the field a workflow
-// author would put a deliberate identifier in), then .value, then
-// .block_id, per the owner's decision on #2230 -- only the first action is
-// considered, matching Slack's own behavior of sending exactly one action
-// per block_actions payload for a single click.
-func extractCallbackRoute(payload slackInteractivePayload) (wfID, sigName string, ok bool) {
+// embedded in the clicked action's action_id instead. cleat#2230(a): the
+// original handler read only callback_id, so a click on a real button
+// silently routed nowhere.
+//
+// action_id ONLY -- not value or block_id. cleat#2230(a) originally fell
+// back action_id -> value -> block_id, per the owner's initial #2230 spec;
+// coordinator narrowed it after cleat-review's #2253 review, since a
+// workflow author who names a button's action_id something with no
+// routing intent (a plain label) while a DIFFERENT field happens to parse
+// as a route creates an ambiguous, undocumented second way to route a
+// click. One documented field is simpler to reason about and to audit.
+//
+// action is returned alongside the route (nil for the legacy callback_id
+// path, which carries no per-action fields) so the caller can build the
+// scoped signal payload without re-parsing payload.Actions itself.
+func extractCallbackRoute(payload slackInteractivePayload) (wfID, sigName string, action *slackBlockAction, ok bool) {
 	if wfID, sigName, ok := parseCallbackRoute(payload.CallbackID); ok {
-		return wfID, sigName, true
+		return wfID, sigName, nil, true
 	}
 	if len(payload.Actions) == 0 {
-		return "", "", false
+		return "", "", nil, false
 	}
 	var actions []slackBlockAction
 	if err := json.Unmarshal(payload.Actions, &actions); err != nil || len(actions) == 0 {
-		return "", "", false
+		return "", "", nil, false
 	}
-	first := actions[0]
-	for _, candidate := range []string{first.ActionID, first.Value, first.BlockID} {
-		if wfID, sigName, ok := parseCallbackRoute(candidate); ok {
-			return wfID, sigName, true
-		}
+	if wfID, sigName, ok := parseCallbackRoute(actions[0].ActionID); ok {
+		return wfID, sigName, &actions[0], true
 	}
-	return "", "", false
+	return "", "", nil, false
+}
+
+// scopedInteractionPayload is what actually gets marshaled into a
+// workflow's signal payload for a block_actions click. cleat-review's
+// #2253 finding: the original handler forwarded the FULL raw Slack
+// payload verbatim, which includes response_url (a Slack bearer
+// capability, valid to post into the channel unauthenticated for about 30
+// minutes), trigger_id, and the complete message text -- none of which had
+// ever been scoped down before, because before cleat#2230(a) nothing ever
+// routed successfully enough to reach signalWorkflow at all. Deliberately
+// narrow: only what a workflow needs to know which button was clicked and
+// who clicked it. If a workflow needs to reply via response_url, that is a
+// later feature in which the plugin itself holds and uses it -- it must
+// not be handed to tenant-visible workflow code.
+type scopedInteractionPayload struct {
+	ActionID  string `json:"action_id"`
+	BlockID   string `json:"block_id,omitempty"`
+	Value     string `json:"value,omitempty"`
+	UserID    string `json:"user_id,omitempty"`
+	TeamID    string `json:"team_id,omitempty"`
+	ChannelID string `json:"channel_id,omitempty"`
+	ActionTS  string `json:"action_ts,omitempty"`
+}
+
+// slackObjectID extracts just the "id" field from one of a Slack
+// payload's user/team/channel objects, which this plugin otherwise treats
+// as opaque json.RawMessage. Best-effort: a missing or malformed object
+// yields an empty ID rather than an error, since by the time this is
+// called the route has already been resolved and refusing delivery over an
+// unparsable, non-routing field would be a stranger failure than simply
+// omitting it.
+func slackObjectID(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var v struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return ""
+	}
+	return v.ID
+}
+
+// buildScopedPayload assembles the narrow payload actually delivered to a
+// workflow's signal (see scopedInteractionPayload's doc comment). action is
+// nil on the legacy callback_id path, which carries no per-action fields.
+func buildScopedPayload(payload slackInteractivePayload, action *slackBlockAction) ([]byte, error) {
+	scoped := scopedInteractionPayload{
+		UserID:    slackObjectID(payload.User),
+		TeamID:    slackObjectID(payload.Team),
+		ChannelID: slackObjectID(payload.Channel),
+	}
+	if action != nil {
+		scoped.ActionID = action.ActionID
+		scoped.BlockID = action.BlockID
+		scoped.Value = action.Value
+		scoped.ActionTS = action.ActionTS
+	}
+	return json.Marshal(scoped)
 }
 
 // signingSecret fetches the current Slack request-signing secret. Called at
@@ -129,7 +199,18 @@ func (p *Plugin) signingSecret(ctx context.Context) (string, error) {
 // handleInteractiveCallback receives Slack interactive payloads (button clicks, etc.),
 // verifies the request, and delivers a signal to the relevant workflow.
 //
-// Callback ID convention used by workflows: wf:<workflow_id>:sig:<signal_name>
+// Routing convention: wf:<workflow_id>:sig:<signal_name>, either as the
+// legacy top-level callback_id (older "attachment" interactive_message
+// payloads) or as a block_actions payload's actions[0].action_id --
+// buttons only, first action only, route in action_id (Slack bounds it to
+// 255 characters); value and block_id are never read for routing. See
+// extractCallbackRoute's doc comment for why action_id alone, and
+// scopedInteractionPayload's for what of the click actually reaches the
+// workflow.
+//
+// cleat#2230(a)/(b): this route cannot resolve a tenant yet (see the
+// tenant-refusal block below), so every click refuses with 404 until
+// cleat#2230(b) lands the slack_workspace lookup.
 func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Request) {
 	// Bound the body before reading any of it. This route lost its auth
 	// middleware gate in this same change (cleat#2172's exemption, so the
@@ -224,23 +305,59 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Extract workflow signal, trying the legacy top-level callback_id and
-	// then a block_actions payload's actions[].action_id/value/block_id.
+	// then a block_actions payload's actions[0].action_id.
 	// Convention: wf:<workflowID>:sig:<signalName>
-	wfID, sigName, ok := extractCallbackRoute(payload)
+	wfID, sigName, action, ok := extractCallbackRoute(payload)
 	if !ok {
 		// Nothing to route. Return 200 OK per Slack requirements.
-		if payload.CallbackID != "" {
+		switch {
+		case payload.CallbackID != "":
 			p.logger.Warn("slack-notify: unrecognized callback_id format", "callback_id", payload.CallbackID)
+		case len(payload.Actions) > 0:
+			// A real block_actions click that just doesn't carry a
+			// wf:...:sig:... route in action_id -- an ordinary button a
+			// workflow author never meant to route, not a malformed
+			// request. Debug rather than Warn: this is the expected shape
+			// for any button that isn't wired to a signal.
+			p.logger.Debug("slack-notify: block_actions payload has no routable action_id")
 		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 		return
 	}
 
-	// Deliver as workflow signal
-	sigPayload, _ := json.Marshal(payload)
+	// cleat#2230(a): refuse rather than deliver unscoped. This route is
+	// auth-exempt (cleat#2172), so nothing upstream of this handler ever
+	// sets a tenant in ctx -- and engine/main.go's signalPluginWorkflow
+	// treats "no tenant in ctx" as "unscoped", which on Postgres/SQL
+	// Server runs as the DEFAULT tenant's own session (cleat#2209's fix
+	// made that explicit). cleat-review's #2253 review measured the
+	// consequence: any tenant could post a button whose action_id named
+	// the default tenant's own workflow and signal it, while no other
+	// tenant's buttons worked at all. cleat#2230(b) adds the
+	// slack_workspace lookup that resolves a real tenant here; until then,
+	// every click refuses. ids only in the log -- no payload contents,
+	// which may carry a user-controlled value/block_id.
+	tid, tenantOK := auth.TenantIDFromRequest(r)
+	if !tenantOK {
+		p.interactiveNoTenantRefusals.Add(1)
+		p.logger.Warn("slack-notify: no tenant resolved for /slack/interactive, refusing",
+			"workflow_id", wfID, "signal", sigName)
+		p.writeError(w, http.StatusNotFound, "workspace not mapped")
+		return
+	}
+	ctx := auth.WithTenantID(r.Context(), tid)
+
+	// Deliver as workflow signal, scoped down to what a workflow needs to
+	// know about the click -- see scopedInteractionPayload's doc comment.
+	sigPayload, err := buildScopedPayload(payload, action)
+	if err != nil {
+		p.logger.Error("slack-notify: failed to build scoped signal payload", "workflow_id", wfID, "signal", sigName, "error", err)
+		p.writeError(w, http.StatusInternalServerError, "failed to process payload")
+		return
+	}
 	if p.signalWorkflow != nil {
-		if err := p.signalWorkflow(r.Context(), wfID, sigName, string(sigPayload)); err != nil {
+		if err := p.signalWorkflow(ctx, wfID, sigName, string(sigPayload)); err != nil {
 			p.logger.Error("slack-notify: failed to deliver signal", "workflow_id", wfID, "signal", sigName, "error", err)
 			p.writeError(w, http.StatusInternalServerError, "failed to deliver signal")
 			return

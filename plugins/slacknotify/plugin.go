@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -40,6 +41,15 @@ type Plugin struct {
 
 	signalWorkflow    func(ctx context.Context, workflowID, signalName, payload string) error
 	deploymentSecrets plugin.DeploymentSecrets
+
+	// interactiveNoTenantRefusals counts /slack/interactive requests that
+	// parsed a valid route but were refused for carrying no resolvable
+	// tenant -- see handleInteractiveCallback (interactive.go), cleat#2230(a).
+	// Until cleat#2230(b) adds the slack_workspace lookup this route has no
+	// way to resolve one at all (the route is auth-exempt, cleat#2172), so
+	// today this counts every click that would otherwise have been
+	// delivered. Observability for that gap, not a limit enforced anywhere.
+	interactiveNoTenantRefusals atomic.Int64
 }
 
 // Config holds optional configuration for the slack-notify plugin.
