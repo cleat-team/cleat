@@ -63,6 +63,7 @@ cmd/cleat-worker	TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt	1
 cmd/cleat-worker	TestWorkerMigratesFromOutsideTheRepo	2
 cmd/cleat-worker	TestWorkerShutdownAbortsADurableCallsHostBackoffWait	1
 cmd/cleat-worker	newSignalAuthStore	1
+cmd/cleatctl	TestAuditVerifyExitStatusesAreDistinct	1
 engine	MSSQLBackend.Setup	1
 engine	MSSQLBackend.SetupForTenant	1
 engine	MySQLBackend.Setup	1
@@ -198,6 +199,7 @@ plugin	TestConcurrentPluginMigratorsAreSerialisedOnMySQLAndSQLServer	1
 plugin	TestDownloadWASMInvalidURL	1
 plugin	newPluginScratchDB	1
 plugins/auditlog	TestTheAuditInsertWorksOnMySQLsIDColumn	1
+plugins/auditlog	newChainEnv	1
 plugins/blobstore	TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave	1
 plugins/blobstore	TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkflowsRef	1
 plugins/scheduledbackup	TestNextRun_Feb29NonLeapYear	1

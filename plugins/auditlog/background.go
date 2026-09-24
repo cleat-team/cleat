@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // Run starts the background goroutine. It periodically drains the audit
@@ -78,42 +79,74 @@ func (p *Plugin) drainBuffer() {
 	}
 }
 
-// cleanupRetention deletes audit events older than the configured retention period.
+// cleanupRetention deletes audit events older than the configured retention period,
+// one tenant at a time, and records what it removed from each chain (chain_retention.go).
 // Returns the number of deleted events.
+//
+// The DELETEs are per tenant because retention is a fact about a tenant's chain: the head
+// row's lock and the floor it records are that tenant's, and a statement across tenants
+// could hold neither. Only the enumeration crosses tenants (expiredTenants), and it reads
+// a list of ids, never a row.
 func (p *Plugin) cleanupRetention(ctx context.Context) (int64, error) {
 	retention := time.Duration(p.config.RetentionDays) * 24 * time.Hour
-	cutoff := time.Now().Add(-retention)
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	cutoff := now().Add(-retention)
 
-	// A NAMED cross-tenant sweep. cleat#1278.
-	//
-	// Retention is global: the cutoff is a timestamp, the loop has no tenant
-	// and could not have one, and deleting only one tenant's expired rows per
-	// tick would be wrong rather than merely slow. Once audit_events carries a
-	// row-level policy (migrations.go v2) an unnamed statement from here is
-	// refused with "cleat.tenant_id is not set", so adding the policy and
-	// leaving this bare are the same change -- which is why they are in the
-	// same commit.
-	//
-	// The reason string is written to cleat.cross_tenant for the life of the
-	// transaction, so a session holding a lock at three in the morning can be
-	// asked which sweep it is.
-	//
-	// Contrast recordAudit, which is NOT marked: it writes one tenant's row
-	// and had the tenant in hand all along. See the note in migrations.go.
-	ctx = plugin.AcrossAllTenants(ctx, "audit-log retention sweep: the cutoff is global, no tenant owns it")
-
-	result, err := p.db.Exec(ctx, plugin.Rebind(`
-			DELETE FROM audit_events
-			WHERE timestamp < $1
-		`, p.dialect), cutoff)
+	tenants, err := p.expiredTenants(ctx, cutoff)
 	if err != nil {
-		return 0, fmt.Errorf("delete old events: %w", err)
+		return 0, fmt.Errorf("audit retention: %w", err)
 	}
-	if result > 0 {
-		p.logger.Info("audit-log: deleted expired events",
-			"count", result,
-			"cutoff", cutoff,
-		)
+	var total int64
+	var firstErr error
+	for _, raw := range tenants {
+		tid, err := uuid.Parse(raw)
+		if err != nil {
+			continue
+		}
+		n, err := p.retainTenant(ctx, tid, cutoff)
+		total += n
+		if err != nil {
+			// One tenant's failure must not stop the others being swept.
+			p.logger.Error("audit-log: retention for a tenant failed", "tenant", tid, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
-	return result, nil
+	if total > 0 {
+		p.logger.Info("audit-log: deleted expired events", "count", total, "cutoff", cutoff)
+	}
+	return total, firstErr
+}
+
+// expiredTenants lists the tenants that have at least one row older than cutoff. It asks
+// the audit table, not the tenant registry: retention used to purge by age whatever the
+// tenant's state, and a tenant removed from the registry leaves its audit rows behind
+// (there is no foreign key), so enumerating registered tenants would keep those forever.
+// It also visits only tenants with something to remove.
+func (p *Plugin) expiredTenants(ctx context.Context, cutoff time.Time) ([]string, error) {
+	col := "tenant_id"
+	if p.dialect == plugin.DialectMSSQL {
+		col = "CONVERT(varchar(36), tenant_id)"
+	}
+	ctx = plugin.AcrossAllTenants(ctx, "audit retention: list the tenants that have expired rows")
+	rows, err := p.db.Query(ctx, plugin.Rebind(fmt.Sprintf(
+		`SELECT DISTINCT %s FROM audit_events WHERE %s < $1`,
+		col, epochMicrosExpr(p.dialect, "timestamp")), p.dialect), cutoff.UTC().UnixMicro())
+	if err != nil {
+		return nil, fmt.Errorf("list tenants with expired rows: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("list tenants with expired rows: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

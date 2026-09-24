@@ -85,18 +85,20 @@ func TestTheAuditInsertWorksOnMySQLsIDColumn(t *testing.T) {
 	// The SHIPPED MySQL DDL, not a copy. A hand-written CREATE TABLE here would
 	// let this pass while the real column kept its missing default -- the test
 	// would be asserting something about itself.
-	var ddl string
+	// EVERY shipped MySQL migration, in order: the chain (cleat#2047) added columns
+	// and a head table that the plugin's insert now writes, so the first CREATE TABLE
+	// alone is no longer the shape the plugin runs against.
+	var ddls []string
 	for _, m := range (&Plugin{}).Migrations() {
-		if strings.Contains(m.UpMySQL, "audit_events") &&
-			strings.Contains(strings.ToUpper(m.UpMySQL), "CREATE TABLE") {
-			ddl = m.UpMySQL
-			break
+		if strings.Contains(m.UpMySQL, "audit_") {
+			ddls = append(ddls, m.UpMySQL)
 		}
 	}
-	if ddl == "" {
+	if len(ddls) == 0 || !strings.Contains(strings.ToUpper(ddls[0]), "CREATE TABLE") {
 		t.Fatal("no MySQL audit_events CREATE TABLE found in the plugin's migrations; " +
 			"this test can no longer reach the column it exists to check")
 	}
+	ddl := strings.Join(ddls, ";\n")
 
 	// The plugin's SQL names audit_events literally, so the fixture uses that
 	// name and cleans up after itself rather than renaming the table.

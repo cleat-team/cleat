@@ -68,6 +68,15 @@ var unrestrictedSubcommands = map[string]string{
 	// tenant_egress_allow and tenant_api_keys. Every statement in quota.go goes
 	// through d.rebind, asserted directly by TestQuotaStatementsRebindPerDialect.
 	"quota": "ported to all three; tenant_quota is control-plane like tenant_settings (plugins read one shared env.DB, no per-tenant MySQL routing), and every statement goes through d.rebind (cleat#2046)",
+
+	// All three, and the SQL is not this package's: it calls auditlog.VerifyChain and
+	// auditlog.ChainedTenants, whose statements carry a per-dialect arm each and are
+	// exercised on PostgreSQL, MySQL and SQL Server by plugins/auditlog's
+	// TestEveryTamperWithAChainIsReported and TestChainedTenantsListsEveryTenantThatHasAChain.
+	// The audit tables are control-plane (the plugin's migrations run against the base
+	// database), so no tenantScopedDB is needed on MySQL. This package's own test,
+	// TestAuditVerifyExitStatusesAreDistinct, covers the exit statuses on PostgreSQL only.
+	"audit": "ported to all three through plugins/auditlog, whose statements are exercised on every dialect (cleat#2047)",
 }
 
 // Every subcommand main.go dispatches declares the dialects it runs on.

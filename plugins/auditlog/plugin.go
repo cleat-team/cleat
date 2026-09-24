@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -52,6 +53,14 @@ type Plugin struct {
 	config  Config
 	dialect plugin.Dialect
 	buffer  chan queuedAuditEvent // bounded channel acting as ring buffer
+
+	// headsSeen remembers the tenants whose chain head row this process has ensured
+	// exists, so the steady-state append does not repeat the insert. See ensureHead.
+	headsSeen sync.Map
+
+	// now is the clock retention measures its cutoff from; nil means time.Now. A test
+	// sets it, because the rows it wants expired are hashed and cannot be back-dated.
+	now func() time.Time
 }
 
 // Config controls audit-log behaviour.

@@ -321,6 +321,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The audit log is now tamper-evident: each tenant's rows form a SHA-256 hash chain, and `cleatctl audit verify` checks it.** (cleat#2047)
+
+  Every `audit_events` row carries `seq`, `prev_hash` and `row_hash`, and each tenant has a head
+  row in `audit_chain_heads`. An edited row, a row removed from the middle, and rows removed from
+  the end are each reported, by kind, at the first place they occur. `cleatctl audit verify
+  (--tenant <id> | --all-tenants) [--json]` exits `0` clean, `1` on a break, and `2` when it could
+  not look, and the two non-zero values are different on purpose.
+
+  **What it is not:** the chain proves the integrity of what was recorded, not that everything was
+  recorded, and it does not stop a database administrator who rewrites a whole chain and its head
+  together. `docs/reference/audit-log.md` states both, with the encoding an offline verifier needs.
+
+  Behaviour changes to know about:
+  - **Existing rows are not backfilled.** They stay unchained and are outside the guarantee.
+  - **Retention is per tenant.** It deletes an expired prefix of a tenant's chain (at most 5,000 rows
+    per tenant per hourly sweep) and records a floor, instead of one cross-tenant `DELETE`. A backlog
+    of expired rows now drains over several sweeps.
+  - **Each request is a short transaction that locks its tenant's head row,** so a tenant's appends
+    serialise. Different tenants do not contend.
+  - **Text that cannot be stored (invalid UTF-8, NUL) is replaced with U+FFFD instead of dropping the
+    whole event.**
+  - **A value too long for its column is truncated with a `...[truncated]` marker instead of failing the
+    insert** (`path` 700 characters and 800 UTF-16 units, `method` 255, the free-text columns 4,096). On
+    MySQL and SQL Server an over-long path used to leave no audit row at all.
+  - **The MySQL `audit_events.timestamp` column becomes `DATETIME(6)` holding UTC** (it was
+    `TIMESTAMP(6)`, which stops at 2038).
+  - **`cleatctl audit verify --retention-days N`** also reports a retention floor that covers rows too
+    young to have expired.
+
 - **Tenant-secrets master-key rotation: a key ring and `cleatctl reseal-secrets`.** (cleat#1991)
 
   A key is now named by an integer version. `CLEAT_SECRET_MASTER_KEY_VERSION` (default `1`, which is what every
