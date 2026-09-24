@@ -42,8 +42,8 @@ import (
 // of this test that just ran both sequentially would pass whether or not the
 // ingest actually waited for anything.
 //
-// PostgreSQL and SQL Server, not MySQL. PostgreSQL: FOR SHARE closes the gap
-// at its default READ COMMITTED, where a plain read does not see an UPDATE
+// PostgreSQL, MySQL and SQL Server. PostgreSQL: FOR SHARE closes the gap at
+// its default READ COMMITTED, where a plain read does not see an UPDATE
 // inside a still-open transaction. SQL Server: with READ_COMMITTED_SNAPSHOT
 // (RCSI) ON -- the configuration docs/reference/database-backends.md
 // recommends -- a plain read sees a row-versioned snapshot instead of
@@ -55,10 +55,17 @@ import (
 // test's to depend on. cleat#2237, the same gap cleat#2233 closed for
 // notifications' sendWebhook -- this test is that PR's
 // TestASendWebhookRacingAnOpenDeleteTransactionIsBlocked, adapted to this
-// package's HTTP handler. MySQL is excluded: its default isolation already
-// blocks a plain read against a row an open UPDATE holds, with no
-// dialect-specific tuning needed, so there is no analogous race to close or
-// test.
+// package's HTTP handler.
+//
+// MySQL gets a "mysql" subtest too, not on the strength of the routes.go
+// comment's claim that its default isolation already blocks a plain read
+// against a row an open UPDATE holds -- that claim shipped in #2221 (the PR
+// that added FOR SHARE there) with no live-interleaving test behind it,
+// which is exactly the unmeasured-claim shape CLAUDE.md warns about. This
+// subtest is that measurement: same runIngestRaceTest, same 700ms proof of
+// blocking, against real MySQL, with FOR SHARE already in production code
+// for that dialect (routes.go's existsGuard applies it to everything but
+// MSSQL).
 func TestAnIngestRacingAnOpenDeleteTransactionIsBlocked(t *testing.T) {
 	t.Run("postgres", func(t *testing.T) {
 		for _, be := range testutil.NewPluginTestBackends(t) {
@@ -67,6 +74,17 @@ func TestAnIngestRacingAnOpenDeleteTransactionIsBlocked(t *testing.T) {
 			}
 			defer be.Cleanup()
 			runIngestRaceTest(t, plugin.DialectPostgres, be.DB)
+			return
+		}
+	})
+
+	t.Run("mysql", func(t *testing.T) {
+		for _, be := range testutil.NewPluginTestBackends(t) {
+			if be.Dialect != testutil.DialectMySQL {
+				continue
+			}
+			defer be.Cleanup()
+			runIngestRaceTest(t, plugin.DialectMySQL, be.DB)
 			return
 		}
 	})
