@@ -37,11 +37,25 @@ type deployDialect struct {
 	driver string // database/sql driver name
 }
 
+// admin returns the DSN of the server this dialect's test runs against, or "".
+// PostgreSQL is CLEAT_TEST_POSTGRES with CLEAT_TEST_DB as the fallback, as in every
+// other database-backed test in this package: the test-go/commands job sets only
+// CLEAT_TEST_DB, and reading one name skipped the PostgreSQL case there.
+func (c deployDialect) admin() string {
+	if v := os.Getenv(c.env); v != "" {
+		return v
+	}
+	if c.name == "postgres" {
+		return os.Getenv("CLEAT_TEST_DB")
+	}
+	return ""
+}
+
 // deployScratch creates an EMPTY database for one dialect and returns the DSN the
 // worker should use and a handle for inspecting it.
 func deployScratch(t *testing.T, c deployDialect) (dsn string, db *sql.DB) {
 	t.Helper()
-	admin := os.Getenv(c.env)
+	admin := c.admin()
 	adb, err := sql.Open(c.driver, admin)
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +221,7 @@ func TestMigrationIsADeployStepOnEveryDialect(t *testing.T) {
 		{"mssql", "CLEAT_TEST_MSSQL", "sqlserver"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if os.Getenv(c.env) == "" {
+			if c.admin() == "" {
 				t.Skipf("%s not set, skipping %s", c.env, c.name)
 			}
 			dsn, db := deployScratch(t, c)
