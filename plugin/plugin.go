@@ -155,6 +155,15 @@ type Environment struct {
 	// deployment, deprecation, capability changes, and invocation events.
 	// May be nil if the audit log is not configured.
 	Audit *AuditLogger
+
+	// Secrets and Payloads give a plugin access to per-tenant encrypted
+	// storage (cleat#1992) -- see secrets.go for the design and why neither
+	// takes a tenantID parameter. May be nil where no master key is
+	// configured, the same convention DB/HTTPTransport already use: a plugin
+	// that dereferences a nil Environment field is a bug the type system
+	// cannot catch here, same as it cannot for those either.
+	Secrets  Secrets
+	Payloads Payloads
 }
 
 // StartRequest is everything a plugin must supply to start a workflow.

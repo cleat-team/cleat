@@ -1,0 +1,87 @@
+package plugin
+
+import "context"
+
+// Secrets gives a plugin access to its own tenant's secrets (cleat#1992).
+// engine.SecretStore is the implementation; this interface exists so plugin
+// code, which cannot import engine, can reach it.
+//
+// NO tenantID PARAMETER ON THE REQUEST-PATH METHODS, and that is the whole
+// design. engine.SecretStore's own GetSecret/PutSecret/RetireSecret take a
+// tenantID string -- correct for engine's internal callers, which read it
+// straight off a verified row -- but wrong for a plugin API, because a string
+// argument is something a caller can get wrong. RLS on PostgreSQL and a
+// SECURITY POLICY on SQL Server protect the SESSION's tenant; neither can
+// protect a plain parameter, since setting the session's tenant is a
+// side-effect of that same parameter (see
+// engine/a_secret_never_crosses_tenants_at_the_store_test.go's "WHAT THIS
+// DOES NOT PROVE" for the measurement this reasons from). A plugin serving
+// tenant B's request that passed tenantA by mistake would have the database
+// agree with it.
+//
+// So these methods take the tenant from ctx instead -- the same tenant
+// plugin.ForTenant already marks a context with before a plugin runs its own
+// tenant-scoped SQL (oauthprovider's getConfig is one example). There is
+// nothing left to pass wrong, because there is nothing left to pass.
+//
+// Get returns ErrSecretNotFound (via the underlying store) for a name this
+// tenant has not set. Put stores or replaces one secret; Retire disables one
+// without removing the row (see engine.SecretStore.RetireSecret's own doc
+// comment for why).
+type Secrets interface {
+	Get(ctx context.Context, name string) (string, error)
+	Put(ctx context.Context, name, value string) error
+	Retire(ctx context.Context, name string) (int64, error)
+
+	// ForTenant is the escape hatch for the two shapes of caller that have a
+	// tenant in hand but not in an authenticated request context:
+	//
+	//   - a background loop with no request at all (datadogexport's sweep,
+	//     iterating every tenant). This mirrors plugin.ForTenant on the SQL
+	//     side, not plugin.AcrossAllTenants: AllTenantIDs (plugin/tenant_enum.go,
+	//     cleat#2125) discovers the list with no bypass needed at all --
+	//     admin.tenants carries no row-level security on any dialect -- and
+	//     the loop then marks EACH iteration with ForTenant(id), one tenant
+	//     at a time. AcrossAllTenants is for a different shape: a single
+	//     unscoped read or write spanning every tenant in one statement (a
+	//     retention cutoff, a due-schedule claim) -- see
+	//     plugin/a_cross_tenant_bypass_is_declared_test.go's crossTenantLedger
+	//     for the taxonomy. Nothing here is that shape: every ForTenant call
+	//     still names exactly one tenant, so it is not tracked in that
+	//     ledger, the same way plugin.ForTenant's own call sites are not;
+	//   - an unauthenticated request that NAMES a tenant as its own subject
+	//     rather than discovering one (oauthprovider's handleLogin, which
+	//     reads ?tenant_id= because a login has no session yet to derive one
+	//     from -- the tenant here is not attacker-supplied in a way that
+	//     matters, because the whole call is "fetch config for the tenant
+	//     this request says it is logging into").
+	//
+	// A SEPARATE, NAMED METHOD rather than an optional argument on Get/Put/
+	// Retire, for the same reason plugin.AcrossAllTenants is a distinct call
+	// from plugin.ForTenant rather than a flag: a reviewer's question about
+	// where a plugin crosses tenants is one grep, and every cross-tenant call
+	// site names itself.
+	ForTenant(tenantID string) TenantSecrets
+}
+
+// TenantSecrets is Secrets scoped to one named tenant, returned by
+// Secrets.ForTenant. See that method's doc comment for when to reach for it.
+type TenantSecrets interface {
+	Get(ctx context.Context, name string) (string, error)
+	Put(ctx context.Context, name, value string) error
+	Retire(ctx context.Context, name string) (int64, error)
+}
+
+// Payloads gives a plugin access to the same tenant-derived, rotatable
+// encryption engine's own payloads use (engine.PayloadEncryption), for values
+// that do not fit Secrets' shape: high-churn, one per something-other-than-a-
+// fixed-name, no operator step. oauthprovider's session/access/refresh tokens
+// are the first caller -- one row per session, minted on every login, with no
+// fixed name and no `cleatctl set-secret` involved.
+//
+// Same reasoning as Secrets for the missing tenantID parameter: the tenant
+// comes from ctx, via the same plugin.ForTenant marker.
+type Payloads interface {
+	Seal(ctx context.Context, plaintext []byte) ([]byte, error)
+	Open(ctx context.Context, sealed []byte) ([]byte, error)
+}
