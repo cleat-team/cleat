@@ -197,6 +197,20 @@ func TestJavaBuildRefusesAStaleManifest(t *testing.T) {
 	javaDir := filepath.Join(tempRoot, "examples", "java-workflow")
 	cleatJavaDir := filepath.Join(tempRoot, "crates", "cleat-java")
 
+	// rsync only creates ONE missing leaf directory, not a chain of them --
+	// javaDir and cleatJavaDir are each two levels below tempRoot, and real
+	// rsync (3.2.7, the GitHub runner's) refuses with "mkdir ... failed: No
+	// such file or directory" when both are missing. macOS's bundled rsync
+	// (openrsync) creates the whole chain, which is why this went unnoticed
+	// locally and only failed in CI. mkdir the destinations first so both
+	// rsyncs land on an existing (empty) directory regardless of which rsync
+	// runs them.
+	if mkErr := os.MkdirAll(javaDir, 0o755); mkErr != nil {
+		t.Fatalf("mkdir %s: %v", javaDir, mkErr)
+	}
+	if mkErr := os.MkdirAll(cleatJavaDir, 0o755); mkErr != nil {
+		t.Fatalf("mkdir %s: %v", cleatJavaDir, mkErr)
+	}
 	if out, cpErr := exec.Command("rsync", "-a", "--exclude=build",
 		javaSrcDir+"/", javaDir+"/").CombinedOutput(); cpErr != nil {
 		t.Fatalf("copying %s to %s: %v\n%s", javaSrcDir, javaDir, cpErr, out)
@@ -301,6 +315,20 @@ func TestJavaBuildRefusesMultipleManifests(t *testing.T) {
 	javaDir := filepath.Join(tempRoot, "examples", "java-workflow")
 	cleatJavaDir := filepath.Join(tempRoot, "crates", "cleat-java")
 
+	// rsync only creates ONE missing leaf directory, not a chain of them --
+	// javaDir and cleatJavaDir are each two levels below tempRoot, and real
+	// rsync (3.2.7, the GitHub runner's) refuses with "mkdir ... failed: No
+	// such file or directory" when both are missing. macOS's bundled rsync
+	// (openrsync) creates the whole chain, which is why this went unnoticed
+	// locally and only failed in CI. mkdir the destinations first so both
+	// rsyncs land on an existing (empty) directory regardless of which rsync
+	// runs them.
+	if mkErr := os.MkdirAll(javaDir, 0o755); mkErr != nil {
+		t.Fatalf("mkdir %s: %v", javaDir, mkErr)
+	}
+	if mkErr := os.MkdirAll(cleatJavaDir, 0o755); mkErr != nil {
+		t.Fatalf("mkdir %s: %v", cleatJavaDir, mkErr)
+	}
 	if out, cpErr := exec.Command("rsync", "-a", "--exclude=build",
 		javaSrcDir+"/", javaDir+"/").CombinedOutput(); cpErr != nil {
 		t.Fatalf("copying %s to %s: %v\n%s", javaSrcDir, javaDir, cpErr, out)
