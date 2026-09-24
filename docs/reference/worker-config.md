@@ -551,6 +551,30 @@ for an oversized body need to handle `413`.
 
 ---
 
+### --plugin-max-body-size
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int64 | `1048576` (1 MiB) | Maximum request body size in bytes for plugin HTTP routes |
+
+Separate from `--max-body-size` above, which bounds only the core API.
+Plugin routes got no request-body limit at all until cleat#2232 — thirteen
+plugins read `r.Body` directly with `io.ReadAll` or `json.NewDecoder`, and
+two of the resulting endpoints are exempt from tenant auth by design
+(`POST /slack/interactive`, `POST /ingest/{source_id}`), so an unauthenticated
+caller could make the worker allocate an unbounded amount of memory.
+
+Every plugin route is bounded by this flag unless it declares its own,
+larger ceiling at registration (`plugin.MaxBody`) — blobstore's
+`PUT /blobs/{key...}` does this, sized by its own `max_blob_size` config
+(default 10 MiB), since a 1 MiB default would refuse an ordinary blob
+upload. An oversized body answers `413`, naming the limit and the knob that
+moves it, the same shape `--max-body-size` uses:
+
+    {"error":"request body too large: the limit is 1048576 bytes, set by --plugin-max-body-size unless this route declares a larger one"}
+
+---
+
 ### --http-read-timeout
 
 | Type | Default | Description |

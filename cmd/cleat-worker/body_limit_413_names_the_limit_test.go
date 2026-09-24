@@ -156,6 +156,16 @@ func TestA413NamesTheLimitItHitAndWhichKnobMovesIt(t *testing.T) {
 // It parses rather than greps. A line-oriented scan cannot tell a call from a
 // comment about a call, and this file is full of comments about
 // MaxBytesReader.
+//
+// SCOPED TO THIS PACKAGE (cmd/cleat-worker), NOT THE REPOSITORY. `go test`
+// runs a package's test binary with its working directory set to the
+// package directory, and `git ls-files "*.go"` with no `--full-name` or
+// absolute path resolves relative to that cwd -- so this returns only files
+// under cmd/cleat-worker/, never plugins/ or engine/. A MaxBytesReader call
+// added inside a plugin (see plugin.MaxBody / boundPluginRequestBody in
+// cmd/cleat-worker/plugin_body_limit.go for the cleat#2232 host-adapter
+// wrap, which itself IS in this package and IS covered) is out of this
+// test's scope by construction, not by an exemption anyone chose.
 func TestEveryBoundedBodyGoesThroughTheHelper(t *testing.T) {
 	out, err := exec.Command("git", "ls-files", "*.go").Output()
 	if err != nil {
@@ -174,7 +184,12 @@ func TestEveryBoundedBodyGoesThroughTheHelper(t *testing.T) {
 		t.Fatal("PRECONDITION FAILED: git ls-files matched no non-test Go files")
 	}
 
-	allowed := map[string]bool{"decodeBody": true, "readBody": true}
+	// boundPluginRequestBody added by cleat#2232: the host-side half of the
+	// plugin-route body ceiling (plugin_body_limit.go). It does not itself
+	// write a 413 -- plugin.ReadBody/ReadJSONBody do that, inside each
+	// plugin -- so it is a THIRD shape here, alongside decodeBody/readBody's
+	// bound-and-translate-in-one, not a second copy of either.
+	allowed := map[string]bool{"decodeBody": true, "readBody": true, "boundPluginRequestBody": true}
 	found := 0
 	fset := token.NewFileSet()
 	for _, file := range files {

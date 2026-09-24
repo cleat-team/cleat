@@ -1640,12 +1640,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// cleat#2232, design A: every plugin route is registered through this
+	// adapter rather than directly on plugMux, so a request body is bounded
+	// (--plugin-max-body-size, or a route's own larger plugin.MaxBody
+	// declaration) before any plugin's own code runs. Core routes, registered
+	// separately below via registerRoutes(mux, api), are untouched by this --
+	// see the block comment a few lines down for why plugMux is not a
+	// plugin-only mux and why that reuse means this wrap must not reach them.
+	pluginRouter := &pluginBodyLimitRouter{mux: plugMux, defaultLimit: *pluginMaxBodySize}
 	for _, lp := range plugList {
 		if !lp.Healthy {
 			continue
 		}
 		if p, ok := lp.Plugin.(plugin.HasRoutes); ok && plugMux != nil {
-			if rerr := p.RegisterRoutes(plugMux); rerr != nil {
+			if rerr := p.RegisterRoutes(pluginRouter); rerr != nil {
 				logger.ErrorContext(context.Background(), "plugin route registration failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
 			}
 		}
