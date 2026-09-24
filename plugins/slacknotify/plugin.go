@@ -87,6 +87,14 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.signalWorkflow = env.SignalWorkflow
 	p.slackSigningSecret = p.config.SlackSigningSecret
 
+	if p.slackSigningSecret == "" {
+		// interactive.go only verifies the Slack signature when this is set --
+		// existing behaviour, not new here. Flagged at WARN rather than left
+		// silent so an operator who forgot the deployment secret can see it at
+		// boot instead of discovering it from an unverified webhook later.
+		p.logger.Warn("slack-notify: no signing secret configured -- inbound requests will not be signature-verified")
+	}
+
 	p.logger.Info("slack-notify: initialized")
 	return nil
 }
