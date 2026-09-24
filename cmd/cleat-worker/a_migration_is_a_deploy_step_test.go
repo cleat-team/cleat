@@ -351,7 +351,27 @@ func TestMigrationIsADeployStepOnEveryDialect(t *testing.T) {
 			//    A stored secret and no CLEAT_SECRET_MASTER_KEY is exactly the case in
 			//    which a normal start refuses; a deploy job has no reason to hold the
 			//    key, so it must not.
-			if _, err := db.Exec(insertSecretSQL(c.name)); err != nil {
+			//
+			// tenant_secrets is one of migration 103's (cleat#2205) covered
+			// tables, and this INSERT names a literal tenant_id, so on SQL
+			// Server it needs SESSION_CONTEXT('tenant_id') set to that same
+			// value on the connection that issues it -- a plain db.Exec has
+			// none, and the AFTER INSERT block predicate refuses it outright.
+			if c.name == "mssql" {
+				conn, err := db.Conn(context.Background())
+				if err != nil {
+					t.Fatalf("pin a connection to seed a stored secret: %v", err)
+				}
+				defer conn.Close()
+				if _, err := conn.ExecContext(context.Background(),
+					`EXEC sp_set_session_context @key=N'tenant_id', @value=N'00000000-0000-0000-0000-000000000000'`,
+				); err != nil {
+					t.Fatalf("set the tenant session context to seed a stored secret: %v", err)
+				}
+				if _, err := conn.ExecContext(context.Background(), insertSecretSQL(c.name)); err != nil {
+					t.Fatalf("seed a stored secret: %v", err)
+				}
+			} else if _, err := db.Exec(insertSecretSQL(c.name)); err != nil {
 				t.Fatalf("seed a stored secret: %v", err)
 			}
 			if code, out = runWorker(t, bin, []string{"CLEAT_SECRET_MASTER_KEY="}, append(base, "--migrate-only")...); code != 0 {

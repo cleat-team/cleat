@@ -383,13 +383,24 @@ func TestStartPluginWorkflow_MySQLIsSingleTenantOnly(t *testing.T) {
 // TestStartPluginWorkflow_MSSQLScopesTheWriteUnderTheDestinationTenantsSessionContext
 // is the SQL Server half, and it answers the question the other two dialects
 // don't need to ask: not just "was the row stamped with the right tenant_id"
-// (true even unfixed, see cleat#2187's investigation -- MSSQL's security
-// policies carry no BLOCK predicate, so nothing today stops an unscoped
-// write), but "did the write happen under a SESSION_CONTEXT that matches the
-// destination tenant". cleat#2205 will add BLOCK predicates that check
-// exactly that, so this test adds one itself -- against a throwaway,
-// per-test database, dropped at the end regardless of outcome -- and proves
-// the fixed code path already satisfies it, and the unfixed one does not.
+// (true even unfixed, see cleat#2187's investigation -- before cleat#2205,
+// MSSQL's security policies carried no BLOCK predicate, so nothing stopped an
+// unscoped write), but "did the write happen under a SESSION_CONTEXT that
+// matches the destination tenant". cleat#2205 (migration 103) added BLOCK
+// predicates that check exactly that, applied here the same way a real
+// deployment gets them -- by the real Runner, below -- against a throwaway,
+// per-test database, dropped at the end regardless of outcome. This proves
+// the fixed code path satisfies the real predicate, and the unfixed one does
+// not.
+//
+// UNTIL cleat#2205 landed, this test ADDED that BLOCK PREDICATE ITSELF, by
+// hand, to simulate a migration that did not exist yet. It no longer does:
+// migration 103 is one of the migrations migration.NewRunner.Run applies
+// below, so a second, manual ALTER SECURITY POLICY ... ADD BLOCK PREDICATE
+// now collides with the one the Runner already added --
+// "A BLOCK predicate for the same operation has already been defined ...
+// (33262)" -- which is the right failure for a test whose own simulation has
+// been overtaken by the real thing landing.
 func TestStartPluginWorkflow_MSSQLScopesTheWriteUnderTheDestinationTenantsSessionContext(t *testing.T) {
 	base := os.Getenv("CLEAT_TEST_MSSQL")
 	if base == "" {
@@ -439,15 +450,10 @@ func TestStartPluginWorkflow_MSSQLScopesTheWriteUnderTheDestinationTenantsSessio
 		t.Fatalf("apply mssql migrations: %v", err)
 	}
 
-	// Add a real BLOCK PREDICATE AFTER INSERT on workflow_instances --
-	// mirroring what cleat#2205 will add for real. The whole database is
-	// dropped in t.Cleanup above, so nothing needs to remove this
-	// separately.
-	if _, err := testDB.ExecContext(ctx, `
-		ALTER SECURITY POLICY dbo.TenantFilter_Instances
-		ADD BLOCK PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_instances AFTER INSERT`); err != nil {
-		t.Fatalf("add BLOCK PREDICATE: %v", err)
-	}
+	// migration 103 (cleat#2205), applied above by the real Runner, already
+	// added the AFTER INSERT BLOCK PREDICATE this test needs on
+	// dbo.workflow_instances -- see the file-level comment on why this used
+	// to add one itself and no longer does.
 
 	factory := engine.NewMSSQLStoreFactory(connStr)
 

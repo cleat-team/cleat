@@ -116,9 +116,35 @@ func NewPluginTestBackends(t *testing.T) []PluginTestBackend {
 // CROSS-TENANT RATHER THAN PER-TENANT, deliberately: a fixture invents whatever
 // tenants it likes and frequently seeds several, so pinning it to one would
 // just move the problem. A per-tenant variant was written first and deleted
-// unused -- every fixture that needed anything needed this one. The reason
-// string is recorded in the session for the same reason a real sweep's is: a
-// connection holding a bypass should be able to say why.
+// unused -- every fixture that needed anything needed this one.
+//
+// THE cross_tenant SESSION KEY BELOW HAS NEVER BEEN A BYPASS, AND THE COMMENT
+// HERE IMPLIED OTHERWISE UNTIL cleat#2205. dbo.fn_tenant_filter has never in
+// its shipped history read a key called cross_tenant: 001 and 012 check only
+// SESSION_CONTEXT('tenant_id') and IS_ROLEMEMBER('cleat_admin'), and 075 made
+// even that disjunct opt-in, off by default. Measured directly against a
+// migrated CLEAT_TEST_MSSQL database, connected as sa exactly as
+// MSSQLTestDB connects: `SELECT IS_ROLEMEMBER(N'cleat_admin')` returns 0 and
+// admin.rls_predicate_form reads 'plain'. So a plain sa connection setting
+// only the cross_tenant key was never exempt from FILTER either, and every
+// fixture that used this function for a SELECT or DELETE spanning more than
+// its own single seeded tenant was reading or deleting less than it assumed,
+// silently, for as long as this function has existed -- the same failure
+// mode its own doc comment above describes, just not fully closed by the fix
+// that comment credits. The `EXEC sp_set_session_context @key =
+// N'cross_tenant', ...` call below is kept only as a human-readable label on
+// the session, visible in sys.dm_exec_sessions during a hung test; it must
+// not be relied on for access.
+//
+// So for MSSQL this now routes the connection through MSSQLAdminDB, which is
+// the real mechanism: it applies migrations/mssql/optional/cross_tenant_claim.sql
+// (switching dbo.fn_tenant_filter to the IS_ROLEMEMBER('cleat_admin') form,
+// refcounted and restored per mssql_admin.go's file comment so it does not
+// leak into a deployment-shaped test elsewhere in the suite) and returns a
+// pool authenticated as a member of that role. Since migration 103 binds its
+// BLOCK predicates to the SAME dbo.fn_tenant_filter, IS_ROLEMEMBER admits
+// writes exactly as it already admitted reads and deletes -- no second,
+// independently-drifting exemption.
 //
 // It is a no-op on PostgreSQL and MySQL, and the connection is released by
 // t.Cleanup. Returning it to the pool clears the session context (go-mssqldb
@@ -126,7 +152,13 @@ func NewPluginTestBackends(t *testing.T) []PluginTestBackend {
 // bypass cannot leak to the next borrower.
 func (b PluginTestBackend) CrossTenantConn(t *testing.T, ctx context.Context, reason string) *sql.Conn {
 	t.Helper()
-	conn, err := b.DB.Conn(ctx)
+
+	pool := b.DB
+	if b.Dialect == DialectMSSQL {
+		pool = MSSQLAdminDB(t, b.DB)
+	}
+
+	conn, err := pool.Conn(ctx)
 	if err != nil {
 		t.Fatalf("pin a connection on %s: %v", b.Name, err)
 	}
