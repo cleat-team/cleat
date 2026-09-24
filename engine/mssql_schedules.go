@@ -432,6 +432,64 @@ func (s *MSSQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef 
 	return totalDeleted, nil
 }
 
+// mssqlIDChunk is the id-list chunk size deleteByWorkflowIDs and
+// chunkedMarkHistorySwept use, kept under SQL Server's 2100-parameter cap.
+//
+// mssqlEventRowChunk bounds how many event_history rows a single DELETE may
+// remove -- cleat#2060. SQL Server escalates row/page locks to a table lock
+// once a statement holds ~5000 locks on one object; event_history is the one
+// table in this file where a workflow can own an unbounded number of rows, so
+// it is the only delete bounded by ROW count rather than workflow count. Set
+// well under that threshold, and equal to mssqlIDChunk so a statement that
+// happens to delete one event per workflow still cannot mark more than
+// mssqlIDChunk workflows swept -- see chunkedMarkHistorySwept, which chunks
+// regardless rather than relying on that coincidence.
+const (
+	mssqlIDChunk       = 2000
+	mssqlEventRowChunk = 2000
+
+	// mssqlInterleaveChunk bounds how many workflow ids deleteWorkflowsBatchOnce
+	// carries through event_history's delete AND workflow_instances's delete
+	// together before moving to the next chunk. cleat#2060, and this is the
+	// part row-bounding event_history's OWN delete does not cover.
+	//
+	// event_history's FK to workflow_instances is ON DELETE CASCADE (see
+	// mssqlWorkflowChildTables's comment), so deleting a workflow_instances
+	// row makes SQL Server verify no event_history row still references it.
+	// That check still takes locks on event_history even when it finds
+	// nothing to cascade -- ghost records from event_history's OWN
+	// just-completed delete are still physically present until a background
+	// task reclaims them, and the RI check locks its way past them to
+	// confirm there is no LIVE row left.
+	//
+	// Bisected directly against TestMSSQLRetentionSweepsCauseNoLockEscalation's
+	// scenario (6,000 workflows, 5 events each, deleted then their parents
+	// deleted): chunks of 100 and 50 still intermittently escalated by 1;
+	// 25 and 10 held at 0 across repeated trials. Set to 20 for headroom
+	// against workflows that accumulate more events than that test's scale
+	// before compaction catches up, at the cost of more, smaller
+	// transactions -- an acceptable trade for a background sweep, and the
+	// one deleteWorkflowsBatchOnce's interleaved loop is built around. See
+	// its comment for the two designs that were tried and measured first.
+	mssqlInterleaveChunk = 20
+)
+
+// mssqlDeleteExpiredEventsQuery bounds event_history rows removed per
+// statement to mssqlEventRowChunk (cleat#2060) rather than the number of
+// workflows scanned to find them -- a workflow batch of up to 10000 candidate
+// ids can own far more than mssqlEventRowChunk events between them. Built
+// once at package init since msExpiredEventsWorkflows is itself a constant.
+var mssqlDeleteExpiredEventsQuery = fmt.Sprintf(`
+			DELETE TOP (%d) FROM event_history
+			OUTPUT deleted.workflow_id
+			WHERE workflow_id IN (
+				SELECT id`+msExpiredEventsWorkflows+`
+				  AND tenant_id = @p2
+				ORDER BY id
+				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
+			)
+		`, mssqlEventRowChunk)
+
 func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	var out int64
 	err := withRollbackGuaranteedRetry(ctx, "delete expired events", mssqlTxRetries, mssqlTxRetryDelay, func() error {
@@ -462,16 +520,7 @@ func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time
 		// predicate: ties history_swept_at to the workflows this statement
 		// actually removed rows for. A workflow_id can repeat (multiple
 		// event_history rows); deduplicated below before the UPDATE.
-		rows, err := tx.QueryContext(ctx, `
-			DELETE FROM event_history
-			OUTPUT deleted.workflow_id
-			WHERE workflow_id IN (
-				SELECT id`+msExpiredEventsWorkflows+`
-				  AND tenant_id = @p2
-				ORDER BY id
-				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
-			)
-		`, olderThan, s.tenantID)
+		rows, err := tx.QueryContext(ctx, mssqlDeleteExpiredEventsQuery, olderThan, s.tenantID)
 		if err != nil {
 			tx.Rollback()
 			return totalDeleted, fmt.Errorf("delete expired events: %w", err)
@@ -502,33 +551,26 @@ func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time
 		}
 		rows.Close()
 
-		if len(swept) > 0 {
-			placeholders := make([]string, len(swept))
-			args := make([]any, len(swept))
-			for i, id := range swept {
-				placeholders[i] = fmt.Sprintf("@p%d", i+1)
-				args[i] = id
-			}
-			// cleat#2038: mark, don't just delete -- ReReplay's
-			// pending-intent guard needs to tell "never attempted" from
-			// "swept, outcome unknown" apart, and both currently read as
-			// empty history.
-			//
-			// No tenant_id predicate here: swept is scopedByCaller, not
-			// missing a check. Every id in it came from THIS function's own
-			// SELECT above (msExpiredEventsWorkflows AND tenant_id = @p2),
-			// so it cannot name another tenant's workflow -- see the
-			// tenantPredicateAllowlist entry below.
-			//nolint:gosec // G202: the only concatenated fragment is placeholders, built above
-			// as "@p1", "@p2", ... -- ids are bound as arguments, never interpolated.
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE workflow_instances
-				SET history_swept_at = SYSUTCDATETIME()
-				WHERE id IN (`+strings.Join(placeholders, ",")+`)
-			`, args...); err != nil {
-				tx.Rollback()
-				return totalDeleted, fmt.Errorf("delete expired events: mark swept: %w", err)
-			}
+		// cleat#2038: mark, don't just delete -- ReReplay's pending-intent
+		// guard needs to tell "never attempted" from "swept, outcome
+		// unknown" apart, and both currently read as empty history.
+		//
+		// No tenant_id predicate inside chunkedMarkHistorySwept: swept is
+		// scopedByCaller, not missing a check. Every id in it came from
+		// THIS function's own SELECT above (msExpiredEventsWorkflows AND
+		// tenant_id = @p2), so it cannot name another tenant's workflow --
+		// see the tenantPredicateAllowlist entry below.
+		//
+		// cleat#2103: chunked rather than one IN (...) of arbitrary size --
+		// mssqlEventRowChunk bounds this statement's own DELETE to at most
+		// mssqlEventRowChunk distinct workflows when every swept row is a
+		// different workflow, which already keeps swept under SQL Server's
+		// 2100-parameter cap today. Chunking here anyway, rather than
+		// relying on that, is what keeps it true if mssqlEventRowChunk is
+		// ever raised independently of this UPDATE.
+		if err := s.chunkedMarkHistorySwept(ctx, tx, swept); err != nil {
+			tx.Rollback()
+			return totalDeleted, fmt.Errorf("delete expired events: mark swept: %w", err)
 		}
 
 		if err := tx.Commit(); err != nil {
@@ -635,17 +677,19 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 // excluded -- see the interface doc (store_interface.go) and
 // DeleteDeadLetteredWorkflows above.
 //
-// No explicit event_history delete is needed here: migrations/mssql/001_schema.sql
-// declares event_history's FK to workflow_instances ON DELETE CASCADE and SQL
-// Server never dropped it (only PostgreSQL did, deliberately). Deleting the
-// workflow_instances row below cascades event_history (and workflow_signals,
+// migrations/mssql/001_schema.sql declares event_history's FK to
+// workflow_instances ON DELETE CASCADE, and SQL Server never dropped it
+// (only PostgreSQL did, deliberately) -- so deleting the workflow_instances
+// row below WOULD cascade event_history (and workflow_signals,
 // workflow_promises, concurrency_keys, workflow_update_requests)
-// automatically.
-//
-// UNVERIFIED: no SQL Server instance was available to run this against; it
-// is written to match DeleteDeadLetteredWorkflows immediately above exactly
-// (same batching shape, same reliance on cascade), which was itself the
-// verified reference for this dialect's FK graph.
+// automatically, correctness-wise. This still runs an explicit,
+// row-bounded event_history delete first (deleteWorkflowsBatchOnce, via
+// deleteEventHistoryRowBoundedCommitting) rather than relying on that --
+// an uncontrolled cascade over a workflow that has accumulated years of
+// events is exactly the unbounded-statement shape cleat#2060 exists to
+// avoid, and cascade gives the caller no way to bound it. See
+// mssqlWorkflowChildTables's comment for the fuller FK picture, confirmed
+// live against a real SQL Server built from these migrations (cleat#2060).
 func (s *MSSQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
@@ -665,15 +709,32 @@ func (s *MSSQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan tim
 // mssqlWorkflowChildTables are the tables a workflow_instances row owns, in
 // deletion order.
 //
-// SQL Server declares NO foreign keys to workflow_instances -- `grep -c
-// "REFERENCES workflow_instances" migrations/mssql/*.sql` is 0, against 5 for
-// each of the other dialects -- so nothing cascades here and every one of these
-// must be deleted explicitly or it is orphaned permanently (cleat#1265). The
-// audit that found this measured 6 of 6 surviving a sweep, including the whole
-// of event_history, which is the largest table in the schema: deleting the
-// instance row removes what made those rows reachable, so they were not merely
-// retained but unreachable AND permanent, while the falling instance count told
-// the operator retention was working.
+// THIS COMMENT USED TO SAY SQL SERVER DECLARES NO FOREIGN KEYS TO
+// workflow_instances, citing a 0 from `grep -c "REFERENCES workflow_instances"
+// migrations/mssql/*.sql` against cleat#1265's original audit. That grep
+// pattern is missing the schema qualifier the migrations actually use --
+// `grep -o "REFERENCES dbo.workflow_instances" migrations/mssql/*.sql | wc -l`
+// is 6, not 0 (five in the tables below, one more on queue_holders, which
+// isn't), and confirmed live against a real SQL Server built from these
+// migrations (cleat#2060):
+//
+//	SELECT OBJECT_NAME(parent_object_id), delete_referential_action_desc
+//	FROM sys.foreign_keys WHERE referenced_object_id = OBJECT_ID('dbo.workflow_instances')
+//
+// returns event_history, workflow_signals, workflow_promises, concurrency_keys
+// and workflow_update_requests, every one ON DELETE CASCADE -- five of the six
+// tables below. Only idempotency_keys has no FK to workflow_instances at all.
+//
+// So deleting workflow_instances DOES cascade-remove five of these six tables
+// on its own, and the explicit deletes below are not what cleat#1265's fix
+// assumed. They still matter for a different reason: cascade gives no control
+// over HOW the removal happens, and for event_history specifically that
+// matters a great deal -- see deleteEventHistoryRowBoundedCommitting and
+// cleat#2060, where an unbounded delete (which is what an uncontrolled
+// cascade would run) is the exact failure this file exists to avoid. The
+// explicit deletes below run first so each table's own delete is the one
+// that actually removes its rows; the cascade that follows when
+// workflow_instances is deleted finds nothing left to touch.
 //
 // Not event_awaiters or workflow_blob_refs: those carry a workflow_id but are
 // owned by the eventtriggers and blobstore plugins, each with its own
@@ -703,6 +764,17 @@ var mssqlDeleteByWorkflowPrefix = map[string]string{
 	"workflow_update_requests": "DELETE FROM workflow_update_requests WHERE workflow_id IN (",
 	"workflow_instances":       "DELETE FROM workflow_instances WHERE id IN (",
 }
+
+// mssqlDeleteEventHistoryTopPrefix is deleteEventHistoryRowBoundedCommitting's own head,
+// separate from mssqlDeleteByWorkflowPrefix["event_history"] because a
+// TOP (N) delete is a different statement, not that prefix with text spliced
+// in front of it -- "DELETE TOP (%d) " + "DELETE FROM event_history..." is
+// two DELETE keywords in one statement and SQL Server rejects it outright
+// (Incorrect syntax near the keyword 'DELETE'), caught the first time this
+// path ran against a real database rather than in gofmt/go vet, which have
+// no way to know either string is SQL.
+var mssqlDeleteEventHistoryTopPrefix = fmt.Sprintf(
+	"DELETE TOP (%d) FROM event_history WHERE workflow_id IN (", mssqlEventRowChunk)
 
 // deleteCompletedWorkflowsBatch deletes one batch, retrying the whole
 // transaction on a rollback-guaranteed failure.
@@ -760,13 +832,11 @@ const mssqlSelectDeadLetteredBatch = `
 		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY`
 
 func (s *MSSQLStore) deleteWorkflowsBatchOnce(ctx context.Context, selectSQL, label string, olderThan time.Time) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("%s: begin: %w", label, err)
-	}
-	defer tx.Rollback()
-
-	rows, err := tx.QueryContext(ctx, selectSQL,
+	// Plain read, no transaction: RCSI (required in production, asserted by
+	// TestMSSQLRetentionSweepsCauseNoLockEscalation in test) gives this a
+	// versioned, non-blocking read, and nothing below depends on the
+	// candidate set being read inside the same transaction that deletes it.
+	rows, err := s.db.QueryContext(ctx, selectSQL,
 		sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
 	if err != nil {
 		return 0, fmt.Errorf("%s: select batch: %w", label, err)
@@ -787,21 +857,120 @@ func (s *MSSQLStore) deleteWorkflowsBatchOnce(ctx context.Context, selectSQL, la
 	rows.Close()
 
 	if len(ids) == 0 {
-		return 0, tx.Commit()
+		return 0, nil
 	}
 
-	// SQL Server has no array parameter, so the id list is expanded into named
-	// placeholders. Never interpolated: these ids come from the database, but a
-	// value that round-trips is still a value.
+	// INTERLEAVED, small-chunk delete -- cleat#2060, and the shape here is
+	// load-bearing, not a style choice. It went through three designs before
+	// this one, and TestMSSQLRetentionSweepsCauseNoLockEscalation caught
+	// each of the first two failing for a different reason:
+	//
+	//  1. Delete ALL of event_history for the whole batch first (row-bounded,
+	//     committing per statement), THEN delete workflow_instances
+	//     afterward, chunked at mssqlIDChunk in one shared transaction.
+	//     event_history's OWN delete never escalated. workflow_instances did
+	//     -- deleting a workflow_instances row fires a referential-integrity
+	//     check against event_history (mssqlWorkflowChildTables's comment
+	//     has the FK detail), and that check still takes locks on
+	//     event_history even when it finds nothing to cascade, because the
+	//     rows it must rule out are GHOST RECORDS: physically still present
+	//     after a DELETE until a background task reclaims them. 6,000
+	//     already-emptied ids, one shared transaction: +1 escalation.
+	//
+	//  2. Same split, but commit the workflow_instances delete per chunk
+	//     too. This made it WORSE, not better -- 15 chunks of 400 gave +15,
+	//     60 chunks of 100 gave +60 -- because the ghost backlog from step 1
+	//     is a property of the WHOLE prior event_history delete, not of any
+	//     one chunk, so every later transaction's RI check pays the same
+	//     tax regardless of its own size, and more transactions means more
+	//     chances to cross the threshold.
+	//
+	// What actually worked: keep the ghost backlog SMALL by never letting it
+	// accumulate across the whole batch in the first place. Each small
+	// id-chunk deletes its OWN event_history rows and then IMMEDIATELY
+	// deletes its OWN workflow_instances (and other child) rows, before the
+	// next chunk's event_history delete creates any more ghosts. Measured at
+	// mssqlInterleaveChunk=20 over 6,000 ids (300 chunk-pairs): 0 escalations
+	// across 3 repeated trials, where 100 and 50 still intermittently gave
+	// +1. See mssqlInterleaveChunk's own comment for the full bisection.
+	//
+	// Losing whole-batch atomicity (previously up to 10000 ids in one
+	// transaction) is safe here for the same reason it was in the two
+	// designs above: a crash between chunks leaves the remaining ids
+	// exactly where the next sweep's SELECT finds them again, and a chunk
+	// that has already committed -- events and parent row both -- is simply
+	// not reselected.
+	var totalDeleted int64
+	for start := 0; start < len(ids); start += mssqlInterleaveChunk {
+		end := start + mssqlInterleaveChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		if err := s.deleteEventHistoryRowBoundedCommitting(ctx, chunk); err != nil {
+			return totalDeleted, err
+		}
+		if err := s.deleteWorkflowsChunkOnce(ctx, chunk); err != nil {
+			return totalDeleted, err
+		}
+		totalDeleted += int64(len(chunk))
+	}
+	return totalDeleted, nil
+}
+
+// deleteWorkflowsChunkOnce deletes one mssqlInterleaveChunk-sized (or
+// smaller) slice of workflow ids from every remaining child table and from
+// workflow_instances itself, in one short transaction. Called immediately
+// after that same chunk's event_history rows are deleted -- see
+// deleteWorkflowsBatchOnce for why the two are interleaved per small chunk
+// rather than run as two separate passes over the whole batch, and why
+// event_history is not in the loop below (it was already deleted, outside
+// any transaction this function opens).
+//
+// SQL Server has no array parameter, so the id list is expanded into named
+// placeholders. Never interpolated: these ids come from the database, but a
+// value that round-trips is still a value. The non-event_history tables need
+// no row-bounding of their own: a workflow owns at most a handful of rows in
+// each of them (a signal, a promise, an idempotency key), so
+// deleteByWorkflowIDs's id-chunking -- already satisfied here, since chunk is
+// far below mssqlIDChunk -- already bounds rows per statement well under the
+// escalation threshold.
+func (s *MSSQLStore) deleteWorkflowsChunkOnce(ctx context.Context, chunk []string) error {
+	return withRollbackGuaranteedRetry(ctx, "delete workflows chunk", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.deleteWorkflowsChunkOnceOnce(ctx, chunk)
+	})
+}
+
+// deleteWorkflowsChunkOnceOnce is deleteWorkflowsChunkOnce's own transaction
+// body, split out so TestEveryMSSQLTransactionBoundaryIsRetried can see it is
+// reached through withRollbackGuaranteedRetry -- that test keys retry
+// coverage on a SEPARATELY NAMED function called by selector from inside the
+// retry closure (the same shape CompactHistory/compactHistoryOnce already
+// use), not on a BeginTx/Commit pair living directly in the wrapped function.
+// The interleaved small chunks deleteWorkflowsBatchOnce drives this from are
+// exactly the shape most likely to collide with a concurrent writer and be
+// chosen as a deadlock victim, which SQL Server rolls back itself -- reaching
+// the caller as an ordinary error the retry wrapper needs to see, not one
+// this function should ever swallow unretried.
+func (s *MSSQLStore) deleteWorkflowsChunkOnceOnce(ctx context.Context, chunk []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	for _, table := range mssqlWorkflowChildTables {
-		if err := s.deleteByWorkflowIDs(ctx, tx, table, ids); err != nil {
-			return 0, err
+		if table == "event_history" {
+			continue
+		}
+		if err := s.deleteByWorkflowIDs(ctx, tx, table, chunk); err != nil {
+			return err
 		}
 	}
-	if err := s.deleteByWorkflowIDs(ctx, tx, "workflow_instances", ids); err != nil {
-		return 0, err
+	if err := s.deleteByWorkflowIDs(ctx, tx, "workflow_instances", chunk); err != nil {
+		return err
 	}
-	return int64(len(ids)), tx.Commit()
+	return tx.Commit()
 }
 
 // deleteByWorkflowIDs deletes rows keyed to the given workflow ids, in chunks.
@@ -811,13 +980,12 @@ func (s *MSSQLStore) deleteWorkflowsBatchOnce(ctx context.Context, selectSQL, la
 // large batches only, which is the shape that would have passed every test and
 // failed on the first real retention run.
 func (s *MSSQLStore) deleteByWorkflowIDs(ctx context.Context, tx *sql.Tx, table string, ids []string) error {
-	const chunk = 2000
 	prefix, ok := mssqlDeleteByWorkflowPrefix[table]
 	if !ok {
 		return fmt.Errorf("delete completed workflows: no delete defined for table %q", table)
 	}
-	for start := 0; start < len(ids); start += chunk {
-		end := start + chunk
+	for start := 0; start < len(ids); start += mssqlIDChunk {
+		end := start + mssqlIDChunk
 		if end > len(ids) {
 			end = len(ids)
 		}
@@ -832,6 +1000,140 @@ func (s *MSSQLStore) deleteByWorkflowIDs(ctx context.Context, tx *sql.Tx, table 
 		stmt := prefix + strings.Join(placeholders, ", ") + ")"
 		if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 			return fmt.Errorf("delete completed workflows: delete %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// deleteEventHistoryRowBoundedCommitting deletes event_history rows for the
+// given workflow ids, bounded to mssqlEventRowChunk ROWS per statement AND
+// COMMITTING AFTER EVERY STATEMENT -- cleat#2060. ids is first chunked at
+// mssqlIDChunk for the 2100-parameter cap (cleat#2103, same as
+// deleteByWorkflowIDs), but a chunk of mssqlIDChunk workflows can still own
+// far more than mssqlEventRowChunk events between them, so each chunk's
+// delete repeats until nothing more matches it -- the same "loop a bounded
+// statement to zero" shape deleteExpiredEventsOnce's outer loop already
+// uses, one level down.
+//
+// EACH STATEMENT GETS ITS OWN TRANSACTION, and that is not incidental: a row
+// lock is held until its transaction COMMITS, not until the statement that
+// took it returns. A first version of this function took one tx from its
+// caller and ran every DELETE TOP through it, and locks from every prior
+// iteration were still held when the next one started -- so a batch large
+// enough to need several iterations could still cross the escalation
+// threshold on their SUM, even with every individual statement safely under
+// it. TestMSSQLRetentionSweepsCauseNoLockEscalation caught this on the first
+// real run, on DeleteDeadLetteredWorkflows: 6,000 workflows x 5 events is 15
+// iterations of 2,000 rows each, comfortably over 5,000 well before the
+// 15th. Committing here, rather than only in the caller's transaction, is
+// what deleteWorkflowsBatchOnce's split relies on -- see its comment for why
+// running this ahead of and outside that transaction is safe to redo.
+//
+// The other tables in mssqlWorkflowChildTables do not need this: a workflow
+// owns at most a handful of rows in each of them (a signal, a promise, an
+// idempotency key), so id-chunking alone already bounds rows per statement.
+// event_history is the one table a workflow can own an unbounded number of
+// rows in.
+func (s *MSSQLStore) deleteEventHistoryRowBoundedCommitting(ctx context.Context, ids []string) error {
+	for start := 0; start < len(ids); start += mssqlIDChunk {
+		end := start + mssqlIDChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		part := ids[start:end]
+		placeholders := make([]string, len(part))
+		args := make([]any, 0, len(part))
+		for i, id := range part {
+			name := fmt.Sprintf("id%d", i)
+			placeholders[i] = "@" + name
+			args = append(args, sql.Named(name, id))
+		}
+		inClause := strings.Join(placeholders, ", ") + ")"
+		stmt := mssqlDeleteEventHistoryTopPrefix + inClause
+		for {
+			n, err := s.deleteEventHistoryChunkOnce(ctx, stmt, args)
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// deleteEventHistoryChunkOnce runs one bounded DELETE TOP statement in its
+// own short transaction and returns the rows it removed. Split out of
+// deleteEventHistoryRowBoundedCommitting so the retry-on-rollback-guaranteed
+// wrapper every other MSSQL transaction in this file uses (see
+// deleteWorkflowsBatch above) covers this one too, rather than leaving a
+// deadlock victim here to surface as a bare, unretried error.
+func (s *MSSQLStore) deleteEventHistoryChunkOnce(ctx context.Context, stmt string, args []any) (int64, error) {
+	var n int64
+	err := withRollbackGuaranteedRetry(ctx, "delete event_history chunk", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var innerErr error
+		n, innerErr = s.deleteEventHistoryChunkOnceOnce(ctx, stmt, args)
+		return innerErr
+	})
+	if err != nil {
+		return 0, fmt.Errorf("delete completed workflows: %w", err)
+	}
+	return n, nil
+}
+
+// deleteEventHistoryChunkOnceOnce is deleteEventHistoryChunkOnce's own
+// transaction body -- named and reached the same way
+// deleteWorkflowsChunkOnceOnce is; see that function's comment for why the
+// split exists (TestEveryMSSQLTransactionBoundaryIsRetried).
+func (s *MSSQLStore) deleteEventHistoryChunkOnceOnce(ctx context.Context, stmt string, args []any) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, stmt, args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete event_history: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete event_history: rows affected: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// chunkedMarkHistorySwept sets history_swept_at on every id in ids, chunked
+// at mssqlIDChunk -- cleat#2103. No tenant_id predicate: every caller passes
+// ids sourced from its own already-tenant-scoped SELECT (see the call site
+// in deleteExpiredEventsOnce), never from user input -- see the
+// tenantPredicateAllowlist entry for this function.
+func (s *MSSQLStore) chunkedMarkHistorySwept(ctx context.Context, tx *sql.Tx, ids []string) error {
+	for start := 0; start < len(ids); start += mssqlIDChunk {
+		end := start + mssqlIDChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		part := ids[start:end]
+		placeholders := make([]string, len(part))
+		args := make([]any, len(part))
+		for i, id := range part {
+			name := fmt.Sprintf("id%d", i)
+			placeholders[i] = "@" + name
+			args[i] = sql.Named(name, id)
+		}
+		//nolint:gosec // G202: the only concatenated fragment is placeholders, built above
+		// as "@id0", "@id1", ... -- ids are bound as arguments, never interpolated.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET history_swept_at = SYSUTCDATETIME()
+			WHERE id IN (`+strings.Join(placeholders, ",")+`)
+		`, args...); err != nil {
+			return fmt.Errorf("mark swept: %w", err)
 		}
 	}
 	return nil
