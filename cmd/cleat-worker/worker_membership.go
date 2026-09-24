@@ -109,6 +109,17 @@ func validateHeartbeat(heartbeat time.Duration) error {
 func (w *Worker) membershipTick(staleAfter time.Duration) {
 	ctx := w.ctx
 
+	// TAKEN BEFORE THE ROUND TRIP, and recorded as the beat. The database stamps
+	// last_heartbeat_at when the statement runs, which is after this instant and before
+	// the reply reaches us, so a beat recorded when the call RETURNS makes this worker's
+	// gap shorter than the gap a writer measures by the reply's latency (and by
+	// everything else this tick does before it records). Recording the instant before
+	// the call makes the worker's gap always at least the writer's, which is the
+	// direction the lapse check needs: it can only fire early, never late. Measured by
+	// review of cleat#2171: at --heartbeat 149s the margin below the writers' window is
+	// 2s, and a 4s skew left the worker unstopped. cleat#2167.
+	beat := time.Now()
+
 	// A lapse is a gap longer than the stale window between two successful
 	// ticks. Nothing was watching during it: a writer can have judged this
 	// worker gone and written a key version it cannot open, and the row may not
@@ -154,7 +165,7 @@ func (w *Worker) membershipTick(staleAfter time.Duration) {
 			return
 		}
 	}
-	w.membershipLastBeat = time.Now()
+	w.membershipLastBeat = beat
 
 	// Every worker sweeps. A DELETE matching nothing is free, and two workers
 	// removing the same expired row is not a conflict -- the second removes

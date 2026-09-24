@@ -153,6 +153,17 @@ func TestAStallPastTheWritersWindowIsAlwaysALapseForTheWorker(t *testing.T) {
 		})
 	}
 
+	// The margin. At the largest heartbeat the worker accepts the threshold is 2s below
+	// the writers' window, and a stall that has just crossed the window (1s past it) must
+	// already be a lapse. The 6 minute stall above cannot tell a 2s margin from none.
+	t.Run("at the boundary, 1s past the writers' window", func(t *testing.T) {
+		hb := 149 * time.Second
+		got := stall(t, hb, engine.SecretKeyLiveWindow+time.Second, false)
+		if !got.wrote || !got.stopped {
+			t.Fatalf("a stall 1s past the window at --heartbeat %v: wrote=%v stopped=%v, want both true", hb, got.wrote, got.stopped)
+		}
+	})
+
 	t.Run("KNOWN-POSITIVE: a heartbeat the worker refuses", func(t *testing.T) {
 		hb := 4 * time.Minute
 		if validateHeartbeat(hb) == nil {
@@ -247,5 +258,179 @@ func TestMainStartsTheLapseClockAtRegistration(t *testing.T) {
 	if !ok {
 		t.Fatal("main.go constructs the Worker without setting membershipLastBeat: a boot slower than the " +
 			"writers' window is then never a lapse (cleat#2167)")
+	}
+}
+
+// THE BEAT IS RECORDED BEFORE THE ROUND TRIP (cleat#2167, found reviewing cleat#2171).
+//
+// The database stamps last_heartbeat_at while the statement runs; the reply then travels
+// back. A beat recorded when the call RETURNS makes this worker's gap shorter than the
+// writer's by the reply's latency, and at the largest accepted heartbeat the margin
+// under the writers' window is only 2s. The property is that the worker's own gap is
+// never SHORTER than the gap a writer measures, and it is checked against a real reply
+// delay: a trigger holds the UPDATE's reply for 4s AFTER the row is stamped. Both gaps
+// are durations (the database's is now() minus its own stamp, ours is monotonic since the
+// beat), so no comparison crosses two clocks.
+func TestTheWorkersGapIsNeverShorterThanTheWritersGap(t *testing.T) {
+	e := newLapseEnv(t, ringV1(t), nil)
+	ctx := context.Background()
+	if err := e.reg.Register(ctx, engine.WorkerRegistration{
+		WorkerID: e.id, Hostname: "slow-reply", PID: 1, SecretKeyVersions: []int{1}}); err != nil {
+		t.Fatal(err)
+	}
+	fn := "zz_2167_slow_reply_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	for _, stmt := range []string{
+		`CREATE FUNCTION public.` + fn + `() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(4); RETURN NULL; END $$`,
+		`CREATE TRIGGER ` + fn + ` AFTER UPDATE ON admin.workers FOR EACH ROW WHEN (NEW.worker_id = '` + e.id + `') EXECUTE FUNCTION public.` + fn + `()`,
+	} {
+		if _, err := e.db.Exec(stmt); err != nil {
+			t.Fatalf("install the slow-reply trigger: %v\n  %s", err, stmt)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = e.db.Exec(`DROP TRIGGER IF EXISTS ` + fn + ` ON admin.workers`)
+		_, _ = e.db.Exec(`DROP FUNCTION IF EXISTS public.` + fn + `()`)
+	})
+
+	e.w.membershipLastBeat = time.Now()
+	began := time.Now()
+	e.w.membershipTick(membershipStaleAfter(149 * time.Second))
+	if took := time.Since(began); took < 3*time.Second {
+		t.Fatalf("the tick took %v, so the trigger never delayed the heartbeat's reply and this test measured nothing", took)
+	}
+
+	// The database's gap first, ours after: measured in that order, any difference from the
+	// instants being apart can only make OUR gap the larger of the two.
+	var dbGap float64
+	if err := e.db.QueryRow(`SELECT extract(epoch FROM now() - last_heartbeat_at) FROM admin.workers WHERE worker_id = $1`, e.id).Scan(&dbGap); err != nil {
+		t.Fatal(err)
+	}
+	ourGap := time.Since(e.w.membershipLastBeat).Seconds()
+	t.Logf("the writer's gap %.2fs, this worker's %.2fs", dbGap, ourGap)
+	if dbGap < 3 {
+		t.Fatalf("the database's gap is %.2fs: the row was not stamped before the delayed reply, so the scenario did not happen", dbGap)
+	}
+	if ourGap < dbGap {
+		t.Fatalf("this worker's gap (%.2fs) is SHORTER than the writer's (%.2fs) by %.2fs: the beat was recorded after the round trip, "+
+			"so a stall can be past the writers' window while the worker still calls it fresh (cleat#2167)", ourGap, dbGap, dbGap-ourGap)
+	}
+}
+
+// mainCalls reports whether function fn in src contains a call to callee whose arguments
+// mention argIdent, and where (a byte offset, for ordering against other statements).
+func mainCalls(src []byte, fn, callee, argIdent string) (bool, token.Pos, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", src, 0)
+	if err != nil {
+		return false, 0, err
+	}
+	var found bool
+	var at token.Pos
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != fn || fd.Recv != nil {
+			continue
+		}
+		ast.Inspect(fd, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != callee {
+				return true
+			}
+			mentions := false
+			for _, a := range call.Args {
+				ast.Inspect(a, func(m ast.Node) bool {
+					if id, ok := m.(*ast.Ident); ok && id.Name == argIdent {
+						mentions = true
+					}
+					return true
+				})
+			}
+			if mentions && !found {
+				found, at = true, call.Pos()
+			}
+			return true
+		})
+	}
+	return found, at, nil
+}
+
+// main is the only place validateHeartbeat can run, and deleting the call leaves every
+// test of the function itself green. So the call is checked in the source, by a finder
+// that is shown to say no.
+func TestMainRefusesAnUnsafeHeartbeatBeforeItDoesAnythingElse(t *testing.T) {
+	for name, src := range map[string]string{
+		"main never calls it":                 `package main; func main() { flag.Parse() }`,
+		"a different function calls it":       `package main; func other() { _ = validateHeartbeat(*heartbeatInterval) }; func main() {}`,
+		"main calls it with another value":    `package main; func main() { _ = validateHeartbeat(time.Second) }`,
+		"main mentions it without calling it": `package main; func main() { _ = validateHeartbeat }`,
+	} {
+		if ok, _, err := mainCalls([]byte(src), "main", "validateHeartbeat", "heartbeatInterval"); err != nil || ok {
+			t.Fatalf("the finder accepted %q: ok=%v err=%v", name, ok, err)
+		}
+	}
+	if ok, _, err := mainCalls([]byte(`package main; func main() { if err := validateHeartbeat(*heartbeatInterval); err != nil {} }`),
+		"main", "validateHeartbeat", "heartbeatInterval"); err != nil || !ok {
+		t.Fatalf("the finder rejected a real call: ok=%v err=%v", ok, err)
+	}
+
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, hbPos, err := mainCalls(src, "main", "validateHeartbeat", "heartbeatInterval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("main() never calls validateHeartbeat(*heartbeatInterval): a --heartbeat at which a stalled worker can hide " +
+			"from a secret writer is then accepted, and every test of validateHeartbeat still passes (cleat#2167)")
+	}
+	// Before the worker registers: a refusal that came after it would have published the row.
+	_, regPos, err := mainCalls(src, "main", "registerWithKeyCheck", "workerRegistry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if regPos != 0 && hbPos > regPos {
+		t.Fatal("main() checks --heartbeat only after it has registered the worker")
+	}
+}
+
+// registeredAt has to be taken BEFORE the registration: the registry stamps the row while
+// RegisterUnderKeyGate runs (after a wait for the gate lock that can last 45s), so a clock
+// started when the call returns is short by all of it.
+func TestTheLapseClockIsStartedBeforeTheRegistration(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assignAt, callAt token.Pos
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			if len(x.Lhs) == 1 {
+				if id, ok := x.Lhs[0].(*ast.Ident); ok && id.Name == "registeredAt" && assignAt == 0 {
+					assignAt = x.Pos()
+				}
+			}
+		case *ast.CallExpr:
+			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "registerWithKeyCheck" && callAt == 0 {
+				callAt = x.Pos()
+			}
+		}
+		return true
+	})
+	if assignAt == 0 || callAt == 0 {
+		t.Fatalf("did not find both `registeredAt := ...` (%v) and the registerWithKeyCheck call (%v) in main.go", assignAt != 0, callAt != 0)
+	}
+	if assignAt > callAt {
+		t.Fatal("registeredAt is assigned AFTER registerWithKeyCheck returns: the lapse clock is then short by the gate wait " +
+			"and the registration round trip (cleat#2167)")
 	}
 }

@@ -1201,6 +1201,11 @@ func main() {
 	// specs/CleatKeyRotation.tla). See checkSecretsUsable for why an unreadable
 	// table refuses to start rather than passing.
 	workerRegistry := &engine.WorkerRegistry{DB: db, Dialect: engine.Dialect(*driver)}
+	// Before the call, not after it: the registry stamps last_heartbeat_at when the
+	// INSERT runs inside RegisterUnderKeyGate, which can first wait for the gate lock
+	// (up to 45s), and a clock started when the call returns would be short by all of
+	// that. See the note on membershipTick's beat. cleat#2167.
+	registeredAt := time.Now()
 	if err := registerWithKeyCheck(ctx, workerRegistry, secretStore, engine.WorkerRegistration{
 		WorkerID:         workerID,
 		Hostname:         hostnameOrEmpty(),
@@ -1218,8 +1223,7 @@ func main() {
 	// From here a writer is entitled to count this worker as live for SecretKeyLiveWindow
 	// after its last heartbeat, and the first heartbeat is a membership interval away.
 	// The rest of boot counts against that, so the clock the membership loop measures a
-	// lapse from starts NOW, not at the first tick (cleat#2167).
-	registeredAt := time.Now()
+	// lapse from is registeredAt, taken before the registration -- not the first tick.
 	logger.InfoContext(context.Background(), "registered in the worker registry",
 		"worker_id", workerID, "secret_key_versions", secretStore.KeyVersions())
 
