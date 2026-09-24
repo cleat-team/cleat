@@ -409,14 +409,64 @@ func TestAnExportVerifiesOfflineWithTheReferenceImplementation(t *testing.T) {
 		// Every chained line deleted: an empty export of a chain that has 15 rows.
 		mustFail("every chained line deleted", rewrite(body, func(ev []string) []string { return ev[:1] }), 1, "MISSING EVENTS")
 
-		// An anchor recorded elsewhere is what binds the ENDS: the right one passes, a wrong one
-		// (the head as it was before rows were removed from the tail) does not.
+		// THE DOWNGRADE. The checkpoint states what KIND of export the file is, and the kind
+		// relaxes the rules, so an edit that changes it is the first thing a forger does: mark a
+		// full export a "range" (which claims no coverage) or as resumed after seq 3 (which
+		// starts wherever it likes). Without an option that is the documented limit of the file
+		// alone. With --require-full, or with either anchor (which imply it), it is refused; and
+		// the anchors bind the EVENTS to the anchored values whatever the checkpoint says.
+		forgeCP := func(stream string, kv map[string]any) string {
+			ls := strings.Split(strings.TrimSpace(stream), "\n")
+			var m map[string]any
+			_ = json.Unmarshal([]byte(ls[len(ls)-1]), &m)
+			for k, v := range kv {
+				m[k] = v
+			}
+			out, _ := json.Marshal(m)
+			return strings.Join(append(ls[:len(ls)-1], string(out)), "\n") + "\n"
+		}
 		var cp exportCheckpoint
 		_ = json.Unmarshal([]byte(lines[len(lines)-1]), &cp)
-		if code, out := verify(body, "--expect-head", fmt.Sprintf("%d:%s", cp.HeadSeq, cp.HeadHash)); code != 0 {
-			t.Errorf("the right anchor: exit %d\n%s", code, out)
+		head := fmt.Sprintf("%d:%s", cp.HeadSeq, cp.HeadHash)
+		floor := fmt.Sprintf("%d:%s", cp.FloorSeq, cp.FloorHash)
+		bothAnchors := []string{"--expect-head", head, "--expect-floor", floor}
+
+		if code, out := verify(body, bothAnchors...); code != 0 {
+			t.Errorf("an honest full export with both anchors: exit %d\n%s", code, out)
+		}
+		if code, out := verify(body, "--require-full"); code != 0 {
+			t.Errorf("an honest full export with --require-full: exit %d\n%s", code, out)
 		}
 		mustFail("a wrong head anchor", body, 1, "ANCHOR MISMATCH", "--expect-head", fmt.Sprintf("%d:%s", cp.HeadSeq+3, cp.HeadHash))
+
+		rangeForged := forgeCP(rewrite(body, func(ev []string) []string { return append(ev[:5], ev[6:]...) }), map[string]any{"from": "2000-01-01T00:00:00.000000Z"})
+		if code, out := verify(rangeForged); code != 0 || !strings.Contains(out, "a range") {
+			t.Errorf("seq 5 deleted and a `from` added, no options: exit %d\n%s\nthis pins the documented limit of a range checkpoint", code, out)
+		}
+		mustFail("seq 5 deleted, `from` added, --require-full", rangeForged, 1, "DOWNGRADED", "--require-full")
+		mustFail("seq 5 deleted, `from` added, both anchors", rangeForged, 1, "DOWNGRADED", bothAnchors...)
+
+		tailForged := forgeCP(rewrite(body, func(ev []string) []string { return ev[:len(ev)-3] }), map[string]any{"from": "2000-01-01T00:00:00.000000Z"})
+		mustFail("the last three deleted, `from` added, both anchors", tailForged, 1, "ANCHOR MISMATCH", bothAnchors...)
+		mustFail("the last three deleted, `from` added, --expect-head only", tailForged, 1, "The events, not just the checkpoint", "--expect-head", head)
+
+		afterForged := forgeCP(rewrite(body, func(ev []string) []string { return append(ev[:1], ev[4:]...) }), map[string]any{"after_seq": 3})
+		if code, out := verify(afterForged); code != 0 || !strings.Contains(out, "a resumed export") {
+			t.Errorf("the first three deleted and after_seq 3 claimed, no options: exit %d\n%s\nthis pins the documented limit of a resumed checkpoint", code, out)
+		}
+		mustFail("the first three deleted, after_seq claimed, both anchors", afterForged, 1, "DOWNGRADED", bothAnchors...)
+		mustFail("the first three deleted, after_seq claimed, --expect-floor only", afterForged, 1, "ANCHOR MISMATCH", "--expect-floor", floor)
+
+		// The join of a resumed export: the last record of the part you hold anchors the first
+		// record of the rest.
+		var ev6 exportEvent
+		_ = json.Unmarshal([]byte(lines[6]), &ev6)
+		_, resumed := e.get(p, tenant, "/audit/export?cursor="+url.QueryEscape(ev6.Cursor))
+		if code, out := verify(resumed, "--expect-after", fmt.Sprintf("6:%s", *ev6.Hash)); code != 0 {
+			t.Errorf("a resumed export joined to the part before it: exit %d\n%s", code, out)
+		}
+		mustFail("a resumed export whose join does not match", resumed, 1, "JOIN MISMATCH", "--expect-after", fmt.Sprintf("6:%s", strings.Repeat("ab", 32)))
+		mustFail("a resumed export missing its first record", rewrite(resumed, func(ev []string) []string { return ev[1:] }), 1, "JOIN MISMATCH", "--expect-after", fmt.Sprintf("6:%s", *ev6.Hash))
 
 		// The other kinds of export verify by their own rules, and are not held to the full one's.
 		// A range: gaps are the point, and it says so.
@@ -426,9 +476,6 @@ func TestAnExportVerifiesOfflineWithTheReferenceImplementation(t *testing.T) {
 			t.Errorf("a range export: exit %d\n%s", code, out)
 		}
 		// A resumed export starts after its cursor and ends at the head.
-		var ev6 exportEvent
-		_ = json.Unmarshal([]byte(lines[6]), &ev6)
-		_, resumed := e.get(p, tenant, "/audit/export?cursor="+url.QueryEscape(ev6.Cursor))
 		if code, out := verify(resumed); code != 0 || !strings.Contains(out, "a resumed export") {
 			t.Errorf("a resumed export: exit %d\n%s", code, out)
 		}

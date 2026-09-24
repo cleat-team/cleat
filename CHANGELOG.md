@@ -376,8 +376,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **An export never ends in a checkpoint over a hole.** Rows removed while it runs (a retention sweep) fail
   the export (`409` before anything was sent, otherwise the connection is aborted and `cleatctl` says
   `INCOMPLETE`) rather than leave a gap that verifies. The checkpoint records `from`, `to` and `after_seq`, so
-  `verify-export` knows which completeness rules apply, and it takes `--expect-head` / `--expect-floor` to
-  bind the ends of a file to an anchor recorded elsewhere. The checkpoint itself is unsigned.
+  `verify-export` knows which completeness rules apply. The checkpoint itself is unsigned, so an edit can
+  present a full export as a range or a resumed one: pass `--require-full` when a whole export was asked
+  for, and `--expect-head` / `--expect-floor` (which imply it and check the records themselves, not only the
+  checkpoint) with values recorded elsewhere. `--expect-after` checks the join of a resumed export.
 
   **`GET /audit/events` no longer answers 500 on SQL Server:** it wrote a literal `LIMIT`.
 

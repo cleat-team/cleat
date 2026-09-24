@@ -110,7 +110,8 @@ The checkpoint also says what kind of export this was, which decides what a veri
 Offline verification:
 
     python3 plugins/auditlog/testdata/audit_chain_reference.py verify-export \
-        [--expect-head SEQ:HASH] [--expect-floor SEQ:HASH] < export.jsonl
+        [--require-full] [--expect-head SEQ:HASH] [--expect-floor SEQ:HASH] \
+        [--expect-after SEQ:HASH] < export.jsonl
 
 It needs no database and shares no code with cleat. It recomputes every chained record's hash from its
 own fields; refuses duplicate ids, a `seq` that does not strictly increase, and consecutive records that
@@ -125,11 +126,28 @@ the kind of export:
 
 Exit `0` verified, `1` a break, `2` incomplete or unreadable.
 
-**The checkpoint is not signed.** A record deleted from the middle, a duplicated record, and a
-reordering are caught from the file alone. Records removed from an end of a full export are caught
-because the checkpoint says where the ends should be; but someone who edits the file can edit the
-checkpoint to match. Only an anchor recorded somewhere they cannot reach makes the ends binding: pass
-`--expect-head` and `--expect-floor` with the head and floor you recorded earlier.
+**Pass `--require-full` when you asked for a whole export.** The kind of export is stated in the
+checkpoint, so an edit that deletes records and adds `from`, `to` or `after_seq` to the checkpoint
+would present a full export as a range or a resumed one, which claims less coverage. Without the
+option that edit verifies (exit `0`), because a range really does make no claim about coverage.
+`--require-full` refuses a checkpoint that says it is anything else (`DOWNGRADED`, exit `1`).
+
+**The checkpoint is not signed.** From the file alone, a record deleted from the middle of a full
+export, a duplicated record and a reordering are caught, and so are records removed from an end
+*unless* the checkpoint was edited to match. Only values recorded somewhere the editor cannot reach
+make the ends binding:
+
+- `--expect-head SEQ:HASH` requires the export to be full and its **last chained record** to be that
+  `seq` with that hash. It checks the records, not only the checkpoint, so a checkpoint edited to
+  agree with a truncated file still fails.
+- `--expect-floor SEQ:HASH` requires the export to be full and its **first chained record** to be
+  `seq + 1` and to link to that hash.
+- `--expect-after SEQ:HASH` is the same join for a resumed export: the first record must be
+  `seq + 1` and link to the hash you recorded for the last record of the part before the cursor.
+  It does not imply a full export.
+
+The anchors imply `--require-full`, except `--expect-after`, which is for exactly the export that
+`--require-full` refuses.
 
 ## Verifying
 

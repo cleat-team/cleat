@@ -197,7 +197,8 @@ def verify():
 def verify_export():
     """Verify a `GET /audit/export` / `cleatctl audit export` stream from stdin, offline.
 
-        verify-export [--expect-head SEQ:HASH] [--expect-floor SEQ:HASH]
+        verify-export [--require-full] [--expect-head SEQ:HASH] [--expect-floor SEQ:HASH]
+                      [--expect-after SEQ:HASH]
 
     What it checks, and what the checkpoint line lets it require:
 
@@ -213,18 +214,35 @@ def verify_export():
         resumed export (`after_seq`) starts at `after_seq + 1` and ends at the head. A range
         claims nothing about coverage.
 
-    THE CHECKPOINT IS NOT SIGNED. Deleting a middle event, a duplicate, or a reordering is
-    caught from the file alone. Deleting events from an END, or rewriting the whole file
-    with the hashes recomputed and the checkpoint edited to match, is caught only against
-    an anchor recorded elsewhere: pass --expect-head and --expect-floor.
+    THE CHECKPOINT IS NOT SIGNED, and it also says what KIND of export the file is, which
+    decides how strict the rules above are. So the file alone proves less than it seems:
+
+      * with no options, a file whose checkpoint says "range" is held to nothing about
+        coverage, so a record deleted from a range, or from a full export whose checkpoint
+        was edited to say range, is not detectable; likewise a full export edited to claim it
+        resumed after seq N;
+      * --require-full says the caller ASKED for a whole export: a checkpoint that claims to
+        be a range or a resumed export is then a break (DOWNGRADED), not verified by weaker
+        rules;
+      * the ANCHORS bind the EVENTS, not just the checkpoint, whatever the checkpoint claims,
+        and each implies --require-full (except --expect-after, which is for a resumed export):
+          --expect-head SEQ:HASH   the last chained event must be that seq and that hash;
+          --expect-floor SEQ:HASH  the first chained event must be seq+1 and link to that hash;
+          --expect-after SEQ:HASH  the first chained event must be seq+1 and link to that hash
+                                   (the last record of the part you already hold: this is what
+                                   makes the join of a resumed export verifiable).
+        The anchor values come from somewhere the editor of the file cannot reach.
 
     Exit status: 0 verified, 1 a break, 2 incomplete or unreadable.
     """
     expect = {}
+    require_full = False
     argv = sys.argv[2:]
     while argv:
         flag = argv.pop(0)
-        if flag in ("--expect-head", "--expect-floor") and argv:
+        if flag == "--require-full":
+            require_full = True
+        elif flag in ("--expect-head", "--expect-floor", "--expect-after") and argv:
             seq, _, h = argv.pop(0).partition(":")
             expect[flag] = (int(seq), h)
         else:
@@ -287,6 +305,12 @@ def verify_export():
 
     ranged = cp.get("from") is not None or cp.get("to") is not None
     after = None if cp.get("after_seq") is None else int(cp["after_seq"])
+    if "--expect-head" in expect or "--expect-floor" in expect:
+        require_full = True  # an anchor on the ends is meaningless for anything but the whole chain
+    if require_full and (ranged or after is not None):
+        brk("DOWNGRADED: a full export was required, and the checkpoint claims to be %s. "
+            "A range or resumed export claims less coverage than a full one; an edit that deletes an "
+            "event and adds one of these to the checkpoint would look like this." % ("a range" if ranged else "a resumed export"))
     head_seq, floor_seq = int(cp["head_seq"]), int(cp["floor_seq"])
 
     prev = None
@@ -322,14 +346,34 @@ def verify_export():
             if head_seq != want_head:
                 brk("MISSING EVENTS: no chained events, but the checkpoint's head is seq %d and the export started after seq %d" % (head_seq, want_head))
 
+    def first_last():
+        return (chained[0], chained[-1]) if chained else (None, None)
+
+    first, last = first_last()
     if "--expect-head" in expect:
         eseq, ehash = expect["--expect-head"]
         if head_seq != eseq or cp["head_hash"] != ehash:
             brk("ANCHOR MISMATCH: the checkpoint's head is seq %d %s, the anchor is seq %d %s" % (head_seq, cp["head_hash"][:12], eseq, ehash[:12]))
+        # With no chained events the export is empty and its end is the floor itself.
+        end = (last[0], last[2]) if last else (floor_seq, cp["floor_hash"])
+        if end != (eseq, ehash):
+            brk("ANCHOR MISMATCH: the last chained event is %s, the anchor is seq %d %s. The events, not just the checkpoint, must end at the anchored head" % (
+                "seq %d %s" % (end[0], end[1][:12]) if last else "absent (the floor, seq %d)" % end[0], eseq, ehash[:12]))
     if "--expect-floor" in expect:
         eseq, ehash = expect["--expect-floor"]
         if floor_seq != eseq or cp["floor_hash"] != ehash:
             brk("ANCHOR MISMATCH: the checkpoint's floor is seq %d %s, the anchor is seq %d %s" % (floor_seq, cp["floor_hash"][:12], eseq, ehash[:12]))
+        if first is not None and (first[0] != eseq + 1 or first[1] != ehash):
+            brk("ANCHOR MISMATCH: the first chained event is seq %d linking to %s, the anchored floor is seq %d %s, so it must be seq %d linking to it" % (
+                first[0], first[1][:12], eseq, ehash[:12], eseq + 1))
+    if "--expect-after" in expect:
+        eseq, ehash = expect["--expect-after"]
+        if first is None:
+            if head_seq != eseq:
+                brk("ANCHOR MISMATCH: no chained events, but the export should continue after seq %d and the head is seq %d" % (eseq, head_seq))
+        elif first[0] != eseq + 1 or first[1] != ehash:
+            brk("JOIN MISMATCH: the first chained event is seq %d linking to %s; the part you hold ends at seq %d %s, so it must be seq %d linking to it" % (
+                first[0], first[1][:12], eseq, ehash[:12], eseq + 1))
 
     kind = "a range" if ranged else ("a resumed export" if after is not None else "a full export")
     print("%d events (%d chained checked, %d unchained not covered), %s, %d breaks" % (events, len(chained), unchained, kind, breaks))
