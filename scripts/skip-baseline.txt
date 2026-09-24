@@ -144,6 +144,8 @@ engine	TestRustWorkflowCompensation	1
 engine	TestRustWorkflowDefersRun	1
 engine	TestRustWorkflowExecute	1
 engine	TestRustWorkflowReplay	1
+engine	TestStaleSetShapeMSSQLAgainstARealDatabase	2
+engine	TestStaleSetShapeMySQLAgainstARealDatabase	2
 engine	TestTenantIsolationWithSeparateStores	1
 engine	TestTenantIsolation_ActiveInstanceCounts	1
 engine	TestTenantIsolation_ConcurrencyKeys	1

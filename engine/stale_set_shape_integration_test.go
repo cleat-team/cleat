@@ -269,4 +269,3 @@ func TestStaleSetShapeMSSQLAgainstARealDatabase(t *testing.T) {
 		running: 3, missedBeat: 3, distinctAssignedTo: 3, noRecentHeartbeat: true, stale: 0,
 	})
 }
-
