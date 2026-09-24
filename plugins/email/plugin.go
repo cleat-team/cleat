@@ -162,7 +162,8 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 				"cleat#1992 part 1 moved the key to a deployment secret, and would "+
 				"silently stop if allowed to boot. Fix: set \"email_enabled\": true, move "+
 				"the key with `cleatctl set-deployment-secret --name email.sendgrid_api_key`, "+
-				"then remove sendgrid_api_key from --plugin-config: %w", plugin.ErrFatalMisconfiguration)
+				"then remove sendgrid_api_key from --plugin-config -- or, if email is meant "+
+				"to stay off, remove sendgrid_api_key to keep it off: %w", plugin.ErrFatalMisconfiguration)
 		}
 		// A config file is present -- for email, for some other plugin, or
 		// both -- but it does not name email_enabled. Same quiet disable as
