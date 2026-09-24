@@ -1600,7 +1600,7 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 		    ORDER BY heartbeat_at
 		    LIMIT $2
 		)
-	`, fmt.Sprintf("%d seconds", int(timeout.Seconds())), reapLimitArg(limit))
+	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
