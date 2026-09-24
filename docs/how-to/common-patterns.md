@@ -202,11 +202,45 @@ curl -X POST http://localhost:8080/api/events/subscriptions \
         "def_name": "signup-workflow",
         "entry_point": "HandleSignup",
         "input_template": {
-            "user_id": "{{.event.data.user_id}}",
-            "email": "{{.event.data.email}}"
+            "user_id": "",
+            "email": "unknown@example.com",
+            "name": "New User"
         }
     }'
 ```
+
+`input_template` is not a template -- there is no placeholder syntax and
+nothing renders `{{...}}` expressions. It declares the workflow input's
+*default* top-level fields. When a matching event is published, its `data`
+payload is overlaid on top: for each of the event data's own top-level keys,
+the event's value replaces the template's value for that key (or adds it, if
+the template didn't have it); every other template field is left as its
+default. Publishing
+
+```json
+{"event_type": "user.signup", "data": {"user_id": "usr_abc123", "email": "alice@example.com"}}
+```
+
+against the subscription above starts the workflow with
+`{"user_id": "usr_abc123", "email": "alice@example.com", "name": "New User"}`
+-- `user_id` and `email` came from the event, `name` kept its template
+default because the event didn't supply one.
+
+Nested data passes through untouched, because the overlay is a plain key
+replacement, not a merge that descends into each value: if the event's data
+has a top-level key whose value is itself an object, that whole object
+becomes the input's value for that key. Given a template of
+`{"user_id": "", "profile": {}}`, publishing
+`{"data": {"user_id": "usr_abc123", "profile": {"city": "Seattle", "plan": "pro"}}}`
+produces `{"user_id": "usr_abc123", "profile": {"city": "Seattle", "plan": "pro"}}`.
+
+What doesn't work: pulling a *nested* field up into a *different* top-level
+name (the `{{.event.data.profile.city}}` shape the old example implied).
+There is no expression language to do that -- `mergeInputAndTemplate`
+(`plugins/eventtriggers/routes.go`) only overlays matching top-level keys. If
+a workflow needs a nested field under its own name, either publish the event
+with that field already at the top level, or have the workflow's own code
+read it out of the nested value it receives.
 
 See the [event-driven example](../examples/event-driven/subscription_workflow.go)
 for a complete signup workflow.

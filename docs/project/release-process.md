@@ -259,6 +259,19 @@ pattern above missed it entirely without that flag.
 That grep will not find the Homebrew formula, which is Ruby — but as of
 cleat#2068 nothing here needs to bump it by hand.
 
+It also will not find `python-sdk/pyproject.toml`, which is TOML
+(`version = "0.2.0"`, no `v` prefix, so the pattern's own anchor can't see
+it). Bump it by hand on the release branch before tagging. This one is not
+optional the way the Homebrew formula isn't needed: as of cleat#2127,
+`.github/workflows/publish-pypi.yml` reads `python-sdk/pyproject.toml`'s
+version on every `v*` tag push and refuses to publish if it disagrees with
+the tag — `::error::tag vX.Y.Z (version X.Y.Z) does not match
+pyproject.toml's version ...`, failing the job before any upload runs. A
+mismatch here is not a warning to notice later; it is a failed release. See
+`CONTRIBUTING.md`'s "SDK versions: which numbers are load-bearing" for why
+the Python version is load-bearing while the three inert `0.1.0`s (Rust,
+Java, AssemblyScript) are deliberately left alone.
+
 ### Releasing a Homebrew formula bump — now automatic
 
 `packaging/homebrew/Formula/cleat.rb.tmpl` in this repo is a **template**, not
