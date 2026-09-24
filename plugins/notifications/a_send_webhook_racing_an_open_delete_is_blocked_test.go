@@ -36,31 +36,64 @@ import (
 // unblocked call would already have finished and returned), not merely the
 // eventual answer.
 //
-// PostgreSQL and SQL Server, not MySQL. PostgreSQL: FOR SHARE closes the gap
-// at its default READ COMMITTED, where a plain read does not see an UPDATE
-// inside a still-open transaction. SQL Server: with READ_COMMITTED_SNAPSHOT
-// (RCSI) ON -- the configuration docs/reference/database-backends.md
-// recommends -- a plain read sees a row-versioned snapshot instead of
-// blocking on the open UPDATE's lock, so it has the SAME gap PostgreSQL has
-// and needed the SAME kind of fix: WITH (READCOMMITTEDLOCK) on the
-// existsGuard SELECT. This test runs SQL Server's leg against a PRIVATE
-// database with RCSI forced ON, because RCSI ON is the case the fix exists
-// for and the shared CI database's own RCSI setting is not this test's to
-// depend on. MySQL is excluded: its default isolation already blocks a
-// plain read against a row an open UPDATE holds, with no dialect-specific
-// tuning needed, so there is no analogous race to close or test -- the same
-// exemption #2221's template records for webhookingest's version of this
-// test.
+// PostgreSQL: FOR SHARE closes the gap at its default READ COMMITTED, where
+// a plain read does not see an UPDATE inside a still-open transaction.
+//
+// MySQL gets TWO subtests, and neither is on the strength of this file's own
+// original claim that its default isolation already blocks a plain read
+// against a row an open UPDATE holds -- that claim shipped in #2233 with no
+// live-interleaving test behind it, which is exactly the unmeasured-claim
+// shape CLAUDE.md warns about, and it was also imprecise: a plain InnoDB
+// SELECT never blocks. What actually closes the gap is narrower -- this is
+// an INSERT ... SELECT, and InnoDB takes shared next-key locks on the rows
+// the SELECT half reads, but only at REPEATABLE READ (MySQL's default).
+// "mysql" measures that: real MySQL, its ordinary connection, same
+// runSendWebhookRaceTest, same 700ms proof of blocking. "mysql_read_committed"
+// measures the case docs/reference/database-backends.md actually recommends
+// for this dialect -- READ COMMITTED, where the same INSERT ... SELECT does
+// NOT take those locks and the gap reopens unless FOR SHARE forces it, which
+// is why FOR SHARE stays unconditional in host_functions.go rather than
+// being gated on MySQL's isolation level. cleat#2243, mirroring
+// cleat-review's cleat#2242 finding for webhookingest's identical guard
+// shape.
+//
+// SQL Server: with READ_COMMITTED_SNAPSHOT (RCSI) ON -- the configuration
+// docs/reference/database-backends.md recommends -- a plain read sees a
+// row-versioned snapshot instead of blocking on the open UPDATE's lock, so
+// it has the SAME gap PostgreSQL has and needs the SAME kind of fix: WITH
+// (REPEATABLEREAD) on the existsGuard SELECT (host_functions.go) -- not
+// READCOMMITTEDLOCK, which closes the race but opens a deadlock window
+// instead (see host_functions.go's comment for the measurements, taken from
+// cleat#2237/#2242's identical guard on webhookingest). This test runs SQL
+// Server's leg against a PRIVATE database with RCSI forced ON, because RCSI
+// ON is the case the fix exists for and the shared CI database's own RCSI
+// setting is not this test's to depend on. cleat#2243.
+//
+// Every subtest whose backend is optional SKIPS explicitly rather than
+// silently doing nothing: a loop over testutil.NewPluginTestBackends that
+// filters by dialect and falls through with no t.Run body when the dialect
+// is absent reports a trivial PASS, not a skip. cleat-review's nit on
+// cleat#2242; applied here too.
 func TestASendWebhookRacingAnOpenDeleteTransactionIsBlocked(t *testing.T) {
 	t.Run("postgres", func(t *testing.T) {
-		for _, be := range testutil.NewPluginTestBackends(t) {
-			if be.Dialect != testutil.DialectPostgres {
-				continue
-			}
-			defer be.Cleanup()
-			runSendWebhookRaceTest(t, plugin.DialectPostgres, be.DB)
-			return
+		db := testutil.TestDB(t, testutil.DialectPostgres)
+		runSendWebhookRaceTest(t, plugin.DialectPostgres, db)
+	})
+
+	t.Run("mysql", func(t *testing.T) {
+		if os.Getenv("CLEAT_TEST_MYSQL") == "" {
+			t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")
 		}
+		db := testutil.MySQLTestDB(t)
+		runSendWebhookRaceTest(t, plugin.DialectMySQL, db)
+	})
+
+	t.Run("mysql_read_committed", func(t *testing.T) {
+		if os.Getenv("CLEAT_TEST_MYSQL") == "" {
+			t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")
+		}
+		db := mysqlReadCommittedTestDB(t)
+		runSendWebhookRaceTest(t, plugin.DialectMySQL, db)
 	})
 
 	t.Run("mssql_rcsi_on", func(t *testing.T) {
@@ -70,6 +103,46 @@ func TestASendWebhookRacingAnOpenDeleteTransactionIsBlocked(t *testing.T) {
 		db := notificationsPrivateRCSIDatabase(t)
 		runSendWebhookRaceTest(t, plugin.DialectMSSQL, db)
 	})
+}
+
+// mysqlReadCommittedTestDB opens CLEAT_TEST_MYSQL with transaction_isolation
+// forced to READ-COMMITTED, the isolation level
+// docs/reference/database-backends.md actually recommends for this dialect
+// -- MySQL's default (REPEATABLE READ) gives INSERT ... SELECT an implicit
+// shared-lock read that masks the race FOR SHARE exists to close.
+//
+// The go-sql-driver/mysql DSN param, not a SET SESSION after connect: the
+// pool may hand runSendWebhookRaceTest's two concurrent statements (the
+// seeded create and the racing send_webhook) different pooled connections,
+// and a SET SESSION issued on only one of them would leave the other at the
+// default isolation with no visible error -- silently testing the wrong
+// thing. The DSN param applies to every connection the pool opens.
+func mysqlReadCommittedTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	base := os.Getenv("CLEAT_TEST_MYSQL")
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	dsn := base + sep + "transaction_isolation=%27READ-COMMITTED%27"
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("open MySQL at READ COMMITTED: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping MySQL at READ COMMITTED: %v", err)
+	}
+
+	var iso string
+	if err := db.QueryRow("SELECT @@transaction_isolation").Scan(&iso); err != nil {
+		t.Fatalf("read @@transaction_isolation: %v", err)
+	}
+	if iso != "READ-COMMITTED" {
+		t.Fatalf("precondition: @@transaction_isolation reads %q, want READ-COMMITTED -- "+
+			"mysqlReadCommittedTestDB's own setup is wrong, not the tree", iso)
+	}
+	return db
 }
 
 // runSendWebhookRaceTest holds handleDeleteWebhook's soft-delete UPDATE open
