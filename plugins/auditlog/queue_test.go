@@ -8,6 +8,7 @@ package auditlog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,6 +33,7 @@ type faultDB struct {
 	delay      time.Duration // every Begin takes this long
 	ackLost    int           // the next n commits succeed, and then report an error
 	panicBegin int           // the next n transactions panic, as a driver bug would
+	hang       chan struct{} // Begin blocks until this is closed AND IGNORES ctx, as lib/pq and go-mssqldb do while the database is paused
 	begins     atomic.Int64
 }
 
@@ -58,6 +60,12 @@ func (f *faultDB) Begin(ctx context.Context) (plugin.PluginTx, error) {
 	f.mu.Unlock()
 	if boom {
 		panic("injected: the driver panicked")
+	}
+	f.mu.Lock()
+	hang := f.hang
+	f.mu.Unlock()
+	if hang != nil {
+		<-hang
 	}
 	stall, delay, fail := f.settings()
 	if stall != nil {
@@ -126,7 +134,7 @@ type queueRig struct {
 	logs   *lockedLog
 	cancel context.CancelFunc
 	done   chan struct{}
-	lost   [3]atomic.Int64 // by lossReasons
+	lost   [len(lossReasons)]atomic.Int64 // by lossReasons
 }
 
 func (r *queueRig) hookLost() int64 {
@@ -427,8 +435,19 @@ func TestWhatShutdownCannotDrainIsCountedLostAsShutdown(t *testing.T) {
 			t.Errorf("%d events are still in the queue after shutdown returned", left)
 		}
 		r.settle(t)
-		if got := r.p.q.lost[2].Load(); got != 12 || r.p.q.recorded.Load() != 0 {
-			t.Errorf("shutdown losses %d, recorded %d, want 12 and 0 (insert_failed %d)", got, r.p.q.recorded.Load(), r.p.q.lost[1].Load())
+		// Up to two events (one per worker) were inside their 1s call when the 300ms drain ran out: shutdown
+		// counts those as shutdown_inflight and sweeps the rest as shutdown. How many were in flight depends
+		// on when each worker last took an event, so the test pins the sum and the bound, not the split.
+		sd, inflight := r.p.q.lost[lossIndex(lossShutdown)].Load(), r.p.q.lost[lossIndex(lossShutdownInflight)].Load()
+		if sd+inflight != 12 || inflight > 2 || r.p.q.lost[lossIndex(lossInsertFailed)].Load() != 0 {
+			t.Errorf("shutdown %d + shutdown_inflight %d, want 12 in all with at most 2 in flight (insert_failed %d)",
+				sd, inflight, r.p.q.lost[lossIndex(lossInsertFailed)].Load())
+		}
+		// When the stuck calls return (failing, after their second) the worker must not count them
+		// again: shutdown already owns them.
+		time.Sleep(1500 * time.Millisecond)
+		if total := r.p.q.lostTotal.Load(); total != 12 || r.p.q.recorded.Load() != 0 {
+			t.Errorf("after the stuck calls returned: lost %d (want 12, counted once each), recorded %d (want 0)", total, r.p.q.recorded.Load())
 		}
 	})
 }
@@ -554,9 +573,96 @@ func TestQueueConfigIsBounded(t *testing.T) {
 		t.Errorf("huge values are not held at the caps: %d %d %s %s %s",
 			c.bufferSize(), c.workers(), c.enqueueWait(), c.retryDeadline(), c.shutdownDrain())
 	}
+	// The host waits 30s for plugins to stop (cmd/cleat-worker/main.go), so the drain must stay below it.
+	if c.shutdownDrain() >= 30*time.Second {
+		t.Errorf("shutdown_drain may reach %s, which is not below the host's 30s", c.shutdownDrain())
+	}
 	c = Config{EnqueueWaitMs: 5000, RetryDeadlineMs: 100}
 	if c.retryDeadline() >= c.enqueueWait() {
 		t.Error("a retry_deadline shorter than enqueue_wait was rewritten")
+	}
+}
+
+// THE STALL THAT IGNORES ctx. faultDB's stall selects on ctx.Done(), which lib/pq and go-mssqldb do
+// not do while the database is paused, so that fake hid this: a worker inside a call that never
+// returns held shutdown open past shutdown_drain and past the host's 30s, and the buffered events
+// were never counted. Now shutdown is a timer: it returns at the deadline, counts the buffered
+// events as shutdown and the ones inside a call as shutdown_inflight.
+func TestShutdownReturnsAtItsDeadlineWhileTheDriverIgnoresCancellation(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		r := e.queueRig(t, Config{BufferSize: 16, Workers: 2, EnqueueWaitMs: 5000, ShutdownDrainMs: 400})
+		tenant := uuid.New()
+		hang := make(chan struct{})
+		r.db.set(func(f *faultDB) { f.hang = hang })
+		r.run(t)
+		defer close(hang) // frees the stuck workers when the test ends
+
+		for i := 0; i < 6; i++ {
+			r.send(tenant, i)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for r.db.begins.Load() < 2 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if r.db.begins.Load() < 2 {
+			t.Fatal("the two workers never entered the hung call, so this measures nothing")
+		}
+
+		start := time.Now()
+		r.cancel()
+		select {
+		case <-r.done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Run did not return: shutdown is waiting on workers stuck in the driver")
+		}
+		if took := time.Since(start); took > 3*time.Second {
+			t.Errorf("shutdown took %s with shutdown_drain_ms 400", took)
+		}
+		if got := r.lost[lossIndex(lossShutdown)].Load(); got != 4 {
+			t.Errorf("%d buffered events counted lost as shutdown, want 4", got)
+		}
+		if got := r.lost[lossIndex(lossShutdownInflight)].Load(); got != 2 {
+			t.Errorf("%d in-flight events counted lost as shutdown_inflight, want 2", got)
+		}
+		if err := r.p.Health(); err == nil || !strings.Contains(err.Error(), "shutdown_inflight 2") {
+			t.Errorf("Health() = %v, want it to report the in-flight loss", err)
+		}
+	})
+}
+
+// The 5-minute window must EXPIRE: an audit log that lost an event once and has been fine since
+// must stop degrading /healthz. Health reads lastLoss, so the test backdates it.
+func TestTheHealthWindowExpires(t *testing.T) {
+	p := &Plugin{}
+	if err := p.Health(); err != nil {
+		t.Fatalf("a plugin that has lost nothing reports %v", err)
+	}
+	p.q.lostTotal.Store(1)
+	p.q.lastLoss.Store(time.Now().Add(-healthWindow + time.Minute).UnixNano())
+	if err := p.Health(); err == nil {
+		t.Error("a loss 4 minutes ago does not degrade Health()")
+	}
+	p.q.lastLoss.Store(time.Now().Add(-healthWindow - time.Second).UnixNano())
+	if err := p.Health(); err != nil {
+		t.Errorf("a loss just past the window still degrades Health(): %v", err)
+	}
+}
+
+// The keys live in the flat plugin config shared by every plugin, so they carry the plugin's prefix.
+func TestQueueConfigKeysArePrefixed(t *testing.T) {
+	var c Config
+	err := json.Unmarshal([]byte(`{"audit_buffer_size":11,"audit_workers":7,"audit_enqueue_wait_ms":250,`+
+		`"audit_retry_deadline_ms":3000,"audit_shutdown_drain_ms":4000,"workers":99,"buffer_size":99}`), &c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.bufferSize() != 11 || c.workers() != 7 || c.enqueueWait() != 250*time.Millisecond ||
+		c.retryDeadline() != 3*time.Second || c.shutdownDrain() != 4*time.Second {
+		t.Errorf("the audit_ keys were not read: %d %d %s %s %s", c.bufferSize(), c.workers(), c.enqueueWait(), c.retryDeadline(), c.shutdownDrain())
+	}
+	// The unprefixed names belong to no one in a shared config, and are ignored.
+	if (Config{}).workers() != defaultWorkers {
+		t.Error("the zero config does not give the default")
 	}
 }
 

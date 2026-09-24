@@ -133,7 +133,7 @@ type Environment struct {
 
 	// EventsLost is how a plugin that buffers events reports the ones it gave up on, so the
 	// host can count them where an operator looks (cleat#2168). pluginName is the plugin's own
-	// name, reason a short fixed word (audit-log uses buffer_full, insert_failed, shutdown) and
+	// name, reason a short fixed word (audit-log uses buffer_full, insert_failed, shutdown, shutdown_inflight) and
 	// n how many. It is called once per loss and must not block.
 	//
 	// NIL MEANS "NOBODY IS COUNTING", and a plugin must still log every loss: the worker sets

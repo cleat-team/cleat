@@ -439,26 +439,93 @@ func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
-// unhealthyPlugins returns, by plugin name, the message of every loaded plugin whose Health() reports
-// an error. Only plugins that implement plugin.HasHealth are asked.
+// unhealthyPlugins returns, by plugin name, the message of every plugin whose Health() last reported
+// a problem. It reads a cache: /healthz is unauthenticated and polled by every kubelet and load
+// balancer, and Health() is the plugin's own code (pagerdutyalert's runs a cross-tenant SELECT), so
+// running it per request would let an anonymous caller drive database load and tie /healthz latency to
+// the plugin pool. pluginHealthLoop fills the cache off the request path. cleat#2168.
 func (w *Worker) unhealthyPlugins() map[string]string {
-	var out map[string]string
+	p := w.pluginHealth.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+const pluginHealthInterval = 10 * time.Second
+
+// pluginHealthCallTimeout is a variable so a test can shorten it.
+var pluginHealthCallTimeout = 5 * time.Second
+
+// refreshPluginHealth asks every plugin that implements plugin.HasHealth, and stores the answer.
+// A plugin whose Init failed (!Healthy) is not asked: its state is not one Health() can describe,
+// and it is already reported through Error. A call that does not answer within
+// pluginHealthCallTimeout, or whose previous call is still running, is UNKNOWN: it keeps the last
+// answer rather than degrading the worker on a slow answer or leaking a goroutine per tick.
+func (w *Worker) refreshPluginHealth() {
+	out := map[string]string{}
+	prev := w.pluginHealth.Load()
 	for _, lp := range w.plugList {
-		if lp == nil || lp.Plugin == nil {
+		if lp == nil || lp.Plugin == nil || !lp.Healthy {
 			continue
 		}
 		h, ok := lp.Plugin.(plugin.HasHealth)
 		if !ok {
 			continue
 		}
-		if err := h.Health(); err != nil {
-			if out == nil {
-				out = map[string]string{}
+		name := lp.Plugin.Info().Name
+		answered, err := w.callPluginHealth(name, h)
+		switch {
+		case !answered:
+			if prev != nil {
+				if msg, had := (*prev)[name]; had {
+					out[name] = msg
+				}
 			}
-			out[lp.Plugin.Info().Name] = err.Error()
+		case err != nil:
+			out[name] = err.Error()
 		}
 	}
-	return out
+	w.pluginHealth.Store(&out)
+}
+
+// callPluginHealth runs h.Health() on its own goroutine so a hung one cannot stall the refresh.
+func (w *Worker) callPluginHealth(name string, h plugin.HasHealth) (answered bool, err error) {
+	if _, running := w.pluginHealthRunning.LoadOrStore(name, struct{}{}); running {
+		return false, nil
+	}
+	res := make(chan error, 1)
+	go func() {
+		defer w.pluginHealthRunning.Delete(name)
+		plugin.RecoverGoroutine(name, nil, func() { res <- h.Health() })
+	}()
+	select {
+	case err := <-res:
+		return true, err
+	case <-time.After(pluginHealthCallTimeout):
+		w.logger.WarnContext(w.ctx, "plugin Health() did not answer in time; keeping its last reported state",
+			"worker_id", w.id, "plugin", name, "timeout", pluginHealthCallTimeout)
+		return false, nil
+	}
+}
+
+// pluginHealthLoop refreshes the cache every pluginHealthInterval, starting immediately.
+func (w *Worker) pluginHealthLoop() {
+	defer w.wg.Done()
+	w.healthTracker.setInterval("plugin_health", pluginHealthInterval)
+	w.refreshPluginHealth()
+	w.healthTracker.recordRun("plugin_health")
+	ticker := time.NewTicker(pluginHealthInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-w.getLoopCtx("plugin_health").Done():
+			return
+		case <-ticker.C:
+			w.healthTracker.recordRun("plugin_health")
+			w.refreshPluginHealth()
+		}
+	}
 }
 
 // handleDrain handles POST and GET /api/admin/drain for graceful worker drain.

@@ -37,6 +37,10 @@ const (
 	lossBufferFull   = "buffer_full"   // no room in the queue within enqueue_wait
 	lossInsertFailed = "insert_failed" // the database refused it until retry_deadline
 	lossShutdown     = "shutdown"      // the process stopped before it could be written
+	// lossShutdownInflight is an event that was inside a database call that had not returned when the
+	// shutdown drain ran out. It may still commit, so this is an upper bound: an overcount is better
+	// than silence.
+	lossShutdownInflight = "shutdown_inflight"
 )
 
 // Defaults, used when the config does not set a positive value.
@@ -69,7 +73,7 @@ const (
 	maxWorkers       = 64
 	maxEnqueueWait   = 30 * time.Second
 	maxRetryDeadline = time.Hour
-	maxShutdownDrain = 5 * time.Minute
+	maxShutdownDrain = 25 * time.Second
 )
 
 func clampedMs(ms int, def, max time.Duration) time.Duration {
@@ -122,14 +126,20 @@ type queueState struct {
 
 	sent      atomic.Int64 // events handed to enqueueAudit
 	recorded  atomic.Int64 // events on their chain, including ones a retry found already there
-	lost      [3]atomic.Int64
+	lost      [len(lossReasons)]atomic.Int64
 	lastLoss  atomic.Int64 // unix nano of the latest loss, 0 = none
-	lastLog   [3]atomic.Int64
-	suppress  [3]atomic.Int64
+	lastLog   [len(lossReasons)]atomic.Int64
+	suppress  [len(lossReasons)]atomic.Int64
 	lostTotal atomic.Int64
+
+	// inflight holds the id of every event inside persistGuarded right now. Whoever removes an id
+	// (LoadAndDelete) owns that event's accounting: its worker, when the attempt ends, or shutdown, when
+	// it gives up waiting. So an event is counted lost exactly once even if its call returns late.
+	inflight  sync.Map
+	abandoned atomic.Bool // set when the shutdown drain ran out: no new attempt may start
 }
 
-var lossReasons = [3]string{lossBufferFull, lossInsertFailed, lossShutdown}
+var lossReasons = [...]string{lossBufferFull, lossInsertFailed, lossShutdown, lossShutdownInflight}
 
 func lossIndex(reason string) int {
 	for i, r := range lossReasons {
@@ -172,8 +182,8 @@ func (p *Plugin) Health() error {
 	if last == 0 || time.Since(time.Unix(0, last)) > healthWindow {
 		return nil
 	}
-	return fmt.Errorf("audit-log lost %d event(s) (buffer_full %d, insert_failed %d, shutdown %d); the latest %s ago",
-		p.q.lostTotal.Load(), p.q.lost[0].Load(), p.q.lost[1].Load(), p.q.lost[2].Load(),
+	return fmt.Errorf("audit-log lost %d event(s) (buffer_full %d, insert_failed %d, shutdown %d, shutdown_inflight %d); the latest %s ago",
+		p.q.lostTotal.Load(), p.q.lost[0].Load(), p.q.lost[1].Load(), p.q.lost[2].Load(), p.q.lost[3].Load(),
 		time.Since(time.Unix(0, last)).Round(time.Second))
 }
 
@@ -263,16 +273,15 @@ func (p *Plugin) limit(giveUp time.Time) (time.Time, bool) {
 }
 
 // persist records ev, retrying a failed append with jittered backoff until retry_deadline (or the
-// end of the shutdown drain), and counts the event lost if it never lands. Nothing else drops it.
-func (p *Plugin) persist(ev queuedAuditEvent) {
+// end of the shutdown drain), and returns why if it never lands (the caller counts it). Nothing else drops it.
+func (p *Plugin) persist(ev queuedAuditEvent) (lossReason string, lastErr error) {
 	giveUp := time.Now().Add(p.config.retryDeadline())
 	backoff := retryBackoffMin
-	var lastErr error
 	for attempt := 1; ; attempt++ {
 		err := p.appendEvent(ev, attempt > 1)
 		if err == nil || errors.Is(err, errAlreadyRecorded) {
 			p.q.recorded.Add(1)
-			return
+			return "", nil
 		}
 		lastErr = err
 		if attempt == 1 {
@@ -285,8 +294,7 @@ func (p *Plugin) persist(ev queuedAuditEvent) {
 			if shutdown {
 				reason = lossShutdown
 			}
-			p.lose(reason, ev, lastErr)
-			return
+			return reason, lastErr
 		}
 		time.Sleep(wait)
 		if backoff *= 2; backoff > retryBackoffMax {
@@ -298,13 +306,42 @@ func (p *Plugin) persist(ev queuedAuditEvent) {
 // persistGuarded is persist with a panic turned into a counted loss. A panic in the database driver
 // or a hook would otherwise end the worker goroutine, shrinking the pool by one and dropping the
 // event in hand without a count, which is the silent loss this file exists to prevent.
+//
+// It also registers the event as in flight, so that shutdown can count it if the database call will
+// not return (see shutdown), and refuses to start an attempt once shutdown has given up waiting.
 func (p *Plugin) persistGuarded(ev queuedAuditEvent) {
+	p.q.inflight.Store(ev.id, struct{}{})
+	// mine reports whether this worker still owns the event's accounting: shutdown takes it, and
+	// counts the event as shutdown_inflight, if it stops waiting before the call returns.
+	mine := func() bool { _, ok := p.q.inflight.LoadAndDelete(ev.id); return ok }
 	defer func() {
-		if r := recover(); r != nil {
+		if r := recover(); r != nil && mine() {
 			p.lose(lossInsertFailed, ev, fmt.Errorf("panic while recording: %v", r))
 		}
 	}()
-	p.persist(ev)
+	if p.q.abandoned.Load() {
+		if mine() {
+			p.lose(lossShutdown, ev, errors.New("the process stopped before the event could be written"))
+		}
+		return
+	}
+	reason, err := p.persist(ev)
+	if mine() && reason != "" {
+		p.lose(reason, ev, err)
+	}
+}
+
+// loseInflight counts n events that were inside a database call when shutdown gave up waiting.
+func (p *Plugin) loseInflight(n int64) {
+	p.q.lost[lossIndex(lossShutdownInflight)].Add(n)
+	p.q.lostTotal.Add(n)
+	p.q.lastLoss.Store(time.Now().UnixNano())
+	if p.eventsLost != nil {
+		p.eventsLost("audit-log", lossShutdownInflight, n)
+	}
+	p.logger.Error("audit-log: AUDIT EVENTS POSSIBLY LOST: a database call had not returned when shutdown stopped waiting",
+		"reason", lossShutdownInflight, "events", n,
+		"note", "they may still commit; the count is an upper bound")
 }
 
 // startWorkers starts the pool. Each worker appends one event at a time; different tenants append
@@ -331,14 +368,9 @@ func (p *Plugin) startWorkers(ctx context.Context) {
 	}
 }
 
-// shutdown finishes the queue when the plugin is asked to stop: workers stop taking new events,
-// what is buffered is drained by the pool within shutdown_drain, and whatever is left after that is
-// counted lost. After it returns no event can be enqueued.
-func (p *Plugin) shutdown() {
-	deadline := time.Now().Add(p.config.shutdownDrain())
-	p.q.drainDeadline.Store(deadline.UnixNano())
+// drainOnShutdown waits for the workers, then drains what is buffered with a pool, until deadline.
+func (p *Plugin) drainOnShutdown(deadline time.Time) {
 	p.q.workers.Wait()
-
 	var wg sync.WaitGroup
 	for i := 0; i < p.config.workers(); i++ {
 		wg.Add(1)
@@ -357,8 +389,38 @@ func (p *Plugin) shutdown() {
 		}()
 	}
 	wg.Wait()
+}
 
-	// No send can land after this, so what is in the buffer now is exactly what is left.
+// shutdown finishes the queue when the plugin is asked to stop: what is buffered is drained within
+// shutdown_drain, and whatever is left after that is counted lost. After it returns no event can be
+// enqueued.
+//
+// THE DEADLINE IS A TIMER, NOT A WAIT ON THE WORKERS. The PostgreSQL and SQL Server drivers do not
+// honour a cancelled context while the database is unresponsive, so a worker can sit inside one
+// call for as long as the database stays stalled, and the host gives plugins only 30s before it
+// exits. Waiting for the workers would leave the buffer unswept and its events uncounted. So when
+// the timer fires the buffered events are counted lost (shutdown), the events inside a call that
+// has not returned are counted as shutdown_inflight, and shutdown returns while the workers are
+// still stuck. The in-flight count is an upper bound: those calls may yet commit.
+func (p *Plugin) shutdown() {
+	deadline := time.Now().Add(p.config.shutdownDrain())
+	p.q.drainDeadline.Store(deadline.UnixNano())
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		plugin.RecoverGoroutine("audit-log", nil, func() { p.drainOnShutdown(deadline) })
+	}()
+	timer := time.NewTimer(time.Until(deadline))
+	select {
+	case <-drained:
+	case <-timer.C:
+	}
+	timer.Stop()
+
+	// From here no goroutine starts an attempt, and no send can land, so what is in the buffer is
+	// exactly what is left.
+	p.q.abandoned.Store(true)
 	p.q.mu.Lock()
 	p.q.stopped = true
 	p.q.mu.Unlock()
@@ -366,8 +428,19 @@ func (p *Plugin) shutdown() {
 		select {
 		case ev := <-p.buffer:
 			p.lose(lossShutdown, ev, errors.New("the process stopped before the event could be written"))
+			continue
 		default:
-			return
 		}
+		break
+	}
+	var inflight int64
+	p.q.inflight.Range(func(id, _ any) bool {
+		if _, taken := p.q.inflight.LoadAndDelete(id); taken {
+			inflight++
+		}
+		return true
+	})
+	if inflight > 0 {
+		p.loseInflight(inflight)
 	}
 }

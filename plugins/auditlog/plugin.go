@@ -79,11 +79,11 @@ type Config struct {
 	// The queue (queue.go). Each is used only when positive; the defaults are the ones the
 	// owner chose on cleat#2168: an enqueue waits up to 1s for room, a failed append is retried
 	// for up to 60s, and shutdown drains for up to 10s.
-	BufferSize      int `json:"buffer_size"`       // events waiting for a worker; default 1000
-	Workers         int `json:"workers"`           // appends in parallel; default 4
-	EnqueueWaitMs   int `json:"enqueue_wait_ms"`   // how long a full queue holds a request; default 1000
-	RetryDeadlineMs int `json:"retry_deadline_ms"` // how long an event is retried; default 60000
-	ShutdownDrainMs int `json:"shutdown_drain_ms"` // how long shutdown drains; default 10000
+	BufferSize      int `json:"audit_buffer_size"`       // events waiting for a worker; default 1000
+	Workers         int `json:"audit_workers"`           // appends in parallel; default 4
+	EnqueueWaitMs   int `json:"audit_enqueue_wait_ms"`   // how long a full queue holds a request; default 1000
+	RetryDeadlineMs int `json:"audit_retry_deadline_ms"` // how long an event is retried; default 60000
+	ShutdownDrainMs int `json:"audit_shutdown_drain_ms"` // how long shutdown drains; default 10000
 }
 
 // Info returns plugin metadata for discovery and documentation.

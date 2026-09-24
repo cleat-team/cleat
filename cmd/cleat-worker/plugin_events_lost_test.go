@@ -12,20 +12,30 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/plugin"
 )
 
 // A plugin that reports its own health, and one that does not (cleat#2168).
 type healthPlugin struct {
-	name string
-	err  error
+	name  string
+	err   error
+	calls atomic.Int64
+	hang  chan struct{} // Health blocks until this is closed, when set
 }
 
 func (h *healthPlugin) Info() plugin.PluginInfo                         { return plugin.PluginInfo{Name: h.name} }
 func (h *healthPlugin) Init(context.Context, *plugin.Environment) error { return nil }
-func (h *healthPlugin) Health() error                                   { return h.err }
+func (h *healthPlugin) Health() error {
+	h.calls.Add(1)
+	if h.hang != nil {
+		<-h.hang
+	}
+	return h.err
+}
 
 type silentPlugin struct{}
 
@@ -49,10 +59,11 @@ func healthzOf(t *testing.T, api *apiServer) (int, map[string]any) {
 func TestHealthzReportsAnUnhealthyPluginAsDegradedAnd200(t *testing.T) {
 	api := newTestAPIServer(&mockStore{})
 	api.worker.plugList = []*plugin.LoadedPlugin{
-		{Plugin: silentPlugin{}},
-		{Plugin: &healthPlugin{name: "audit-log", err: errors.New("audit-log lost 3 event(s)")}},
-		{Plugin: &healthPlugin{name: "fine"}},
+		{Plugin: silentPlugin{}, Healthy: true},
+		{Plugin: &healthPlugin{name: "audit-log", err: errors.New("audit-log lost 3 event(s)")}, Healthy: true},
+		{Plugin: &healthPlugin{name: "fine"}, Healthy: true},
 	}
+	api.worker.refreshPluginHealth()
 	code, body := healthzOf(t, api)
 	if code != http.StatusOK {
 		t.Fatalf("/healthz = %d with an unhealthy plugin, want 200 (degraded, not failed)", code)
@@ -73,7 +84,8 @@ func TestHealthzReportsAnUnhealthyPluginAsDegradedAnd200(t *testing.T) {
 	}
 
 	// Healthy, and a plugin that does not implement HasHealth, are the plain answer.
-	api.worker.plugList = []*plugin.LoadedPlugin{{Plugin: silentPlugin{}}, {Plugin: &healthPlugin{name: "fine"}}}
+	api.worker.plugList = []*plugin.LoadedPlugin{{Plugin: silentPlugin{}, Healthy: true}, {Plugin: &healthPlugin{name: "fine"}, Healthy: true}}
+	api.worker.refreshPluginHealth()
 	code, body = healthzOf(t, api)
 	if code != http.StatusOK || len(body) != 1 || body["ok"] != true {
 		t.Errorf("/healthz with only healthy plugins = %d %v, want 200 {ok:true}", code, body)
@@ -164,4 +176,96 @@ func TestTheWorkerSetsEventsLostOnThePluginEnvironment(t *testing.T) {
 		t.Error("main.go's plugin.Environment does not set EventsLost from pluginEventsLostHook: every plugin's " +
 			"lost events would be logged and never counted")
 	}
+}
+
+// /healthz is unauthenticated and polled by every probe. Health() is plugin code (pagerdutyalert's runs a
+// cross-tenant SELECT), so it must never run on the request: 50 probes must cost 0 Health() calls.
+func TestHealthzDoesNotRunPluginHealthOnTheRequestPath(t *testing.T) {
+	api := newTestAPIServer(&mockStore{})
+	p := &healthPlugin{name: "counted", err: errors.New("down")}
+	api.worker.plugList = []*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}
+	api.worker.refreshPluginHealth()
+	if p.calls.Load() != 1 {
+		t.Fatalf("one refresh made %d Health() calls, want 1", p.calls.Load())
+	}
+	for i := 0; i < 50; i++ {
+		if code, body := healthzOf(t, api); code != 200 || body["reason"] != "plugin_unhealthy" {
+			t.Fatalf("probe %d: %d %v", i, code, body)
+		}
+	}
+	if n := p.calls.Load(); n != 1 {
+		t.Errorf("50 /healthz probes ran Health() %d more times: it is on the request path", n-1)
+	}
+}
+
+// A plugin whose Init failed is not asked, and one that hangs neither stalls the refresh nor is asked
+// again while the first call is still running.
+func TestPluginHealthSkipsAFailedInitAndSurvivesAHangingHealth(t *testing.T) {
+	api := newTestAPIServer(&mockStore{})
+	failedInit := &healthPlugin{name: "failed-init", err: errors.New("would report unhealthy")}
+	hang := make(chan struct{})
+	hung := &healthPlugin{name: "hung", hang: hang}
+	api.worker.plugList = []*plugin.LoadedPlugin{
+		{Plugin: failedInit, Healthy: false, Error: errors.New("init failed")},
+		{Plugin: hung, Healthy: true},
+	}
+	old := pluginHealthCallTimeoutForTest(200 * time.Millisecond)
+	defer old()
+	start := time.Now()
+	api.worker.refreshPluginHealth()
+	if failedInit.calls.Load() != 0 {
+		t.Error("Health() was called on a plugin whose Init failed")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("a hanging Health() held the refresh for %s", d)
+	}
+	api.worker.refreshPluginHealth() // the first call is still running: not asked again
+	if hung.calls.Load() != 1 {
+		t.Errorf("a plugin with a Health() call still running was asked %d times, want 1", hung.calls.Load())
+	}
+	if code, body := healthzOf(t, api); code != 200 || len(body) != 1 {
+		t.Errorf("an unanswered Health() degraded the worker: %d %v", code, body)
+	}
+	close(hang)
+}
+
+// The cache is filled by a loop, and a loop nobody launches leaves /healthz reporting every plugin
+// healthy forever: correct-looking, and measuring nothing. This reads setup.go for the launch call.
+func TestThePluginHealthLoopIsLaunched(t *testing.T) {
+	src, err := os.ReadFile("setup.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "setup.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launches := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "launchLoop" {
+			return true
+		}
+		if lit, ok := call.Args[0].(*ast.BasicLit); ok {
+			launches[strings.Trim(lit.Value, `"`)] = true
+		}
+		return true
+	})
+	if len(launches) < 5 {
+		t.Fatalf("found only %d launchLoop calls: the scan is broken, not the wiring", len(launches))
+	}
+	if !launches["plugin_health"] {
+		t.Error(`setup.go never calls launchLoop("plugin_health", ...): /healthz would never see a plugin's health`)
+	}
+}
+
+// pluginHealthCallTimeoutForTest sets the timeout and returns the function that restores it.
+func pluginHealthCallTimeoutForTest(d time.Duration) (restore func()) {
+	old := pluginHealthCallTimeout
+	pluginHealthCallTimeout = d
+	return func() { pluginHealthCallTimeout = old }
 }

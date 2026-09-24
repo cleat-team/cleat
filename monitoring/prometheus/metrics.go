@@ -409,7 +409,7 @@ func New(cfg Config) (*Metrics, error) {
 
 	m.pluginEventsLost, err = meter.Int64Counter(
 		"cleat_plugin_events_lost_total",
-		metric.WithDescription("Events a plugin gave up on and will never record, by plugin and reason (audit-log: buffer_full, insert_failed, shutdown). Any increase is a loss an operator should know about"),
+		metric.WithDescription("Events a plugin gave up on and will never record, by plugin and reason (audit-log: buffer_full, insert_failed, shutdown, shutdown_inflight). Any increase is a loss an operator should know about"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_plugin_events_lost_total: %w", err)

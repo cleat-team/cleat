@@ -36,37 +36,53 @@ queued events to their tenants' chains. That keeps a slow audit table from slowi
 cost this page states rather than hides.
 
 - **A full queue makes the request wait, briefly, and then gives the event up.** The wait is
-  `enqueue_wait_ms` (default 1,000). It is paid only while the queue is full, and it is the most the audit log
-  can ever add to a request, however long the database is down.
-- **A failed append is retried** with jittered backoff (100 ms doubling to 5 s) for up to
-  `retry_deadline_ms` (default 60,000). A retry first looks for its own event by `id` under the tenant's head
-  lock, so an append that committed but whose acknowledgement was lost is recorded once and never twice.
+  `audit_enqueue_wait_ms` (default 1,000, at most 30,000). It is paid only while the queue is full, and it is
+  the most the audit log can ever add to a request, however long the database is down.
+- **A failed append is retried** with jittered backoff (100 ms doubling to 5 s) until
+  `audit_retry_deadline_ms` (default 60,000): no new attempt starts after it. A retry first looks for its own
+  event by `id` under the tenant's head lock, so an append that committed but whose acknowledgement was lost is
+  recorded once and never twice.
 - **An event that is given up on is counted and logged, not dropped.** The reasons are `buffer_full` (no room
-  within the wait), `insert_failed` (the database refused it for the whole retry deadline) and `shutdown` (the
-  process stopped first; shutdown drains the queue for up to `shutdown_drain_ms`, default 10,000, and counts what
-  is left). Each is an `AUDIT EVENT LOST` Error log naming the tenant, method, path, status and the last
-  error (at most one line per reason per second, carrying how many more were lost in between), and the host
-  is told through `Environment.EventsLost`. While any loss is recent the plugin reports unhealthy
-  (`plugin.HasHealth`).
+  within the wait), `insert_failed` (the database refused it for the whole retry deadline), `shutdown` (the
+  process stopped while it was still queued; shutdown drains the queue for up to `audit_shutdown_drain_ms`,
+  default 10,000, and counts what is left) and `shutdown_inflight` (see below). Each is an `AUDIT EVENT LOST`
+  Error log naming the tenant, method, path, status and the last error (at most one line per reason per second,
+  carrying how many more were lost in between), and the host is told through `Environment.EventsLost`. While
+  any loss is recent the plugin reports unhealthy (`plugin.HasHealth`), which shows on `/healthz` as
+  `degraded` for five minutes.
 - **The event's `timestamp` is when the request finished**, not when it was appended.
+
+**The bounds are bounds on starting work, not on a call already in the database driver.** The PostgreSQL and
+SQL Server drivers do not honour a cancelled context while the database is unresponsive, so an attempt that
+began before a stall can stay inside the driver for as long as the stall lasts, past `audit_retry_deadline_ms`
+and past the shutdown drain. The process does not wait for it. The shutdown drain is a timer: when it runs out,
+whatever is still queued is counted as `shutdown`, and the events inside a driver call that has not returned
+are counted as `shutdown_inflight` and shutdown returns, because the host stops waiting for plugins after 30
+seconds and exits (`audit_shutdown_drain_ms` is capped at 25,000 for that reason). A `shutdown_inflight` event
+may still commit when the call returns, so that count is an upper bound: an overcount is better than silence.
 
 **Chain order is not timestamp order.** With several workers and retries, an event can be appended seconds
 after its request finished, so `seq` order and `timestamp` order can disagree. The chain is ordered by `seq`:
 verification, export and retention all read it that way (retention removes a prefix by `seq`, so a row whose
 timestamp is older than a later row's is not removed before it), and none assumes timestamps increase.
 
-**Consequence for time-windowed exports.** `from` and `to` select by the row's timestamp, which is the time of
-the request, so an event that was retried can be committed after its window was exported: it has the earlier
-timestamp and the later `seq`. A ranged export of a window that closed a minute ago can therefore be missing
-a row that a re-export a minute later contains, and a row can fall outside a window while its chain
-neighbours are inside (the export carries the gap in `seq`, as it always has for a range). Incremental
-collection should follow the chain by `seq` (the cursor, or `--expect-after` anchors), not by time; the lateness is bounded by
-`retry_deadline_ms` plus `enqueue_wait_ms`.
+**Consequence for anything that selects by time.** `from` and `to`, on `GET /audit/export` and on
+`GET /audit/events`, select by the row's timestamp, which is the time of the request. An event that was
+retried can be committed after a window was read: it has the earlier timestamp and the later `seq`. A poller
+that reads the window that closed a minute ago can therefore be missing a row that a read a minute later
+contains, and in an export a row can fall outside a window while its chain neighbours are inside (the export
+carries the gap in `seq`, as it always has for a range). Collect incrementally by `seq` (the export cursor,
+or `--expect-after` anchors), not by time. A time-based poller that must not miss rows should lag its window
+by more than `audit_retry_deadline_ms` plus `audit_enqueue_wait_ms` (61 seconds by default), and a stall the
+driver does not cancel can make an event later than that.
 
 **What this does not do: survive the process.** The queue is memory. A process that is killed loses the
 events it held, and nothing counts them, because nothing was running to count. A durable spool would close
-that; it is not built. `workers`, `buffer_size`, `enqueue_wait_ms`, `retry_deadline_ms` and `shutdown_drain_ms`
-are the plugin config keys (defaults 4, 1,000, 1,000, 60,000, 10,000). A zero or negative value means the default; a value above its cap (buffer 1,000,000, 64 workers, enqueue wait 30s, retry deadline 1h, shutdown drain 5min) is held at the cap.
+that; it is not built. `audit_workers`, `audit_buffer_size`, `audit_enqueue_wait_ms`,
+`audit_retry_deadline_ms` and `audit_shutdown_drain_ms` are the plugin config keys, prefixed because the
+plugin config is one flat object shared by every plugin (defaults 4, 1,000, 1,000, 60,000, 10,000). A zero or
+negative value means the default; a value above its cap (buffer 1,000,000, 64 workers, enqueue wait 30s, retry
+deadline 1h, shutdown drain 25s) is held at the cap.
 
 ## The chain
 
