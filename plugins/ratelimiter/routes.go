@@ -137,8 +137,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req rateLimitPut
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		p.writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.MaxRequests <= 0 {

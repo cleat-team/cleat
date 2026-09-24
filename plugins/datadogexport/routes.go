@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -95,17 +94,8 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("datadog-export: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createConfigRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.APIKey.Reveal() == "" {
@@ -136,7 +126,7 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO dd_config (tenant_id, id, name, site, metrics_prefix, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
 		`, p.dialect), tid, id, req.Name, site, prefix, now)
@@ -261,17 +251,8 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("datadog-export: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req updateConfigRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 

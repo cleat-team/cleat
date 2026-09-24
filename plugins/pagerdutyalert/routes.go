@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -84,17 +83,8 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("pagerduty: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createConfigRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -119,7 +109,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO pd_config (tenant_id, id, name, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, true, $4, $4)
 		`, p.dialect), tid, id, req.Name, now)
@@ -240,17 +230,8 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("pagerduty: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req updateConfigRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 

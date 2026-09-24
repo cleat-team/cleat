@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -86,17 +85,8 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("event-triggers: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req publishEventRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 
@@ -171,17 +161,8 @@ func (p *Plugin) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("event-triggers: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createSubscriptionRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 
@@ -202,6 +183,7 @@ func (p *Plugin) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 	now := time.Now()
 
 	var subID uuid.UUID
+	var err error
 	if p.dialect == plugin.DialectMySQL {
 		// MySQL: generate UUID on Go side, insert without RETURNING
 		subID = uuid.New()

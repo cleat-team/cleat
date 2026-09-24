@@ -1386,8 +1386,11 @@ func TestSB_CreateConfig_InvalidJSON(t *testing.T) {
 	}
 	var m map[string]string
 	sbReadJSON(t, rec, &m)
-	if m["error"] != "invalid JSON body" {
-		t.Errorf("want 'invalid JSON body', got %q", m["error"])
+	// cleat#2232: plugin.ReadJSONBody, not a hand-rolled json.NewDecoder,
+	// now serves this route, and its message includes the underlying JSON
+	// error rather than a fixed sentence.
+	if !strings.HasPrefix(m["error"], "invalid JSON: ") {
+		t.Errorf("want a message starting with 'invalid JSON: ', got %q", m["error"])
 	}
 }
 

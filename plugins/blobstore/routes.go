@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -56,13 +55,10 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the entire body.
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("blobstore: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
+	body, ok := plugin.ReadBody(w, r)
+	if !ok {
 		return
 	}
-	defer r.Body.Close()
 
 	if len(body) == 0 {
 		p.writeError(w, 400, "empty body")
@@ -112,7 +108,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	if storageBackend == "s3" {
 		s3Key = &sha256Hex
 	}
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(upsertBlobContent.For(p.dialect), p.dialect),
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(upsertBlobContent.For(p.dialect), p.dialect),
 		hash[:], len(body), storageBackend, s3Key)
 	if err != nil {
 		p.logger.Error("blobstore: store content", "key", key, "error", err)

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -86,17 +85,8 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("feature-flags: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createFlagRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.Key == "" {
@@ -119,7 +109,7 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO feature_flags (tenant_id, id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		`, p.dialect), tid, id, req.Key, req.Name, req.Description, req.Enabled,
@@ -254,17 +244,8 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("feature-flags: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req updateFlagRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 
@@ -395,17 +376,8 @@ func (p *Plugin) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("feature-flags: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req evaluateRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.Key == "" {
@@ -417,7 +389,7 @@ func (p *Plugin) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	var f flagJSON
 	// See plugin.JSONColumn: SQL Server returns JSON columns as strings.
 	var rules plugin.JSONColumn
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err := plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
