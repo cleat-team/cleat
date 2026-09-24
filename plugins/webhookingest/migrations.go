@@ -224,5 +224,98 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					MODIFY payload JSON NOT NULL DEFAULT ('{}');
 			`,
 		},
+		{
+			// webhook_sources.secret moves into tenant secrets, sealed under the
+			// same envelope encryption every other tenant secret uses. cleat#1992.
+			// Mirrors plugins/notifications/migrations.go's v5, which this
+			// plugin's #1992 sibling did first -- same column shape (DEFAULT
+			// ''), same reasoning, same fix.
+			//
+			// secret_configured REPLACES it rather than merely accompanying it.
+			// handleIngestWebhook can no longer answer "does this source have a
+			// signing secret" by looking at its own secret column -- that value
+			// now lives in a different store, envelope-encrypted, unreadable to
+			// a WHERE clause -- so the row carries the answer itself instead.
+			// The marker is honoured at ingest: unset means today's unsigned
+			// behaviour, unchanged; set means the secret MUST be readable, and
+			// any lookup failure (not found, empty, error) refuses the request
+			// rather than silently accepting an unsigned payload for a source
+			// that was supposed to require one.
+			//
+			// NO BACKFILL: 0.3.0 requires a fresh database, with no upgrade path
+			// from v0.2.0 (cleat#2058, owner decision 3), so no deployment ever
+			// has an existing plaintext secret to move -- ADD then DROP is
+			// unconditionally correct.
+			Version: 7,
+			Up: `
+				ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS secret_configured BOOLEAN NOT NULL DEFAULT false;
+				ALTER TABLE webhook_sources DROP COLUMN IF EXISTS secret;
+			`,
+			UpMySQL: `
+				ALTER TABLE webhook_sources ADD COLUMN secret_configured TINYINT(1) NOT NULL DEFAULT 0;
+				ALTER TABLE webhook_sources DROP COLUMN secret;
+			`,
+			// v1's secret column carries DEFAULT '', which SQL Server backs
+			// with an unnamed default constraint. DROP COLUMN refuses while
+			// any object still depends on the column (error 5074), so the
+			// constraint has to be found by its parent (object_id, column_id)
+			// and dropped by name before the column can go -- the same move
+			// plugins/tenantquota/migrations.go and
+			// plugins/notifications/migrations.go's v5 use.
+			//
+			// NO BEGIN/END, on purpose: plugin.splitStatements shreds a
+			// migration's SQL into separate exec calls on every literal ';',
+			// with no awareness of T-SQL block structure -- a BEGIN in one
+			// fragment and its END in another is two batches, neither valid
+			// on its own. Each statement below has to be independently
+			// complete. A missing 'secret' column makes the DECLARE/SELECT
+			// above set @dfname to NULL rather than error, so the
+			// constraint-drop step needs no existence guard of its own; only
+			// the column DROP does.
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'secret_configured')
+				ALTER TABLE webhook_sources ADD secret_configured BIT NOT NULL DEFAULT 0;
+
+				DECLARE @dfname sysname
+				SELECT @dfname = dc.name
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+					WHERE dc.parent_object_id = OBJECT_ID('webhook_sources') AND c.name = 'secret'
+				IF @dfname IS NOT NULL EXEC('ALTER TABLE webhook_sources DROP CONSTRAINT [' + @dfname + ']');
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'secret')
+				ALTER TABLE webhook_sources DROP COLUMN secret;
+			`,
+			// Down restores the SCHEMA, not the data -- the value is gone
+			// from webhook_sources the moment Up runs; it now lives in tenant
+			// secrets, a different store. No attempt to recover
+			// secret_configured's state into the restored column either:
+			// existing rows have nothing to put there.
+			Down: `
+				ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS secret TEXT NOT NULL DEFAULT '';
+				ALTER TABLE webhook_sources DROP COLUMN IF EXISTS secret_configured;
+			`,
+			DownMySQL: `
+				ALTER TABLE webhook_sources ADD COLUMN secret VARCHAR(255) NOT NULL DEFAULT '';
+				ALTER TABLE webhook_sources DROP COLUMN secret_configured;
+			`,
+			// Mirrors Up's DROP COLUMN secret above -- secret_configured's own
+			// DEFAULT 0 gets an unnamed constraint too, and no BEGIN/END for
+			// the same splitStatements reason given on UpMSSQL.
+			DownMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'secret')
+				ALTER TABLE webhook_sources ADD secret NVARCHAR(MAX) NOT NULL DEFAULT '';
+
+				DECLARE @dfname sysname
+				SELECT @dfname = dc.name
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+					WHERE dc.parent_object_id = OBJECT_ID('webhook_sources') AND c.name = 'secret_configured'
+				IF @dfname IS NOT NULL EXEC('ALTER TABLE webhook_sources DROP CONSTRAINT [' + @dfname + ']');
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'secret_configured')
+				ALTER TABLE webhook_sources DROP COLUMN secret_configured;
+			`,
+		},
 	}
 }

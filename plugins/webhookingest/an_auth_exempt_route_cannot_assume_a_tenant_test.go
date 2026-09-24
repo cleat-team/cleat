@@ -2,6 +2,9 @@ package webhookingest
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -97,6 +100,24 @@ func TestAnAuthExemptRouteCannotAssumeATenant(t *testing.T) {
 	p.db = &engine.SQLDBAdapter{DB: rls, Dialect: dialect}
 	p.env = &plugin.Environment{Dialect: dialect, Logger: quiet}
 
+	// A REAL SecretStore: cleat#1992/#2172, owner decision (b), made a
+	// signing secret mandatory, so this route's own signature check -- not
+	// just its tenant scoping -- is on the path this test exercises. Sealed
+	// under the OWNER connection (su), not rls: the RLS connection is the
+	// thing under test for webhook_sources/webhook_events, and tenant_secrets
+	// is not part of that -- routing it through su keeps this test's own
+	// setup from depending on a second policy it is not about.
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = 0x5a
+	}
+	ring, err := engine.NewKeyRing(engine.VersionedKey{Version: 1, Key: key})
+	if err != nil {
+		t.Fatalf("build key ring: %v", err)
+	}
+	secretStore := engine.NewSecretStoreWithRing(su, string(dialect), ring)
+	p.secrets = engine.NewPluginSecrets(secretStore)
+
 	// THE TWO CONNECTIONS MUST BE ON THE SAME DATABASE. If this is ever
 	// violated every seed below succeeds, the rows land somewhere real, and
 	// every read finds nothing -- which reads as a broken statement rather than
@@ -130,21 +151,45 @@ func TestAnAuthExemptRouteCannotAssumeATenant(t *testing.T) {
 	// The other tenant's source is seeded FIRST, and it is the reason the
 	// lookup's predicate is evaluated at all.
 	//
-	// signal_workflow_id is written explicitly as the empty string, not left to
-	// the column's NULL. The column is nullable with no default while
-	// handleIngestWebhook scans it into a plain string, so a NULL there fails
-	// the lookup with "converting NULL to string is unsupported" -- which
-	// arrives as the same 500 this test exists to catch, from an unrelated
-	// cause. handleCreateSource always writes a Go string, so the API cannot
-	// produce that row; seeding it this way is faithful to what exists rather
-	// than papering over it.
+	// signal_workflow_id is written explicitly as the empty string here. The
+	// column is nullable with no default, and handleCreateSource DOES leave
+	// it NULL for a source created with no signal_workflow_id -- routes.go's
+	// three SELECTs now COALESCE it to '' before scanning (cleat#1992 found
+	// this: an uncoalesced NULL there fails with "converting NULL to string
+	// is unsupported", the same 500 this test exists to catch, from an
+	// unrelated cause). Seeding '' rather than NULL here just avoids
+	// depending on that COALESCE to reach the assertions below.
+	//
+	// secret_configured = true for both: cleat#1992/#2172, owner decision
+	// (b), made a signing secret mandatory, so a real row can no longer read
+	// false here. Only "mine"'s secret is actually seeded into the store
+	// below -- "theirs" never needs to be readable, since nothing in this
+	// test ingests against it.
+	// tenant_secrets carries a foreign key to admin.tenants (cleat#1992's own
+	// finding, this same PR): neither "mine" nor "theirs" is the seeded
+	// default tenant, so each needs its own row here before Put below can
+	// succeed. ON CONFLICT DO NOTHING because mine/theirs are FIXED uuids
+	// (unlike sourceID etc. above) and SuiteTestDB's database PERSISTS
+	// between runs -- a second run of this test hits a duplicate key on a
+	// plain INSERT.
+	if _, err := su.ExecContext(ctx,
+		`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2), ($3, $4)
+		 ON CONFLICT (tenant_id) DO NOTHING`,
+		mine, "cleat-1992-mine", theirs, "cleat-1992-theirs"); err != nil {
+		t.Fatalf("seed admin.tenants for mine and theirs: %v", err)
+	}
+
+	const mineSecret = "mine-tenant-secret"
 	if _, err := su.ExecContext(ctx,
 		`INSERT INTO `+schema+`.webhook_sources
-		     (id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name)
-		 VALUES ($1, $2, 'theirs', 'generic', '', true, '', 'webhook_received'),
-		        ($3, $4, 'mine',   'generic', '', true, '', 'webhook_received')`,
+		     (id, tenant_id, name, source_type, secret_configured, enabled, signal_workflow_id, signal_name)
+		 VALUES ($1, $2, 'theirs', 'generic', true, true, '', 'webhook_received'),
+		        ($3, $4, 'mine',   'generic', true, true, '', 'webhook_received')`,
 		otherSourceID, theirs, sourceID, mine); err != nil {
 		t.Fatalf("seeding both tenants' sources: %v", err)
+	}
+	if err := p.secrets.ForTenant(mine.String()).Put(ctx, WebhookIngestSecretName(sourceID), mineSecret); err != nil {
+		t.Fatalf("seed mine's ingest secret: %v", err)
 	}
 
 	// THE POSITIVE CONTROL, and it runs before anything about the handler.
@@ -154,7 +199,7 @@ func TestAnAuthExemptRouteCannotAssumeATenant(t *testing.T) {
 	// is installed and fail-closed on this connection: a tenantless read must
 	// RAISE, not return rows and not return zero rows.
 	var n int
-	err := rls.QueryRowContext(ctx, `SELECT count(*) FROM `+schema+`.webhook_sources`).Scan(&n)
+	err = rls.QueryRowContext(ctx, `SELECT count(*) FROM `+schema+`.webhook_sources`).Scan(&n)
 	if err == nil {
 		t.Fatalf("UNMEASURED: a read of webhook_sources with no tenant set returned %d rows "+
 			"instead of raising. The policy is absent, or this connection bypasses it, and "+
@@ -166,11 +211,17 @@ func TestAnAuthExemptRouteCannotAssumeATenant(t *testing.T) {
 	}
 
 	// The request as the route actually receives it: no tenant in the context,
-	// because cmd/cleat-worker exempts this path from auth.
+	// because cmd/cleat-worker exempts this path from auth. Signed with
+	// mine's secret -- required unconditionally since cleat#2172 (b).
+	const ingestPayload = `{"hello":"world"}`
+	mac := hmac.New(sha256.New, []byte(mineSecret))
+	mac.Write([]byte(ingestPayload))
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	req := httptest.NewRequest(http.MethodPost, "/ingest/"+sourceID.String(),
-		strings.NewReader(`{"hello":"world"}`))
+		strings.NewReader(ingestPayload))
 	req.SetPathValue("source_id", sourceID.String())
 	req.Header.Set("X-Event-Type", "push")
+	req.Header.Set("X-Hub-Signature-256", sig)
 	rec := httptest.NewRecorder()
 
 	p.handleIngestWebhook(rec, req)
