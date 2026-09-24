@@ -106,6 +106,24 @@ func validateHeartbeat(heartbeat time.Duration) error {
 		heartbeat, stale, engine.SecretKeyLiveWindow, int((limit.Truncate(time.Second)+time.Second)/time.Second))
 }
 
+// validateHeartbeatMaxConnections refuses a negative --heartbeat-max-connections.
+//
+// REFUSED, NOT CLAMPED, mirroring validateHeartbeat and validateReclaimTimeout
+// above: silently clamping a negative value to 0 would hand the operator a
+// worker running with the reserved pool disabled, having asked for something
+// else entirely. Zero itself stays valid and documented -- it means "no
+// separate pool, share the execution pool as before" -- so only strictly
+// negative values are refused.
+func validateHeartbeatMaxConnections(maxConns int) error {
+	if maxConns >= 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"--heartbeat-max-connections %d is negative: use 0 to disable the reserved heartbeat pool, "+
+			"or a positive number of connections to reserve.",
+		maxConns)
+}
+
 func (w *Worker) membershipTick(staleAfter time.Duration) {
 	ctx := w.ctx
 

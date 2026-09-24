@@ -50,6 +50,7 @@ func TestTheCensusFollowsTheFlags(t *testing.T) {
 		{"no separate plugin pool", connectionBudget{Core: 15, Flusher: 50}, 65},
 		{"two shards", connectionBudget{Core: 15, Plugin: 10, Flusher: 50, Shards: 2 * shardPoolMaxConns}, 105},
 		{"migrating", connectionBudget{Core: 15, Plugin: 10, Flusher: 50, Migrate: migratePoolMaxConns}, 77},
+		{"heartbeat pool reserved", connectionBudget{Core: 15, Plugin: 10, Flusher: 50, Heartbeat: 3}, 78},
 		{"nothing configured", connectionBudget{}, 0},
 	} {
 		if got := tc.b.Fixed(); got != tc.fixed {
