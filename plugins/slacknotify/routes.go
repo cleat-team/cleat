@@ -22,7 +22,7 @@ func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	mux.HandleFunc("GET /slack/configs/{id}", p.handleGetConfig)
 	mux.HandleFunc("PUT /slack/configs/{id}", p.handleUpdateConfig)
 	mux.HandleFunc("DELETE /slack/configs/{id}", p.handleDeleteConfig)
-	mux.HandleFunc("POST /slack/interactive", p.handleInteractiveCallback)
+	mux.Handle("POST /slack/interactive", plugin.MaxBody(interactiveMaxBodySize, p.handleInteractiveCallback))
 	return nil
 }
 

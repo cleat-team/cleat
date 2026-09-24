@@ -318,31 +318,70 @@ func TestSN_InteractiveCallback_MissingPayload(t *testing.T) {
 	}
 }
 
-// TestSN_InteractiveCallback_OversizedBody is cleat-review's #2231 DoS
-// finding, known-positive: before interactiveMaxBodySize, io.ReadAll(r.Body)
-// had no bound, and the route is public (cleat#2172's auth-middleware
-// exemption, this same PR), so an anonymous POST far larger than any
-// legitimate Slack payload could allocate arbitrarily before the signature
-// check ran. A body over the bound must be refused with 413, never reach
-// signature verification, and never call signalWorkflow.
-func TestSN_InteractiveCallback_OversizedBody(t *testing.T) {
-	p, mux := interactiveServer(t)
-	signalCalled := false
-	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
-		signalCalled = true
-		return nil
+// capturingRouter is a plugin.Router that records the handler registered for
+// each pattern, so a test can inspect what RegisterRoutes declared without a
+// real host adapter -- there is exactly one of those, and it is wired up in
+// cmd/cleat-worker/main.go, a `main` package no plugin's own test can import.
+type capturingRouter struct {
+	handlers map[string]http.Handler
+}
+
+func (c *capturingRouter) Handle(pattern string, handler http.Handler) {
+	if c.handlers == nil {
+		c.handlers = map[string]http.Handler{}
+	}
+	c.handlers[pattern] = handler
+}
+
+func (c *capturingRouter) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	c.Handle(pattern, http.HandlerFunc(handler))
+}
+
+// TestSN_InteractiveCallback_DeclaresItsOwnBodyLimit is cleat-review's #2231
+// DoS finding, adapted for cleat#2232's design A: before interactiveMaxBodySize,
+// io.ReadAll(r.Body) had no bound, and the route is public (cleat#2172's
+// auth-middleware exemption, this same PR), so an anonymous POST far larger
+// than any legitimate Slack payload could allocate arbitrarily before the
+// signature check ran.
+//
+// The ENFORCEMENT of that bound moved out of this plugin in cleat#2232: the
+// host's plugin-route adapter (cmd/cleat-worker/main.go) is what actually
+// applies http.MaxBytesReader before a plugin handler ever runs, reading the
+// limit off plugin.MaxBodyLimit. That adapter lives in a `main` package,
+// which no plugin's own test can import to exercise end-to-end -- see
+// TestPluginRouteOversizedBodyIs413 in cmd/cleat-worker for the real,
+// host-adapter-backed 413 check on this exact route and on webhookingest's
+// /ingest/{source_id}, both auth-exempt.
+//
+// What THIS test can and must still assert, entirely within this package: the
+// registration itself pins the ceiling via plugin.MaxBody(interactiveMaxBodySize,
+// ...) rather than leaving the route at the host's configurable default --
+// see interactiveMaxBodySize's doc comment for why that pinning matters (an
+// operator raising --plugin-max-body-size for another route must not also
+// raise this one's).
+func TestSN_InteractiveCallback_DeclaresItsOwnBodyLimit(t *testing.T) {
+	p := &Plugin{
+		logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		deploymentSecrets: &fakeInteractiveDeploymentSecrets{secret: testSigningSecret},
+	}
+	router := &capturingRouter{}
+	if err := p.RegisterRoutes(router); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	oversized := strings.Repeat("a", interactiveMaxBodySize+1)
-	req := httptest.NewRequest("POST", "/slack/interactive", strings.NewReader(oversized))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Errorf("expected 413 for an oversized body, got %d: %s", rec.Code, rec.Body.String())
+	handler, ok := router.handlers["POST /slack/interactive"]
+	if !ok {
+		t.Fatal("POST /slack/interactive was not registered")
 	}
-	if signalCalled {
-		t.Error("signal must not be delivered for an oversized body")
+	limit, ok := plugin.MaxBodyLimit(handler)
+	if !ok {
+		t.Fatal("POST /slack/interactive was registered with mux.Handle but declares no " +
+			"plugin.MaxBody ceiling -- it would fall through to the host's configurable " +
+			"--plugin-max-body-size default instead of staying pinned at interactiveMaxBodySize")
+	}
+	if limit != interactiveMaxBodySize {
+		t.Errorf("POST /slack/interactive declares a %d-byte ceiling, want %d (interactiveMaxBodySize)",
+			limit, interactiveMaxBodySize)
 	}
 }
 
