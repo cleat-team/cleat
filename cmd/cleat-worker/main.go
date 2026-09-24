@@ -989,6 +989,10 @@ func main() {
 			"key_versions", secretRing.Versions())
 	}
 	secretStore := engine.NewSecretStoreWithRing(db, string(factory.Dialect()), secretRing)
+	// deployment_secrets shares tenant secrets' ring (cleat#1992 part 1) --
+	// domain separation is carried by engine.DeploymentSecretStore's own HKDF
+	// info string and AAD, not a second master key.
+	deploymentSecretStore := engine.NewDeploymentSecretStore(db, string(factory.Dialect()), secretRing)
 	// checkSecretsUsable runs AFTER the migrations below, not here: it reads
 	// tenant_secrets, which does not exist until migration 080 has applied, and a
 	// check that has to tolerate a missing table is a check that tolerates every
@@ -1075,8 +1079,9 @@ func main() {
 		// Every method on both then returns a clear "not configured" error
 		// rather than panicking, which is what lets these be assigned
 		// unconditionally instead of behind an if.
-		Secrets:  engine.NewPluginSecrets(secretStore),
-		Payloads: engine.NewPluginPayloads(payloadEncryption),
+		Secrets:           engine.NewPluginSecrets(secretStore),
+		Payloads:          engine.NewPluginPayloads(payloadEncryption),
+		DeploymentSecrets: engine.NewPluginDeploymentSecrets(deploymentSecretStore),
 	}
 
 	var err error
@@ -1318,6 +1323,16 @@ func main() {
 				}
 			}
 		}()
+	}
+
+	// cleat#1992 part 1: fail closed if an ENABLED plugin's required
+	// deployment secret is missing or unopenable, rather than starting and
+	// having every call that plugin serves fail individually. See
+	// checkRequiredDeploymentSecrets (setup.go) for why this runs after Init
+	// rather than folded into it.
+	if rErr := checkRequiredDeploymentSecrets(ctx, plugList, pluginEnv.Config, deploymentSecretStore); rErr != nil {
+		logger.ErrorContext(context.Background(), "refusing to start: "+rErr.Error(), "worker_id", workerID)
+		os.Exit(1)
 	}
 
 	for _, lp := range plugList {

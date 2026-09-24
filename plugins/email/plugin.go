@@ -119,3 +119,11 @@ func (p *Plugin) sendGridAPIKey(ctx context.Context) (string, error) {
 	}
 	return key, nil
 }
+
+// RequiredDeploymentSecrets implements plugin.HasRequiredDeploymentSecrets.
+// Unconditional: this is only consulted for a plugin Init already accepted
+// (a config section is present), and every call this plugin serves needs the
+// SendGrid key, so there is no enabled-but-key-optional case to encode here.
+func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
+	return []string{"email.sendgrid_api_key"}, nil
+}

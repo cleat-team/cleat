@@ -88,3 +88,24 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.logger.Info("llm: initialized", "providers", len(p.config.Providers))
 	return nil
 }
+
+// RequiredDeploymentSecrets implements plugin.HasRequiredDeploymentSecrets:
+// one "llm.providers.<provider>.api_key" per ENABLED provider, excluding
+// ollama, which providerAPIKey (host_functions.go) never looks up because
+// OllamaChat/OllamaChatStream take no key at all.
+func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
+	var cfg Config
+	if len(config) > 0 {
+		if err := json.Unmarshal(config, &cfg); err != nil {
+			return nil, fmt.Errorf("llm: invalid config: %w", err)
+		}
+	}
+	var names []string
+	for provider, pc := range cfg.Providers {
+		if !pc.Enabled || provider == "ollama" {
+			continue
+		}
+		names = append(names, "llm.providers."+provider+".api_key")
+	}
+	return names, nil
+}

@@ -551,3 +551,28 @@ type HasHealth interface {
 	Plugin
 	Health() error // nil = healthy
 }
+
+// HasRequiredDeploymentSecrets: plugin names the deployment secrets it
+// cannot run without, given the same raw config bytes Init receives
+// (cleat#1992 part 1).
+//
+// Checked by the worker AFTER Init succeeds, not during it: Init's own
+// config-presence check is what decides whether the plugin is enabled at
+// all (see Environment.Config's doc comment, and ErrNotConfigured), and a
+// plugin with no config section is skipped before this is ever consulted.
+// This interface answers a narrower, later question -- for a plugin that IS
+// enabled, which of its deployment secrets must actually resolve before the
+// worker is allowed to serve traffic.
+//
+// RequiredDeploymentSecrets returns the deployment-secret NAMES this
+// instance needs (e.g. "email.sendgrid_api_key", or one
+// "llm.providers.<provider>.api_key" per enabled provider) -- not whether
+// they currently resolve. The worker checks that separately, against
+// Environment.DeploymentSecrets, and refuses to start if any is missing or
+// unopenable: a plugin enabled but unable to reach its own credential is
+// worse than one not enabled at all, because every call it serves fails
+// individually instead of the worker saying so once, at boot.
+type HasRequiredDeploymentSecrets interface {
+	Plugin
+	RequiredDeploymentSecrets(config []byte) ([]string, error)
+}
