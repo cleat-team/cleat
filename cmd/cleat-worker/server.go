@@ -903,42 +903,16 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Inject entry point into input if provided.
-	//
-	// FLAT-MERGED, not nested. determineEntryPoint (cmd/cleat-worker/setup.go)
-	// documents its option 1 as "an explicit __entry_point field IN THE START
-	// INPUT" -- a sibling of the entry's own fields, exactly the shape
-	// cmd/cleat-bench/main.go already uses: `{"__entry_point":"...","order_id":"..."}`.
-	// No guest -- Go's generated dispatcher included -- unwraps an "input" key
-	// or strips __entry_point; wf.Input reaches the guest verbatim
-	// (cmd/cleat-worker/setup.go: inputJSON := wf.Input). This used to wrap
-	// instead: `{"input": originalInput, "__entry_point": ...}`, which
-	// determineEntryPoint still resolved correctly (it only reads the
-	// top-level key) but corrupted the entry's own input, which arrived as
-	// the wrong shape and failed to deserialize. cleat#2108, found live while
-	// verifying cleat#2097/#2109 against examples/rust-workflow.
-	//
-	// Refused rather than silently discarded when the input isn't a JSON
-	// object: there is no field to merge __entry_point into. The prior code
-	// let json.Unmarshal's error pass silently and merged into a nil map,
-	// which regenerated as {"input":null,"__entry_point":"..."} -- the
-	// caller's actual input vanished into "null" with no indication why.
-	in := input.Input
-	if input.EntryPoint != "" {
-		var originalInput map[string]any
-		if err := json.Unmarshal(input.Input, &originalInput); err != nil || originalInput == nil {
-			s.writeError(w, 400, fmt.Sprintf(
-				"entry_point requires \"input\" to be a JSON object so __entry_point can be merged into it "+
-					"(got %s): %v", string(input.Input), err))
-			return
-		}
-		originalInput["__entry_point"] = input.EntryPoint
-		merged, marshalErr := json.Marshal(originalInput)
-		if marshalErr != nil {
-			s.writeError(w, 500, "encoding input with entry_point: "+marshalErr.Error())
-			return
-		}
-		in = merged
+	// Inject entry point into input if provided. plugin.MergeEntryPoint is the
+	// one place this flat-merge shape is implemented -- cleat#2108 found this
+	// handler WRAPPING instead of merging, and cleat#2114 gave the
+	// event-triggers plugin's start path the same job, so it is a shared
+	// helper rather than a second copy free to drift the way #2108's did.
+	// See its doc comment for why the shape matters.
+	in, err := plugin.MergeEntryPoint(input.Input, input.EntryPoint)
+	if err != nil {
+		s.writeError(w, 400, err.Error())
+		return
 	}
 
 	// Support Concurrency-Key header or JSON body field (Feature 5).

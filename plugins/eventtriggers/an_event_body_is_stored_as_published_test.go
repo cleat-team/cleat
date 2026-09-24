@@ -227,11 +227,12 @@ func TestAnEventBodyIsStoredAsPublished(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type fakeSubscription struct {
-	id      uuid.UUID
-	defName string
-	tmpl    json.RawMessage
-	filter  string
-	enabled bool
+	id         uuid.UUID
+	defName    string
+	tmpl       json.RawMessage
+	filter     string
+	enabled    bool
+	entryPoint string
 }
 
 type recordingDB struct {
@@ -314,7 +315,7 @@ func (r *subscriptionRows) Err() error   { return nil }
 func (r *subscriptionRows) Scan(dest ...any) error {
 	s := r.subs[r.i]
 	return assignRow(dest, []any{
-		s.id.String(), uuid.Nil.String(), "order.created", s.defName, "main",
+		s.id.String(), uuid.Nil.String(), "order.created", s.defName, s.entryPoint,
 		[]byte(s.tmpl), s.filter, s.enabled, time.Unix(0, 0).UTC(), int64(3),
 	})
 }

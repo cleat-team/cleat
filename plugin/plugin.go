@@ -29,6 +29,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 )
 
@@ -190,6 +191,58 @@ type StartRequest struct {
 
 	// TenantID is the tenant the started run belongs to, as a UUID string.
 	TenantID string
+
+	// EntryPoint names the workflow entry point to start, for a multi-entry
+	// workflow. Empty means implicit resolution -- today that is
+	// determineEntryPoint's single-entry-point shortcut or its
+	// firstHandleExport fallback; once a workflow declares more than one
+	// entry point, an empty EntryPoint here is exactly as ambiguous as an
+	// empty entry_point on the public start API, and is resolved (or
+	// refused) the same way. cleat#2114.
+	//
+	// Merge it into Input with MergeEntryPoint before calling StartWorkflow
+	// -- callers must not roll their own merge. See MergeEntryPoint's doc
+	// comment for why the shape (flat, not nested) matters.
+	EntryPoint string
+}
+
+// MergeEntryPoint flat-merges an entry point name into a JSON object input,
+// as a sibling field "__entry_point" -- the one shape determineEntryPoint
+// (cmd/cleat-worker/setup.go) actually reads: "an explicit __entry_point
+// field IN THE START INPUT". No guest -- Go's generated dispatcher included
+// -- unwraps a nested "input" key or strips __entry_point, so wf.Input must
+// reach the guest with __entry_point sitting flat alongside the entry's own
+// fields, not wrapping them.
+//
+// cleat#2108 found the REST start API doing this wrong -- wrapping instead
+// of merging, `{"input": originalInput, "__entry_point": ...}` -- which
+// determineEntryPoint still resolved (it only reads the top-level key) but
+// corrupted the entry's own input, so the guest failed to deserialize it.
+// cleat#2114 is the same shape one seam over: event-triggered starts built
+// plugin.StartRequest with no way to express an entry point at all. Both
+// paths call this one helper so there is exactly one place that shape is
+// implemented, instead of a second copy free to drift the way #2108's did.
+//
+// entryPoint == "" is a no-op: input is returned unchanged (todays implicit
+// resolution). A non-empty entryPoint against a non-object input is
+// refused -- there is no field to merge __entry_point into, and silently
+// discarding the caller's input (as the pre-#2108 code did, producing
+// {"input":null,"__entry_point":...}) is worse than an explicit error.
+func MergeEntryPoint(input json.RawMessage, entryPoint string) (json.RawMessage, error) {
+	if entryPoint == "" {
+		return input, nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(input, &obj); err != nil || obj == nil {
+		return nil, fmt.Errorf("entry_point requires the input to be a JSON object so __entry_point "+
+			"can be merged into it (got %s): %w", string(input), err)
+	}
+	obj["__entry_point"] = entryPoint
+	merged, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("encoding input with entry_point: %w", err)
+	}
+	return merged, nil
 }
 
 // AuditLogger is the interface for recording plugin lifecycle events.

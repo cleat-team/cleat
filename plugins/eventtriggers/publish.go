@@ -259,6 +259,7 @@ func triggerMatchingWorkflows(
 				Input:          inputJSON,
 				IdempotencyKey: fmt.Sprintf("eventtrigger:%s:%s", eventID, sub.ID),
 				TenantID:       tenantID.String(),
+				EntryPoint:     sub.EntryPoint,
 			}
 			runID, err := env.StartWorkflow(ctx, req)
 			if err != nil {
