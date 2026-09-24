@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/cleat-team/cleat/auth"
 )
 
 // handleExport handles GET /audit/export: the caller's tenant's audit log as JSON Lines.
@@ -18,8 +18,10 @@ import (
 // owner's decision on cleat#2047: cleat has no roles yet, cleat#2169). There is no
 // cross-tenant variant over HTTP; an operator uses `cleatctl audit export --all-tenants`.
 func (p *Plugin) handleExport(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	// ok, not tid != uuid.Nil: the seeded default tenant IS the zero UUID, and comparing
+	// to it rejects that tenant's own valid API key on every route that does (cleat#2183).
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, http.StatusUnauthorized, "tenant required")
 		return
 	}
@@ -88,8 +90,10 @@ func (p *Plugin) handleExport(w http.ResponseWriter, r *http.Request) {
 // a 500 means the check could not be made. The plugin's own retention_days is passed, so a
 // floor over rows too young to have expired is reported.
 func (p *Plugin) handleVerify(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	// ok, not tid != uuid.Nil: the seeded default tenant IS the zero UUID, and comparing
+	// to it rejects that tenant's own valid API key on every route that does (cleat#2183).
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, http.StatusUnauthorized, "tenant required")
 		return
 	}

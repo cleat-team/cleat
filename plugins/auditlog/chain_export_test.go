@@ -27,12 +27,19 @@ import (
 // get calls a plugin route as tenant and returns the status and body.
 func (e *chainEnv) get(p *Plugin, tenant uuid.UUID, target string) (int, string) {
 	e.t.Helper()
+	// uuid.Nil here means "no tenant in the context at all"; the default tenant, whose id is
+	// the zero UUID, is getAs with authenticated true.
+	return e.getAs(p, tenant, tenant != uuid.Nil, target)
+}
+
+func (e *chainEnv) getAs(p *Plugin, tenant uuid.UUID, authenticated bool, target string) (int, string) {
+	e.t.Helper()
 	mux := http.NewServeMux()
 	if err := p.RegisterRoutes(mux); err != nil {
 		e.t.Fatal(err)
 	}
 	req := httptest.NewRequest("GET", target, nil)
-	if tenant != uuid.Nil {
+	if authenticated {
 		req = req.WithContext(auth.WithTenantID(req.Context(), tenant))
 	}
 	rec := httptest.NewRecorder()
@@ -399,6 +406,29 @@ func TestRowsAppendedDuringAnExportBelongToTheNextOne(t *testing.T) {
 		next, cp2, _ := exportLines(t, body)
 		if code != 200 || len(next) != 5 || *next[0].Seq != 10 || cp2 == nil || cp2.HeadSeq != 14 {
 			t.Fatalf("the next export: %d, %d events, checkpoint %+v; want the 5 appended rows from seq 10, head_seq 14", code, len(next), cp2)
+		}
+	})
+}
+
+// The seeded default tenant is the zero UUID, and it is a tenant like any other: comparing
+// the id to uuid.Nil instead of checking whether the request was authenticated rejects its own
+// valid API key with a 401 (cleat#2183, which fixed /audit/events the same way).
+func TestTheDefaultTenantMayExportAndVerifyItself(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		def := uuid.Nil
+		e.record(p, def, 4)
+		code, body := e.getAs(p, def, true, "/audit/export")
+		evs, cp, _ := exportLines(t, body)
+		if code != 200 || len(evs) != 4 || cp == nil || cp.HeadSeq != 4 {
+			t.Fatalf("the default tenant's export: %d, %d events, checkpoint %+v", code, len(evs), cp)
+		}
+		code, body = e.getAs(p, def, true, "/audit/verify")
+		if code != 200 || !strings.Contains(body, `"ok":true`) {
+			t.Fatalf("the default tenant's verify: %d %s", code, body)
+		}
+		if code, _ := e.getAs(p, def, false, "/audit/export"); code != 401 {
+			t.Fatalf("an unauthenticated request: %d, want 401", code)
 		}
 	})
 }
