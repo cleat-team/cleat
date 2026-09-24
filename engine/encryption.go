@@ -93,6 +93,23 @@ func tenantForAAD(tenantID string) string {
 // master.
 const payloadKeyInfo = "cleat-payload-v1"
 
+// pluginPayloadKeyInfo domain-separates plugin.Payloads' derived keys
+// (cleat#1992) from payloadKeyInfo's engine-internal event_history payloads.
+//
+// MEASURED BY cleat-review ON #2163, NOT ASSUMED: before this, pluginPayloads
+// called Encrypt/Decrypt directly, which derive with payloadKeyInfo -- the
+// SAME info string, the SAME master key, and the SAME AAD (tenantID) that
+// encodeEventForStorage uses for a workflow's own event_history fields. Same
+// (key, AAD) pair, so a plugin's Open could decrypt engine's own
+// event_history ciphertext outright, not merely in principle. Plugins are
+// trusted code (see plugin/a_cross_tenant_bypass_is_declared_test.go's
+// header on why this package does not treat them as adversarial), so this is
+// not a defense against a malicious plugin -- it is the same "one bypass
+// should not silently double as another" reasoning payloadKeyInfo's own doc
+// comment already gives for staying distinct from tenant_secrets.go's info
+// string, extended to the newer caller that shared it by accident.
+const pluginPayloadKeyInfo = "cleat-plugin-payload-v1"
+
 // tenantCipher holds one tenant's keys for the duration of one operation.
 //
 // WHY THIS EXISTS AT ALL, AND IT IS A MEASUREMENT RATHER THAN A PREFERENCE.
@@ -120,12 +137,27 @@ const payloadKeyInfo = "cleat-payload-v1"
 // sentence did not transfer; the measurement is why.
 type tenantCipher struct {
 	tenantID string
-	derived  []byte   // HKDF(current key, tenantID, payloadKeyInfo)
+	derived  []byte   // HKDF(current key, tenantID, info)
 	master   []byte   // current key, kept for the two legacy forms below
 	ring     *KeyRing // for trying previous keys on read; nil write paths never touch it
+	// info is the HKDF info string this cipher was derived with -- payloadKeyInfo
+	// for every engine-internal caller, pluginPayloadKeyInfo for plugin.Payloads
+	// (see forTenantWithInfo). Carried here, rather than re-passed to every
+	// method that might re-derive (openUnderPreviousKeys), so the two domains
+	// cannot drift apart by one caller forgetting which constant it started
+	// from.
+	info string
 }
 
-// forTenant derives this tenant's payload key, under the ring's CURRENT key.
+// forTenant derives this tenant's payload key under payloadKeyInfo, the
+// engine-internal domain. See forTenantWithInfo for the general form and
+// pluginPayloadKeyInfo's doc comment for why a second domain exists at all.
+func (pe *PayloadEncryption) forTenant(tenantID string) (*tenantCipher, error) {
+	return pe.forTenantWithInfo(tenantID, payloadKeyInfo)
+}
+
+// forTenantWithInfo derives this tenant's payload key, under the ring's
+// CURRENT key and the given HKDF info string.
 //
 // PER TENANT, so that a key recovered from one tenant's ciphertext -- by
 // cryptanalysis, by a bug, by a disclosed plaintext -- does not decrypt
@@ -133,7 +165,13 @@ type tenantCipher struct {
 // between tenants; this stops one recovered key reading all of them. They are
 // different properties and this subsystem now has both, which is what
 // tenant_secrets.go has had since it was written.
-func (pe *PayloadEncryption) forTenant(tenantID string) (*tenantCipher, error) {
+//
+// PARAMETERISED ON info, rather than always payloadKeyInfo, so that
+// pluginPayloadKeyInfo's domain can share every other mechanism here --
+// ring, rotation, per-tenant derivation, AAD binding -- while landing
+// somewhere payloadKeyInfo's own callers can never decrypt into. See
+// pluginPayloadKeyInfo's own doc comment for the measurement this answers.
+func (pe *PayloadEncryption) forTenantWithInfo(tenantID, info string) (*tenantCipher, error) {
 	if tenantID == "" {
 		return nil, ErrNoTenantForEncryption
 	}
@@ -160,11 +198,11 @@ func (pe *PayloadEncryption) forTenant(tenantID string) (*tenantCipher, error) {
 		return nil, fmt.Errorf("payload encryption: master key is %d bytes, want 32", curLen)
 	}
 	derived := make([]byte, 32)
-	r := hkdf.New(sha256.New, cur, []byte(tenantID), []byte(payloadKeyInfo))
+	r := hkdf.New(sha256.New, cur, []byte(tenantID), []byte(info))
 	if _, err := io.ReadFull(r, derived); err != nil {
 		return nil, fmt.Errorf("payload encryption: derive tenant key: %w", err)
 	}
-	return &tenantCipher{tenantID: tenantID, derived: derived, master: cur, ring: pe.ring}, nil
+	return &tenantCipher{tenantID: tenantID, derived: derived, master: cur, ring: pe.ring, info: info}, nil
 }
 
 // currentKey returns the ring's current key and its length, or (nil, 0) if no
@@ -406,7 +444,7 @@ func (tc *tenantCipher) openUnderPreviousKeys(data []byte) ([]byte, error) {
 			continue
 		}
 		derived := make([]byte, 32)
-		r := hkdf.New(sha256.New, vk.Key, []byte(tc.tenantID), []byte(payloadKeyInfo))
+		r := hkdf.New(sha256.New, vk.Key, []byte(tc.tenantID), []byte(tc.info))
 		if _, err := io.ReadFull(r, derived); err != nil {
 			lastErr = err
 			continue
@@ -426,10 +464,83 @@ func (tc *tenantCipher) openUnderPreviousKeys(data []byte) ([]byte, error) {
 	return nil, lastErr
 }
 
+// openUnderPreviousKeysDerivedOnly is openUnderPreviousKeys restricted to the
+// derived-key form alone -- no master-key-AAD form, no nil-AAD form. Used by
+// openForPlugin, never by engine's own read paths: see openForPlugin's doc
+// comment for why plugin.Payloads has no legacy shape to carry forward.
+func (tc *tenantCipher) openUnderPreviousKeysDerivedOnly(data []byte) ([]byte, error) {
+	if tc.ring == nil {
+		return nil, errors.New("payload encryption: no key ring")
+	}
+	curVersion := tc.ring.Current().Version
+	var lastErr error = errors.New("payload encryption: no previous key configured")
+	for _, v := range tc.ring.Versions() {
+		if v == curVersion {
+			continue
+		}
+		vk, ok := tc.ring.Key(v)
+		if !ok {
+			continue
+		}
+		derived := make([]byte, 32)
+		r := hkdf.New(sha256.New, vk.Key, []byte(tc.tenantID), []byte(tc.info))
+		if _, err := io.ReadFull(r, derived); err != nil {
+			lastErr = err
+			continue
+		}
+		if pt, err := openGCM(derived, data, []byte(tc.tenantID)); err == nil {
+			return pt, nil
+		} else {
+			lastErr = err
+		}
+	}
+	return nil, lastErr
+}
+
 // open is openClassify for callers that only want the plaintext.
 func (tc *tenantCipher) open(data []byte) ([]byte, error) {
 	pt, _, err := tc.openClassify(data)
 	return pt, err
+}
+
+// SealForPlugin and OpenForPlugin are plugin.Payloads' primitives
+// (engine/plugin_secrets.go's pluginPayloads), domain-separated from every
+// engine-internal caller via pluginPayloadKeyInfo -- see that constant's own
+// doc comment for the measurement this closes.
+//
+// OpenForPlugin ALSO NARROWS WHAT IT ACCEPTS, and that is a second, separate
+// decision from the domain separation: it tries only the CURRENT key's
+// derived form and each PREVIOUS key's derived form (openUnderPreviousKeysDerivedOnly)
+// -- never PayloadFormBound (master key, tenant AAD) or PayloadFormLegacy
+// (master key, nil AAD), the two fallbacks openClassify carries for
+// pre-cleat#1776 engine rows. Those exist to keep DATA WRITTEN BEFORE THE
+// DERIVED FORM EXISTED readable; no plugin has ever called Seal, so there is
+// no plugin-written data in either legacy shape for this path to serve. Cheap
+// hardening before the first real caller (cleat-review, #2163): narrower
+// acceptance is free to add now and only gets more expensive to add once
+// something depends on the wider one.
+func (pe *PayloadEncryption) SealForPlugin(tenantID string, plaintext []byte) ([]byte, error) {
+	tc, err := pe.forTenantWithInfo(tenantID, pluginPayloadKeyInfo)
+	if err != nil {
+		return nil, err
+	}
+	return tc.seal(plaintext)
+}
+
+// OpenForPlugin is SealForPlugin's read half. See SealForPlugin's doc comment
+// for both the domain separation and the narrower acceptance.
+func (pe *PayloadEncryption) OpenForPlugin(tenantID string, data []byte) ([]byte, error) {
+	tc, err := pe.forTenantWithInfo(tenantID, pluginPayloadKeyInfo)
+	if err != nil {
+		return nil, err
+	}
+	if pt, err := openGCM(tc.derived, data, []byte(tc.tenantID)); err == nil {
+		return pt, nil
+	}
+	if pt, err := tc.openUnderPreviousKeysDerivedOnly(data); err == nil {
+		return pt, nil
+	}
+	return nil, fmt.Errorf("decrypt: open: message authentication failed")
 }
 
 // Decrypt opens data produced by Encrypt, in any of the three forms.

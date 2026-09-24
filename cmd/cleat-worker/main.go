@@ -1063,6 +1063,16 @@ func main() {
 		SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
 			return store.DeliverSignal(ctx, workflowID, signalName, payload)
 		},
+
+		// cleat#1992. Both adapters are safe on a nil target -- secretStore is
+		// never nil (see where it is built, above) but has no usable master key
+		// when secretRing is nil, and payloadEncryption is a plain nil
+		// *engine.PayloadEncryption when --encrypt-sensitive-payloads is off.
+		// Every method on both then returns a clear "not configured" error
+		// rather than panicking, which is what lets these be assigned
+		// unconditionally instead of behind an if.
+		Secrets:  engine.NewPluginSecrets(secretStore),
+		Payloads: engine.NewPluginPayloads(payloadEncryption),
 	}
 
 	var err error

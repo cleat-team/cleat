@@ -87,6 +87,36 @@ site must appear in `perTenantLoopLedger`, checked bidirectionally the same way
 C2's ledger is — an undeclared site is a new, unreviewed loop; a stale ledger
 entry is a grant covering nothing.
 
+### C16 — every `Secrets.ForTenant` call site is declared
+
+**Guard:** `TestEverySecretsForTenantCallIsDeclared`
+(`plugin/a_secrets_for_tenant_is_declared_test.go`)
+
+`plugin.Secrets`/`plugin.Payloads` (cleat#1992) take no `tenantID` parameter
+on the request-path methods — the tenant comes from `ctx` instead, so there
+is no argument for a plugin bug to pass wrong. `Secrets.ForTenant` is the one
+place a plugin still names a tenant directly: a background loop with no
+request to derive one from (mirroring `plugin.ForTenant` on the SQL side,
+cleat#2125), or an unauthenticated request naming its own tenant as its
+subject. Neither is `crossTenantLedger`'s shape — every `ForTenant` call
+still names exactly one tenant, never a bypass spanning all of them — nor
+`perTenantLoopLedger`'s (C15): a `Secrets.ForTenant` call site need not sit
+inside an `AllTenantIDs` loop. It is the same KIND of question a reviewer
+asks of the other two ledgers, though — "where does this plugin act on a
+tenant it did not get from its own request" — and this is that ledger for
+the `Secrets`/`Payloads` surface, checked bidirectionally the same way: an
+undeclared site is a new, unreviewed tenant-naming call; a stale entry is a
+grant covering nothing.
+
+Numbered C16, after C15 above, for the same reason C15's own text gives for
+its number: added later, kept in Tenant isolation because that is where it
+belongs, not renumbered into the middle of an existing sequence. Kept as a
+separate ledger from `perTenantLoopLedger` rather than folded in — cleat#2141
+merged first, and the two check different shapes (a bypass-spanning loop
+versus a single named tenant) closely enough that a reviewer reading one
+ledger's diff should not have to also read the other's scanner to know it is
+complete.
+
 ---
 
 ## Storage and dialects
