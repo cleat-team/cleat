@@ -320,5 +320,198 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_config DROP COLUMN secret_configured;
 			`,
 		},
+		{
+			// webhook_config gets a soft-delete marker. cleat#2220.
+			//
+			// handleDeleteWebhook (routes.go) used to hard-delete the row.
+			// webhook_delivery.webhook_id REFERENCES webhook_config(id) with no
+			// ON DELETE action (v1), so deleting a webhook with any delivery
+			// history hit a foreign key violation on PostgreSQL and SQL Server
+			// outright, and silently orphaned the delivery rows on MySQL, where
+			// the same inline REFERENCES clause creates no real constraint at
+			// all -- see v7's comment for how that was confirmed. Soft-deleting
+			// instead means the config row survives (so nothing it is
+			// referenced by ever needs a CASCADE to fire from this path) and a
+			// webhook's delivery history is preserved rather than destroyed the
+			// moment the webhook itself is removed.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v1: a recorded migration never
+			// runs again, so editing v1 would add this column only for
+			// databases created after this lands.
+			Version: 6,
+			Up:      `ALTER TABLE webhook_config ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;`,
+			// MySQL has no ADD COLUMN IF NOT EXISTS -- the same idempotency
+			// hazard and the same PREPARE/EXECUTE/DEALLOCATE guard as
+			// migrations/mysql/055_a_run_records_when_a_worker_began_executing_it.sql
+			// and plugins/webhookingest/migrations.go's own deleted_at column
+			// (v8 there): a crash between this ALTER succeeding and
+			// plugin_migrations recording version 6 would otherwise leave a
+			// worker that repeats the ALTER on every subsequent boot and fails
+			// permanently with ERROR 1060 (42S21) Duplicate column name
+			// 'deleted_at'.
+			UpMySQL: `
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'deleted_at'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_config ADD COLUMN deleted_at TIMESTAMP(6) NULL',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_config') AND name = 'deleted_at')
+				ALTER TABLE webhook_config ADD deleted_at DATETIMEOFFSET;
+			`,
+			Down:      `ALTER TABLE webhook_config DROP COLUMN IF EXISTS deleted_at;`,
+			DownMySQL: `ALTER TABLE webhook_config DROP COLUMN deleted_at;`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_config') AND name = 'deleted_at')
+				ALTER TABLE webhook_config DROP COLUMN deleted_at;
+			`,
+		},
+		{
+			// webhook_delivery.webhook_id gets ON DELETE CASCADE. cleat#2222.
+			//
+			// admin.drop_tenant hard-deletes webhook_config directly (it is
+			// TenantScoped, v2 above) -- webhook_delivery is not and cannot be
+			// (v2's own comment: it has no tenant_id column), so nothing ever
+			// deletes its rows for a dropped tenant except a cascade from
+			// webhook_config. Without ON DELETE CASCADE that hard delete hit
+			// the same foreign key shape #2199 fixed for webhookingest:
+			//
+			//   postgres: update or delete on table "webhook_config" violates
+			//     foreign key constraint "webhook_delivery_webhook_id_fkey"
+			//     (23503)
+			//   mssql: The DELETE statement conflicted with the REFERENCE
+			//     constraint (547)
+			//
+			// Confirmed with a fresh v1 schema and no rows: pg_constraint shows
+			// conrelid='webhook_delivery', contype='f',
+			// conname='webhook_delivery_webhook_id_fkey' -- Postgres's default
+			// <table>_<column>_fkey naming, deterministic from v1's column
+			// definition, which names no CONSTRAINT of its own.
+			// sys.foreign_keys shows one auto-named constraint on SQL Server
+			// (e.g. FK__webhook_d__webho__<hash>) -- NOT deterministic, so the
+			// UpMSSQL arm below has to look it up rather than name it.
+			// information_schema.table_constraints on MySQL shows NONE at all:
+			// v1's inline `webhook_id CHAR(36) NOT NULL REFERENCES
+			// webhook_config(id)` is accepted syntax but creates no enforced
+			// foreign key on this dialect -- MySQL's inline column-level
+			// REFERENCES clause requires an explicit FOREIGN KEY clause to
+			// actually be enforced, which is exactly why cleat#2222 observed
+			// MySQL silently orphaning rows rather than refusing the delete the
+			// way PostgreSQL and SQL Server do. So the MySQL arm below adds a
+			// real constraint for the first time; the PostgreSQL and SQL
+			// Server arms replace an existing one.
+			//
+			// This does not change #2220's soft-delete behaviour:
+			// handleDeleteWebhook never issues a hard DELETE on webhook_config,
+			// so this cascade never fires from that path, and a webhook's
+			// delivery history survives its own deletion exactly as v6's
+			// comment describes. It fires only from admin.drop_tenant's hard
+			// delete (a full tenant purge), which is the case it exists to
+			// fix.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v1, for the same reason v6 is.
+			Version: 7,
+			Up: `
+				ALTER TABLE webhook_delivery DROP CONSTRAINT IF EXISTS webhook_delivery_webhook_id_fkey;
+				ALTER TABLE webhook_delivery ADD CONSTRAINT webhook_delivery_webhook_id_fkey
+					FOREIGN KEY (webhook_id) REFERENCES webhook_config(id) ON DELETE CASCADE;
+			`,
+			// Guarded the same way migrations/mysql/078's tenants_org_id_fk is:
+			// MySQL raises ER_DUP_KEYNAME/ER_FK_DUP_NAME on a re-add rather
+			// than silently no-op-ing, and there is no ADD CONSTRAINT IF NOT
+			// EXISTS to lean on.
+			//
+			// ADD FOREIGN KEY validates every existing row and refuses the
+			// migration if an orphan is already present -- fine here, because
+			// 0.3.0 requires a fresh database (#2058 decision 3: no upgrade
+			// path from v0.2.0, and #2059 compacts the migration set before
+			// the tag), so no database this ever runs against can already
+			// hold a pre-v7 orphan from the old hard-delete path.
+			UpMySQL: `
+				SET @fk := (
+					SELECT COUNT(*) FROM information_schema.table_constraints
+					WHERE constraint_schema = DATABASE() AND table_name = 'webhook_delivery'
+					  AND constraint_name = 'webhook_delivery_webhook_id_fkey'
+				);
+				SET @ddl := IF(@fk = 0,
+					'ALTER TABLE webhook_delivery ADD CONSTRAINT webhook_delivery_webhook_id_fkey FOREIGN KEY (webhook_id) REFERENCES webhook_config(id) ON DELETE CASCADE',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			// The auto-generated constraint name is not deterministic (see the
+			// comment above), so it has to be looked up rather than named --
+			// the same DECLARE/SELECT/EXEC idiom the default-constraint drops
+			// elsewhere in this file and in plugins/webhookingest/migrations.go
+			// already use, and for the same reason: NO BEGIN/END, because
+			// plugin.splitStatements shreds this migration's SQL into separate
+			// exec calls on every literal ';' with no awareness of T-SQL block
+			// structure, so a BEGIN in one fragment and its END in another
+			// would be two invalid batches.
+			//
+			// The name filter (`fk.name <> '...cascade'`) makes this
+			// idempotent without a separate guard: the first run finds the
+			// original auto-named constraint (excluded name does not match it)
+			// and drops it; the second run finds nothing (the original is gone
+			// and the replacement is excluded by name), so @fkname stays NULL
+			// and no drop is attempted. The ADD below is guarded by existence
+			// directly.
+			UpMSSQL: `
+				DECLARE @fkname sysname
+				SELECT @fkname = fk.name
+					FROM sys.foreign_keys fk
+					WHERE fk.parent_object_id = OBJECT_ID('webhook_delivery')
+					  AND fk.referenced_object_id = OBJECT_ID('webhook_config')
+					  AND fk.name <> 'fk_webhook_delivery_webhook_id_cascade'
+				IF @fkname IS NOT NULL EXEC('ALTER TABLE webhook_delivery DROP CONSTRAINT [' + @fkname + ']');
+
+				IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'fk_webhook_delivery_webhook_id_cascade')
+				ALTER TABLE webhook_delivery
+					ADD CONSTRAINT fk_webhook_delivery_webhook_id_cascade
+					FOREIGN KEY (webhook_id) REFERENCES webhook_config(id) ON DELETE CASCADE;
+			`,
+			// Down restores a plain, unnamed-action reference on Postgres
+			// (matching v1's own text) and drops MySQL's constraint back to
+			// v1's unenforced state. Neither restores the exact original SQL
+			// Server auto-generated name -- impossible, since it was never
+			// recorded -- but a plain NO ACTION constraint under a fixed name
+			// is functionally equivalent to what v1 created, which is the same
+			// "restores the schema, not the exact original object identity"
+			// reasoning v5's Down above already documents for this file.
+			Down: `
+				ALTER TABLE webhook_delivery DROP CONSTRAINT IF EXISTS webhook_delivery_webhook_id_fkey;
+				ALTER TABLE webhook_delivery ADD CONSTRAINT webhook_delivery_webhook_id_fkey
+					FOREIGN KEY (webhook_id) REFERENCES webhook_config(id);
+			`,
+			DownMySQL: `
+				SET @fk := (
+					SELECT COUNT(*) FROM information_schema.table_constraints
+					WHERE constraint_schema = DATABASE() AND table_name = 'webhook_delivery'
+					  AND constraint_name = 'webhook_delivery_webhook_id_fkey'
+				);
+				SET @ddl := IF(@fk > 0,
+					'ALTER TABLE webhook_delivery DROP FOREIGN KEY webhook_delivery_webhook_id_fkey',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'fk_webhook_delivery_webhook_id_cascade')
+				ALTER TABLE webhook_delivery DROP CONSTRAINT fk_webhook_delivery_webhook_id_cascade;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE parent_object_id = OBJECT_ID('webhook_delivery') AND referenced_object_id = OBJECT_ID('webhook_config'))
+				ALTER TABLE webhook_delivery
+					ADD CONSTRAINT fk_webhook_delivery_webhook_id
+					FOREIGN KEY (webhook_id) REFERENCES webhook_config(id);
+			`,
+		},
 	}
 }

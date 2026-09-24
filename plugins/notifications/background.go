@@ -211,9 +211,15 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 	// comment. ScanRow substitutes plugin.GUID for any *uuid.UUID
 	// destination and swaps it back, the same correction routes.go's own
 	// scans in this package already get.
+	// deleted_at IS NULL: defense-in-depth on top of queryDueDeliveries' own
+	// join guard below and handleDeleteWebhook's proactive cancellation
+	// (routes.go) -- cleat#2220, the same belt-and-suspenders shape cleat#2199
+	// gave webhookingest's deliver-path lookups. This is the layer that
+	// matters if either of those has a bug or a race admits a delivery for a
+	// webhook that has since been soft-deleted.
 	var cfg webhookConfigRow
 	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT url, tenant_id, secret_configured FROM webhook_config WHERE id = $1
+			SELECT url, tenant_id, secret_configured FROM webhook_config WHERE id = $1 AND deleted_at IS NULL
 		`, p.dialect), d.WebhookID), &cfg.URL, &cfg.TenantID, &cfg.SecretConfigured)
 	if err != nil {
 		return "", fmt.Errorf("lookup webhook config: %w", err)
@@ -304,6 +310,13 @@ func (p *Plugin) retryOrFail(ctx context.Context, d deliveryRow, reason string) 
 
 // markDelivered updates the delivery as successfully delivered.
 func (p *Plugin) markDelivered(ctx context.Context, id uuid.UUID, attemptCount, statusCode int, responseBody string) error {
+	// AND status IN ('pending', 'retrying'): a delivery attempt in flight
+	// races handleDeleteWebhook's own cancellation (routes.go) exactly the
+	// way sendWebhook's guarded INSERT races the same delete
+	// (host_functions.go) -- cleat-review's #2233 finding. Without this, an
+	// attempt that was already under way when the delete committed the
+	// row's status to 'cancelled' would overwrite that back to 'delivered'
+	// afterward, resurrecting a delivery the tenant asked to stop.
 	_, err := p.db.Exec(ctx, plugin.Rebind(`
 			UPDATE webhook_delivery
 			SET status = 'delivered',
@@ -312,7 +325,7 @@ func (p *Plugin) markDelivered(ctx context.Context, id uuid.UUID, attemptCount, 
 			    delivered_at = now(),
 			    response_code = $2,
 			    response_body = $3
-			WHERE id = $4
+			WHERE id = $4 AND status IN ('pending', 'retrying')
 		`, p.dialect), attemptCount, statusCode, responseBody, id)
 	if err != nil {
 		return fmt.Errorf("mark delivered: %w", err)
@@ -334,6 +347,9 @@ func (p *Plugin) markRetrying(ctx context.Context, id uuid.UUID, attemptCount in
 	// next_attempt_at expression, ahead of $3/$4 textually, so the args
 	// below are ordered to match rather than to match the column order in
 	// the SET list. See CLAUDE.md's "MySQL binds `?` by APPEARANCE".
+	// AND status IN ('pending', 'retrying'): see markDelivered's comment --
+	// the same guard against resurrecting a delivery a concurrent delete
+	// already cancelled.
 	query := fmt.Sprintf(`
 			UPDATE webhook_delivery
 			SET status = 'retrying',
@@ -341,7 +357,7 @@ func (p *Plugin) markRetrying(ctx context.Context, id uuid.UUID, attemptCount in
 			    last_attempt_at = %s,
 			    next_attempt_at = %s,
 			    response_body = $3
-			WHERE id = $4
+			WHERE id = $4 AND status IN ('pending', 'retrying')
 		`, nowSQLExpr(p.dialect), nowPlusSecondsSQLExpr(p.dialect, "$2"))
 	_, err := p.db.Exec(ctx, plugin.Rebind(query, p.dialect), attemptCount, backoffSeconds, reason, id)
 	if err != nil {
@@ -354,13 +370,16 @@ func (p *Plugin) markRetrying(ctx context.Context, id uuid.UUID, attemptCount in
 
 // markFailed updates the delivery as permanently failed.
 func (p *Plugin) markFailed(ctx context.Context, id uuid.UUID, attemptCount int, reason string) error {
+	// AND status IN ('pending', 'retrying'): see markDelivered's comment --
+	// the same guard against resurrecting a delivery a concurrent delete
+	// already cancelled.
 	_, err := p.db.Exec(ctx, plugin.Rebind(`
 			UPDATE webhook_delivery
 			SET status = 'failed',
 			    attempt_count = $1,
 			    last_attempt_at = now(),
 			    response_body = $2
-			WHERE id = $3
+			WHERE id = $3 AND status IN ('pending', 'retrying')
 		`, p.dialect), attemptCount, reason, id)
 	if err != nil {
 		return fmt.Errorf("mark failed: %w", err)
@@ -465,21 +484,35 @@ func nowPlusSecondsSQLExpr(d plugin.Dialect, ph string) string {
 // missed sweep before the next one caught it -- silent by dilution, not by
 // impossibility, which is exactly the class of bug a lower-frequency
 // production system does not surface for itself.
+// INNER JOIN webhook_config, not a LEFT JOIN: cleat#2220. A LEFT JOIN plus
+// "wc.deleted_at IS NULL" would read true when there is no matching config
+// row at all (a missing row makes every wc.* column NULL, and NULL IS NULL
+// is true in SQL) -- admitting a delivery whose webhook was hard-deleted as
+// though it were merely "not soft-deleted". That case is reachable here in a
+// way it was not for webhookingest's LEFT JOIN (background.go there): this
+// plugin's webhook_config row IS hard-deleted, by admin.drop_tenant, and
+// migrations.go v7's ON DELETE CASCADE removes the matching webhook_delivery
+// rows at the same time -- so in steady state a delivery with no matching
+// config should not exist, and an INNER JOIN says so rather than silently
+// admitting it if that invariant is ever violated.
 var queryDueDeliveries = plugin.Query{
 	Default: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= now()
 ORDER BY d.next_attempt_at ASC
 LIMIT 100`,
 	MySQL: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= NOW(6)
 ORDER BY d.next_attempt_at ASC
 LIMIT 100`,
 	MSSQL: `SELECT TOP 100 d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= now()
 ORDER BY d.next_attempt_at ASC`,

@@ -60,11 +60,18 @@ func WebhookSecretName(id uuid.UUID) string {
 // Found by cleat-review running sendWebhook and handleListDeliveries against
 // real SQL Server for the first time -- every call failed outright, since
 // SELECT EXISTS(...) is not valid syntax there at all.
+//
+// deleted_at IS NULL: a soft-deleted webhook reads as gone (404/not found),
+// the same as one that never existed, rather than as merely disabled --
+// cleat#2220, matching the treatment cleat#2199 gave webhookingest's sources.
+// Both of this function's callers (handleListDeliveries, sendWebhook) rely on
+// this to refuse a deleted webhook's own sub-resources and new deliveries,
+// not just the config row itself.
 func webhookExistsSQL(d plugin.Dialect) string {
 	if d == plugin.DialectMSSQL {
-		return `SELECT CASE WHEN EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2) THEN 1 ELSE 0 END`
+		return `SELECT CASE WHEN EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL) THEN 1 ELSE 0 END`
 	}
-	return `SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2)`
+	return `SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL)`
 }
 
 // ---- types ----
@@ -224,7 +231,7 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
 			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
-			WHERE tenant_id = $1
+			WHERE tenant_id = $1 AND deleted_at IS NULL
 			ORDER BY created_at DESC
 		`, p.dialect), tid)
 	if err != nil {
@@ -279,7 +286,7 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
-			WHERE id = $1 AND tenant_id = $2
+			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
 		`, p.dialect), id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "webhook not found")
@@ -377,7 +384,7 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 	query := fmt.Sprintf(`
 			UPDATE webhook_config
 			SET %s
-			WHERE id = $%d AND tenant_id = $%d
+			WHERE id = $%d AND tenant_id = $%d AND deleted_at IS NULL
 		`, joinSetClauses(setClauses), argIdx, argIdx+1)
 
 	rows, err := p.db.Exec(r.Context(), plugin.Rebind(query, p.dialect), args...)
@@ -413,7 +420,7 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
-			WHERE id = $1 AND tenant_id = $2
+			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
 		`, p.dialect), id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("notifications: re-fetch webhook", "error", err)
@@ -443,24 +450,85 @@ func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
-			DELETE FROM webhook_config
-			WHERE id = $1 AND tenant_id = $2
+	// A SOFT delete, not a hard one. cleat#2220, matching cleat#2199's shape
+	// for webhookingest's sources: a hard DELETE FROM webhook_config hit a
+	// foreign key violation on PostgreSQL and SQL Server for any webhook that
+	// had ever received a delivery (webhook_delivery.webhook_id REFERENCES
+	// webhook_config(id), no ON DELETE action before migrations.go v7) and
+	// silently orphaned the delivery rows on MySQL instead. Marking the row
+	// deleted rather than removing it keeps webhook_delivery's rows in the
+	// DATABASE, for anything auditing what was sent before the webhook was
+	// removed, or for a future admin-only endpoint to read them.
+	//
+	// They are NOT reachable through GET .../deliveries once the webhook is
+	// deleted, and this used to say otherwise: handleListDeliveries calls
+	// webhookExistsSQL first, which filters deleted_at IS NULL exactly like
+	// every other read path here, so it 404s for a deleted webhook's id the
+	// same as GET/PUT do (coordinator's #2233 review; see
+	// TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent's own
+	// "LIST deliveries for deleted webhook: want 404" assertion).
+	//
+	// Cancelling the webhook's own pending/retrying deliveries in the SAME
+	// transaction as the soft-delete, not as a separate step, mirrors
+	// cleat#2199's handleDeleteSource exactly: a tenant deleting a webhook
+	// is asking cleat to stop sending to it, and without this a delivery
+	// already queued (or awaiting its next backoff retry) would still go out
+	// after the delete -- background.go's own doc comments describe the
+	// existing config-lookup and secret-lookup failure paths that already
+	// existed if this were left to happen by the config row simply becoming
+	// unreadable, none of which mark the delivery as anything other than
+	// "still pending, retried forever". Setting status='cancelled' here
+	// stops it at the source rather than relying on deliver() to fail its
+	// way to the same place. queryDueDeliveries (background.go) carries an
+	// independent deleted_at IS NULL guard on top of this, the same
+	// defense-in-depth belt-and-suspenders shape #2199 used for
+	// processBatch/awaitWebhook.
+	tx, err := p.db.Begin(r.Context())
+	if err != nil {
+		p.logger.Error("notifications: begin delete transaction", "error", err)
+		p.writeError(w, 500, "failed to delete webhook")
+		return
+	}
+
+	rows, err := tx.Exec(r.Context(), plugin.Rebind(`
+			UPDATE webhook_config
+			SET enabled = false, deleted_at = now()
+			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
 		`, p.dialect), id, tid)
 	if err != nil {
+		tx.Rollback()
 		p.logger.Error("notifications: delete webhook", "error", err)
 		p.writeError(w, 500, "failed to delete webhook")
 		return
 	}
 	if rows == 0 {
+		tx.Rollback()
 		p.writeError(w, 404, "webhook not found")
 		return
 	}
 
-	// Best-effort: the config row is already gone, which is the operation
-	// the caller asked for and got. A failure here leaves a retired-but-not-
-	// yet-retired secret with no config row pointing at it -- inert, since
-	// nothing looks it up by an id that no longer exists -- so it is logged
+	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
+			UPDATE webhook_delivery
+			SET status = 'cancelled'
+			WHERE webhook_id = $1 AND status IN ('pending', 'retrying')
+		`, p.dialect), id); err != nil {
+		tx.Rollback()
+		p.logger.Error("notifications: cancel pending deliveries after delete", "error", err, "id", id)
+		p.writeError(w, 500, "failed to delete webhook")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		p.logger.Error("notifications: commit delete webhook", "error", err)
+		p.writeError(w, 500, "failed to delete webhook")
+		return
+	}
+
+	// Best-effort, outside the transaction: the config row is already
+	// soft-deleted, which is the operation the caller asked for and got. A
+	// failure here leaves a retired-but-not-yet-retired secret pointing at a
+	// webhook id no route or sweep will read again (every lookup filters
+	// deleted_at IS NULL) -- inert rather than reachable -- so it is logged
 	// rather than turned into a 500 for an otherwise-successful delete.
 	if _, err := p.secrets.Retire(r.Context(), WebhookSecretName(id)); err != nil {
 		p.logger.Error("notifications: retire webhook secret after delete", "error", err, "id", id)

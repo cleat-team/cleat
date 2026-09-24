@@ -1369,10 +1369,24 @@ func TestDeliverSecretGetError(t *testing.T) {
 // processDeliveries — deliver function returns error (webhook config missing)
 // ===========================================================================
 
-func TestProcessDeliveries_DeliverError(t *testing.T) {
+// TestProcessDeliveries_OrphanedDeliveryIsNotAttempted replaces what used to
+// be TestProcessDeliveries_DeliverError. cleat#2220 added an INNER JOIN
+// webhook_config to queryDueDeliveries (background.go), so a delivery row
+// whose webhook_id matches no config at all is now excluded at the SQL level
+// -- processDeliveries never sees it, and deliver() is never called for it.
+// That is the scenario this fixture builds (a delivery with no matching
+// config), so the correct assertion is now that the sweep skips it entirely,
+// not that deliver() errors on it. See TestDeliverMissingConfig below for
+// coverage of deliver()'s own defense-in-depth lookup failing the same way,
+// which this rewrite would otherwise have dropped.
+func TestProcessDeliveries_OrphanedDeliveryIsNotAttempted(t *testing.T) {
 	p, store := setupTestPlugin(t)
 
-	// Create a delivery row but no matching webhook config.
+	// Create a delivery row but no matching webhook config. In steady state
+	// this cannot happen -- migrations.go v7's ON DELETE CASCADE removes a
+	// webhook's deliveries in the same operation that removes its config --
+	// but the JOIN is what makes that invariant load-bearing rather than
+	// merely assumed, so it is worth pinning directly.
 	now := time.Now().UTC()
 	past := now.Add(-1 * time.Hour)
 	store.mu.Lock()
@@ -1396,16 +1410,96 @@ func TestProcessDeliveries_DeliverError(t *testing.T) {
 		t.Fatalf("processDeliveries: %v", err)
 	}
 
-	// The deliver function returns an error (webhook not found), so the delivery
-	// is not counted as succeeded or failed — it's skipped.
-	if attempted != 1 {
-		t.Errorf("expected 1 attempted, got %d", attempted)
+	if attempted != 0 {
+		t.Errorf("expected 0 attempted (orphaned delivery filtered by the join), got %d", attempted)
 	}
 	if succeeded != 0 {
 		t.Errorf("expected 0 succeeded, got %d", succeeded)
 	}
 	if failed != 0 {
 		t.Errorf("expected 0 failed, got %d", failed)
+	}
+}
+
+// TestDeliverMissingConfig calls deliver() directly rather than through
+// processDeliveries, so it still exercises deliver()'s own
+// "SELECT ... FROM webhook_config WHERE id = $1 AND deleted_at IS NULL"
+// lookup failing for a webhook_id with no matching row -- the defense-in-depth
+// layer queryDueDeliveries' INNER JOIN (cleat#2220) now normally screens out
+// before deliver() is ever reached. See
+// TestProcessDeliveries_OrphanedDeliveryIsNotAttempted above for the join
+// itself.
+func TestDeliverMissingConfig(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	d := deliveryRow{
+		ID:           uuid.New(),
+		WebhookID:    uuid.New(), // No config exists for this webhook_id.
+		EventType:    "test.event",
+		Payload:      json.RawMessage(`{"msg":"hello"}`),
+		AttemptCount: 0,
+	}
+
+	outcome, err := p.deliver(ctx, ctx, d)
+	if err == nil {
+		t.Fatal("deliver: expected an error for a webhook_id with no matching config, got nil")
+	}
+	if outcome != "" {
+		t.Errorf("deliver: expected empty outcome on error, got %q", outcome)
+	}
+	if !strings.Contains(err.Error(), "lookup webhook config") {
+		t.Errorf("deliver: expected error mentioning the config lookup, got %q", err)
+	}
+}
+
+// TestDeliverSoftDeletedConfig is the backstop half of coordinator's #2233
+// item 7 -- lower priority than the handleListWebhooks list assertion, but
+// asked for alongside it: TestDeliverMissingConfig above proves deliver()
+// refuses a webhook_id with NO config row at all, which is a different SQL
+// path from a config row that EXISTS but carries deleted_at. Both go through
+// the same "AND deleted_at IS NULL" filter (background.go's deliver), but a
+// row that exists and merely fails the filter is the actual shape a
+// soft-deleted webhook takes, and is what this test seeds.
+func TestDeliverSoftDeletedConfig(t *testing.T) {
+	p, store := setupTestPlugin(t)
+
+	webhookID := uuid.New()
+	now := time.Now().UTC()
+	store.configs = append(store.configs, &testWebhookCfg{
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              "https://example.com/soft-deleted",
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          false,
+		createdAt:        now,
+		updatedAt:        now,
+		deletedAt:        &now,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	d := deliveryRow{
+		ID:           uuid.New(),
+		WebhookID:    webhookID,
+		EventType:    "test.event",
+		Payload:      json.RawMessage(`{"msg":"hello"}`),
+		AttemptCount: 0,
+	}
+
+	outcome, err := p.deliver(ctx, ctx, d)
+	if err == nil {
+		t.Fatal("deliver: expected an error for a soft-deleted webhook's config, got nil")
+	}
+	if outcome != "" {
+		t.Errorf("deliver: expected empty outcome on error, got %q", outcome)
+	}
+	if !strings.Contains(err.Error(), "lookup webhook config") {
+		t.Errorf("deliver: expected error mentioning the config lookup, got %q", err)
 	}
 }
 
