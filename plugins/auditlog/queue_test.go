@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -663,6 +664,70 @@ func TestQueueConfigKeysArePrefixed(t *testing.T) {
 	// The unprefixed names belong to no one in a shared config, and are ignored.
 	if (Config{}).workers() != defaultWorkers {
 		t.Error("the zero config does not give the default")
+	}
+}
+
+// Run's return is bounded by the drain, not by drain + enqueue wait: an enqueue waiting for room holds the
+// queue's read lock, and shutdown needs the write lock. cleat-review measured drain 3s + wait 20s returning at
+// 19.8s, which at the caps (25s + 30s) is past the host's 30s.
+func TestShutdownDoesNotWaitOutAnEnqueueThatIsWaitingForRoom(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		r := e.queueRig(t, Config{BufferSize: 1, Workers: 1, EnqueueWaitMs: 20000, ShutdownDrainMs: 300})
+		tenant := uuid.New()
+		hang := make(chan struct{})
+		r.db.set(func(f *faultDB) { f.hang = hang }) // the one worker never returns, so the queue stays full
+		r.run(t)
+		defer close(hang)
+
+		r.send(tenant, 0) // taken by the worker, stuck in the driver
+		deadline := time.Now().Add(10 * time.Second)
+		for r.db.begins.Load() < 1 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		r.send(tenant, 1) // fills the queue's one slot
+		waiting := make(chan struct{})
+		go func() {
+			defer close(waiting)
+			r.send(tenant, 2) // finds it full, and waits up to 20s for room
+		}()
+		time.Sleep(200 * time.Millisecond) // let it reach the wait
+
+		start := time.Now()
+		r.cancel()
+		select {
+		case <-r.done:
+		case <-time.After(15 * time.Second):
+			t.Fatal("Run did not return: shutdown is waiting out the enqueue wait")
+		}
+		if took := time.Since(start); took > 5*time.Second {
+			t.Errorf("Run took %s with shutdown_drain_ms 300 and enqueue_wait_ms 20000: shutdown waited on the enqueue", took)
+		}
+		select {
+		case <-waiting:
+		case <-time.After(5 * time.Second):
+			t.Error("the request waiting for room was not released by shutdown")
+		}
+		// All three are accounted: one in flight, two counted lost as shutdown (the queued one and the waiter).
+		if got := r.p.q.lostTotal.Load(); got != 3 {
+			t.Errorf("%d events counted lost, want 3 (queued 1 + waiting 1 as shutdown, 1 shutdown_inflight)", got)
+		}
+	})
+}
+
+// Once shutdown has given up waiting, no worker starts a new attempt: the event is counted lost as
+// shutdown and the database is never touched. A Plugin with no database at all shows it, since an
+// attempt would panic (counted insert_failed) instead.
+func TestNoAttemptStartsOnceShutdownHasGivenUp(t *testing.T) {
+	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	p.q.abandoned.Store(true)
+	ev := newQueuedEvent(uuid.New(), "u", "GET", "/x", 200, "1.1.1.1", "ua", time.Millisecond)
+	p.q.sent.Add(1)
+	p.persistGuarded(ev)
+	if got := p.q.lost[lossIndex(lossShutdown)].Load(); got != 1 {
+		t.Errorf("shutdown losses %d, want 1", got)
+	}
+	if p.q.lost[lossIndex(lossInsertFailed)].Load() != 0 || p.q.recorded.Load() != 0 {
+		t.Error("an attempt was started after shutdown gave up (it panicked on the missing database, or wrote)")
 	}
 }
 

@@ -343,6 +343,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`GET /api/workflows/{id}/stream` answered 500 "streaming not supported by this server" on every default build.** (cleat#2254)
+
+  Every plugin middleware wraps the core mux, and the audit-log's response-writer wrapper embedded
+  `http.ResponseWriter` without a `Flush()`, so every handler behind it that asks for an
+  `http.Flusher` was refused: the workflow stream route, eventstore's SSE route and the audit NDJSON
+  export. The wrappers in audit-log, tenant-quota and backendkit now pass `Flush` and `Unwrap` through.
+  A test serves a real request through the real plugin middleware chain, and another fails the build
+  for any type that embeds `http.ResponseWriter` without both methods. The stream tests never met a
+  wrapper before, because they call the handler directly with a recorder that has a `Flush`.
+
 - **The audit log no longer drops events silently when the database is slow or down.** (cleat#2168)
 
   A request that finds the audit buffer full now waits up to 1s for room (`audit_enqueue_wait_ms`), and an

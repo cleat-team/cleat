@@ -269,3 +269,27 @@ func pluginHealthCallTimeoutForTest(d time.Duration) (restore func()) {
 	pluginHealthCallTimeout = d
 	return func() { pluginHealthCallTimeout = old }
 }
+
+// A Health() call that does not answer keeps the plugin's last reported state: a slow answer must neither
+// clear a real problem nor invent one. (cleat-review: removing this branch survived.)
+func TestPluginHealthKeepsTheLastAnswerWhenACallDoesNotAnswer(t *testing.T) {
+	api := newTestAPIServer(&mockStore{})
+	p := &healthPlugin{name: "audit-log", err: errors.New("audit-log lost 3 event(s)")}
+	api.worker.plugList = []*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}
+	api.worker.refreshPluginHealth()
+	if len(api.worker.unhealthyPlugins()) != 1 {
+		t.Fatal("the first refresh did not record the problem, so this measures nothing")
+	}
+
+	defer pluginHealthCallTimeoutForTest(100 * time.Millisecond)()
+	hang := make(chan struct{})
+	p.hang = hang
+	api.worker.refreshPluginHealth() // the call does not answer within the timeout
+	close(hang)
+	if got := api.worker.unhealthyPlugins(); len(got) != 1 {
+		t.Errorf("an unanswered Health() cleared the plugin's last reported problem: %v", got)
+	}
+	if code, body := healthzOf(t, api); code != 200 || body["reason"] != "plugin_unhealthy" {
+		t.Errorf("/healthz after an unanswered Health(): %d %v, want it to keep saying plugin_unhealthy", code, body)
+	}
+}

@@ -164,6 +164,19 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
+// Flush delegates to the real writer's http.Flusher, and counts as writing the implicit 200: a flush
+// before any write sends the header. Embedding http.ResponseWriter does not promote Flush, so without
+// this every streaming route behind this middleware answered "streaming not supported". cleat#2254.
+func (s *statusRecorder) Flush() {
+	s.wroteHeader = true
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the real writer.
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
 // quotaFor reads one tenant's quota. found=false means none is configured,
 // which is not an error.
 func (p *Plugin) quotaFor(ctx context.Context, tid uuid.UUID, resource string) (quota, bool, error) {

@@ -135,8 +135,23 @@ type queueState struct {
 	// inflight holds the id of every event inside persistGuarded right now. Whoever removes an id
 	// (LoadAndDelete) owns that event's accounting: its worker, when the attempt ends, or shutdown, when
 	// it gives up waiting. So an event is counted lost exactly once even if its call returns late.
-	inflight  sync.Map
+	inflight sync.Map
+
+	// stop is closed when shutdown gives up waiting, so an enqueue that is holding the read lock while it
+	// waits for room returns at once instead of holding shutdown's write lock off for up to
+	// audit_enqueue_wait_ms (measured: drain 3s + wait 20s returned at 19.8s, past the host's 30s at the caps).
+	stopOnce  sync.Once
+	closeOnce sync.Once
+	stop      chan struct{}
 	abandoned atomic.Bool // set when the shutdown drain ran out: no new attempt may start
+}
+
+// signalStop closes the stop channel, once.
+func (q *queueState) signalStop() { q.closeOnce.Do(func() { close(q.stopChan()) }) }
+
+func (q *queueState) stopChan() chan struct{} {
+	q.stopOnce.Do(func() { q.stop = make(chan struct{}) })
+	return q.stop
 }
 
 var lossReasons = [...]string{lossBufferFull, lossInsertFailed, lossShutdown, lossShutdownInflight}
@@ -226,6 +241,8 @@ func (p *Plugin) enqueueAudit(tenantID uuid.UUID, userID, method, path string, s
 	case p.buffer <- ev:
 	case <-timer.C:
 		p.lose(lossBufferFull, ev, fmt.Errorf("the queue (%d) stayed full for %s", cap(p.buffer), p.config.enqueueWait()))
+	case <-p.q.stopChan():
+		p.lose(lossShutdown, ev, errors.New("the audit log stopped while the event waited for room in the queue"))
 	}
 }
 
@@ -421,6 +438,7 @@ func (p *Plugin) shutdown() {
 	// From here no goroutine starts an attempt, and no send can land, so what is in the buffer is
 	// exactly what is left.
 	p.q.abandoned.Store(true)
+	p.q.signalStop() // releases any enqueue still waiting for room, and with it the read lock
 	p.q.mu.Lock()
 	p.q.stopped = true
 	p.q.mu.Unlock()

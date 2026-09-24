@@ -228,6 +228,24 @@ middleware sets.
 
 ---
 
+## HTTP middleware
+
+### C18 — a `ResponseWriter` wrapper passes `Flush` and `Unwrap` through
+
+**Guard:** `TestEveryResponseWriterWrapperImplementsFlushAndUnwrap`
+(`plugin/response_writer_wrappers_test.go`)
+
+Every plugin middleware wraps the **core** mux, not only the plugin's own routes (cleat#1569), so a
+`http.ResponseWriter` wrapper a plugin installs sits in front of every core handler. Embedding the interface
+promotes only its own methods, and `http.ResponseWriter` has no `Flush`: a wrapper that adds nothing hides the
+real writer's `http.Flusher`, and every handler behind it that streams answers 500 "streaming not supported".
+audit-log's did exactly that on every default build (cleat#2254). A type that embeds `http.ResponseWriter` must
+also declare `Flush()`, delegating to the inner `http.Flusher` when there is one (marking an implicit 200 as
+written first, if it tracks the status), and `Unwrap() http.ResponseWriter`, which is how
+`http.ResponseController` reaches the real writer.
+
+---
+
 ## Two obligations with no clause of their own
 
 Stated because writing this page to match the guards that happen to exist would

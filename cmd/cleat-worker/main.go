@@ -1641,15 +1641,7 @@ func main() {
 	// concluded plugin middleware did NOT reach core routes, which the
 	// `mux := plugMux` line contradicts.
 	if plugMux != nil {
-		plugHandler = plugMux
-		for _, lp := range plugList {
-			if !lp.Healthy {
-				continue
-			}
-			if p, ok := lp.Plugin.(plugin.HasMiddleware); ok {
-				plugHandler = p.Middleware(plugHandler)
-			}
-		}
+		plugHandler = wrapPluginMiddleware(plugMux, plugList)
 	}
 
 	for _, lp := range plugList {

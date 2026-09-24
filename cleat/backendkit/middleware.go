@@ -58,6 +58,18 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
+// Flush delegates to the real writer's http.Flusher; embedding http.ResponseWriter does not promote it,
+// so without this a streaming handler behind LoggingMiddleware is told streaming is unsupported.
+// cleat#2254.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the real writer.
+func (rw *responseWriter) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
+
 // LoggingMiddleware logs each request as structured key=value pairs via slog.
 // Pass nil for logger to use slog.Default().
 func LoggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {

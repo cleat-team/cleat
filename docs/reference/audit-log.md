@@ -59,7 +59,7 @@ and past the shutdown drain. The process does not wait for it. The shutdown drai
 whatever is still queued is counted as `shutdown`, and the events inside a driver call that has not returned
 are counted as `shutdown_inflight` and shutdown returns, because the host stops waiting for plugins after 30
 seconds and exits (`audit_shutdown_drain_ms` is capped at 25,000 for that reason). A `shutdown_inflight` event
-may still commit when the call returns, so that count is an upper bound: an overcount is better than silence.
+may still commit when the call returns, so that count is an upper bound: an overcount is better than silence. A request that is waiting for room in a full queue when the drain runs out is released at once and its event counted as `shutdown`, so shutdown is bounded by the drain and not by the drain plus `audit_enqueue_wait_ms`.
 
 **Chain order is not timestamp order.** With several workers and retries, an event can be appended seconds
 after its request finished, so `seq` order and `timestamp` order can disagree. The chain is ordered by `seq`:
