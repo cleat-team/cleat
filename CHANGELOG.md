@@ -767,9 +767,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than releasing the laggards on that survivor's heartbeat alone.
   This protection is per-episode, not per-row: a reaper that never
   observed the stall's opening tick has no episode to be sticky about, and
-  can still reclaim a laggard within about `missedBeatSlack` (~1s) of one
-  worker's heartbeat landing while its siblings' have not — the gap
-  between one worker's recovery and the rest is not itself modeled here.
+  can still reclaim a laggard within about one heartbeat retry interval
+  plus reconnect time of one worker's heartbeat landing while its
+  siblings' have not — the gap between one worker's recovery and the rest
+  is not itself modeled here.
 
   **Worst case, a genuinely dead worker's run now takes up to about 39s to
   reclaim at the default `--heartbeat`** (twice the ~14.5s reclaim window
@@ -777,6 +778,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   happens to coincide with an unrelated fleet-wide stall being suppressed.
   New metric `cleat_suspected_db_stall_total`, labeled by shard, counts
   every tick this suppression fires. cleat#2006.
+
+- **`ReapStaleInstances` truncated its reclaim timeout to whole seconds on
+  all three dialects, halving #2166's 1s `reclaimSlack` at the default
+  ~14.5s `--reclaim-timeout`** (PG: `"%d seconds"` over
+  `int(timeout.Seconds())`; MySQL: `INTERVAL ? SECOND` over `int(...)`;
+  MSSQL: `DATEADD(SECOND, ...)` over `int(...)`). At the default, a row
+  actually became reclaimable at 14s rather than 14.5s; at `--heartbeat
+  2.9s` (R=10.9s), only 0.1s of the documented slack remained. #2180 fixed
+  the same truncation in `StaleSetShape` only, so the stall detector's
+  `Stale` count (millisecond-precise) and the reap statement it feeds
+  (second-truncated) could disagree about which rows were reclaimable, up
+  to just under a second apart. Now millisecond-precise (microsecond on
+  MySQL) on all three, matching `StaleSetShape`. cleat#2189.
 
 ## [0.2.0] - 2026-08-10
 

@@ -45,11 +45,11 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 		WHERE id IN (
 		    SELECT TOP (@p3) id FROM workflow_instances
 		    WHERE status = 'running'
-		      AND heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME())
+		      AND heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME())
 		      AND tenant_id = @p2
 		    ORDER BY heartbeat_at
 		)
-	`, -int(timeout.Seconds()), s.tenantID, reapLimitArg(limit))
+	`, -timeout.Milliseconds(), s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}

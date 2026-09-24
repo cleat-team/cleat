@@ -1221,13 +1221,13 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 		    SELECT id FROM (
 		        SELECT id FROM workflow_instances
 		        WHERE status = 'running'
-		          AND heartbeat_at < NOW(6) - INTERVAL ? SECOND
+		          AND heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND
 		          AND tenant_id = ?
 		        ORDER BY heartbeat_at
 		        LIMIT ?
 		    ) t
 		)
-	`, int(timeout.Seconds()), s.tenantID, reapLimitArg(limit))
+	`, timeout.Microseconds(), s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}

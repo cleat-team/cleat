@@ -139,6 +139,8 @@ engine	TestPythonDeferSegmentRunsOnlyTheDefers	1
 engine	TestPythonOrdinarySegmentRunsTheBody	1
 engine	TestPythonWasmEndToEnd	1
 engine	TestRLSTenantIsolation	1
+engine	TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnMSSQL	2
+engine	TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnMySQL	2
 engine	TestRustAllHostCallsCompiles	2
 engine	TestRustDeferSegmentRunsOnlyTheDefers	1
 engine	TestRustWorkflowCancelOrder	1
