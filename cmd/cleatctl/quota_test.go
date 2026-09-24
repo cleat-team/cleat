@@ -259,6 +259,25 @@ func TestQuotaSet_RejectsMissingTenant(t *testing.T) {
 	}
 }
 
+// TestQuotaSet_RejectsOversizedWindowSeconds is the known-positive for the
+// CodeQL finding on cleat#2170 (pull/2170): --window-seconds is parsed as
+// int64 but window_seconds is a 32-bit SQL column on all three dialects, and
+// the narrowing int64->int conversion had no upper-bound check. A value
+// above math.MaxInt32 must be refused before it reaches that conversion,
+// not silently truncated into an unrelated, still-positive window.
+func TestQuotaSet_RejectsOversizedWindowSeconds(t *testing.T) {
+	stderr := withExitPanic(t, func() {
+		runSetQuota(context.Background(), nil, dialect{}, []string{
+			"--tenant", uuid.New().String(),
+			"--limit-count", "1",
+			"--window-seconds", "5000000000",
+		})
+	})
+	if !strings.Contains(stderr, "must fit in a 32-bit column") {
+		t.Errorf("quota set with an oversized --window-seconds produced:\n%s", stderr)
+	}
+}
+
 func TestQuotaSet_RejectsNonUUIDTenant(t *testing.T) {
 	stderr := withExitPanic(t, func() {
 		runSetQuota(context.Background(), nil, dialect{}, []string{"--tenant", "not-a-uuid", "--limit-count", "1", "--window-seconds", "1"})

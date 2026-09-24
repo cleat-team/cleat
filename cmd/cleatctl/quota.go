@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -393,6 +394,32 @@ func runSetQuota(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		osExit(1)
 		return
 	}
+	// Validated here, before any connection is opened: these depend only on
+	// the parsed flags, not on the row this command is about to read, and a
+	// bad value should be refused the same way a bad --tenant is -- without
+	// needing a database to say so.
+	if limitCount == 0 {
+		fmt.Fprintf(os.Stderr, "--limit-count must be positive, got 0\n")
+		osExit(1)
+		return
+	}
+	if windowSeconds == 0 {
+		fmt.Fprintf(os.Stderr, "--window-seconds must be positive, got 0\n")
+		osExit(1)
+		return
+	}
+	// window_seconds is a 32-bit SQL column on all three dialects
+	// (INTEGER/INT/INT), but it is parsed as int64 (parseQuotaFlags,
+	// strconv.ParseInt(v, 10, 64)), so a bad flag value is reported as
+	// "needs an integer" rather than silently wrapping. Bound-checked here,
+	// before the narrowing conversion further down, rather than letting a
+	// value like 5_000_000_000 truncate into an unrelated, still-positive
+	// int32 and get written as a plausible-looking wrong window.
+	if windowSeconds > math.MaxInt32 {
+		fmt.Fprintf(os.Stderr, "--window-seconds must fit in a 32-bit column, got %d (max %d)\n", windowSeconds, int32(math.MaxInt32))
+		osExit(1)
+		return
+	}
 
 	exec, closeExec, err := quotaConnFor(ctx, db, d, tenantID)
 	if err != nil {
@@ -428,19 +455,11 @@ func runSetQuota(ctx context.Context, db *sql.DB, d dialect, args []string) {
 
 	next := current
 	if limitCount >= 0 {
-		if limitCount == 0 {
-			fmt.Fprintf(os.Stderr, "--limit-count must be positive, got 0\n")
-			osExit(1)
-			return
-		}
 		next.limitCount = limitCount
 	}
 	if windowSeconds >= 0 {
-		if windowSeconds == 0 {
-			fmt.Fprintf(os.Stderr, "--window-seconds must be positive, got 0\n")
-			osExit(1)
-			return
-		}
+		// Already validated (positive, fits int32) above, before the DB was
+		// touched.
 		next.windowSeconds = int(windowSeconds)
 	}
 	if enforceFlag != "" {

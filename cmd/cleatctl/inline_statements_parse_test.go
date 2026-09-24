@@ -132,6 +132,27 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// a statement to the AST walk -- there is no SQL here at all, just a
 		// five-letter subcommand name that collides with the UPDATE keyword.
 		"update": "cmd/cleatctl/queue.go's `case \"update\":` switch label for the `queue update` subcommand; matches the verb regex by coincidence of spelling, not because it is SQL",
+
+		// cleat#2046. tenant_quota is a PLUGIN table (plugins/tenantquota/
+		// migrations.go), not part of the core schema testutil.TestDB applies
+		// here -- unlike tenant_settings, tenant_egress_allow and
+		// tenant_secrets, which this package also writes inline SQL against
+		// and which ARE core tables, so their statements are checked by this
+		// test as written. PREPAREing any of the five below against this
+		// test's db fails with "relation tenant_quota does not exist", which
+		// is a property of this test's fixture, not of the SQL.
+		//
+		// The coverage is not lost: TestQuotaCommandWorksOnEveryDialect runs
+		// every one of these five, unmodified, through plugin.RunMigrations
+		// (the same call cmd/cleat-worker uses at boot) against real
+		// Postgres, MySQL and SQL Server databases -- a stronger check than
+		// this test's PREPARE-only one, and the only one of the three
+		// dialects this test could have run against anyway.
+		"SELECT limit_count, window_seconds, enforce, updated_at FROM tenant_quota WHERE tenant_id = $1 AND resource = $2":                                        "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
+		"INSERT INTO tenant_quota (tenant_id, resource, limit_count, window_seconds, enforce, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)":        "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
+		"UPDATE tenant_quota SET limit_count = $1, window_seconds = $2, enforce = $3, updated_at = $4 WHERE tenant_id = $5 AND resource = $6 AND updated_at = $7": "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
+		"SELECT tenant_id, resource, limit_count, window_seconds, enforce, updated_at FROM tenant_quota WHERE tenant_id = $1 ORDER BY resource":                   "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
+		"SELECT tenant_id, resource, limit_count, window_seconds, enforce, updated_at FROM tenant_quota ORDER BY tenant_id, resource":                             "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
 	}
 
 	// A template is not checkable as written, and saying so out loud is the
