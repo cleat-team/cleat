@@ -168,7 +168,9 @@ func startsHealthy(t *testing.T, bin string, args ...string) (bool, string) {
 	t.Helper()
 	port := freePort(t)
 	cmd := exec.Command(bin, append(args, fmt.Sprintf("--api-addr=127.0.0.1:%d", port), "--require-auth=false")...)
-	var out strings.Builder
+	// Read while the worker is still running (the healthy case returns before it
+	// is killed), so the buffer has to be safe against exec's copier goroutine.
+	var out syncBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	cmd.Env = os.Environ()
 	if err := cmd.Start(); err != nil {
