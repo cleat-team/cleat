@@ -139,11 +139,16 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// Found running handleCreateSource+handleIngestWebhook against a real
 	// database for the first time (cleat#1992's dialect coverage) -- the
 	// in-memory fake driver has no NULL to fail to scan.
+	// deleted_at IS NULL: a deleted source reads as gone (404), the same as
+	// one that never existed, rather than as merely disabled (403) --
+	// cleat#2199. handleDeleteSource never removes the row, so without this
+	// clause a deleted source's endpoint would keep answering 403 forever
+	// instead of behaving like the caller asked it to stop existing.
 	var source webhookSourceJSON
 	err = plugin.ScanRow(p.db.QueryRow(discoverCtx, plugin.Rebind(`
 		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at
 		FROM webhook_sources
-		WHERE id = $1
+		WHERE id = $1 AND deleted_at IS NULL
 	`, p.dialect), sourceID), &source.ID, &source.TenantID, &source.Name, &source.SourceType,
 		&source.SecretConfigured, &source.Enabled, &source.SignalWorkflowID, &source.SignalName,
 		&source.CreatedAt, &source.UpdatedAt)
@@ -358,10 +363,15 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// deleted_at IS NULL: a soft-deleted source (cleat#2199) is gone from the
+	// tenant's own listing, the same as what "delete" should mean to the
+	// caller, even though the row survives underneath for admin.drop_tenant
+	// and for GET /ingest/events, which is deliberately NOT filtered the
+	// same way -- see handleDeleteSource.
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
 		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at
 		FROM webhook_sources
-		WHERE tenant_id = $1
+		WHERE tenant_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC
 	`, p.dialect), tid)
 	if err != nil {
@@ -512,11 +522,12 @@ func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// deleted_at IS NULL -- see handleListSources.
 	var s webhookSourceJSON
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at
 		FROM webhook_sources
-		WHERE id = $1 AND tenant_id = $2
+		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
 	`, p.dialect), id, tid), &s.ID, &s.TenantID, &s.Name, &s.SourceType,
 		&s.SecretConfigured, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
 		&s.CreatedAt, &s.UpdatedAt)
@@ -549,10 +560,29 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SOFT delete, not a real DELETE. cleat#2199:
+	// webhook_events.source_id REFERENCES webhook_sources(id) with no ON
+	// DELETE action, so removing the row 500s on PostgreSQL/SQL Server for
+	// any source with at least one event, and orphans webhook_events rows on
+	// MySQL (InnoDB ignores an inline-column REFERENCES). Nothing is removed
+	// now, so the FK is never exercised on any dialect.
+	//
+	// enabled = false is not redundant with deleted_at: it is what
+	// handleIngestWebhook's disabled-source check (above) already enforces,
+	// kept in lockstep so a deleted source is ALSO a disabled one by every
+	// existing rule, not just the new deleted_at-scoped ones added here.
+	//
+	// The WHERE clause's `deleted_at IS NULL` makes a second DELETE of an
+	// already-deleted source read the same as one that never existed: rows
+	// affected is 0 either way, and this returns 404 -- same as today's
+	// pre-#2199 behaviour for a repeat delete, so this is not a new
+	// idempotency contract, just one that no longer depends on the row
+	// having been physically removed.
 	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
-		DELETE FROM webhook_sources
-		WHERE id = $1 AND tenant_id = $2
-	`, p.dialect), id, tid)
+		UPDATE webhook_sources
+		SET enabled = false, deleted_at = $1
+		WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL
+	`, p.dialect), time.Now(), id, tid)
 	if err != nil {
 		p.logger.Error("webhook-ingest: delete source", "error", err)
 		p.writeError(w, 500, "failed to delete source")
@@ -563,13 +593,18 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Best-effort: the source row is already gone, which is the operation
-	// the caller asked for and got. A failure here leaves a retired-but-not-
-	// yet-retired secret with no source row pointing at it -- inert, since
-	// nothing looks it up by an id that no longer exists -- so it is logged
-	// rather than turned into a 500 for an otherwise-successful delete.
-	// cleat#1992, same shape as plugins/notifications/routes.go's
-	// handleDeleteWebhook.
+	// Best-effort, and no longer merely a courtesy: retiring the secret is
+	// now the FIRST of two independent things that stop ingestion (the
+	// second is deleted_at, above) -- handleIngestWebhook's signature check
+	// already refuses on any secret-load error rather than falling back
+	// unsigned, so the secret becomes unusable the moment this succeeds,
+	// regardless of the flag. A failure here still doesn't fail the delete:
+	// the source row is already marked deleted, which is the operation the
+	// caller asked for and got, and deleted_at alone is sufficient to stop
+	// ingestion even if this retire call never completes. Logged rather
+	// than turned into a 500 for an otherwise-successful delete. cleat#1992,
+	// same shape as plugins/notifications/routes.go's handleDeleteWebhook
+	// (cleat#2220 tracks the identical FK bug there, not fixed by this PR).
 	if _, err := p.secrets.Retire(r.Context(), WebhookIngestSecretName(id)); err != nil {
 		p.logger.Error("webhook-ingest: retire source secret after delete", "error", err, "id", id)
 	}

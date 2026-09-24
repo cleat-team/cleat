@@ -52,6 +52,17 @@ type awaitWebhookOutput struct {
 // tenant. If a matching event is found, it is marked as processed and returned.
 // If none is found, the output {"found": false} is returned and the workflow
 // engine will retry according to its retry policy.
+//
+// A deleted source (cleat#2199) is not special-cased here, deliberately: this
+// query has no join to webhook_sources at all, so an event ingested BEFORE its
+// source was deleted is still found and delivered. What changes is that no
+// NEW event can ever arrive for that source_id -- handleIngestWebhook refuses
+// every POST to a deleted source -- so an await_webhook call scoped to it
+// simply keeps returning {"found": false} forever afterward, and the calling
+// workflow is woken only by its own retry policy's eventual timeout, the same
+// as if the source had just gone quiet. There is no signal here that the
+// source was deleted rather than merely idle; a caller that needs to
+// distinguish the two has to check GET /ingest/sources/{id} itself.
 func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
 	if cc == nil || cc.TenantID == "" {

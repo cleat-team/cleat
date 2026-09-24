@@ -317,5 +317,43 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_sources DROP COLUMN secret_configured;
 			`,
 		},
+		{
+			// A deleted source is soft-deleted, not removed. cleat#2199:
+			// webhook_events.source_id REFERENCES webhook_sources(id) with no
+			// ON DELETE action, so a hard DELETE on webhook_sources 500s on
+			// PostgreSQL and SQL Server for any source with at least one event,
+			// and on MySQL succeeds while orphaning that source's
+			// webhook_events rows (InnoDB ignores an inline-column REFERENCES).
+			//
+			// Nothing is removed either way now -- handleDeleteSource sets
+			// enabled = false and deleted_at, so the FK is never exercised on
+			// any of the three dialects, and a source's ingested events (its
+			// audit trail) survive the source that received them, which
+			// matters most exactly when a source is deleted for a leaked
+			// secret: that is an incident, and the history of what was
+			// ingested during the compromise window is what an operator needs
+			// kept, not erased.
+			Version: 8,
+			Up: `
+					ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+				`,
+			UpMySQL: `
+					ALTER TABLE webhook_sources ADD COLUMN deleted_at TIMESTAMP(6) NULL;
+				`,
+			UpMSSQL: `
+					IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'deleted_at')
+					ALTER TABLE webhook_sources ADD deleted_at DATETIMEOFFSET NULL;
+				`,
+			Down: `
+					ALTER TABLE webhook_sources DROP COLUMN IF EXISTS deleted_at;
+				`,
+			DownMySQL: `
+					ALTER TABLE webhook_sources DROP COLUMN deleted_at;
+				`,
+			DownMSSQL: `
+					IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'deleted_at')
+					ALTER TABLE webhook_sources DROP COLUMN deleted_at;
+				`,
+		},
 	}
 }
