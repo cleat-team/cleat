@@ -119,6 +119,32 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	return nil
 }
 
+// RequiredDeploymentSecrets implements plugin.HasRequiredDeploymentSecrets.
+//
+// Conditional, unlike email's and llm's unconditional requirement: slack-notify
+// also serves outbound webhook notifications that need no signing secret at
+// all, so a bare enabled slack-notify must not be forced to have one -- the
+// same reasoning that already keeps it off checkRequiredDeploymentSecrets'
+// unconditional list.
+//
+// The owner's call on cleat#2172 (relayed on #2231's review) is that this
+// cannot stay unconditional-OFF either: a deployment whose --plugin-config
+// still carries the legacy slack_signing_secret has, by definition, used
+// /slack/interactive before -- Init's leftover-key WARN a few lines up keys
+// on exactly the same signal. For that deployment, upgrading with no
+// slacknotify.signing_secret set would go from "button clicks accepted" to
+// "button clicks silently 401" with nothing at boot saying why. Requiring
+// the secret ONLY in that case reuses checkRequiredDeploymentSecrets
+// (cmd/cleat-worker/setup.go) rather than a second boot-time check: this
+// plugin's Init never needs to look the secret up itself.
+func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
+	var legacy legacySlackConfig
+	if err := json.Unmarshal(config, &legacy); err == nil && legacy.SlackSigningSecret != "" {
+		return []string{"slacknotify.signing_secret"}, nil
+	}
+	return nil, nil
+}
+
 // DeploymentSecretPrefix implements plugin.HasDeploymentSecretPrefix:
 // slack-notify only ever reads "slacknotify.signing_secret".
 func (p *Plugin) DeploymentSecretPrefix() string {
