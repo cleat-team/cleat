@@ -384,57 +384,21 @@ func nextBackoff(attemptCount int) time.Duration {
 	}
 }
 
-// Deliveries that are due: pending or retrying, with their next attempt in the
-// past.
+// nowSQLExpr returns a dialect-correct SQL expression for "the database's
+// own now" -- used to stamp next_attempt_at (in sendWebhook and markRetrying)
+// out of the SAME clock queryDueDeliveries (below) compares it against: the
+// database server's, not the Go process's.
 //
-// `LIMIT 100` has no T-SQL spelling (cleat#1133). `now()` does not either, but
-// that one the adapter handles -- plugin.Rebind rewrites it to
-// SYSUTCDATETIME(), so only the row limit needs an arm. The split is the same
-// one the adapter draws everywhere: a token that maps one-to-one is rewritten
-// centrally; a construct that moves to a different clause is written out.
-//
-// THE MYSQL ARM USES `NOW(6)`, NOT A BARE `now()`. next_attempt_at is
-// TIMESTAMP(6) (migrations.go), storing microseconds -- at the time this was
-// found, the value sendWebhook inserted was Go's time.Now(), full precision.
-// (sendWebhook and markRetrying now stamp next_attempt_at with the
-// database's own clock too -- see nowSQLExpr below, added for a related but
-// distinct bug -- so this paragraph's "the value sendWebhook inserts" is
-// history rather than current behaviour; the precision mismatch it explains
-// would have applied to an app-clock value just the same.) MySQL's `now()`
-// with no argument returns SECOND precision, truncating any fractional part
-// to zero.
-// So `next_attempt_at <= now()` compares a microsecond-precise value against
-// one truncated DOWN to the start of the current second: a delivery whose
-// next_attempt_at falls anywhere after that second's :00 -- which is nearly
-// always, since it is set to "now" at creation -- reads as still in the
-// future until the wall clock ticks over to the NEXT second. Found running
-// this against real MySQL with no delay between creating a delivery and
-// sweeping for it (cleat-review on #2198's requested test): attempted=0 on
-// every run, despite the row existing with status='pending' and
-// next_attempt_at a few milliseconds in the past. NOW(6) matches the
-// column's own precision, the same fix engine/query_builder.go's nowExpr()
-// already uses for MySQL. In production, where Run ticks every
-// deliveryInterval (30s) rather than immediately, this cost at most one
-// missed sweep before the next one caught it -- silent by dilution, not by
-// impossibility, which is exactly the class of bug a lower-frequency
-// production system does not surface for itself.
-//
-// nowSQLExpr and nowPlusSecondsSQLExpr build next_attempt_at (in sendWebhook
-// and markRetrying) out of the SAME clock this query compares it against:
-// the database server's, not the Go process's.
-//
-// A SECOND, DISTINCT gap from the one above, found in cleat-review's re-check
-// of #2198: sendWebhook and markRetrying used to stamp next_attempt_at with
-// Go's time.Now() (the app/host clock), literal precision aside. Measured:
-// MySQL runs about 35ms behind the Go host clock in cleat-review's
-// environment, so a freshly-created delivery's next_attempt_at (host clock,
-// "now") read as still in the future against the database's own, slightly
-// earlier "now" -- it missed its first sweep every time, not only when the
-// clocks happened to straddle a second boundary the way the precision bug
-// above needed. Any app/DB clock skew, in EITHER direction, delays every
+// A gap found in cleat-review's re-check of #2198: sendWebhook and
+// markRetrying used to stamp next_attempt_at with Go's time.Now() (the
+// app/host clock). Measured: MySQL runs about 35ms behind the Go host clock
+// in cleat-review's environment, so a freshly-created delivery's
+// next_attempt_at (host clock, "now") read as still in the future against
+// the database's own, slightly earlier "now" -- it missed its first sweep
+// every time. Any app/DB clock skew, in EITHER direction, delays every
 // attempt -- creation and every retry -- by the same amount, silently.
-// Stamping with the database's own clock, exactly as this query's own read
-// side already does, removes the skew rather than bounding it.
+// Stamping with the database's own clock, exactly as queryDueDeliveries's
+// own read side already does, removes the skew rather than bounding it.
 func nowSQLExpr(d plugin.Dialect) string {
 	switch d {
 	case plugin.DialectMySQL:
@@ -467,6 +431,40 @@ func nowPlusSecondsSQLExpr(d plugin.Dialect, ph string) string {
 	}
 }
 
+// Deliveries that are due: pending or retrying, with their next attempt in the
+// past.
+//
+// `LIMIT 100` has no T-SQL spelling (cleat#1133). `now()` does not either, but
+// that one the adapter handles -- plugin.Rebind rewrites it to
+// SYSUTCDATETIME(), so only the row limit needs an arm. The split is the same
+// one the adapter draws everywhere: a token that maps one-to-one is rewritten
+// centrally; a construct that moves to a different clause is written out.
+//
+// THE MYSQL ARM USES `NOW(6)`, NOT A BARE `now()`. next_attempt_at is
+// TIMESTAMP(6) (migrations.go), storing microseconds -- at the time this was
+// found, the value sendWebhook inserted was Go's time.Now(), full precision.
+// (sendWebhook and markRetrying now stamp next_attempt_at with the
+// database's own clock too -- see nowSQLExpr above, added for a related but
+// distinct bug -- so this paragraph's "the value sendWebhook inserts" is
+// history rather than current behaviour; the precision mismatch it explains
+// would have applied to an app-clock value just the same.) MySQL's `now()`
+// with no argument returns SECOND precision, truncating any fractional part
+// to zero.
+// So `next_attempt_at <= now()` compares a microsecond-precise value against
+// one truncated DOWN to the start of the current second: a delivery whose
+// next_attempt_at falls anywhere after that second's :00 -- which is nearly
+// always, since it is set to "now" at creation -- reads as still in the
+// future until the wall clock ticks over to the NEXT second. Found running
+// this against real MySQL with no delay between creating a delivery and
+// sweeping for it (cleat-review on #2198's requested test): attempted=0 on
+// every run, despite the row existing with status='pending' and
+// next_attempt_at a few milliseconds in the past. NOW(6) matches the
+// column's own precision, the same fix engine/query_builder.go's nowExpr()
+// already uses for MySQL. In production, where Run ticks every
+// deliveryInterval (30s) rather than immediately, this cost at most one
+// missed sweep before the next one caught it -- silent by dilution, not by
+// impossibility, which is exactly the class of bug a lower-frequency
+// production system does not surface for itself.
 var queryDueDeliveries = plugin.Query{
 	Default: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
