@@ -2,12 +2,32 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
+
+// ErrPluginCrossTenantContext is wrapped into every error
+// errCrossTenantContext returns, so a caller -- or a test proving the refusal
+// actually fired, rather than some other error PostgreSQL's or SQL Server's
+// own defense-in-depth happened to produce first -- can check
+// errors.Is(err, ErrPluginCrossTenantContext) instead of matching on message
+// text or merely on err != nil.
+//
+// That distinction is load-bearing, not decorative: PostgreSQL's
+// markCrossTenantOnTx (see errCrossTenantContext's doc below) already 42501s
+// on its own once a ctx is cross-tenant-marked, because SET LOCAL ROLE
+// cleat_sweep drops cleat_app's grants. So on PostgreSQL specifically, err !=
+// nil is true whether or not checkNotCrossTenant runs at all -- a test
+// asserting only non-nil-ness would stay green with the Go-level refusal
+// deleted, proving nothing about it. cleat-review caught this re-verifying
+// #2163 (dad45b06): the fix is not to remove the plain-error test rows below
+// but to also assert the SPECIFIC refusal.
+var ErrPluginCrossTenantContext = errors.New(
+	"plugin: ctx is cross-tenant-marked (plugin.AcrossAllTenants)")
 
 // errNoTenantInContext is returned by the request-path methods when ctx
 // carries no tenant -- either because the caller forgot plugin.ForTenant, or
@@ -56,9 +76,9 @@ func errNoTenantInContext(method string) error {
 // failure modes -- is the same choice #2141 made for the SQL per-tenant
 // loops via plugin.IsCrossTenant.
 func errCrossTenantContext(method string) error {
-	return fmt.Errorf("plugin.%s: ctx is cross-tenant-marked (plugin.AcrossAllTenants) -- "+
-		"refused rather than silently mis-scoped or bypassed; see beginTenantTx's own doc "+
-		"comment in engine/plugindb_tenant.go for why the bypass wins over a tenant marking", method)
+	return fmt.Errorf("plugin.%s: %w -- refused rather than silently mis-scoped or bypassed; "+
+		"see beginTenantTx's own doc comment in engine/plugindb_tenant.go for why the bypass "+
+		"wins over a tenant marking", method, ErrPluginCrossTenantContext)
 }
 
 // checkNotCrossTenant is the one check every Secrets/Payloads method makes

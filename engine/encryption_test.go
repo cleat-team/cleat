@@ -512,3 +512,43 @@ func TestEncryptJSON_EmptyInput(t *testing.T) {
 		t.Errorf("expected empty result, got %v", got)
 	}
 }
+
+// TestDecryptCannotOpenASealForPluginCiphertext is this file's own,
+// adapter-independent version of the domain-separation claim
+// TestPluginPayloadsCannotOpenEnginesOwnEventHistoryCiphertext
+// (plugin_secrets_test.go) proves through the pluginPayloads adapter in both
+// directions. That test goes through plugin.Payloads' Seal/Open, so a
+// refusal there could in principle come from something other than the
+// crypto -- checkNotCrossTenant, a ctx-plumbing bug, anything upstream of
+// SealForPlugin/OpenForPlugin. This one calls SealForPlugin and Decrypt
+// directly, because the hazard cleat-review flagged re-verifying #2163 is
+// specifically a future "unify the openers" refactor INSIDE this file: one
+// that merges OpenForPlugin and Decrypt (or SealForPlugin and Encrypt) into
+// shared code and, in doing so, accidentally widens Decrypt to accept
+// SealForPlugin's form. A test that only goes through the plugin adapter
+// would not catch that -- the adapter's own refusal has nothing to do with
+// which HKDF info string was used underneath it.
+func TestDecryptCannotOpenASealForPluginCiphertext(t *testing.T) {
+	pe, err := NewPayloadEncryption(validKey(t))
+	if err != nil {
+		t.Fatalf("NewPayloadEncryption: %v", err)
+	}
+
+	sealed, err := pe.SealForPlugin(DefaultTenantUUID, []byte("plugin-payload"))
+	if err != nil {
+		t.Fatalf("SealForPlugin: %v", err)
+	}
+
+	// Known-positive: OpenForPlugin, SealForPlugin's own opener, must still
+	// open it, or a refusal below proves nothing about domain separation
+	// specifically as opposed to the ciphertext simply being malformed.
+	if got, err := pe.OpenForPlugin(DefaultTenantUUID, sealed); err != nil || string(got) != "plugin-payload" {
+		t.Fatalf("UNMEASURED: OpenForPlugin could not open its own SealForPlugin ciphertext: got=%q err=%v", got, err)
+	}
+
+	// THE CLAIM UNDER TEST: engine's own Decrypt, same tenant, must NOT open
+	// a ciphertext sealed through SealForPlugin's domain.
+	if got, err := pe.Decrypt(DefaultTenantUUID, sealed); err == nil {
+		t.Fatalf("engine's own Decrypt opened a SealForPlugin-domain ciphertext: got=%q", got)
+	}
+}

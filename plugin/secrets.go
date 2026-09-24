@@ -108,6 +108,13 @@ type TenantSecrets interface {
 //
 // Same reasoning as Secrets for the missing tenantID parameter: the tenant
 // comes from ctx, via the same plugin.ForTenant marker.
+//
+// NOT COVERED BY `cleatctl reseal-payloads`: that command only rewrites
+// event_history's own encrypted columns (engine.EncryptedEventColumns), so a
+// value a plugin sealed through here stays readable after a key rotation
+// only for as long as the key it was sealed under remains in the ring as a
+// previous key -- a plugin storing a long-lived Sealed value is responsible
+// for its own re-seal, the same way it is responsible for its own storage.
 type Payloads interface {
 	Seal(ctx context.Context, plaintext []byte) ([]byte, error)
 	Open(ctx context.Context, sealed []byte) ([]byte, error)

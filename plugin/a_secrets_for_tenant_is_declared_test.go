@@ -35,14 +35,15 @@ import (
 // rather than the guard being wired up after the fact once something is
 // already undeclared.
 //
-// RECONCILE WITH cleat#2141 WHEN IT MERGES. #2141 (still open when this was
-// written) adds perTenantLoopLedger as crossTenantLedger's sibling for
-// plugin.AllTenantIDs call sites. This ledger is Secrets.ForTenant's
-// equivalent, added separately because #2163 does not depend on #2141
-// merging first. Whichever of the two lands second should fold this into
-// perTenantLoopLedger's file (or leave both, if a reviewer decides the two
-// questions are worth keeping visually distinct) rather than carrying two
-// near-identical scanners indefinitely.
+// RECONCILED WITH cleat#2141, which merged first (09910eb3). #2141 added
+// perTenantLoopLedger as crossTenantLedger's sibling for plugin.AllTenantIDs
+// call sites, documented as C15 in docs/contributor/plugins/plugin-contract.md.
+// This ledger is Secrets.ForTenant's equivalent and is documented as C16,
+// right after it -- kept as a separate file rather than folded into
+// perTenantLoopLedger's, because the two check different shapes (a
+// bypass-spanning AllTenantIDs loop versus a single named tenant) closely
+// enough that folding them would make one file's diff answer a question about
+// the other's scanner.
 var secretsForTenantLedger = map[string]bool{}
 
 // secretsForTenantSite is one Secrets.ForTenant-shaped call, located by

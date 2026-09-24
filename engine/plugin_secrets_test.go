@@ -39,6 +39,25 @@ import (
 	"github.com/google/uuid"
 )
 
+// wantCrossTenantRefusal asserts err is specifically the checkNotCrossTenant
+// refusal (errors.Is against ErrPluginCrossTenantContext), not merely
+// non-nil. See TestPluginSecretsRefusesACrossTenantMarkedContext's doc
+// comment for why a bare err != nil is not sufficient here: on PostgreSQL,
+// SET LOCAL ROLE cleat_sweep already produces a non-nil 42501 error on its
+// own once a ctx is cross-tenant-marked, independent of whether
+// checkNotCrossTenant runs at all.
+func wantCrossTenantRefusal(t *testing.T, err error, what string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s returned no error", what)
+	}
+	if !errors.Is(err, ErrPluginCrossTenantContext) {
+		t.Fatalf("%s: got %v, want an error wrapping ErrPluginCrossTenantContext "+
+			"(got some other error instead -- possibly a dialect's own defense-in-depth, "+
+			"not the checkNotCrossTenant refusal this test exists to prove)", what, err)
+	}
+}
+
 // TestPluginSecretsCannotReachAnotherTenantByAnyArgument is the known-positive
 // half deliberately kept in the same test as the refusal: tenant A's own
 // request-path read succeeding, and ForTenant(tenantA) independently reading
@@ -200,6 +219,21 @@ func TestPluginSecretsRequestPathRefusesAnUnmarkedContext(t *testing.T) {
 // by TestPluginSecretsRequestPathRefusesAnUnmarkedContext and would not
 // exercise beginTenantTx's documented cross-tenant-before-tenant precedence
 // at all.
+//
+// EVERY refusal below is asserted with wantCrossTenantRefusal, not a bare
+// err == nil check, and that is load-bearing on PostgreSQL specifically:
+// SET LOCAL ROLE cleat_sweep already 42501s on its own once a ctx is
+// cross-tenant-marked (see errCrossTenantContext's doc), so err != nil is
+// true on Postgres whether or not checkNotCrossTenant runs at all -- a test
+// asserting only non-nil-ness would stay green with the Go-level refusal
+// deleted, proving nothing about it. Falsified by commenting out
+// checkNotCrossTenant's body (returning nil unconditionally): on MSSQL every
+// assertion below failed loudly, for the expected reason (a stale-session-key
+// Get/Put/Retire rather than a refusal); on Postgres the plain err != nil
+// checks this test used to have stayed GREEN -- RLS's own 42501 stood in for
+// the deleted refusal -- and only wantCrossTenantRefusal's errors.Is check
+// went red, for the right reason: got a *pgconn.PgError, not
+// ErrPluginCrossTenantContext. Restored and re-verified by content diff.
 func TestPluginSecretsRefusesACrossTenantMarkedContext(t *testing.T) {
 	for _, dialect := range []testutil.Dialect{testutil.DialectPostgres, testutil.DialectMSSQL} {
 		t.Run(string(dialect), func(t *testing.T) {
@@ -225,30 +259,24 @@ func TestPluginSecretsRefusesACrossTenantMarkedContext(t *testing.T) {
 			marked := plugin.AcrossAllTenants(e.ctx(aTenant), "test: deliberately marked")
 
 			// THE CLAIM UNDER TEST, request-path.
-			if _, err := secrets.Get(marked, "plugin_secrets_crosstenant_probe"); err == nil {
-				t.Fatal("Get on a cross-tenant-marked ctx returned no error")
-			}
-			if err := secrets.Put(marked, "plugin_secrets_crosstenant_probe", "should-not-write"); err == nil {
-				t.Fatal("Put on a cross-tenant-marked ctx returned no error")
-			}
-			if n, err := secrets.Retire(marked, "plugin_secrets_crosstenant_probe"); err == nil {
-				t.Fatalf("Retire on a cross-tenant-marked ctx returned no error (rowsAffected=%d)", n)
-			}
+			_, err = secrets.Get(marked, "plugin_secrets_crosstenant_probe")
+			wantCrossTenantRefusal(t, err, "Get on a cross-tenant-marked ctx")
+			err = secrets.Put(marked, "plugin_secrets_crosstenant_probe", "should-not-write")
+			wantCrossTenantRefusal(t, err, "Put on a cross-tenant-marked ctx")
+			_, err = secrets.Retire(marked, "plugin_secrets_crosstenant_probe")
+			wantCrossTenantRefusal(t, err, "Retire on a cross-tenant-marked ctx")
 
 			// THE CLAIM UNDER TEST, ForTenant: marking wins over ForTenant's own
 			// tenant per beginTenantTx's documented precedence, so ForTenant
 			// must ALSO refuse a marked incoming ctx rather than silently
 			// no-op past the marking.
 			tenantScoped := secrets.ForTenant(aTenant.String())
-			if _, err := tenantScoped.Get(marked, "plugin_secrets_crosstenant_probe"); err == nil {
-				t.Fatal("ForTenant(...).Get on a cross-tenant-marked ctx returned no error")
-			}
-			if err := tenantScoped.Put(marked, "plugin_secrets_crosstenant_probe", "should-not-write"); err == nil {
-				t.Fatal("ForTenant(...).Put on a cross-tenant-marked ctx returned no error")
-			}
-			if n, err := tenantScoped.Retire(marked, "plugin_secrets_crosstenant_probe"); err == nil {
-				t.Fatalf("ForTenant(...).Retire on a cross-tenant-marked ctx returned no error (rowsAffected=%d)", n)
-			}
+			_, err = tenantScoped.Get(marked, "plugin_secrets_crosstenant_probe")
+			wantCrossTenantRefusal(t, err, "ForTenant(...).Get on a cross-tenant-marked ctx")
+			err = tenantScoped.Put(marked, "plugin_secrets_crosstenant_probe", "should-not-write")
+			wantCrossTenantRefusal(t, err, "ForTenant(...).Put on a cross-tenant-marked ctx")
+			_, err = tenantScoped.Retire(marked, "plugin_secrets_crosstenant_probe")
+			wantCrossTenantRefusal(t, err, "ForTenant(...).Retire on a cross-tenant-marked ctx")
 
 			// Known-positive #2: tenant A's secret must have survived every
 			// refused call above untouched, or "refused" could mean "silently
@@ -262,7 +290,15 @@ func TestPluginSecretsRefusesACrossTenantMarkedContext(t *testing.T) {
 
 // TestPluginPayloadsRefusesACrossTenantMarkedContext is Payloads' version of
 // the claim above. Payloads has no ForTenant (see plugin.Payloads' doc
-// comment), so only the request-path Seal/Open pair is exercised.
+// comment), so only the request-path Seal/Open pair is exercised. Uses the
+// same wantCrossTenantRefusal helper as the Secrets test above for
+// consistency, though the PostgreSQL confound that helper exists to catch
+// does not apply here: Seal/Open are pure HKDF+AES-GCM with no SQL in the
+// loop, so falsifying checkNotCrossTenant makes them succeed outright with a
+// nil error on every dialect, not a defense-in-depth error standing in for
+// the refusal. Falsified and confirmed: with checkNotCrossTenant deleted,
+// both PostgreSQL and MSSQL subtests failed with "returned no error" rather
+// than a wrapped-error mismatch. Restored and re-verified by content diff.
 func TestPluginPayloadsRefusesACrossTenantMarkedContext(t *testing.T) {
 	for _, dialect := range []testutil.Dialect{testutil.DialectPostgres, testutil.DialectMSSQL} {
 		t.Run(string(dialect), func(t *testing.T) {
@@ -292,12 +328,10 @@ func TestPluginPayloadsRefusesACrossTenantMarkedContext(t *testing.T) {
 			marked := plugin.AcrossAllTenants(e.ctx(aTenant), "test: deliberately marked")
 
 			// THE CLAIM UNDER TEST.
-			if _, err := payloads.Seal(marked, []byte("should-not-seal")); err == nil {
-				t.Fatal("Seal on a cross-tenant-marked ctx returned no error")
-			}
-			if _, err := payloads.Open(marked, sealed); err == nil {
-				t.Fatal("Open on a cross-tenant-marked ctx returned no error")
-			}
+			_, err = payloads.Seal(marked, []byte("should-not-seal"))
+			wantCrossTenantRefusal(t, err, "Seal on a cross-tenant-marked ctx")
+			_, err = payloads.Open(marked, sealed)
+			wantCrossTenantRefusal(t, err, "Open on a cross-tenant-marked ctx")
 		})
 	}
 }
