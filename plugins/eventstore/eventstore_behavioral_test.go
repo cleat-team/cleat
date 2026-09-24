@@ -141,9 +141,56 @@ func (c *esConn) ExecContext(_ context.Context, query string, args []driver.Name
 	switch {
 	case strings.Contains(q, "DELETE FROM event_stream"):
 		return c.execDelete(args)
+	case strings.Contains(q, "INSERT INTO event_stream"):
+		return c.execAppend(args)
 	default:
 		return nil, fmt.Errorf("esConn: unexpected Exec: %.80s", q)
 	}
+}
+
+// execAppend handles insertEvent (queries.go): a plain INSERT with the
+// caller-computed sequence as an argument, not a RETURNING clause -- see
+// queries.go's comment on why handleAppend now reads the next sequence in
+// its own statement (queryMaxSeq below) rather than a subquery of this
+// INSERT. Returns a duplicate-key-shaped error if the (tenant, stream,
+// sequence) triple already exists, matching isPKConflict's substring check.
+func (c *esConn) execAppend(args []driver.NamedValue) (driver.Result, error) {
+	tidStr, err := esArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := uuid.Parse(tidStr)
+	if err != nil {
+		return nil, err
+	}
+	streamID, err := esArgString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	sequence, err := esArgInt64(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	eventBody, err := esArgString(args, 4)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, e := range c.db.events {
+		if e.tenantID == tid && e.streamID == streamID && e.sequence == sequence {
+			return nil, fmt.Errorf("esConn: duplicate key value violates unique constraint (simulated)")
+		}
+	}
+
+	c.db.events = append(c.db.events, esRow{
+		tenantID:  tid,
+		streamID:  streamID,
+		sequence:  sequence,
+		event:     eventBody,
+		createdAt: time.Now().UTC().Truncate(time.Microsecond),
+	})
+
+	return &esResult{1}, nil
 }
 
 func (c *esConn) execDelete(args []driver.NamedValue) (driver.Result, error) {
@@ -189,10 +236,6 @@ func (c *esConn) QueryContext(_ context.Context, query string, args []driver.Nam
 
 	q := strings.ReplaceAll(query, "\n", " ")
 	switch {
-	case strings.Contains(q, "INSERT INTO event_stream") && strings.Contains(q, "RETURNING sequence"):
-		c.db.mu.Lock()
-		defer c.db.mu.Unlock()
-		return c.execInsert(args)
 	case strings.Contains(q, "COALESCE(MAX(sequence)"):
 		c.db.mu.RLock()
 		defer c.db.mu.RUnlock()
@@ -206,48 +249,10 @@ func (c *esConn) QueryContext(_ context.Context, query string, args []driver.Nam
 	}
 }
 
-func (c *esConn) execInsert(args []driver.NamedValue) (driver.Rows, error) {
-	tidStr, err := esArgString(args, 1)
-	if err != nil {
-		return nil, err
-	}
-	tid, err := uuid.Parse(tidStr)
-	if err != nil {
-		return nil, err
-	}
-	streamID, err := esArgString(args, 2)
-	if err != nil {
-		return nil, err
-	}
-	eventBody, err := esArgString(args, 3)
-	if err != nil {
-		return nil, err
-	}
-
-	// Compute next sequence
-	var maxSeq int64
-	for _, e := range c.db.events {
-		if e.tenantID == tid && e.streamID == streamID && e.sequence > maxSeq {
-			maxSeq = e.sequence
-		}
-	}
-	sequence := maxSeq + 1
-
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	c.db.events = append(c.db.events, esRow{
-		tenantID:  tid,
-		streamID:  streamID,
-		sequence:  sequence,
-		event:     eventBody,
-		createdAt: now,
-	})
-
-	return &esRows{
-		columns: []string{"sequence"},
-		data:    [][]driver.Value{{sequence}},
-	}, nil
-}
-
+// queryMaxSeq handles nextSequenceForStream (queries.go): the separate
+// read-side statement appendOnce runs before its INSERT. Its 2-arg shape
+// (tenant, stream) is unchanged by cleat#2260 -- only the INSERT moved to
+// ExecContext's execAppend, above.
 func (c *esConn) queryMaxSeq(args []driver.NamedValue) (driver.Rows, error) {
 	tidStr, err := esArgString(args, 1)
 	if err != nil {

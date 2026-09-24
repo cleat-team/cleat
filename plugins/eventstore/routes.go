@@ -1,13 +1,17 @@
 package eventstore
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
@@ -91,14 +95,26 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Insert event with auto-incrementing sequence.
-	// Retry loop handles PK conflicts from concurrent appends.
+	// Insert event with auto-incrementing sequence. The next sequence is
+	// read in its own statement, not a subquery of the INSERT (cleat#2260 --
+	// see nextSequenceForStream's comment in queries.go for why). Retry loop
+	// handles PK conflicts from concurrent appends racing on the same
+	// read-then-write.
+	//
+	// maxAppendAttempts was 3 until cleat#2260's own concurrent-append test
+	// (n=20 appenders against one stream) exhausted it for real: every
+	// loser's retry reads the now-current MAX and can still collide with
+	// another concurrent loser, and a fixed 10/20ms backoff retries every
+	// loser in the same round in lockstep, which does not thin the herd.
+	// 32 attempts with jittered backoff (so losers spread out instead of
+	// re-colliding together) clears n=20 reliably; see that test for the
+	// measurement this is tuned against.
 	var sequence int64
-	const maxAppendAttempts = 3
-	backoff := 10 * time.Millisecond
+	const maxAppendAttempts = 32
+	backoff := 5 * time.Millisecond
+	const maxBackoff = 100 * time.Millisecond
 	for attempt := 1; attempt <= maxAppendAttempts; attempt++ {
-		err = p.db.QueryRow(r.Context(), plugin.Rebind(insertEventReturning.For(p.dialect), p.dialect),
-			tid, streamID, string(body)).Scan(&sequence)
+		err = p.appendOnce(r.Context(), tid, streamID, body, &sequence)
 		if err == nil {
 			break
 		}
@@ -106,8 +122,12 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if attempt < maxAppendAttempts {
-			time.Sleep(backoff)
+			jitter := time.Duration(rand.Int64N(int64(backoff)))
+			time.Sleep(backoff/2 + jitter)
 			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
 		}
 	}
 	if err != nil {
@@ -126,6 +146,37 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 		"stream_id": streamID,
 		"sequence":  sequence,
 	})
+}
+
+// appendOnce runs one attempt of the read-next-sequence-then-insert pair in
+// a single transaction, writing the sequence it used into *sequence. A
+// caller retries on a duplicate-key error (isPKConflict); see the comment on
+// nextSequenceForStream in queries.go for why this is two statements and
+// why the retry, not a lock, is what makes it safe under concurrency.
+func (p *Plugin) appendOnce(ctx context.Context, tenantID uuid.UUID, streamID string, body []byte, sequence *int64) error {
+	tx, err := p.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+
+	var maxSeq int64
+	if err := tx.QueryRow(ctx, plugin.Rebind(nextSequenceForStream.For(p.dialect), p.dialect),
+		tenantID, streamID).Scan(&maxSeq); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("read next sequence: %w", err)
+	}
+	*sequence = maxSeq + 1
+
+	if _, err := tx.Exec(ctx, plugin.Rebind(insertEvent.For(p.dialect), p.dialect),
+		tenantID, streamID, *sequence, string(body)); err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
 }
 
 // ---- GET /events/{stream_id} ----

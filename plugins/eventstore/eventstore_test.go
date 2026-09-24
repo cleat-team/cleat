@@ -92,10 +92,65 @@ func (*fakeTx) Commit() error   { return nil }
 func (*fakeTx) Rollback() error { return nil }
 
 // --- ExecContext ---
-// (eventstore only uses QueryRowContext / QueryContext, no ExecContext needed)
 
 func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	return nil, fmt.Errorf("fakeConn: unexpected Exec query: %s", query)
+	switch {
+	case strings.Contains(query, "INSERT INTO event_stream"):
+		c.store.mu.Lock()
+		defer c.store.mu.Unlock()
+		return c.execAppend(args)
+	default:
+		return nil, fmt.Errorf("fakeConn: unexpected Exec query: %s", query)
+	}
+}
+
+// execAppend handles insertEvent (queries.go): a plain INSERT with the
+// caller-computed sequence as an argument, not a RETURNING/OUTPUT clause --
+// see queries.go's comment on why handleAppend now reads the next sequence
+// in its own statement (queryMaxSeq below) rather than a subquery of this
+// INSERT. Returns a duplicate-key-shaped error, matching isPKConflict's own
+// substring check, if the (tenant, stream, sequence) triple already exists
+// -- the same race handleAppend's retry loop exists to recover from.
+func (c *fakeConn) execAppend(args []driver.NamedValue) (driver.Result, error) {
+	if c.store.failOnAppend {
+		return nil, fmt.Errorf("fakeConn: simulated append failure")
+	}
+	tidStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := uuid.Parse(tidStr)
+	if err != nil {
+		return nil, err
+	}
+	streamID, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	sequence, err := argInt64(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	eventBody, err := argString(args, 4)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, e := range c.store.events {
+		if e.tenantID == tid && e.streamID == streamID && e.sequence == sequence {
+			return nil, fmt.Errorf("fakeConn: duplicate key value violates unique constraint (simulated)")
+		}
+	}
+
+	c.store.events = append(c.store.events, eventRow{
+		tenantID:  tid,
+		streamID:  streamID,
+		sequence:  sequence,
+		event:     []byte(eventBody),
+		createdAt: time.Now().UTC(),
+	})
+
+	return &fakeResult{rowsAffected: 1}, nil
 }
 
 // --- QueryContext ---
@@ -106,10 +161,6 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
-	case strings.Contains(query, "INSERT INTO event_stream"):
-		c.store.mu.Lock()
-		defer c.store.mu.Unlock()
-		return c.queryAppend(args)
 	case strings.Contains(query, "COALESCE(MAX(sequence)"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
@@ -147,51 +198,6 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 	return &fakeRows{
 		columns: []string{"tenant_id"},
 		data:    [][]driver.Value{{tid}},
-	}, nil
-}
-
-func (c *fakeConn) queryAppend(args []driver.NamedValue) (driver.Rows, error) {
-	if c.store.failOnAppend {
-		return nil, fmt.Errorf("fakeConn: simulated append failure")
-	}
-	tidStr, err := argString(args, 1)
-	if err != nil {
-		return nil, err
-	}
-	tid, err := uuid.Parse(tidStr)
-	if err != nil {
-		return nil, err
-	}
-	streamID, err := argString(args, 2)
-	if err != nil {
-		return nil, err
-	}
-	eventBody, err := argString(args, 3)
-	if err != nil {
-		return nil, err
-	}
-
-	// Compute next sequence number.
-	var maxSeq int64
-	for _, e := range c.store.events {
-		if e.tenantID == tid && e.streamID == streamID && e.sequence > maxSeq {
-			maxSeq = e.sequence
-		}
-	}
-	sequence := maxSeq + 1
-
-	now := time.Now().UTC()
-	c.store.events = append(c.store.events, eventRow{
-		tenantID:  tid,
-		streamID:  streamID,
-		sequence:  sequence,
-		event:     []byte(eventBody),
-		createdAt: now,
-	})
-
-	return &fakeRows{
-		columns: []string{"sequence"},
-		data:    [][]driver.Value{{sequence}},
 	}, nil
 }
 
