@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
@@ -129,6 +130,14 @@ func seedRemainingTenantTables(t *testing.T, ctx context.Context, db *sql.DB, te
 		{"public.tenant_domains",
 			`INSERT INTO tenant_domains (hostname, tenant_id) VALUES ($1, $2)`,
 			[]any{"host-" + tag + ".example.test", tenant}},
+		// cleat#2230. ON DELETE CASCADE from admin.tenants, like tenant_domains
+		// above -- droptenant.go lists it in its preview for the same reason,
+		// but the actual removal is the foreign key, not a DELETE admin.drop_tenant
+		// names. team_id must satisfy ck_slack_workspace_team_id_shape (leading
+		// T/E, uppercase alphanumeric only), hence the upper-cased tag.
+		{"public.slack_workspace",
+			`INSERT INTO slack_workspace (team_id, tenant_id) VALUES ($1, $2)`,
+			[]any{"T" + strings.ToUpper(tag), tenant}},
 		{"public.tenant_secrets",
 			`INSERT INTO tenant_secrets (tenant_id, name, ciphertext) VALUES ($1, $2, $3)`,
 			[]any{tenant, "secret-" + tag, []byte("ciphertext-" + tag)}},

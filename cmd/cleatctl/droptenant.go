@@ -135,6 +135,11 @@ var dropTenantTables = []struct {
 	// by the coverage test rather than by reading the function -- it is deleted
 	// correctly and was simply never counted. cleat#1644.
 	{"admin.tenant_egress_allow", `SELECT count(*) FROM admin.tenant_egress_allow WHERE tenant_id = $1`},
+	// ON DELETE CASCADE from migrations/postgres/104 (cleat#2230). Listed for
+	// the count, as tenant_domains and tenant_secrets are above: a dropped
+	// tenant's Slack workspace mapping(s) go with it, and the operator wants
+	// to see that.
+	{"slack_workspace", `SELECT count(*) FROM slack_workspace WHERE tenant_id = $1`},
 	{"admin.tenants", `SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`},
 }
 

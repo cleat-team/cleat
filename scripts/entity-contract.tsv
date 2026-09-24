@@ -43,6 +43,7 @@ public.deployment_secrets	member	cleat#1992 part 1; the operator-wide sibling of
 admin.tenant_egress_allow	member	migration 079; absent from the issue's list of eleven
 public.tenant_domains	member	migration 080; absent from the issue's list of eleven
 public.queues	member	cleat#1116, #1702's twelfth instance; migration 093/092/092
+public.slack_workspace	exempt	cleat#2230; unlike deployment_secrets/tenant_domains, unmap-workspace is a real DELETE by design (immediate revocation, no disabled_at check to wait out) -- there is no soft-disable state to carry created_at's siblings for
 public.workflow_instances	not-an-entity	the run
 public.event_history	not-an-entity	run events
 public.workflow_promises	not-an-entity	run-scoped
