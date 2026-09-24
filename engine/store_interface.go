@@ -843,6 +843,31 @@ type StaleSetShape struct {
 	// actually act on. Used only to know when the set has fully recovered
 	// (Stale == 0), not for detection.
 	Stale int
+
+	// NoRecentHeartbeat is true when NOT EVEN ONE running row in scope has
+	// a heartbeat newer than missedBeatTimeout -- i.e. the single freshest
+	// row in the WHOLE population is itself stale. Computed server-side,
+	// against the database's own clock, over every running row -- unlike
+	// MissedBeatNewest, which is MAX() taken only across the already-stale
+	// subset and so cannot answer "has anything recent happened at all":
+	// if every row happens to be stale, MissedBeatNewest reports the
+	// freshest of THOSE, which looks identical whether or not a live
+	// survivor exists outside the CASE WHEN filter that produced it.
+	//
+	// cleat-review on cleat#2006 (2026-09-24): the original fraction+spread
+	// criterion (suspectedStallStaleFraction) had a residual false-negative
+	// at the boundary -- 5 workers, the 4 oldest rows past missedBeat and
+	// the 5th (freshest) not yet, is 4/5 = 80%, and 80% is not > 80%. This
+	// field is what replaced it: cheaper to reason about, and it doesn't
+	// depend on staleness arriving within any particular spread window.
+	NoRecentHeartbeat bool
+
+	// DistinctAssignedTo is COUNT(DISTINCT assigned_to) over EVERY running
+	// row in scope, not just the missed-beat subset (contrast
+	// MissedBeatDistinctAssignedTo). See suspectedDBStall's doc for why a
+	// single-worker fleet must never trip suspicion regardless of
+	// NoRecentHeartbeat.
+	DistinctAssignedTo int
 }
 
 // DBStallDetector is implemented by a store that can report StaleSetShape,

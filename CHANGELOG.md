@@ -690,24 +690,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A new optional `DBStallDetector` capability (implemented on all three
   dialect stores) reports the shape of the currently-stale set: how many
   running rows have missed at least one heartbeat, how many distinct
-  workers they belong to, and how tightly clustered in time. The reaper
-  suppresses reclaiming for one tick whenever that shape looks like a
-  synchronized event rather than ordinary dead-worker attrition — more than
-  80% of running rows missed a beat, across more than one worker, within
-  one worker's own write-cycle width — and keeps suppressing until either
+  workers they belong to, and whether not even one running row anywhere in
+  scope has a heartbeat newer than the detection threshold. The reaper
+  suppresses reclaiming for one tick whenever no recent heartbeat has
+  landed anywhere, across more than one worker — a single fresh survivor
+  anywhere blocks suspicion outright — and keeps suppressing until either
   the stale set genuinely clears or the full reclaim window elapses a
   second time, at which point it reclaims anyway and logs once: a
   persistent stall-shaped set is by then more likely a genuine mass
   failure than a database outage. A sharded deployment evaluates and
   suppresses each shard independently, so one stalled shard cannot pause
-  reclaiming on a healthy sibling.
+  reclaiming on a healthy sibling. If the shape probe itself fails, that
+  shard's reclaim is skipped for the tick rather than proceeding
+  unsuppressed — a slow or failing read over the very table about to be
+  updated is itself stall-shaped, so "could not check" fails closed.
 
   Detection deliberately uses a **shorter** threshold than reclaim
   eligibility itself: gating suspicion on the same window `reclaimAfter()`
   reclaims at would miss a fleet stall lasting somewhat less than that
   window, because individual rows cross it staggered rather than all at
   once, and each gets reclaimed the instant it does — precisely the harm
-  this exists to prevent.
+  this exists to prevent. **Full protection holds for stalls up to about
+  23s at the default `--heartbeat` (detection latency plus the reclaim
+  window), degrading to none by about 33s** (one more reaper tick, the
+  worst case for when the stall is first observed) — see
+  `stallProtectionLower`/`stallProtectionUpper` in `cmd/cleat-worker`.
 
   **Worst case, a genuinely dead worker's run now takes up to about 39s to
   reclaim at the default `--heartbeat`** (twice the ~14.5s reclaim window

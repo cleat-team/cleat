@@ -1249,23 +1249,29 @@ func (s *MySQLStore) PingDB(ctx context.Context) error {
 func (s *MySQLStore) StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error) {
 	var shape StaleSetShape
 	var oldest, newest sql.NullTime
+	var noRecentHeartbeat int
+	missedBeatMicros := missedBeatTimeout.Microseconds()
+	staleMicros := timeout.Microseconds()
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
 		    COUNT(*),
-		    COUNT(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? SECOND THEN 1 END),
-		    COUNT(DISTINCT CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? SECOND THEN assigned_to END),
-		    MIN(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? SECOND THEN heartbeat_at END),
-		    MAX(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? SECOND THEN heartbeat_at END),
-		    COUNT(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? SECOND THEN 1 END)
+		    COUNT(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND THEN 1 END),
+		    COUNT(DISTINCT CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND THEN assigned_to END),
+		    MIN(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND THEN heartbeat_at END),
+		    MAX(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND THEN heartbeat_at END),
+		    COUNT(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND THEN 1 END),
+		    CASE WHEN MAX(heartbeat_at) < NOW(6) - INTERVAL ? MICROSECOND THEN 1 ELSE 0 END,
+		    COUNT(DISTINCT assigned_to)
 		FROM workflow_instances
 		WHERE status = 'running' AND tenant_id = ?
-	`, int(missedBeatTimeout.Seconds()), int(missedBeatTimeout.Seconds()), int(missedBeatTimeout.Seconds()),
-		int(missedBeatTimeout.Seconds()), int(timeout.Seconds()), s.tenantID,
+	`, missedBeatMicros, missedBeatMicros, missedBeatMicros,
+		missedBeatMicros, staleMicros, missedBeatMicros, s.tenantID,
 	).Scan(&shape.Running, &shape.MissedBeat, &shape.MissedBeatDistinctAssignedTo,
-		&oldest, &newest, &shape.Stale)
+		&oldest, &newest, &shape.Stale, &noRecentHeartbeat, &shape.DistinctAssignedTo)
 	if err != nil {
 		return StaleSetShape{}, fmt.Errorf("stale set shape: %w", err)
 	}
+	shape.NoRecentHeartbeat = noRecentHeartbeat != 0
 	if oldest.Valid {
 		shape.MissedBeatOldest = oldest.Time
 	}

@@ -1636,13 +1636,15 @@ func (s *PostgresStore) StaleSetShape(ctx context.Context, timeout, missedBeatTi
 		    COUNT(DISTINCT assigned_to) FILTER (WHERE heartbeat_at < now() - $1::interval),
 		    MIN(heartbeat_at) FILTER (WHERE heartbeat_at < now() - $1::interval),
 		    MAX(heartbeat_at) FILTER (WHERE heartbeat_at < now() - $1::interval),
-		    COUNT(*) FILTER (WHERE heartbeat_at < now() - $2::interval)
+		    COUNT(*) FILTER (WHERE heartbeat_at < now() - $2::interval),
+		    (CASE WHEN MAX(heartbeat_at) < now() - $1::interval THEN true ELSE false END),
+		    COUNT(DISTINCT assigned_to)
 		FROM workflow_instances
 		WHERE status = 'running'
-	`, fmt.Sprintf("%d seconds", int(missedBeatTimeout.Seconds())),
-		fmt.Sprintf("%d seconds", int(timeout.Seconds())),
+	`, fmt.Sprintf("%d milliseconds", missedBeatTimeout.Milliseconds()),
+		fmt.Sprintf("%d milliseconds", timeout.Milliseconds()),
 	).Scan(&shape.Running, &shape.MissedBeat, &shape.MissedBeatDistinctAssignedTo,
-		&oldest, &newest, &shape.Stale)
+		&oldest, &newest, &shape.Stale, &shape.NoRecentHeartbeat, &shape.DistinctAssignedTo)
 	if err != nil {
 		return StaleSetShape{}, fmt.Errorf("stale set shape: %w", err)
 	}

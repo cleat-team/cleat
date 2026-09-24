@@ -3755,16 +3755,30 @@ func missedBeatThreshold(heartbeat time.Duration) time.Duration {
 	return heartbeat + dbCallDeadlineFor(heartbeat) + missedBeatSlack
 }
 
-// suspectedStallStaleFraction is the proposal's own number (#2006: "e.g.
-// above 80%"). A plain constant, not a flag: the issue's examples are all
-// the evidence this has for a starting point: easy to expose as a flag
-// later if an operator needs to tune it.
-const suspectedStallStaleFraction = 0.80
-
-// suspectedDBStall implements #2006's proposal: nearly all running rows
-// have missed a beat, across more than one worker, clustered in time. Runs
-// against the MissedBeat population (see missedBeatThreshold's doc), not
-// Stale -- Stale is for reapSuppressionState's reset condition only.
+// suspectedDBStall implements #2006's proposal, on the criterion
+// cleat-review substituted for the original fraction+spread one
+// (2026-09-24): a stall is suspected when NOT EVEN ONE running row in
+// scope has a heartbeat newer than missedBeatThreshold -- shape.
+// NoRecentHeartbeat, computed server-side -- across more than one worker.
+//
+// WHAT THIS REPLACED, AND WHY. The original test was
+// `fraction > 0.80 && distinctAssignedTo > 1 && spread <= missedBeatThreshold`,
+// against the MissedBeat population. It had a residual false-negative at
+// its own boundary: 5 workers, the 4 oldest rows already past
+// missedBeatThreshold and the 5th (freshest) not quite there yet, is
+// 4/5 = 80% -- and 80% is not > 80%, so a genuine whole-fleet stall one
+// worker's phase away from full staleness went undetected. It also
+// degraded as the running set aged: one long-dead, never-reclaimed row
+// widens MissedBeatOldest..MissedBeatNewest without bound, eventually
+// exceeding the spread gate on its own regardless of what every other row
+// is doing.
+//
+// NoRecentHeartbeat has neither problem: it doesn't average or compare
+// against a spread window, it asks the single sharpest form of the
+// question this heuristic exists to answer -- has ANYTHING happened,
+// anywhere, recently. A single fresh survivor anywhere in scope answers
+// "yes" and the whole gate reports false, with no fraction arithmetic
+// to sit exactly on a boundary.
 //
 // A single-worker fleet can never trip this: every running row shares one
 // assigned_to, so DistinctAssignedTo > 1 never holds. That is correct, not
@@ -3773,15 +3787,11 @@ const suspectedStallStaleFraction = 0.80
 // reapingIsSafe (#2166) already refuses its own reaper on that signal. This
 // heuristic exists for the case #2166 cannot see: worker B reclaiming
 // worker A's row with no trouble of its own recorded anywhere.
-func suspectedDBStall(shape engine.StaleSetShape, heartbeat time.Duration) bool {
-	if shape.Running == 0 || shape.MissedBeat == 0 {
+func suspectedDBStall(shape engine.StaleSetShape) bool {
+	if shape.Running == 0 {
 		return false
 	}
-	fraction := float64(shape.MissedBeat) / float64(shape.Running)
-	spread := shape.MissedBeatNewest.Sub(shape.MissedBeatOldest)
-	return fraction > suspectedStallStaleFraction &&
-		shape.MissedBeatDistinctAssignedTo > 1 &&
-		spread <= missedBeatThreshold(heartbeat)
+	return shape.NoRecentHeartbeat && shape.DistinctAssignedTo > 1
 }
 
 // stallSuppressionEpisode tracks one independent instance of the
@@ -3790,9 +3800,9 @@ func suspectedDBStall(shape engine.StaleSetShape, heartbeat time.Duration) bool 
 type stallSuppressionEpisode struct {
 	// since is the UnixNano of the tick suspicion FIRST fired for the
 	// current episode. Zero means no active episode. Deliberately does not
-	// reset merely because one tick's ratio dips under the threshold -- see
-	// evaluate's doc -- so a mass-death event hovering near the fraction
-	// threshold cannot win a fresh grace period by flickering.
+	// reset merely because one tick briefly sees a fresh heartbeat -- see
+	// evaluate's doc -- so a mass-death event with one flickering survivor
+	// cannot win a fresh grace period on the strength of a single blip.
 	since atomic.Int64
 	// alerted marks that the bound-hit warning has already fired for the
 	// current episode, so it logs once at the transition rather than on
@@ -3811,6 +3821,37 @@ type stallSuppressionDecision struct {
 	BoundHit bool
 }
 
+// stallProtectionLower and stallProtectionUpper bound how long a
+// whole-fleet stall can last and still be fully protected from a wrongful
+// reclaim -- cleat-review asked this be documented explicitly with a
+// number, on cleat#2006 (2026-09-24), rather than left implicit in the
+// arithmetic below.
+//
+// Lower bound: missedBeatThreshold (detection latency -- how long a stall
+// has to run before NoRecentHeartbeat can even become true) plus
+// reclaimAfter (the suppression window itself, evaluate's `reclaimAfter`
+// argument). At the 5s heartbeat default, 8.5s + 14.5s = 23s.
+//
+// Upper bound: the lower bound plus one full reaper tick interval
+// (max(heartbeat, 10s)) -- reapOnce only samples StaleSetShape once per
+// tick, so a stall that begins just after a tick fires is not observed,
+// and therefore not detected, until nearly a full interval later. At the
+// default, 23s + 10s = 33s.
+//
+// A stall shorter than the lower bound is always protected; a stall
+// longer than the upper bound is never protected (BoundHit fires and
+// reclaiming resumes mid-stall); a stall between the two may or may not
+// be, depending on tick phase. This does not model reapingIsSafe's own
+// grace period (#2166), which covers the reaper's OWN observed trouble
+// and runs independently of this suppression.
+func stallProtectionLower(heartbeat, reclaimAfter time.Duration) time.Duration {
+	return missedBeatThreshold(heartbeat) + reclaimAfter
+}
+
+func stallProtectionUpper(heartbeat, reclaimAfter time.Duration) time.Duration {
+	return stallProtectionLower(heartbeat, reclaimAfter) + max(heartbeat, 10*time.Second)
+}
+
 // evaluate is one reaper tick's decision for one episode. reclaimAfter is
 // the caller's current R (minimumReclaimAfter-derived window); the
 // suppression bound reuses that same duration rather than a new constant --
@@ -3826,13 +3867,13 @@ type stallSuppressionDecision struct {
 // heartbeat default this is 2*14.5s + 10s = 39s -- worse than the pre-#2006
 // R alone, and deliberately so: the alternative is reclaiming a run that is
 // still alive, which #2166 exists to prevent.
-func (e *stallSuppressionEpisode) evaluate(shape engine.StaleSetShape, heartbeat, reclaimAfter time.Duration, now time.Time) stallSuppressionDecision {
-	suspected := suspectedDBStall(shape, heartbeat)
+func (e *stallSuppressionEpisode) evaluate(shape engine.StaleSetShape, reclaimAfter time.Duration, now time.Time) stallSuppressionDecision {
+	suspected := suspectedDBStall(shape)
 	if !suspected {
 		// Reset ONLY on true quiescence (nothing even reclaim-eligible
-		// remains) -- not merely "this tick's ratio looked calmer". A mass
-		// death hovering around the fraction threshold as workers die one
-		// at a time must not get a fresh bound every tick it dips under.
+		// remains) -- not merely "this tick saw one fresh heartbeat". A
+		// mass death with one flickering survivor must not get a fresh
+		// bound every tick that survivor happens to write.
 		if shape.Stale == 0 {
 			e.since.Store(0)
 			e.alerted.Store(false)
@@ -4011,15 +4052,25 @@ func (w *Worker) reapOnce() {
 				return err
 			})
 			if shapeErr != nil {
-				// A failed shape probe degrades to "detect nothing" for
-				// this tick, not "skip reclaiming forever" -- the ordinary
-				// reclaim attempt below still runs, and recordDBTrouble
-				// below covers the probe failure itself if that attempt
-				// fails too.
+				// FAIL CLOSED, not open (cleat-review on cleat#2006,
+				// 2026-09-24). This used to fall through to the ordinary
+				// reclaim attempt below, unsuppressed -- but a slow or
+				// failing aggregate over the very table ReapStaleInstances
+				// is about to UPDATE is exactly the shape a genuine
+				// database stall takes. Treating "I could not check" as
+				// "assume it's fine" defeats the whole point of checking:
+				// the one tick this probe is most likely to fail is the
+				// one where suppressing matters most. Skip this unit's
+				// reclaim for the tick instead, the same as an explicit
+				// Suppress=true decision; recordDBTrouble below still
+				// covers the probe failure itself.
 				lastErr = shapeErr
+				w.logger.WarnContext(w.ctx, "Reaper: suspected-database-stall probe failed -- skipping this unit's reclaim this tick rather than reclaiming blind",
+					"worker_id", w.id, "shard", unit.logLabel(), "error", shapeErr)
+				suppressed = true
 			} else {
 				episode := w.stallEpisodeFor(unit.name)
-				decision := episode.evaluate(shape, w.heartbeatInterval, staleTimeout, time.Now())
+				decision := episode.evaluate(shape, staleTimeout, time.Now())
 				if decision.BoundHit {
 					w.logger.WarnContext(w.ctx, "Reaper: suspected-database-stall suppression bound reached -- reclaiming despite a stall-shaped stale set; this may be a genuine mass worker failure rather than a database stall",
 						"worker_id", w.id, "shard", unit.logLabel(), "running", shape.Running, "missed_beat", shape.MissedBeat, "bound", staleTimeout)
