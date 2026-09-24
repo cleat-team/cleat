@@ -1242,6 +1242,39 @@ func (s *MySQLStore) PingDB(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// StaleSetShape satisfies DBStallDetector. Same tenant scoping and same
+// status='running' population as ReapStaleInstances. MySQL has no FILTER
+// (WHERE ...) clause, so this uses CASE WHEN in place of Postgres's FILTER
+// -- same aggregates, different syntax.
+func (s *MySQLStore) StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error) {
+	var shape StaleSetShape
+	var oldest, newest sql.NullTime
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+		    COUNT(*),
+		    COUNT(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? SECOND THEN 1 END),
+		    COUNT(DISTINCT CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? SECOND THEN assigned_to END),
+		    MIN(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? SECOND THEN heartbeat_at END),
+		    MAX(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? SECOND THEN heartbeat_at END),
+		    COUNT(CASE WHEN heartbeat_at < NOW(6) - INTERVAL ? SECOND THEN 1 END)
+		FROM workflow_instances
+		WHERE status = 'running' AND tenant_id = ?
+	`, int(missedBeatTimeout.Seconds()), int(missedBeatTimeout.Seconds()), int(missedBeatTimeout.Seconds()),
+		int(missedBeatTimeout.Seconds()), int(timeout.Seconds()), s.tenantID,
+	).Scan(&shape.Running, &shape.MissedBeat, &shape.MissedBeatDistinctAssignedTo,
+		&oldest, &newest, &shape.Stale)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: %w", err)
+	}
+	if oldest.Valid {
+		shape.MissedBeatOldest = oldest.Time
+	}
+	if newest.Valid {
+		shape.MissedBeatNewest = newest.Time
+	}
+	return shape, nil
+}
+
 // ---- ParentClosePolicy ----
 
 // enforceParentClosePolicy applies ParentClosePolicy to all child workflows

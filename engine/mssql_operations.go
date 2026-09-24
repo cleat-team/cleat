@@ -64,6 +64,38 @@ func (s *MSSQLStore) PingDB(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// StaleSetShape satisfies DBStallDetector. Same tenant scoping and same
+// status='running' population as ReapStaleInstances. Read-only, so unlike
+// ReapStaleInstances this needs no transaction or retry wrapper -- those
+// exist there for the UPDATE's lock contention, not for a plain SELECT.
+func (s *MSSQLStore) StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error) {
+	var shape StaleSetShape
+	var oldest, newest sql.NullTime
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+		    COUNT(*),
+		    COUNT(CASE WHEN heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME()) THEN 1 END),
+		    COUNT(DISTINCT CASE WHEN heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME()) THEN assigned_to END),
+		    MIN(CASE WHEN heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME()) THEN heartbeat_at END),
+		    MAX(CASE WHEN heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME()) THEN heartbeat_at END),
+		    COUNT(CASE WHEN heartbeat_at < DATEADD(SECOND, @p2, SYSUTCDATETIME()) THEN 1 END)
+		FROM workflow_instances
+		WHERE status = 'running' AND tenant_id = @p3
+	`, -int(missedBeatTimeout.Seconds()), -int(timeout.Seconds()), s.tenantID,
+	).Scan(&shape.Running, &shape.MissedBeat, &shape.MissedBeatDistinctAssignedTo,
+		&oldest, &newest, &shape.Stale)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: %w", err)
+	}
+	if oldest.Valid {
+		shape.MissedBeatOldest = oldest.Time
+	}
+	if newest.Valid {
+		shape.MissedBeatNewest = newest.Time
+	}
+	return shape, nil
+}
+
 // GetQueryState reads one key of a workflow's query state.
 //
 // Tenant-predicated for the reason on TerminateWorkflow: the id comes from the

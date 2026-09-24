@@ -678,6 +678,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   happened. Postgres and SQL Server were already transactional here.
   cleat#2005.
 
+- **The reaper can no longer be fooled into reclaiming a live run by a
+  whole-fleet database stall, only by a genuinely dead worker.** #2166
+  covers a worker that itself observed database trouble; this covers the
+  complementary gap — a fleet-wide stall silences heartbeat *writes* while
+  reads keep working, so every running row ages past the reclaim threshold
+  together, and whichever worker's reaper reaches the database first after
+  recovery reclaims runs that are still alive, including its own, with no
+  trouble ever recorded on its own side.
+
+  A new optional `DBStallDetector` capability (implemented on all three
+  dialect stores) reports the shape of the currently-stale set: how many
+  running rows have missed at least one heartbeat, how many distinct
+  workers they belong to, and how tightly clustered in time. The reaper
+  suppresses reclaiming for one tick whenever that shape looks like a
+  synchronized event rather than ordinary dead-worker attrition — more than
+  80% of running rows missed a beat, across more than one worker, within
+  one worker's own write-cycle width — and keeps suppressing until either
+  the stale set genuinely clears or the full reclaim window elapses a
+  second time, at which point it reclaims anyway and logs once: a
+  persistent stall-shaped set is by then more likely a genuine mass
+  failure than a database outage. A sharded deployment evaluates and
+  suppresses each shard independently, so one stalled shard cannot pause
+  reclaiming on a healthy sibling.
+
+  Detection deliberately uses a **shorter** threshold than reclaim
+  eligibility itself: gating suspicion on the same window `reclaimAfter()`
+  reclaims at would miss a fleet stall lasting somewhat less than that
+  window, because individual rows cross it staggered rather than all at
+  once, and each gets reclaimed the instant it does — precisely the harm
+  this exists to prevent.
+
+  **Worst case, a genuinely dead worker's run now takes up to about 39s to
+  reclaim at the default `--heartbeat`** (twice the ~14.5s reclaim window
+  plus one reaper tick), up from that window alone, if its discovery
+  happens to coincide with an unrelated fleet-wide stall being suppressed.
+  New metric `cleat_suspected_db_stall_total`, labeled by shard, counts
+  every tick this suppression fires. cleat#2006.
+
 ## [0.2.0] - 2026-08-10
 
 ### UPGRADE NOTES — breaking

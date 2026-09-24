@@ -816,5 +816,65 @@ type DBPinger interface {
 	PingDB(ctx context.Context) error
 }
 
+// StaleSetShape is the raw shape of a store's currently-stale running set,
+// against two thresholds: a short one (missedBeatTimeout, "has this row
+// missed at least one expected heartbeat") used to DETECT a suspected
+// database stall quickly, and the reclaim threshold itself (timeout) used
+// only to know when the set has fully recovered. See DBStallDetector.
+type StaleSetShape struct {
+	// Running is every status='running' row in the store's scope -- the
+	// same population ReapStaleInstances sweeps.
+	Running int
+
+	// MissedBeat, MissedBeatDistinctAssignedTo, MissedBeatOldest and
+	// MissedBeatNewest describe the rows with heartbeat_at older than
+	// missedBeatTimeout -- NOT the reclaim threshold. This is the
+	// DETECTION population: cleat#2006 found that gating detection on the
+	// full reclaim threshold misses a whole-fleet stall shorter than that
+	// threshold, because individual rows cross it staggered rather than at
+	// once.
+	MissedBeat                   int
+	MissedBeatDistinctAssignedTo int
+	MissedBeatOldest             time.Time
+	MissedBeatNewest             time.Time
+
+	// Stale is the count with heartbeat_at older than the reclaim
+	// threshold (timeout) itself -- the population ReapStaleInstances will
+	// actually act on. Used only to know when the set has fully recovered
+	// (Stale == 0), not for detection.
+	Stale int
+}
+
+// DBStallDetector is implemented by a store that can report StaleSetShape,
+// for the suspected-database-stall-vs-dead-workers decision (cleat#2006).
+//
+// Deliberately its own interface, same reasoning as DBPinger: most test
+// doubles have no database behind them to answer this, and a caller checks
+// for it with a type assertion rather than every mock growing a new method.
+type DBStallDetector interface {
+	// StaleSetShape reports the shape of the running set. timeout is the
+	// reclaim threshold (what ReapStaleInstances would use); missedBeatTimeout
+	// is the shorter detection threshold. See StaleSetShape's doc for why
+	// both are needed.
+	StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error)
+}
+
+// MultiShard is implemented by a store that fans a single logical operation
+// out across independently-failing shards (ShardedStore). A caller that
+// wants a per-shard decision -- cleat#2006's stall detection, where one
+// shard's stall must not pause reclaiming on a healthy sibling -- type-
+// asserts for this instead of treating the store as one unit.
+//
+// A non-sharded store does not implement this; callers that get ok=false
+// treat the whole store as a single shard.
+type MultiShard interface {
+	// ShardNames returns the shard names, stable across calls for the
+	// life of the store.
+	ShardNames() []string
+
+	// ShardStore returns the WorkflowStore for one shard by name.
+	ShardStore(name string) (WorkflowStore, bool)
+}
+
 // DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.
 const DefaultTenantUUID = "00000000-0000-0000-0000-000000000000"
