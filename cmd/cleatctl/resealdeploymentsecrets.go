@@ -10,6 +10,10 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
+// gosec G101: usage text, not a credential -- see retiredeploymentsecret.go's
+// identical finding.
+//
+//nolint:gosec // G101
 const resealDeploymentSecretsUsage = `usage: cleatctl --db <dsn> reseal-deployment-secrets [--dry-run]
 
 Re-encrypts every deployment secret that is not sealed under the current
