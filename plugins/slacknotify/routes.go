@@ -39,13 +39,6 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // ---- types ----
 
 type slackConfigJSON struct {
@@ -75,8 +68,8 @@ type updateConfigRequest struct {
 // ---- POST /slack/configs ----
 
 func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -133,8 +126,8 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 // ---- GET /slack/configs ----
 
 func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -173,8 +166,8 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 // ---- GET /slack/configs/{id} ----
 
 func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -209,8 +202,8 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // ---- PUT /slack/configs/{id} ----
 
 func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -314,8 +307,8 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /slack/configs/{id} ----
 
 func (p *Plugin) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

@@ -522,6 +522,49 @@ func authedRequest(method, target string, body io.Reader) *http.Request {
 // Behavioral tests
 // ---------------------------------------------------------------------------
 
+// TestDefaultTenantAPIKeyIsAccepted is cleat#2183's known-positive: the
+// seeded default tenant (uuid.Nil) authenticating with its own valid API key
+// must reach the handler and get a real response, not the 401 that comparing
+// the resolved tenant ID to uuid.Nil produced on every route of this shape
+// before the fix -- see auth.TenantIDFromRequest's doc comment.
+//
+// setupTestPlugin (above) seeds its key for testTenantID
+// (...-000000000001) specifically so ordinary tests are not accidentally
+// exercising the one tenant ID this bug could not distinguish from "no
+// tenant". This test is the one place that ID is deliberately used.
+func TestDefaultTenantAPIKeyIsAccepted(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("default-tenant-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = uuid.Nil.String()
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+
+	req := httptest.NewRequest("GET", "/slack/configs", nil)
+	req.Header.Set("Authorization", "Bearer default-tenant-key")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatalf("default tenant's own valid API key got 401 (cleat#2183 regression): %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for the default tenant listing its (empty) configs, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
 // TestConfigCreateAndGet verifies creating a Slack notification config and
 // retrieving it by ID.
 func TestConfigCreateAndGet(t *testing.T) {

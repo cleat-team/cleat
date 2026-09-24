@@ -77,18 +77,11 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // ---- POST /api/events/publish ----
 
 func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -172,8 +165,8 @@ func mergeInputAndTemplate(tmpl, eventData json.RawMessage) (json.RawMessage, er
 // ---- POST /api/events/subscriptions ----
 
 func (p *Plugin) handleCreateSubscription(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -258,8 +251,8 @@ func (p *Plugin) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 // ---- GET /api/events/subscriptions ----
 
 func (p *Plugin) handleListSubscriptions(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -302,8 +295,8 @@ func (p *Plugin) handleListSubscriptions(w http.ResponseWriter, r *http.Request)
 // ---- DELETE /api/events/subscriptions/{id} ----
 
 func (p *Plugin) handleDeleteSubscription(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -344,8 +337,8 @@ type retryEventResponse struct {
 // handleRetryEvent replays a dead-lettered or failed event by resetting its
 // processing state and immediately re-attempting dispatch to subscriptions.
 func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

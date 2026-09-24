@@ -38,12 +38,6 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// tenantID extracts the tenant UUID from the request context.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // schedule represents a single schedule row.
 type schedule struct {
 	ID           uuid.UUID  `json:"id"`
@@ -79,8 +73,8 @@ type updateScheduleRequest struct {
 // ---- POST /schedules ----
 
 func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -148,8 +142,8 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 // ---- GET /schedules ----
 
 func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -188,8 +182,8 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 // ---- GET /schedules/{id} ----
 
 func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -227,8 +221,8 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 // ---- PUT /schedules/{id} ----
 
 func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -338,8 +332,8 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /schedules/{id} ----
 
 func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -371,8 +365,8 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 // ---- POST /schedules/{id}/trigger ----
 
 func (p *Plugin) handleTrigger(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

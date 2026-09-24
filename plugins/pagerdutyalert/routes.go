@@ -38,13 +38,6 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // PagerdutyRoutingKeySecretName is the tenant-secret name a pd_config row's
 // routing key is stored under. cleat#1992. Per-config, not per-tenant, for
 // the same reason as datadogexport.DatadogAPIKeySecretName
@@ -85,8 +78,8 @@ type updateConfigRequest struct {
 // ---- POST /pagerduty/configs ----
 
 func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -153,8 +146,8 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 // ---- GET /pagerduty/configs ----
 
 func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -198,8 +191,8 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 // ---- GET /pagerduty/configs/{id} ----
 
 func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -234,8 +227,8 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // ---- PUT /pagerduty/configs/{id} ----
 
 func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -338,8 +331,8 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /pagerduty/configs/{id} ----
 
 func (p *Plugin) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
