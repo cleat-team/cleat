@@ -50,6 +50,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/migrations"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
@@ -216,9 +217,70 @@ func scopeToTenant(store engine.WorkflowStore, tenantID string) engine.WorkflowS
 		return s.WithTenant(tenantID)
 	case *engine.ShardedStore:
 		return s.WithTenant(tenantID)
+	case *engine.MySQLStore:
+		// No per-call scoping exists or is needed -- see the doc comment above.
+		return s
 	default:
+		// A store type this function does not recognize. Returning it
+		// unscoped without saying so would repeat cleat#2187/#2204 for
+		// whatever dialect or wrapper this is the first time anyone adds
+		// one -- log it so the gap is visible before an incident finds it.
+		slog.Default().Warn("scopeToTenant: unrecognized store type, returning it unscoped",
+			"type", fmt.Sprintf("%T", store), "tenant_id", tenantID)
 		return store
 	}
+}
+
+// signalPluginWorkflow delivers a signal from a plugin to a specific
+// workflow run, scoped to the tenant workflowID's own run belongs to.
+//
+// store is the same process-wide, default-tenant store startPluginWorkflow
+// above re-scopes per call -- see its doc comment for why that matters on
+// Postgres and SQL Server. The tenant comes from ctx rather than a request
+// field: every real caller already carries one there. webhookingest's HTTP
+// handler and retry loop, and eventtriggers' publish path, each wrap ctx
+// with plugin.ForTenant before calling env.SignalWorkflow. Without this,
+// DeliverSignal ran on the default tenant's session regardless of which
+// tenant's workflow was named -- on Postgres and SQL Server that wrote the
+// signal row under the default tenant and updated zero rows of the actual
+// target, silently, so webhookingest and eventtriggers both marked the
+// triggering event completed with the signal never delivered (cleat#2209).
+//
+// No tenant in ctx is left unscoped rather than treated as an error -- the
+// same pass-through convention tenantctx.From's other callers in this
+// package use (see dbServiceCaller.resolveSecrets,
+// hostPluginRegistryAdapter.withSecrets): a caller with no tenant to give
+// has no wrong tenant to guard against either, and DeliverSignal now fails
+// loudly on its own if the workflow it names cannot be found under
+// whatever session it ran under.
+func signalPluginWorkflow(ctx context.Context, store engine.WorkflowStore, workflowID, signalName, payload string) error {
+	scoped := store
+	if tid, ok := tenantctx.From(ctx); ok {
+		scoped = scopeToTenant(store, tid.String())
+	}
+	return scoped.DeliverSignal(ctx, workflowID, signalName, payload)
+}
+
+// signalPluginWorkflowWithAuth is signalPluginWorkflow plus the
+// --require-signal-auth check: pluginName must appear (or "*" must appear)
+// in the target workflow's own allowed_signals. Scoped once, so the
+// authorization check and the delivery it gates read the SAME tenant's row
+// -- checking one tenant's allowed_signals and then delivering under
+// another's would make the check meaningless, not merely wrong (cleat#2209:
+// GetAllowedSignalCallers ran unscoped here exactly like DeliverSignal did).
+func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStore, workflowID, signalName, payload, pluginName string) error {
+	scoped := store
+	if tid, ok := tenantctx.From(ctx); ok {
+		scoped = scopeToTenant(store, tid.String())
+	}
+	callers, err := scoped.GetAllowedSignalCallers(ctx, workflowID)
+	if err != nil {
+		return err
+	}
+	if !signalCallerAllowed(callers, pluginName) {
+		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
+	}
+	return scoped.DeliverSignal(ctx, workflowID, signalName, payload)
 }
 
 func main() {
@@ -1197,7 +1259,7 @@ func main() {
 		},
 
 		SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
-			return store.DeliverSignal(ctx, workflowID, signalName, payload)
+			return signalPluginWorkflow(ctx, store, workflowID, signalName, payload)
 		},
 
 		// cleat#1992. Both adapters are safe on a nil target -- secretStore is
@@ -1422,14 +1484,7 @@ func main() {
 		if *requireSignalAuth {
 			pluginName := lp.Plugin.Info().Name
 			envCopy.SignalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
-				callers, err := store.GetAllowedSignalCallers(ctx, workflowID)
-				if err != nil {
-					return err
-				}
-				if !signalCallerAllowed(callers, pluginName) {
-					return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
-				}
-				return store.DeliverSignal(ctx, workflowID, signalName, payload)
+				return signalPluginWorkflowWithAuth(ctx, store, workflowID, signalName, payload, pluginName)
 			}
 		}
 		func() {

@@ -257,6 +257,14 @@ func (s *MSSQLStore) log() *slog.Logger {
 // This is used in the dispatch loop to set the correct tenant context
 // before executing a workflow. The returned store's methods will set
 // the RLS session variable via sp_set_session_context.
+//
+// Only re-asserted for a method that opens its own transaction via
+// beginTxWithContext (ClaimWorkflows, StartNewRun, DeliverSignal, and as of
+// cleat#2187 ListVersions and GetWorkflowByID). A method that runs a plain
+// query against s.db instead answers under whatever SESSION_CONTEXT that
+// connection's pool happened to have baked in at connect time, ignoring
+// this copy's tenantID entirely -- roughly 45 other methods still have this
+// shape and it is tracked as latent in cleat#2210, not fixed here.
 func (s *MSSQLStore) WithTenant(tenantID string) *MSSQLStore {
 	cp := *s
 	cp.tenantID = tenantID

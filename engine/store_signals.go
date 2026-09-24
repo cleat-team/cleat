@@ -258,13 +258,27 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	// unconditionally, in this transaction, so the counter and the delivery
 	// become visible together: a reader that can see the row can see the
 	// bump (cleat#953).
-	if _, err := tx.ExecContext(ctx, `
+	// RowsAffected, not just err == nil: RLS's USING clause filters this
+	// UPDATE by session the same way it filters a SELECT, so a tenantID
+	// that does not match the row's own tenant matches nothing here and
+	// this would otherwise return a silent, successful no-op -- the signal
+	// row above still gets written, tagged with tenantID, and the workflow
+	// it was actually meant for never wakes (cleat#2187, cleat#2209).
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,
 		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
 		WHERE id = $1
-	`, workflowID); err != nil {
+	`, workflowID)
+	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("deliver signal: rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("deliver signal: workflow %s not found for tenant %s", workflowID, tenantID)
 	}
 	return nil
 }
