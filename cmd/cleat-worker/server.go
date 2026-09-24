@@ -1345,6 +1345,15 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	if s.worker.requireSignalAuth != nil && *s.worker.requireSignalAuth {
 		callers, err := st.GetAllowedSignalCallers(r.Context(), id)
 		if err != nil {
+			// 404, not 500: callerOwnsTarget above already confirmed this id
+			// exists under the caller's own tenant, so the only way
+			// GetAllowedSignalCallers reaches ErrWorkflowNotFound here is the
+			// workflow having been purged in the window between that check
+			// and this one -- a genuine not-found, not a server error.
+			if errors.Is(err, engine.ErrWorkflowNotFound) {
+				s.writeError(w, 404, "not found")
+				return
+			}
 			s.writeError(w, 500, err.Error())
 			return
 		}
@@ -1370,6 +1379,14 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	if key != "" && canAbsorb {
 		already, err := si.DeliverSignalIdempotent(r.Context(), id, req.SignalName, payload, key)
 		if err != nil {
+			// Same TOCTOU window as the auth check above: callerOwnsTarget
+			// already confirmed this id exists, so ErrWorkflowNotFound here
+			// means it was purged in between -- a genuine not-found, not a
+			// server error.
+			if errors.Is(err, engine.ErrWorkflowNotFound) {
+				s.writeError(w, 404, "not found")
+				return
+			}
 			s.writeError(w, 500, err.Error())
 			return
 		}
@@ -1388,6 +1405,11 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	if err := st.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
+		// Same TOCTOU window as above.
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			s.writeError(w, 404, "not found")
+			return
+		}
 		s.writeError(w, 500, err.Error())
 		return
 	}
@@ -2070,6 +2092,14 @@ func (s *apiServer) handleGetAllowedSignals(w http.ResponseWriter, r *http.Reque
 	}
 	callers, err := st.GetAllowedSignalCallers(r.Context(), id)
 	if err != nil {
+		// 404 for a workflow this tenant cannot see, same as
+		// handleSetAllowedSignals below -- this endpoint has no
+		// callerOwnsTarget pre-check of its own, so this is the first and
+		// only place a missing id is discovered here, not a narrow race.
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			s.writeError(w, 404, "workflow not found")
+			return
+		}
 		s.writeError(w, 500, err.Error())
 		return
 	}

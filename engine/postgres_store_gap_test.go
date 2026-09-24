@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // Gap coverage tests for PostgresStore methods not yet covered by existing tests.
@@ -218,8 +220,13 @@ func TestGap_GetAllowedSignalCallers_ErrNoRows(t *testing.T) {
 
 	store := NewPostgresStore(db)
 	callers, err := store.GetAllowedSignalCallers(testCtx, "wf-1")
-	if err != nil {
-		t.Fatalf("GetAllowedSignalCallers (no rows): %v", err)
+	// cleat#2227: a missing row now returns ErrWorkflowNotFound, matching
+	// DeliverSignal's own contract, instead of the (nil, nil) this test
+	// asserted before -- the getter and the setter now agree on what a
+	// missing workflow means. See store_signals.go's doc comment on
+	// GetAllowedSignalCallers.
+	if !errors.Is(err, ErrWorkflowNotFound) {
+		t.Fatalf("GetAllowedSignalCallers (no rows) err = %v, want ErrWorkflowNotFound", err)
 	}
 	if callers != nil {
 		t.Errorf("expected nil callers, got %v", callers)
@@ -480,5 +487,60 @@ func TestGap_TerminateWorkflow_BeginError(t *testing.T) {
 	err := store.TerminateWorkflow(testCtx, "wf-1", "error")
 	if err == nil {
 		t.Fatal("expected error from TerminateWorkflow when BeginTx fails")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isSignalsWorkflowFKViolationPG
+// ---------------------------------------------------------------------------
+
+// TestGap_IsSignalsWorkflowFKViolationPG pins the constraint-name check added
+// in review of cleat#2227/#2239: a bare SQLSTATE 23503 is not enough,
+// because workflow_promises (migrations/postgres/001_schema.sql) carries an
+// auto-named FK to workflow_instances(id) with the identical shape and code,
+// one CREATE TABLE below workflow_signals'. The known-positive uses the real
+// constraint name confirmed against a live schema (`SELECT conname FROM
+// pg_constraint WHERE conrelid = 'workflow_signals'::regclass AND contype =
+// 'f'`); the negative control is workflow_promises' own name, which a
+// bare-code check cannot tell apart from the one this function exists to
+// catch.
+func TestGap_IsSignalsWorkflowFKViolationPG(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "matching code and constraint",
+			err:  &pq.Error{Code: "23503", Constraint: "workflow_signals_workflow_id_fkey"},
+			want: true,
+		},
+		{
+			name: "matching code, sibling table's constraint (negative control)",
+			err:  &pq.Error{Code: "23503", Constraint: "workflow_promises_workflow_id_fkey"},
+			want: false,
+		},
+		{
+			name: "matching constraint name, wrong code",
+			err:  &pq.Error{Code: "23505", Constraint: "workflow_signals_workflow_id_fkey"},
+			want: false,
+		},
+		{
+			name: "not a pq.Error",
+			err:  fmt.Errorf("some other failure"),
+			want: false,
+		},
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSignalsWorkflowFKViolationPG(tc.err); got != tc.want {
+				t.Errorf("isSignalsWorkflowFKViolationPG(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

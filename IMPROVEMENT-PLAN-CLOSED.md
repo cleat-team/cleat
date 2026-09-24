@@ -4812,6 +4812,22 @@ workflow per name" is a global truth, and putting `tenant_id` in that key would 
 tenants to hold a signal for the same workflow. Turning the refusal into a clean not-found is a
 change to an HTTP contract and belongs in its own PR.
 
+**That PR landed, in two parts, and the oracle described above no longer exists in this form.**
+`§3.340`/cleat#2218 (`IMPROVEMENT-PLAN.md`) replaced the `MERGE` with an EXISTS-gated `INSERT`,
+so a foreign-tenant id and a nonexistent id now take the identical path on all three dialects —
+no 500, no orphan row, and (on `DeliverSignal` specifically) no error at all, closing the oracle
+this paragraph recorded. `§3.341`/cleat#2227 then gave that shared "not found" outcome a typed
+`ErrWorkflowNotFound` instead of silence — on `DeliverSignal`, on `GetAllowedSignalCallers`, and
+on the foreign-key-violation race a non-locking `EXISTS` check leaves open — still identical for
+"foreign" and "nonexistent", so the oracle stays shut. Making it loud surfaced two genuinely live
+bugs rather than reopening one: webhookingest's dead-letter path treated `DeliverSignal`'s nil as
+a delivery and never dead-lettered an event whose target did not exist, and
+`GetAllowedSignalCallers` — never touched by cleat#2218 at all — returned an empty caller list
+for a missing workflow, so `--require-signal-auth` read that as "exists, but nobody is allowed"
+and leaked cleat#2213's awaiter on that path continuously. eventtriggers' own awaiter cleanup was
+never reopened by cleat#2218: it already unregisters on nil via its own success path, so cleat#2227
+changes that case's log line, not its outcome.
+
 **Three tables, five statements, five statements, twelve statements — all found by reading one
 file while scoping something else.** That is not a method, and the fourth file would not be
 either. **The guard is now written**: `engine/mssql_tenant_predicate_test.go`, shaped after

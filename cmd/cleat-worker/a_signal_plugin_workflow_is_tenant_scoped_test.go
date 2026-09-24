@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -46,13 +47,31 @@ import (
 // making a mismatch loud: signalPluginWorkflow/signalPluginWorkflowWithAuth
 // now scope via scopeToTenant before calling DeliverSignal, so a caller
 // signalling its own real workflow reaches it. A genuinely cross-tenant
-// call (the wrong id, not a scoping bug) still succeeds with no error --
-// an earlier version of this fix added a RowsAffected check that turned
-// that case into an error too, which broke
+// call (the wrong id, not a scoping bug) used to succeed with no error --
+// an earlier version of THIS fix (cleat#2209) added a RowsAffected check on
+// the UPDATE that turned that case into an error too, which broke
 // mssql_admin_login_control_plane_tenant_test.go in CI and was reverted
-// (cleat#2207). What this file's negative-control sections assert is
-// therefore not "the call fails" but "the OTHER tenant's real workflow is
-// untouched by it" -- see each test's own comment.
+// (cleat#2207). What this file's negative-control sections asserted at that
+// point was therefore not "the call fails" but "the OTHER tenant's real
+// workflow is untouched by it".
+//
+// cleat#2227 changed this again, on the INSERT rather than the UPDATE
+// cleat#2207 reverted: RowsAffected()==0 on the EXISTS-gated INSERT now
+// returns ErrWorkflowNotFound (translated to plugin.ErrWorkflowNotFound at
+// this file's boundary), identically for a foreign id and a nonexistent
+// one, so a genuinely cross-tenant call DOES now return an error -- see
+// IMPROVEMENT-PLAN 3.341 for why this is not the same case cleat#2207
+// reverted: that revert was about erroring on the UPDATE's
+// RowsAffected()==0 AFTER the INSERT -- ungated before cleat#2218 -- had
+// already written an orphan row under the CALLER's own tenant for a
+// genuinely foreign id, so the error landed on top of a write that had
+// already happened, breaking the harmless-no-op contract the admin-login
+// test pins. cleat#2227's check runs on the INSERT itself, which cleat#2218
+// had already gated on EXISTS: RowsAffected()==0 there means nothing was
+// written at all, so the error is now all-or-nothing rather than layered
+// on top of a completed write. Every negative-control section below now
+// asserts BOTH: the returned error, and that the other tenant's real
+// workflow is untouched.
 //
 // What a cross-tenant call WRITES changed under cleat#2218, and every
 // negative control below was updated with it: the INSERT into
@@ -174,22 +193,21 @@ func TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant(t *testing.T) {
 	// CROSS-TENANT CALL, NOT A SCOPING BUG: tenant A names tenant B's REAL
 	// workflow id -- a caller signalling a workflow it genuinely does not
 	// own, as opposed to #2209's actual defect (a caller signalling its OWN
-	// workflow through a store scoped to the wrong tenant). It must still
-	// succeed with no error -- success-versus-failure must not become a
-	// cross-tenant existence oracle -- but cleat#2218 changed what
-	// "succeed" writes: the INSERT is now gated on
-	// `EXISTS (... id = ? AND tenant_id = <caller>)`, so a foreign id
-	// writes NOTHING at all rather than the harmless orphan row under the
-	// CALLER's own tenant that the pre-2218 contract described (see the
-	// doc comment on deliverSignalTx). What has to hold is unchanged: nil,
-	// and tenant B's real workflow untouched.
+	// workflow through a store scoped to the wrong tenant). Under cleat#2218
+	// this succeeded with no error and wrote nothing, closing an oracle;
+	// under cleat#2227 it now returns plugin.ErrWorkflowNotFound and STILL
+	// writes nothing -- the oracle stays closed because a nonexistent id
+	// returns the identical error (see NonexistentID-shaped assertions
+	// elsewhere in this repo), so success-versus-failure still cannot be
+	// used to tell "foreign" from "does not exist" apart. What has to hold
+	// is tenant B's real workflow untouched.
 	wfBeforeA, err := storeB.GetWorkflowByID(ctx, runB)
 	if err != nil {
 		t.Fatalf("tenant B reading back its own run before tenant A's cross-tenant call: %v", err)
 	}
-	if err := signalPluginWorkflow(plugin.ForTenant(ctx, tenantA), processStore, runB, "sig-from-a", `{}`); err != nil {
-		t.Fatalf("a cross-tenant delivery naming another tenant's real workflow id should still "+
-			"succeed as a silent no-op (cleat#2218), not error: %v", err)
+	if err := signalPluginWorkflow(plugin.ForTenant(ctx, tenantA), processStore, runB, "sig-from-a", `{}`); !errors.Is(err, plugin.ErrWorkflowNotFound) {
+		t.Fatalf("a cross-tenant delivery naming another tenant's real workflow id = %v, want "+
+			"plugin.ErrWorkflowNotFound (cleat#2227)", err)
 	}
 
 	// B's real workflow must not have woken.
@@ -352,18 +370,17 @@ func TestSignalPluginWorkflow_PostgresShardedStoreScopesToTheTargetsTenant(t *te
 	}
 
 	// CROSS-TENANT CALL, NOT A SCOPING BUG -- same distinction as the plain
-	// Postgres test above: this must still succeed with no error, and
-	// cleat#2218 changed what "succeed" writes -- the INSERT's EXISTS gate
-	// makes a foreign id write NOTHING at all now, not the harmless orphan
-	// under tenant A the pre-2218 contract described. B's real workflow
-	// must be untouched either way.
+	// Postgres test above: cleat#2227 makes this return
+	// plugin.ErrWorkflowNotFound now, identically to a nonexistent id, so
+	// success-versus-failure still cannot distinguish the two. B's real
+	// workflow must be untouched either way.
 	wfBeforeA, err := storeB.GetWorkflowByID(ctx, runB)
 	if err != nil {
 		t.Fatalf("tenant B reading back its own run before tenant A's cross-tenant call: %v", err)
 	}
-	if err := signalPluginWorkflow(plugin.ForTenant(ctx, tenantA), ss, runB, "sig-from-a", `{}`); err != nil {
-		t.Fatalf("a cross-tenant delivery on a sharded store should still succeed as a silent "+
-			"no-op (cleat#2218), not error: %v", err)
+	if err := signalPluginWorkflow(plugin.ForTenant(ctx, tenantA), ss, runB, "sig-from-a", `{}`); !errors.Is(err, plugin.ErrWorkflowNotFound) {
+		t.Fatalf("a cross-tenant delivery on a sharded store = %v, want plugin.ErrWorkflowNotFound "+
+			"(cleat#2227)", err)
 	}
 	wfAfterA, err := storeB.GetWorkflowByID(ctx, runB)
 	if err != nil {
@@ -530,21 +547,21 @@ func TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant(t *testing.T) {
 	}
 
 	// CROSS-TENANT CALL, NOT A SCOPING BUG -- same distinction as the
-	// PostgreSQL test above: this must still succeed with no error, and
-	// cleat#2218 changed what "succeed" writes -- the INSERT's EXISTS gate
-	// (and, on MSSQL, closing an FK-error existence oracle
-	// fk_signals_workflow otherwise gave a nonexistent id) makes a foreign
-	// id write NOTHING at all now, not the harmless orphan under tenant A
-	// the pre-2218 contract described. B's real workflow must be untouched
-	// either way (mssql_admin_login_control_plane_tenant_test.go's
-	// DeliverSignal case, IMPROVEMENT-PLAN 3.86/3.215).
+	// PostgreSQL test above: cleat#2227 makes this return
+	// plugin.ErrWorkflowNotFound now, identically to what a nonexistent id
+	// returns (fk_signals_workflow's FK-error oracle stays closed by
+	// cleat#2218's EXISTS gate; cleat#2227 changes only whether that gate's
+	// RowsAffected()==0 is silent or loud). B's real workflow must be
+	// untouched either way
+	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal case,
+	// IMPROVEMENT-PLAN 3.86/3.215/3.341).
 	wfBeforeA, err := storeB.GetWorkflowByID(ctx, runB)
 	if err != nil {
 		t.Fatalf("tenant B reading back its own run before tenant A's cross-tenant call: %v", err)
 	}
-	if err := signalPluginWorkflow(plugin.ForTenant(ctx, tenantA), processStore, runB, "sig-from-a", `{}`); err != nil {
-		t.Fatalf("a cross-tenant delivery on MSSQL should still succeed as a silent no-op "+
-			"(cleat#2218), not error: %v", err)
+	if err := signalPluginWorkflow(plugin.ForTenant(ctx, tenantA), processStore, runB, "sig-from-a", `{}`); !errors.Is(err, plugin.ErrWorkflowNotFound) {
+		t.Fatalf("a cross-tenant delivery on MSSQL = %v, want plugin.ErrWorkflowNotFound (cleat#2227)",
+			err)
 	}
 	wfAfterA, err := storeB.GetWorkflowByID(ctx, runB)
 	if err != nil {
@@ -607,12 +624,14 @@ func TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant(t *testing.T) {
 // The failure mode an unscoped helper produces here is not "wrong tenant's
 // row" the way the plain-signal tests catch it -- it is a LEGITIMATE,
 // allowed caller getting denied: GetAllowedSignalCallers on the wrong
-// tenant's scope reads no row for runB, PostgresStore.GetAllowedSignalCallers
-// treats that as sql.ErrNoRows and returns an empty list with no error (see
-// its doc comment in engine/store_signals.go), and signalCallerAllowed(nil,
-// anything) is always false. So it fails CLOSED, silently, which is worse
-// than failing open: nothing crashes, nothing logs "denied wrongly", a
-// legitimate webhook caller just stops being able to signal.
+// tenant's scope reads no row for runB, and PostgresStore.GetAllowedSignalCallers
+// treats that as sql.ErrNoRows and returns engine.ErrWorkflowNotFound (see
+// its doc comment in engine/store_signals.go) -- translated to
+// plugin.ErrWorkflowNotFound at this function's boundary, same as a
+// genuinely missing workflow. So it fails CLOSED, and does so
+// indistinguishably from "this workflow does not exist": nothing crashes,
+// nothing logs "denied wrongly", a legitimate webhook caller just stops
+// being able to signal, and the error it gets back does not say why.
 func TestSignalPluginWorkflowWithAuth_OnlyAnAllowedCallerCanSignal(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2209 test")

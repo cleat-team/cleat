@@ -1198,10 +1198,15 @@ func TestMSSQLStore_DeliverSignal_Success(t *testing.T) {
 		// 3.215 and the doc comment on deliverSignalTx in
 		// mssql_signals_promises.go. This match string named the pre-3.215
 		// statement and, being a substring match, silently fell through to
-		// the mock's unmatched default instead of failing -- harmless here
-		// only because deliverSignalTx does not check the INSERT's own
-		// RowsAffected.
-		{match: "INSERT INTO workflow_signals"},
+		// the mock's unmatched default instead of failing.
+		//
+		// affected: 1 is load-bearing now, not decoration -- cleat#2227
+		// checks this exec's own RowsAffected and returns ErrWorkflowNotFound
+		// on 0, which is mockExecResult's zero value. Before #2227 that zero
+		// was harmless because nothing read it; now an unset affected here
+		// makes this "success" test fail with ErrWorkflowNotFound instead of
+		// exercising the success path it is named for.
+		{match: "INSERT INTO workflow_signals", affected: 1},
 		// Matched on "UPDATE workflow_instances", not "SET next_wake_at" --
 		// the wake column is set inside a CASE expression following "SET
 		// signal_seq = signal_seq + 1,", so the latter is not actually a

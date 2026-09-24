@@ -335,7 +335,13 @@ func signalPluginWorkflow(ctx context.Context, store engine.WorkflowStore, workf
 	if tid, ok := tenantctx.From(ctx); ok {
 		scoped = scopeToTenant(store, tid.String())
 	}
-	return scoped.DeliverSignal(ctx, workflowID, signalName, payload)
+	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			return plugin.ErrWorkflowNotFound
+		}
+		return err
+	}
+	return nil
 }
 
 // signalPluginWorkflowWithAuth is signalPluginWorkflow plus the
@@ -345,6 +351,21 @@ func signalPluginWorkflow(ctx context.Context, store engine.WorkflowStore, workf
 // -- checking one tenant's allowed_signals and then delivering under
 // another's would make the check meaningless, not merely wrong (cleat#2209:
 // GetAllowedSignalCallers ran unscoped here exactly like DeliverSignal did).
+//
+// GetAllowedSignalCallers's own ErrWorkflowNotFound is translated the same
+// way DeliverSignal's is, below. Before this fix, a missing workflow read
+// back as an empty caller list -- GetAllowedSignalCallers returned (nil,
+// nil) for it -- so this function reported the ordinary "signal auth
+// denied" for a target that did not exist, while signalPluginWorkflow (auth
+// off) reported not-found for the identical id. The two functions
+// disagreeing was itself a leak: the shape of the error told a caller
+// whether --require-signal-auth was on. And unlike DeliverSignal's own
+// not-found case, cleat#2218 never touched this one -- it only reached
+// deliverSignalTx, not GetAllowedSignalCallers -- so cleat#2213's awaiter
+// leak was live here, continuously, the whole time: signalAwaiters
+// unregisters on ErrWorkflowNotFound but not on an ordinary error, and this
+// path returned an ordinary "signal auth denied" for a target that was
+// never there to be denied.
 func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStore, workflowID, signalName, payload, pluginName string) error {
 	scoped := store
 	if tid, ok := tenantctx.From(ctx); ok {
@@ -352,12 +373,21 @@ func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStor
 	}
 	callers, err := scoped.GetAllowedSignalCallers(ctx, workflowID)
 	if err != nil {
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			return plugin.ErrWorkflowNotFound
+		}
 		return err
 	}
 	if !signalCallerAllowed(callers, pluginName) {
 		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
 	}
-	return scoped.DeliverSignal(ctx, workflowID, signalName, payload)
+	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			return plugin.ErrWorkflowNotFound
+		}
+		return err
+	}
+	return nil
 }
 
 func main() {

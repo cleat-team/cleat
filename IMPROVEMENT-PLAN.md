@@ -10249,6 +10249,7 @@ Server by gating the INSERT itself: `INSERT ... SELECT ... WHERE EXISTS (SELECT 
 workflow_instances WHERE id = ? AND tenant_id = <caller>)`. A nonexistent id and a foreign-tenant
 id now take the identical path — the `EXISTS` is false either way, nothing is written, no error —
 so the two cases are indistinguishable from every side, not just the victim's.
+
 `engine/mssql_admin_login_control_plane_tenant_test.go`'s `DeliverSignal`/`DeliverSignalNonexistentID`
 cases prove it under SQL Server's `cleat_admin` bypass role specifically; a new dialect-independent
 test, `TestDeliverSignalToAnIDTheCallerCannotTouchWritesNothing`
@@ -10269,9 +10270,130 @@ and zero package-level failures both times (one single-occurrence failure on the
 `TestACompletedRunReportsWhenItFinished/mssql`, did not reproduce across 5 isolated retries nor
 across a full second run — a flake, not a regression from this change).
 
+**"No error" did not survive review.** §3.341/cleat#2227, merged the same day, replaces it with
+a typed `ErrWorkflowNotFound`, identical for both cases, so the "no error" sentence above
+describes this PR's original mechanism rather than today's error contract — the oracle it
+closes is unaffected; what changed is only whether "not found" is silent or loud. See §3.341
+before citing this section's "no error" as current.
+
 Files: `migrations/mssql/103_a_filtered_write_is_a_blocked_write.sql`,
 `migrations/mssql/075_the_admin_bypass_is_opt_in.sql`, `migrations/mssql/optional/cross_tenant_claim.sql`,
 `engine/mssql_block_predicates_test.go`, `engine/a_signal_to_an_id_the_caller_cannot_touch_writes_nothing_test.go`,
 `engine/store_signals.go`, `engine/mysql_store.go`, `engine/mssql_signals_promises.go`,
 `engine/a_deleted_row_and_an_invisible_row_are_told_apart_test.go`, `docs/reference/multi-tenancy.md`,
 and the nine other MSSQL test files whose fixtures needed a pinned, session-context-set connection.
+
+### 3.341 DeliverSignal's silence outlived its reason — ✅ **FIXED 2026-09-24** (cleat#2227)
+
+**§3.340's own "no error" half became the next bug, inside the PR that shipped it.** cleat#2218
+closed `DeliverSignal`'s existence oracle by making a foreign-tenant id and a nonexistent id
+answer identically: `RowsAffected()==0` on the EXISTS-gated INSERT returned nil, same as success.
+That is correct for the oracle question -- a caller still learns nothing about *which* is true --
+but it also means a signal to a workflow that is genuinely gone, in the CALLER'S OWN tenant
+(purged, or never existed), is now indistinguishable from a signal that landed. Two real
+consumers depend on telling those apart, in two different ways. webhookingest's retry/dead-letter
+loop (`plugins/webhookingest/background.go`) treats nil as delivered and never dead-letters an
+event whose target does not exist -- a live bug, unaffected by cleat#2218's timing, that #2227
+fixes. eventtriggers' awaiter cleanup (`plugins/eventtriggers/publish.go`'s `signalAwaiters`)
+unregisters on the success path -- so a nil for "not found" was ALREADY being unregistered there,
+as a side effect of cleat#2218, not left registered: the actual `cleat#2213` leak predates
+cleat#2218 (a plain, non-nil error for "not found" before it, which the failure path does not
+unregister for) and was fixed by cleat#2218's nil by accident, at the cost of logging a delivery
+that never happened. cleat#2227 does not reopen or refix a leak here; it gives "not found" its
+own path so the SAME outcome (unregister) happens honestly, with its own log line, instead of by
+being mistaken for a delivery.
+
+**The fix is `ErrWorkflowNotFound` on `RowsAffected()==0`, on all three dialects**
+(`engine/store_signals.go`, `engine/mysql_store.go`, `engine/mssql_signals_promises.go`), loud
+again without reopening the oracle: foreign-tenant and nonexistent still return the *identical*
+error, so a caller learns "not found", never which reason. A plugin-visible
+`plugin.ErrWorkflowNotFound` sentinel carries this across the plugin/engine boundary (plugins
+cannot import `engine`), translated in `cmd/cleat-worker/main.go`'s `signalPluginWorkflow` and
+`signalPluginWorkflowWithAuth`. `eventtriggers.signalAwaiters` now unregisters the awaiter on
+`errors.Is(err, plugin.ErrWorkflowNotFound)` specifically, rather than only on success.
+`webhookingest` needed no code change: its retry/dead-letter path is already generic over any
+non-nil error, so restoring a real one restores full dead-letter-after-3-retries behaviour with
+nothing plugin-specific to write.
+
+**This is the residual §3.86 recorded and declined to fix**, back when the mechanism was a
+`MERGE` rather than an EXISTS-gated INSERT: "distinguishable from delivering to an id that
+exists nowhere (which still succeeds, creating a harmless orphan row under the caller's own
+tenant) ... Turning the refusal into a clean not-found is a change to an HTTP contract and
+belongs in its own PR" (`IMPROVEMENT-PLAN-CLOSED.md`). §3.215 then removed the orphan row
+entirely (the INSERT stopped being an upsert), and §3.340/cleat#2218 made the refusal silent
+instead of a 500 -- closer to "clean not-found" in spirit, but still not loud. cleat#2227 is
+that PR: the refusal is now a typed, caller-visible not-found, on the ordinary write path this
+time rather than as an HTTP status code.
+
+**Test contract inverted on purpose, and the inversion is the finding, not a regression.**
+`TestDeliverSignalToAnIDTheCallerCannotTouchWritesNothing`'s `ForeignID`/`NonexistentID`
+subtests (run per dialect: Postgres, MySQL, MSSQL) and
+`mssql_admin_login_control_plane_tenant_test.go`'s `DeliverSignal`, `DeliverSignalWake` and
+`DeliverSignalNonexistentID` subtests asserted `err == nil` under cleat#2218's contract; they
+now assert `errors.Is(err, ErrWorkflowNotFound)`. `OwnID` and the own-tenant positive controls in
+the admin-login file are unchanged and still must succeed -- without them, a `DeliverSignal` that
+had stopped writing ANYTHING would pass every inverted assertion too. The plugin-boundary
+equivalents in `cmd/cleat-worker/a_signal_plugin_workflow_is_tenant_scoped_test.go` (the
+cross-tenant case in each of its three tests: plain Postgres, sharded Postgres, MSSQL) were
+inverted the same way, to `errors.Is(err, plugin.ErrWorkflowNotFound)`.
+
+Falsified in two rounds, test files untouched each time. Reverting the three store files alone:
+9 leaf subtests in `engine` went red for the expected reason (`want ErrWorkflowNotFound, got
+<nil>`) -- the 6 dialect × case combinations above plus the 3 MSSQL-admin-login cases. Reverting
+them again with the plugin-boundary translation in place: the 3
+`a_signal_plugin_workflow_is_tenant_scoped_test.go` cross-tenant cases went red the same way
+(`want plugin.ErrWorkflowNotFound, got <nil>`). Every positive control stayed green in both
+rounds. `TestANotFoundAwaiterUnregistersInsteadOfLeaking`
+(`plugins/eventtriggers/a_not_found_awaiter_unregisters_instead_of_leaking_test.go`) was
+falsified the same way against `signalAwaiters` alone and carries its own negative control: an
+ordinary (non-sentinel) delivery error must NOT unregister the awaiter, only
+`ErrWorkflowNotFound` does.
+
+**cleat#2213's leak had a second, live path this section did not name: `--require-signal-auth`.**
+`engine.GetAllowedSignalCallers` was never touched by cleat#2218 -- it kept returning
+`(nil, nil)` for a missing workflow on all three dialects, which `signalPluginWorkflowWithAuth`
+read as "exists, but the caller is not on the list" and answered the ordinary auth-denied error,
+not `ErrWorkflowNotFound`. So with signal authorization on, `signalAwaiters` never took the
+not-found branch above for a purged workflow -- it retried the auth-denied error forever,
+continuously, independent of cleat#2218's timing. `GetAllowedSignalCallers` now returns
+`ErrWorkflowNotFound` for a missing row too, on all three dialects, closing that path the same
+way. The HTTP layer picks up the same fix: `cmd/cleat-worker/server.go`'s `handleSignal` maps it
+to 404 on the auth-check branch, and `handleGetAllowedSignals` (GET on the same resource
+`handleSetAllowedSignals`/PUT already 404'd on) now does too.
+
+**A second, narrower not-found path was found in review and closed the same way: a purge racing
+the EXISTS-gated INSERT itself.** The EXISTS check `deliverSignalTx` guards on is a plain,
+non-locking read, so a `DeleteCompletedWorkflows` purge committing in the gap between that read
+and the INSERT's own foreign-key check can turn a zero-rows not-found into a raw FK-violation
+error instead -- SQLSTATE 23503 on PostgreSQL, error 1452 on MySQL, error 547 on SQL Server.
+`isSignalsWorkflowFKViolationPG` / `isSignalsWorkflowFKViolation` /
+`isMSSQLSignalsWorkflowFKViolation` catch it on all three and map it to the same
+`ErrWorkflowNotFound`. This PR's first draft called the window "a few microseconds, not
+reproduced under a live race" -- wrong, found in review: a held-open purge (a transaction that
+deletes the row and does not commit) makes it deterministic rather than rare, and
+`engine/deliver_signal_purge_race_test.go` forces it directly on all three dialects rather than
+relying on timing. Falsifying each dialect's classifier separately found the three do not agree
+on mechanism: PostgreSQL's FK trigger genuinely blocks and needs the classifier (falsifying it
+turns the test red with a raw driver error); MySQL and SQL Server's `WHERE EXISTS(...)` blocks at
+the subquery itself under this same interleave and resolves via the ordinary
+`RowsAffected()==0` branch, never reaching their own classifiers at all -- recorded in that
+test's own comment rather than left as an unqualified "all three dialects" claim.
+
+**The four `ErrWorkflowNotFound`→404 HTTP mappings this added (`server.go`'s `handleSignal` on
+its auth-check, idempotent-delivery and plain-delivery branches, plus `handleGetAllowedSignals`)
+had no test of their own until review found the gap** -- the nearest existing coverage
+(`TestASignalForAnUnownedWorkflowNeverReachesTheStore`) exercises `callerOwnsTarget`, a check
+that runs before all four and never reaches any of them. `cmd/cleat-worker/signal_not_found_mapping_test.go`
+covers each directly, with a plain-error negative control (500, not 404) on the two branches that
+can distinguish "not found" from "some other store failure".
+
+Files: `engine/store_signals.go`, `engine/mysql_store.go`, `engine/mssql_signals_promises.go`,
+`plugin/plugin.go`, `cmd/cleat-worker/main.go`, `cmd/cleat-worker/server.go`,
+`plugins/eventtriggers/publish.go`,
+`engine/a_signal_to_an_id_the_caller_cannot_touch_writes_nothing_test.go`,
+`engine/mssql_admin_login_control_plane_tenant_test.go`, `engine/mssql_store_test.go`,
+`engine/unscoped_queries_tenant_test.go`, `engine/deliver_signal_purge_race_test.go`,
+`cmd/cleat-worker/a_signal_plugin_workflow_is_tenant_scoped_test.go`,
+`cmd/cleat-worker/signal_not_found_mapping_test.go`,
+`cmd/cleat-worker/a_purged_awaiter_unregisters_across_dialects_test.go`,
+`plugins/eventtriggers/a_not_found_awaiter_unregisters_instead_of_leaking_test.go`.

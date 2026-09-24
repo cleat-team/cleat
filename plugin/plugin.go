@@ -72,6 +72,35 @@ var ErrNotConfigured = errors.New("plugin not configured")
 // marking the plugin unhealthy and continuing.
 var ErrFatalMisconfiguration = errors.New("plugin: fatal misconfiguration")
 
+// ErrWorkflowNotFound is returned by Environment.SignalWorkflow when the
+// target workflowID is not visible under the caller's own tenant --
+// because it belongs to another tenant, or because no such workflow ever
+// existed, or because it existed and was purged. All three collapse to
+// this one error deliberately: telling them apart would reopen the
+// existence oracle that engine.DeliverSignal was changed specifically to
+// avoid re-creating (cleat#2218), by answering the same way regardless of
+// which of the three is true. See engine.ErrWorkflowNotFound
+// (engine/store_signals.go), which this stands in for at the plugin/engine
+// boundary -- cmd/cleat-worker/main.go's signalPluginWorkflow translates
+// one to the other, since plugins/* cannot import engine to compare
+// against its sentinel directly.
+//
+// Before cleat#2218, this case returned a plain, non-nil error (an FK
+// violation on the engine dialects that have one), and a signal to a
+// since-purged workflow -- routine, not a bug -- was indistinguishable from
+// a genuine delivery failure. eventtriggers treated every non-nil error the
+// same, as transient and worth retrying, so an awaiter for a permanently
+// gone workflow never unregistered and leaked forever (cleat#2213).
+// cleat#2218 changed this case to return nil instead -- fixing that leak as
+// a side effect, since eventtriggers unregisters on nil too, but leaving it
+// indistinguishable from a real delivery: a caller had no way to log or
+// react to "not found" specifically, only to treat it as success. This
+// error restores that distinction. A caller that wants to react
+// specifically to "not found" -- as plugins/eventtriggers now does, to log
+// and unregister the awaiter honestly rather than by accident -- uses
+// errors.Is(err, plugin.ErrWorkflowNotFound), not string matching.
+var ErrWorkflowNotFound = errors.New("plugin: workflow not found")
+
 // PluginInfo describes a plugin for discovery and documentation.
 type PluginInfo struct {
 	Name           string         `json:"name"`
@@ -178,6 +207,11 @@ type Environment struct {
 	// SignalWorkflow delivers a signal to a running workflow instance.
 	// The signal name and JSON payload are recorded deterministically
 	// in the workflow_signals table.
+	//
+	// Returns ErrWorkflowNotFound (cleat#2227) when workflowID is not
+	// visible under the caller's own tenant -- foreign, nonexistent, and
+	// purged are indistinguishable on purpose; see that error's doc
+	// comment. Any other non-nil error is a genuine delivery failure.
 	SignalWorkflow func(ctx context.Context, workflowID, signalName, payload string) error
 
 	// Audit provides access to the plugin audit log. Plugins can record
