@@ -133,12 +133,13 @@ func NewPluginTestBackends(t *testing.T) []PluginTestBackend {
 // either.
 //
 // dbo.fn_plugin_tenant_filter (every plugin-owned table: workflow_blob_refs,
-// kv_store, task_queue, ...) is a SEPARATE function, and it DOES read this key
-// -- `OR CAST(SESSION_CONTEXT(N'cross_tenant') AS NVARCHAR(4000)) <> N''`,
-// plugin/migration.go's applyTenantScopingMSSQL. It is not a test-only
-// convenience: plugin.markCrossTenantOnTx sets the identical key in production,
-// and every plugin's AcrossAllTenants sweep (blobstore's stale-ref sweep among
-// them) depends on it to see every tenant's rows in one pass. So the `EXEC
+// kv_store, task_queue, ...) is a SEPARATE function, and it DOES read this
+// key: an OR disjunct in plugin/migration.go's applyTenantScopingMSSQL casts
+// SESSION_CONTEXT(N'cross_tenant') to NVARCHAR and admits any non-empty
+// value. It is not a test-only convenience: plugin.markCrossTenantOnTx sets
+// the identical key in production, and every plugin's AcrossAllTenants sweep
+// (blobstore's stale-ref sweep among them) depends on it to see every
+// tenant's rows in one pass. So the `EXEC
 // sp_set_session_context @key = N'cross_tenant', ...` call below is exactly
 // the bypass a fixture touching a PLUGIN table needs, and is the same
 // mechanism the code under test uses -- keep it wired for anything that reads,
