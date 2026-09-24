@@ -41,6 +41,11 @@ type testWebhookCfg struct {
 	enabled          bool
 	createdAt        time.Time
 	updatedAt        time.Time
+	// deletedAt mirrors webhook_config.deleted_at (cleat#2220). nil means the
+	// row is live; every read path below filters it out once set, matching
+	// the "AND deleted_at IS NULL" production adds to every SELECT and to
+	// handleUpdateWebhook's/handleDeleteWebhook's own WHERE clauses.
+	deletedAt *time.Time
 }
 
 type testDelivery struct {
@@ -138,8 +143,24 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execInsertWebhookConfig(args)
 	case strings.Contains(query, "INSERT INTO webhook_delivery"):
 		return c.execInsertWebhookDelivery(args)
+	// Checked ahead of the generic "UPDATE webhook_config" case below:
+	// handleDeleteWebhook's soft-delete (routes.go, cleat#2220) sets both
+	// enabled and deleted_at to LITERAL values, not $N placeholders, so the
+	// generic case's placeholder-driven field-mapping loop would match zero
+	// fields and silently no-op the whole update -- this case has its own
+	// dedicated handler instead.
+	case strings.Contains(query, "SET enabled = false, deleted_at = now()"):
+		return c.execSoftDeleteWebhookConfig(args)
 	case strings.Contains(query, "UPDATE webhook_config"):
 		return c.execUpdateWebhookConfig(args, query)
+	// Also checked ahead of its generic sibling: handleDeleteWebhook's
+	// delivery-cancellation UPDATE (routes.go, cleat#2220) has a completely
+	// different WHERE shape (webhook_id + status IN (...), no delivery id at
+	// all) from execUpdateWebhookDelivery's single-row-by-id update -- routed
+	// generically, args[1] (a webhook_id) would be misread as a delivery id,
+	// match nothing, and silently cancel 0 rows.
+	case strings.Contains(query, "SET status = 'cancelled'"):
+		return c.execCancelPendingDeliveries(args)
 	case strings.Contains(query, "UPDATE webhook_delivery"):
 		return c.execUpdateWebhookDelivery(args, query)
 	case strings.Contains(query, "DELETE FROM webhook_config"):
@@ -301,7 +322,7 @@ func (c *fakeConn) execUpdateWebhookConfig(args []driver.NamedValue, query strin
 	id := uuid.MustParse(idStr)
 
 	cfg := findWebhookCfg(c.store.configs, id)
-	if cfg == nil || cfg.tenantID != tid {
+	if cfg == nil || cfg.tenantID != tid || cfg.deletedAt != nil {
 		return &fakeResult{rowsAffected: 0}, nil
 	}
 
@@ -387,7 +408,39 @@ func (c *fakeConn) execUpdateWebhookDelivery(args []driver.NamedValue, query str
 	return &fakeResult{rowsAffected: 1}, nil
 }
 
+// execDeleteWebhookConfig is now the compensating hard delete
+// handleCreateWebhook issues when p.secrets.Put fails after the row is
+// written (routes.go: "DELETE FROM webhook_config WHERE id = $1", id only --
+// there is no tenant_id in that WHERE clause, since it runs right after the
+// INSERT this same request just made). handleDeleteWebhook itself no longer
+// issues any hard DELETE at all -- cleat#2220 replaced it with the soft
+// delete below.
 func (c *fakeConn) execDeleteWebhookConfig(args []driver.NamedValue) (driver.Result, error) {
+	idStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, cfg := range c.store.configs {
+		if cfg.id == id {
+			c.store.configs = append(c.store.configs[:i], c.store.configs[i+1:]...)
+			return &fakeResult{rowsAffected: 1}, nil
+		}
+	}
+	return &fakeResult{rowsAffected: 0}, nil
+}
+
+// execSoftDeleteWebhookConfig simulates handleDeleteWebhook's
+// "SET enabled = false, deleted_at = now() WHERE id = $1 AND tenant_id = $2
+// AND deleted_at IS NULL" (routes.go, cleat#2220). Already-deleted rows do
+// not match -- the production WHERE clause's own "deleted_at IS NULL" makes a
+// second delete of the same webhook affect 0 rows, which is what turns a
+// repeat DELETE into 404 rather than a silent no-op success.
+func (c *fakeConn) execSoftDeleteWebhookConfig(args []driver.NamedValue) (driver.Result, error) {
 	idStr, err := argString(args, 1)
 	if err != nil {
 		return nil, err
@@ -405,13 +458,39 @@ func (c *fakeConn) execDeleteWebhookConfig(args []driver.NamedValue) (driver.Res
 		return nil, err
 	}
 
-	for i, cfg := range c.store.configs {
-		if cfg.id == id && cfg.tenantID == tid {
-			c.store.configs = append(c.store.configs[:i], c.store.configs[i+1:]...)
-			return &fakeResult{rowsAffected: 1}, nil
+	cfg := findWebhookCfg(c.store.configs, id)
+	if cfg == nil || cfg.tenantID != tid || cfg.deletedAt != nil {
+		return &fakeResult{rowsAffected: 0}, nil
+	}
+	now := time.Now().UTC()
+	cfg.enabled = false
+	cfg.deletedAt = &now
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+// execCancelPendingDeliveries simulates handleDeleteWebhook's
+// "UPDATE webhook_delivery SET status = 'cancelled' WHERE webhook_id = $1
+// AND status IN ('pending', 'retrying')" (routes.go, cleat#2220): the
+// proactive cancellation run in the same transaction as the soft-delete
+// above, mirroring cleat#2199's handleDeleteSource for webhookingest.
+func (c *fakeConn) execCancelPendingDeliveries(args []driver.NamedValue) (driver.Result, error) {
+	webhookIDStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	webhookID, err := uuid.Parse(webhookIDStr)
+	if err != nil {
+		return nil, err
+	}
+
+	var n int64
+	for _, d := range c.store.deliveries {
+		if d.webhookID == webhookID && (d.status == "pending" || d.status == "retrying") {
+			d.status = "cancelled"
+			n++
 		}
 	}
-	return &fakeResult{rowsAffected: 0}, nil
+	return &fakeResult{rowsAffected: n}, nil
 }
 
 // --- Query implementations ---
@@ -452,7 +531,7 @@ func (c *fakeConn) queryWebhookExists(args []driver.NamedValue) (driver.Rows, er
 
 	exists := false
 	for _, cfg := range c.store.configs {
-		if cfg.id == id && cfg.tenantID == tid {
+		if cfg.id == id && cfg.tenantID == tid && cfg.deletedAt == nil {
 			exists = true
 			break
 		}
@@ -476,7 +555,7 @@ func (c *fakeConn) queryWebhookConfigForDelivery(args []driver.NamedValue) (driv
 
 	columns := []string{"url", "tenant_id", "secret_configured"}
 	cfg := findWebhookCfg(c.store.configs, id)
-	if cfg == nil {
+	if cfg == nil || cfg.deletedAt != nil {
 		return &fakeRows{columns: columns}, nil
 	}
 	return &fakeRows{
@@ -489,16 +568,26 @@ func (c *fakeConn) queryPendingDeliveries(args []driver.NamedValue) (driver.Rows
 	columns := []string{"id", "webhook_id", "event_type", "payload", "attempt_count"}
 	var data [][]driver.Value
 	for _, d := range c.store.deliveries {
-		if d.status == "pending" || d.status == "retrying" {
-			// The payload must be []byte for driver.Value compatibility.
-			data = append(data, []driver.Value{
-				d.id.String(),
-				d.webhookID.String(),
-				d.eventType,
-				d.payload,
-				int64(d.attemptCount),
-			})
+		if d.status != "pending" && d.status != "retrying" {
+			continue
 		}
+		// Mirrors queryDueDeliveries' own
+		// "JOIN webhook_config wc ON wc.id = d.webhook_id AND
+		// wc.deleted_at IS NULL" (background.go, cleat#2220): an INNER join,
+		// not a LEFT one, so a delivery with no matching config row at all --
+		// not just a soft-deleted one -- is excluded too.
+		cfg := findWebhookCfg(c.store.configs, d.webhookID)
+		if cfg == nil || cfg.deletedAt != nil {
+			continue
+		}
+		// The payload must be []byte for driver.Value compatibility.
+		data = append(data, []driver.Value{
+			d.id.String(),
+			d.webhookID.String(),
+			d.eventType,
+			d.payload,
+			int64(d.attemptCount),
+		})
 	}
 	return &fakeRows{columns: columns, data: data}, nil
 }
@@ -592,7 +681,7 @@ func (c *fakeConn) queryGetWebhook(args []driver.NamedValue) (driver.Rows, error
 
 	columns := []string{"id", "url", "secret_configured", "events", "enabled", "created_at", "updated_at"}
 	for _, cfg := range c.store.configs {
-		if cfg.id == id && cfg.tenantID == tid {
+		if cfg.id == id && cfg.tenantID == tid && cfg.deletedAt == nil {
 			return &fakeRows{
 				columns: columns,
 				data: [][]driver.Value{{
@@ -623,7 +712,7 @@ func (c *fakeConn) queryListWebhooks(args []driver.NamedValue) (driver.Rows, err
 	columns := []string{"id", "url", "secret_configured", "events", "enabled", "created_at", "updated_at"}
 	var data [][]driver.Value
 	for _, cfg := range c.store.configs {
-		if cfg.tenantID == tid {
+		if cfg.tenantID == tid && cfg.deletedAt == nil {
 			data = append(data, []driver.Value{
 				cfg.id.String(),
 				cfg.url,

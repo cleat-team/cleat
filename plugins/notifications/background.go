@@ -211,9 +211,15 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 	// comment. ScanRow substitutes plugin.GUID for any *uuid.UUID
 	// destination and swaps it back, the same correction routes.go's own
 	// scans in this package already get.
+	// deleted_at IS NULL: defense-in-depth on top of queryDueDeliveries' own
+	// join guard below and handleDeleteWebhook's proactive cancellation
+	// (routes.go) -- cleat#2220, the same belt-and-suspenders shape cleat#2199
+	// gave webhookingest's deliver-path lookups. This is the layer that
+	// matters if either of those has a bug or a race admits a delivery for a
+	// webhook that has since been soft-deleted.
 	var cfg webhookConfigRow
 	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT url, tenant_id, secret_configured FROM webhook_config WHERE id = $1
+			SELECT url, tenant_id, secret_configured FROM webhook_config WHERE id = $1 AND deleted_at IS NULL
 		`, p.dialect), d.WebhookID), &cfg.URL, &cfg.TenantID, &cfg.SecretConfigured)
 	if err != nil {
 		return "", fmt.Errorf("lookup webhook config: %w", err)
@@ -465,21 +471,35 @@ func nowPlusSecondsSQLExpr(d plugin.Dialect, ph string) string {
 // missed sweep before the next one caught it -- silent by dilution, not by
 // impossibility, which is exactly the class of bug a lower-frequency
 // production system does not surface for itself.
+// INNER JOIN webhook_config, not a LEFT JOIN: cleat#2220. A LEFT JOIN plus
+// "wc.deleted_at IS NULL" would read true when there is no matching config
+// row at all (a missing row makes every wc.* column NULL, and NULL IS NULL
+// is true in SQL) -- admitting a delivery whose webhook was hard-deleted as
+// though it were merely "not soft-deleted". That case is reachable here in a
+// way it was not for webhookingest's LEFT JOIN (background.go there): this
+// plugin's webhook_config row IS hard-deleted, by admin.drop_tenant, and
+// migrations.go v7's ON DELETE CASCADE removes the matching webhook_delivery
+// rows at the same time -- so in steady state a delivery with no matching
+// config should not exist, and an INNER JOIN says so rather than silently
+// admitting it if that invariant is ever violated.
 var queryDueDeliveries = plugin.Query{
 	Default: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= now()
 ORDER BY d.next_attempt_at ASC
 LIMIT 100`,
 	MySQL: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= NOW(6)
 ORDER BY d.next_attempt_at ASC
 LIMIT 100`,
 	MSSQL: `SELECT TOP 100 d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= now()
 ORDER BY d.next_attempt_at ASC`,
