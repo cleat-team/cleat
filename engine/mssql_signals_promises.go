@@ -108,32 +108,32 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 		return err
 	}
 
-	// Scoped for the same reason as the MERGE above: without it, delivering a
-	// signal to an id belonging to another tenant woke that tenant's workflow.
+	// Scoped for the same reason as the INSERT above: without it, delivering
+	// a signal to an id belonging to another tenant woke that tenant's
+	// workflow.
 	//
-	// RowsAffected, not just err == nil: the FILTER predicate does not gate
-	// this UPDATE's WHERE clause the way it gates a plain SELECT -- the
-	// explicit "AND tenant_id = @p2" is what actually excludes a mismatched
-	// row, and it excludes it SILENTLY. Without checking the count, a
-	// tenantID that does not match the target's own tenant returns a
-	// successful no-op: the signal row above is still written, tagged with
-	// s.tenantID, and the workflow it was meant for never wakes
-	// (cleat#2187, cleat#2209).
-	res, err := tx.ExecContext(ctx, `
+	// No RowsAffected check here, and that is deliberate, not an oversight:
+	// the explicit "AND tenant_id = @p2" excludes a mismatched row SILENTLY,
+	// on purpose -- that is the ESTABLISHED, tested contract for a
+	// cross-tenant or nonexistent-id delivery
+	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal and
+	// DeliverSignalWake cases, IMPROVEMENT-PLAN 3.86/3.215): it succeeds as
+	// a harmless orphan INSERT under the caller's own tenant, not an error,
+	// specifically so that success-versus-failure cannot be used as a
+	// cross-tenant existence oracle. cleat#2209's actual defect was that
+	// SignalWorkflow ran on a store scoped to the WRONG tenant for a REAL,
+	// correctly-owned target -- scopeToTenant (cmd/cleat-worker/main.go,
+	// signalPluginWorkflow) is what fixes that, by ensuring this UPDATE runs
+	// under the target's own tenant, where it matches. Erroring here on
+	// RowsAffected()==0 was tried and reverted (cleat#2207) after it broke
+	// that established contract in CI.
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET signal_seq = signal_seq + 1,
 		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN SYSUTCDATETIME() ELSE next_wake_at END
 		WHERE id = @p1 AND tenant_id = @p2
-	`, workflowID, s.tenantID)
-	if err != nil {
+	`, workflowID, s.tenantID); err != nil {
 		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("deliver signal: rows affected: %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("deliver signal: workflow %s not found for tenant %s", workflowID, s.tenantID)
 	}
 	return nil
 }

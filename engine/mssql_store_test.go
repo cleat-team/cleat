@@ -1184,20 +1184,20 @@ func TestMSSQLStore_DeliverSignal_Success(t *testing.T) {
 		// 3.215 and the doc comment on deliverSignalTx in
 		// mssql_signals_promises.go. This match string named the pre-3.215
 		// statement and, being a substring match, silently fell through to
-		// the mock's unmatched default (RowsAffected=0) instead of failing
-		// -- harmless here only because deliverSignalTx does not check the
-		// INSERT's own RowsAffected, unlike the wake-UPDATE below.
+		// the mock's unmatched default instead of failing -- harmless here
+		// only because deliverSignalTx does not check the INSERT's own
+		// RowsAffected.
 		{match: "INSERT INTO workflow_signals"},
-		// affected: 1 -- deliverSignalTx now treats RowsAffected()==0 on this
-		// UPDATE as "workflow not found for tenant" (cleat#2209), so the mock
-		// must report a matched row or this success case fails for the wrong
-		// reason. Matched on "UPDATE workflow_instances", not "SET
-		// next_wake_at" -- the wake column is set inside a CASE expression
-		// following "SET signal_seq = signal_seq + 1,", so the latter is not
-		// actually a substring of the query text and never matched anything;
-		// it only went unnoticed because nothing checked this exec's
-		// RowsAffected before cleat#2209.
-		{match: "UPDATE workflow_instances", affected: 1},
+		// Matched on "UPDATE workflow_instances", not "SET next_wake_at" --
+		// the wake column is set inside a CASE expression following "SET
+		// signal_seq = signal_seq + 1,", so the latter is not actually a
+		// substring of the query text and never matched anything. Harmless
+		// while nothing checks this exec's RowsAffected either (cleat#2207
+		// tried that and reverted it -- see the doc comment on
+		// deliverSignalTx), but still worth matching correctly since a
+		// stale/wrong pattern here is a trap for the next person who adds a
+		// real assertion against this mock.
+		{match: "UPDATE workflow_instances"},
 	})
 	defer db.Close()
 
