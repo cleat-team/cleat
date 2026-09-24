@@ -2123,6 +2123,56 @@ jobs:
           }
           sudo systemctl disable --now cleat-worker.service
 
+      # cleat#2099: rehearse the release.yml helm-chart-publish job (lint,
+      # package, push) on every PR, without a real tag and without touching
+      # ghcr.io. This is the manifests Go test's complement, not a
+      # replacement for it: that test executes the two DSN-building helpers
+      # in isolation against fake values (tests/manifests), read/rendered by
+      # a text/template stand-in that knows nothing about Helm's own
+      # semantics; this uses the real `helm` binary against the whole chart,
+      # so a `helm lint`-only defect (an undeclared value, a bad
+      # relationship between two fields, a template that helm itself refuses
+      # to parse) is caught here and would not be caught there.
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: latest
+
+      - name: helm lint
+        run: helm lint charts/cleat
+
+      - name: helm template renders without error
+        run: helm template cleat charts/cleat --version 0.3.0-dryrun > /tmp/cleat-chart-rendered.yaml
+
+      # A scratch, unauthenticated registry -- this job has no ghcr.io
+      # credentials and should not need any to prove push mechanics work.
+      # -p 5050:5000 rather than the image's own 5000, to stay clear of
+      # anything else in this job's default network namespace.
+      - name: Start a scratch OCI registry
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name helm-dryrun-registry -p 5050:5000 registry:2
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:5050/v2/ >/dev/null && exit 0
+            sleep 1
+          done
+          echo "::error::scratch OCI registry never answered http://localhost:5050/v2/"
+          docker logs helm-dryrun-registry
+          exit 1
+
+      - name: Package and push the chart to the scratch registry
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/helm-dist
+          helm package charts/cleat \
+            --version 0.3.0-dryrun --app-version 0.3.0-dryrun \
+            -d /tmp/helm-dist
+          helm push /tmp/helm-dist/cleat-0.3.0-dryrun.tgz oci://localhost:5050/charts-dryrun --plain-http
+
+      - name: Stop the scratch OCI registry
+        if: always()
+        run: docker rm -f helm-dryrun-registry
+
   build:
     name: Build
     runs-on: ubuntu-latest

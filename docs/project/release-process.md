@@ -339,6 +339,59 @@ without touching the tap: `brew install --HEAD --build-from-source
 packaging/homebrew/Formula/cleat.rb.tmpl` builds from the `head` line (the
 `develop` branch), which never touches `url`/`sha256` at all.
 
+### Releasing the Helm chart — also automatic
+
+As of cleat#2099, `charts/cleat` is published as an OCI artifact to
+`ghcr.io/cleat-team/charts/cleat`, versioned with the release, by
+`.github/workflows/release.yml`'s `helm-chart-publish` job — which runs
+after `goreleaser` on every `v*` tag push:
+
+1. Derives the chart's `version`/`appVersion` from the tag with the leading
+   `v` stripped (`vX.Y.Z` → `X.Y.Z`; Helm's chart `version` must be strict
+   SemVer). These are passed to `helm package --version --app-version`,
+   which overrides `Chart.yaml` at package time — the tracked file's
+   `0.1.0` is never edited for a release.
+2. Rewrites `charts/cleat/values.yaml`'s `image.tag` (also only in this
+   ephemeral checkout, never committed) from `latest` to the release tag —
+   `vX.Y.Z`, matching the tag the `cleat-worker` image was just pushed
+   under in the `goreleaser` job. A bare `helm install` then deploys the
+   worker this chart was tested against, not whatever `latest` resolves to
+   later.
+3. Runs `helm lint charts/cleat`, packages it, and `helm push`es the
+   resulting `.tgz` to `oci://ghcr.io/cleat-team/charts`.
+
+**Package visibility.** Same caveat as the `cleat-worker` image: ghcr.io
+package visibility (public/private) is a repository/org setting, not
+something this workflow controls. `packages: write` is enough for the push
+to succeed; until an owner makes
+`ghcr.io/cleat-team/charts/cleat` public, `helm install
+oci://ghcr.io/cleat-team/charts/cleat` 403s for anyone not authenticated to
+this org — check this once alongside the image's own visibility, not
+per release.
+
+**Verifying it worked**, either by rehearsing the packaging steps locally
+with a fake version and no tag or network needed (the same thing the
+`Release Dry Run` job in `ci.yml` does against a throwaway local registry,
+see 4a below), or after a real release, against what actually landed:
+
+```bash
+# Dry run: does the chart even lint and package, with no tag needed?
+helm lint charts/cleat
+helm package charts/cleat --version 9.9.9 --app-version 9.9.9 -d /tmp/chart-dryrun
+
+# After a real release: pull and inspect what actually got pushed.
+helm pull oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z -d /tmp/chart-check
+tar xzOf /tmp/chart-check/cleat-X.Y.Z.tgz cleat/values.yaml | grep -A2 '^image:'
+```
+
+The unpacked `values.yaml` should show `tag: vX.Y.Z`, not `latest`.
+
+Installing it:
+
+```bash
+helm install cleat oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z
+```
+
 ### 4. Run multi-database tests
 
 Run the WorkflowStore test suite against all three supported backends to verify
@@ -383,6 +436,15 @@ GitHub upload — `build` stops before all of it. It also does not run the `Buil
 
 **It is not a required check.** `.github/required-checks.txt` mirrors branch protection;
 making this blocking is a repository settings change.
+
+The same job also rehearses `helm-chart-publish` (cleat#2099): `helm lint`, `helm
+template`, `helm package`, and `helm push` against a throwaway registry
+(`registry:2`, started in the job and torn down after) started on
+`localhost`, not `ghcr.io` — this job carries no ghcr.io credentials and
+should not need any to prove the packaging and push mechanics work. It does
+not cover the real `ghcr.io` push, the tag-derived version numbers (it uses
+a fixed `0.3.0-dryrun`), or package visibility — those are exercised for
+real only by a tag, per the Helm section above.
 
 ### 5. Commit and open the release PR into `main`
 
@@ -470,6 +532,13 @@ from the published version, which is a green that measured nothing.
 This step is not ceremony. `v0.1.0` was published and could not be installed at
 all — `go install pkg@version` refuses any module whose `go.mod` carries a
 `replace` directive, and the root module carried one until v0.2.0.
+
+4. Verify the Helm chart published alongside it — see "Releasing the Helm
+   chart" above for the full pull/inspect commands:
+
+```bash
+helm pull oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z -d /tmp/chart-check
+```
 
 ### 10. Announce
 
