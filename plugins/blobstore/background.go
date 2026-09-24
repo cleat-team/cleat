@@ -3,9 +3,12 @@ package blobstore
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // cleanupInterval is how often Run sweeps.
@@ -27,6 +30,14 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return nil
 	}
 
+	// baseCtx carries no tenant marker at all -- kept alongside the
+	// AcrossAllTenants-marked ctx below because cleat#2125's SQL Server path
+	// needs to layer plugin.ForTenant on top of a CLEAN context. beginTenantTx
+	// checks for a cross-tenant marker before it checks for a tenant, so
+	// ForTenant on top of an already-cross-tenant ctx is a no-op: the bypass
+	// wins. See sweepStaleWorkflowRefsMSSQL in this file.
+	baseCtx := ctx
+
 	// THE SWEEP NAMES ITSELF CROSS-TENANT. cleat#1512. blob_index carries a
 	// row-level policy from migration v4, and the policy calls
 	// cleat.assert_tenant_set(), which RAISEs rather than filtering when no
@@ -43,11 +54,13 @@ func (p *Plugin) Run(ctx context.Context) error {
 	// bypassing there compiles, passes every test, and silently disables
 	// isolation on that path.
 	//
-	// Marked ONCE here rather than at the seven statements in cleanupExpired,
-	// because every one of them is cross-tenant for the same reason. The
-	// handlers in routes.go are deliberately NOT marked: they run on
-	// r.Context(), which carries the request's tenant, and neither is the host
-	// call in host_functions.go, which has carried the workflow's tenant since
+	// Marked here and used for phases 2 and 3, plus phase 1 on PostgreSQL and
+	// MySQL, because every one of those statements is cross-tenant for the
+	// same reason. Phase 1 on SQL Server is the one exception -- see
+	// sweepStaleWorkflowRefsMSSQL, which takes baseCtx instead. The handlers
+	// in routes.go are deliberately NOT marked: they run on r.Context(), which
+	// carries the request's tenant, and neither is the host call in
+	// host_functions.go, which has carried the workflow's tenant since
 	// cleat#1492 bridged it at the PluginCall boundary.
 	ctx = plugin.AcrossAllTenants(ctx,
 		"blobstore TTL cleanup: expiry and orphan collection run over every tenant's index")
@@ -65,7 +78,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 		case <-ticker.C:
 			start := time.Now()
-			staleRefs, expiredEntries, orphanedBlobs, err := p.cleanupExpired(ctx)
+			staleRefs, expiredEntries, orphanedBlobs, err := p.cleanupExpired(ctx, baseCtx)
 			if err != nil {
 				p.logger.Error("blobstore: TTL cleanup failed",
 					"plugin", p.Info().Name,
@@ -97,10 +110,15 @@ func (p *Plugin) Run(ctx context.Context) error {
 //
 // Phase 3: Garbage-collect blob_content rows with ref_count <= 0, but only
 // if no in-flight workflow references the content via workflow_blob_refs.
-func (p *Plugin) cleanupExpired(ctx context.Context) (staleRefs, expiredEntries, orphanedBlobs int, err error) {
+//
+// ctx is the AcrossAllTenants-marked context Run built; baseCtx is the
+// unmarked one it was built from. Every phase but the SQL Server arm of
+// phase 1 uses ctx -- see sweepStaleWorkflowRefs for why that one arm needs
+// baseCtx instead.
+func (p *Plugin) cleanupExpired(ctx, baseCtx context.Context) (staleRefs, expiredEntries, orphanedBlobs int, err error) {
 	// Phase 1: clean up stale workflow blob references. A ref is stale when
 	// the referencing workflow is no longer in-flight (done, failed, cancelled).
-	result1, err := p.db.Exec(ctx, plugin.Rebind(staleWorkflowRefs.For(p.dialect), p.dialect))
+	result1, err := p.sweepStaleWorkflowRefs(ctx, baseCtx)
 	if err != nil {
 		return staleRefs, expiredEntries, orphanedBlobs, err
 	}
@@ -174,4 +192,133 @@ func (p *Plugin) cleanupExpired(ctx context.Context) (staleRefs, expiredEntries,
 	}
 
 	return staleRefs, expiredEntries, orphanedBlobs, nil
+}
+
+// sweepStaleWorkflowRefs removes workflow_blob_refs rows whose workflow is no
+// longer in flight. PostgreSQL and MySQL do it in the one statement
+// staleWorkflowRefs holds (see its own doc for why each is safe cross-tenant
+// today). SQL Server has no arm there at all -- cleat#2125 -- and runs
+// sweepStaleWorkflowRefsMSSQL instead, on baseCtx rather than ctx.
+func (p *Plugin) sweepStaleWorkflowRefs(ctx, baseCtx context.Context) (int64, error) {
+	if p.dialect == plugin.DialectMSSQL {
+		return p.sweepStaleWorkflowRefsMSSQL(baseCtx)
+	}
+	return p.db.Exec(ctx, plugin.Rebind(staleWorkflowRefs.For(p.dialect), p.dialect))
+}
+
+// sweepStaleWorkflowRefsMSSQL is SQL Server's half of cleat#2125.
+//
+// WHY NOT A PER-TENANT LOOP OF THE WHOLE STATEMENT, the shape
+// sweepAbandonedJobsPerTenant in plugins/jobqueue/background.go uses.
+// task_queue is declared TenantScoped, so looping it per tenant scopes BOTH
+// sides of that statement -- the UPDATE's own table and the workflow_instances
+// subquery -- to the same tenant at once. workflow_blob_refs is not: it has no
+// tenant_id column at all (migrations.go's v3), so it carries no row-level
+// security to scope it. Looping THIS statement's DELETE per tenant would
+// scope only the subquery, and during tenant A's turn tenant B's genuinely
+// in-flight workflow ids are invisible (dbo.fn_tenant_filter admits only A),
+// so the DELETE would read them as not-in-flight and remove tenant B's refs
+// on tenant A's turn -- deleting exactly the rows this fix exists to protect.
+//
+// So the in-flight set has to be gathered whole, across every tenant, before
+// anything is deleted. Each tenant's rows can only be read under its own
+// SESSION_CONTEXT (RLS again, this time working as intended), one query per
+// tenant; the DELETE itself is unscoped, because workflow_blob_refs has
+// nothing for RLS to scope.
+//
+// WHY NOT WHERE workflow_id NOT IN (<every in-flight id>) IN ONE STATEMENT.
+// SQL Server's driver-level parameter ceiling is 2100 per statement, and nothing
+// bounds how many workflows a busy fleet has in flight across every tenant at
+// once. Excluding by NOT IN also does not compose across batches -- splitting
+// the exclusion list into two statements would have each one delete the other
+// batch's still-in-flight refs, since neither NOT IN clause can see the ids the
+// other protects. Inverted instead: read every workflow_id workflow_blob_refs
+// currently references (bounded by how many distinct workflows have ever
+// written a blob ref that has not yet been swept -- self-limiting, since this
+// sweep is what retires them), subtract the in-flight set in Go, and delete the
+// remainder with a plain IN clause, which -- unlike NOT IN -- is safe to batch:
+// each batch only needs the ids it targets.
+func (p *Plugin) sweepStaleWorkflowRefsMSSQL(ctx context.Context) (int64, error) {
+	inFlight, err := p.allInFlightWorkflowIDsMSSQL(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("blobstore: list in-flight workflow ids: %w", err)
+	}
+
+	rows, err := p.db.Query(ctx, `SELECT DISTINCT workflow_id FROM workflow_blob_refs`)
+	if err != nil {
+		return 0, fmt.Errorf("blobstore: list referenced workflow ids: %w", err)
+	}
+	var toDelete []string
+	for rows.Next() {
+		var wfID string
+		if err := rows.Scan(&wfID); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("blobstore: list referenced workflow ids: scan: %w", err)
+		}
+		if _, live := inFlight[wfID]; !live {
+			toDelete = append(toDelete, wfID)
+		}
+	}
+	rerr := rows.Err()
+	_ = rows.Close()
+	if rerr != nil {
+		return 0, fmt.Errorf("blobstore: list referenced workflow ids: %w", rerr)
+	}
+
+	const batchSize = 500 // well under SQL Server's 2100-parameter ceiling
+	var total int64
+	for start := 0; start < len(toDelete); start += batchSize {
+		batch := toDelete[start:min(start+batchSize, len(toDelete))]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			placeholders[i] = fmt.Sprintf("@p%d", i+1)
+			args[i] = id
+		}
+		n, err := p.db.Exec(ctx,
+			`DELETE FROM workflow_blob_refs WHERE workflow_id IN (`+strings.Join(placeholders, ", ")+`)`,
+			args...)
+		if err != nil {
+			return total, fmt.Errorf("blobstore: delete stale refs: %w", err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// allInFlightWorkflowIDsMSSQL reads every tenant's in-flight workflow ids,
+// one tenant at a time under that tenant's own SESSION_CONTEXT. ctx must
+// carry no AcrossAllTenants marker -- plugin.ForTenant on top of one is a
+// no-op, since beginTenantTx checks for a cross-tenant bypass first.
+func (p *Plugin) allInFlightWorkflowIDsMSSQL(ctx context.Context) (map[string]struct{}, error) {
+	tenants, err := plugin.AllTenantIDs(ctx, p.db, p.dialect)
+	if err != nil {
+		return nil, fmt.Errorf("list tenants: %w", err)
+	}
+	ids := make(map[string]struct{})
+	for _, tid := range tenants {
+		id, perr := uuid.Parse(tid)
+		if perr != nil {
+			return nil, fmt.Errorf("tenant id %q is not a UUID: %w", tid, perr)
+		}
+		tctx := plugin.ForTenant(ctx, id)
+		rows, err := p.db.Query(tctx, `SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')`)
+		if err != nil {
+			return nil, fmt.Errorf("in-flight ids for tenant %s: %w", tid, err)
+		}
+		for rows.Next() {
+			var wfID string
+			if err := rows.Scan(&wfID); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("in-flight ids for tenant %s: scan: %w", tid, err)
+			}
+			ids[wfID] = struct{}{}
+		}
+		rerr := rows.Err()
+		_ = rows.Close()
+		if rerr != nil {
+			return nil, fmt.Errorf("in-flight ids for tenant %s: %w", tid, rerr)
+		}
+	}
+	return ids, nil
 }

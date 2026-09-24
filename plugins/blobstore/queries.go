@@ -101,8 +101,8 @@ var jsonbContains = plugin.Query{
 	MSSQL:   `EXISTS (SELECT 1 FROM OPENJSON(i.tags) AS t1 INNER JOIN OPENJSON($1) AS t2 ON t1.[key] = t2.[key] AND t1.value = t2.value)`,
 }
 
-// staleWorkflowRefs deletes the references held by workflows that are no longer
-// in flight.
+// staleWorkflowRefs deletes the references held by workflows that are no
+// longer in flight, on the two dialects where one statement can say so.
 //
 // THE POSTGRES ARM DOES NOT READ workflow_instances DIRECTLY, and that is the
 // whole of cleat#1528. That table's policy is 001_schema.sql's inline
@@ -119,28 +119,21 @@ var jsonbContains = plugin.Query{
 // MySQL keeps the direct subquery: it has no row-level security, so it never
 // had the problem.
 //
-// SQL SERVER IS NOT EXEMPT EITHER, cleat#2125. "Neither has row-level
-// security on workflow_instances" was wrong for this dialect from
-// 001_schema.sql on -- dbo.fn_tenant_filter applies to every principal,
-// AcrossAllTenants sets a SESSION_CONTEXT key that predicate does not read,
-// and on a default deployment (migration 075's plain form) the direct
-// subquery below saw zero rows, so this DELETE removed the in-flight
-// workflow's own reference on every tick. Fixed by migration 102 the same
-// way PostgreSQL's 073 does it: admin.fn_in_flight_workflow_ids() is a
-// multi-statement table-valued function WITH EXECUTE AS 'cleat_dispatcher',
-// a NOLOGIN principal fn_tenant_filter admits by name, so the impersonated
-// read sees every tenant's rows and a plain caller of this query still sees
-// only its own.
+// SQL SERVER HAS NO ARM HERE AT ALL, cleat#2125, and that is deliberate --
+// see sweepStaleWorkflowRefsMSSQL in background.go for why one statement
+// cannot express this on that dialect (dbo.fn_tenant_filter does not read
+// AcrossAllTenants's marker, and workflow_blob_refs itself carries no
+// tenant_id for a per-tenant loop to scope). This field is left absent
+// rather than set to something reached by a stale branch: plugin.Query.For
+// falls back to Default when MSSQL is empty, but sweepStaleWorkflowRefs
+// branches on the dialect before ever calling For, so Default is never
+// reached on that dialect either.
 var staleWorkflowRefs = plugin.Query{
 	Default: `DELETE FROM workflow_blob_refs
 WHERE workflow_id NOT IN (SELECT id FROM admin.in_flight_workflow_ids())`,
 	MySQL: `DELETE FROM workflow_blob_refs
 WHERE workflow_id NOT IN (
 	SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
-)`,
-	MSSQL: `DELETE FROM workflow_blob_refs
-WHERE workflow_id NOT IN (
-	SELECT id FROM admin.fn_in_flight_workflow_ids()
 )`,
 }
 
