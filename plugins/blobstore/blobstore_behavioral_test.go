@@ -803,6 +803,102 @@ func TestPluginInitS3Backend(t *testing.T) {
 	}
 }
 
+// TestPluginInitS3BackendUseIAMCredentials is the opt-out path's own
+// construction test: with use_iam_credentials true, newS3Backend must build
+// a client from the EnvAWS/IAM chain rather than reaching for
+// p.deploymentSecrets -- env.DeploymentSecrets is left nil here, so a client
+// that mistakenly went through the deployment-secrets path would still
+// construct without error (neither path makes an HTTP call at construction
+// time -- see the comment above), but this pins the wiring textually rather
+// than relying on that absence of a crash to mean anything.
+func TestPluginInitS3BackendUseIAMCredentials(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{}
+	ctx := context.Background()
+
+	env := &plugin.Environment{
+		DB:     &engine.SQLDBAdapter{DB: db},
+		Mux:    http.NewServeMux(),
+		Logger: slog.Default(),
+		Config: []byte(`{"backend":"s3","bucket":"test-bucket","region":"us-east-1","endpoint":"localhost:9000","use_iam_credentials":true}`),
+	}
+
+	if err := p.Init(ctx, env); err != nil {
+		t.Fatalf("Init with use_iam_credentials: %v", err)
+	}
+	if !p.config.UseIAMCredentials {
+		t.Error("expected UseIAMCredentials to be true")
+	}
+	if p.backend == nil {
+		t.Error("expected backend to be set")
+	}
+}
+
+// TestBlobstoreInitWarnsOnLeftoverKeys is the mirror of scheduledbackup's
+// TestSB_InitWarnsOnLeftoverDSN: access_key_id/secret_access_key left over
+// in --plugin-config from before cleat#1992 part 1b no longer do anything --
+// Config has no field for either -- so Init must WARN naming the dead
+// fields and the replacement commands, rather than silently ignoring them.
+func TestBlobstoreInitWarnsOnLeftoverKeys(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		Config: []byte(`{"access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "access_key_id") || !strings.Contains(got, "secret_access_key") {
+		t.Errorf("expected a WARN naming both dead fields, got log output: %q", got)
+	}
+	if !strings.Contains(got, "no longer read") {
+		t.Errorf("expected the WARN to say the fields are no longer read, got: %q", got)
+	}
+	if !strings.Contains(got, "set-deployment-secret") {
+		t.Errorf("expected the WARN to name the replacement command, got: %q", got)
+	}
+}
+
+// TestBlobstoreInitWarnsOnOneLeftoverKey proves the WARN fires on EITHER
+// field alone, not only when both are present -- an operator could have
+// migrated one and not the other.
+func TestBlobstoreInitWarnsOnOneLeftoverKey(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		Config: []byte(`{"secret_access_key":"old-secret"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "no longer read") {
+		t.Errorf("expected a WARN with only secret_access_key set, got: %q", got)
+	}
+}
+
+// TestBlobstoreInitNoWarnWithoutLeftoverKeys is the negative control: a
+// config with neither field at all must not log the leftover-key WARN.
+func TestBlobstoreInitNoWarnWithoutLeftoverKeys(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		Config: []byte(`{"backend":"memory"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "no longer read") {
+		t.Errorf("did not expect a leftover-key WARN with neither field in config, got: %q", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Route handler backend error paths
 // ---------------------------------------------------------------------------

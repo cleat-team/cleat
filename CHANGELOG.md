@@ -142,6 +142,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scheduledbackup.dsn` set will now refuse to start on upgrade, where it previously started
   fine and failed backups silently.
 
+- **`blobstore`'s S3 access key pair moves to deployment secrets, and its `minio-go` client
+  now re-resolves credentials on a 60s TTL instead of holding a static pair for the client's
+  entire lifetime.** (cleat#1992)
+
+  `access_key_id`/`secret_access_key` are no longer read from `--plugin-config`; they move to
+  `blobstore.access_key_id`/`blobstore.secret_access_key`. Unlike every other plugin converted so
+  far, the S3 client is still built once at `Init`, not per call — a custom `credentials.Provider`
+  (`deploymentSecretsCredentialsProvider`, `plugins/blobstore/backend.go`) gates minio-go's own
+  credential cache with a 60s TTL instead, so a rotated or retired key pair still takes effect
+  without a worker restart, just not on the very next S3 call the way a bare `Get` would. A
+  deployment secret that cannot be resolved fails the S3 request outright — it is never treated as
+  an unsigned (i.e. effectively anonymous) request, and is never chained to a different credential
+  source. A new `use_iam_credentials: true` config flag opts a deployment with no static keys at
+  all — EC2 instance profile, ECS task role, or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in the
+  worker's own environment — out of this table entirely, using the original credential chain
+  unchanged. See `docs/how-to/use-deployment-secrets.md`.
+
+  **Who is affected:** any deployment running `blobstore` with `"backend":"s3"` and a static
+  `access_key_id`/`secret_access_key` in `--plugin-config`. Unlike `email-notify`/`llm`/
+  `slack-notify`, there is no boot-time check yet — an unmigrated deployment starts fine and every
+  S3 call then fails at request time until `blobstore.access_key_id`/`blobstore.secret_access_key`
+  are set with `cleatctl set-deployment-secret`. A leftover key pair in `--plugin-config` otherwise
+  does nothing and logs a WARN at boot naming the replacement commands. A deployment using IAM/
+  instance-profile credentials already (no static keys in `--plugin-config`) is unaffected only if
+  it also sets `"use_iam_credentials": true` — without it, the default credential source is now
+  the (unset) deployment secret store, not the IAM chain.
+
 - **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
   (cleat#2046)
 

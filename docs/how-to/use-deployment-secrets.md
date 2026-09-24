@@ -21,6 +21,7 @@ Converted to read from here, live, on every call:
 | `llm` | `llm.providers.<provider>.api_key`, one per **enabled**, non-`ollama` provider that has not opted out (below) |
 | `slack-notify` | `slacknotify.signing_secret` |
 | `scheduled-backup` | `scheduledbackup.dsn` |
+| `blobstore` | `blobstore.access_key_id`, `blobstore.secret_access_key` — only when its `backend` is `"s3"` and `use_iam_credentials` is not set |
 
 `email-notify` and `llm` refuse to start the worker if their required name is
 missing or cannot be opened — see "Fail-closed at boot" below.
@@ -100,15 +101,22 @@ plugin:
   `cleatctl set-deployment-secret --name email.sendgrid_api_key`, then
   remove `sendgrid_api_key` from `--plugin-config`.
 
-**Not yet converted**, and still read from `--plugin-config` at `Init` the way
-every plugin's credentials used to be: `blobstore` (its S3 key pair). Tracked
-as a checklist item on cleat#1992. Do not write `blobstore.access_key_id` or
-`blobstore.secret_access_key` here yet — nothing reads them from this table
-until that plugin's own conversion lands. Unlike the others, blobstore's S3
-client is built once at `Init` from a `minio-go` static-credential provider,
-not fetched per call — converting it needs either a custom
-`credentials.Provider` or reconstructing the client per use, which is why it
-has not landed alongside the rest of this table.
+- `blobstore` WARNs the same way as `llm`/`slack-notify` -- naming both
+  `access_key_id` and `secret_access_key` if either is still present -- but
+  implements no boot check at all yet (see below). A leftover key pair here
+  has no effect regardless of `backend` or `use_iam_credentials`; the WARN
+  fires on the raw `--plugin-config` bytes before either is parsed.
+
+**`blobstore`'s S3 client is built once at `Init`, not fetched per call like
+every other row in this table** — a `minio-go` `credentials.Provider`
+(`deploymentSecretsCredentialsProvider`, `plugins/blobstore/backend.go`)
+gates the client's own credential cache with a 60s TTL instead, so a rotated
+or retired key pair still takes effect without a worker restart, just not on
+the very next call the way a bare `Get` would. A failed resolve fails the S3
+request outright; it is never treated as "unsigned" or chained to another
+credential source. `use_iam_credentials: true` opts a deployment with no
+static keys at all out of this table entirely, using the original
+env-var/instance-profile/task-role chain instead.
 
 `checkRequiredDeploymentSecrets` (below) consults `plugin.HasRequiredDeploymentSecrets`
 per plugin rather than a single fixed list — `email-notify` and `llm`

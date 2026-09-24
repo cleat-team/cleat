@@ -45,13 +45,14 @@ func (f *fakeUnscopedDeploymentSecrets) Get(ctx context.Context, name string) (s
 	return "", errors.New("deployment secret not found")
 }
 
-// TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix proves email, llm
-// and scheduled-backup -- the plugins that declare a deployment-secret prefix
-// today -- each get a DeploymentSecrets that resolves their OWN prefix and
-// refuses the others'. Deleting any one plugin's DeploymentSecretPrefix
-// method makes the corresponding block of this test fail: the plugin stops
-// implementing plugin.HasDeploymentSecretPrefix, so deploymentSecretsForPlugin
-// returns nil instead of a scoped adapter.
+// TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix proves email, llm,
+// scheduled-backup and blobstore -- the plugins that declare a
+// deployment-secret prefix today -- each get a DeploymentSecrets that
+// resolves their OWN prefix and refuses the others'. Deleting any one
+// plugin's DeploymentSecretPrefix method makes the corresponding block of
+// this test fail: the plugin stops implementing
+// plugin.HasDeploymentSecretPrefix, so deploymentSecretsForPlugin returns
+// nil instead of a scoped adapter.
 //
 // scheduled-backup's own case is the one cleat-review's #2236 GAP flagged.
 // It does implement plugin.HasRequiredDeploymentSecrets now, but only
@@ -67,6 +68,12 @@ func (f *fakeUnscopedDeploymentSecrets) Get(ctx context.Context, name string) (s
 // scheduledbackup's own package-level tests would stay green regardless,
 // since they construct Plugin directly rather than going through this
 // wiring. This test is what actually exercises it, unconditionally.
+//
+// blobstore's RequiredDeploymentSecrets is UNCONDITIONAL instead (see its
+// own doc comment, plugins/blobstore/plugin.go) -- backend=="s3" &&
+// !use_iam_credentials always requires both names, so a missing
+// DeploymentSecretPrefix there fails boot on every s3-backed deployment,
+// not only ones carrying a legacy key. Both shapes are exercised here.
 func TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix(t *testing.T) {
 	loaded, err := plugin.Discover()
 	if err != nil {
@@ -75,11 +82,14 @@ func TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix(t *testing.T) {
 	email := findPlugin(t, loaded, "email-notify")
 	llm := findPlugin(t, loaded, "llm")
 	scheduledBackup := findPlugin(t, loaded, "scheduled-backup")
+	blobstore := findPlugin(t, loaded, "blobstore")
 
 	unscoped := &fakeUnscopedDeploymentSecrets{values: map[string]string{
 		"email.sendgrid_api_key":       "sg-real",
 		"llm.providers.openai.api_key": "sk-real",
 		"scheduledbackup.dsn":          "postgres://real",
+		"blobstore.access_key_id":      "AKIAREAL",
+		"blobstore.secret_access_key":  "sk-real-blob",
 	}}
 
 	got := deploymentSecretsForPlugin(email, unscoped)
@@ -122,6 +132,20 @@ func TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix(t *testing.T) {
 	}
 	if v, err := got3.Get(context.Background(), "scheduledbackup.dsn"); err != nil || v != "postgres://real" {
 		t.Errorf("scheduled-backup's own prefix should still resolve: got %q, %v", v, err)
+	}
+
+	got4 := deploymentSecretsForPlugin(blobstore, unscoped)
+	if got4 == nil {
+		t.Fatal("blobstore declares plugin.HasDeploymentSecretPrefix; " +
+			"deploymentSecretsForPlugin returned nil instead of a scoped adapter -- " +
+			"either the wiring in main.go or blobstore's DeploymentSecretPrefix method is gone")
+	}
+	if _, err := got4.Get(context.Background(), "email.sendgrid_api_key"); err == nil {
+		t.Error("blobstore's scoped DeploymentSecrets let it read email's own key -- " +
+			"prefix scoping is not actually enforced")
+	}
+	if v, err := got4.Get(context.Background(), "blobstore.access_key_id"); err != nil || v != "AKIAREAL" {
+		t.Errorf("blobstore's own prefix should still resolve: got %q, %v", v, err)
 	}
 }
 
