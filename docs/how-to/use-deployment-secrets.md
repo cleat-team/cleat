@@ -21,6 +21,7 @@ Converted to read from here, live, on every call:
 | `llm` | `llm.providers.<provider>.api_key`, one per **enabled**, non-`ollama` provider that has not opted out (below) |
 | `slack-notify` | `slacknotify.signing_secret` |
 | `scheduled-backup` | `scheduledbackup.dsn` |
+| `blobstore` | `blobstore.access_key_id`, `blobstore.secret_access_key` — only when its `backend` is `"s3"` and `use_iam_credentials` is not set |
 
 `email-notify` and `llm` refuse to start the worker if their required name is
 missing or cannot be opened — see "Fail-closed at boot" below.
@@ -100,22 +101,76 @@ plugin:
   `cleatctl set-deployment-secret --name email.sendgrid_api_key`, then
   remove `sendgrid_api_key` from `--plugin-config`.
 
-**Not yet converted**, and still read from `--plugin-config` at `Init` the way
-every plugin's credentials used to be: `blobstore` (its S3 key pair). Tracked
-as a checklist item on cleat#1992. Do not write `blobstore.access_key_id` or
-`blobstore.secret_access_key` here yet — nothing reads them from this table
-until that plugin's own conversion lands. Unlike the others, blobstore's S3
-client is built once at `Init` from a `minio-go` static-credential provider,
-not fetched per call — converting it needs either a custom
-`credentials.Provider` or reconstructing the client per use, which is why it
-has not landed alongside the rest of this table.
+- `blobstore` WARNs the same way as `llm`/`slack-notify` -- naming both
+  `access_key_id` and `secret_access_key` if either is still present -- and
+  the WARN itself fires on the raw `--plugin-config` bytes before `backend`
+  or `use_iam_credentials` is even consulted, so it appears regardless of
+  either. **The boot refusal is a SEPARATE question from the WARN, not a
+  narrower version of it.** `blobstore.access_key_id` and
+  `blobstore.secret_access_key` are required at boot whenever `backend` is
+  `"s3"` and `use_iam_credentials` is not set -- unconditionally, whether or
+  not `--plugin-config` carries a leftover key pair at all. This used to be
+  gated on the leftover pair's presence, and that was a real bug, not a
+  conservative choice: on develop, `{"backend":"s3"}` with no static keys
+  fell back silently to the AWS env/instance-profile credential chain, so
+  every IAM-role S3 deployment -- upgraders and new installs alike -- has NO
+  leftover key pair and would have booted with no boot check at all, then
+  failed every S3 call once `use_iam_credentials: true` was not also set. A
+  leftover pair alongside the default memory backend, or alongside
+  `use_iam_credentials: true`, is still excluded -- neither path ever reads
+  either secret -- but that exclusion is keyed on `backend`/
+  `use_iam_credentials`, not on whether the pair is present.
+
+**`blobstore`'s S3 client is built once at `Init`, not fetched per call like
+every other row in this table** — a `minio-go` `credentials.Provider`
+(`deploymentSecretsCredentialsProvider`, `plugins/blobstore/backend.go`)
+gates the client's own credential cache with a 60s TTL instead, so a rotated
+or retired key pair still takes effect without a worker restart, just not on
+the very next call the way a bare `Get` would. A failed resolve fails the S3
+request outright; it is never treated as "unsigned" or chained to another
+credential source. `use_iam_credentials: true` opts a deployment with no
+static keys at all out of this table entirely, using the original
+env-var/instance-profile/task-role chain instead.
+
+**Rotate the pair in this order: write the new secrets, wait at least 60s
+(the TTL above), then retire the old ones.** `set-deployment-secret` writes
+one name at a time, so a torn pair -- one name resolving new, the other
+still resolving old -- CAN happen for the moment between the two writes,
+even following this order; it is not something the order alone prevents.
+What the order (writing both before retiring either) buys is that a torn
+pair during that moment is still one valid credential paired with one
+*not-yet-retired* one, rather than one valid credential paired with one
+already-dead: `expireCredsOnAuthError` (`plugins/blobstore/backend.go`)
+turns a 403 from S3 (`InvalidAccessKeyId` or `SignatureDoesNotMatch`) into
+an immediate re-resolve rather than waiting out the rest of the TTL, so a
+torn pair self-heals on its own next request -- measured at 7ms for the torn
+pair itself and 123ms end-to-end against a real worker and MinIO. Retiring
+the old pair before the new one has had a chance to be read at all removes
+the credential the self-heal would have recovered onto, so the order above
+still matters; it bounds the outage rather than the possibility of a torn
+pair occurring in the first place.
+
+**A credential refresh can hold up an S3 call past its own context
+deadline.** minio-go's `credentials.Credentials` holds one mutex across the
+whole `RetrieveWithCredContext` call, including the `DeploymentSecrets.Get`
+round trip to the database, and `IsExpired` takes no context — so a slow or
+stalled database on the refreshing request also blocks every other
+in-flight S3 call waiting on the same `*credentials.Credentials` for as long
+as the stall lasts, deadline or not. Low impact in practice (a 60s TTL means
+this window is rare, and a stalled deployment-secrets read is itself a sign
+of a database in trouble for other reasons too), documented here rather than
+fixed in code.
 
 `checkRequiredDeploymentSecrets` (below) consults `plugin.HasRequiredDeploymentSecrets`
 per plugin rather than a single fixed list — `email-notify` and `llm`
-implement it unconditionally, `slack-notify` and `scheduled-backup` implement
-it conditionally (see above), and `blobstore` does not implement it at all
-yet, which is a separate fact from whether a plugin is converted to read
-from this table.
+implement it unconditionally, `slack-notify` and `scheduled-backup`
+conditionally, gated on a leftover legacy field in `--plugin-config` (see
+above), and `blobstore` conditionally too but on a different axis — gated on
+`backend`/`use_iam_credentials` alone, not on any leftover field. A plugin
+that also implements `plugin.HasDeploymentSecretRemedyHint` (`blobstore`
+does) gets its hint text appended to the boot-refusal error, naming a
+non-secret way to avoid the requirement (`use_iam_credentials: true`, for
+`blobstore`) alongside the missing secret's name.
 
 ## Set up a master key, once
 
@@ -201,14 +256,19 @@ plugin serves, one at a time, with an error that does not say why.
 
 A plugin declares what it needs by implementing
 `plugin.HasRequiredDeploymentSecrets`; `email-notify` and `llm` do
-unconditionally, `slack-notify` and `scheduled-backup` conditionally (only
-when the legacy `slack_signing_secret`/`dsn` field is present in
-`--plugin-config` — see above). A plugin with no config section at all is
+unconditionally, `slack-notify` and `scheduled-backup` conditionally —
+`slack-notify` only when the legacy `slack_signing_secret` field is present
+in `--plugin-config`, `scheduled-backup` only when the legacy `dsn` field is
+— and `blobstore` conditionally too but on a different axis: only when
+`backend` is `"s3"` with `use_iam_credentials` unset, regardless of whether
+`--plugin-config` carries a leftover `access_key_id`/`secret_access_key`
+pair (see above for all three). A plugin with no config section at all is
 not enabled, and this check never runs against it — the same
 `plugin.ErrNotConfigured` gate that already decides whether a plugin's
-ordinary `Init` runs. Neither `slack-notify` nor `scheduled-backup` has such
-a gate of its own (neither `Config` carries an enablement flag), so each is
-always "enabled" once loaded, and `RequiredDeploymentSecrets` is what
+ordinary `Init` runs. None of the three has such a gate of its own (none of
+their `Config` structs carries an enablement flag — `blobstore` defaults to
+the memory backend rather than refusing to start), so all three are always
+"enabled" once loaded, and `RequiredDeploymentSecrets` is what
 carries the conditional logic instead of `Init` refusing to run at all.
 
 ## What is not covered

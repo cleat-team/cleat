@@ -6594,6 +6594,10 @@ func checkRequiredDeploymentSecrets(ctx context.Context, plugins []*plugin.Loade
 		}
 		for _, name := range names {
 			if _, gErr := store.GetDeploymentSecret(ctx, name); gErr != nil {
+				if hint, ok := lp.Plugin.(plugin.HasDeploymentSecretRemedyHint); ok {
+					return fmt.Errorf("%s: required deployment secret %q: %w (%s)",
+						lp.Plugin.Info().Name, name, gErr, hint.DeploymentSecretRemedyHint())
+				}
 				return fmt.Errorf("%s: required deployment secret %q: %w", lp.Plugin.Info().Name, name, gErr)
 			}
 		}

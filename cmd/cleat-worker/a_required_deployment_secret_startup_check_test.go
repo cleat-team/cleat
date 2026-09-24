@@ -108,6 +108,38 @@ func TestCheckRequiredDeploymentSecretsIgnoresAPluginThatDoesNotImplementIt(t *t
 	}
 }
 
+// requiringPluginWithHint adds plugin.HasDeploymentSecretRemedyHint to
+// requiringPlugin, for exercising the hint-appending branch in
+// checkRequiredDeploymentSecrets separately from the plain refusal path
+// TestCheckRequiredDeploymentSecretsRefusesWhenMissing already covers (that
+// test's requiringPlugin does NOT implement the hint interface, so it is
+// this test's negative control for free: same refusal, no hint text).
+type requiringPluginWithHint struct {
+	requiringPlugin
+	hint string
+}
+
+func (p *requiringPluginWithHint) DeploymentSecretRemedyHint() string { return p.hint }
+
+func TestCheckRequiredDeploymentSecretsAppendsTheRemedyHintWhenThePluginHasOne(t *testing.T) {
+	p := &requiringPluginWithHint{
+		requiringPlugin: requiringPlugin{name: "blobstore", names: []string{"blobstore.access_key_id"}},
+		hint:            "alternatively, set use_iam_credentials: true",
+	}
+	store := &fakeDeploymentSecretGetter{values: map[string]string{}}
+
+	err := checkRequiredDeploymentSecrets(context.Background(), []*plugin.LoadedPlugin{healthyLoadedPlugin(p)}, nil, store)
+	if err == nil {
+		t.Fatal("expected a refusal when the required deployment secret is not set")
+	}
+	if !strings.Contains(err.Error(), "use_iam_credentials") {
+		t.Errorf("expected the refusal to name the alternative remedy, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "blobstore.access_key_id") {
+		t.Errorf("expected the refusal to still name the missing secret, got: %v", err)
+	}
+}
+
 func TestCheckRequiredDeploymentSecretsPropagatesADeterminationError(t *testing.T) {
 	p := &requiringPlugin{name: "llm", err: errors.New("invalid config")}
 	store := &fakeDeploymentSecretGetter{values: map[string]string{}}

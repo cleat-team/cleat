@@ -618,3 +618,16 @@ type HasDeploymentSecretPrefix interface {
 	Plugin
 	DeploymentSecretPrefix() string
 }
+
+// HasDeploymentSecretRemedyHint: plugin names an additional, non-secret way
+// an operator can satisfy HasRequiredDeploymentSecrets -- e.g. blobstore's
+// use_iam_credentials, a --plugin-config flag that opts out of the
+// deployment secrets this interface's sibling would otherwise require.
+// Optional: checkRequiredDeploymentSecrets (cmd/cleat-worker/setup.go)
+// appends the hint to its boot-refusal error when a plugin implements this,
+// so the operator sees every way to fix the refusal, not just the one
+// RequiredDeploymentSecrets is named after.
+type HasDeploymentSecretRemedyHint interface {
+	Plugin
+	DeploymentSecretRemedyHint() string
+}

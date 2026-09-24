@@ -142,6 +142,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scheduledbackup.dsn` set will now refuse to start on upgrade, where it previously started
   fine and failed backups silently.
 
+- **`blobstore`'s S3 access key pair moves to deployment secrets, and its `minio-go` client
+  now re-resolves credentials on a 60s TTL instead of holding a static pair for the client's
+  entire lifetime.** (cleat#1992)
+
+  `access_key_id`/`secret_access_key` are no longer read from `--plugin-config`; they move to
+  `blobstore.access_key_id`/`blobstore.secret_access_key`. Unlike every other plugin converted so
+  far, the S3 client is still built once at `Init`, not per call — a custom `credentials.Provider`
+  (`deploymentSecretsCredentialsProvider`, `plugins/blobstore/backend.go`) gates minio-go's own
+  credential cache with a 60s TTL instead, so a rotated or retired key pair still takes effect
+  without a worker restart, just not on the very next S3 call the way a bare `Get` would. A
+  deployment secret that cannot be resolved fails the S3 request outright — it is never treated as
+  an unsigned (i.e. effectively anonymous) request, and is never chained to a different credential
+  source. A new `use_iam_credentials: true` config flag opts a deployment with no static keys at
+  all — EC2 instance profile, ECS task role, or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in the
+  worker's own environment — out of this table entirely, using the original credential chain
+  unchanged. See `docs/how-to/use-deployment-secrets.md`.
+
+  **BREAKING CHANGE: the AWS env-var/instance-profile/task-role credential chain is no longer the
+  default for an s3 backend with no static keys — it is now opt-in via `"use_iam_credentials":
+  true`.** Previously, `{"backend":"s3"}` with no `access_key_id` in `--plugin-config` fell back to
+  that chain silently. As of this change, the same config now requires
+  `blobstore.access_key_id`/`blobstore.secret_access_key` in the deployment secret store and, with
+  neither those secrets nor `use_iam_credentials: true` set, **refuses to start the worker** — the
+  same fail-closed check `email-notify`/`llm`/`slack-notify` already had, and unconditional: it does
+  not depend on whether `--plugin-config` carries a leftover key pair.
+
+  **Who is affected:** any deployment running `blobstore` with `"backend":"s3"` and no
+  `"use_iam_credentials": true` — whether or not it ever had a static `access_key_id`/
+  `secret_access_key` in `--plugin-config`. This includes every IAM-role deployment that relied on
+  the old silent fallback: **before upgrading, either set both**
+  `blobstore.access_key_id`/`blobstore.secret_access_key` with `cleatctl set-deployment-secret`, **or
+  add `"use_iam_credentials": true`** to `--plugin-config` to keep using the instance-profile/task-role
+  chain explicitly. The boot refusal names both options. A leftover key pair alongside the default
+  memory backend, or alongside `"use_iam_credentials": true`, was already unused before this
+  conversion and does not block startup — it still logs a WARN at boot naming the replacement
+  commands, but is not treated as an upgrade hazard.
+
 - **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
   (cleat#2046)
 
