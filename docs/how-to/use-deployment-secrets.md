@@ -19,9 +19,27 @@ Converted to read from here, live, on every call:
 |---|---|
 | `email-notify` | `email.sendgrid_api_key` |
 | `llm` | `llm.providers.<provider>.api_key`, one per **enabled**, non-`ollama` provider that has not opted out (below) |
+| `slack-notify` | `slacknotify.signing_secret` |
 
-Both refuse to start the worker if their required name is missing or cannot
-be opened — see "Fail-closed at boot" below.
+`email-notify` and `llm` refuse to start the worker if their required name is
+missing or cannot be opened — see "Fail-closed at boot" below.
+
+**`slack-notify` is different: it does not refuse to start.** The signing
+secret is checked on every `POST /slack/interactive` request, not once at
+boot — a worker with `slack-notify` enabled but no signing secret set (or
+one that later becomes unreadable or is retired) starts fine and answers
+every outgoing Slack webhook normally; only the interactive-callback route
+refuses, with a 401, and it refuses unconditionally: missing, unreadable, or
+retired all take the same path, and there is no config that makes it accept
+an unsigned request (cleat#2172). This is deliberate, not a gap matching the
+other two — `slack-notify` also serves outbound webhook notifications that
+have nothing to do with the signing secret, so failing the whole worker over
+a credential only the interactive feature needs would be wrong. `--require-auth`
+does not gate this route either: `/slack/interactive` is on cleat's
+hand-maintained public-route list (`cmd/cleat-worker/main.go`, next to
+`/ingest/{source_id}` and the OAuth callback) because Slack's own request
+carries no cleat API key, so the signature check is the only gate once a
+request reaches the handler.
 
 **`email-notify` needs `"email_enabled": true` in its `--plugin-config`
 section, not just a non-empty file.** Every plugin's `Init` receives the
@@ -37,11 +55,12 @@ enough, since it is legitimately optional.
 provider. Omitted, it defaults to `true`, today's behavior for every
 enabled provider except `ollama`.
 
-**A leftover `sendgrid_api_key` or `providers.*.api_key` in `--plugin-config`
-does nothing** — neither struct has a field for it anymore. What a worker
-does about a leftover one differs by plugin:
+**A leftover `sendgrid_api_key`, `providers.*.api_key`, or
+`slack_signing_secret` in `--plugin-config` does nothing** — none of the
+three structs has a field for it anymore. What a worker does about a
+leftover one differs by plugin:
 
-- `llm` always logs a WARN naming the dead field and the
+- `llm` and `slack-notify` always log a WARN naming the dead field and the
   `set-deployment-secret` command to use instead, at boot.
 - `email-notify` WARNs the same way, but **only if `email_enabled: true` is
   also set.** A leftover `sendgrid_api_key` with `email_enabled` still
@@ -54,12 +73,12 @@ does about a leftover one differs by plugin:
 
 **Not yet converted**, and still read from `--plugin-config` at `Init` the way
 every plugin's credentials used to be: `blobstore` (its S3 key pair),
-`scheduledbackup` (its backup-target DSN), `slacknotify` (its request-signing
-secret). Each is tracked as a checklist item on cleat#1992. Do not write
-`blobstore.access_key_id`, `scheduledbackup.dsn` or `slacknotify.signing_secret`
+`scheduledbackup` (its backup-target DSN). Each is tracked as a checklist item
+on cleat#1992. Do not write `blobstore.access_key_id` or `scheduledbackup.dsn`
 here yet — nothing reads them from this table until that plugin's own
 conversion lands, and the fixed-name list above is the one actually checked by
-`checkRequiredDeploymentSecrets` at boot.
+`checkRequiredDeploymentSecrets` at boot (`slack-notify` deliberately is not
+on that list — see above).
 
 ## Set up a master key, once
 

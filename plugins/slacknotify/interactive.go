@@ -1,6 +1,7 @@
 package slacknotify
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,6 +27,24 @@ type slackInteractivePayload struct {
 	Message     json.RawMessage `json:"message,omitempty"`
 }
 
+// signingSecret fetches the current Slack request-signing secret. Called at
+// the moment of use, on every request, rather than cached at Init -- the
+// same "PER-USE, NOT PER-Init" convention as email's sendGridAPIKey
+// (plugins/email/plugin.go) -- so a secret rotated with
+// `cleatctl set-deployment-secret` takes effect on the very next request,
+// and a secret that is retired takes effect just as fast: the next request
+// refuses instead of verifying against a value that should no longer work.
+func (p *Plugin) signingSecret(ctx context.Context) (string, error) {
+	if p.deploymentSecrets == nil {
+		return "", fmt.Errorf("slack-notify: no deployment secret store configured")
+	}
+	secret, err := p.deploymentSecrets.Get(ctx, "slacknotify.signing_secret")
+	if err != nil {
+		return "", fmt.Errorf("slack-notify: signing_secret: %w", err)
+	}
+	return secret, nil
+}
+
 // handleInteractiveCallback receives Slack interactive payloads (button clicks, etc.),
 // verifies the request, and delivers a signal to the relevant workflow.
 //
@@ -44,30 +63,42 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Verify Slack signing signature if configured
-	if p.slackSigningSecret != "" {
-		timestamp := r.Header.Get("X-Slack-Request-Timestamp")
-		signature := r.Header.Get("X-Slack-Signature")
-		if timestamp == "" || signature == "" {
-			p.writeError(w, http.StatusUnauthorized, "missing Slack signature headers")
-			return
-		}
+	// Verify the Slack signing signature. cleat#2172 option A: this route is
+	// public (see cmd/cleat-worker/main.go's auth-middleware exemption), so
+	// the signature is the ONLY gate, and it is never skipped. Earlier this
+	// checked `if p.slackSigningSecret != ""` and fell through to accepting
+	// the request unsigned when it was empty -- exactly the hole #2172
+	// reported. There is no such fallthrough here: a signing secret that is
+	// absent, unreadable, or retired refuses the request the same way a bad
+	// signature does.
+	secret, err := p.signingSecret(r.Context())
+	if err != nil {
+		p.logger.Error("slack-notify: signing secret unavailable, refusing /slack/interactive", "error", err)
+		p.writeError(w, http.StatusUnauthorized, "signing secret unavailable")
+		return
+	}
 
-		// Reject requests older than 5 minutes
-		ts, err := strconv.ParseInt(timestamp, 10, 64)
-		if err != nil || time.Now().Unix()-ts > 300 {
-			p.writeError(w, http.StatusUnauthorized, "stale request")
-			return
-		}
+	timestamp := r.Header.Get("X-Slack-Request-Timestamp")
+	signature := r.Header.Get("X-Slack-Signature")
+	if timestamp == "" || signature == "" {
+		p.writeError(w, http.StatusUnauthorized, "missing Slack signature headers")
+		return
+	}
 
-		basestring := fmt.Sprintf("v0:%s:%s", timestamp, string(bodyBytes))
-		mac := hmac.New(sha256.New, []byte(p.slackSigningSecret))
-		mac.Write([]byte(basestring))
-		expected := "v0=" + hex.EncodeToString(mac.Sum(nil))
-		if !hmac.Equal([]byte(signature), []byte(expected)) {
-			p.writeError(w, http.StatusUnauthorized, "invalid signature")
-			return
-		}
+	// Reject requests older than 5 minutes
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || time.Now().Unix()-ts > 300 {
+		p.writeError(w, http.StatusUnauthorized, "stale request")
+		return
+	}
+
+	basestring := fmt.Sprintf("v0:%s:%s", timestamp, string(bodyBytes))
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(basestring))
+	expected := "v0=" + hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(signature), []byte(expected)) {
+		p.writeError(w, http.StatusUnauthorized, "invalid signature")
+		return
 	}
 
 	// Parse the Slack payload (URL-encoded JSON in the "payload" form field)

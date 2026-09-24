@@ -224,10 +224,63 @@ func TestSN_SendMessage_NoChannel(t *testing.T) {
 // ===========================================================================
 
 // interactiveServer creates a plugin+handler for testing interactive callbacks.
+// testSigningSecret is the value interactiveServer's default
+// fakeDeploymentSecrets answers for "slacknotify.signing_secret". Tests that
+// want to reach past signature verification sign their request with it via
+// signSlackRequest; tests of the verification step itself override
+// p.deploymentSecrets (or clear it) after interactiveServer returns.
+const testSigningSecret = "test-signing-secret"
+
+// fakeInteractiveDeploymentSecrets is a plugin.DeploymentSecrets that
+// answers one fixed value for "slacknotify.signing_secret" and an error for
+// anything else, or always errors if errOnGet is set -- covering "absent",
+// "wrong name", and "lookup fails (unreadable/retired)" with one type. The
+// same shape as email's and llm's fakeDeploymentSecrets test doubles.
+type fakeInteractiveDeploymentSecrets struct {
+	secret   string
+	errOnGet error
+}
+
+func (f *fakeInteractiveDeploymentSecrets) Get(ctx context.Context, name string) (string, error) {
+	if f.errOnGet != nil {
+		return "", f.errOnGet
+	}
+	if name == "slacknotify.signing_secret" {
+		return f.secret, nil
+	}
+	return "", fmt.Errorf("fakeInteractiveDeploymentSecrets: %q not set", name)
+}
+
+// signSlackRequest computes the timestamp and signature headers a real
+// Slack request would carry for body, signed with secret, matching
+// handleInteractiveCallback's own basestring construction exactly.
+func signSlackRequest(secret, body string) (timestamp, signature string) {
+	now := time.Now().Unix()
+	timestamp = fmt.Sprintf("%d", now)
+	basestring := fmt.Sprintf("v0:%s:%s", timestamp, body)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(basestring))
+	signature = "v0=" + hex.EncodeToString(mac.Sum(nil))
+	return timestamp, signature
+}
+
+// signedInteractiveRequest builds a POST /slack/interactive request signed
+// with testSigningSecret, for tests exercising logic AFTER signature
+// verification (payload parsing, callback_id routing, signal delivery).
+func signedInteractiveRequest(body string) *http.Request {
+	timestamp, signature := signSlackRequest(testSigningSecret, body)
+	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Slack-Request-Timestamp", timestamp)
+	req.Header.Set("X-Slack-Signature", signature)
+	return req
+}
+
 func interactiveServer(t *testing.T) (*Plugin, http.Handler) {
 	t.Helper()
 	p := &Plugin{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		deploymentSecrets: &fakeInteractiveDeploymentSecrets{secret: testSigningSecret},
 	}
 	mux := http.NewServeMux()
 	if err := p.RegisterRoutes(mux); err != nil {
@@ -243,23 +296,75 @@ func TestSN_InteractiveCallback_MissingPayload(t *testing.T) {
 	}
 
 	body := "not-payload-form"
-	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
+// TestSN_InteractiveCallback_NoDeploymentSecret is cleat#2172's core fix,
+// known-positive: with no deployment secret configured at all -- the
+// pre-#2172 state, where p.slackSigningSecret was simply "" -- a request
+// carrying NO signature headers used to reach payload parsing unverified.
+// It must now be refused before signature verification is even attempted,
+// the same 401 as a bad signature, never a fallthrough to acceptance.
+func TestSN_InteractiveCallback_NoDeploymentSecret(t *testing.T) {
+	p, mux := interactiveServer(t)
+	p.deploymentSecrets = nil
+	signalCalled := false
+	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+		signalCalled = true
+		return nil
+	}
+
+	// Exactly the unsigned shape #2172 reported as silently accepted.
+	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-123%3Asig%3Abutton-click%22%7D"
+	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with no deployment secret configured, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if signalCalled {
+		t.Error("signal must not be delivered when the signing secret is unavailable")
+	}
+}
+
+// TestSN_InteractiveCallback_DeploymentSecretLookupFails covers "missing,
+// unreadable, or retired" (cleat#2172 option A): whatever error
+// DeploymentSecrets.Get returns, the request refuses -- not just the
+// name-not-found case.
+func TestSN_InteractiveCallback_DeploymentSecretLookupFails(t *testing.T) {
+	p, mux := interactiveServer(t)
+	p.deploymentSecrets = &fakeInteractiveDeploymentSecrets{errOnGet: fmt.Errorf("secret is retired")}
+	signalCalled := false
+	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+		signalCalled = true
+		return nil
+	}
+
+	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-123%3Asig%3Abutton-click%22%7D"
+	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 when the deployment secret lookup fails, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if signalCalled {
+		t.Error("signal must not be delivered when the signing secret lookup fails")
+	}
+}
+
 func TestSN_InteractiveCallback_WithSignature(t *testing.T) {
 	p, mux := interactiveServer(t)
-	p.slackSigningSecret = "my-secret"
 	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
 		return nil
 	}
 
-	// Missing signature headers.
+	// Missing signature headers, even though a secret IS configured.
 	body := "payload=%7B%22type%22%3A%22block_actions%22%7D"
 	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -272,7 +377,6 @@ func TestSN_InteractiveCallback_WithSignature(t *testing.T) {
 
 func TestSN_InteractiveCallback_StaleRequest(t *testing.T) {
 	p, mux := interactiveServer(t)
-	p.slackSigningSecret = "my-secret"
 	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
 		return nil
 	}
@@ -293,7 +397,6 @@ func TestSN_InteractiveCallback_StaleRequest(t *testing.T) {
 
 func TestSN_InteractiveCallback_InvalidSignature(t *testing.T) {
 	p, mux := interactiveServer(t)
-	p.slackSigningSecret = "my-secret"
 	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
 		return nil
 	}
@@ -312,18 +415,9 @@ func TestSN_InteractiveCallback_InvalidSignature(t *testing.T) {
 }
 
 func TestSN_InteractiveCallback_ValidSignature(t *testing.T) {
-	secret := "my-secret"
-	now := time.Now().Unix()
 	rawBody := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-123%3Asig%3Abutton-click%22%7D"
 
-	// Compute the expected signature.
-	basestring := fmt.Sprintf("v0:%d:%s", now, rawBody)
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(basestring))
-	signature := "v0=" + hex.EncodeToString(mac.Sum(nil))
-
 	p, mux := interactiveServer(t)
-	p.slackSigningSecret = secret
 	signalDelivered := false
 	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
 		if workflowID == "wf-123" && signalName == "button-click" {
@@ -332,12 +426,8 @@ func TestSN_InteractiveCallback_ValidSignature(t *testing.T) {
 		return nil
 	}
 
-	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(rawBody)))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Slack-Request-Timestamp", fmt.Sprintf("%d", now))
-	req.Header.Set("X-Slack-Signature", signature)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	mux.ServeHTTP(rec, signedInteractiveRequest(rawBody))
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -354,10 +444,8 @@ func TestSN_InteractiveCallback_NoCallbackID(t *testing.T) {
 
 	// Valid payload but no callback_id.
 	body := "payload=%7B%22type%22%3A%22block_actions%22%7D"
-	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 for no callback_id, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -371,10 +459,8 @@ func TestSN_InteractiveCallback_BadCallbackID(t *testing.T) {
 	}
 
 	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22bad-format%22%7D"
-	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 for bad callback_id, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -387,10 +473,8 @@ func TestSN_InteractiveCallback_SignalError(t *testing.T) {
 	}
 
 	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-1%3Asig%3Aaction%22%7D"
-	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500 for signal error, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -401,10 +485,8 @@ func TestSN_InteractiveCallback_NoSignalFunc(t *testing.T) {
 	// signalWorkflow is nil
 
 	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-1%3Asig%3Aaction%22%7D"
-	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
 	// Should succeed (no signal func, but no error).
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 when signalWorkflow is nil, got %d: %s", rec.Code, rec.Body.String())
@@ -623,20 +705,60 @@ func TestSN_UpdateConfigRefetchError(t *testing.T) {
 }
 
 // ===========================================================================
-// Init with signing secret config
+// Init with a leftover slack_signing_secret in --plugin-config
 // ===========================================================================
 
-func TestSN_InitWithSigningSecret(t *testing.T) {
+// TestSN_InitWarnsOnLeftoverSigningSecret covers legacySlackConfig's WARN
+// (cleat#2172): a slack_signing_secret left over in --plugin-config does
+// nothing now -- Config has no field for it -- and used to do so silently.
+// Same shape as email's TestInitWarnsOnLeftoverSendGridAPIKey.
+func TestSN_InitWarnsOnLeftoverSigningSecret(t *testing.T) {
+	var buf bytes.Buffer
 	p := &Plugin{}
 	env := &plugin.Environment{
 		Config: []byte(`{"slack_signing_secret":"my-secret"}`),
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
 	}
-	err := p.Init(context.Background(), env)
-	if err != nil {
+	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() returned error: %v", err)
 	}
-	if p.slackSigningSecret != "my-secret" {
-		t.Errorf("expected signing secret 'my-secret', got %q", p.slackSigningSecret)
+	got := buf.String()
+	if !strings.Contains(got, "slack_signing_secret") {
+		t.Errorf("expected a WARN naming the leftover slack_signing_secret, got log output: %q", got)
+	}
+	if !strings.Contains(got, "set-deployment-secret") {
+		t.Errorf("expected the WARN to name the replacement command, got log output: %q", got)
+	}
+	if !strings.Contains(got, "level=WARN") {
+		t.Errorf("expected the leftover-key message at WARN level, got log output: %q", got)
+	}
+}
+
+// TestSN_InitNoWarnWithoutLeftoverSigningSecret is the negative control: a
+// config with no slack_signing_secret field at all must not mention it.
+func TestSN_InitNoWarnWithoutLeftoverSigningSecret(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{}`),
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "slack_signing_secret") {
+		t.Errorf("did not expect a slack_signing_secret WARN with no leftover key present, got log output: %q", got)
+	}
+}
+
+// TestSN_DeploymentSecretPrefix pins DeploymentSecretPrefix's return value:
+// the worker uses this to scope which deployment secrets slack-notify can
+// read (plugin.HasDeploymentSecretPrefix), so a change here silently widens
+// or narrows that scope.
+func TestSN_DeploymentSecretPrefix(t *testing.T) {
+	p := &Plugin{}
+	if got := p.DeploymentSecretPrefix(); got != "slacknotify." {
+		t.Errorf("expected DeploymentSecretPrefix() = %q, got %q", "slacknotify.", got)
 	}
 }
 
@@ -652,10 +774,8 @@ func TestSN_InteractiveCallback_InvalidPayloadJSON(t *testing.T) {
 
 	// URL-encoded body with bad JSON payload.
 	body := "payload=not-json"
-	req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}

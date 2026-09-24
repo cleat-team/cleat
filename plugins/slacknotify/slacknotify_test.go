@@ -44,13 +44,14 @@ func TestInit(t *testing.T) {
 	}
 }
 
-// TestInitWarnsThatUnsignedRequestsAreCurrentlyAccepted is cleat-review's
-// #2202 pass: the WARN logged when no signing secret is configured must
-// state the PRESENT truth (/slack/interactive accepts every request
-// unsigned right now), not only cleat#2172's future refusal -- an earlier
-// wording said only the latter, which a reader could mistake for "nothing is
-// wrong yet".
-func TestInitWarnsThatUnsignedRequestsAreCurrentlyAccepted(t *testing.T) {
+// TestInitNoWarnWithNoConfig is the mirror of
+// TestSN_InitWarnsOnLeftoverSigningSecret (slacknotify_new_test.go): with no
+// --plugin-config at all, Init must log no leftover-key WARN. Before
+// cleat#2172, Init logged a WARN here about unsigned requests being
+// accepted -- that premise is gone now that handleInteractiveCallback
+// refuses unconditionally when no secret is available (interactive.go), so
+// nothing about signing belongs in Init's own log output any more.
+func TestInitNoWarnWithNoConfig(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plugin{}
 	env := &plugin.Environment{
@@ -59,12 +60,8 @@ func TestInitWarnsThatUnsignedRequestsAreCurrentlyAccepted(t *testing.T) {
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() returned error: %v", err)
 	}
-	got := buf.String()
-	if !strings.Contains(got, "currently ACCEPTS unsigned requests") {
-		t.Errorf("expected the WARN to state the present-tense truth, got log output: %q", got)
-	}
-	if !strings.Contains(got, "level=WARN") {
-		t.Errorf("expected the missing-signing-secret message at WARN level, got log output: %q", got)
+	if got := buf.String(); strings.Contains(got, "signing") || strings.Contains(got, "signature") {
+		t.Errorf("did not expect Init to log anything about signing with no config at all, got log output: %q", got)
 	}
 }
 

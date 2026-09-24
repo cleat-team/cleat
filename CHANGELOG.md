@@ -75,6 +75,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No migration procedure is needed for the same reason as `dd_config`/`pd_config`: **0.3.0
   requires a fresh database, with no upgrade path from v0.2.0** (cleat#2058, owner decision 3).
 
+- **`slack-notify`'s request-signing secret moves to a deployment secret, `POST /slack/interactive`
+  is now reachable without a cleat API key, and it refuses every unsigned request.**
+  (cleat#1992, cleat#2172, owner decision, option A)
+
+  Two problems, one fix. `--require-auth`'s default-on exemption list did not include
+  `/slack/interactive`, so on a default deployment Slack's own POST — which carries no cleat API
+  key — was 401ed before `slack-notify`'s own signature check ever ran; the interactive-approval
+  flow could not work at all. And that signature check itself only ran `if p.slackSigningSecret
+  != ""`, so an unset secret meant every request was accepted **unverified**, which would have
+  been the live behaviour the moment (1) was fixed on its own.
+
+  `/slack/interactive` is now on the same hand-maintained public-route list as
+  `POST /ingest/{source_id}` and the OAuth callback (`cmd/cleat-worker/main.go`), and the
+  signature check is unconditional: a signing secret that is missing, unreadable, or retired
+  refuses the request (401) the same way a bad signature does. There is no configuration under
+  which an unsigned request is accepted. The secret itself moves to `slacknotify.signing_secret`,
+  read live on every request rather than cached at `Init` — see
+  `docs/how-to/use-deployment-secrets.md`, which also explains why `slack-notify`, unlike
+  `email-notify` and `llm`, does **not** refuse to start the worker when the secret is absent:
+  it also serves outbound webhook notifications that do not need one, so only the
+  interactive-callback route is gated.
+
+  **Who is affected:** any deployment using Slack's interactive (button-click) callbacks must set
+  `slacknotify.signing_secret` via `cleatctl set-deployment-secret` before those callbacks will
+  work — previously they silently accepted unsigned requests (or, with auth on, could not be
+  reached by Slack at all). A leftover `slack_signing_secret` in `--plugin-config` now does
+  nothing and logs a WARN at boot naming the replacement command.
+
 - **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
   (cleat#2046)
 
