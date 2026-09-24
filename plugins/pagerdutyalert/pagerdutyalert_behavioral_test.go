@@ -21,6 +21,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -29,13 +30,12 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakePDConfigRow struct {
-	tenantID   string
-	id         string
-	name       string
-	routingKey string
-	enabled    bool
-	createdAt  time.Time
-	updatedAt  time.Time
+	tenantID  string
+	id        string
+	name      string
+	enabled   bool
+	createdAt time.Time
+	updatedAt time.Time
 }
 
 type fakeDBStore struct {
@@ -166,11 +166,7 @@ func (c *fakeConn) execInsertPDConfig(args []driver.NamedValue) (driver.Result, 
 	if err != nil {
 		return nil, err
 	}
-	routingKey, err := argS(args, 4)
-	if err != nil {
-		return nil, err
-	}
-	nowVal, err := argAny(args, 5)
+	nowVal, err := argAny(args, 4)
 	if err != nil {
 		return nil, err
 	}
@@ -178,13 +174,12 @@ func (c *fakeConn) execInsertPDConfig(args []driver.NamedValue) (driver.Result, 
 
 	key := tid + ":" + id
 	c.store.pdConfig[key] = &fakePDConfigRow{
-		tenantID:   tid,
-		id:         id,
-		name:       name,
-		routingKey: routingKey,
-		enabled:    true,
-		createdAt:  now,
-		updatedAt:  now,
+		tenantID:  tid,
+		id:        id,
+		name:      name,
+		enabled:   true,
+		createdAt: now,
+		updatedAt: now,
 	}
 	return &fakeResult{1}, nil
 }
@@ -275,8 +270,14 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	switch {
 	case strings.Contains(q, "tenant_api_keys"):
 		return c.queryTenantByKeyHash(args)
-	case strings.Contains(q, "SELECT routing_key FROM pd_config") || (strings.Contains(q, "routing_key") && strings.Contains(q, "FROM pd_config") && strings.Contains(q, "enabled = true")):
-		return c.queryRoutingKey(args)
+	case strings.Contains(q, "SELECT id") && strings.Contains(q, "FROM pd_config") && strings.Contains(q, "enabled = true"):
+		// The host-function existence check (triggerIncident/resolveIncident):
+		// SELECT id FROM pd_config WHERE id = $1 AND tenant_id = $2 AND enabled = true.
+		// Must be checked before the generic "WHERE id =" case below, which this
+		// query also matches -- routing_key has no column any more (cleat#1992),
+		// the actual key comes from p.secrets.Get after this confirms the
+		// config exists and is enabled.
+		return c.queryConfigIDIfEnabled(args)
 	case strings.Contains(q, "FROM pd_config") && strings.Contains(q, "ORDER BY"):
 		return c.queryPDConfigList(args, corruptList)
 	case strings.Contains(q, "FROM pd_config") && strings.Contains(q, "WHERE id ="):
@@ -303,7 +304,11 @@ func (c *fakeConn) queryTenantByKeyHash(args []driver.NamedValue) (driver.Rows, 
 	}, nil
 }
 
-func (c *fakeConn) queryRoutingKey(args []driver.NamedValue) (driver.Rows, error) {
+// queryConfigIDIfEnabled backs the host-function existence check -- it never
+// returns routing_key, because that column is gone; a match here only
+// confirms the config exists, is enabled, and belongs to this tenant, which
+// is what triggerIncident/resolveIncident check before calling p.secrets.Get.
+func (c *fakeConn) queryConfigIDIfEnabled(args []driver.NamedValue) (driver.Rows, error) {
 	configID, err := argS(args, 1)
 	if err != nil {
 		return nil, err
@@ -316,12 +321,12 @@ func (c *fakeConn) queryRoutingKey(args []driver.NamedValue) (driver.Rows, error
 	key := tid + ":" + configID
 	row, ok := c.store.pdConfig[key]
 	if !ok || !row.enabled {
-		return &fakeRows{columns: []string{"routing_key"}}, nil
+		return &fakeRows{columns: []string{"id"}}, nil
 	}
 
 	return &fakeRows{
-		columns: []string{"routing_key"},
-		data:    [][]driver.Value{{row.routingKey}},
+		columns: []string{"id"},
+		data:    [][]driver.Value{{row.id}},
 	}, nil
 }
 
@@ -331,7 +336,7 @@ func (c *fakeConn) queryPDConfigList(args []driver.NamedValue, corruptData bool)
 		return nil, err
 	}
 
-	columns := []string{"id", "name", "routing_key", "enabled", "created_at", "updated_at"}
+	columns := []string{"id", "name", "enabled", "created_at", "updated_at"}
 	var data [][]driver.Value
 	for _, row := range c.store.pdConfig {
 		if row.tenantID != tid {
@@ -339,12 +344,12 @@ func (c *fakeConn) queryPDConfigList(args []driver.NamedValue, corruptData bool)
 		}
 		if corruptData {
 			data = append(data, []driver.Value{
-				row.id, row.name, row.routingKey, "not-a-bool",
+				row.id, row.name, "not-a-bool",
 				row.createdAt, row.updatedAt,
 			})
 		} else {
 			data = append(data, []driver.Value{
-				row.id, row.name, row.routingKey, row.enabled,
+				row.id, row.name, row.enabled,
 				row.createdAt, row.updatedAt,
 			})
 		}
@@ -369,13 +374,13 @@ func (c *fakeConn) queryPDConfigByID(args []driver.NamedValue, refetchFail bool)
 	key := tid + ":" + id
 	row, ok := c.store.pdConfig[key]
 	if !ok {
-		return &fakeRows{columns: []string{"id", "name", "routing_key", "enabled", "created_at", "updated_at"}}, nil
+		return &fakeRows{columns: []string{"id", "name", "enabled", "created_at", "updated_at"}}, nil
 	}
 
 	return &fakeRows{
-		columns: []string{"id", "name", "routing_key", "enabled", "created_at", "updated_at"},
+		columns: []string{"id", "name", "enabled", "created_at", "updated_at"},
 		data: [][]driver.Value{{
-			row.id, row.name, row.routingKey, row.enabled,
+			row.id, row.name, row.enabled,
 			row.createdAt, row.updatedAt,
 		}},
 	}, nil
@@ -435,6 +440,7 @@ func setupTestPlugin(t *testing.T, httpClient *http.Client) (*Plugin, http.Handl
 		db:         &engine.SQLDBAdapter{DB: db},
 		logger:     slog.Default(),
 		httpClient: client,
+		secrets:    plugintest.NewFakeSecrets(),
 	}
 
 	mux := http.NewServeMux()
@@ -453,6 +459,13 @@ func authedRequest(method, target string, body io.Reader) *http.Request {
 }
 
 func withCallContext(ctx context.Context) context.Context {
+	// Also stamp the tenantctx-backed auth context, not just plugin.CallContext:
+	// in production, engine's tenantScopedContext does both for every plugin
+	// call context (engine/plugin_call_context.go), which is what lets
+	// p.secrets.Get -- a request-path call with no explicit ForTenant --
+	// resolve a tenant. Without this, FakeSecrets.Get sees no tenant in ctx
+	// even though plugin.CallContextFromContext(ctx) reports one.
+	ctx = auth.WithTenantID(ctx, testTenantID)
 	return plugin.WithCallContext(ctx, &plugin.CallContext{
 		TenantID: testTenantID.String(),
 	})
@@ -719,7 +732,13 @@ func TestPDDeleteConfig(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTriggerIncidentLifecycle(t *testing.T) {
-	// Mock PagerDuty Events API.
+	// Mock PagerDuty Events API. capturedRoutingKey is the cleat#1992
+	// known-positive: it holds the value the outgoing request actually
+	// carried, so the test below can assert it is the SAME string that went
+	// in through the admin route (createBody's routing_key), not merely that
+	// SOME non-empty string reached the mock server. Written and read only
+	// from this test's own goroutine, sequentially -- no lock needed.
+	var capturedRoutingKey string
 	pdMux := http.NewServeMux()
 	pdMux.HandleFunc("/v2/enqueue", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -728,6 +747,7 @@ func TestTriggerIncidentLifecycle(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		capturedRoutingKey = req.RoutingKey
 		if req.RoutingKey == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(`{"status":"error","message":"routing key required"}`))
@@ -773,13 +793,20 @@ func TestTriggerIncidentLifecycle(t *testing.T) {
 
 	// Verify the config exists in the store.
 	store.mu.RLock()
-	row, ok := store.pdConfig[testTenantStr+":"+configID]
+	_, ok := store.pdConfig[testTenantStr+":"+configID]
 	store.mu.RUnlock()
 	if !ok {
 		t.Fatal("expected config in store")
 	}
-	if row.routingKey != "rk_lifecycle" {
-		t.Errorf("expected routing_key 'rk_lifecycle', got %q", row.routingKey)
+	// routing_key has no column any more (cleat#1992) -- it lives in
+	// p.secrets, keyed per config id.
+	secrets := p.secrets.(*plugintest.FakeSecrets)
+	gotKey, err := secrets.ForTenant(testTenantStr).Get(context.Background(), PagerdutyRoutingKeySecretName(uuid.MustParse(configID)))
+	if err != nil {
+		t.Fatalf("get routing key secret: %v", err)
+	}
+	if gotKey != "rk_lifecycle" {
+		t.Errorf("expected routing_key 'rk_lifecycle', got %q", gotKey)
 	}
 
 	// Trigger an incident.
@@ -799,6 +826,9 @@ func TestTriggerIncidentLifecycle(t *testing.T) {
 	if triggerResult.Status != "success" {
 		t.Errorf("expected status 'success', got %q", triggerResult.Status)
 	}
+	if capturedRoutingKey != "rk_lifecycle" {
+		t.Errorf("the trigger sent routing key %q, want the one set via the admin route %q", capturedRoutingKey, "rk_lifecycle")
+	}
 
 	// Resolve the incident using the returned incident_key.
 	resolveInput := `{"config_id":"` + configID + `","incident_key":"` + triggerResult.IncidentKey + `"}`
@@ -813,6 +843,123 @@ func TestTriggerIncidentLifecycle(t *testing.T) {
 	}
 	if resolveResult.Status != "success" {
 		t.Errorf("expected status 'success', got %q", resolveResult.Status)
+	}
+}
+
+// TestRoutingKeyRotationTakesEffectWithoutARestart is the second cleat#1992
+// known-positive, pagerduty-alert's mirror of the datadog-export test of the
+// same name: PUTting a new routing_key over an existing config changes what
+// the VERY NEXT triggerIncident call sends, with no plugin re-Init and no new
+// Plugin value -- the same p throughout, mid-process, the way a long-running
+// worker would see a rotation land.
+func TestRoutingKeyRotationTakesEffectWithoutARestart(t *testing.T) {
+	var capturedRoutingKey string
+	pdMux := http.NewServeMux()
+	pdMux.HandleFunc("/v2/enqueue", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req pdEventRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		capturedRoutingKey = req.RoutingKey
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"success","dedup_key":"incident_rotation","message":"Event processed"}`))
+	})
+	pdSrv := httptest.NewServer(pdMux)
+	defer pdSrv.Close()
+
+	client := &http.Client{
+		Transport: &mockTransport{origURL: "https://events.pagerduty.com", mockURL: pdSrv.URL},
+		Timeout:   5 * time.Second,
+	}
+	p, handler, _ := setupTestPlugin(t, client)
+
+	createBody := `{"name":"rotation-test","routing_key":"rk-before-rotation"}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	configID := created["id"].(string)
+
+	triggerInput := `{"config_id":"` + configID + `","summary":"before rotation","severity":"critical","source":"test-suite"}`
+	if _, err := p.triggerIncident(withCallContext(context.Background()), triggerInput); err != nil {
+		t.Fatalf("triggerIncident (before rotation): %v", err)
+	}
+	if capturedRoutingKey != "rk-before-rotation" {
+		t.Fatalf("before rotation: sent %q, want %q", capturedRoutingKey, "rk-before-rotation")
+	}
+
+	// Rotate. Same process, same *Plugin, no restart.
+	updateBody := `{"routing_key":"rk-after-rotation"}`
+	req = authedRequest("PUT", "/pagerduty/configs/"+configID, bytes.NewReader([]byte(updateBody)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	triggerInput = `{"config_id":"` + configID + `","summary":"after rotation","severity":"critical","source":"test-suite"}`
+	if _, err := p.triggerIncident(withCallContext(context.Background()), triggerInput); err != nil {
+		t.Fatalf("triggerIncident (after rotation): %v", err)
+	}
+	if capturedRoutingKey != "rk-after-rotation" {
+		t.Errorf("after rotation: sent %q, want %q -- rotation did not take effect without a restart", capturedRoutingKey, "rk-after-rotation")
+	}
+}
+
+// TestTenantBCannotReadTenantAsRoutingKeyThroughTheRoute is the third
+// cleat#1992 known-positive, pagerduty-alert's mirror of the datadog-export
+// test of the same name: tenant B, authenticated as itself, cannot reach
+// tenant A's config -- or its routing key -- through the admin route, by ID
+// or by list.
+func TestTenantBCannotReadTenantAsRoutingKeyThroughTheRoute(t *testing.T) {
+	_, handler, store := setupTestPlugin(t, nil)
+
+	const realKey = "pd-tenant-a-secret-routing-key"
+	body := `{"name":"tenant-a-config","routing_key":"` + realKey + `"}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("tenant A create: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	tenantAConfigID := created["id"].(string)
+
+	tenantBID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	tenantBKeyHash := sha256.Sum256([]byte("tenant-b-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", tenantBKeyHash)] = tenantBID.String()
+	tenantBRequest := func(method, target string) *http.Request {
+		req := httptest.NewRequest(method, target, nil)
+		req.Header.Set("Authorization", "Bearer tenant-b-api-key")
+		return req
+	}
+
+	req = tenantBRequest("GET", "/pagerduty/configs/"+tenantAConfigID)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("tenant B GET tenant A's config: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("tenant B GET response leaked tenant A's real routing_key: %s", rec.Body.String())
+	}
+
+	req = tenantBRequest("GET", "/pagerduty/configs")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant B LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) || strings.Contains(rec.Body.String(), tenantAConfigID) {
+		t.Errorf("tenant B LIST response contained tenant A's config or key: %s", rec.Body.String())
 	}
 }
 
@@ -889,17 +1036,20 @@ func TestTriggerIncidentMissingAPIKey(t *testing.T) {
 	// somebody points this test at a real database.
 	//
 	// THE RESULT IS STILL DISCARDED, which is pre-existing rather than
-	// deliberate: checking it fails with "arg 5 not found" from the fake, which
-	// counts this statement's placeholders differently than the seed supplies
-	// them. So this seed may create nothing, and the assertion below -- that
-	// triggerIncident reports a missing API key -- may be passing for a config
-	// that is not there. That is worth its own look and is NOT fixed here;
-	// naming it is the point.
+	// deliberate: checking it fails with an arg-not-found error from the fake,
+	// which counts this statement's placeholders differently than the seed
+	// supplies them (execInsertPDConfig wants a 4th positional arg for
+	// created_at/updated_at; this literal supplies now() as inline SQL
+	// instead). So this seed may create nothing, and the assertion below --
+	// that triggerIncident reports a missing API key -- may be passing for a
+	// config that is not there. That is worth its own look and is NOT fixed
+	// here; naming it is the point. routing_key has no column any more
+	// (cleat#1992), so it is dropped from both the statement and the args.
 	cfgID := uuid.New().String()
 	p.db.Exec(plugin.ForTenant(context.Background(), testTenantID), `
-		INSERT INTO pd_config (tenant_id, id, name, routing_key, enabled, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, true, now(), now())
-	`, testTenantStr, cfgID, "test", "rk_test")
+		INSERT INTO pd_config (tenant_id, id, name, enabled, created_at, updated_at)
+		VALUES ($1, $2, $3, true, now(), now())
+	`, testTenantStr, cfgID, "test")
 
 	input := `{"config_id":"` + cfgID + `","summary":"test","severity":"error","source":"src"}`
 	_, err := p.triggerIncident(withCallContext(context.Background()), input)
@@ -1328,13 +1478,12 @@ func TestTriggerIncident_DisabledConfig(t *testing.T) {
 	cfgID := uuid.New().String()
 	store.mu.Lock()
 	store.pdConfig[testTenantStr+":"+cfgID] = &fakePDConfigRow{
-		tenantID:   testTenantStr,
-		id:         cfgID,
-		name:       "disabled",
-		routingKey: "rk_disabled",
-		enabled:    false,
-		createdAt:  time.Now(),
-		updatedAt:  time.Now(),
+		tenantID:  testTenantStr,
+		id:        cfgID,
+		name:      "disabled",
+		enabled:   false,
+		createdAt: time.Now(),
+		updatedAt: time.Now(),
 	}
 	store.mu.Unlock()
 

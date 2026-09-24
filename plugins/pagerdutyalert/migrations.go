@@ -68,5 +68,42 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Version:      2,
 			TenantScoped: []string{"pd_config"},
 		},
+		{
+			// pd_config.routing_key moves into tenant secrets. cleat#1992.
+			// Same shape and same reasoning as datadogexport's v4
+			// (plugins/datadogexport/migrations.go): no backfill step,
+			// because cleat#2058 (owner decision 3) settled that 0.3.0
+			// requires a fresh database with no upgrade path from v0.2.0 --
+			// so no deployment ever has a routing_key value that needs to
+			// survive this DROP.
+			//
+			// PER-CONFIG NAMING: pd_config is not one row per tenant either
+			// (own id, name per config, same as dd_config), so the secret
+			// name is keyed by config id (PagerdutyRoutingKeySecretName,
+			// routes.go), not a single fixed name per tenant.
+			Version: 3,
+			Up: `
+				ALTER TABLE pd_config DROP COLUMN IF EXISTS routing_key;
+			`,
+			UpMySQL: `
+				ALTER TABLE pd_config DROP COLUMN routing_key;
+			`,
+			UpMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('pd_config') AND name = 'routing_key')
+				ALTER TABLE pd_config DROP COLUMN routing_key;
+			`,
+			// Down restores the schema, not the data -- see datadogexport's
+			// v4 for why that is the ordinary and expected shape here.
+			Down: `
+				ALTER TABLE pd_config ADD COLUMN IF NOT EXISTS routing_key TEXT;
+			`,
+			DownMySQL: `
+				ALTER TABLE pd_config ADD COLUMN routing_key TEXT;
+			`,
+			DownMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('pd_config') AND name = 'routing_key')
+				ALTER TABLE pd_config ADD routing_key NVARCHAR(MAX);
+			`,
+		},
 	}
 }

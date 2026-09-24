@@ -83,6 +83,8 @@ plugin/registry.go	func LoadAll
 plugin/tenant_role_password.go	func TenantRoleName
 plugins/plugintest/arms.go	func RunEveryArm
 plugins/plugintest/migrations.go	func AssertMigrationsDoSomething
+plugins/plugintest/secrets.go	func FakeSecrets.Seed
+plugins/plugintest/secrets.go	func NewFakeSecrets
 wasm/adapter_metadata.go	func AdapterFieldNames
 wasm/metadata.go	func HasImport
 wasm/metadata.go	func Metadata.EffectivePolicy

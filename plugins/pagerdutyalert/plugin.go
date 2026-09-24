@@ -37,6 +37,7 @@ type Plugin struct {
 	httpClient *http.Client
 	config     Config
 	dialect    plugin.Dialect
+	secrets    plugin.Secrets
 }
 
 // Config holds optional configuration for the pagerduty-alert plugin.
@@ -63,6 +64,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.dialect = env.Dialect
+	p.secrets = env.Secrets
 	p.httpClient = &http.Client{
 		// cleat#1565: every outbound request goes through the egress guard.
 		// Nil in tests that build an Environment directly, which falls back to

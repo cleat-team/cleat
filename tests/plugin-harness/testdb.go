@@ -14,6 +14,8 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/pagerdutyalert"
+	"github.com/google/uuid"
 )
 
 // OpenTestDB opens a database connection and creates an isolated schema
@@ -306,9 +308,12 @@ func SeedPluginConfig(t *testing.T, db *sql.DB, dialect plugin.Dialect) {
 			args:  []interface{}{defaultTenant, "00000000-0000-0000-0000-000000000004", "test-slack", "https://hooks.slack.com/test", true},
 		},
 		{
+			// No routing_key column any more (cleat#1992, migration v3) -- the
+			// value SeedPluginSecrets writes below, under the same name
+			// triggerIncident reads, is what makes this config usable.
 			table: "pd_config",
-			sql:   placeholderSQL(dialect, "INSERT INTO pd_config (tenant_id, id, name, routing_key, enabled) VALUES (%s, %s, %s, %s, %s)"),
-			args:  []interface{}{defaultTenant, "00000000-0000-0000-0000-000000000003", "test-pd", "test-routing-key", true},
+			sql:   placeholderSQL(dialect, "INSERT INTO pd_config (tenant_id, id, name, enabled) VALUES (%s, %s, %s, %s)"),
+			args:  []interface{}{defaultTenant, "00000000-0000-0000-0000-000000000003", "test-pd", true},
 		},
 	}
 
@@ -318,6 +323,37 @@ func SeedPluginConfig(t *testing.T, db *sql.DB, dialect plugin.Dialect) {
 		if _, err := db.ExecContext(ctx, row.sql, row.args...); err != nil {
 			t.Logf("SeedPluginConfig: %s: %v (plugin migrations may not have run yet)", row.table, err)
 		}
+	}
+}
+
+// SeedPluginSecrets writes the tenant secrets SeedPluginConfig's rows now
+// depend on, since cleat#1992 moved their credentials out of the plugin's own
+// table and into tenant_secrets.
+//
+// A SEPARATE FUNCTION FROM SeedPluginConfig, not folded into it: that one
+// takes a *sql.DB, and Secrets is a distinct plugin.Environment field wired
+// from a distinct store (NewTestPluginEnv builds both against the same
+// database, but a caller of SeedPluginConfig alone -- there may be one, this
+// package's own SQL-only tests -- should not have to construct a
+// plugin.Secrets it does not need).
+func SeedPluginSecrets(t *testing.T, ctx context.Context, secrets plugin.Secrets) {
+	t.Helper()
+	if secrets == nil {
+		return
+	}
+
+	const defaultTenant = "00000000-0000-0000-0000-000000000000"
+	pdConfigID := uuid.MustParse("00000000-0000-0000-0000-000000000003")
+
+	name := pagerdutyalert.PagerdutyRoutingKeySecretName(pdConfigID)
+	if err := secrets.ForTenant(defaultTenant).Put(ctx, name, "test-routing-key"); err != nil {
+		// Fatalf, not Logf: unlike SeedPluginConfig's "the plugin migration
+		// hasn't run yet" case, there is no legitimate reason for this write to
+		// fail against a freshly migrated test database. Logging it here would
+		// surface as a confusing "routing key not found" failure in whichever
+		// pagerduty-alert test happens to run next, pointing at the wrong
+		// place -- this IS the place. cleat-review, reviewing this PR.
+		t.Fatalf("SeedPluginSecrets: %s: %v", name, err)
 	}
 }
 

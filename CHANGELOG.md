@@ -12,6 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **`dd_config.api_key` and `pd_config.routing_key` move into tenant secrets; the plaintext
+  columns are dropped.** (cleat#1992)
+
+  datadog-export and pagerduty-alert used to store the Datadog API key and the PagerDuty
+  routing key in plain SQL columns. They now go through the same `plugin.Secrets` envelope
+  encryption every other tenant secret uses, under the names
+  `datadogexport.api_key.<config-id>` and `pagerdutyalert.routing_key.<config-id>` (one secret
+  per config, not one per tenant, since a tenant can have more than one config of each kind).
+  Admin routes are unchanged (`POST`/`PUT .../configs` still take `api_key`/`routing_key` in the
+  request body, and responses still redact it) — only where the value lives has changed.
+
+  No migration procedure is needed: **0.3.0 requires a fresh database, with no upgrade path
+  from v0.2.0** (cleat#2058, owner decision 3). A fresh database never has a plaintext
+  `api_key`/`routing_key` row to move, so `datadog-export`'s v4 migration and `pagerduty-alert`'s
+  v3 migration simply drop the columns (`plugin.Migration.Up`, plain SQL) with nothing to carry
+  forward.
+
 - **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
   (cleat#2046)
 

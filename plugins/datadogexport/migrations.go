@@ -115,5 +115,50 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Version:      3,
 			TenantScoped: []string{"dd_config"},
 		},
+		{
+			// dd_config.api_key moves into tenant secrets. cleat#1992.
+			//
+			// No backfill step: cleat#2058 (owner decision 3) settled that
+			// 0.3.0 requires a fresh database, with no upgrade path from
+			// v0.2.0. There is therefore no deployment where this column
+			// holds a value that needs to survive the DROP -- a fresh
+			// database never populates api_key in the first place. An
+			// earlier version of this comment described a two-step,
+			// operator-run migration procedure; that no longer applies and
+			// would be actively wrong advice against a fresh install.
+			//
+			// PER-CONFIG, NOT PER-TENANT NAMING. dd_config is not one row per
+			// tenant -- a tenant can have several named Datadog configs (own
+			// id, site, metrics_prefix) -- so the secret name is keyed by
+			// config id (DatadogAPIKeySecretName, routes.go) rather than a
+			// single fixed name per tenant. Confirmed with WS-3 (owner of the
+			// Secrets interface and cleat#1992's PR split) before writing this:
+			// no downstream assumption of one fixed name per tenant.
+			Version: 4,
+			Up: `
+				ALTER TABLE dd_config DROP COLUMN IF EXISTS api_key;
+			`,
+			UpMySQL: `
+				ALTER TABLE dd_config DROP COLUMN api_key;
+			`,
+			UpMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dd_config') AND name = 'api_key')
+				ALTER TABLE dd_config DROP COLUMN api_key;
+			`,
+			// Down restores the SCHEMA, not the data -- ordinary for a DROP
+			// COLUMN reversal (the value is gone from dd_config the moment Up
+			// runs; it now lives in tenant secrets, a different store). No
+			// NOT NULL/DEFAULT: existing rows have nothing to put there.
+			Down: `
+				ALTER TABLE dd_config ADD COLUMN IF NOT EXISTS api_key TEXT;
+			`,
+			DownMySQL: `
+				ALTER TABLE dd_config ADD COLUMN api_key TEXT;
+			`,
+			DownMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dd_config') AND name = 'api_key')
+				ALTER TABLE dd_config ADD api_key NVARCHAR(MAX);
+			`,
+		},
 	}
 }
