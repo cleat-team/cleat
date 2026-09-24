@@ -10349,9 +10349,51 @@ falsified the same way against `signalAwaiters` alone and carries its own negati
 ordinary (non-sentinel) delivery error must NOT unregister the awaiter, only
 `ErrWorkflowNotFound` does.
 
+**cleat#2213's leak had a second, live path this section did not name: `--require-signal-auth`.**
+`engine.GetAllowedSignalCallers` was never touched by cleat#2218 -- it kept returning
+`(nil, nil)` for a missing workflow on all three dialects, which `signalPluginWorkflowWithAuth`
+read as "exists, but the caller is not on the list" and answered the ordinary auth-denied error,
+not `ErrWorkflowNotFound`. So with signal authorization on, `signalAwaiters` never took the
+not-found branch above for a purged workflow -- it retried the auth-denied error forever,
+continuously, independent of cleat#2218's timing. `GetAllowedSignalCallers` now returns
+`ErrWorkflowNotFound` for a missing row too, on all three dialects, closing that path the same
+way. The HTTP layer picks up the same fix: `cmd/cleat-worker/server.go`'s `handleSignal` maps it
+to 404 on the auth-check branch, and `handleGetAllowedSignals` (GET on the same resource
+`handleSetAllowedSignals`/PUT already 404'd on) now does too.
+
+**A second, narrower not-found path was found in review and closed the same way: a purge racing
+the EXISTS-gated INSERT itself.** The EXISTS check `deliverSignalTx` guards on is a plain,
+non-locking read, so a `DeleteCompletedWorkflows` purge committing in the gap between that read
+and the INSERT's own foreign-key check can turn a zero-rows not-found into a raw FK-violation
+error instead -- SQLSTATE 23503 on PostgreSQL, error 1452 on MySQL, error 547 on SQL Server.
+`isSignalsWorkflowFKViolationPG` / `isSignalsWorkflowFKViolation` /
+`isMSSQLSignalsWorkflowFKViolation` catch it on all three and map it to the same
+`ErrWorkflowNotFound`. This PR's first draft called the window "a few microseconds, not
+reproduced under a live race" -- wrong, found in review: a held-open purge (a transaction that
+deletes the row and does not commit) makes it deterministic rather than rare, and
+`engine/deliver_signal_purge_race_test.go` forces it directly on all three dialects rather than
+relying on timing. Falsifying each dialect's classifier separately found the three do not agree
+on mechanism: PostgreSQL's FK trigger genuinely blocks and needs the classifier (falsifying it
+turns the test red with a raw driver error); MySQL and SQL Server's `WHERE EXISTS(...)` blocks at
+the subquery itself under this same interleave and resolves via the ordinary
+`RowsAffected()==0` branch, never reaching their own classifiers at all -- recorded in that
+test's own comment rather than left as an unqualified "all three dialects" claim.
+
+**The four `ErrWorkflowNotFound`→404 HTTP mappings this added (`server.go`'s `handleSignal` on
+its auth-check, idempotent-delivery and plain-delivery branches, plus `handleGetAllowedSignals`)
+had no test of their own until review found the gap** -- the nearest existing coverage
+(`TestASignalForAnUnownedWorkflowNeverReachesTheStore`) exercises `callerOwnsTarget`, a check
+that runs before all four and never reaches any of them. `cmd/cleat-worker/signal_not_found_mapping_test.go`
+covers each directly, with a plain-error negative control (500, not 404) on the two branches that
+can distinguish "not found" from "some other store failure".
+
 Files: `engine/store_signals.go`, `engine/mysql_store.go`, `engine/mssql_signals_promises.go`,
-`plugin/plugin.go`, `cmd/cleat-worker/main.go`, `plugins/eventtriggers/publish.go`,
+`plugin/plugin.go`, `cmd/cleat-worker/main.go`, `cmd/cleat-worker/server.go`,
+`plugins/eventtriggers/publish.go`,
 `engine/a_signal_to_an_id_the_caller_cannot_touch_writes_nothing_test.go`,
 `engine/mssql_admin_login_control_plane_tenant_test.go`, `engine/mssql_store_test.go`,
+`engine/unscoped_queries_tenant_test.go`, `engine/deliver_signal_purge_race_test.go`,
 `cmd/cleat-worker/a_signal_plugin_workflow_is_tenant_scoped_test.go`,
+`cmd/cleat-worker/signal_not_found_mapping_test.go`,
+`cmd/cleat-worker/a_purged_awaiter_unregisters_across_dialects_test.go`,
 `plugins/eventtriggers/a_not_found_awaiter_unregisters_instead_of_leaking_test.go`.

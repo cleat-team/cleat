@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -74,6 +75,44 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 			fixtureDB := be.CrossTenantConn(t, context.Background(),
 				"cleat#2213 fixture: seeds and purges workflow_instances/"+
 					"event_awaiters rows directly")
+
+			// Cleanup, not t.Cleanup: registered AFTER "defer be.Cleanup()"
+			// above so LIFO runs it FIRST, while be.DB is still open. A
+			// t.Cleanup callback here would run after the function body
+			// returns, which is after the deferred be.Cleanup() has already
+			// closed that pool -- the SQL below would run on a dead
+			// connection and every statement would fail, silently, since
+			// nothing here would be watching for it in that ordering.
+			//
+			// be.DB, NOT fixtureDB. On MSSQL, CrossTenantConn (fixtureDB's
+			// source) routes through MSSQLAdminDB -- a login that is only a
+			// MEMBER of cleat_admin, for bypassing row-level security
+			// predicates, not the login RunMigrations used to create these
+			// tables and policies. Measured directly (cleat#2239): a
+			// DROP SECURITY POLICY / DROP TABLE through that connection fails
+			// "does not exist or you do not have permission" (3701) for an
+			// object the SAME connection's own SELECT against
+			// sys.security_policies / sys.tables confirms is there --
+			// SQL Server's deliberately ambiguous wording for "you can see
+			// the catalog row but you may not touch the object." be.DB is the
+			// pool migrations actually ran on and has the rights to reverse
+			// them.
+			//
+			// WHY THIS EXISTS AT ALL: this test runs eventtriggers'
+			// migrations against testutil's SHARED, PERSISTENT test
+			// database, not a private one -- TestDB opens a real server and
+			// leaves its schema in place for the rest of the test binary's
+			// life (engine/testutil/schema.go's TestDB doc comment). Without
+			// this, event_awaiters/event_subscriptions/ingested_events and
+			// their admin.plugin_tables registry rows outlive this test and
+			// are still there when engine's
+			// TestEveryTenantOwnedTableIsEmptiedByDropTenant later scans
+			// information_schema.columns for every tenant_id-bearing table in
+			// that same database -- three tables it was never written to
+			// seed, which that test's own design (see its file comment) fails
+			// on by NAME rather than passing on a false "0 rows" negative.
+			// Found by cleat-review, cleat#2239.
+			defer cleanupEventTriggersSchema(t, be.DB, be.Dialect)
 
 			// MySQL isolates tenants by physical database (tiers.yaml D1: a
 			// second tenant row cannot even be created -- see
@@ -264,5 +303,78 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 			t.Run("without_signal_auth", func(t *testing.T) { runTenantSignal(t, false) })
 			t.Run("with_signal_auth", func(t *testing.T) { runTenantSignal(t, true) })
 		})
+	}
+}
+
+// cleanupEventTriggersSchema undoes eventtriggers.Migrations() against
+// TestPurgedAwaiterUnregistersAcrossDialects' shared, persistent test
+// database, table by table rather than via plugin.RunDownMigrations: that
+// function reverses a plugin's Down SQL, but eventtriggers' v4 migration
+// (TenantScoped, cleat#1512) applies its security policy through
+// plugin.RunMigrations' own runtime side effect (applyTenantScoping), not
+// through any Up/Down SQL the plugin declares -- so a Down pass never drops
+// the policy, and on SQL Server the later DROP TABLE for event_awaiters would
+// fail while that policy still references it ("...used by a security
+// policy..."). Dropping the policies first, by the same
+// "<table>_tenant_isolation" name plugin/migration.go's
+// applyTenantScopingMSSQL constructs, avoids depending on that ordering at
+// all.
+//
+// admin.plugin_tables (registerTenantScopedTables, Postgres only) is cleared
+// too, so a registry row naming a table that no longer exists cannot outlive
+// this test either -- see CLAUDE.md's "a resolver must be able to return
+// UNKNOWN" family of notes on stale registry rows reading as confident wrong
+// answers.
+func cleanupEventTriggersSchema(t *testing.T, conn *sql.DB, dialect testutil.Dialect) {
+	t.Helper()
+	ctx := context.Background()
+	const pluginName = "event-triggers"
+	tables := []string{"event_awaiters", "event_subscriptions", "ingested_events"}
+
+	exec := func(query string) {
+		if _, err := conn.ExecContext(ctx, query); err != nil {
+			t.Errorf("cleanupEventTriggersSchema: %s: %v", query, err)
+		}
+	}
+	exists := func(query string, args ...any) bool {
+		var n int
+		if err := conn.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+			t.Errorf("cleanupEventTriggersSchema: existence check %s: %v", query, err)
+			return false
+		}
+		return n > 0
+	}
+
+	if dialect == testutil.DialectMSSQL {
+		// Checked in Go and dropped unconditionally rather than
+		// "IF EXISTS(...) DROP ..." in one batch: measured directly against
+		// a real SQL Server (cleat#2239) that the single-batch form raises
+		// 3701 ("does not exist or you do not have permission") on an
+		// object sys.security_policies confirms IS there, on the very
+		// connection running the check -- the IF guard and the DROP do not
+		// agree with each other inside one batch here, for a reason not
+		// worth chasing further when checking first in Go sidesteps it
+		// entirely.
+		for _, tbl := range tables {
+			policy := tbl + "_tenant_isolation"
+			if exists(`SELECT COUNT(*) FROM sys.security_policies WHERE name = @p1`, policy) {
+				exec(`DROP SECURITY POLICY dbo.` + policy)
+			}
+		}
+		for _, tbl := range tables {
+			if exists(`SELECT COUNT(*) FROM sys.tables WHERE name = @p1`, tbl) {
+				exec(`DROP TABLE ` + tbl)
+			}
+		}
+		exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
+		return
+	}
+
+	for _, tbl := range tables {
+		exec(`DROP TABLE IF EXISTS ` + tbl)
+	}
+	exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
+	if dialect == testutil.DialectPostgres {
+		exec(`DELETE FROM admin.plugin_tables WHERE plugin_name = '` + pluginName + `'`)
 	}
 }
