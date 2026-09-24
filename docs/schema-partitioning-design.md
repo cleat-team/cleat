@@ -34,7 +34,7 @@ here.
 
 ## Why now
 
-Every worker applies migrations at boot and exits on failure
+Every worker applied migrations at boot and exited on failure (until cleat#2117 made migration a deploy step, `cleat-worker --migrate-only`)
 (`cmd/cleat-worker/main.go:680-689`), so a migration is not a deploy step that can fail in
 isolation — it is a condition of the fleet starting at all. That is survivable at current scale and
 becomes the dominant uptime risk at a hundred tenants sharing one set of RLS-scoped tables, where

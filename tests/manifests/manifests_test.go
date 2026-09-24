@@ -121,6 +121,11 @@ func TestDeploymentManifestsUseFlagsTheWorkerAccepts(t *testing.T) {
 		"k8s/deployment.yaml",
 		"charts/cleat/templates/deployment.yaml",
 		"docker-compose.cluster.yml",
+		// The migration steps (cleat#2117) are worker invocations too, and a
+		// --migrate-only that the binary did not define would fail the deploy step
+		// itself, before any worker started.
+		"k8s/migrate-job.yaml",
+		"charts/cleat/templates/migrate-job.yaml",
 	}
 
 	for _, path := range manifests {
@@ -131,9 +136,19 @@ func TestDeploymentManifestsUseFlagsTheWorkerAccepts(t *testing.T) {
 			// manifest is restructured, or the regex rots -- this test would
 			// pass while checking nothing. Every one of these manifests starts a
 			// worker, so every one must pass --db.
-			if len(used) < 3 {
-				t.Fatalf("extracted only %d flags from %s, want at least 3 -- "+
-					"the manifest's arg block is no longer being read", len(used), path)
+			// The floor is per manifest: a migration Job legitimately passes only
+			// --migrate-only and --db.
+			floor := 3
+			if strings.HasSuffix(path, "migrate-job.yaml") {
+				floor = 2
+				if !contains(used, "migrate-only") {
+					t.Fatalf("extracted %v from %s, which does not include --migrate-only -- "+
+						"the arg block being read is not the migration step's", used, path)
+				}
+			}
+			if len(used) < floor {
+				t.Fatalf("extracted only %d flags from %s, want at least %d -- "+
+					"the manifest's arg block is no longer being read", len(used), path, floor)
 			}
 			if !contains(used, "db") {
 				t.Fatalf("extracted %v from %s, which does not include --db -- "+
@@ -158,4 +173,96 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestEveryWorkerLaunchSiteSaysHowItsSchemaGetsMigrated (cleat#2117). A worker no
+// longer migrates the database when it starts, so every artifact that starts one has
+// to do one of two things, and this names which for each:
+//
+//	"--migrate-only"     it is (or has) the deploy step that migrates first
+//	"--migrate-on-start" it is a single node that migrates itself
+//
+// A launch site that does neither works on a database that happens to be migrated
+// already and fails, with a message that explains itself, on a fresh one -- which is
+// the case nobody re-tests. The list is asserted COMPLETE against the repo, not just
+// correct for the entries in it: a new artifact that starts a worker and is in neither
+// list fails here rather than shipping without an answer.
+func TestEveryWorkerLaunchSiteSaysHowItsSchemaGetsMigrated(t *testing.T) {
+	want := map[string]string{
+		// A deploy step exists for these.
+		"docker-compose.cluster.yml":              "--migrate-only",
+		"charts/cleat/templates/migrate-job.yaml": "--migrate-only",
+		"k8s/migrate-job.yaml":                    "--migrate-only",
+		"packaging/systemd/cleat-worker.service":  "--migrate-only",
+		// Single-node development and scaffolds: the worker migrates itself.
+		"cmd/cleat/templates/agent/docker-compose.yml":     "--migrate-on-start",
+		"cmd/cleat/templates/fullstack/docker-compose.yml": "--migrate-on-start",
+		"cmd/cleat/templates/workflow/docker-compose.yml":  "--migrate-on-start",
+		"Makefile": "--migrate-on-start",
+	}
+	for path, flag := range want {
+		data, err := os.ReadFile(filepath.Join(repoRoot, path))
+		if err != nil {
+			t.Errorf("%s: %v", path, err)
+			continue
+		}
+		// Ignore comment-only mentions: a comment that says "--migrate-only" is not a
+		// launch site that passes it.
+		found := false
+		for _, line := range strings.Split(string(data), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(line, flag) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s starts a worker but does not pass %s outside a comment: on a fresh database "+
+				"the worker verifies the schema and refuses to start", path, flag)
+		}
+	}
+
+	// COMPLETENESS. Every tracked file that runs the worker image or binary with a
+	// database must be in `want` or be named here with a reason. The patterns are the
+	// two ways a launch site refers to the worker: the published image, and the
+	// installed binary's unit. (A new kind of launch site -- a Nomad job, a Procfile --
+	// is not found by these; adding its pattern is how that gets covered.)
+	out, err := exec.Command("git", "-C", repoRoot, "ls-files").Output()
+	if err != nil {
+		t.Fatalf("git ls-files: %v", err)
+	}
+	exempt := map[string]string{
+		"charts/cleat/templates/deployment.yaml": "the runtime Deployment: verifies; the migrate-job.yaml hook migrates first",
+		"k8s/deployment.yaml":                    "the runtime Deployment: verifies; k8s/migrate-job.yaml migrates first",
+		"charts/cleat/values.yaml":               "names the image only",
+		"Dockerfile":                             "the image: ENTRYPOINT with no database",
+		"docker-compose.cluster.yml":             "asserted above",
+	}
+	launch := regexp.MustCompile(`ghcr\.io/cleat-team/cleat-worker|image:\s*cleat-worker:latest|ExecStart=.*cleat-worker`)
+	seen := 0
+	for _, path := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if !(strings.HasSuffix(path, ".yml") || strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".service") ||
+			strings.HasSuffix(path, ".tpl")) || strings.HasPrefix(path, ".github/") || strings.HasPrefix(path, "docs/") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(repoRoot, path))
+		if err != nil || !launch.Match(data) {
+			continue
+		}
+		seen++
+		if _, ok := want[path]; ok {
+			continue
+		}
+		if _, ok := exempt[path]; ok {
+			continue
+		}
+		t.Errorf("%s starts the cleat-worker image or unit but is in neither the migrated-how list nor the "+
+			"exemptions of this test: say how its schema gets migrated (cleat#2117)", path)
+	}
+	if seen < 6 {
+		t.Fatalf("found only %d launch sites in git ls-files; the scan is not looking where they are", seen)
+	}
 }

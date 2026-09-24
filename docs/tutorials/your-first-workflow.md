@@ -246,8 +246,14 @@ cleat deploy --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
 
 ```bash
 cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
-    --api-addr :8080
+    --api-addr :8080 --migrate-on-start
 ```
+
+`--migrate-on-start` lets this worker create the database schema when it starts,
+which is what you want for one node on a fresh database. Without it a worker
+**verifies** the schema and refuses to start if it is not there. For more than one
+worker, migrate once as a deploy step instead (`cleat-worker --migrate-only`); see
+[Upgrading](../operations/upgrading.md#migration-is-a-deploy-step).
 
 ## Step 8: Trigger execution
 

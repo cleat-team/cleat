@@ -21,6 +21,10 @@ services:
     command:
       - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
       - "--api-addr=:8080"
+      # Single-node development: this worker applies the schema itself at start.
+      # A worker no longer migrates unless told to (cleat#2117) -- for a fleet, run
+      # `cleat-worker --migrate-only` as a deploy step and drop this flag.
+      - "--migrate-on-start"
       - "--plugin-config=/etc/cleat/plugins.json"
     ports:
       - "8080:8080"

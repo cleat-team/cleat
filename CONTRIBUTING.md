@@ -396,8 +396,11 @@ defaults to connecting to `http://localhost:8080`). Start the worker with the
 
 ```bash
 cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
-    --api-addr :8080
+    --api-addr :8080 --migrate-on-start
 ```
+
+(`--migrate-on-start` creates the schema on a fresh development database; a worker
+otherwise only verifies it.)
 
 To build the UI for production (output goes to `cmd/cleat-worker/web/dist/`):
 

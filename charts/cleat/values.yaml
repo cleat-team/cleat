@@ -57,6 +57,32 @@ postgres:
   existingSecret: ""
   sslmode: disable
 
+# -- Schema migration, run as a pre-install/pre-upgrade hook Job (cleat#2117).
+#
+# A worker no longer migrates the database when it starts: it VERIFIES the schema and
+# refuses to start, with the remediation in its message, if a migration is not applied.
+# So a release migrates BEFORE its pods start, and this Job (cleat-worker --migrate-only)
+# is that step. Turn it off only if you run `cleat-worker --migrate-only` yourself as a
+# deploy step -- with it off and no other migration step, new pods will not start.
+migration:
+  # -- Run the migration Job on install and upgrade.
+  enabled: true
+  # -- A DDL-capable role for the Job, if the runtime role (postgres.username) is
+  # unprivileged, as it should be. Defaults to postgres.username / postgres.password.
+  username: ""
+  password: ""
+  # -- Name of an existing Secret holding the migration DSN (key: existingSecretKey).
+  # Preferred: the DDL credentials then never pass through chart values. When unset
+  # and postgres.existingSecret is set, that Secret is reused; otherwise the chart
+  # creates a short-lived hook Secret from username/password above.
+  existingSecret: ""
+  existingSecretKey: "database-url"
+  # -- The Job is not retried: a failed migration needs a person, and a retry of a
+  # half-applied one is exactly what the lock and per-migration transactions are for.
+  backoffLimit: 0
+  # -- Seconds before the Job is failed. A first migration onto a large table can be slow.
+  activeDeadlineSeconds: 900
+
 # -- HTTP API server configuration.
 api:
   # -- Port for the HTTP API, health checks, and metrics endpoint.

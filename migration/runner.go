@@ -9,6 +9,7 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"io/fs"
 	"log"
@@ -326,6 +327,141 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
+// SchemaState is what Verify found, and the answer to "may a worker start here".
+//
+// THE RULE (cleat#2117), stated once because a rolling upgrade exercises every arm:
+//
+//	behind  a migration this binary ships is not applied   -> REFUSE, with the remediation
+//	equal   every shipped migration is applied              -> start
+//	ahead   applied versions this binary does not ship      -> START, and say so
+//
+// Ahead is not refused because during a rolling upgrade the deploy job migrates to
+// N+1 while workers still on N are running or restarting; refusing there would wedge
+// the rollout on the very workers it is trying to replace. It relies on migrations
+// staying additive within a release line, which is what makes an N binary able to
+// run against an N+1 schema, and the warning names both versions so the reliance is
+// visible. Behind is refused because a binary running against a schema older than
+// its code fails later and less legibly, on the first query that needs the missing
+// column.
+type SchemaState struct {
+	// Shipped is how many migrations this binary carries.
+	Shipped int
+	// LatestShipped is the highest version this binary carries.
+	LatestShipped int
+	// Pending are the shipped migrations that are not applied, in order.
+	Pending []string
+	// TrackingTableMissing means schema_migrations does not exist: nothing has
+	// ever been applied, so every shipped migration is pending.
+	TrackingTableMissing bool
+	// LatestApplied is the highest applied version, 0 if none.
+	LatestApplied int
+	// Ahead are applied versions this binary does not ship, ascending.
+	Ahead []int
+}
+
+// Behind reports whether a shipped migration is not applied.
+func (s SchemaState) Behind() bool { return len(s.Pending) > 0 }
+
+// SchemaBehindError is what a worker start reports when Behind. Its message is the
+// remediation; a refusal that only says "schema behind" sends the operator to read
+// source.
+type SchemaBehindError struct {
+	State SchemaState
+}
+
+func (e *SchemaBehindError) Error() string {
+	s := e.State
+	first := s.Pending[0]
+	shown := first
+	if len(s.Pending) > 1 {
+		shown = fmt.Sprintf("%s ... %s", first, s.Pending[len(s.Pending)-1])
+	}
+	state := fmt.Sprintf("%d of %d migration(s) this binary ships are not applied (%s)",
+		len(s.Pending), s.Shipped, shown)
+	if s.TrackingTableMissing {
+		state = fmt.Sprintf("the database has no schema_migrations table: it has never been migrated, "+
+			"and all %d migration(s) this binary ships are pending", s.Shipped)
+	}
+	return "the database schema is behind this worker: " + state + ".\n" +
+		"A worker does not migrate the database on start. Run the migrations as a deploy step:\n\n" +
+		"    cleat-worker --migrate-only --db <dsn> [--migrate-db <owner dsn>]\n\n" +
+		"and then start the workers. (If a --migrate-only run is already in progress, wait for it. " +
+		"For a single-node install or development, --migrate-on-start restores the old behaviour.)"
+}
+
+// Verify reads the schema and reports its state WITHOUT changing it: it creates no
+// table, takes no lock and applies nothing. It is what a normal worker start does
+// in place of Run.
+//
+// It takes no lock on purpose. A start that raced a migration in progress and read
+// "behind" refuses, the supervisor restarts it, and the next attempt sees the
+// finished schema; waiting on the migration lock would instead make every booting
+// worker queue behind the deploy step and hold a connection while it does.
+func (r *Runner) Verify(ctx context.Context) (SchemaState, error) {
+	var st SchemaState
+	migrations, err := r.readMigrations()
+	if err != nil {
+		return st, fmt.Errorf("read migrations: %w", err)
+	}
+	st.Shipped = len(migrations)
+	shipped := make(map[int]bool, len(migrations))
+	for _, m := range migrations {
+		shipped[m.version] = true
+		if m.version > st.LatestShipped {
+			st.LatestShipped = m.version
+		}
+	}
+
+	exists, err := r.trackingTableExists(ctx)
+	if err != nil {
+		return st, fmt.Errorf("check for schema_migrations: %w", err)
+	}
+	applied := map[int]bool{}
+	if !exists {
+		st.TrackingTableMissing = true
+	} else if applied, err = r.getAppliedVersions(ctx, r.db); err != nil {
+		return st, fmt.Errorf("get applied versions: %w", err)
+	}
+
+	for _, m := range migrations {
+		if !applied[m.version] {
+			st.Pending = append(st.Pending, m.name)
+		}
+	}
+	for v := range applied {
+		if v > st.LatestApplied {
+			st.LatestApplied = v
+		}
+		if !shipped[v] {
+			st.Ahead = append(st.Ahead, v)
+		}
+	}
+	sort.Ints(st.Ahead)
+	return st, nil
+}
+
+// trackingTableExists asks the catalog rather than catching the error a missing
+// table raises, so "has never been migrated" is told apart from every other read
+// failure (a permission error, a dead connection) and the latter is not reported
+// to an operator as an un-migrated database.
+func (r *Runner) trackingTableExists(ctx context.Context) (bool, error) {
+	var n int
+	var err error
+	switch r.dialect {
+	case DialectPostgres:
+		err = r.db.QueryRowContext(ctx, "SELECT CASE WHEN to_regclass($1) IS NULL THEN 0 ELSE 1 END",
+			r.trackingTable()).Scan(&n)
+	case DialectMySQL:
+		err = r.db.QueryRowContext(ctx, "SELECT count(*) FROM information_schema.tables "+
+			"WHERE table_schema = DATABASE() AND table_name = 'schema_migrations'").Scan(&n)
+	case DialectMSSQL:
+		err = r.db.QueryRowContext(ctx, "SELECT count(*) FROM sys.tables WHERE name = 'schema_migrations'").Scan(&n)
+	default:
+		return false, fmt.Errorf("unsupported dialect: %s", r.dialect)
+	}
+	return n > 0, err
+}
+
 // sqlSession is the subset of *sql.DB and *sql.Conn the runner uses. Both
 // types satisfy it, which lets Run pin a single connection on PostgreSQL while
 // the other dialects keep using the pool.
@@ -342,11 +478,16 @@ type sqlSession interface {
 // migrates at boot and docker-compose.cluster.yml starts four at once; see
 // migrationsLockKey for what that produced without the lock.
 //
-// Only PostgreSQL is covered. MySQL (GET_LOCK) and SQL Server (sp_getapplock)
-// have equivalents, but cleat only ships a multi-worker topology for
-// PostgreSQL, and untested locking code for the other two would be worse than
-// none: there, this returns the pool unchanged and the behaviour is exactly
-// what it was before.
+// MySQL and SQL Server are serialised too, by lockedSession below. That was
+// not always so: this comment used to call the absence deliberate because
+// "cleat only ships a multi-worker topology for PostgreSQL". Measured on
+// 2026-09-23 for cleat#2117, four concurrent Runs against an empty database
+// (`migration/a_concurrent_migrators_*_test.go` keeps the measurement): PostgreSQL
+// 4 of 4 succeed; MySQL 3 of 4 FAIL ("Duplicate key name" from 001_schema.sql);
+// SQL Server 3 of 4 FAIL (deadlock victim 1205, "referenced entity was modified
+// during DDL" 2021, "already an object named" 2714). Every failure is a worker
+// that exits at boot. Migration is now a deploy step (cleat-worker --migrate-only)
+// so the concurrent case is the one a deploy job and a straggling worker produce.
 //
 // The lock TIMEOUT set below has the same boundary, and for a reason that
 // follows from the line above rather than a second judgement: the other two
@@ -361,7 +502,7 @@ type sqlSession interface {
 // dialect-neutral.
 func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
 	if r.dialect != DialectPostgres {
-		return r.db, func() {}, nil
+		return r.lockedSession(ctx)
 	}
 
 	if r.schema != "" && !plainIdentifier.MatchString(r.schema) {
@@ -445,6 +586,86 @@ func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
 		// run was cut short by a cancelled context.
 		_, _ = conn.ExecContext(free,
 			"SELECT pg_advisory_unlock($1)", migrationsLockKey)
+		conn.Close()
+	}, nil
+}
+
+// migrationsMySQLLock and migrationsMSSQLLock name the lock. MySQL's GET_LOCK
+// namespace is SERVER-wide, so the name carries a hash of the database: two
+// databases on one server (the per-tenant MySQL databases) must not queue behind
+// each other. SQL Server's application locks are already scoped to the current
+// database. The hash keeps the name under MySQL's 64-character limit whatever the
+// database is called. Like migrationsLockKey, these are an identity and never change.
+const (
+	migrationsMySQLLockPrefix = "cleat.migrations."
+	migrationsMSSQLLock       = "cleat.migrations"
+)
+
+// migrationLockWait bounds the wait for the migration lock on MySQL and SQL
+// Server. A migration can legitimately take a long time and the run that holds the
+// lock is doing real work, so this is generous -- it exists so a wedged holder is
+// an error that says so and not a hang.
+const migrationLockWait = 15 * time.Minute
+
+// lockedSession pins ONE connection and takes the migration lock on it, for the
+// two dialects whose lock is SESSION-scoped (MySQL GET_LOCK, SQL Server
+// sp_getapplock with a Session owner). Both survive COMMIT -- MySQL commits DDL
+// implicitly, so a transaction-scoped lock could not span a migration there -- and
+// both stay with the connection, which is why the connection is pinned and why the
+// release runs on it, in a defer, on every exit. If the release itself fails the
+// connection is discarded, which ends the session and so the lock: a lock that
+// outlived its holder would block every later migrator for migrationLockWait.
+func (r *Runner) lockedSession(ctx context.Context) (sqlSession, func(), error) {
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("acquire migration lock: connection: %w", err)
+	}
+	secs := int(migrationLockWait / time.Second)
+	var release string
+	switch r.dialect {
+	case DialectMySQL:
+		var got sql.NullInt64
+		if err := conn.QueryRowContext(ctx,
+			"SELECT GET_LOCK(CONCAT('"+migrationsMySQLLockPrefix+"', MD5(DATABASE())), ?)", secs).Scan(&got); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("acquire migration lock: GET_LOCK: %w", err)
+		}
+		if !got.Valid || got.Int64 != 1 {
+			conn.Close()
+			return nil, nil, fmt.Errorf("acquire migration lock: another migration has held it for %s "+
+				"(GET_LOCK returned %v); is a --migrate-only run stuck?", migrationLockWait, got)
+		}
+		release = "SELECT RELEASE_LOCK(CONCAT('" + migrationsMySQLLockPrefix + "', MD5(DATABASE())))"
+	case DialectMSSQL:
+		var code int
+		if err := conn.QueryRowContext(ctx,
+			"DECLARE @r int; EXEC @r = sp_getapplock @Resource = N'"+migrationsMSSQLLock+
+				"', @LockMode = N'Exclusive', @LockOwner = N'Session', @LockTimeout = @p1; SELECT @r",
+			secs*1000).Scan(&code); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("acquire migration lock: sp_getapplock: %w", err)
+		}
+		if code < 0 {
+			conn.Close()
+			return nil, nil, fmt.Errorf("acquire migration lock: sp_getapplock returned %d "+
+				"(-1 = timed out after %s: is a --migrate-only run stuck?)", code, migrationLockWait)
+		}
+		release = "DECLARE @r int; EXEC @r = sp_releaseapplock @Resource = N'" + migrationsMSSQLLock +
+			"', @LockOwner = N'Session'; SELECT @r"
+	default:
+		// Not reachable from session(); a dialect with no lock is refused
+		// rather than run unserialised, because that is the bug this fixes.
+		conn.Close()
+		return nil, nil, fmt.Errorf("unsupported dialect: %s", r.dialect)
+	}
+	return conn, func() {
+		free := context.WithoutCancel(ctx)
+		var out sql.NullInt64
+		if err := conn.QueryRowContext(free, release).Scan(&out); err != nil ||
+			(r.dialect == DialectMySQL && (!out.Valid || out.Int64 != 1)) ||
+			(r.dialect == DialectMSSQL && out.Int64 < 0) {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
 		conn.Close()
 	}, nil
 }

@@ -88,6 +88,54 @@ watchdog entirely.
 
 ---
 
+## Schema migration
+
+A worker does **not** migrate the database when it starts (cleat#2117). A normal
+start verifies the schema and refuses to start if it is behind; migrating is a
+deploy step.
+
+### --migrate-only
+
+| Type | Default | Description |
+|------|---------|-------------|
+| bool | `false` | Apply the core and plugin migrations and exit |
+
+Exits `0` when the schema is current and non-zero on any failure, having started
+nothing else: it exits before the worker registers and before it reads the secrets,
+so it needs no master key. Use `--migrate-db` for a DSN with DDL rights (default:
+`--db`). Idempotent: a second run on a migrated database changes nothing. Safe if
+several run at once, or alongside a `--migrate-on-start` worker: they queue on a
+named lock in the database, on every dialect. A plugin migration that fails fails
+the run.
+
+---
+
+### --migrate-on-start
+
+| Type | Default | Description |
+|------|---------|-------------|
+| bool | `false` | Let this worker apply pending migrations at startup |
+
+The behaviour every worker had before cleat#2117, kept as an explicit opt-in for a
+single node or development, where there is no deploy step. A fleet should use
+`--migrate-only`.
+
+**What a normal start does instead.** It reads the migration tracking tables (as the
+runtime role, no DDL rights needed) and:
+
+| the schema is | the worker |
+|---|---|
+| **behind** — a migration this binary ships is not applied | refuses to start; the message says which and how to fix it |
+| **equal** | starts |
+| **ahead** — migrations applied that this binary does not ship | starts, and logs a warning naming both versions |
+
+Ahead starts because a rolling upgrade migrates to the new version while workers on
+the old one are still running or restarting; refusing there would wedge the rollout
+on the workers it is replacing. It relies on migrations staying additive within a
+release line.
+
+---
+
 ## Concurrency
 
 ### --concurrency

@@ -1,0 +1,51 @@
+# The schema migration, as a Job to run BEFORE the worker Deployment (cleat#2117).
+#
+# A worker no longer migrates the database when it starts: it verifies the schema
+# and refuses to start, with the remediation in its message, if a migration is not
+# applied. So apply this first, wait for it, then roll out the Deployment:
+#
+#   kubectl apply -f k8s/migrate-job.yaml
+#   kubectl wait --for=condition=complete --timeout=15m job/cleat-migrate
+#   kubectl apply -f k8s/deployment.yaml
+#
+# `cleat-worker --migrate-only` is idempotent (a second run changes nothing) and safe
+# if two run at once, so re-applying this on every release is the intended use. Delete
+# the finished Job before the next release (`kubectl delete job cleat-migrate`), or
+# add ttlSecondsAfterFinished if your cluster enables it.
+#
+# It needs DDL rights, which the worker's runtime role should not have: point
+# database_url in the cleat-worker-migrate Secret at an owner/migrator role.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cleat-migrate
+  labels:
+    app: cleat-migrate
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: cleat-migrate
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: cleat-worker:latest
+          args:
+            - "--migrate-only"
+            - "--db=$(DATABASE_URL)"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cleat-worker-migrate
+                  key: database_url
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

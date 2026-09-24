@@ -1101,18 +1101,77 @@ func main() {
 		WithFS(migrationsOverrideFS()).
 		WithLockTimeout(*migrationLockTimeout).
 		WithSchema(*schemaName)
-	if err := migrator.Run(ctx); err != nil {
-		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges (see --migrate-db)", "worker_id", workerID, "error", err)
+
+	// MIGRATE OR VERIFY (cleat#2117). Migration is a deploy step: `--migrate-only`
+	// applies it and exits; a normal start only VERIFIES that the schema is not
+	// behind this binary and refuses, with the remediation, if it is. The old
+	// migrate-at-every-start is the explicit opt-in `--migrate-on-start`, for a
+	// single node with no deploy step.
+	migrating := *migrateOnly || *migrateOnStart
+	if migrating {
+		if err := migrator.Run(ctx); err != nil {
+			logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges (see --migrate-db)", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+		// WithSchema, or plugin tables land in public while the runtime pool --
+		// opened through dsnWithSchema -- looks in --schema, and every plugin's
+		// first query fails with "relation ... does not exist". cleat#1287.
+		if err := plugin.RunMigrations(ctx, migrateDB, plugin.Dialect(factory.Dialect()), nil, plugList,
+			plugin.WithSchema(*schemaName)); err != nil {
+			logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+	} else if err := verifySchema(ctx, migrator, migrateDB, plugin.Dialect(factory.Dialect()), plugList,
+		*schemaName, func(msg string, args ...any) {
+			logger.WarnContext(context.Background(), msg, append([]any{"worker_id", workerID}, args...)...)
+		}); err != nil {
+		logger.ErrorContext(context.Background(), "refusing to start: "+err.Error(), "worker_id", workerID)
 		os.Exit(1)
 	}
 
-	// WithSchema, or plugin tables land in public while the runtime pool --
-	// opened through dsnWithSchema -- looks in --schema, and every plugin's
-	// first query fails with "relation ... does not exist". cleat#1287.
-	if err := plugin.RunMigrations(ctx, migrateDB, plugin.Dialect(factory.Dialect()), nil, plugList,
-		plugin.WithSchema(*schemaName)); err != nil {
-		logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
-		os.Exit(1)
+	// For MySQL, the factory creates a per-tenant database that needs its own
+	// copy of the schema: migrated or verified exactly as the shared one is.
+	// (This block used to sit further down, after the row-level-security check;
+	// nothing there depends on it, and --migrate-only has to finish it before it
+	// exits.)
+	if *driver == "mysql" {
+		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
+			tenantDB, terr := mf.TenantDB(ctx, defaultTenantID)
+			if terr != nil {
+				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
+				os.Exit(1)
+			}
+			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), *migrationsDir).
+				WithFS(migrationsOverrideFS()).
+				WithLockTimeout(*migrationLockTimeout).
+				WithSchema(*schemaName)
+			if migrating {
+				if terr = tm.Run(ctx); terr != nil {
+					logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
+					os.Exit(1)
+				}
+				if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList,
+					plugin.WithSchema(*schemaName)); terr != nil {
+					logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr)
+					os.Exit(1)
+				}
+			} else if terr = verifySchema(ctx, tm, tenantDB, plugin.Dialect(factory.Dialect()), plugList,
+				*schemaName, func(msg string, args ...any) {
+					logger.WarnContext(context.Background(), msg, append([]any{"worker_id", workerID}, args...)...)
+				}); terr != nil {
+				logger.ErrorContext(context.Background(), "refusing to start (tenant database): "+terr.Error(), "worker_id", workerID)
+				os.Exit(1)
+			}
+		}
+	}
+
+	// --migrate-only ends HERE: the schema is current, and nothing below -- the
+	// worker registering, the secrets check, serving -- is part of a deploy step.
+	// In particular a migrate job has no reason to hold the master key, so it must
+	// not reach checkSecretsUsable.
+	if *migrateOnly {
+		logger.InfoContext(context.Background(), "migrations complete", "worker_id", workerID)
+		os.Exit(0)
 	}
 
 	// The secrets startup check, now that the schema is current. See the comment
@@ -1166,31 +1225,6 @@ func main() {
 			os.Exit(1)
 		default:
 			logger.WarnContext(context.Background(), engine.FormatRLSBypass(reasons), "worker_id", workerID)
-		}
-	}
-
-	// For MySQL, the factory creates a per-tenant database that needs its
-	// own copy of the schema. Run core and plugin migrations on it.
-	if *driver == "mysql" {
-		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
-			tenantDB, terr := mf.TenantDB(ctx, defaultTenantID)
-			if terr != nil {
-				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
-				os.Exit(1)
-			}
-			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), *migrationsDir).
-				WithFS(migrationsOverrideFS()).
-				WithLockTimeout(*migrationLockTimeout).
-				WithSchema(*schemaName)
-			if terr = tm.Run(ctx); terr != nil {
-				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
-				os.Exit(1)
-			}
-			if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList,
-				plugin.WithSchema(*schemaName)); terr != nil {
-				logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr)
-				os.Exit(1)
-			}
 		}
 	}
 

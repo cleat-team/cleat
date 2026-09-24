@@ -591,8 +591,10 @@ for idempotent application).
 
 ### Future Plans
 
-- **Auto-migration** at worker startup: the worker will check the schema
-  version and apply pending migrations before entering the dispatch loop.
+- **Auto-migration** at worker startup: shipped, and then made a deploy step
+  (cleat#2117). `cleat-worker --migrate-only` applies pending migrations and exits;
+  a normal start verifies the schema and refuses if it is behind; `--migrate-on-start`
+  is the opt-in for a single node. See `docs/operations/upgrading.md`.
 - **Versioned migrations**: each migration will be a numbered SQL file in a
   `migrations/` directory with an up/down pair.
 - **Plugin migrations**: plugins implementing `plugin.HasMigrations` can

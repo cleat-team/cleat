@@ -12,6 +12,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **A worker no longer migrates the database when it starts; migration is a deploy step.**
+  (cleat#2117)
+
+  `cleat-worker --migrate-only` applies the core and plugin migrations and exits `0` (any
+  failure is non-zero). It is idempotent, needs no master key, and is safe if two run at
+  once. A normal start now **verifies** the schema and refuses to start, with the
+  remediation in the message, if a migration this binary ships is not applied. **One-line
+  migration:** run `cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"` (with
+  `--migrate-db` for a role that has DDL rights) before starting workers, or start a
+  single-node or development worker with `--migrate-on-start`, which restores the old behaviour.
+
+  **A schema ahead of the binary still starts**, with a warning naming both versions, so a
+  rolling upgrade (which migrates to the new version while old workers are still running)
+  does not wedge on the workers it is replacing. A schema *behind* is refused.
+
+  Concurrent migrators are now safe on **every** dialect. Measured before this change, four
+  concurrent runs against an empty database: PostgreSQL 4 of 4 succeeded; **MySQL 1 of 4 and
+  SQL Server 1 of 4** (the rest failed with `Duplicate key name`, a deadlock, and "already an
+  object named"). MySQL and SQL Server now queue on a named lock, as PostgreSQL always did.
+
+  Shipped launch sites updated: the Helm chart (a pre-install/pre-upgrade hook Job, `migration.*`
+  values), `k8s/migrate-job.yaml`, the `.deb` systemd unit (`ExecStartPre`),
+  `docker-compose.cluster.yml` (a one-shot `migrate` service), and the three `cleat init`
+  templates and `make` dev target (`--migrate-on-start`). Anything of your own that starts a
+  worker against a fresh or older database needs one of the two.
+
 - **A `TERMINATE` close-policy child is now recorded `status='terminated'`, not
   `status='failed'`.** (cleat#1978)
 

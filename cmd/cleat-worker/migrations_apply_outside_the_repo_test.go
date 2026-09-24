@@ -66,10 +66,15 @@ func TestWorkerMigratesFromOutsideTheRepo(t *testing.T) {
 	const apiAddr = ":18299"
 	waitForWorkerTestPortFree(t, 18299)
 
+	// --migrate-on-start: this test is about WHERE the embedded migrations are read
+	// from, and it starts the worker on an EMPTY database. A worker no longer
+	// migrates unless asked (cleat#2117); without the flag it refuses to start, which
+	// is asserted in a_migration_is_a_deploy_step_test.go.
 	worker := exec.Command(workerBin,
 		"--db="+dsn,
 		"--api-addr="+apiAddr,
 		"--require-auth=false",
+		"--migrate-on-start",
 	)
 	worker.Dir = outsideDir
 	worker.Env = os.Environ()

@@ -48,6 +48,7 @@ cmd/cleat-worker	TestABlockedStartIsAcceptedAndWaits	1
 cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow	1
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
 cmd/cleat-worker	TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP	1
+cmd/cleat-worker	TestMigrationIsADeployStepOnEveryDialect	2
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
@@ -172,6 +173,7 @@ engine/testutil	MySQLTestDB	1
 engine/testutil	SuiteTestDB	2
 engine/testutil	TestDB	4
 internal/transform	TestUpdateCallSitesSkipsWhenHAlreadyFirstArg	1
+migration	TestConcurrentMigratorsAreSerialisedOnMySQLAndSQLServer	1
 migration	TestCreatedAtIsBackfilledFromUpdatedAtNotFromTheMigrationsClock	1
 migration	TestIdempotencyTenantMigrationPreservesExistingKeys	1
 migration	mssqlCredentials	2
@@ -180,6 +182,7 @@ migration	mssqlDSNAsSA	1
 migration	newMSSQLScratchDB	1
 migration	newMySQLScratchDB	1
 migration	newScratchDB	1
+plugin	TestConcurrentPluginMigratorsAreSerialisedOnMySQLAndSQLServer	1
 plugin	TestDownloadWASMInvalidURL	1
 plugin	newPluginScratchDB	1
 plugins/auditlog	TestTheAuditInsertWorksOnMySQLsIDColumn	1
