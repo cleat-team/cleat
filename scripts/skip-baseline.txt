@@ -198,6 +198,8 @@ plugin	TestConcurrentPluginMigratorsAreSerialisedOnMySQLAndSQLServer	1
 plugin	TestDownloadWASMInvalidURL	1
 plugin	newPluginScratchDB	1
 plugins/auditlog	TestTheAuditInsertWorksOnMySQLsIDColumn	1
+plugins/blobstore	TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave	1
+plugins/blobstore	TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkflowsRef	1
 plugins/scheduledbackup	TestNextRun_Feb29NonLeapYear	1
 plugins/scheduler	TestCronDSTTransition	1
 tests/cluster	TestAddRemoveWorkers	1

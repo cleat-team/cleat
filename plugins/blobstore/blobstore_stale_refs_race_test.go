@@ -13,7 +13,7 @@
 //   - TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave uses
 //     sweepStaleWorkflowRefsMSSQLTestHook to land a write in the exact gap
 //     between the two reads, every run, in well under a second.
-//   - TestReview2141_ConcurrentNewWorkflowKeepsItsRef (cleat-review's own
+//   - TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkflowsRef (cleat-review's own
 //     scratch reproduction, ported here) hits the same window through real
 //     goroutine/database concurrency with no hook at all -- the case that
 //     the deterministic test's hook could in principle be hiding something
@@ -42,6 +42,17 @@ import (
 )
 
 func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
+	// MSSQL-only: NewPluginTestBackends(t) only returns an MSSQL backend
+	// when CLEAT_TEST_MSSQL is set (and Fatals, rather than skipping, if it
+	// is set but unreachable -- see MSSQLTestDB), so this is "not
+	// requested", never "requested but unavailable". Without it, a
+	// PostgreSQL-only job's loop below finds no MSSQL backend, runs zero
+	// subtests and asserts nothing -- a vacuous pass, not a skip event, and
+	// invisible to both scripts/check-skips.sh and
+	// scripts/check-skip-budget.sh. cleat#2181 (e).
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server-only deterministic-interleave test")
+	}
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		if be.Dialect != testutil.DialectMSSQL {
 			continue // the race is specific to sweepStaleWorkflowRefsMSSQL's two-read shape
@@ -143,7 +154,7 @@ func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
 	}
 }
 
-// TestReview2141_ConcurrentNewWorkflowKeepsItsRef is cleat-review's own
+// TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkflowsRef is cleat-review's own
 // reproduction (plugins/blobstore/zz_review_race_test.go, run against
 // bf55fbba), ported in as the real-concurrency counterpart to the
 // deterministic test above: no hook, just a writer goroutine racing the
@@ -151,7 +162,7 @@ func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
 // a 4% loss rate against the pre-fix ordering); the CI default is smaller so
 // the test finishes quickly, but still reproduces reliably -- see the
 // reliability measurement in this PR's description.
-func TestReview2141_ConcurrentNewWorkflowKeepsItsRef(t *testing.T) {
+func TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkflowsRef(t *testing.T) {
 	nTenants, _ := strconv.Atoi(os.Getenv("REVIEW_TENANTS"))
 	if nTenants == 0 {
 		nTenants = 8
@@ -159,6 +170,11 @@ func TestReview2141_ConcurrentNewWorkflowKeepsItsRef(t *testing.T) {
 	raceDuration := 2 * time.Second
 	if d, err := time.ParseDuration(os.Getenv("REVIEW_RACE_DURATION")); err == nil && d > 0 {
 		raceDuration = d
+	}
+	// MSSQL-only -- see the identical guard and reasoning on
+	// TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave above.
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server-only real-concurrency test")
 	}
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		if be.Dialect != testutil.DialectMSSQL {
