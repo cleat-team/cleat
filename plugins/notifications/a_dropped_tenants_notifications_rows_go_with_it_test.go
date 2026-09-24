@@ -183,6 +183,31 @@ func TestADroppedTenantsNotificationsRowsGoWithIt(t *testing.T) {
 			if got := countWebhookDelivery(webhookIDs[bystander]); got != 1 {
 				t.Errorf("dropping the victim changed the bystander's webhook_delivery rows (count=%d, want 1)", got)
 			}
+
+			// Drop the bystander too, now that every assertion that needed
+			// it alive has run. Coordinator's #2233 review flagged that a
+			// prior run's bystander tenant, webhook and delivery rows were
+			// left behind in the shared database indefinitely -- tn is
+			// fresh per run (uuid.New()), so a leftover bystander from an
+			// earlier run cannot collide with THIS run's counts, but it is
+			// exactly the "unbounded table is a trap for whoever writes the
+			// next test" CLAUDE.md warns about. Via admin.drop_tenant
+			// itself -- the same sweep this test exists to verify -- rather
+			// than a t.Cleanup: t.Cleanup callbacks run AFTER this closure
+			// returns, by which point the deferred be.Cleanup() above has
+			// already closed be.DB, so a cleanup registered with t.Cleanup
+			// here would silently fail on a closed pool (measured: exactly
+			// one of the two tenants per run leaked with that shape).
+			switch be.Dialect {
+			case testutil.DialectMSSQL:
+				if _, err := be.DB.ExecContext(ctx, `EXEC admin.drop_tenant @tenant_id = @p1`, bystander); err != nil {
+					t.Errorf("cleanup: admin.drop_tenant(bystander): %v", err)
+				}
+			default:
+				if _, err := be.DB.ExecContext(ctx, `SELECT admin.drop_tenant($1, 'public')`, bystander); err != nil {
+					t.Errorf("cleanup: admin.drop_tenant(bystander): %v", err)
+				}
+			}
 		})
 	}
 }

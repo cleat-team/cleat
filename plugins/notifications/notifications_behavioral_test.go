@@ -1455,6 +1455,54 @@ func TestDeliverMissingConfig(t *testing.T) {
 	}
 }
 
+// TestDeliverSoftDeletedConfig is the backstop half of coordinator's #2233
+// item 7 -- lower priority than the handleListWebhooks list assertion, but
+// asked for alongside it: TestDeliverMissingConfig above proves deliver()
+// refuses a webhook_id with NO config row at all, which is a different SQL
+// path from a config row that EXISTS but carries deleted_at. Both go through
+// the same "AND deleted_at IS NULL" filter (background.go's deliver), but a
+// row that exists and merely fails the filter is the actual shape a
+// soft-deleted webhook takes, and is what this test seeds.
+func TestDeliverSoftDeletedConfig(t *testing.T) {
+	p, store := setupTestPlugin(t)
+
+	webhookID := uuid.New()
+	now := time.Now().UTC()
+	store.configs = append(store.configs, &testWebhookCfg{
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              "https://example.com/soft-deleted",
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          false,
+		createdAt:        now,
+		updatedAt:        now,
+		deletedAt:        &now,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	d := deliveryRow{
+		ID:           uuid.New(),
+		WebhookID:    webhookID,
+		EventType:    "test.event",
+		Payload:      json.RawMessage(`{"msg":"hello"}`),
+		AttemptCount: 0,
+	}
+
+	outcome, err := p.deliver(ctx, ctx, d)
+	if err == nil {
+		t.Fatal("deliver: expected an error for a soft-deleted webhook's config, got nil")
+	}
+	if outcome != "" {
+		t.Errorf("deliver: expected empty outcome on error, got %q", outcome)
+	}
+	if !strings.Contains(err.Error(), "lookup webhook config") {
+		t.Errorf("deliver: expected error mentioning the config lookup, got %q", err)
+	}
+}
+
 // ===========================================================================
 // processDeliveries — one delivery with mock server
 // ===========================================================================

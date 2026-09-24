@@ -96,43 +96,64 @@ func TestAPluginCallersJSONSurvivesTheColumn(t *testing.T) {
 		insert  string // one $-free MySQL statement with a single ? for the value
 		read    string
 		cleanup string
+
+		// parentInsert/parentCleanup seed and remove a row this case's insert
+		// depends on via a foreign key, keyed on the same tenant value. Empty
+		// for every column except webhook_delivery.payload: migrations.go v7
+		// added an enforced webhook_id -> webhook_config(id) foreign key on
+		// MySQL (cleat#2222 -- MySQL's inline column-level REFERENCES is
+		// accepted syntax but was never enforced before v7), so an insert
+		// with no matching webhook_config row now fails the fixture rather
+		// than testing the column.
+		parentInsert  string
+		parentCleanup string
 	}{
 		{"event_stream.event",
 			"INSERT INTO event_stream (tenant_id, stream_id, sequence, event) VALUES (?, 'p1622', 1, ?)",
 			"SELECT event FROM event_stream WHERE tenant_id = ?",
-			"DELETE FROM event_stream WHERE tenant_id = ?"},
+			"DELETE FROM event_stream WHERE tenant_id = ?",
+			"", ""},
 		{"event_subscriptions.input_template",
 			"INSERT INTO event_subscriptions (id, tenant_id, event_type, def_name, input_template) VALUES (UUID(), ?, 'e', 'd', ?)",
 			"SELECT input_template FROM event_subscriptions WHERE tenant_id = ?",
-			"DELETE FROM event_subscriptions WHERE tenant_id = ?"},
+			"DELETE FROM event_subscriptions WHERE tenant_id = ?",
+			"", ""},
 		{"kv_store.value",
 			"INSERT INTO kv_store (tenant_id, `key`, value) VALUES (?, 'k', ?)",
 			"SELECT value FROM kv_store WHERE tenant_id = ?",
-			"DELETE FROM kv_store WHERE tenant_id = ?"},
+			"DELETE FROM kv_store WHERE tenant_id = ?",
+			"", ""},
 		{"schedules.input",
 			"INSERT INTO schedules (tenant_id, id, name, cron, workflow_name, input) VALUES (?, UUID(), 'n', '* * * * *', 'w', ?)",
 			"SELECT input FROM schedules WHERE tenant_id = ?",
-			"DELETE FROM schedules WHERE tenant_id = ?"},
+			"DELETE FROM schedules WHERE tenant_id = ?",
+			"", ""},
 		{"feature_flags.rules",
 			"INSERT INTO feature_flags (tenant_id, id, `key`, rules) VALUES (?, UUID(), 'k', ?)",
 			"SELECT rules FROM feature_flags WHERE tenant_id = ?",
-			"DELETE FROM feature_flags WHERE tenant_id = ?"},
+			"DELETE FROM feature_flags WHERE tenant_id = ?",
+			"", ""},
 		{"task_queue.input",
 			"INSERT INTO task_queue (tenant_id, queue_name, job_id, input) VALUES (?, 'q', UUID(), ?)",
 			"SELECT input FROM task_queue WHERE tenant_id = ?",
-			"DELETE FROM task_queue WHERE tenant_id = ?"},
+			"DELETE FROM task_queue WHERE tenant_id = ?",
+			"", ""},
 		{"task_queue.payload",
 			"INSERT INTO task_queue (tenant_id, queue_name, job_id, payload) VALUES (?, 'q', UUID(), ?)",
 			"SELECT payload FROM task_queue WHERE tenant_id = ?",
-			"DELETE FROM task_queue WHERE tenant_id = ?"},
+			"DELETE FROM task_queue WHERE tenant_id = ?",
+			"", ""},
 		{"webhook_events.payload",
 			"INSERT INTO webhook_events (id, source_id, tenant_id, payload) VALUES (UUID(), UUID(), ?, ?)",
 			"SELECT payload FROM webhook_events WHERE tenant_id = ?",
-			"DELETE FROM webhook_events WHERE tenant_id = ?"},
+			"DELETE FROM webhook_events WHERE tenant_id = ?",
+			"", ""},
 		{"webhook_delivery.payload",
 			"INSERT INTO webhook_delivery (id, webhook_id, event_type, payload) VALUES (UUID(), ?, 'e', ?)",
 			"SELECT payload FROM webhook_delivery WHERE webhook_id = ?",
-			"DELETE FROM webhook_delivery WHERE webhook_id = ?"},
+			"DELETE FROM webhook_delivery WHERE webhook_id = ?",
+			"INSERT INTO webhook_config (tenant_id, id, url) VALUES (UUID(), ?, 'https://example.com')",
+			"DELETE FROM webhook_config WHERE id = ?"},
 	}
 
 	for _, col := range columns {
@@ -147,7 +168,20 @@ func TestAPluginCallersJSONSurvivesTheColumn(t *testing.T) {
 				// breaks nothing today -- but a shared local database runs
 				// this 81 times per invocation, and an unbounded table is a
 				// trap for whoever writes the next test against it.
+				//
+				// The child row's cleanup is registered AFTER the parent's,
+				// so t.Cleanup (LIFO) runs it FIRST -- the parent must
+				// outlive every row that references it.
+				if col.parentCleanup != "" {
+					t.Cleanup(func() { db.ExecContext(ctx, col.parentCleanup, tenant) })
+				}
 				t.Cleanup(func() { db.ExecContext(ctx, col.cleanup, tenant) })
+
+				if col.parentInsert != "" {
+					if _, err := db.ExecContext(ctx, col.parentInsert, tenant); err != nil {
+						t.Fatalf("UNMEASURED: insert parent row for %s: %v", col.name, err)
+					}
+				}
 
 				if _, err := db.ExecContext(ctx, col.insert, tenant, p.json); err != nil {
 					t.Fatalf("UNMEASURED: insert into %s: %v", col.name, err)

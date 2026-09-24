@@ -310,6 +310,13 @@ func (p *Plugin) retryOrFail(ctx context.Context, d deliveryRow, reason string) 
 
 // markDelivered updates the delivery as successfully delivered.
 func (p *Plugin) markDelivered(ctx context.Context, id uuid.UUID, attemptCount, statusCode int, responseBody string) error {
+	// AND status IN ('pending', 'retrying'): a delivery attempt in flight
+	// races handleDeleteWebhook's own cancellation (routes.go) exactly the
+	// way sendWebhook's guarded INSERT races the same delete
+	// (host_functions.go) -- cleat-review's #2233 finding. Without this, an
+	// attempt that was already under way when the delete committed the
+	// row's status to 'cancelled' would overwrite that back to 'delivered'
+	// afterward, resurrecting a delivery the tenant asked to stop.
 	_, err := p.db.Exec(ctx, plugin.Rebind(`
 			UPDATE webhook_delivery
 			SET status = 'delivered',
@@ -318,7 +325,7 @@ func (p *Plugin) markDelivered(ctx context.Context, id uuid.UUID, attemptCount, 
 			    delivered_at = now(),
 			    response_code = $2,
 			    response_body = $3
-			WHERE id = $4
+			WHERE id = $4 AND status IN ('pending', 'retrying')
 		`, p.dialect), attemptCount, statusCode, responseBody, id)
 	if err != nil {
 		return fmt.Errorf("mark delivered: %w", err)
@@ -340,6 +347,9 @@ func (p *Plugin) markRetrying(ctx context.Context, id uuid.UUID, attemptCount in
 	// next_attempt_at expression, ahead of $3/$4 textually, so the args
 	// below are ordered to match rather than to match the column order in
 	// the SET list. See CLAUDE.md's "MySQL binds `?` by APPEARANCE".
+	// AND status IN ('pending', 'retrying'): see markDelivered's comment --
+	// the same guard against resurrecting a delivery a concurrent delete
+	// already cancelled.
 	query := fmt.Sprintf(`
 			UPDATE webhook_delivery
 			SET status = 'retrying',
@@ -347,7 +357,7 @@ func (p *Plugin) markRetrying(ctx context.Context, id uuid.UUID, attemptCount in
 			    last_attempt_at = %s,
 			    next_attempt_at = %s,
 			    response_body = $3
-			WHERE id = $4
+			WHERE id = $4 AND status IN ('pending', 'retrying')
 		`, nowSQLExpr(p.dialect), nowPlusSecondsSQLExpr(p.dialect, "$2"))
 	_, err := p.db.Exec(ctx, plugin.Rebind(query, p.dialect), attemptCount, backoffSeconds, reason, id)
 	if err != nil {
@@ -360,13 +370,16 @@ func (p *Plugin) markRetrying(ctx context.Context, id uuid.UUID, attemptCount in
 
 // markFailed updates the delivery as permanently failed.
 func (p *Plugin) markFailed(ctx context.Context, id uuid.UUID, attemptCount int, reason string) error {
+	// AND status IN ('pending', 'retrying'): see markDelivered's comment --
+	// the same guard against resurrecting a delivery a concurrent delete
+	// already cancelled.
 	_, err := p.db.Exec(ctx, plugin.Rebind(`
 			UPDATE webhook_delivery
 			SET status = 'failed',
 			    attempt_count = $1,
 			    last_attempt_at = now(),
 			    response_body = $2
-			WHERE id = $3
+			WHERE id = $3 AND status IN ('pending', 'retrying')
 		`, p.dialect), attemptCount, reason, id)
 	if err != nil {
 		return fmt.Errorf("mark failed: %w", err)

@@ -426,6 +426,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// MySQL raises ER_DUP_KEYNAME/ER_FK_DUP_NAME on a re-add rather
 			// than silently no-op-ing, and there is no ADD CONSTRAINT IF NOT
 			// EXISTS to lean on.
+			//
+			// ADD FOREIGN KEY validates every existing row and refuses the
+			// migration if an orphan is already present -- fine here, because
+			// 0.3.0 requires a fresh database (#2058 decision 3: no upgrade
+			// path from v0.2.0, and #2059 compacts the migration set before
+			// the tag), so no database this ever runs against can already
+			// hold a pre-v7 orphan from the old hard-delete path.
 			UpMySQL: `
 				SET @fk := (
 					SELECT COUNT(*) FROM information_schema.table_constraints

@@ -210,6 +210,28 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 				t.Errorf("LIST deliveries for deleted webhook: want 404, got %d: %s", deliveriesRec.Code, deliveriesRec.Body.String())
 			}
 
+			// handleListWebhooks was the one read path GET/PUT/DELETE/
+			// ListDeliveries above did not cover: coordinator's #2233 review
+			// found it unasserted -- its own query carries the same
+			// "AND deleted_at IS NULL" as every other read here, but nothing
+			// proved a soft-deleted webhook is actually absent from the list
+			// rather than merely 404ing when addressed directly.
+			listReq := httptest.NewRequest("GET", "/webhooks", nil).WithContext(tenantCtx)
+			listRec := httptest.NewRecorder()
+			p.handleListWebhooks(listRec, listReq)
+			if listRec.Code != http.StatusOK {
+				t.Fatalf("LIST webhooks: want 200, got %d: %s", listRec.Code, listRec.Body.String())
+			}
+			var listed []webhookConfigJSON
+			if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+				t.Fatalf("decode list response: %v", err)
+			}
+			for _, c := range listed {
+				if c.ID == webhookID {
+					t.Errorf("LIST webhooks after delete: the deleted webhook %s is still present", webhookID)
+				}
+			}
+
 			// Repeating the delete is a 404, not a silent no-op success: the
 			// production WHERE clause's own "deleted_at IS NULL" makes a second
 			// soft-delete affect 0 rows.
@@ -246,16 +268,32 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 			// (removing "AND wc.deleted_at IS NULL" from the JOIN) and finding
 			// the mssql subtest stayed green -- it was RLS hiding everything,
 			// not the guard being exercised.
+			//
+			// The sweep's own attempted/succeeded/failed RETURN VALUES are NOT
+			// asserted on here, deliberately: they count every due delivery in
+			// the whole database, tenant-scoped test data from a PRIOR run
+			// included, since nothing truncates this shared, persistent
+			// database between runs. Coordinator's #2233 review found exactly
+			// that -- attempted!=0 on a second run against PG/MSSQL, from
+			// leftover rows the first run's cleanup never reached. What this
+			// test owns is orphanID's own row, so that is what gets checked,
+			// by identity rather than by a count something else can inflate.
 			sweepCtx := plugin.AcrossAllTenants(ctx, "cleat#2220 test: sweeping due deliveries across tenants")
-			attempted, succeeded, failed, err := p.processDeliveries(sweepCtx, ctx)
-			if err != nil {
+			if _, _, _, err := p.processDeliveries(sweepCtx, ctx); err != nil {
 				t.Fatalf("processDeliveries: %v", err)
 			}
-			if attempted != 0 {
-				t.Errorf("processDeliveries after delete: attempted=%d, want 0 (queryDueDeliveries' join must exclude it)", attempted)
+			var orphanStatus string
+			var orphanAttempts int
+			var orphanLastAttempt any
+			if err := readConn.QueryRowContext(ctx, plugin.Rebind(
+				`SELECT status, attempt_count, last_attempt_at FROM webhook_delivery WHERE id = $1`, dialect),
+				orphanID).Scan(&orphanStatus, &orphanAttempts, &orphanLastAttempt); err != nil {
+				t.Fatalf("read orphan delivery after sweep: %v", err)
 			}
-			if succeeded != 0 || failed != 0 {
-				t.Errorf("processDeliveries after delete: succeeded=%d failed=%d, want 0/0", succeeded, failed)
+			if orphanStatus != "pending" || orphanAttempts != 0 || orphanLastAttempt != nil {
+				t.Errorf("orphan delivery %s after sweep: status=%q attempt_count=%d last_attempt_at=%v, "+
+					"want pending/0/nil (queryDueDeliveries' join must exclude it)",
+					orphanID, orphanStatus, orphanAttempts, orphanLastAttempt)
 			}
 			if delivered != 0 {
 				t.Errorf("mock HTTP server received %d request(s) for a deleted webhook, want 0", delivered)
@@ -271,32 +309,23 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 				t.Errorf("sendWebhook against a deleted webhook: got %q, want it to mention \"webhook not found\"", err)
 			}
 
-			// ---- the race guard, in isolation ----
-			// sendWebhook's own existence check has already refused every call
-			// against this webhook since the delete -- that is what the
-			// assertion just above covers. What it cannot exercise is the window
-			// between that check succeeding and the INSERT running: a call whose
-			// lookup happened a moment before the delete lands. Running the
-			// production guarded INSERT text directly, against a webhook this
-			// test has already deleted, is the deterministic equivalent of
-			// losing that race every time, with no goroutines or timing needed.
-			existsGuard := "SELECT 1 FROM webhook_config WHERE id = $6 AND tenant_id = $7 AND deleted_at IS NULL"
-			if dialect != plugin.DialectMSSQL {
-				existsGuard += " FOR SHARE"
-			}
-			raceDeliveryID := uuid.New()
-			rowsInserted, err := p.db.Exec(tenantCtx, plugin.Rebind(fmt.Sprintf(`
-				INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, created_at)
-				SELECT $1, $2, $3, $4, 'pending', 0, %s, $5
-				WHERE EXISTS (%s)
-			`, nowSQLExpr(dialect), existsGuard), dialect),
-				raceDeliveryID, webhookID, "raced.after.delete", "{}", time.Now(), webhookID, tenantID)
-			if err != nil {
-				t.Fatalf("race-guarded INSERT against a deleted webhook: %v", err)
-			}
-			if rowsInserted != 0 {
-				t.Errorf("race-guarded INSERT against a deleted webhook: inserted %d row(s), want 0", rowsInserted)
-			}
+			// The race window itself -- a sendWebhook call whose existence
+			// check ran a moment before the delete lands, racing the delete's
+			// own open transaction -- used to be covered here by a retyped
+			// copy of host_functions.go's guarded INSERT text run
+			// deterministically against an already-deleted webhook.
+			// cleat-review measured that a retyped copy passes even with the
+			// real guard mutated to `1=1 OR EXISTS` or with FOR SHARE
+			// dropped entirely, because it is not the code under test. It is
+			// replaced by
+			// TestASendWebhookRacingAnOpenDeleteTransactionIsBlocked
+			// (a_send_webhook_racing_an_open_delete_is_blocked_test.go),
+			// which calls the real p.sendWebhook concurrently against a
+			// delete held open in an uncommitted transaction and proves the
+			// BLOCK, not merely the eventual answer -- PostgreSQL and SQL
+			// Server (with READ_COMMITTED_SNAPSHOT forced ON, the
+			// configuration the gap exists under), matching #2221's own
+			// live-interleaving template for webhookingest.
 		})
 	}
 }

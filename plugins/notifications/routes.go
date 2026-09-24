@@ -456,10 +456,17 @@ func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 	// had ever received a delivery (webhook_delivery.webhook_id REFERENCES
 	// webhook_config(id), no ON DELETE action before migrations.go v7) and
 	// silently orphaned the delivery rows on MySQL instead. Marking the row
-	// deleted rather than removing it keeps it out of every read path
-	// (webhookExistsSQL and the SELECTs above all filter deleted_at IS NULL)
-	// while leaving its delivery history intact for GET .../deliveries and
-	// for anything auditing what was sent before the webhook was removed.
+	// deleted rather than removing it keeps webhook_delivery's rows in the
+	// DATABASE, for anything auditing what was sent before the webhook was
+	// removed, or for a future admin-only endpoint to read them.
+	//
+	// They are NOT reachable through GET .../deliveries once the webhook is
+	// deleted, and this used to say otherwise: handleListDeliveries calls
+	// webhookExistsSQL first, which filters deleted_at IS NULL exactly like
+	// every other read path here, so it 404s for a deleted webhook's id the
+	// same as GET/PUT do (coordinator's #2233 review; see
+	// TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent's own
+	// "LIST deliveries for deleted webhook: want 404" assertion).
 	//
 	// Cancelling the webhook's own pending/retrying deliveries in the SAME
 	// transaction as the soft-delete, not as a separate step, mirrors

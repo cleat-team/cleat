@@ -84,16 +84,29 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	// tenant just removed -- one the cancellation in handleDeleteWebhook's own
 	// transaction never sees, since it runs before this INSERT exists at all.
 	//
-	// FOR SHARE on the EXISTS subquery on PostgreSQL and MySQL, not on SQL
-	// Server, closes the same READ COMMITTED gap #2221 fixed for
-	// webhookingest: at PostgreSQL's default isolation, a plain read does not
-	// see an UPDATE inside a still-open transaction, so an INSERT racing an
-	// open handleDeleteWebhook transaction would otherwise read the
-	// pre-delete row and succeed anyway. FOR SHARE makes the subquery block
-	// until that transaction commits or rolls back, then re-reads and sees
-	// the committed deleted_at. MySQL and SQL Server already block a plain
-	// read against a row an open UPDATE holds, so FOR SHARE is added on MySQL
-	// too (harmless there) and left off SQL Server, which has no such syntax.
+	// FOR SHARE on the EXISTS subquery on PostgreSQL and MySQL closes the same
+	// READ COMMITTED gap #2221 fixed for webhookingest: at PostgreSQL's
+	// default isolation, a plain read does not see an UPDATE inside a still-
+	// open transaction, so an INSERT racing an open handleDeleteWebhook
+	// transaction would otherwise read the pre-delete row and succeed
+	// anyway. FOR SHARE makes the subquery block until that transaction
+	// commits or rolls back, then re-reads and sees the committed
+	// deleted_at. MySQL blocks a plain read against a row an open UPDATE
+	// holds by default, so FOR SHARE is added there too (harmless, and
+	// consistent regardless of which isolation level a given connection
+	// runs at).
+	//
+	// SQL Server does NOT get the same guarantee for free, and this used to
+	// say it did. That is true only with READ_COMMITTED_SNAPSHOT (RCSI) off.
+	// docs/reference/database-backends.md recommends RCSI ON, and under RCSI
+	// a plain SELECT reads a row-versioned snapshot instead of blocking on
+	// the open UPDATE's lock -- so on the recommended configuration this
+	// subquery would read the pre-delete row and race exactly like the
+	// PostgreSQL case above, with no FOR SHARE syntax available to close it.
+	// WITH (READCOMMITTEDLOCK) forces the read to take and wait on a shared
+	// lock instead of using the snapshot, restoring the same blocking
+	// behaviour FOR SHARE gives PostgreSQL and MySQL. cleat-review measured
+	// this closes the gap on MSSQL with RCSI on.
 	//
 	// The residual: a send_webhook call that reads and commits entirely
 	// before a delete's transaction begins is not a race at either isolation
@@ -101,7 +114,11 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	// webhook was removed" case, and queryDueDeliveries' own independent
 	// deleted_at guard (background.go) still stops it from ever being
 	// attempted.
-	existsGuard := "SELECT 1 FROM webhook_config WHERE id = $6 AND tenant_id = $7 AND deleted_at IS NULL"
+	existsGuard := "SELECT 1 FROM webhook_config"
+	if p.dialect == plugin.DialectMSSQL {
+		existsGuard += " WITH (READCOMMITTEDLOCK)"
+	}
+	existsGuard += " WHERE id = $6 AND tenant_id = $7 AND deleted_at IS NULL"
 	if p.dialect != plugin.DialectMSSQL {
 		existsGuard += " FOR SHARE"
 	}

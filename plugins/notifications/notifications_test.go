@@ -381,8 +381,18 @@ func (c *fakeConn) execUpdateWebhookDelivery(args []driver.NamedValue, query str
 	}
 
 	now := time.Now().UTC()
+	// Matched on "SET status = '...'" specifically, not a bare "'...'": the
+	// mark* UPDATEs (background.go) now all carry a trailing
+	// "AND status IN ('pending', 'retrying')" guard (cleat#2233 item 6), so
+	// markFailed's query text contains BOTH "'retrying'" (from that guard)
+	// and "'failed'" (from its own SET) -- a bare Contains("'retrying'")
+	// check ahead of the "'failed'" one matched markFailed's query too, and
+	// this fake driver reported every delivery reaching its 10th attempt as
+	// still "retrying". Anchoring on "SET status = " excludes the WHERE
+	// clause's literal entirely, so it cannot collide with a future one
+	// either.
 	switch {
-	case strings.Contains(query, "'delivered'"):
+	case strings.Contains(query, "SET status = 'delivered'"):
 		d.status = "delivered"
 		d.deliveredAt = &now
 		// response_code = $2
@@ -394,9 +404,9 @@ func (c *fakeConn) execUpdateWebhookDelivery(args []driver.NamedValue, query str
 		if body, err := argString(args, 3); err == nil {
 			d.responseBody = &body
 		}
-	case strings.Contains(query, "'retrying'"):
+	case strings.Contains(query, "SET status = 'retrying'"):
 		d.status = "retrying"
-	case strings.Contains(query, "'failed'"):
+	case strings.Contains(query, "SET status = 'failed'"):
 		d.status = "failed"
 	}
 
