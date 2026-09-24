@@ -268,6 +268,29 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// the read done a few lines up, closes that window regardless of how
 	// wide it is.
 	//
+	// FOR SHARE on the EXISTS subquery on PostgreSQL and MySQL, not on SQL
+	// Server. cleat-review's re-check found the guard above NARROWED the
+	// race rather than closing it on PostgreSQL: at its default READ
+	// COMMITTED isolation, an uncommitted UPDATE is invisible to a plain
+	// read, so an ingest whose EXISTS subquery ran while a delete's
+	// transaction was still open (UPDATE applied, not yet committed) saw the
+	// pre-delete row -- 201, inserted, signalled inline -- and only then did
+	// the delete commit. Measured: one signal delivered, event
+	// 'completed'. FOR SHARE makes this subquery a locking read: against a
+	// row an open UPDATE already holds, it BLOCKS until that transaction
+	// ends, then re-reads under READ COMMITTED's per-statement snapshot
+	// rule and sees the committed deleted_at. MySQL and SQL Server were
+	// never affected -- both already block a plain read against a
+	// row an open UPDATE holds, which is the same effect FOR SHARE adds to
+	// PostgreSQL explicitly -- so this is added there too, where it is a
+	// harmless restatement of what already happens, but left off SQL Server,
+	// which has no FOR SHARE syntax at all.
+	//
+	// The residual: an ingest that reads and commits ENTIRELY before the
+	// delete's transaction begins is not a race at either isolation level --
+	// it is the ordinary "the event arrived before the delete" case, and
+	// history from before a delete is exactly what cleat#2199 keeps.
+	//
 	// $8, not a second $2: MySQL's Rebind turns each $N occurrence into a `?`
 	// bound by textual position, not by its number (see CLAUDE.md's "MySQL
 	// binds `?` by APPEARANCE" and the identical fix already applied to this
@@ -275,11 +298,15 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// Reusing $2 for the EXISTS clause would work on PostgreSQL and SQL
 	// Server, which bind by number, and silently misalign every MySQL
 	// argument after it. sourceID is passed twice, once per placeholder.
-	rowsInserted, err := p.db.Exec(tenantCtx, plugin.Rebind(`
+	existsGuard := "SELECT 1 FROM webhook_sources WHERE id = $8 AND deleted_at IS NULL"
+	if p.dialect != plugin.DialectMSSQL {
+		existsGuard += " FOR SHARE"
+	}
+	rowsInserted, err := p.db.Exec(tenantCtx, plugin.Rebind(fmt.Sprintf(`
 		INSERT INTO webhook_events (id, source_id, tenant_id, event_type, headers, payload, received_at, processed)
 		SELECT $1, $2, $3, $4, $5, $6, $7, false
-		WHERE EXISTS (SELECT 1 FROM webhook_sources WHERE id = $8 AND deleted_at IS NULL)
-	`, p.dialect), eventID, sourceID, source.TenantID, eventType, string(headersJSON), string(payloadJSON), now, sourceID)
+		WHERE EXISTS (%s)
+	`, existsGuard), p.dialect), eventID, sourceID, source.TenantID, eventType, string(headersJSON), string(payloadJSON), now, sourceID)
 	if err != nil {
 		p.logger.Error("webhook-ingest: store event", "error", err)
 		p.writeError(w, 500, "failed to store event")
