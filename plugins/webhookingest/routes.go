@@ -618,7 +618,12 @@ func (p *Plugin) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query += " ORDER BY received_at DESC"
-	query += fmt.Sprintf(" LIMIT $%d", argIdx)
+	// plugin.LimitClause, not a literal "LIMIT $N": SQL Server has no LIMIT,
+	// only OFFSET/FETCH after an ORDER BY (which this query already has).
+	// cleat-review's re-check on #2198 found this endpoint 500ing on MSSQL --
+	// the same bug as notifications/routes.go's handleListDeliveries, fixed
+	// the same way #2191 already fixed it for /audit/events.
+	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, 100)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)

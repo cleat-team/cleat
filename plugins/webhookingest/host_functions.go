@@ -93,7 +93,12 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 		argIdx++ //nolint:ineffassign // Deliberate: keeps the placeholder counter correct so the next clause added below cannot silently reuse this one's $N. Deleting it is a latent SQL bug, not a cleanup.
 	}
 
-	query += " ORDER BY received_at DESC LIMIT 1"
+	// plugin.LimitClause, not a literal "LIMIT 1": SQL Server has no LIMIT,
+	// only OFFSET/FETCH after an ORDER BY (which this query already has).
+	// cleat-review's re-check on #2198 found await_webhook erroring outright
+	// on MSSQL -- a workflow could never see an ingested event there. Same
+	// bug, same fix, as the two list-endpoint LIMITs in this PR.
+	query += " ORDER BY received_at DESC " + plugin.LimitClause("1", p.dialect)
 
 	var (
 		eventID    uuid.UUID

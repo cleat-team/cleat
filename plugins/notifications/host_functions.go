@@ -74,10 +74,15 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	deliveryID := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.Exec(ctx, plugin.Rebind(`
+	// next_attempt_at uses the DATABASE's own clock (nowSQLExpr), not the
+	// app clock -- see its doc comment in background.go for why. created_at
+	// keeps the app clock: nothing compares it across processes, so the
+	// couple-of-millisecond host/container skew that matters for
+	// next_attempt_at is immaterial there.
+	_, err = p.db.Exec(ctx, plugin.Rebind(fmt.Sprintf(`
 			INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, created_at)
-			VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6)
-		`, p.dialect), deliveryID, input.WebhookID, input.EventType, string(input.Payload), now, now)
+			VALUES ($1, $2, $3, $4, 'pending', 0, %s, $5)
+		`, nowSQLExpr(p.dialect)), p.dialect), deliveryID, input.WebhookID, input.EventType, string(input.Payload), now)
 	if err != nil {
 		return "", fmt.Errorf("notifications: create delivery: %w", err)
 	}

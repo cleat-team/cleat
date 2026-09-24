@@ -517,7 +517,12 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query += " ORDER BY created_at DESC"
-	query += fmt.Sprintf(" LIMIT $%d", argIdx)
+	// plugin.LimitClause, not a literal "LIMIT $N": SQL Server has no LIMIT,
+	// only OFFSET/FETCH after an ORDER BY (which this query already has).
+	// cleat-review's re-check on #2198 found this endpoint 500ing on MSSQL
+	// with "Incorrect syntax near 'LIMIT'" -- the same bug #2191 already
+	// fixed the same way for /audit/events.
+	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, 100)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)

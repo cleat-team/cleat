@@ -52,20 +52,28 @@ import (
 //     failed, was logged, and was skipped, so attempted stayed 0 forever. See
 //     plugin.JSONColumn's doc comment; processDeliveries now scans through it.
 //
-// THE SWEEP IS POLLED, NOT CALLED ONCE. A single processDeliveries call
-// proved flaky in exactly the way this comment warns against elsewhere in
-// this codebase: next_attempt_at is set from the TEST PROCESS's clock (Go's
-// time.Now(), on the host), and the due-delivery WHERE clause compares
-// against the DATABASE SERVER's own clock (SQL now()/NOW(6)/SYSUTCDATETIME(),
-// inside a Docker container). The two are not the same clock, and a
-// container's clock reading even a few milliseconds behind the host's would
-// make a freshly-created delivery read as "not yet due" for a single
-// synchronous sweep. Production never notices this: Run ticks every
-// deliveryInterval (30s by default), which drowns out any millisecond-scale
-// skew. A single-shot assertion here does not have that margin, so it polls
-// instead -- the same shape webhook_config_rows_are_scoped_by_a_policy_test.go
-// already uses for the same reason (its own comment: polled rather than
-// slept, because a fixed sleep is still a wall-clock assertion).
+// THE SWEEP IS A SINGLE CALL, ASSERTED SAME-TICK, NOT POLLED. This used to
+// poll for up to 10s, because next_attempt_at was set from the TEST
+// PROCESS's clock (Go's time.Now(), on the host) while the due-delivery
+// WHERE clause compared against the DATABASE SERVER's own clock (SQL
+// now()/NOW(6)/SYSUTCDATETIME(), inside a Docker container) -- two different
+// clocks, and a container reading even a few milliseconds behind the host's
+// would make a freshly-created delivery read as "not yet due" on a single
+// synchronous sweep. cleat-review's re-check on #2198 measured that skew at
+// ~35ms on MySQL and asked for ONE clock: sendWebhook and markRetrying now
+// stamp next_attempt_at with the DATABASE's own clock (nowSQLExpr,
+// background.go), the same clock queryDueDeliveries compares it against --
+// see that function's doc comment. With one clock, a delivery created a
+// moment ago is due on the very first sweep, by construction, and polling
+// would only have hidden a regression back to two clocks behind a retry
+// loop -- which is exactly what happened before this comment was written:
+// the original polling version of this test could not have caught a
+// same-tick regression, only an eventual-delivery one. The single call
+// below is that catch: if next_attempt_at is ever stamped with the app
+// clock again (or MySQL's NOW(6) reverts to a bare now(), truncating away
+// the microseconds this same check depends on), the first sweep sees the
+// delivery as not-yet-due and this assertion fails, where a polling loop
+// would have silently retried past it.
 func TestSendWebhookDeliversWithTheConfiguredSecret(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		be := be
@@ -174,32 +182,25 @@ func TestSendWebhookDeliversWithTheConfiguredSecret(t *testing.T) {
 			// from, same as Run().
 			sweepCtx := plugin.AcrossAllTenants(ctx, "test: multidb delivery sweep")
 
-			// Polled, not called once -- see the clock-skew comment above the
-			// test. Every tick is a REAL processDeliveries call through the
-			// production code path; this is not a sleep-then-assert.
-			deadline := time.Now().Add(10 * time.Second)
-			var lastAttempted, lastSucceeded, lastFailed int
-			delivered := false
-			for time.Now().Before(deadline) {
-				attempted, succeeded, failed, err := p.processDeliveries(sweepCtx, ctx)
-				if err != nil {
-					t.Fatalf("processDeliveries: %v", err)
-				}
-				lastAttempted, lastSucceeded, lastFailed = attempted, succeeded, failed
-				if succeeded > 0 {
-					delivered = true
-					break
-				}
-				time.Sleep(50 * time.Millisecond)
+			// A SINGLE call, not a loop -- see the doc comment above the
+			// test. sendWebhook and queryDueDeliveries now agree on one
+			// clock, so the delivery created a moment ago must already be
+			// due; polling here would mask exactly the regression this
+			// assertion exists to catch.
+			attempted, succeeded, failed, err := p.processDeliveries(sweepCtx, ctx)
+			if err != nil {
+				t.Fatalf("processDeliveries: %v", err)
 			}
-			if !delivered {
-				t.Fatalf("delivery was never swept as due within 10s "+
-					"(last sweep: attempted=%d succeeded=%d failed=%d)",
-					lastAttempted, lastSucceeded, lastFailed)
+			if succeeded != 1 {
+				t.Fatalf("delivery was not swept as due on the SAME TICK it was created "+
+					"(attempted=%d succeeded=%d failed=%d) -- next_attempt_at and the "+
+					"due-delivery check have gone back to comparing two different clocks; "+
+					"see the doc comment above this test",
+					attempted, succeeded, failed)
 			}
-			if lastFailed != 0 {
+			if failed != 0 {
 				t.Fatalf("delivery attempt failed instead of succeeding: attempted=%d succeeded=%d failed=%d",
-					lastAttempted, lastSucceeded, lastFailed)
+					attempted, succeeded, failed)
 			}
 
 			select {
@@ -231,6 +232,31 @@ func TestSendWebhookDeliversWithTheConfiguredSecret(t *testing.T) {
 			if receivedSig != wantSig {
 				t.Errorf("signature %q does not match the secret set via the admin route (want %q)",
 					receivedSig, wantSig)
+			}
+
+			// GET /webhooks/{id}/deliveries, through the real route. cleat-review's
+			// re-check on #2198 found this 500ing on MSSQL with "Incorrect syntax
+			// near 'LIMIT'" -- handleListDeliveries built its row limit as a
+			// literal "LIMIT $N", which is not valid T-SQL. Fixed with
+			// plugin.LimitClause, the same helper #2191 used for /audit/events;
+			// exercised here so a regression back to a literal LIMIT fails this
+			// test rather than shipping unseen a second time.
+			listReq := httptest.NewRequest("GET", "/webhooks/"+webhookID+"/deliveries", nil).WithContext(tenantCtx)
+			listReq.SetPathValue("id", webhookID)
+			listRec := httptest.NewRecorder()
+			p.handleListDeliveries(listRec, listReq)
+			if listRec.Code != http.StatusOK {
+				t.Fatalf("list deliveries: want 200, got %d: %s", listRec.Code, listRec.Body.String())
+			}
+			var deliveries []map[string]any
+			if err := json.Unmarshal(listRec.Body.Bytes(), &deliveries); err != nil {
+				t.Fatalf("decode deliveries list: %v", err)
+			}
+			if len(deliveries) != 1 {
+				t.Fatalf("deliveries list: got %d entries, want 1: %s", len(deliveries), listRec.Body.String())
+			}
+			if deliveries[0]["status"] != "delivered" {
+				t.Errorf("delivery status in list: got %v, want %q", deliveries[0]["status"], "delivered")
 			}
 		})
 	}
