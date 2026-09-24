@@ -1,6 +1,9 @@
 package testutil
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // cleat#2125's second starter piece: MSSQLAdminDB used to flip the WHOLE
 // DATABASE's predicate form from 'plain' to 'admin' (applyMSSQLCrossTenantOptIn)
@@ -10,6 +13,9 @@ import "testing"
 // installs. This proves the refcounted restore in mssql_admin.go actually
 // puts the form back to 'plain' once the last caller's Cleanup has run.
 func TestMSSQLAdminDBRestoresThePlainPredicateAfterUse(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
 	db := MSSQLTestDB(t)
 	SetupMSSQLFullSchema(t, db)
 
@@ -47,6 +53,9 @@ func TestMSSQLAdminDBRestoresThePlainPredicateAfterUse(t *testing.T) {
 // The refcount, not just the restore: two overlapping callers must not have
 // the first one's Cleanup pull the predicate out from under the second.
 func TestMSSQLAdminDBRefcountsOverlappingCallers(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
 	db := MSSQLTestDB(t)
 	SetupMSSQLFullSchema(t, db)
 
