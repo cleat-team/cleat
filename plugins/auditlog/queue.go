@@ -60,39 +60,52 @@ var (
 	retryBackoffMax = 5 * time.Second
 )
 
-func (c Config) bufferSize() int {
-	if c.BufferSize > 0 {
-		return c.BufferSize
+// Bounds on the operator's numbers. A non-positive value means "use the default", so a zero or a
+// negative cannot switch the wait or the retry off; a value above the cap is held at the cap, so a
+// typo cannot allocate a billion-slot buffer, start thousands of workers, or make a request wait
+// for minutes on the audit log (the enqueue wait is spent inside the request).
+const (
+	maxBufferSize    = 1_000_000
+	maxWorkers       = 64
+	maxEnqueueWait   = 30 * time.Second
+	maxRetryDeadline = time.Hour
+	maxShutdownDrain = 5 * time.Minute
+)
+
+func clampedMs(ms int, def, max time.Duration) time.Duration {
+	if ms <= 0 {
+		return def
 	}
-	return defaultBufferSize
+	if d := time.Duration(ms) * time.Millisecond; d < max {
+		return d
+	}
+	return max
+}
+
+func (c Config) bufferSize() int {
+	if c.BufferSize <= 0 {
+		return defaultBufferSize
+	}
+	return min(c.BufferSize, maxBufferSize)
 }
 
 func (c Config) workers() int {
-	if c.Workers > 0 {
-		return c.Workers
+	if c.Workers <= 0 {
+		return defaultWorkers
 	}
-	return defaultWorkers
+	return min(c.Workers, maxWorkers)
 }
 
 func (c Config) enqueueWait() time.Duration {
-	if c.EnqueueWaitMs > 0 {
-		return time.Duration(c.EnqueueWaitMs) * time.Millisecond
-	}
-	return defaultEnqueueWait
+	return clampedMs(c.EnqueueWaitMs, defaultEnqueueWait, maxEnqueueWait)
 }
 
 func (c Config) retryDeadline() time.Duration {
-	if c.RetryDeadlineMs > 0 {
-		return time.Duration(c.RetryDeadlineMs) * time.Millisecond
-	}
-	return defaultRetryDeadline
+	return clampedMs(c.RetryDeadlineMs, defaultRetryDeadline, maxRetryDeadline)
 }
 
 func (c Config) shutdownDrain() time.Duration {
-	if c.ShutdownDrainMs > 0 {
-		return time.Duration(c.ShutdownDrainMs) * time.Millisecond
-	}
-	return defaultShutdownDrain
+	return clampedMs(c.ShutdownDrainMs, defaultShutdownDrain, maxShutdownDrain)
 }
 
 // queueState is the accounting and shutdown state of the queue. The zero value is ready.
@@ -266,7 +279,7 @@ func (p *Plugin) persist(ev queuedAuditEvent) {
 			p.logger.Warn("audit-log: could not record an event, retrying",
 				"tenant", ev.tenantID, "path", ev.path, "error", err)
 		}
-		wait := backoff/2 + time.Duration(rand.Int63n(int64(backoff/2)+1))
+		wait := backoff/2 + time.Duration(rand.Int63n(int64(backoff/2)+1)) //nolint:gosec // G404: retry jitter, so workers do not retry in step. Cryptographic randomness would be a category error.
 		if lim, shutdown := p.limit(giveUp); time.Now().Add(wait).After(lim) {
 			reason := lossInsertFailed
 			if shutdown {

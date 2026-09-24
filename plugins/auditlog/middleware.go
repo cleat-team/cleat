@@ -1,12 +1,10 @@
 package auditlog
 
 import (
-	"context"
 	"net/http"
 	"time"
 
 	"github.com/cleat-team/cleat/auth"
-	"github.com/google/uuid"
 )
 
 // responseWriter wraps http.ResponseWriter to capture the status code.
@@ -46,11 +44,4 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		userID, _ := auth.SubjectFromContext(r.Context())
 		p.enqueueAudit(tid, userID, r.Method, r.URL.Path, rw.statusCode, r.RemoteAddr, r.UserAgent(), duration)
 	})
-}
-
-// recordAudit writes one audit event now, with a single attempt: the queue-less path a Plugin
-// built directly uses, and what tests call to put rows on a chain. A failure is counted and
-// logged (lose), not swallowed.
-func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, userID, method, path string, statusCode int, ipAddress, userAgent string, duration time.Duration) {
-	p.recordOnce(newQueuedEvent(tenantID, userID, method, path, statusCode, ipAddress, userAgent, duration))
 }

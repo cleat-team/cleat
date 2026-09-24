@@ -356,7 +356,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker). Four workers now drain the buffer (`workers`), and shutdown drains it for up to 10s.
   A row's timestamp is now the time of the request rather than of the append, so **chain order (seq) may
   differ from timestamp order**; the chain follows commit order and verifies either way. There is still
-  no durable spool: a killed process loses what is in its buffer. New public surface:
+  no durable spool: a killed process loses what is in its buffer. The five keys are bounded (zero or negative
+  means the default; buffer 1,000,000, 64 workers, enqueue wait 30s, retry deadline 1h, shutdown drain 5min
+  are the caps), and a time-windowed export selects by request time, so incremental collection should follow
+  `seq`. New public surface:
   `plugin.Environment.EventsLost`, the metric, and the `/healthz` shape.
 
 - **A worker with no `CLEAT_SECRET_MASTER_KEY` now refuses to start on PostgreSQL and SQL Server when the

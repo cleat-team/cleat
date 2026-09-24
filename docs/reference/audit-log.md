@@ -55,10 +55,18 @@ after its request finished, so `seq` order and `timestamp` order can disagree. T
 verification, export and retention all read it that way (retention removes a prefix by `seq`, so a row whose
 timestamp is older than a later row's is not removed before it), and none assumes timestamps increase.
 
+**Consequence for time-windowed exports.** `from` and `to` select by the row's timestamp, which is the time of
+the request, so an event that was retried can be committed after its window was exported: it has the earlier
+timestamp and the later `seq`. A ranged export of a window that closed a minute ago can therefore be missing
+a row that a re-export a minute later contains, and a row can fall outside a window while its chain
+neighbours are inside (the export carries the gap in `seq`, as it always has for a range). Incremental
+collection should follow the chain by `seq` (the cursor, or `--expect-after` anchors), not by time; the lateness is bounded by
+`retry_deadline_ms` plus `enqueue_wait_ms`.
+
 **What this does not do: survive the process.** The queue is memory. A process that is killed loses the
 events it held, and nothing counts them, because nothing was running to count. A durable spool would close
 that; it is not built. `workers`, `buffer_size`, `enqueue_wait_ms`, `retry_deadline_ms` and `shutdown_drain_ms`
-are the plugin config keys (defaults 4, 1,000, 1,000, 60,000, 10,000).
+are the plugin config keys (defaults 4, 1,000, 1,000, 60,000, 10,000). A zero or negative value means the default; a value above its cap (buffer 1,000,000, 64 workers, enqueue wait 30s, retry deadline 1h, shutdown drain 5min) is held at the cap.
 
 ## The chain
 

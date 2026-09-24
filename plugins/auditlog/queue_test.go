@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -495,6 +496,68 @@ func TestChainOrderIsNotTimestampOrder(t *testing.T) {
 			t.Errorf("retention removed %d rows: seq 1 has the latest timestamp, so the expired prefix by seq is empty", n)
 		}
 	})
+}
+
+// A time-windowed export of a chain whose timestamps are out of seq order: the window selects by
+// timestamp, so a record can be OUTSIDE it while its chain neighbours are inside, and the export
+// carries the gap rather than refusing. The records still come out in seq order and still link.
+func TestARangedExportOfAnOutOfOrderChainHasGapsInSeqAndStaysInSeqOrder(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		base := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+		for i, offset := range []time.Duration{50, 10, 40, 20, 30} { // seq 1..5
+			ev := newQueuedEvent(tenant, "u", "GET", fmt.Sprintf("/o/%d", i), 200, "10.0.0.1", "agent", time.Millisecond)
+			ev.ts = base.Add(offset * time.Second)
+			if err := p.appendEvent(ev, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// [15s, 45s] holds the requests made at 40s (seq 3), 20s (seq 4) and 30s (seq 5). Seq 2 (10s) is
+		// outside although its chain neighbours are inside. In TIMESTAMP order these would be 4, 5, 3, so
+		// the assertion below fails an export that sorted by time.
+		q := "/audit/export?from=" + url.QueryEscape(base.Add(15*time.Second).Format(time.RFC3339Nano)) +
+			"&to=" + url.QueryEscape(base.Add(45*time.Second).Format(time.RFC3339Nano))
+		code, body := e.get(p, tenant, q)
+		if code != 200 {
+			t.Fatalf("a ranged export of an out-of-order chain = %d: %s", code, body)
+		}
+		evs, cp, _ := exportLines(t, body)
+		if cp == nil || len(evs) != 3 {
+			t.Fatalf("want three records, got %d, checkpoint %+v", len(evs), cp)
+		}
+		for i, want := range []int64{3, 4, 5} {
+			if evs[i].Seq == nil || *evs[i].Seq != want {
+				t.Fatalf("record %d is not seq %d: a ranged export must stay in seq order", i, want)
+			}
+		}
+	})
+}
+
+// The operator's numbers are bounded: zero and negative mean the default, and a huge value is held at
+// a cap instead of allocating, spawning or blocking without limit. retry_deadline shorter than
+// enqueue_wait is allowed: they bound different things (a request's wait, an event's retry).
+func TestQueueConfigIsBounded(t *testing.T) {
+	c := Config{}
+	if c.bufferSize() != defaultBufferSize || c.workers() != defaultWorkers || c.enqueueWait() != defaultEnqueueWait ||
+		c.retryDeadline() != defaultRetryDeadline || c.shutdownDrain() != defaultShutdownDrain {
+		t.Error("the zero Config does not give the defaults")
+	}
+	c = Config{BufferSize: -5, Workers: -1, EnqueueWaitMs: -1, RetryDeadlineMs: -1, ShutdownDrainMs: -1}
+	if c.bufferSize() != defaultBufferSize || c.workers() != defaultWorkers || c.enqueueWait() != defaultEnqueueWait ||
+		c.retryDeadline() != defaultRetryDeadline || c.shutdownDrain() != defaultShutdownDrain {
+		t.Error("negative values do not give the defaults")
+	}
+	c = Config{BufferSize: 1 << 40, Workers: 1 << 20, EnqueueWaitMs: 1 << 30, RetryDeadlineMs: 1 << 30, ShutdownDrainMs: 1 << 30}
+	if c.bufferSize() != maxBufferSize || c.workers() != maxWorkers || c.enqueueWait() != maxEnqueueWait ||
+		c.retryDeadline() != maxRetryDeadline || c.shutdownDrain() != maxShutdownDrain {
+		t.Errorf("huge values are not held at the caps: %d %d %s %s %s",
+			c.bufferSize(), c.workers(), c.enqueueWait(), c.retryDeadline(), c.shutdownDrain())
+	}
+	c = Config{EnqueueWaitMs: 5000, RetryDeadlineMs: 100}
+	if c.retryDeadline() >= c.enqueueWait() {
+		t.Error("a retry_deadline shorter than enqueue_wait was rewritten")
+	}
 }
 
 // A panic while recording is a counted loss, not a dead worker: the pool keeps its size, the event in
