@@ -52,6 +52,23 @@ type awaitWebhookOutput struct {
 // tenant. If a matching event is found, it is marked as processed and returned.
 // If none is found, the output {"found": false} is returned and the workflow
 // engine will retry according to its retry policy.
+//
+// A deleted source's events are cancelled, not delivered here -- owner
+// decision on cleat#2199, applied in cleat-review on #2221. An event ingested
+// BEFORE its source was deleted but not yet consumed by this call is marked
+// status='cancelled' in the same transaction as the delete
+// (handleDeleteSource, routes.go), and the WHERE clause below excludes any
+// row in that state on top of that -- the same belt-and-suspenders shape
+// processBatch's queryUnprocessedWebhookEvents already uses for the
+// background retry path (background.go), so a future write path that forgets
+// the delete-time cancellation still cannot hand a deleted source's event to
+// a caller. Practically: once a source is deleted, no event of its ever
+// reaches this function again, delivered or not, past or future -- an
+// awaiting workflow simply keeps getting {"found": false} and is woken only
+// by its own retry policy's eventual timeout, the same as if the source had
+// gone quiet rather than been deleted. There is no signal here that the
+// source was deleted rather than merely idle; a caller that needs to
+// distinguish the two has to check GET /ingest/sources/{id} itself.
 func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
 	if cc == nil || cc.TenantID == "" {
@@ -74,21 +91,31 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 	}
 
 	// Build query for the latest matching unprocessed event.
+	//
+	// LEFT JOIN webhook_sources s, not a bare FROM webhook_events: the
+	// `s.deleted_at IS NULL` guard below needs it, and every selected and
+	// filtered column is qualified with `e.` because joining introduces a
+	// second `id` column (webhook_sources has one too) -- an unqualified
+	// `id` in the SELECT list or WHERE clause would be ambiguous the moment
+	// this join exists, not merely stylistically inconsistent.
 	query := `
-		SELECT id, event_type, payload, received_at
-		FROM webhook_events
-		WHERE tenant_id = $1 AND processed = false
+		SELECT e.id, e.event_type, e.payload, e.received_at
+		FROM webhook_events e
+		LEFT JOIN webhook_sources s ON e.source_id = s.id
+		WHERE e.tenant_id = $1 AND e.processed = false
+		  AND (e.status IS NULL OR e.status != 'cancelled')
+		  AND s.deleted_at IS NULL
 	`
 	args := []any{cc.TenantID}
 	argIdx := 2
 
 	if sourceID != uuid.Nil {
-		query += fmt.Sprintf(" AND source_id = $%d", argIdx)
+		query += fmt.Sprintf(" AND e.source_id = $%d", argIdx)
 		args = append(args, sourceID)
 		argIdx++
 	}
 	if input.EventType != "" {
-		query += fmt.Sprintf(" AND event_type = $%d", argIdx)
+		query += fmt.Sprintf(" AND e.event_type = $%d", argIdx)
 		args = append(args, input.EventType)
 		argIdx++ //nolint:ineffassign // Deliberate: keeps the placeholder counter correct so the next clause added below cannot silently reuse this one's $N. Deleting it is a latent SQL bug, not a cleanup.
 	}
@@ -98,7 +125,7 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 	// cleat-review's re-check on #2198 found await_webhook erroring outright
 	// on MSSQL -- a workflow could never see an ingested event there. Same
 	// bug, same fix, as the two list-endpoint LIMITs in this PR.
-	query += " ORDER BY received_at DESC " + plugin.LimitClause("1", p.dialect)
+	query += " ORDER BY e.received_at DESC " + plugin.LimitClause("1", p.dialect)
 
 	var (
 		eventID    uuid.UUID

@@ -42,6 +42,7 @@ type webhookSourceRow struct {
 	signalName       string
 	createdAt        time.Time
 	updatedAt        time.Time
+	deleted          bool
 }
 
 type webhookEventRow struct {
@@ -139,9 +140,25 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execUpdateEventRetry(query, args)
 	case strings.Contains(query, "SET processed"):
 		return c.execUpdateEventProcessed(args)
+	// cleat-review on #2221: handleDeleteSource cancels a deleted source's
+	// own pending events in the same transaction as the soft-delete. Matched
+	// on "SET status = 'cancelled'", a literal specific to this one
+	// statement -- it is the only webhook_events UPDATE keyed by source_id
+	// rather than by event id, so routing it into execUpdateEvent (which
+	// reads args[0] as an event id) would silently no-op: no error, no
+	// stored event ever marked cancelled, and every assertion the caller
+	// makes about the DELETE response itself would still pass.
+	case strings.Contains(query, "UPDATE webhook_events") && strings.Contains(query, "SET status = 'cancelled'"):
+		return c.execCancelPendingEventsForSource(args)
 	case strings.Contains(query, "UPDATE webhook_events"):
 		return c.execUpdateEvent(args)
-	case strings.Contains(query, "DELETE FROM webhook_sources"):
+	// cleat#2199: soft delete (UPDATE ... SET enabled = false, deleted_at =
+	// ...), not a real DELETE -- the production query's literal SET clause
+	// distinguishes it from every other webhook_sources UPDATE this fake
+	// could see (there are none today, but matching a literal substring
+	// specific to this statement rather than the bare table name is the same
+	// discipline the SELECT routing below already needs).
+	case strings.Contains(query, "UPDATE webhook_sources") && strings.Contains(query, "deleted_at"):
 		return c.execDeleteSource(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Exec query: %s", query)
@@ -189,7 +206,13 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
 	case strings.Contains(query, "SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at"):
-		if strings.Contains(query, "WHERE id = $1 AND") {
+		// "WHERE id = $1 AND" used to be specific to handleGetSource's
+		// two-argument query (id, tenant_id). cleat#2199 added
+		// "AND deleted_at IS NULL" to handleIngestWebhook's one-argument
+		// (id only) query too, so both now contain that substring --
+		// matched on "tenant_id = $2" instead, which only handleGetSource's
+		// query has.
+		if strings.Contains(query, "WHERE id = $1 AND tenant_id = $2") {
 			c.store.mu.RLock()
 			defer c.store.mu.RUnlock()
 			return c.queryGetSource(args)
@@ -206,7 +229,12 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryListEvents(query, args, corrupt)
-	case strings.Contains(query, "SELECT id, event_type, payload, received_at"):
+	// cleat-review on #2221 joined webhook_sources into this query (for the
+	// deleted_at guard, see host_functions.go), so it now shares the same
+	// "FROM webhook_events e ... LEFT JOIN webhook_sources s" shape as
+	// queryProcessBatch below -- matched, and ordered ahead of that case,
+	// on the select list instead, which the two queries do not share.
+	case strings.Contains(query, "SELECT e.id, e.event_type, e.payload, e.received_at"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryAwaitEvents(query, args)
@@ -390,19 +418,60 @@ func (c *fakeConn) execUpdateEvent(args []driver.NamedValue) (driver.Result, err
 	return c.execUpdateEventProcessed(args)
 }
 
-func (c *fakeConn) execDeleteSource(args []driver.NamedValue) (driver.Result, error) {
-	id, err := argString(args, 1)
+// execCancelPendingEventsForSource is cleat-review on #2221's delete-time
+// cancellation: production's `UPDATE webhook_events SET status =
+// 'cancelled', processed = true, error_msg = 'source deleted' WHERE
+// source_id = $1 AND tenant_id = $2 AND processed = false AND (status =
+// 'pending' OR status IS NULL)`. processed = true, same as this table's
+// other terminal statuses ('completed', 'dead_letter') -- owner decision on
+// cleat#2199: a delete stops both the background retry AND a future
+// await_webhook call from ever reaching this event.
+func (c *fakeConn) execCancelPendingEventsForSource(args []driver.NamedValue) (driver.Result, error) {
+	sourceID, err := argString(args, 1)
 	if err != nil {
 		return nil, err
 	}
-	tid, err := argString(args, 2)
+	tenantID, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	var affected int64
+	for i, evt := range c.store.events {
+		if evt.sourceID != sourceID || evt.tenantID != tenantID || evt.processed {
+			continue
+		}
+		if evt.status != "pending" && evt.status != "" {
+			continue
+		}
+		reason := "source deleted"
+		c.store.events[i].status = "cancelled"
+		c.store.events[i].processed = true
+		c.store.events[i].errorMsg = &reason
+		affected++
+	}
+	return &fakeResult{rowsAffected: affected}, nil
+}
+
+// execDeleteSource is cleat#2199's soft delete: production's
+// `UPDATE webhook_sources SET enabled = false, deleted_at = $1 WHERE id = $2
+// AND tenant_id = $3 AND deleted_at IS NULL` -- $1 is the deletion
+// timestamp, not an id, matching the argument order a hand-typed
+// falsification of this file would get wrong first.
+func (c *fakeConn) execDeleteSource(args []driver.NamedValue) (driver.Result, error) {
+	id, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := argString(args, 3)
 	if err != nil {
 		return nil, err
 	}
 
 	for i, src := range c.store.sources {
-		if src.id == id && src.tenantID == tid {
-			c.store.sources = append(c.store.sources[:i], c.store.sources[i+1:]...)
+		if src.id == id && src.tenantID == tid && !src.deleted {
+			c.store.sources[i].deleted = true
+			c.store.sources[i].enabled = false
 			return &fakeResult{rowsAffected: 1}, nil
 		}
 	}
@@ -437,7 +506,7 @@ func (c *fakeConn) queryListSources(args []driver.NamedValue, corrupt bool) (dri
 
 	var results []webhookSourceRow
 	for _, s := range c.store.sources {
-		if s.tenantID == tid {
+		if s.tenantID == tid && !s.deleted {
 			results = append(results, s)
 		}
 	}
@@ -465,7 +534,7 @@ func (c *fakeConn) querySourceByID(args []driver.NamedValue) (driver.Rows, error
 	}
 
 	for _, s := range c.store.sources {
-		if s.id == id {
+		if s.id == id && !s.deleted {
 			return &fakeRows{
 				columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"},
 				data: [][]driver.Value{{
@@ -490,7 +559,7 @@ func (c *fakeConn) queryGetSource(args []driver.NamedValue) (driver.Rows, error)
 	}
 
 	for _, s := range c.store.sources {
-		if s.id == id && s.tenantID == tid {
+		if s.id == id && s.tenantID == tid && !s.deleted {
 			return &fakeRows{
 				columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"},
 				data: [][]driver.Value{{
@@ -605,9 +674,18 @@ func (c *fakeConn) queryAwaitEvents(query string, args []driver.NamedValue) (dri
 
 	var results []webhookEventRow
 	for _, e := range c.store.events {
-		if e.tenantID == tid && !e.processed {
-			results = append(results, e)
+		if e.tenantID != tid || e.processed {
+			continue
 		}
+		// Mirrors production's `AND (e.status IS NULL OR e.status !=
+		// 'cancelled') AND s.deleted_at IS NULL` (cleat-review on #2221,
+		// owner decision on cleat#2199): a second, independent guard on top
+		// of execCancelPendingEventsForSource setting processed=true above,
+		// the same belt-and-suspenders shape queryProcessBatch already has.
+		if e.status == "cancelled" || c.sourceDeleted(e.sourceID) {
+			continue
+		}
+		results = append(results, e)
 	}
 
 	nextArg := 2
@@ -669,15 +747,37 @@ func (c *fakeConn) queryAwaitEvents(query string, args []driver.NamedValue) (dri
 	return &fakeRows{columns: columns, data: data}, nil
 }
 
+// sourceDeleted reports whether id names a source this store has soft-
+// deleted, or no source at all -- a LEFT JOIN with no matching row also
+// reads s.deleted_at as NULL, so this returns false in that case too,
+// matching the real query's (deliberately) permissive behaviour for an
+// orphaned event.
+func (c *fakeConn) sourceDeleted(id string) bool {
+	for _, s := range c.store.sources {
+		if s.id == id {
+			return s.deleted
+		}
+	}
+	return false
+}
+
 func (c *fakeConn) queryProcessBatch(_ []driver.NamedValue, corrupt bool) (driver.Rows, error) {
 	// Find unprocessed events older than ~10 seconds.
 	var results []webhookEventRow
 	cutoff := time.Now().Add(-10 * time.Second)
 
 	for _, e := range c.store.events {
-		if !e.processed && (e.status == "pending" || e.status == "") && e.receivedAt.Before(cutoff) {
-			results = append(results, e)
+		if e.processed || (e.status != "pending" && e.status != "") || !e.receivedAt.Before(cutoff) {
+			continue
 		}
+		// Mirrors the production query's new `AND s.deleted_at IS NULL`
+		// (cleat-review on #2221): a second, independent guard against
+		// delivering to a deleted source, on top of the delete-time
+		// cancellation execCancelPendingEventsForSource applies above.
+		if c.sourceDeleted(e.sourceID) {
+			continue
+		}
+		results = append(results, e)
 	}
 
 	// Sort by received_at ASC
@@ -1472,6 +1572,104 @@ func TestBackgroundRetryWorker(t *testing.T) {
 	}
 }
 
+// TestDeletingASourceCancelsItsPendingEventsForBothDeliveryPaths pins
+// cleat-review's finding on #2221: an event ingested before a source is
+// deleted, still pending because its inline signal delivery
+// (handleIngestWebhook's SignalWorkflow call) failed, must never reach a
+// workflow afterward -- neither through the background retry sweep
+// (processBatch, the PUSH path) nor through a later await_webhook call (the
+// PULL path, host_functions.go; owner decision on cleat#2199). Falsified by
+// reverting handleDeleteSource's second UPDATE (the one that cancels the
+// source's own pending events) back to a no-op: both assertions below then
+// fail -- the signal fires, and await_webhook hands the event out.
+func TestDeletingASourceCancelsItsPendingEventsForBothDeliveryPaths(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	sourceID := uuid.New()
+	store.sources = append(store.sources, webhookSourceRow{
+		id:               sourceID.String(),
+		tenantID:         testTenantStr,
+		name:             "to-delete-with-pending-event",
+		sourceType:       "generic",
+		enabled:          true,
+		signalWorkflowID: "wf-123",
+	})
+
+	eventID := uuid.New()
+	store.events = append(store.events, webhookEventRow{
+		id:         eventID.String(),
+		sourceID:   sourceID.String(),
+		tenantID:   testTenantStr,
+		eventType:  "push",
+		payload:    `{"hello":"world"}`,
+		receivedAt: time.Now().Add(-30 * time.Second), // past processBatch's 10s cutoff
+		processed:  false,
+		status:     "pending",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
+	}
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+
+	req := authedRequest("DELETE", "/ingest/sources/"+sourceID.String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	store.mu.RLock()
+	evt := store.events[0]
+	store.mu.RUnlock()
+	if evt.status != "cancelled" {
+		t.Fatalf("event status after delete: got %q, want %q", evt.status, "cancelled")
+	}
+	if !evt.processed {
+		t.Fatalf("event processed after delete: got false, want true")
+	}
+
+	// PUSH path.
+	var signalled int
+	p.env = &plugin.Environment{
+		SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
+			signalled++
+			return nil
+		},
+	}
+	p.processBatch(context.Background())
+	if signalled != 0 {
+		t.Errorf("processBatch signalled a deleted source's cancelled event %d time(s), want 0", signalled)
+	}
+
+	// PULL path.
+	callCtx := &plugin.CallContext{TenantID: testTenantStr, WorkflowID: "test-wf"}
+	ctx := plugin.WithCallContext(context.Background(), callCtx)
+	input, _ := json.Marshal(map[string]any{"source_id": sourceID.String()})
+	outJSON, err := p.awaitWebhook(ctx, string(input))
+	if err != nil {
+		t.Fatalf("awaitWebhook: %v", err)
+	}
+	var out awaitWebhookOutput
+	if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
+		t.Fatalf("unmarshal awaitWebhook output: %v", err)
+	}
+	if out.Found {
+		t.Errorf("awaitWebhook returned a deleted source's cancelled event (id=%s), want found=false", out.ID)
+	}
+}
+
 // TestAwaitWebhookHostFunction verifies the await_webhook host function
 // finds and claims unprocessed events.
 func TestAwaitWebhookHostFunction(t *testing.T) {
@@ -1577,6 +1775,12 @@ func TestAwaitWebhookNoEvents(t *testing.T) {
 }
 
 // TestSourceDelete verifies deleting a webhook source.
+//
+// cleat#2199: this is a SOFT delete -- the row stays in the store (marked
+// deleted, disabled), it does not vanish from it. See
+// a_deleted_source_stays_gone_but_keeps_its_events_multidb_test.go for the
+// end-to-end pin, against real databases, of what soft-delete is for: an
+// event ingested before the delete has to survive it.
 func TestSourceDelete(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
@@ -1601,9 +1805,29 @@ func TestSourceDelete(t *testing.T) {
 
 	store.mu.RLock()
 	count := len(store.sources)
+	var deleted, enabled bool
+	if count == 1 {
+		deleted = store.sources[0].deleted
+		enabled = store.sources[0].enabled
+	}
 	store.mu.RUnlock()
-	if count != 0 {
-		t.Errorf("expected 0 sources after delete, got %d", count)
+	if count != 1 {
+		t.Fatalf("expected 1 source after a soft delete (the row is marked, not removed), got %d", count)
+	}
+	if !deleted {
+		t.Errorf("source row after delete: deleted=false, want true")
+	}
+	if enabled {
+		t.Errorf("source row after delete: enabled=true, want false")
+	}
+
+	// And it is unreachable through the API, which is the half of
+	// soft-delete that has to look like a real delete to a caller.
+	getReq := authedRequest("GET", "/ingest/sources/"+id, nil)
+	getRec := httptest.NewRecorder()
+	handler.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusNotFound {
+		t.Errorf("GET after delete: expected 404, got %d", getRec.Code)
 	}
 }
 
