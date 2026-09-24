@@ -46,12 +46,20 @@
 -- what this table is sealed under too. Domain separation above is what
 -- keeps that safe rather than merely convenient.
 --
--- key_version, disabled_at, updated_at: the same three columns
--- tenant_secrets carries for the same reasons (081_a_secret_never_reaches_
--- the_guest.sql, 102_a_worker_publishes_the_secret_keys_it_can_open.sql) --
--- rotation is not precluded, a secret can be retired without losing its
--- ciphertext, and "last changed" is tracked. name is the primary key
--- because there is no tenant dimension to pair it with.
+-- key_version, disabled_at, updated_at, created_at: the same four columns
+-- tenant_secrets carries, in its FINAL shape after cleat#1702's entity
+-- contract (081_a_secret_never_reaches_the_guest.sql,
+-- 102_a_worker_publishes_the_secret_keys_it_can_open.sql,
+-- 086_two_entities_record_when_they_were_created.sql) -- rotation is not
+-- precluded, a secret can be retired without losing its ciphertext, and
+-- both "last changed" and "when created" are tracked. name is the primary
+-- key because there is no tenant dimension to pair it with. Unlike
+-- tenant_secrets, created_at needs no separate backfill migration: this
+-- table has no rows yet, so it is simply part of the CREATE TABLE below --
+-- scripts/entity-contract.tsv classifies this table as a member, and the
+-- grandfather list a new member could lean on instead is capped at empty
+-- (scripts/check-entity-contract.py), so a brand-new member has to conform
+-- on arrival.
 
 CREATE TABLE IF NOT EXISTS deployment_secrets (
     -- Matches engine.validSecretName, the same charset tenant_secrets uses,
@@ -69,6 +77,7 @@ CREATE TABLE IF NOT EXISTS deployment_secrets (
     key_version INTEGER NOT NULL DEFAULT 1,
     disabled_at TIMESTAMPTZ,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     CONSTRAINT ck_deployment_secrets_name_charset
         CHECK (name ~ '^[A-Za-z0-9_.-]{1,128}$'),

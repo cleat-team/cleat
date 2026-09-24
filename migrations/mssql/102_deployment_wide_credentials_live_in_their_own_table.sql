@@ -27,6 +27,7 @@ CREATE TABLE dbo.deployment_secrets (
     key_version INT              NOT NULL CONSTRAINT df_deployment_secrets_keyver DEFAULT 1,
     disabled_at DATETIMEOFFSET   NULL,
     updated_at  DATETIMEOFFSET   NOT NULL CONSTRAINT df_deployment_secrets_updated DEFAULT SYSUTCDATETIME(),
+    created_at  DATETIMEOFFSET   NOT NULL CONSTRAINT df_deployment_secrets_created DEFAULT SYSUTCDATETIME(),
 
     CONSTRAINT pk_deployment_secrets PRIMARY KEY (name),
     CONSTRAINT ck_deployment_secrets_ciphertext_nonempty

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS deployment_secrets (
     key_version INT          NOT NULL DEFAULT 1,
     disabled_at TIMESTAMP(6) NULL,
     updated_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+    created_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 
     PRIMARY KEY (name),
 

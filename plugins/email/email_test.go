@@ -114,9 +114,10 @@ func setupTestStatusServer(t *testing.T, statusCode int, responseBody string) *h
 	}))
 }
 
-// newTestPlugin creates a Plugin instance configured for testing.
-// fakeDeploymentSecrets is a plugin.DeploymentSecrets that answers "test-api-key"
-// for email.sendgrid_api_key and ErrDeploymentSecretNotFound for anything else.
+// fakeDeploymentSecrets is a plugin.DeploymentSecrets that answers whatever
+// values map gives it and an error for anything else -- not
+// ErrDeploymentSecretNotFound specifically, since sendGridAPIKey only checks
+// err != nil.
 type fakeDeploymentSecrets struct {
 	values map[string]string
 }
@@ -128,6 +129,7 @@ func (f *fakeDeploymentSecrets) Get(ctx context.Context, name string) (string, e
 	return "", fmt.Errorf("fakeDeploymentSecrets: %q not set", name)
 }
 
+// newTestPlugin creates a Plugin instance configured for testing.
 func newTestPlugin(t *testing.T) *Plugin {
 	t.Helper()
 	return &Plugin{
