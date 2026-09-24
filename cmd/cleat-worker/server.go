@@ -421,7 +421,41 @@ func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// A plugin that reports itself unhealthy (plugin.HasHealth) degrades the worker and does not fail it:
+	// a lost audit event is something an operator must see, and a reason for the host to stop serving would
+	// turn the audit log's trouble into the API's outage. 200, like memory_pressure. cleat#2168.
+	if unhealthy := s.worker.unhealthyPlugins(); len(unhealthy) > 0 {
+		s.writeJSON(w, 200, map[string]any{
+			"ok":       true,
+			"degraded": true,
+			"reason":   "plugin_unhealthy",
+			"plugins":  unhealthy,
+		})
+		return
+	}
 	s.writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+// unhealthyPlugins returns, by plugin name, the message of every loaded plugin whose Health() reports
+// an error. Only plugins that implement plugin.HasHealth are asked.
+func (w *Worker) unhealthyPlugins() map[string]string {
+	var out map[string]string
+	for _, lp := range w.plugList {
+		if lp == nil || lp.Plugin == nil {
+			continue
+		}
+		h, ok := lp.Plugin.(plugin.HasHealth)
+		if !ok {
+			continue
+		}
+		if err := h.Health(); err != nil {
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[lp.Plugin.Info().Name] = err.Error()
+		}
+	}
+	return out
 }
 
 // handleDrain handles POST and GET /api/admin/drain for graceful worker drain.

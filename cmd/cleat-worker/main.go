@@ -1335,6 +1335,7 @@ func main() {
 		Logger:        slog.Default(),
 		Done:          ctx.Done(),
 		Dialect:       plugin.Dialect(factory.Dialect()),
+		EventsLost:    pluginEventsLostHook(metricsInstance),
 		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			return startPluginWorkflow(ctx, store, req)
 		},

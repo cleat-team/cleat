@@ -343,6 +343,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The audit log no longer drops events silently when the database is slow or down.** (cleat#2168)
+
+  A request that finds the audit buffer full now waits up to 1s for room (`enqueue_wait_ms`), and an
+  event whose insert fails is retried with backoff for up to 60s (`retry_deadline_ms`) instead of being
+  discarded on the first error. A retry checks by event id that the first attempt did not commit before
+  appending, so a lost commit acknowledgement does not record the event twice. What is still given up is
+  counted, logged at Error (at most once a second per reason), and reported: the new metric
+  `cleat_plugin_events_lost_total{plugin,reason}` (reasons `buffer_full`, `insert_failed`, `shutdown`,
+  with a Grafana panel), and `/healthz` answers `200` with `"degraded": true, "reason":
+  "plugin_unhealthy"` for five minutes after a loss (not 503: a stalled audit table must not restart the
+  worker). Four workers now drain the buffer (`workers`), and shutdown drains it for up to 10s.
+  A row's timestamp is now the time of the request rather than of the append, so **chain order (seq) may
+  differ from timestamp order**; the chain follows commit order and verifies either way. There is still
+  no durable spool: a killed process loses what is in its buffer. New public surface:
+  `plugin.Environment.EventsLost`, the metric, and the `/healthz` shape.
+
 - **A worker with no `CLEAT_SECRET_MASTER_KEY` now refuses to start on PostgreSQL and SQL Server when the
   database holds secrets, as it always did on MySQL.** (cleat#2123)
 

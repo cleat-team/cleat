@@ -79,6 +79,7 @@ type Metrics struct {
 	workflowsPurged         metric.Int64Counter
 	backgroundLoops         metric.Int64Counter
 	backgroundLoopRestarts  metric.Int64Counter
+	pluginEventsLost        metric.Int64Counter
 	reaperInstancesClaimed  metric.Int64Counter
 	suspectedDBStalls       metric.Int64Counter
 	httpRequests            metric.Int64Counter
@@ -404,6 +405,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_background_loop_restarts_total: %w", err)
+	}
+
+	m.pluginEventsLost, err = meter.Int64Counter(
+		"cleat_plugin_events_lost_total",
+		metric.WithDescription("Events a plugin gave up on and will never record, by plugin and reason (audit-log: buffer_full, insert_failed, shutdown). Any increase is a loss an operator should know about"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_plugin_events_lost_total: %w", err)
 	}
 
 	m.reaperInstancesClaimed, err = meter.Int64Counter(
@@ -1098,6 +1107,23 @@ func (m *Metrics) RecordBackgroundLoop(ctx context.Context, loopName, status str
 		attribute.String("status", status),
 	}, extraAttrs...)...)
 	m.backgroundLoops.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordPluginEventsLost adds to the plugin-events-lost counter (cleat#2168).
+//
+// A plugin that buffers events (audit-log queues one per request) reports each one it gives up on
+// through plugin.Environment.EventsLost, which the worker points here. The plugin name and the reason
+// are the only labels: the reason is a short fixed word chosen by the plugin, never a tenant, path or
+// error text, so the series count stays the number of (plugin, reason) pairs.
+func (m *Metrics) RecordPluginEventsLost(ctx context.Context, pluginName, reason string, count int64, extraAttrs ...attribute.KeyValue) {
+	if count <= 0 {
+		return
+	}
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("plugin", pluginName),
+		attribute.String("reason", reason),
+	}, extraAttrs...)...)
+	m.pluginEventsLost.Add(ctx, count, metric.WithAttributes(attrs...))
 }
 
 // RecordBackgroundLoopRestart increments the background-loop-restarts counter.

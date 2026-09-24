@@ -131,6 +131,15 @@ type Environment struct {
 	Done     <-chan struct{}
 	Dialect  Dialect
 
+	// EventsLost is how a plugin that buffers events reports the ones it gave up on, so the
+	// host can count them where an operator looks (cleat#2168). pluginName is the plugin's own
+	// name, reason a short fixed word (audit-log uses buffer_full, insert_failed, shutdown) and
+	// n how many. It is called once per loss and must not block.
+	//
+	// NIL MEANS "NOBODY IS COUNTING", and a plugin must still log every loss: the worker sets
+	// it, and cleattest, the embedded runner and a plugin's own unit tests do not.
+	EventsLost func(pluginName, reason string, n int64)
+
 	// HTTPTransport is the egress-guarded RoundTripper a plugin must use for
 	// every outbound HTTP request. cleat#1565.
 	//

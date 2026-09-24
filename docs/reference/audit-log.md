@@ -28,6 +28,38 @@ characters and 800 UTF-16 code units (SQL Server cannot index more), and `user_i
 `ip_address` and `user_agent` 4,096 characters. The MySQL `timestamp` column is `DATETIME(6)`
 holding UTC, not `TIMESTAMP(6)`, which stops at 2038.
 
+## Delivery: when the database is slow, or down
+
+A request does not write its audit row itself. When the request finishes, the middleware fixes the
+event's `id` and `timestamp` and hands it to a bounded in-memory queue; a small pool of workers appends
+queued events to their tenants' chains. That keeps a slow audit table from slowing the API, and it has a
+cost this page states rather than hides.
+
+- **A full queue makes the request wait, briefly, and then gives the event up.** The wait is
+  `enqueue_wait_ms` (default 1,000). It is paid only while the queue is full, and it is the most the audit log
+  can ever add to a request, however long the database is down.
+- **A failed append is retried** with jittered backoff (100 ms doubling to 5 s) for up to
+  `retry_deadline_ms` (default 60,000). A retry first looks for its own event by `id` under the tenant's head
+  lock, so an append that committed but whose acknowledgement was lost is recorded once and never twice.
+- **An event that is given up on is counted and logged, not dropped.** The reasons are `buffer_full` (no room
+  within the wait), `insert_failed` (the database refused it for the whole retry deadline) and `shutdown` (the
+  process stopped first; shutdown drains the queue for up to `shutdown_drain_ms`, default 10,000, and counts what
+  is left). Each is an `AUDIT EVENT LOST` Error log naming the tenant, method, path, status and the last
+  error (at most one line per reason per second, carrying how many more were lost in between), and the host
+  is told through `Environment.EventsLost`. While any loss is recent the plugin reports unhealthy
+  (`plugin.HasHealth`).
+- **The event's `timestamp` is when the request finished**, not when it was appended.
+
+**Chain order is not timestamp order.** With several workers and retries, an event can be appended seconds
+after its request finished, so `seq` order and `timestamp` order can disagree. The chain is ordered by `seq`:
+verification, export and retention all read it that way (retention removes a prefix by `seq`, so a row whose
+timestamp is older than a later row's is not removed before it), and none assumes timestamps increase.
+
+**What this does not do: survive the process.** The queue is memory. A process that is killed loses the
+events it held, and nothing counts them, because nothing was running to count. A durable spool would close
+that; it is not built. `workers`, `buffer_size`, `enqueue_wait_ms`, `retry_deadline_ms` and `shutdown_drain_ms`
+are the plugin config keys (defaults 4, 1,000, 1,000, 60,000, 10,000).
+
 ## The chain
 
 Each tenant has its own chain and its own head row in `audit_chain_heads`. An append is one
@@ -251,9 +283,10 @@ passed. See "What a clean result means" for what that does and does not catch.
 its predecessor, and the head agrees with the newest row. Anyone who edited or removed a row
 without also rewriting the head, the floor, and every later row would be caught.
 
-**It does not mean the log is complete.** An event that was never appended, because the process
-crashed, the buffer was full, or an insert failed, leaves no gap in the chain. The chain proves
-the integrity of what was recorded, not that everything was recorded.
+**It does not mean the log is complete.** An event that was never appended leaves no gap in the chain: one
+given up on because the queue stayed full or the database kept refusing it is counted and logged (see
+*Delivery*), and one held by a process that was killed is not counted at all. The chain proves the integrity of
+what was recorded, not that everything was recorded.
 
 **It does not protect against anyone who can write these tables.** The hash is not keyed, and
 nothing outside the database anchors it. That is not only a database administrator: the
