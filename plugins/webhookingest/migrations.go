@@ -337,8 +337,31 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Up: `
 					ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 				`,
+			// cleat-review on #2221: a bare `ALTER TABLE ... ADD COLUMN` here
+			// is not idempotent on MySQL the way the Postgres and MSSQL arms
+			// above are -- MySQL DDL is not transactional, so a crash between
+			// this ALTER and plugin_migrations recording version 8 leaves a
+			// worker that re-runs it on its next start and gets
+			// `ERROR 1060 (42S21): Duplicate column name 'deleted_at'` and
+			// never boots. Guarded through information_schema.columns, the
+			// same prepared-statement shape migrations/mysql/055 uses for the
+			// identical hazard on workflow_instances.started_at -- MySQL has
+			// no bare conditional DDL statement, so the ALTER itself has to be
+			// built as text and executed through PREPARE/EXECUTE rather than
+			// wrapped in a plain IF the way UpMSSQL's sys.columns check is.
 			UpMySQL: `
-					ALTER TABLE webhook_sources ADD COLUMN deleted_at TIMESTAMP(6) NULL;
+					SET @col := (
+						SELECT COUNT(*) FROM information_schema.columns
+						WHERE table_schema = DATABASE()
+						  AND table_name = 'webhook_sources'
+						  AND column_name = 'deleted_at'
+					);
+					SET @ddl := IF(@col = 0,
+						'ALTER TABLE webhook_sources ADD COLUMN deleted_at TIMESTAMP(6) NULL',
+						'DO 0');
+					PREPARE stmt FROM @ddl;
+					EXECUTE stmt;
+					DEALLOCATE PREPARE stmt;
 				`,
 			UpMSSQL: `
 					IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'deleted_at')
