@@ -13,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/cleat-team/cleat/auth"
 )
 
 // interactiveMaxBodySize bounds POST /slack/interactive, whose payloads are a
@@ -307,7 +305,13 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 	// Extract workflow signal, trying the legacy top-level callback_id and
 	// then a block_actions payload's actions[0].action_id.
 	// Convention: wf:<workflowID>:sig:<signalName>
-	wfID, sigName, action, ok := extractCallbackRoute(payload)
+	// action (extractCallbackRoute's 3rd return) is unused here: the
+	// scoped-payload build that consumed it moved out of this handler along
+	// with signal delivery, both dead until cleat#2230(b) resolves a real
+	// tenant. buildScopedPayload itself stays defined and directly
+	// unit-tested (TestBuildScopedPayload) so (b) does not have to
+	// reconstruct it.
+	wfID, sigName, _, ok := extractCallbackRoute(payload)
 	if !ok {
 		// Nothing to route. Return 200 OK per Slack requirements.
 		switch {
@@ -326,44 +330,32 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// cleat#2230(a): refuse rather than deliver unscoped. This route is
-	// auth-exempt (cleat#2172), so nothing upstream of this handler ever
-	// sets a tenant in ctx -- and engine/main.go's signalPluginWorkflow
-	// treats "no tenant in ctx" as "unscoped", which on Postgres/SQL
-	// Server runs as the DEFAULT tenant's own session (cleat#2209's fix
-	// made that explicit). cleat-review's #2253 review measured the
-	// consequence: any tenant could post a button whose action_id named
-	// the default tenant's own workflow and signal it, while no other
-	// tenant's buttons worked at all. cleat#2230(b) adds the
-	// slack_workspace lookup that resolves a real tenant here; until then,
-	// every click refuses. ids only in the log -- no payload contents,
-	// which may carry a user-controlled value/block_id.
-	tid, tenantOK := auth.TenantIDFromRequest(r)
-	if !tenantOK {
-		p.interactiveNoTenantRefusals.Add(1)
-		p.logger.Warn("slack-notify: no tenant resolved for /slack/interactive, refusing",
-			"workflow_id", wfID, "signal", sigName)
-		p.writeError(w, http.StatusNotFound, "workspace not mapped")
-		return
-	}
-	ctx := auth.WithTenantID(r.Context(), tid)
-
-	// Deliver as workflow signal, scoped down to what a workflow needs to
-	// know about the click -- see scopedInteractionPayload's doc comment.
-	sigPayload, err := buildScopedPayload(payload, action)
-	if err != nil {
-		p.logger.Error("slack-notify: failed to build scoped signal payload", "workflow_id", wfID, "signal", sigName, "error", err)
-		p.writeError(w, http.StatusInternalServerError, "failed to process payload")
-		return
-	}
-	if p.signalWorkflow != nil {
-		if err := p.signalWorkflow(ctx, wfID, sigName, string(sigPayload)); err != nil {
-			p.logger.Error("slack-notify: failed to deliver signal", "workflow_id", wfID, "signal", sigName, "error", err)
-			p.writeError(w, http.StatusInternalServerError, "failed to deliver signal")
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	// cleat#2230(a): refuse EVERY click, unconditionally, until cleat#2230(b)
+	// lands. This handler MUST NOT read a tenant from the request or its
+	// context by any means -- not auth.TenantIDFromRequest, not any other
+	// source. cleat-review's second pass on this PR found why: this route is
+	// auth-exempt (cleat#2172), but a deployment running
+	// --tenant-resolver header:X-Tenant-ID resolves a tenant from an
+	// arbitrary request header on EVERY route, including exempt ones -- that
+	// resolver sits outside auth.Middleware's public-pattern short-circuit
+	// (cmd/cleat-worker/main.go), so an "auth-exempt" request still ends up
+	// with a tenant in ctx if that resolver is configured. Slack's HMAC
+	// signature (verified above) covers the payload, never headers, so
+	// whoever controls the header -- a gateway in front of the worker, not
+	// Slack -- would pick which tenant every click signals. Measured live:
+	// header mode + X-Tenant-ID: B -> 200, and the signal landed in B's
+	// workflow_signals, for a button that named no tenant at all. The
+	// earlier version of this fix read auth.TenantIDFromRequest and refused
+	// only when THAT returned no tenant, which is exactly the gap: it
+	// trusted whatever the resolver chain had already put in context instead
+	// of establishing its own. cleat#2230(b) adds the only source this
+	// handler will trust -- team_id resolved through slack_workspace, read
+	// fresh in this handler and never taken from ctx. Until then there is no
+	// safe tenant to signal under, so every click refuses. ids only in the
+	// log -- no payload contents, which may carry a user-controlled
+	// value/block_id.
+	p.interactiveNoTenantRefusals.Add(1)
+	p.logger.Warn("slack-notify: interactive callbacks are refused until cleat#2230(b) resolves a workspace mapping",
+		"workflow_id", wfID, "signal", sigName)
+	p.writeError(w, http.StatusNotFound, "workspace not mapped")
 }

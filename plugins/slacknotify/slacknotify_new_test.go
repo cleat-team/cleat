@@ -245,14 +245,16 @@ func interactiveServer(t *testing.T) (*Plugin, http.Handler) {
 // p.deploymentSecrets (or clear it) after interactiveServer returns.
 const testSigningSecret = "test-signing-secret"
 
-// withTestTenant stamps a request's context with testTenantID, the same way
-// auth.Middleware would for an authenticated request on a route that isn't
-// exempt. cleat#2230(a)'s tenant-refusal stub means handleInteractiveCallback
-// now 404s any request with no tenant in context -- every test that isn't
-// specifically exercising that refusal needs this so it can still reach
-// signal delivery. /slack/interactive is itself auth-exempt (cleat#2172), so
-// nothing in the real request path sets this yet; that's exactly the gap
-// cleat#2230(b) closes with a real slack_workspace lookup.
+// withTestTenant stamps a request's context with testTenantID. It no longer
+// represents a legitimate path to a tenant on this route -- /slack/interactive
+// is auth-exempt (cleat#2172), so nothing in the real request path is
+// SUPPOSED to set one. It now exists to simulate the gap cleat-review found
+// in this PR's first tenant-refusal stub: a deployment running
+// --tenant-resolver header:X-Tenant-ID puts a tenant in context on every
+// route, exempt ones included, from a header Slack's signature never covers.
+// handleInteractiveCallback must refuse identically whether or not this is
+// applied -- see TestSN_InteractiveCallback_TenantInContextIsIgnored, the
+// test that pins it.
 func withTestTenant(req *http.Request) *http.Request {
 	return req.WithContext(auth.WithTenantID(req.Context(), testTenantID))
 }
@@ -537,25 +539,29 @@ func TestSN_InteractiveCallback_InvalidSignature(t *testing.T) {
 	}
 }
 
+// TestSN_InteractiveCallback_ValidSignature pins cleat#2230(a)'s unconditional
+// refusal: a correctly-signed request naming a valid wf:...:sig:... route
+// still 404s and never reaches signalWorkflow, because there is no tenant
+// this handler will trust until cleat#2230(b) lands. Before that fix landed
+// this same request (with a tenant in ctx) delivered successfully; now that
+// path is deliberately dead.
 func TestSN_InteractiveCallback_ValidSignature(t *testing.T) {
 	rawBody := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-123%3Asig%3Abutton-click%22%7D"
 
 	p, mux := interactiveServer(t)
 	signalDelivered := false
 	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
-		if workflowID == "wf-123" && signalName == "button-click" {
-			signalDelivered = true
-		}
+		signalDelivered = true
 		return nil
 	}
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, withTestTenant(signedInteractiveRequest(rawBody)))
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 (every click refuses until cleat#2230(b)), got %d: %s", rec.Code, rec.Body.String())
 	}
-	if !signalDelivered {
-		t.Error("expected signal to be delivered")
+	if signalDelivered {
+		t.Error("signal must not be delivered -- there is no trusted tenant to deliver it under")
 	}
 }
 
@@ -589,33 +595,20 @@ func TestSN_InteractiveCallback_BadCallbackID(t *testing.T) {
 	}
 }
 
-func TestSN_InteractiveCallback_SignalError(t *testing.T) {
-	p, mux := interactiveServer(t)
-	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
-		return fmt.Errorf("delivery failed")
-	}
-
-	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-1%3Asig%3Aaction%22%7D"
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, withTestTenant(signedInteractiveRequest(body)))
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 for signal error, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
 // TestSN_InteractiveCallback_NoTenantRefuses is cleat#2230(a)'s tenant
-// refusal stub, added after cleat-review's #2253 finding: /slack/interactive
-// is auth-exempt (cleat#2172), so before this stub a click with a valid
-// route delivered its signal with NO tenant in ctx -- which
-// signalPluginWorkflow (cmd/cleat-worker/main.go) treats as unscoped, i.e.
-// the DEFAULT tenant's own session on Postgres/SQL Server. Any tenant could
-// post a button naming the default tenant's workflow and signal it, while
-// no other tenant's own buttons worked at all. Until cleat#2230(b) adds a
-// real slack_workspace lookup, this route has no way to resolve a tenant,
-// so every click with an otherwise-valid route must refuse. Known-positive:
-// falsified by deleting the tenantOK check, which makes this test fail (200
-// instead of 404, signalCalled true) while leaving every other test above
-// green, since they all supply a tenant via withTestTenant.
+// refusal: /slack/interactive is auth-exempt (cleat#2172), so before this fix
+// a click with a valid route delivered its signal with NO tenant in ctx --
+// which signalPluginWorkflow (cmd/cleat-worker/main.go) treats as unscoped,
+// i.e. the DEFAULT tenant's own session on Postgres/SQL Server. Any tenant
+// could post a button naming the default tenant's workflow and signal it,
+// while no other tenant's own buttons worked at all. Until cleat#2230(b)
+// adds a real slack_workspace lookup, this route has no way to resolve a
+// tenant, so every click with an otherwise-valid route must refuse.
+// Known-positive: falsified by restoring the auth.TenantIDFromRequest-gated
+// version, which makes this test still pass (it supplies no tenant either
+// way) but TestSN_InteractiveCallback_TenantInContextIsIgnored fail --
+// that's the version cleat-review's second pass actually caught, which this
+// test alone did not.
 func TestSN_InteractiveCallback_NoTenantRefuses(t *testing.T) {
 	p, mux := interactiveServer(t)
 	signalCalled := false
@@ -641,45 +634,87 @@ func TestSN_InteractiveCallback_NoTenantRefuses(t *testing.T) {
 	}
 }
 
-// TestSN_InteractiveCallback_RealBlockActionsPayload is cleat#2230(a): a real
-// Slack block_actions click, shaped the way Slack actually sends it and the
-// way this plugin's own sendMessage host function actually builds buttons
-// (host_functions.go's Blocks field is opaque JSON the plugin never stamps
-// a callback_id into) -- no top-level callback_id at all, route embedded in
-// the clicked action's action_id. Before cleat#2230(a) this fell straight
-// into the "no callback_id -- nothing to route" 200-OK no-op, so every
-// button this plugin ever sent was unroutable. Known-positive: falsified by
-// reverting extractCallbackRoute to check only payload.CallbackID, which
-// makes signalCalled stay false and this test fail.
-func TestSN_InteractiveCallback_RealBlockActionsPayload(t *testing.T) {
+// TestSN_InteractiveCallback_TenantInContextIsIgnored is the fix for
+// cleat-review's second-pass finding on this PR: the first version of the
+// stub above read auth.TenantIDFromRequest and refused only when THAT found
+// no tenant -- which is bypassable, because a deployment running
+// --tenant-resolver header:X-Tenant-ID puts a tenant in context on every
+// route, exempt ones included, from a request header Slack's signature never
+// covers (measured live against a real worker: header mode +
+// X-Tenant-ID: B -> 200, signal delivered into B's workflow_signals).
+// withTestTenant simulates exactly that -- a tenant present in context from
+// some source outside this handler's control -- and the fixed handler must
+// refuse identically to the no-tenant case, because it no longer reads a
+// tenant from the request at all. Known-positive: falsified by reintroducing
+// `if tid, ok := auth.TenantIDFromRequest(r); ok { ... deliver ... }`, which
+// makes this test fail (200, signalCalled true) while
+// TestSN_InteractiveCallback_NoTenantRefuses above stays green -- proving
+// that test alone cannot catch this gap.
+func TestSN_InteractiveCallback_TenantInContextIsIgnored(t *testing.T) {
 	p, mux := interactiveServer(t)
-	var gotWF, gotSig, gotPayload string
+	signalCalled := false
 	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
-		gotWF, gotSig, gotPayload = workflowID, signalName, payload
+		signalCalled = true
 		return nil
 	}
+	before := p.interactiveNoTenantRefusals.Load()
 
-	// A real Slack block_actions payload: no callback_id field at all, the
-	// route lives in actions[0].action_id.
-	rawPayload := `{"type":"block_actions","actions":[{"type":"button","action_id":"wf:wf-456:sig:approve","block_id":"approval_block","value":"approve","action_ts":"1234567890.123456"}],"team":{"id":"T123"},"user":{"id":"U123"},"channel":{"id":"C123"}}`
-	body := "payload=" + url.QueryEscape(rawPayload)
-
+	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-1%3Asig%3Aaction%22%7D"
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, withTestTenant(signedInteractiveRequest(body)))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 even with a tenant in context, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if gotWF != "wf-456" || gotSig != "approve" {
-		t.Errorf("expected signal for wf-456/approve from actions[].action_id, got wf=%q sig=%q", gotWF, gotSig)
+	if signalCalled {
+		t.Error("signal must not be delivered -- a tenant in ctx from an untrusted source (e.g. a header resolver) must not be honored")
 	}
-	// gotPayload must be the REAL scoped payload, not a placeholder --
-	// decode it and check the fields cleat-review's #2253 review specified
-	// (action_id, block_id, value, user_id, team_id, channel_id, action_ts)
-	// survived the round trip. A double that only asserted wf/sig could
-	// pass even if the plugin delivered an empty or synthetic payload.
+	if got := p.interactiveNoTenantRefusals.Load(); got != before+1 {
+		t.Errorf("expected interactiveNoTenantRefusals to increment by 1, got %d -> %d", before, got)
+	}
+}
+
+// TestExtractCallbackRouteAndBuildScopedPayload is cleat#2230(a), moved to a
+// direct unit test of the two helpers rather than an HTTP-level test through
+// handleInteractiveCallback: that handler now refuses every click
+// unconditionally (see TestSN_InteractiveCallback_ValidSignature), so it can
+// no longer exercise what this test actually checks -- that a real Slack
+// block_actions payload (shaped the way Slack actually sends it, and the way
+// this plugin's own sendMessage host function actually builds buttons;
+// host_functions.go's Blocks field is opaque JSON the plugin never stamps a
+// callback_id into, so there is never a top-level callback_id, only
+// actions[0].action_id) parses to the right route and scopes down to the
+// right payload. buildScopedPayload and extractCallbackRoute stay directly
+// tested here so cleat#2230(b) can wire them back into the handler without
+// reproving either. Known-positive: falsified by reverting
+// extractCallbackRoute to check only payload.CallbackID, which makes ok
+// false and this test fail.
+func TestExtractCallbackRouteAndBuildScopedPayload(t *testing.T) {
+	rawPayload := `{"type":"block_actions","actions":[{"type":"button","action_id":"wf:wf-456:sig:approve","block_id":"approval_block","value":"approve","action_ts":"1234567890.123456"}],"team":{"id":"T123"},"user":{"id":"U123"},"channel":{"id":"C123"}}`
+
+	var payload slackInteractivePayload
+	if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
+		t.Fatalf("invalid test fixture: %v", err)
+	}
+
+	wfID, sigName, action, ok := extractCallbackRoute(payload)
+	if !ok {
+		t.Fatalf("expected a routable action_id, got ok=false")
+	}
+	if wfID != "wf-456" || sigName != "approve" {
+		t.Errorf("expected wf-456/approve from actions[].action_id, got wf=%q sig=%q", wfID, sigName)
+	}
+
+	// gotPayload must be the REAL scoped payload -- decode it and check the
+	// fields cleat-review's #2253 review specified (action_id, block_id,
+	// value, user_id, team_id, channel_id, action_ts) survived the round
+	// trip.
+	sigPayload, err := buildScopedPayload(payload, action)
+	if err != nil {
+		t.Fatalf("buildScopedPayload: %v", err)
+	}
 	var decoded scopedInteractionPayload
-	if err := json.Unmarshal([]byte(gotPayload), &decoded); err != nil {
-		t.Fatalf("delivered payload is not valid JSON: %v\npayload: %s", err, gotPayload)
+	if err := json.Unmarshal(sigPayload, &decoded); err != nil {
+		t.Fatalf("scoped payload is not valid JSON: %v\npayload: %s", err, sigPayload)
 	}
 	want := scopedInteractionPayload{
 		ActionID:  "wf:wf-456:sig:approve",
@@ -691,14 +726,14 @@ func TestSN_InteractiveCallback_RealBlockActionsPayload(t *testing.T) {
 		ChannelID: "C123",
 	}
 	if decoded != want {
-		t.Errorf("delivered payload = %+v, want %+v", decoded, want)
+		t.Errorf("scoped payload = %+v, want %+v", decoded, want)
 	}
 	// And nothing beyond the scoped fields -- response_url, trigger_id,
 	// and message text must NOT reach the workflow (cleat-review's #2253
 	// PII/capability finding).
 	for _, forbidden := range []string{"response_url", "trigger_id", "message"} {
-		if strings.Contains(gotPayload, forbidden) {
-			t.Errorf("delivered payload must not mention %q: %s", forbidden, gotPayload)
+		if strings.Contains(string(sigPayload), forbidden) {
+			t.Errorf("scoped payload must not mention %q: %s", forbidden, sigPayload)
 		}
 	}
 }
@@ -732,19 +767,6 @@ func TestSN_InteractiveCallback_ValueAndBlockIDAreNotRoutable(t *testing.T) {
 	}
 	if signalCalled {
 		t.Error("value and block_id must not be treated as routable, even when action_id is a plain label")
-	}
-}
-
-func TestSN_InteractiveCallback_NoSignalFunc(t *testing.T) {
-	_, mux := interactiveServer(t)
-	// signalWorkflow is nil
-
-	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-1%3Asig%3Aaction%22%7D"
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, withTestTenant(signedInteractiveRequest(body)))
-	// Should succeed (no signal func, but no error).
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 when signalWorkflow is nil, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
