@@ -4073,7 +4073,9 @@ func (w *Worker) reapOnce() {
 				decision := episode.evaluate(shape, staleTimeout, time.Now())
 				if decision.BoundHit {
 					w.logger.WarnContext(w.ctx, "Reaper: suspected-database-stall suppression bound reached -- reclaiming despite a stall-shaped stale set; this may be a genuine mass worker failure rather than a database stall",
-						"worker_id", w.id, "shard", unit.logLabel(), "running", shape.Running, "missed_beat", shape.MissedBeat, "bound", staleTimeout)
+						"worker_id", w.id, "shard", unit.logLabel(), "running", shape.Running, "missed_beat", shape.MissedBeat, "bound", staleTimeout,
+						"protection_lower", stallProtectionLower(w.heartbeatInterval, staleTimeout),
+						"protection_upper", stallProtectionUpper(w.heartbeatInterval, staleTimeout))
 				}
 				if decision.Suppress {
 					w.logger.WarnContext(w.ctx, "Reaper: stale set looks like a suspected database stall, not dead workers -- deferring reclaim by one tick",
