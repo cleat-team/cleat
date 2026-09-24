@@ -377,9 +377,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the export (`409` before anything was sent, otherwise the connection is aborted and `cleatctl` says
   `INCOMPLETE`) rather than leave a gap that verifies. The checkpoint records `from`, `to` and `after_seq`, so
   `verify-export` knows which completeness rules apply. The checkpoint itself is unsigned, so an edit can
-  present a full export as a range or a resumed one: pass `--require-full` when a whole export was asked
-  for, and `--expect-head` / `--expect-floor` (which imply it and check the records themselves, not only the
-  checkpoint) with values recorded elsewhere. `--expect-after` checks the join of a resumed export.
+  present a full export as a range or a resumed one: the options say what the caller knows (`--require-full`,
+  `--expect-head`, `--expect-floor`, `--expect-after`, `--expect-unchained`), each pins the kind of export
+  expected, and a bare run prints a `NOTE` saying what it did not establish. An unchained record after a
+  chained one is refused, as is any unchained record in a resumed export. The behaviour of every kind x
+  option x edit is one table, `chain_export_matrix_test.go`.
 
   **`GET /audit/events` no longer answers 500 on SQL Server:** it wrote a literal `LIMIT`.
 

@@ -430,6 +430,10 @@ func TestAnExportVerifiesOfflineWithTheReferenceImplementation(t *testing.T) {
 		head := fmt.Sprintf("%d:%s", cp.HeadSeq, cp.HeadHash)
 		floor := fmt.Sprintf("%d:%s", cp.FloorSeq, cp.FloorHash)
 		bothAnchors := []string{"--expect-head", head, "--expect-floor", floor}
+		// An emptied export whose head_seq was moved to the floor but whose head hash still names
+		// the old head: an empty chain's head is its floor.
+		emptied := forgeCP(rewrite(body, func(ev []string) []string { return ev[:1] }), map[string]any{"head_seq": cp.FloorSeq})
+		mustFail("every chained line deleted and head_seq moved to the floor", emptied, 1, "HEAD MISMATCH")
 
 		if code, out := verify(body, bothAnchors...); code != 0 {
 			t.Errorf("an honest full export with both anchors: exit %d\n%s", code, out)
@@ -447,15 +451,14 @@ func TestAnExportVerifiesOfflineWithTheReferenceImplementation(t *testing.T) {
 		mustFail("seq 5 deleted, `from` added, both anchors", rangeForged, 1, "DOWNGRADED", bothAnchors...)
 
 		tailForged := forgeCP(rewrite(body, func(ev []string) []string { return ev[:len(ev)-3] }), map[string]any{"from": "2000-01-01T00:00:00.000000Z"})
-		mustFail("the last three deleted, `from` added, both anchors", tailForged, 1, "ANCHOR MISMATCH", bothAnchors...)
-		mustFail("the last three deleted, `from` added, --expect-head only", tailForged, 1, "The events, not just the checkpoint", "--expect-head", head)
+		mustFail("the last three deleted, `from` added, both anchors", tailForged, 1, "DOWNGRADED", bothAnchors...)
+		mustFail("the last three deleted, `from` added, --expect-head only", tailForged, 1, "DOWNGRADED", "--expect-head", head)
 
 		afterForged := forgeCP(rewrite(body, func(ev []string) []string { return append(ev[:1], ev[4:]...) }), map[string]any{"after_seq": 3})
-		if code, out := verify(afterForged); code != 0 || !strings.Contains(out, "a resumed export") {
-			t.Errorf("the first three deleted and after_seq 3 claimed, no options: exit %d\n%s\nthis pins the documented limit of a resumed checkpoint", code, out)
-		}
+		// The pre-chain row is still at the front, and a resumed export has none: caught with no options.
+		mustFail("the first three deleted and after_seq 3 claimed, no options", afterForged, 1, "UNCHAINED IN A RESUMED")
 		mustFail("the first three deleted, after_seq claimed, both anchors", afterForged, 1, "DOWNGRADED", bothAnchors...)
-		mustFail("the first three deleted, after_seq claimed, --expect-floor only", afterForged, 1, "ANCHOR MISMATCH", "--expect-floor", floor)
+		mustFail("the first three deleted, after_seq claimed, --expect-floor only", afterForged, 1, "DOWNGRADED", "--expect-floor", floor)
 
 		// The join of a resumed export: the last record of the part you hold anchors the first
 		// record of the rest.

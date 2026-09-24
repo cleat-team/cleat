@@ -109,45 +109,55 @@ The checkpoint also says what kind of export this was, which decides what a veri
 
 Offline verification:
 
-    python3 plugins/auditlog/testdata/audit_chain_reference.py verify-export \
-        [--require-full] [--expect-head SEQ:HASH] [--expect-floor SEQ:HASH] \
-        [--expect-after SEQ:HASH] < export.jsonl
+    python3 plugins/auditlog/testdata/audit_chain_reference.py verify-export [options] < export.jsonl
 
-It needs no database and shares no code with cleat. It recomputes every chained record's hash from its
-own fields; refuses duplicate ids, a `seq` that does not strictly increase, and consecutive records that
-do not link; and requires exactly one checkpoint whose `events` matches. What else it requires depends on
-the kind of export:
+It needs no database and shares no code with cleat. `verify-export --help` prints the full rules. It
+recomputes every chained record's hash from its own fields; refuses duplicate ids, a `seq` that does not
+strictly increase, consecutive records that do not link, and an unchained record after a chained one (an
+export sends the unchained ones first); and requires exactly one checkpoint whose `events` matches. What
+else it requires depends on the kind of export the checkpoint says it is:
 
 | export | also required |
 |---|---|
 | full (no range, no `after_seq`) | no gaps; the first chained record is `floor_seq + 1` and links to `floor_hash`; the last is `head_seq` with `head_hash` |
-| resumed (`after_seq`) | no gaps; the first is `after_seq + 1`; the last is the head. The join to the part before the cursor cannot be checked, so it verifies as a chain from that point |
+| resumed (`after_seq`) | no gaps; the first is `after_seq + 1`; the last is the head; **no unchained records** (a resume starts in the chained part). The join to the part before the cursor cannot be checked without an anchor |
 | range (`from` or `to`) | nothing about coverage: a range has gaps by design, and a record deleted from inside one is not detectable |
 
-Exit `0` verified, `1` a break, `2` incomplete or unreadable.
+Exit `0` verified, `1` a break, `2` incomplete, unreadable, or a contradictory command line.
 
-**Pass `--require-full` when you asked for a whole export.** The kind of export is stated in the
-checkpoint, so an edit that deletes records and adds `from`, `to` or `after_seq` to the checkpoint
-would present a full export as a range or a resumed one, which claims less coverage. Without the
-option that edit verifies (exit `0`), because a range really does make no claim about coverage.
-`--require-full` refuses a checkpoint that says it is anything else (`DOWNGRADED`, exit `1`).
+**The checkpoint is not signed**, and it says which kind of export the file is, so an edit can delete
+records and relabel the file as a range, or move an end to match. From the file alone that is not
+detectable, and the verifier prints a `NOTE` saying what it did not establish. The options say what *you*
+know from somewhere the editor cannot reach. Each pins the kind you expect (a checkpoint claiming another
+is `DOWNGRADED`) and checks the **records**, not just the checkpoint:
 
-**The checkpoint is not signed.** From the file alone, a record deleted from the middle of a full
-export, a duplicated record and a reordering are caught, and so are records removed from an end
-*unless* the checkpoint was edited to match. Only values recorded somewhere the editor cannot reach
-make the ends binding:
+| option | kind it requires | what it binds |
+|---|---|---|
+| `--require-full` | full | nothing more: you asked for a whole export |
+| `--expect-floor SEQ:HASH` | full | the first chained record is `SEQ + 1` and links to `HASH` (the **start** only) |
+| `--expect-head SEQ:HASH` | full, or resumed with `--expect-after` | the last chained record is `SEQ` with `HASH` (the **end** only) |
+| `--expect-after SEQ:HASH` | resumed, with `after_seq == SEQ` | the first chained record is `SEQ + 1` and links to `HASH`: the join to the part you already hold |
+| `--expect-unchained N` | full, or resumed with `--expect-after` (then `N` is 0) | exactly `N` unchained records; take `N` from `GET /audit/verify`'s `unchained` |
 
-- `--expect-head SEQ:HASH` requires the export to be full and its **last chained record** to be that
-  `seq` with that hash. It checks the records, not only the checkpoint, so a checkpoint edited to
-  agree with a truncated file still fails.
-- `--expect-floor SEQ:HASH` requires the export to be full and its **first chained record** to be
-  `seq + 1` and to link to that hash.
-- `--expect-after SEQ:HASH` is the same join for a resumed export: the first record must be
-  `seq + 1` and link to the hash you recorded for the last record of the part before the cursor.
-  It does not imply a full export.
+The anchors bind the records and not only the checkpoint. The structure rules tie the first and last
+chained records to the checkpoint's floor (or `after_seq`) and head, and the anchors tie the checkpoint to
+the values you trust, so an edit that moves the checkpoint to hide a deletion disagrees with the anchor and
+one that leaves it alone disagrees with the records. A range is refused whenever an anchor is given. The
+join of a resumed export is checked directly, because nothing in the file says what precedes its first
+record.
 
-The anchors imply `--require-full`, except `--expect-after`, which is for exactly the export that
-`--require-full` refuses.
+`--expect-after` cannot be combined with `--require-full` or `--expect-floor`. For a whole export give
+`--expect-head` **and** `--expect-floor`: either alone leaves the other end open. For a resumed one give
+`--expect-after` and `--expect-head`.
+
+**`--expect-unchained` exists because an unchained record has no hash.** The chain cannot say that one was
+added, and one added at the front of the file looks like the rows written before the chain existed. One
+added after a chained record is refused without any option; one at the front is caught only by a count you
+supply.
+
+With no option a downgraded file verifies (exit `0`, with the note). That is the limit of the file alone, and
+`chain_export_matrix_test.go` pins it: the whole grid of export kinds, option sets and edits, with the exit
+code and finding each must give.
 
 ## Verifying
 
