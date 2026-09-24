@@ -145,10 +145,27 @@ func (p *Plugin) processDeliveries(ctx, baseCtx context.Context) (int, int, int,
 
 	for rows.Next() {
 		var d deliveryRow
-		if err := plugin.ScanRow(rows, &d.ID, &d.WebhookID, &d.EventType, &d.Payload, &d.AttemptCount); err != nil {
+		// plugin.JSONColumn, not &d.Payload directly: SQL Server returns
+		// NVARCHAR as a Go string, and database/sql has no fast-path
+		// conversion from a string driver.Value into a *json.RawMessage
+		// (json.RawMessage is a named []byte type, not the literal []byte
+		// database/sql's fast path matches on) -- see JSONColumn's own doc
+		// comment for the exact failure signature. lib/pq and
+		// go-sql-driver/mysql both return jsonb/json columns as []byte, which
+		// convertAssignRows DOES special-case (a []byte value is assignable
+		// to any named-[]byte-underlying type), so this scanned successfully
+		// on Postgres and MySQL and failed silently -- logged, then
+		// `continue`d past -- on every SQL Server row. Found running the real
+		// delivery loop against real SQL Server for the first time
+		// (cleat-review's requested multi-dialect test on #2198): every due
+		// delivery was skipped, attempted stayed 0, and nothing else in this
+		// loop's return values said why.
+		var payload plugin.JSONColumn
+		if err := plugin.ScanRow(rows, &d.ID, &d.WebhookID, &d.EventType, &payload, &d.AttemptCount); err != nil {
 			p.logger.Error("notifications: scan delivery row", "error", err)
 			continue
 		}
+		d.Payload = payload.Raw
 
 		attempted++
 		// ONE TRACE PER DELIVERY, originated here because a webhook delivery has
@@ -217,13 +234,24 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 	// "a lookup failure must not read as unsigned" reasoning cleat#2172 needed
 	// for webhookingest's inbound verification, applied to this plugin's
 	// outbound one.
+	//
+	// Both failure paths below go through retryOrFail rather than a bare
+	// error return. Before cleat-review on #2198, deliver() returned an error
+	// here and processDeliveries just `continue`d: the delivery row was never
+	// touched, so it stayed pending forever, was retried every tick with
+	// nothing but a log line to show for it, got no attempt_count, and
+	// GET .../deliveries had no way to say why. A retired or undecryptable
+	// secret is not a transient condition that will clear on the next tick
+	// the way a network blip might, but it is still recorded through the
+	// same retry-then-fail machinery as every other delivery error, so it
+	// surfaces in the same place an operator already looks.
 	if !cfg.SecretConfigured {
-		return "", fmt.Errorf("webhook %s has no secret configured", d.WebhookID)
+		return p.retryOrFail(ctx, d, fmt.Sprintf("webhook %s has no secret configured", d.WebhookID))
 	}
 	tenantCtx := plugin.ForTenant(baseCtx, cfg.TenantID)
 	secret, err := p.secrets.ForTenant(cfg.TenantID.String()).Get(tenantCtx, WebhookSecretName(d.WebhookID))
 	if err != nil {
-		return "", fmt.Errorf("get webhook secret: %w", err)
+		return p.retryOrFail(ctx, d, fmt.Sprintf("get webhook secret: %v", err))
 	}
 
 	// Build the request body.
@@ -244,12 +272,7 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 	// Execute the HTTP request.
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		// Network or timeout error — record and retry.
-		newCount := d.AttemptCount + 1
-		if newCount >= 10 {
-			return "failed", p.markFailed(ctx, d.ID, newCount, fmt.Sprintf("request failed: %v", err))
-		}
-		return "retrying", p.markRetrying(ctx, d.ID, newCount, fmt.Sprintf("request failed: %v", err))
+		return p.retryOrFail(ctx, d, fmt.Sprintf("request failed: %v", err))
 	}
 	defer resp.Body.Close()
 
@@ -260,12 +283,23 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 		return "delivered", p.markDelivered(ctx, d.ID, d.AttemptCount+1, resp.StatusCode, respBody)
 	}
 
-	// Non-2xx response — retry.
+	return p.retryOrFail(ctx, d, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
+}
+
+// retryOrFail marks a delivery for another attempt, or permanently failed
+// once it has reached the retry ceiling, and returns the outcome in the same
+// (string, error) shape markRetrying/markFailed's callers already expect.
+// Shared by every failure path in deliver -- a network error, a non-2xx
+// response, and (cleat#1992/#2172, cleat-review on #2198) a secret that could
+// not be configured or read -- so each is recorded the same way instead of
+// some going through markRetrying/markFailed and others returning a bare
+// error that processDeliveries only logs and drops.
+func (p *Plugin) retryOrFail(ctx context.Context, d deliveryRow, reason string) (string, error) {
 	newCount := d.AttemptCount + 1
 	if newCount >= 10 {
-		return "failed", p.markFailed(ctx, d.ID, newCount, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
+		return "failed", p.markFailed(ctx, d.ID, newCount, reason)
 	}
-	return "retrying", p.markRetrying(ctx, d.ID, newCount, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
+	return "retrying", p.markRetrying(ctx, d.ID, newCount, reason)
 }
 
 // markDelivered updates the delivery as successfully delivered.
@@ -347,6 +381,26 @@ func nextBackoff(attemptCount int) time.Duration {
 // SYSUTCDATETIME(), so only the row limit needs an arm. The split is the same
 // one the adapter draws everywhere: a token that maps one-to-one is rewritten
 // centrally; a construct that moves to a different clause is written out.
+//
+// THE MYSQL ARM USES `NOW(6)`, NOT A BARE `now()`. next_attempt_at is
+// TIMESTAMP(6) (migrations.go), storing microseconds -- the value sendWebhook
+// inserts is Go's time.Now(), full precision. MySQL's `now()` with no
+// argument returns SECOND precision, truncating any fractional part to zero.
+// So `next_attempt_at <= now()` compares a microsecond-precise value against
+// one truncated DOWN to the start of the current second: a delivery whose
+// next_attempt_at falls anywhere after that second's :00 -- which is nearly
+// always, since it is set to "now" at creation -- reads as still in the
+// future until the wall clock ticks over to the NEXT second. Found running
+// this against real MySQL with no delay between creating a delivery and
+// sweeping for it (cleat-review on #2198's requested test): attempted=0 on
+// every run, despite the row existing with status='pending' and
+// next_attempt_at a few milliseconds in the past. NOW(6) matches the
+// column's own precision, the same fix engine/query_builder.go's nowExpr()
+// already uses for MySQL. In production, where Run ticks every
+// deliveryInterval (30s) rather than immediately, this cost at most one
+// missed sweep before the next one caught it -- silent by dilution, not by
+// impossibility, which is exactly the class of bug a lower-frequency
+// production system does not surface for itself.
 var queryDueDeliveries = plugin.Query{
 	Default: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
@@ -357,7 +411,7 @@ LIMIT 100`,
 	MySQL: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
 WHERE d.status IN ('pending', 'retrying')
-  AND d.next_attempt_at <= now()
+  AND d.next_attempt_at <= NOW(6)
 ORDER BY d.next_attempt_at ASC
 LIMIT 100`,
 	MSSQL: `SELECT TOP 100 d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count

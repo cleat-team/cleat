@@ -51,6 +51,22 @@ func WebhookSecretName(id uuid.UUID) string {
 	return "notifications.webhook_secret." + id.String()
 }
 
+// webhookExistsSQL returns dialect-specific SQL that checks whether a
+// webhook_config row exists for a given (id, tenant_id) pair, scanned into a
+// Go bool. `SELECT EXISTS(...)` as a top-level select list expression is
+// valid PostgreSQL and MySQL but not T-SQL -- SQL Server has no boolean
+// column type, so it needs `CASE WHEN EXISTS(...) THEN 1 ELSE 0 END`. Same
+// shape, same reason, as plugin/migration.go's checkPluginMigrationSQL.
+// Found by cleat-review running sendWebhook and handleListDeliveries against
+// real SQL Server for the first time -- every call failed outright, since
+// SELECT EXISTS(...) is not valid syntax there at all.
+func webhookExistsSQL(d plugin.Dialect) string {
+	if d == plugin.DialectMSSQL {
+		return `SELECT CASE WHEN EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2) THEN 1 ELSE 0 END`
+	}
+	return `SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2)`
+}
+
 // ---- types ----
 
 type webhookConfigJSON struct {
@@ -141,25 +157,44 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	const secretConfigured = true
 
-	// The secret is written FIRST. If it fails, nothing else has happened --
-	// no orphaned config row. If the INSERT below fails after this succeeds,
-	// the secret is orphaned under a name no config row references; harmless
-	// (unreachable, never resolved by anything) but logged so it is not a
-	// silent leak of key material nobody can account for.
-	if err := p.secrets.Put(r.Context(), WebhookSecretName(id), req.Secret.Reveal()); err != nil {
-		p.logger.Error("notifications: store webhook secret", "error", err)
-		p.writeError(w, 500, "failed to store secret")
+	// The row is written FIRST, the secret AFTER, with a compensating delete
+	// if the secret write fails -- the opposite order from before cleat-review
+	// on #2198. Secret-first meant every failed INSERT orphaned a secret; on
+	// MySQL the INSERT below failed on EVERY call (the $6, $6 bug this same
+	// change fixes), so it was not a rare edge case, it was every create.
+	// Row-first still risks a row with secret_configured=true and no secret
+	// if the Put fails, which the compensating delete below closes: nothing
+	// is left with secretConfigured=true unless Put actually succeeded.
+	//
+	// Every placeholder numbered once, strictly increasing: $6 named twice
+	// (for created_at and updated_at) would rebind to two SEPARATE "?" on
+	// MySQL, in TEXTUAL order -- plugin.Rebind replaces every $N occurrence
+	// positionally, not by its number (see CLAUDE.md's "MySQL binds `?` by
+	// APPEARANCE") -- while PostgreSQL and SQL Server bind by the number
+	// itself. The only ordering that satisfies both is one placeholder per
+	// argument, numbered in the same order the arguments are passed, so `now`
+	// is passed twice ($6 and $7) rather than reused. Same defect, same fix,
+	// as plugins/webhookingest/routes.go's handleCreateSource -- found there
+	// first; this one was missed in the same PR and caught by cleat-review
+	// running POST /webhooks against real MySQL.
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+			INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, true, $6, $7)
+		`, p.dialect), tid, id, req.URL, secretConfigured, string(eventsJSON), now, now)
+	if err != nil {
+		p.logger.Error("notifications: create webhook", "error", err)
+		p.writeError(w, 500, "failed to create webhook")
 		return
 	}
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
-			INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
-		`, p.dialect), tid, id, req.URL, secretConfigured, string(eventsJSON), now)
-	if err != nil {
-		p.logger.Error("notifications: create webhook",
-			"error", err, "orphaned_secret_configured", secretConfigured)
-		p.writeError(w, 500, "failed to create webhook")
+	if err := p.secrets.Put(r.Context(), WebhookSecretName(id), req.Secret.Reveal()); err != nil {
+		p.logger.Error("notifications: store webhook secret", "error", err)
+		if _, delErr := p.db.Exec(r.Context(), plugin.Rebind(
+			`DELETE FROM webhook_config WHERE id = $1`, p.dialect), id); delErr != nil {
+			p.logger.Error("notifications: compensating delete after failed secret store",
+				"id", id, "error", delErr)
+		}
+		p.writeError(w, 500, "failed to store secret")
 		return
 	}
 
@@ -453,9 +488,8 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 
 	// Verify the webhook belongs to the tenant.
 	var exists bool
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2)
-		`, p.dialect), webhookID, tid).Scan(&exists)
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(webhookExistsSQL(p.dialect), p.dialect),
+		webhookID, tid).Scan(&exists)
 	if err != nil {
 		p.logger.Error("notifications: verify webhook", "error", err)
 		p.writeError(w, 500, "failed to verify webhook")

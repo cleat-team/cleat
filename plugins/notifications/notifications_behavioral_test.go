@@ -1224,6 +1224,148 @@ func TestDeliverMaxRetriesNetworkError(t *testing.T) {
 }
 
 // ===========================================================================
+// deliver — a secret failure is retried/failed, not silently skipped
+// ===========================================================================
+//
+// cleat-review on #2198 (cleat#1992/#2172): before this, both branches below
+// returned a bare error from deliver, and processDeliveries only logged it
+// and `continue`d -- the delivery row was never touched, so it stayed
+// 'pending' forever, was retried every tick with no attempt_count and no
+// response_body, and GET .../deliveries had no way to say why. Both now go
+// through retryOrFail like every other failure mode.
+
+func TestDeliverNoSecretConfigured(t *testing.T) {
+	p, store := setupTestPlugin(t)
+
+	webhookID := uuid.New()
+	now := time.Now().UTC()
+	store.mu.Lock()
+	store.configs = append(store.configs, &testWebhookCfg{
+		tenantID: testTenantID,
+		id:       webhookID,
+		url:      "http://127.0.0.1:1/webhook",
+		// secretConfigured left false: no secret was ever written for this
+		// row through the admin route, which today's handleCreateWebhook
+		// refuses to allow -- but deliver must not assume that guarantee
+		// holds forever, so this exercises the row shape directly.
+		secretConfigured: false,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
+	})
+	past := now.Add(-1 * time.Hour)
+	deliveryID := uuid.New()
+	store.deliveries = append(store.deliveries, &testDelivery{
+		id:            deliveryID,
+		webhookID:     webhookID,
+		eventType:     "test.event",
+		payload:       []byte(`{"msg":"hello"}`),
+		status:        "pending",
+		attemptCount:  0,
+		nextAttemptAt: &past,
+		createdAt:     past,
+	})
+	store.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	attempted, succeeded, failed, err := p.processDeliveries(ctx, ctx)
+	if err != nil {
+		t.Fatalf("processDeliveries: %v", err)
+	}
+	if attempted != 1 {
+		t.Errorf("expected 1 attempted, got %d", attempted)
+	}
+	if succeeded != 0 {
+		t.Errorf("expected 0 succeeded, got %d", succeeded)
+	}
+	if failed != 0 {
+		t.Errorf("expected 0 failed (should retry, not fail, on attempt 1), got %d", failed)
+	}
+
+	store.mu.RLock()
+	d := findTestDelivery(store.deliveries, deliveryID)
+	store.mu.RUnlock()
+	if d == nil {
+		t.Fatal("delivery not found")
+	}
+	if d.status != "retrying" {
+		t.Errorf("expected status 'retrying' when secret_configured=false, got %q -- "+
+			"a secret failure must go through retryOrFail like any other delivery failure", d.status)
+	}
+	if d.attemptCount != 1 {
+		t.Errorf("expected attempt_count 1, got %d", d.attemptCount)
+	}
+}
+
+func TestDeliverSecretGetError(t *testing.T) {
+	p, store := setupTestPlugin(t)
+
+	webhookID := uuid.New()
+	now := time.Now().UTC()
+	store.mu.Lock()
+	store.configs = append(store.configs, &testWebhookCfg{
+		tenantID: testTenantID,
+		id:       webhookID,
+		url:      "http://127.0.0.1:1/webhook",
+		// secretConfigured is true, but nothing is Seed()ed into FakeSecrets
+		// below -- reproducing a retired or undecryptable secret, where the
+		// row promises a secret exists but the store cannot produce it.
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
+	})
+	past := now.Add(-1 * time.Hour)
+	deliveryID := uuid.New()
+	store.deliveries = append(store.deliveries, &testDelivery{
+		id:            deliveryID,
+		webhookID:     webhookID,
+		eventType:     "test.event",
+		payload:       []byte(`{"msg":"hello"}`),
+		status:        "pending",
+		attemptCount:  0,
+		nextAttemptAt: &past,
+		createdAt:     past,
+	})
+	store.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	attempted, succeeded, failed, err := p.processDeliveries(ctx, ctx)
+	if err != nil {
+		t.Fatalf("processDeliveries: %v", err)
+	}
+	if attempted != 1 {
+		t.Errorf("expected 1 attempted, got %d", attempted)
+	}
+	if succeeded != 0 {
+		t.Errorf("expected 0 succeeded, got %d", succeeded)
+	}
+	if failed != 0 {
+		t.Errorf("expected 0 failed (should retry, not fail, on attempt 1), got %d", failed)
+	}
+
+	store.mu.RLock()
+	d := findTestDelivery(store.deliveries, deliveryID)
+	store.mu.RUnlock()
+	if d == nil {
+		t.Fatal("delivery not found")
+	}
+	if d.status != "retrying" {
+		t.Errorf("expected status 'retrying' when the secret store returns an error, got %q -- "+
+			"a secret failure must go through retryOrFail like any other delivery failure", d.status)
+	}
+	if d.attemptCount != 1 {
+		t.Errorf("expected attempt_count 1, got %d", d.attemptCount)
+	}
+}
+
+// ===========================================================================
 // processDeliveries — deliver function returns error (webhook config missing)
 // ===========================================================================
 

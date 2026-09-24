@@ -62,9 +62,8 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 
 	// Verify the webhook belongs to the tenant.
 	var exists bool
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2)
-		`, p.dialect), input.WebhookID, cc.TenantID).Scan(&exists)
+	err := p.db.QueryRow(ctx, plugin.Rebind(webhookExistsSQL(p.dialect), p.dialect),
+		input.WebhookID, cc.TenantID).Scan(&exists)
 	if err != nil {
 		return "", fmt.Errorf("notifications: verify webhook: %w", err)
 	}
