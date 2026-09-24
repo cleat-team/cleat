@@ -180,6 +180,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if err := validateHeartbeat(*heartbeatInterval); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	// Before anything else, and before any database is needed: --verify-backend
 	// answers "does this binary have the wasmtime backend?" and exits.
@@ -1211,6 +1215,11 @@ func main() {
 			"worker_id", workerID, "error", err)
 		os.Exit(1)
 	}
+	// From here a writer is entitled to count this worker as live for SecretKeyLiveWindow
+	// after its last heartbeat, and the first heartbeat is a membership interval away.
+	// The rest of boot counts against that, so the clock the membership loop measures a
+	// lapse from starts NOW, not at the first tick (cleat#2167).
+	registeredAt := time.Now()
 	logger.InfoContext(context.Background(), "registered in the worker registry",
 		"worker_id", workerID, "secret_key_versions", secretStore.KeyVersions())
 
@@ -1668,6 +1677,7 @@ func main() {
 		bgWg:                             &bgWg,
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,
+		membershipLastBeat:               registeredAt,
 		reclaimTimeout:                   *reclaimTimeout,
 		flushRetryWindow:                 *flushRetryWindow,
 		privateHosts:                     pluginPrivateHosts,

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -29,7 +30,7 @@ func (w *Worker) workerMembershipLoop() {
 	}
 	// The same shape as the zombie reaper's staleTimeout: a lease is stale at
 	// twice the heartbeat, and never sooner than 10s.
-	staleAfter := max(interval*2, 10*time.Second)
+	staleAfter := membershipStaleAfter(interval)
 
 	w.healthTracker.setInterval("worker_membership", interval)
 	ticker := time.NewTicker(interval)
@@ -62,6 +63,49 @@ func (w *Worker) workerMembershipLoop() {
 	}
 }
 
+// membershipStaleAfter is the gap between two successful membership ticks that this
+// worker treats as a lapse, and the age at which its lease is swept. One function,
+// so the loop and validateHeartbeat cannot disagree about it.
+func membershipStaleAfter(heartbeat time.Duration) time.Duration {
+	if heartbeat <= 0 {
+		heartbeat = 5 * time.Second
+	}
+	return max(heartbeat*2, 10*time.Second)
+}
+
+// validateHeartbeat refuses a --heartbeat at which a stalled worker can be invisible
+// to a secret writer AND not know it (cleat#2167).
+//
+// A writer counts a worker as live for engine.SecretKeyLiveWindow after its last
+// heartbeat. The worker, for its part, re-registers and re-checks only after a gap
+// longer than membershipStaleAfter. If that threshold is not below the writer's
+// window, a stall can outlast the window (the writer writes a key version this worker
+// cannot open) yet end before the threshold (the worker resumes, sees no lapse, and
+// serves). Above a heartbeat of the window itself it is worse: a healthy worker's own
+// beats are further apart than the writer will wait, so it is not counted between them.
+//
+// Measured on the code as it was, with the worker's row 6 minutes old and a 4 minute
+// heartbeat: the write succeeded and the worker was not stopped; at a 10s threshold it
+// was stopped.
+//
+// REFUSED, NOT CLAMPED, for the reason validateReclaimTimeout gives: clamping would
+// hand the operator a heartbeat they did not ask for.
+func validateHeartbeat(heartbeat time.Duration) error {
+	stale := membershipStaleAfter(heartbeat)
+	if stale < engine.SecretKeyLiveWindow {
+		return nil
+	}
+	// The largest heartbeat that passes: the threshold is 2x the heartbeat above 5s.
+	limit := (engine.SecretKeyLiveWindow - time.Nanosecond) / 2
+	return fmt.Errorf(
+		"--heartbeat %v is too long: a worker's membership threshold is max(2 x --heartbeat, 10s) = %v, "+
+			"which is not below the %v a secret writer waits before it stops counting a worker as live.\n"+
+			"A worker stalled for longer than that could be written past (a key version it cannot open) "+
+			"and resume without noticing.\n"+
+			"Use a --heartbeat below %ds.",
+		heartbeat, stale, engine.SecretKeyLiveWindow, int((limit.Truncate(time.Second)+time.Second)/time.Second))
+}
+
 func (w *Worker) membershipTick(staleAfter time.Duration) {
 	ctx := w.ctx
 
@@ -73,7 +117,8 @@ func (w *Worker) membershipTick(staleAfter time.Duration) {
 	// again and run the secrets check again, as one span under the gate -- and
 	// the worker does not resume unless the check passes. (cleat#1991. A stall
 	// still leaves the stall itself unobserved; this bounds it, it does not
-	// remove it.)
+	// remove it -- and only while membershipStaleAfter is below the writers' live
+	// window, which validateHeartbeat enforces. cleat#2167.)
 	lapsed := !w.membershipLastBeat.IsZero() && time.Since(w.membershipLastBeat) > staleAfter
 
 	hbErr := w.workerRegistry.Heartbeat(ctx, w.id)

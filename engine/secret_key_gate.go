@@ -76,7 +76,11 @@ import (
 // than that while STILL SERVING is invisible to a writer. The model has no
 // clock and does not check liveness. A worker whose membership loop notices its
 // own gap re-registers and re-checks (cmd/cleat-worker/worker_membership.go),
-// which bounds the exposure to the stall itself; it does not remove it.
+// which bounds the exposure to the stall itself; it does not remove it. That
+// bound holds only while the worker's lapse threshold (2 x --heartbeat, at least
+// 10s) is below SecretKeyLiveWindow, so a worker refuses to start with a
+// --heartbeat that would break it (validateHeartbeat, cleat#2167). It also counts
+// a slow boot: the lapse clock starts at registration, not at the first tick.
 // Workers older than this feature are invisible if they do not register.
 const (
 	keyGateName = "cleat.secret_key_gate"

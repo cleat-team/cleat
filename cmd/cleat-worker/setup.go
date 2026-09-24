@@ -1570,8 +1570,10 @@ type Worker struct {
 	// budget nobody configured -- the same opt-in rule the per-worker budget
 	// follows.
 	workerRegistry *engine.WorkerRegistry
-	// membershipLastBeat is when the last membership tick succeeded. Read and
-	// written only by the membership loop's goroutine.
+	// membershipLastBeat is when the last membership tick succeeded, or, until the
+	// first one does, when this worker registered (main sets it; a zero value would
+	// mean a slow boot is never a lapse -- cleat#2167). Read and written only by the
+	// membership loop's goroutine once that starts.
 	membershipLastBeat        time.Time
 	connectionShare           *connectionShare
 	connectionBudgetParts     connectionBudget

@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -151,6 +152,37 @@ func shortWaits(t *testing.T, writer, worker time.Duration) {
 	w0, k0 := keyGateWriterWait, keyGateWorkerWait
 	keyGateWriterWait, keyGateWorkerWait = writer, worker
 	t.Cleanup(func() { keyGateWriterWait, keyGateWorkerWait = w0, k0 })
+}
+
+// returnsWithin runs fn and fails the test if it is still blocked after d, instead of
+// blocking with it. fn keeps running in its goroutine; its result is buffered so that
+// it can finish once the test has released whatever it was waiting for.
+func returnsWithin[T any](t *testing.T, d time.Duration, what string, fn func() T) T {
+	t.Helper()
+	done := make(chan T, 1)
+	go func() { done <- fn() }()
+	select {
+	case v := <-done:
+		return v
+	case <-time.After(d):
+		t.Fatalf("%s did not return within %v: nothing excluded it from a worker that was booting, "+
+			"so it is waiting on that worker's uncommitted rows", what, d)
+		panic("unreachable")
+	}
+}
+
+// releaseOnCleanup returns a func that closes ch once, and also arranges for it to run
+// when the test ends. A gate hook that parks a goroutine on ch holds the gate until
+// ch is closed; if the test Fatalfs first (which is exactly what the known-positive
+// mutations make it do) the goroutine would hold the gate through every later
+// cleanup and the package would hang until its 600s timeout instead of failing
+// (cleat#2167).
+func releaseOnCleanup(t *testing.T, ch chan struct{}) func() {
+	t.Helper()
+	var once sync.Once
+	rel := func() { once.Do(func() { close(ch) }) }
+	t.Cleanup(rel)
+	return rel
 }
 
 // The refusal itself, and that it clears once the worker can open the version.
@@ -327,6 +359,7 @@ func TestAWorkerBootingDuringAWriteSeesTheRowTheWriterWrote(t *testing.T) {
 
 		atHook := make(chan struct{})
 		release := make(chan struct{})
+		closeRelease := releaseOnCleanup(t, release)
 		var once bool
 		writer.beforeGateCheck = func() {
 			if once {
@@ -375,7 +408,7 @@ func TestAWorkerBootingDuringAWriteSeesTheRowTheWriterWrote(t *testing.T) {
 		case <-time.After(400 * time.Millisecond):
 		}
 
-		close(release)
+		closeRelease()
 		if err := <-writerDone; err != nil {
 			t.Fatalf("the writer: %v", err)
 		}
@@ -405,6 +438,7 @@ func TestAWriteDuringABootSeesTheWorkerThatWasBooting(t *testing.T) {
 
 		inCheck := make(chan struct{})
 		release := make(chan struct{})
+		closeRelease := releaseOnCleanup(t, release)
 		workerDone := make(chan error, 1)
 		go func() {
 			workerDone <- e.registry().RegisterUnderKeyGate(context.Background(),
@@ -429,7 +463,7 @@ func TestAWriteDuringABootSeesTheWorkerThatWasBooting(t *testing.T) {
 		case <-time.After(400 * time.Millisecond):
 		}
 
-		close(release)
+		closeRelease()
 		if err := <-workerDone; err != nil {
 			t.Fatalf("the worker: %v", err)
 		}
@@ -571,6 +605,7 @@ func TestALockWaitTimesOutWithAnErrorThatNamesWhatItWaitedFor(t *testing.T) {
 		// A worker mid-boot holds the gate shared (exclusive on MySQL); a writer waits.
 		inCheck := make(chan struct{})
 		release := make(chan struct{})
+		closeRelease := releaseOnCleanup(t, release)
 		workerDone := make(chan error, 1)
 		go func() {
 			workerDone <- e.registry().RegisterUnderKeyGate(context.Background(),
@@ -578,7 +613,16 @@ func TestALockWaitTimesOutWithAnErrorThatNamesWhatItWaitedFor(t *testing.T) {
 				func(context.Context) error { close(inCheck); <-release; return nil })
 		}()
 		<-inCheck
-		err := e.store(ring).PutSecret(e.ctx(tenant), tenant.String(), name, "sk")
+		// Bounded, and not a plain call: with the gate NOT excluding the writer (the
+		// known-positive mutation) it proceeds to read admin.workers, which on SQL
+		// Server blocks on the booting worker's uncommitted row until that worker's
+		// transaction ends -- and that worker is parked on release, which this test
+		// closes only after PutSecret returns. An unbounded call is a deadlock the
+		// test can never report, so the package ran to its 600s timeout instead of
+		// failing (cleat#2167).
+		err := returnsWithin(t, 20*time.Second, "the writer's PutSecret", func() error {
+			return e.store(ring).PutSecret(e.ctx(tenant), tenant.String(), name, "sk")
+		})
 		var busy *KeyGateBusyError
 		if !errors.As(err, &busy) || busy.Mode != keyGateExclusive {
 			t.Fatalf("writer err = %v, want a *KeyGateBusyError in exclusive mode", err)
@@ -586,7 +630,7 @@ func TestALockWaitTimesOutWithAnErrorThatNamesWhatItWaitedFor(t *testing.T) {
 		if !strings.Contains(err.Error(), "workers that are booting") {
 			t.Errorf("the writer's timeout should say it is waiting for booting workers:\n%s", err)
 		}
-		close(release)
+		closeRelease()
 		if err := <-workerDone; err != nil {
 			t.Fatal(err)
 		}
@@ -594,6 +638,7 @@ func TestALockWaitTimesOutWithAnErrorThatNamesWhatItWaitedFor(t *testing.T) {
 		// A writer mid-write holds it exclusively; a booting worker waits.
 		atHook := make(chan struct{})
 		free := make(chan struct{})
+		closeFree := releaseOnCleanup(t, free)
 		w := e.store(ring)
 		w.beforeGateCheck = func() { close(atHook); <-free }
 		writerDone := make(chan error, 1)
@@ -608,7 +653,7 @@ func TestALockWaitTimesOutWithAnErrorThatNamesWhatItWaitedFor(t *testing.T) {
 		if !strings.Contains(err.Error(), "a set-secret or reseal-secrets is running") {
 			t.Errorf("the worker's timeout should say a secret write is running:\n%s", err)
 		}
-		close(free)
+		closeFree()
 		if err := <-writerDone; err != nil {
 			t.Fatal(err)
 		}
