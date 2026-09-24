@@ -146,6 +146,8 @@ func main() {
 		runRevokeAPIKey(ctx, db, args[1:])
 	case "set-tenant-setting":
 		runSetTenantSetting(ctx, db, args[1:])
+	case "quota":
+		runQuota(ctx, db, d, args[1:])
 	case "egress-allow":
 		runEgressAllow(ctx, db, d, args[1:])
 	case "set-secret":
@@ -186,6 +188,10 @@ Commands:
   suspend-tenant <tenant-id> [--yes]           stop new work for a tenant, reversibly
   resume-tenant <tenant-id>                    undo suspend-tenant
   revoke-api-key [--key-id|--key-hash|--key-stdin|--list]  revoke an API key
+  quota get  --tenant <uuid> [--resource <name>]  show a tenant's quota
+  quota set  --tenant <uuid> [--resource <name>] [--limit-count N]
+             [--window-seconds N] [--enforce=true|false]  create or update it
+  quota list [--tenant <uuid>]  list quota rows, one tenant's or all
   egress-allow list <tenant>      show which hosts a tenant's workflows may fetch
   egress-allow add <tenant> <host>...     permit hosts (.example.com = subdomains)
   egress-allow remove <tenant> <host>...  revoke hosts

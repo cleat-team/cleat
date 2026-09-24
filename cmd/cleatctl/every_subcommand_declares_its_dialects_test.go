@@ -59,6 +59,15 @@ var unrestrictedSubcommands = map[string]string{
 	// portedOn instead). retireSecretStmt/secretMetaStmt in
 	// engine/tenant_secrets.go carry all three dialect arms.
 	"retire-secret": "ported to all three; tenant_secrets is a plain per-tenant table on every dialect, same as set-secret (cleat#1989)",
+
+	// All three. tenant_quota is a plain per-tenant table on every dialect, not
+	// per-tenant-database on MySQL: cmd/cleat-worker/main.go hands every plugin
+	// ONE shared env.DB at startup (plugin.Environment.DB, set once from
+	// getPluginDB), with no per-request tenant routing -- the same reason
+	// dialect.tenantScopedDB's own doc comment gives for tenant_settings,
+	// tenant_egress_allow and tenant_api_keys. Every statement in quota.go goes
+	// through d.rebind, asserted directly by TestQuotaStatementsRebindPerDialect.
+	"quota": "ported to all three; tenant_quota is control-plane like tenant_settings (plugins read one shared env.DB, no per-tenant MySQL routing), and every statement goes through d.rebind (cleat#2046)",
 }
 
 // Every subcommand main.go dispatches declares the dialects it runs on.
