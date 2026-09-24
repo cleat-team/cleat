@@ -53,20 +53,32 @@ func TestVerifyOfAChainBeingAppendedToReportsNoBreak(t *testing.T) {
 
 		p := e.plugin()
 		var falses []string
-		for i := 0; i < 40; i++ {
+		// At least 40 verifications, and until enough of them OVERLAPPED the writer: the count that
+		// matters is verifications during which the head moved, not rows appended since the start,
+		// because a starved writer can have written a batch early and then stalled (cleat#2208 saw 2
+		// rows). The verifications keep running while it catches up. The deadline keeps a wedged
+		// writer from hanging the run and names what was seen.
+		const wantMoving = 10
+		deadline := time.Now().Add(90 * time.Second)
+		runs, moving := 0, 0
+		for ; runs < 40 || moving < wantMoving; runs++ {
+			if time.Now().After(deadline) {
+				t.Fatalf("UNMEASURED: after %d verifications only %d overlapped a writer that was appending (%d rows in all), want %d; the chain was not moving", runs, moving, written.Load(), wantMoving)
+			}
+			before := written.Load()
 			rep, err := VerifyChain(context.Background(), p.db, e.d.dialect, tenant, VerifyOptions{})
 			if err != nil {
-				t.Fatalf("verify %d: %v", i, err)
+				t.Fatalf("verify %d: %v", runs, err)
+			}
+			if written.Load() != before {
+				moving++
 			}
 			if !rep.OK() {
 				falses = append(falses, fmt.Sprintf("%s at seq %d (%s)", rep.Break.Kind, rep.Break.Seq, rep.Break.Detail))
 			}
 		}
 		if len(falses) > 0 {
-			t.Fatalf("%d of 40 verifications of a healthy, live chain reported a break; the first: %s", len(falses), falses[0])
-		}
-		if written.Load() < 5 {
-			t.Fatalf("the writer appended only %d rows, so the chain was not moving and this measured nothing", written.Load())
+			t.Fatalf("%d of %d verifications of a healthy, live chain reported a break; the first: %s", len(falses), runs, falses[0])
 		}
 	})
 }
