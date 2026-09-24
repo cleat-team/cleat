@@ -218,12 +218,15 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 		size        int64
 		expiresAt   sql.NullTime
 	)
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
+	// plugin.QuoteIdent, not a bare "i.key": key is a reserved word in MySQL
+	// and SQL Server both -- see handleGet's identical comment in routes.go.
+	// cleat#2257.
+	err := p.db.QueryRow(ctx, plugin.Rebind(fmt.Sprintf(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
-		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, p.dialect), input.Key, cc.TenantID).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+		WHERE i.%s = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
+	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), input.Key, cc.TenantID).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("blobstore: blob not found: %s", input.Key)
 	}

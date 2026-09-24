@@ -309,12 +309,19 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 			jobID     uuid.UUID
 			payload   []byte
 			defName   *string
-			input     json.RawMessage
+			inputCol  plugin.JSONColumn
 		)
-		if err := plugin.ScanRow(rows, &tenantID, &queueName, &jobID, &payload, &defName, &input); err != nil {
+		// plugin.JSONColumn, not a bare json.RawMessage: json.RawMessage is a
+		// named []byte type, and database/sql's convertAssign fast path
+		// doesn't convert a driver string into one -- go-mssqldb returns
+		// NVARCHAR as string, so this failed on every row, NULL included,
+		// and SQL Server never dispatched a job. See plugin.JSONColumn.
+		// cleat#2206.
+		if err := plugin.ScanRow(rows, &tenantID, &queueName, &jobID, &payload, &defName, &inputCol); err != nil {
 			p.logger.Error("jobqueue: scan job", "error", err)
 			continue
 		}
+		input := inputCol.Raw
 
 		// Atomically claim the job. Only succeeds if still pending (avoids
 		// double-dispatch when multiple workers poll concurrently).
@@ -383,11 +390,24 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 			// is gone with no write-back ever having arrived. completed_at
 			// is not set here for the same reason: it means when the run
 			// actually finished, and that is not this moment.
+			// $1 (run_id) before $2-$4 (WHERE): MySQL's ? binds by TEXT
+			// APPEARANCE, not by number (CLAUDE.md), so the placeholder
+			// numbers here must ascend in the order they are WRITTEN, not in
+			// the order the WHERE clause would read more naturally. This
+			// UPDATE previously numbered run_id $4, after job_id/tenant_id/
+			// queue_name at $1-$3 in the WHERE clause below it -- correct on
+			// Postgres and MSSQL, which bind $N/@pN by number, but on MySQL
+			// the rebound query's four "?" get these four args in POSITIONAL
+			// order regardless: run_id took jobID's value, job_id took
+			// tenantID's, and so on. The WHERE clause then matched no row,
+			// and an UPDATE matching zero rows is not an error, so the job
+			// stayed "running" forever on MySQL. Found by cleat#2257's
+			// real-dialect pollPending test.
 			if _, updateErr := p.db.Exec(ctx, plugin.Rebind(`
 					UPDATE task_queue
-					SET status = 'dispatched', run_id = $4
-					WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
-				`, p.dialect), jobID, tenantID, queueName, runID); updateErr != nil {
+					SET status = 'dispatched', run_id = $1
+					WHERE job_id = $2 AND tenant_id = $3 AND queue_name = $4
+				`, p.dialect), runID, jobID, tenantID, queueName); updateErr != nil {
 				p.logger.Error("jobqueue: mark dispatched", "job_id", jobID, "error", updateErr)
 			}
 		} else {
