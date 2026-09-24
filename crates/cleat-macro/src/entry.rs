@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{FnArg, ItemFn, Pat};
+use syn::{FnArg, ItemFn, LitByteStr, Pat};
 
 #[allow(clippy::collapsible_match)]
 pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
@@ -151,10 +151,54 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    // cleat#2113: emit this entry's export name into a "cleat_entry_points"
+    // linker section, one name per #[cleat_entry] expansion. `#[link_section]`
+    // statics sharing a name are concatenated by wasm-ld into ONE WASM custom
+    // section in link order -- the same mechanism wasm-bindgen already relies
+    // on for wasm32-unknown-unknown, verified directly against this target
+    // (LTO+strip, incremental, and a fully-cached no-op rebuild all keep the
+    // section correct) before this was written. `cleat build`'s Rust path
+    // reads that section as the AUTHORITATIVE entry-point list: because it is
+    // assembled by the linker from what actually got compiled, its presence
+    // is proof the compiler itself saw this attribute, not a source-level
+    // regex's guess at what cargo would produce. See
+    // wasm.ReadEntryPointsSection and cmd/cleat/build_rust.go.
+    //
+    // #[used] keeps the static alive even though nothing in this crate ever
+    // reads it -- without it, an unreferenced static is exactly the kind of
+    // dead code aggressive LTO removes.
+    //
+    // The static's own name only has to be unique within this function's
+    // enclosing module (Rust items are module-scoped; two #[cleat_entry]
+    // functions cannot share an identifier in the same module already, since
+    // that would itself be a duplicate-definition error), so deriving it from
+    // fn_name is sufficient -- no crate-wide counter or hash needed.
+    let entry_point_static_name = quote::format_ident!("__CLEAT_ENTRY_POINT_{}", fn_name);
+    let entry_point_bytes = format!("{}\n", fn_name).into_bytes();
+    let entry_point_len = entry_point_bytes.len();
+    let entry_point_lit = LitByteStr::new(&entry_point_bytes, fn_name.span());
+
     let expanded = quote! {
         #compile_errors
         #[allow(non_snake_case)]
         #fn_vis fn #inner_name(#(#inner_params),*) #fn_ret #fn_block
+
+        // wasm32-only: `#[link_section]`'s accepted syntax is
+        // target-specific -- a plain name is valid for a WASM object file's
+        // custom sections, but invalid for Mach-O (which requires
+        // "segment,section") and has its own rules again on PE. cleat-macro's
+        // own native test suite (tests/basic.rs) compiles #[cleat_entry]
+        // expansions for a non-WASM host deliberately (see that file's own
+        // top-of-file comment) to test the generated wrapper without needing
+        // a WASM runtime, so this must not be emitted there -- confirmed by
+        // it failing rustc's Mach-O section-specifier check on macOS before
+        // this cfg was added.
+        #[cfg(target_arch = "wasm32")]
+        #[used]
+        #[link_section = "cleat_entry_points"]
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        static #entry_point_static_name: [u8; #entry_point_len] = *#entry_point_lit;
 
         #[no_mangle]
         pub unsafe extern "C" fn #fn_name(
