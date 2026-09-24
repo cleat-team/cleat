@@ -43,14 +43,14 @@ const (
 
 // slackTeamIDShape matches Slack's own team_id shape: a leading 'T' (a
 // regular workspace) or 'E' (an Enterprise Grid org unit), then
-// alphanumerics, at most 32 characters -- the same bound
-// migrations/postgres/104_a_slack_workspace_maps_to_one_tenant.sql's CHECK
-// constraint enforces there. MySQL enforces the same shape with its own
-// CHECK (REGEXP is portable there); SQL Server enforces neither (092's and
-// 073's own precedent: no regexp in a CHECK, and a LIKE pattern cannot
-// express a bounded repeat of a character class), so on that dialect THIS
-// validator is the only gate -- every write here goes through it regardless
-// of dialect, which is what makes that acceptable rather than a gap.
+// alphanumerics, at most 32 characters -- the same bound every dialect's
+// migration enforces at the database too: postgres and mysql with a REGEXP-
+// style CHECK, and (as of cleat-review's measurement on cleat#2230) mssql
+// with a pair of COLLATE ... BIN2 LIKE clauses -- see
+// migrations/mssql/104_a_slack_workspace_maps_to_one_tenant.sql's header for
+// why a LIKE pattern suffices here despite carrying no bounded-repeat
+// operator. This validator runs on every write regardless of dialect
+// either way, since every write here comes through cleatctl.
 var slackTeamIDShape = regexp.MustCompile(`^[TE][A-Z0-9]+$`)
 
 func validateSlackTeamID(teamID string) error {

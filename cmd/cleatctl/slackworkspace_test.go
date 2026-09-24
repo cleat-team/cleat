@@ -8,8 +8,6 @@ import (
 
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
-	"github.com/cleat-team/cleat/plugin"
-	"github.com/cleat-team/cleat/plugins/slacknotify"
 	"github.com/google/uuid"
 )
 
@@ -177,10 +175,16 @@ func TestSlackCommandWorksOnEveryDialect(t *testing.T) {
 			db := testutil.TestDB(t, tc.td)
 			ctx := context.Background()
 
-			loaded := []*plugin.LoadedPlugin{{Plugin: slacknotify.New(), Healthy: true}}
-			if err := plugin.RunMigrations(ctx, db, tc.d.query, nil, loaded); err != nil {
-				t.Fatalf("apply slacknotify migrations on %s: %v", tc.name, err)
-			}
+			// No plugin.RunMigrations here: slack_workspace is a CORE
+			// migration (migrations/{postgres,mysql,mssql}/10{3,4}...), and
+			// testutil.TestDB already applies every core migration via
+			// SetupMinimalSchema/applyMigrations. slacknotify's own
+			// plugin.RunMigrations was here in an earlier version of this
+			// test and did nothing for this table -- it only pulled in
+			// slacknotify's OWN migrations (slack_config, plus an MSSQL
+			// policy), which this test does not touch and which then leaked
+			// into the shared test database for every other test in this
+			// package to trip over, cleat#2239's class of defect.
 
 			// t.Cleanup, not reliance on the test's own trailing unmap calls:
 			// MySQL's test database is the SHARED, PERSISTENT one behind the
@@ -287,6 +291,36 @@ func TestSlackCommandWorksOnEveryDialect(t *testing.T) {
 				t.Fatalf("mapping %s disturbed %s's mapping: now %s, want %s", team2, team, gotTenant, other)
 			}
 
+			// list-workspaces round-trips tenant_id through the same CAST
+			// slackWorkspaceGetSQL uses. Nothing above exercises this
+			// separately -- slackWorkspaceListSQL is its own statement,
+			// and dropping ITS CAST stays green everywhere but MSSQL,
+			// where UNIQUEIDENTIFIER then scans as 16 raw storage bytes
+			// rather than the canonical hyphenated string (cleat-review,
+			// cleat#2230). uuid.Parse is the assertion that actually
+			// catches that: raw bytes reinterpreted as text fail to parse
+			// as a UUID at all, where a merely-wrong-case string would
+			// still parse and only strings.EqualFold would catch it.
+			listed := parseListWorkspacesOutput(t, captureStdout(t, func() {
+				runListWorkspaces(ctx, db, tc.d, nil)
+			}))
+			for _, want := range []struct{ team, tenant string }{
+				{team, other}, {team2, other},
+			} {
+				got, ok := listed[want.team]
+				if !ok {
+					t.Fatalf("list-workspaces did not list %s (rows: %v)", want.team, listed)
+				}
+				if _, err := uuid.Parse(got); err != nil {
+					t.Fatalf("list-workspaces printed %q for %s's tenant_id, which is not even a UUID: %v "+
+						"(the CAST(tenant_id AS CHAR(36)) in slackWorkspaceListSQL is likely missing)",
+						got, want.team, err)
+				}
+				if !strings.EqualFold(got, want.tenant) {
+					t.Fatalf("list-workspaces says %s -> %s, want %s", want.team, got, want.tenant)
+				}
+			}
+
 			// unmap removes exactly the row named, and only it.
 			runUnmapWorkspace(ctx, db, tc.d, []string{"--team", team})
 			if err := db.QueryRowContext(ctx, tc.d.rebind(slackWorkspaceGetSQL), team).Scan(&gotTenant); err == nil {
@@ -300,6 +334,23 @@ func TestSlackCommandWorksOnEveryDialect(t *testing.T) {
 			runUnmapWorkspace(ctx, db, tc.d, []string{"--team", team})
 		})
 	}
+}
+
+// parseListWorkspacesOutput maps team_id -> tenant_id from runListWorkspaces'
+// fixed-width stdout, skipping its header row. strings.Fields is safe against
+// the %-16s/%-36s padding because it splits on any run of whitespace, not a
+// fixed column width.
+func parseListWorkspacesOutput(t *testing.T, out string) map[string]string {
+	t.Helper()
+	rows := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] == "TEAM_ID" {
+			continue
+		}
+		rows[fields[0]] = fields[1]
+	}
+	return rows
 }
 
 // seedSlackTestTenant inserts one row into the tenants table
