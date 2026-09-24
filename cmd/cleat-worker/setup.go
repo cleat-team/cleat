@@ -3891,15 +3891,9 @@ func stallProtectionUpper(heartbeat, reclaimAfter time.Duration) time.Duration {
 // -- after the stall was suspected but before this reaper ever observed
 // it -- has no episode to be sticky about, and reclaims the still-stale
 // laggards as soon as they individually cross reclaimAfter. That window is
-// about one heartbeat retry interval plus reconnect time -- the spread
-// between workers' heartbeats landing after recovery, set by
-// heartbeatRetryIntervalFor (~1s at the default) plus however long each
-// worker takes to reconnect and land its write, which MSSQL pays on top of.
-// Not missedBeatSlack: the two happen to coincide at the default heartbeat,
-// but slack is this file's arithmetic margin for missedBeatThreshold, not a
-// bound on how spread out a real recovery is. The gap between one worker's
-// heartbeat landing and the rest following is not itself something this
-// suppression models or protects.
+// bounded by missedBeatSlack (~1s): the gap between one worker's heartbeat
+// landing and the rest following is not itself something this suppression
+// models or protects.
 func (e *stallSuppressionEpisode) evaluate(shape engine.StaleSetShape, reclaimAfter time.Duration, now time.Time) stallSuppressionDecision {
 	suspected := suspectedDBStall(shape)
 	if !suspected && shape.Stale == 0 {
