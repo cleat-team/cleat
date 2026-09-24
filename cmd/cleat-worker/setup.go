@@ -3262,6 +3262,19 @@ func heartbeatRetryIntervalFor(heartbeat time.Duration) time.Duration {
 	return min(heartbeat, time.Second)
 }
 
+// heartbeatBatchStore is the store HeartbeatBatchFenced actually calls
+// through: heartbeatStore when one was built (--heartbeat-max-connections >
+// 0), else `store` -- see heartbeatStore's own doc comment for why this
+// exists. Not used for the idle-ping path in heartbeatAndFenceInFlight below,
+// which has no in-flight work of this worker's own competing for `store`'s
+// pool at the moment it runs.
+func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
+	if w.heartbeatStore != nil {
+		return w.heartbeatStore
+	}
+	return w.store
+}
+
 // heartbeatAndFenceInFlight heartbeats every run this worker's OWN goroutines
 // are currently executing, fenced individually per (run, generation) rather
 // than in the single unfenced statement BatchHeartbeat issues. cleat#2008:
@@ -3280,19 +3293,6 @@ func heartbeatRetryIntervalFor(heartbeat time.Duration) time.Duration {
 // wait out the full interval. cleat#2005: see the loop's own comment on why
 // that matters for how soon this worker's own reaper (and every other
 // worker's) trusts it again after a stall.
-// heartbeatBatchStore is the store HeartbeatBatchFenced actually calls
-// through: heartbeatStore when one was built (--heartbeat-max-connections >
-// 0), else `store` -- see heartbeatStore's own doc comment for why this
-// exists. Not used for the idle-ping path in heartbeatAndFenceInFlight below,
-// which has no in-flight work of this worker's own competing for `store`'s
-// pool at the moment it runs.
-func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
-	if w.heartbeatStore != nil {
-		return w.heartbeatStore
-	}
-	return w.store
-}
-
 func (w *Worker) heartbeatAndFenceInFlight() bool {
 	var runs []engine.GenerationKey
 	w.inflight.Range(func(key, value any) bool {
