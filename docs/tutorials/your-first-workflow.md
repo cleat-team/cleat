@@ -235,36 +235,76 @@ cleat vet ./order.go
 
 This reports entry points, leaf functions, and any threading errors.
 
-## Step 6: Deploy
+## Step 6: Migrate and deploy
+
+`workflow_defs` carries row-level security, so it has to exist before
+`cleat deploy` can write to it. Migrate first, using the Postgres superuser
+(or an equivalently privileged role) you created the database with:
 
 ```bash
-cleat deploy --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
+cleat-worker --migrate-only --db "postgres://user:pass@localhost/cleat?sslmode=disable"
+```
+
+This applies every migration (including `005_app_role.sql`, which creates
+the `cleat_app` role `NOLOGIN`) and exits `0`, without starting the worker.
+Run it again on the same database and it changes nothing -- it is safe to
+run from a script every deploy.
+
+`cleat_app` is created `NOLOGIN`, so give it a password before anything can
+connect as it:
+
+```bash
+psql "postgres://user:pass@localhost/cleat?sslmode=disable" \
+    -c "ALTER ROLE cleat_app LOGIN PASSWORD 'a-password-you-choose';"
+```
+
+Now deploy, using the `cleat_app` connection rather than the superuser's --
+see [Database role and
+tenant](../how-to/deploy-workflows.md#database-role-and-tenant):
+
+```bash
+cleat deploy --db "postgres://cleat_app:a-password-you-choose@localhost/cleat?sslmode=disable" \
     --name place_order ./out/order.wasm
 ```
 
 ## Step 7: Run the worker
 
+A worker does not migrate the database on start -- migration is the separate
+step above -- and an ordinary start only *verifies* the schema is current,
+refusing with the remediation if it is behind.
+
+The worker also refuses to start on a connection row-level security does not
+apply to -- a superuser or a role with `BYPASSRLS` -- because
+`GetWorkflowByID` and `ListWorkflows` have no application-level tenant
+filter and would return every tenant's data on such a connection. So `--db`
+has to be the `cleat_app` role from Step 6, not the database's superuser:
+
 ```bash
-cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
-    --api-addr :8080 --migrate-on-start
+cleat-worker --db "postgres://cleat_app:a-password-you-choose@localhost/cleat?sslmode=disable" \
+    --api-addr :8080 \
+    --require-auth=false
 ```
 
-`--migrate-on-start` lets this worker create the database schema when it starts,
-which is what you want for one node on a fresh database. Without it a worker
-**verifies** the schema and refuses to start if it is not there. For more than one
-worker, migrate once as a deploy step instead (`cleat-worker --migrate-only`); see
-[Upgrading](../operations/upgrading.md#migration-is-a-deploy-step).
+The next time you ship a new migration, apply it the same way you did in
+Step 6 (`cleat-worker --migrate-only --db <superuser DSN>`) before
+restarting the workers. A single `--migrate-on-start` flag also exists, as a
+shortcut for local, single-node dev; see
+[Upgrading](../operations/upgrading.md#migration-is-a-deploy-step) for how
+it compares to the two-step flow above. `--require-auth=false` is for local
+development only: it skips the API key `--generate-api-key` would otherwise
+require on every request below. See [Deploy via REST
+API](../how-to/deploy-workflows.md#step-3-deploy-via-rest-api) for the
+production path.
 
 ## Step 8: Trigger execution
 
 ```bash
-curl -X POST http://localhost:8080/api/workflows \
+curl -X POST http://localhost:8080/api/workflows/place_order/start \
     -H "Content-Type: application/json" \
     -d '{
-        "def_name": "place_order",
         "entry_point": "PlaceOrder",
         "input": {
-            "user_id": "user_42",
+            "userID": "user_42",
             "cart": [
                 {"sku": "SKU-001", "quantity": 2}
             ]
@@ -272,7 +312,7 @@ curl -X POST http://localhost:8080/api/workflows \
     }'
 ```
 
-Record the `workflow_id` from the response.
+Record the `id` from the response.
 
 ## Step 9: Inspect event history
 
