@@ -140,12 +140,12 @@ is `DOWNGRADED`) and is checked against the **records**, not against the checkpo
 | option | kind it requires | what it checks |
 |---|---|---|
 | `--require-full` | full | nothing more: you asked for a whole export |
-| `--expect-floor SEQ:HASH` | full | the chain passes through `SEQ` with `HASH` (normally the floor: then the first chained record is `SEQ + 1` linking to it) |
-| `--expect-head SEQ:HASH` | full, or resumed with `--expect-after` | the chain passes through `SEQ` with `HASH`, `SEQ` at most the export's head |
-| `--expect-after SEQ:HASH` | resumed, with `after_seq == SEQ` | the first chained record is `SEQ + 1` linking to `HASH`: the join to the part you already hold |
+| `--expect-floor SEQ:HASH` | full | normally a **check, never a verification**: the floor you recorded is at the export's start (compared with the checkpoint's own `floor_hash`, and the first record must link to it) or has been retired. Given a later `SEQ` it is matched to a record like any anchor. Give `--expect-head` too |
+| `--expect-head SEQ:HASH` | full, or resumed with `--expect-after` | the chain passes through `SEQ` with `HASH`, `SEQ` at most the export's head: **the anchor that verifies** |
+| `--expect-after SEQ:HASH` | resumed, with `after_seq == SEQ` | a **check, never a verification**: the first chained record is `SEQ + 1` linking to `HASH` (the join to the part you already hold), which binds no record's content. Always give `--expect-head` too |
 | `--expect-unchained N` | full, or resumed with `--expect-after` (then `N` is 0) | **at most** `N` unchained records: record `N` from the checkpoint's `unchained` when you record the head and floor |
 
-**An anchor is a point the chain passes through**, not the end of the export. The record at `SEQ` must be
+**Only `--expect-head` verifies.** `--expect-floor` (at the floor) and `--expect-after` are checks: on their own an honest file exits `2`. **An anchor is a point the chain passes through**, not the end of the export. The record at `SEQ` must be
 in the export with `HASH`; a hash depends on every record before it, so the anchor binds every record at or
 below `SEQ`. That is what lets an anchor recorded last week verify an honest export made today, after the
 tenant has grown. What it does not bind is everything **above** `SEQ`: those records are held only by the
@@ -159,8 +159,8 @@ unsigned checkpoint, and the run prints how many. Record the newest head you hav
   binds the first record's link and no record's content, and whoever edits the file also writes the
   checkpoint, so it does **not** count as verification.
 
-**An anchor is verified only by a record present in the file with the anchored hash, and at least one
-`--expect-head` / `--expect-floor` anchor must be, or the run is `INCONCLUSIVE` (exit 2).** Retirement and
+**An anchor is verified only by a record present in the file with the anchored hash, and at least one anchor
+must be, or the run is `INCONCLUSIVE` (exit 2).** A resumed export checked by `--expect-after` alone is the same case: a file forged wholesale from the join passes it. Retirement and
 "the export starts here" are both decided by the checkpoint, which the editor of a file also chooses: cut
 records 1 to 10, move the floor to 10, and a head anchor at 10 matches the forged floor, while an older floor
 anchor is retired. Without this rule every anchor becomes a note and the file exits 0. A retired floor anchor
@@ -189,7 +189,8 @@ added, and one added at the front of the file looks like the rows written before
 added after a chained record is refused without any option. The count is a **ceiling**: none are ever added
 once the chain exists, but retention removes old ones, so a later honest export has fewer, and the run notes
 that a removal cannot be told apart from a sweep. Record the count from the checkpoint's `unchained` (an
-editor can change the checkpoint to match, so the recorded value is what counts). Their **contents** are
+editor can change the checkpoint to match, so the recorded value is what counts). The ceiling bounds **only the count**, and it admits one forged row for every unchained row retention has removed since
+`N` was recorded (2 recorded, 1 swept, 1 forged is exit `0`); that is inherent offline. Their **contents** are
 covered by nothing, whatever is passed.
 
 With no option a downgraded file verifies (exit `0`, with the note). That is the limit of the file alone, and

@@ -382,7 +382,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expected, and a bare run prints a `NOTE` saying what it did not establish. An anchor is a point the chain
   passes through, so one recorded earlier still verifies an honest later export; one that retention has
   removed is reported as retired. At least one anchor must match a record in the file, or the run is
-  INCONCLUSIVE (exit 2), because retirement is decided by the checkpoint and a forger writes that. The chain is unkeyed, so records above the highest anchor can
+  INCONCLUSIVE (exit 2), because retirement is decided by the checkpoint and a forger writes that; only
+  `--expect-head` can, so `--expect-floor` and `--expect-after` always need it beside them. The chain is unkeyed, so records above the highest anchor can
   be rewritten and re-hashed: the run says how many. An unchained record after a chained one is refused, as is
   any in a resumed export, and the checkpoint records `unchained`. The behaviour of every kind x option x edit
   is one table, `chain_export_matrix_test.go`.

@@ -67,7 +67,8 @@ var matrixTampers = []string{
 }
 
 // matrixWant[kind][option][tamper]. Read a row as "with these options, what does each tamper do".
-// INCONCLUSIVE is exit 2: a head or floor anchor was given and none matched a record in the file.
+// INCONCLUSIVE is exit 2: an anchor was given and none matched a record in the file. --expect-floor
+// and --expect-after never match one, so they never verify on their own.
 var matrixWant = map[string][11][13]string{
 	"full": {
 		//               none  del-first del-mid del-last relabel fake-tail fake-front fake-mid del-last* del-first* rewrite edit+rehash fake-front*
@@ -88,7 +89,7 @@ var matrixWant = map[string][11][13]string{
 		/* req-full   */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
 		/* head       */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
 		/* floor      */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
-		/* after      */ {mOK, mAM, mGAP, mOK, mDG, mUA, mUR, mUA, mME, mMS, mOK, mOK, mUC},
+		/* after      */ {mIN, mAM, mGAP, mIN, mDG, mUA, mUR, mUA, mME, mMS, mIN, mIN, mUC},
 		/* head+floor */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
 		/* head+after */ {mOK, mAM, mGAP, mAM, mDG, mUA, mUR, mUA, mME, mMS, mAM, mAM, mUC},
 		/* unchained  */ {mDG, mDG, mGAP, mDG, mDG, mUA, mUR, mUA, mME, mMS, mDG, mDG, mUC},
@@ -651,6 +652,57 @@ func TestAnUnchainedCountRecordedEarlierIsACeilingAcrossASweep(t *testing.T) {
 		_, tooMany := e.get(p, tenant, "/audit/export")
 		if code, out := runVerifyExport(t, py, tooMany, "--expect-head", head, "--expect-unchained", "2"); code != 1 || !strings.Contains(out, "UNCHAINED COUNT") {
 			t.Errorf("3 present against at most 2: exit %d\n%s", code, out)
+		}
+	})
+}
+
+// A resumed export checked with --expect-after alone: the join binds the first record's prev_hash and
+// no record's content, so a file forged from the join on passes it. It must not exit 0 (cleat-review on
+// #2191, two measured forgeries).
+func TestAResumedExportCheckedOnlyByItsJoinIsInconclusive(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatalf("python3 is not installed, so the reference verifier cannot run: %v", err)
+	}
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		e.record(p, tenant, 15)
+		_, body := e.get(p, tenant, "/audit/export")
+		evs, cp, _ := exportLines(t, body)
+		var six, fifteen exportEvent
+		for _, ev := range evs {
+			if ev.Seq != nil && *ev.Seq == 6 {
+				six = ev
+			}
+			if ev.Seq != nil && *ev.Seq == 15 {
+				fifteen = ev
+			}
+		}
+		_, resumed := e.get(p, tenant, "/audit/export?cursor="+url.QueryEscape(six.Cursor))
+		after := fmt.Sprintf("6:%s", *six.Hash)
+		head := fmt.Sprintf("%d:%s", cp.HeadSeq, *fifteen.Hash)
+
+		// Honest, with the join alone: nothing binds a record, so it is inconclusive, not a pass.
+		if code, out := runVerifyExport(t, py, resumed, "--expect-after", after); code != 2 || !strings.Contains(out, "INCONCLUSIVE") {
+			t.Errorf("an honest resumed export with --expect-after alone: exit %d, want 2\n%s", code, out)
+		}
+		// With a head anchor that a record matches, it is verified.
+		if code, out := runVerifyExport(t, py, resumed, "--expect-after", after, "--expect-head", head); code != 0 {
+			t.Errorf("an honest resumed export with head + after: exit %d, want 0\n%s", code, out)
+		}
+		for name, forge := range map[string][]string{
+			"record 9 edited and re-hashed":                   {"--edit-path", "9", "/forged"},
+			"every record forged and re-hashed from the join": {"--edit-all-paths", "/forged"},
+		} {
+			forged := runForge(t, py, resumed, forge...)
+			if code, out := runVerifyExport(t, py, forged, "--expect-after", after); code != 2 || !strings.Contains(out, "INCONCLUSIVE") {
+				t.Errorf("%s, checked by --expect-after alone: exit %d, want 2 (a 0 here is a forgery that verified)\n%s", name, code, out)
+			}
+			// ...and with the real head anchor the same forgeries are findings.
+			if code, out := runVerifyExport(t, py, forged, "--expect-after", after, "--expect-head", head); code != 1 || !strings.Contains(out, "ANCHOR MISMATCH") {
+				t.Errorf("%s, with head + after: exit %d, want 1 ANCHOR MISMATCH\n%s", name, code, out)
+			}
 		}
 	})
 }

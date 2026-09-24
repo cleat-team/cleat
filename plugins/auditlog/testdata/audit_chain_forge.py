@@ -8,7 +8,10 @@ case in the table using the reference implementation's OWN row_hash, so the forg
 verifier cannot share a mistake with the Go code.
 
     audit_chain_forge.py [--drop SEQ] [--edit-path SEQ TEXT] [--renumber]
-                         [--cut-below SEQ [--floor-hash HEX]] < export.jsonl
+                         [--cut-below SEQ [--floor-hash HEX]] [--edit-all-paths TEXT] < export.jsonl
+
+--edit-all-paths TEXT rewrites the path of EVERY chained record (and re-hashes from the join): a wholly
+forged file.
 
 --cut-below SEQ drops every chained record at or below SEQ and moves the checkpoint's floor to SEQ
 (with the dropped record's hash, or --floor-hash if given): what an editor does to make a cut look
@@ -51,6 +54,7 @@ def main():
     renumber = False
     cut_below = None
     floor_hash = None
+    edit_all = None
     argv = sys.argv[1:]
     while argv:
         flag = argv.pop(0)
@@ -60,6 +64,8 @@ def main():
             edit = (int(argv.pop(0)), argv.pop(0))
         elif flag == "--renumber":
             renumber = True
+        elif flag == "--edit-all-paths":
+            edit_all = argv.pop(0)
         elif flag == "--cut-below":
             cut_below = int(argv.pop(0))
         elif flag == "--floor-hash":
@@ -76,6 +82,8 @@ def main():
             continue
         if edit and r["seq"] is not None and int(r["seq"]) == edit[0]:
             r["path"] = edit[1]
+        if edit_all is not None and r["seq"] is not None:
+            r["path"] = edit_all
         kept.append(r)
 
     if cut_below is not None:

@@ -465,7 +465,7 @@ func TestAnExportVerifiesOfflineWithTheReferenceImplementation(t *testing.T) {
 		var ev6 exportEvent
 		_ = json.Unmarshal([]byte(lines[6]), &ev6)
 		_, resumed := e.get(p, tenant, "/audit/export?cursor="+url.QueryEscape(ev6.Cursor))
-		if code, out := verify(resumed, "--expect-after", fmt.Sprintf("6:%s", *ev6.Hash)); code != 0 {
+		if code, out := verify(resumed, "--expect-after", fmt.Sprintf("6:%s", *ev6.Hash), "--expect-head", head); code != 0 {
 			t.Errorf("a resumed export joined to the part before it: exit %d\n%s", code, out)
 		}
 		mustFail("a resumed export whose join does not match", resumed, 1, "JOIN MISMATCH", "--expect-after", fmt.Sprintf("6:%s", strings.Repeat("ab", 32)))

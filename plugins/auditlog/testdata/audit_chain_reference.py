@@ -201,8 +201,8 @@ def verify_export():
                       [--expect-after SEQ:HASH] [--expect-unchained N]
 
     Exit status: 0 verified, 1 a break, 2 could not establish it: an incomplete or unreadable stream, a
-    contradictory command line, or INCONCLUSIVE (a head/floor anchor was given and none matched a record
-    in the file).
+    contradictory command line, or INCONCLUSIVE (an anchor was given and none matched a record in the
+    file).
 
     WHAT THE FILE PROVES BY ITSELF. Every chained event hashes to its own `hash` from its own
     fields and `prev_hash`; event ids are unique; chained `seq` values strictly increase and
@@ -249,7 +249,9 @@ def verify_export():
     export is checked directly: nothing in the file says what precedes its first record.
 
     An anchor is VERIFIED only by a record PRESENT in the file with the anchored hash. At least one
-    --expect-head/--expect-floor anchor must be, or the run is INCONCLUSIVE (exit 2), because retirement
+    anchor must be, or the run is INCONCLUSIVE (exit 2). --expect-floor and --expect-after NEVER verify
+    on their own: the first can only sit at the export's start or be retired, and the second compares
+    the first record's link. Pass --expect-head as well. Retirement
     and the export's start are decided by the checkpoint, which whoever edits the file also chooses:
     a cut, or a forged floor, would otherwise turn every anchor into a note. A retired anchor
     alongside a verified one is exit 0 with a NOTE: that is every honest sweep. Refresh the head
@@ -507,12 +509,16 @@ def verify_export():
         if want_kind == "a full export" and "--expect-floor" not in expect:
             print("NOTE: the start is not anchored: pass --expect-floor SEQ:HASH to check it for as long as the floor has "
                   "not moved. A cut of the first records is otherwise indistinguishable from a retention sweep.")
-    content_anchors = [f for f in ("--expect-floor", "--expect-head") if f in expect]
+    # --expect-after is a CHECK (the join), not a verification: like the floor at the export's start it
+    # compares the first record's prev_hash and binds no record's content, so a wholly forged resumed file
+    # with a correct join passes it. Only a record matched by --expect-head/--expect-floor verifies.
+    content_anchors = [f for f in ("--expect-floor", "--expect-head", "--expect-after") if f in expect]
     if content_anchors and not verified and not breaks:
-        print("INCONCLUSIVE: %s given, and no anchor matched a record in this file: each was above the head "
-              "(no), at the export's start (which compares the checkpoint's own floor hash, not a record), or "
-              "below it (retired). Nothing but the unsigned checkpoint binds any record. This is a failure of "
-              "the check to establish anything, not a finding about the file: record a newer head anchor." % (
+        print("INCONCLUSIVE: %s given, and no anchor matched a record in this file: each was at the export's "
+              "start (which compares the checkpoint's own floor hash, or the join of a resume, and neither binds "
+              "any record's content), or below it (retired). Nothing but the unsigned checkpoint binds any "
+              "record. This is a failure of the check to establish anything, not a finding about the file: "
+              "record a newer head anchor and pass --expect-head." % (
                   " and ".join(content_anchors) + (" was" if len(content_anchors) == 1 else " were")))
         print("%d events (%d chained checked, %d unchained not covered), %s, %d breaks, INCONCLUSIVE" % (
             events, len(chained), unchained, have, breaks))
