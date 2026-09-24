@@ -349,8 +349,21 @@ func (p *Plugin) sweepStaleWorkflowRefsMSSQL(ctx context.Context) (int64, error)
 // allInFlightWorkflowIDsMSSQL reads every tenant's in-flight workflow ids,
 // one tenant at a time under that tenant's own SESSION_CONTEXT. ctx must
 // carry no AcrossAllTenants marker -- plugin.ForTenant on top of one is a
-// no-op, since beginTenantTx checks for a cross-tenant bypass first.
+// no-op, since beginTenantTx checks for a cross-tenant bypass first. Checked
+// rather than trusted, since a marked ctx here would make every "per-tenant"
+// read run under the bypass instead, silently seeing every tenant's rows on
+// every iteration -- see plugin.IsCrossTenant's doc. cleat#2141.
+//
+// A workflow_instances row whose tenant_id matches no row in admin.tenants
+// is invisible to this gather -- there is no FK from one to the other, so
+// that is only reachable by hand (a row inserted or repointed outside the
+// normal admin.tenants-first path), never by ordinary operation.
 func (p *Plugin) allInFlightWorkflowIDsMSSQL(ctx context.Context) (map[string]struct{}, error) {
+	if plugin.IsCrossTenant(ctx) {
+		return nil, fmt.Errorf("blobstore: allInFlightWorkflowIDsMSSQL: ctx is cross-tenant-marked; " +
+			"ForTenant on top of it would be a silent no-op and every tenant's read would run " +
+			"under the bypass instead")
+	}
 	tenants, err := plugin.AllTenantIDs(ctx, p.db, p.dialect)
 	if err != nil {
 		return nil, fmt.Errorf("list tenants: %w", err)

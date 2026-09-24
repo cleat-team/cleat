@@ -137,7 +137,22 @@ func (p *Plugin) sweepAbandonedJobs(ctx context.Context) int {
 // is not for blobstore's staleWorkflowRefs: task_queue is TenantScoped, so
 // looping the whole statement scopes both the UPDATE and its subquery to one
 // tenant at a time, with nothing left unscoped in between.
+//
+// ctx MUST NOT carry AcrossAllTenants's marker -- see plugin.IsCrossTenant's
+// doc for why a marked ctx makes every ForTenant below a silent no-op that
+// runs each "per-tenant" statement under the bypass instead, against every
+// tenant. Checked here rather than trusted, because the failure is a
+// one-token slip in a caller (ctx instead of baseCtx) that every test using a
+// correctly-built context would miss. cleat#2141,
+// TestSweepAbandonedJobsPerTenant_RejectsACrossTenantContext.
 func (p *Plugin) sweepAbandonedJobsPerTenant(ctx context.Context) int {
+	if plugin.IsCrossTenant(ctx) {
+		p.logger.Error("jobqueue: abandonment sweep: ctx is cross-tenant-marked; "+
+			"ForTenant on top of it would be a silent no-op and every tenant's "+
+			"statement would run under the bypass instead",
+			"plugin", p.Info().Name)
+		return -1
+	}
 	tenants, err := plugin.AllTenantIDs(ctx, p.db, p.dialect)
 	if err != nil {
 		p.logger.Error("jobqueue: abandonment sweep: list tenants failed",
