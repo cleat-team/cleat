@@ -89,9 +89,13 @@ To move from version 1 to version 2:
    `CLEAT_SECRET_MASTER_KEY_VERSION=2`, `CLEAT_SECRET_MASTER_KEY_PREVIOUS=<old>`,
    `CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION=1`, and give `cleatctl` the same.
    Each worker logs the versions it can open (never the keys).
-2. **Wait until no worker is still on the old configuration.** Until it is, a
-   secret written at version 2 is unreadable by a worker that only holds version 1.
-   The system does not yet check this for you (see *What is not covered*).
+2. **You do not have to time this by hand.** Every worker publishes the key
+   versions it can open in `admin.workers`, and a write at version *v* —
+   `set-secret` under the new key, and every row `reseal-secrets` moves — is
+   **refused while any live worker cannot open *v***. The refusal names the
+   workers (host, pid, and the versions each opens); roll the ring out to them,
+   or wait for them to stop, and run it again. Nothing is written by a refused
+   attempt.
 3. `cleatctl reseal-secrets --dry-run` reads and verifies every secret and writes
    nothing. Then run it without `--dry-run`.
 4. When it reports nothing left on version 1, remove the `_PREVIOUS` variables.
@@ -103,6 +107,17 @@ not overwritten with the older value. It covers suspended tenants and retired
 secrets, and leaves `disabled_at` and `updated_at` alone. It exits non-zero while
 anything is left, including a secret that **no configured key can open**, which
 it reports by tenant and name and never skips.
+
+**A worker with no master key blocks every write.** It would fail the first
+workflow that resolves the secret, so `set-secret` is refused while one is live,
+and says which. Configure `CLEAT_SECRET_MASTER_KEY` on it, or wait for it to stop
+(a stopped worker leaves the registry within seconds).
+
+**Waiting.** A worker holds a database lock while it starts (it publishes its keys
+and reads every stored secret under it), and a write holds it briefly. Each waits
+up to a bounded time and then says what it was waiting for — "workers that are
+booting", or "a set-secret or reseal-secrets is running" — instead of hanging.
+On MySQL the lock is exclusive, so workers starting together take turns.
 
 A worker whose ring cannot open some stored version **refuses to start** and names
 the version and how many rows carry it. A worker still holding a `_PREVIOUS` key
@@ -195,10 +210,18 @@ ciphertext moved between rows fails to open rather than decrypting.
 
 ## What is not covered
 
-- **A check that a rotation is safe to begin.** `reseal-secrets` refuses nothing
-  because a worker somewhere still lacks the new key; step 2 above is yours to
-  ensure. A rolling deploy that reseals before it has finished can leave a serving
-  worker holding rows it cannot open.
+- **Workers the registry cannot see.** The gate protects against the workers it can
+  see. A worker from before this release that does not appear in `admin.workers`
+  is invisible to it, and a registry row with no key set is read as "opens version
+  1 only". So **complete the upgrade to a release with the gate before the first
+  rotation**; a rotation begun while older workers are still running is not
+  protected against them.
+- **A worker stalled for more than five minutes that is still serving.** A writer
+  counts a worker live if its heartbeat is within five minutes. A worker that stops
+  heartbeating for longer while still handling work is invisible to a writer. When
+  its own membership loop next runs it notices the gap, re-registers and re-checks,
+  and **stops** if it now holds a secret it cannot open — which bounds the
+  exposure to the stall; it does not remove it.
 - **An external KMS.** The master key is supplied directly.
 - **References outside plugin call arguments.** Workflow input, signals and
   schedule payloads are not scanned.

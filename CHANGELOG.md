@@ -278,8 +278,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concurrent `set-secret` is not undone. A worker that cannot open some stored version refuses to start and names it.
   See `docs/how-to/use-secrets.md`.
 
-  **Not yet checked by the system:** that every worker holds the new key before anything is written under it.
-  Nothing changes for a deployment that sets none of the new variables.
+  **The system now checks it.** Every worker publishes the key versions it can open in `admin.workers`, and a
+  write at version *v* (`set-secret`, and each row `reseal-secrets` moves) is refused while any live worker
+  cannot open *v*, naming the worker. The worker's start (publish its keys, read every stored secret) and a
+  write (read the registry, write the row) are serialised by one named database lock, so a worker cannot start
+  while a write is landing that it would then be unable to read. A worker whose membership loop stalled longer
+  than its stale window re-registers and re-checks, and stops if it now holds a secret it cannot open.
+
+  **Upgrade notes.**
+  - **Every worker now registers in `admin.workers`**, not only those started with
+    `--cluster-connection-budget`. The connection share still counts only workers that have a budget, so a
+    mixed fleet divides what it did before.
+  - **Complete the upgrade before the first rotation.** A worker from before this release is invisible to the
+    gate unless it registered under the connection budget, and a registry row with no key set is read as
+    "opens version 1 only".
+  - A worker stalled for more than five minutes while still serving is invisible to a writer; see
+    `docs/how-to/use-secrets.md`.
 
 - **`audit-log` now records who: `user_id` on every row was the empty string, always.** (cleat#1881)
 
