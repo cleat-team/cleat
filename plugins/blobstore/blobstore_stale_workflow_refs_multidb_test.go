@@ -16,11 +16,18 @@
 // guarded by that predicate sees zero rows, so `workflow_id NOT IN (SELECT id
 // FROM workflow_instances WHERE status IN ('ready','running'))` was true for
 // every row -- this DELETEd the blob reference of a workflow that was still
-// running, on every sweep tick. Migration 102 fixes it the same way
-// PostgreSQL's 073 does: admin.fn_in_flight_workflow_ids() runs WITH EXECUTE
-// AS 'cleat_dispatcher', a NOLOGIN principal dbo.fn_tenant_filter admits by
-// name (OR USER_NAME() = N'cleat_dispatcher'), so the impersonated read sees
-// every tenant's rows regardless of the caller's own session context.
+// running, on every sweep tick.
+//
+// THE FIX IS NOT A SECOND PREDICATE, cleat-review having measured what the
+// first attempt (migration 102: an OR USER_NAME() = 'cleat_dispatcher'
+// disjunct on dbo.fn_tenant_filter, PostgreSQL 073's shape) does to every
+// OTHER table sharing that predicate -- Index Seek to Index Scan on a
+// COUNT(*), 4 reads to 1461 on a TOP 50, on all fourteen core tables, not
+// just this one. See plugins/blobstore/background.go's
+// sweepStaleWorkflowRefsMSSQL: it gathers every tenant's in-flight ids one
+// tenant at a time (workflow_blob_refs carries no tenant_id for a per-tenant
+// DELETE to scope, so the ids must be gathered whole before anything is
+// deleted), then deletes what nothing protects.
 package blobstore
 
 import (
@@ -43,7 +50,13 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 				"blobstore stale-workflow-refs fixture: seeds workflow_instances "+
 					"and workflow_blob_refs rows for workflows it invents")
 			defer be.Cleanup()
-			ctx := plugin.AcrossAllTenants(context.Background(),
+			// baseCtx carries no tenant marker: cleanupExpired's second
+			// parameter, used only by SQL Server's per-tenant sweep, which
+			// layers plugin.ForTenant on top of it per admin.tenants row.
+			// Passing the AcrossAllTenants-marked ctx here instead would make
+			// every ForTenant a no-op -- see sweepStaleWorkflowRefsMSSQL.
+			baseCtx := context.Background()
+			ctx := plugin.AcrossAllTenants(baseCtx,
 				"blobstore stale-workflow-refs test: cleanupExpired runs over "+
 					"every tenant's refs, as Run does")
 			dialect := plugin.Dialect(string(be.Dialect))
@@ -58,10 +71,6 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("blobstore migrations on %s: %v", be.Name, err)
 			}
-			// SQL Server needs no admin bypass here: staleWorkflowRefs' MSSQL
-			// arm reads admin.fn_in_flight_workflow_ids(), which runs as
-			// cleat_dispatcher regardless of which principal calls it
-			// (migration 102). Any connection can call it.
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: dialect}
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -72,6 +81,40 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 			shaLive := make([]byte, 32)
 			shaDone := make([]byte, 32)
 			shaLive[0], shaDone[0] = 0x44, 0x55
+
+			// The tenant must exist in admin.tenants: on SQL Server,
+			// sweepStaleWorkflowRefsMSSQL enumerates plugin.AllTenantIDs and
+			// reads each one's workflow_instances under its own
+			// SESSION_CONTEXT -- a tenant with no admin.tenants row is
+			// invisible to that enumeration, so its "in-flight" workflow
+			// would never be gathered and would be deleted right along with
+			// the genuinely done one, defeating the very thing this test
+			// checks. PostgreSQL does not consult admin.tenants for this
+			// statement, but the row does no harm there either.
+			//
+			// MYSQL IS DIFFERENT: tiers.yaml's D1 makes a second tenant
+			// impossible to create at all --
+			// migrations/mysql/038_single_tenant_guard.sql enforces exactly
+			// one row in tenants with a UNIQUE index on a constant column,
+			// so inserting a second one fails with "Duplicate entry '1' for
+			// key '...single_tenant_only_see_tiers_yaml_d1'". Nothing here
+			// needs a second tenant on MySQL -- its arm of staleWorkflowRefs
+			// never reads this table either -- so this uses the pre-existing
+			// default tenant id there instead of creating one, matching
+			// jobqueue's seedTenant/cleanupTenant (plugins/jobqueue's own
+			// multidb test).
+			if be.Dialect == testutil.DialectMySQL {
+				tenant = uuid.MustParse("00000000-0000-0000-0000-000000000000")
+			} else {
+				tenantsTable := map[testutil.Dialect]string{
+					testutil.DialectPostgres: `INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`,
+					testutil.DialectMSSQL:    `INSERT INTO admin.tenants (tenant_id, name) VALUES (@p1, @p2)`,
+				}[be.Dialect]
+				tenantName := "blobstore-2125-" + tenant.String()
+				if _, err := fixtureDB.ExecContext(ctx, tenantsTable, tenant.String(), tenantName); err != nil {
+					t.Fatalf("seed admin.tenants on %s: %v", be.Name, err)
+				}
+			}
 
 			defer func() {
 				bg := context.Background()
@@ -88,6 +131,18 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 				if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
 					`DELETE FROM workflow_defs WHERE name = $1`, dialect), defName); err != nil {
 					t.Errorf("cleanup workflow_defs on %s: %v", be.Name, err)
+				}
+				// A no-op on MySQL: nothing was inserted into tenants there,
+				// and deleting the sole row would break every other MySQL
+				// fixture that assumes it exists.
+				if be.Dialect != testutil.DialectMySQL {
+					tenantsDelete := map[testutil.Dialect]string{
+						testutil.DialectPostgres: `DELETE FROM admin.tenants WHERE tenant_id = $1`,
+						testutil.DialectMSSQL:    `DELETE FROM admin.tenants WHERE tenant_id = @p1`,
+					}[be.Dialect]
+					if _, err := fixtureDB.ExecContext(bg, tenantsDelete, tenant.String()); err != nil {
+						t.Errorf("cleanup admin.tenants on %s: %v", be.Name, err)
+					}
 				}
 			}()
 
@@ -123,7 +178,7 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 				t.Fatalf("insert done workflow_blob_refs on %s: %v", be.Name, err)
 			}
 
-			staleRefs, _, _, err := p.cleanupExpired(ctx)
+			staleRefs, _, _, err := p.cleanupExpired(ctx, baseCtx)
 			if err != nil {
 				t.Fatalf("cleanupExpired on %s: %v", be.Name, err)
 			}

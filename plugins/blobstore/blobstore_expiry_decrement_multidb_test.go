@@ -68,7 +68,8 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 			// matches no rows and returns the same values it returns when
 			// there is nothing to do, which is the failure mode the comment
 			// below is about (cleat#1552).
-			ctx := plugin.AcrossAllTenants(context.Background(),
+			baseCtx := context.Background()
+			ctx := plugin.AcrossAllTenants(baseCtx,
 				"blobstore expiry test: the sweep runs over every tenant's index, as Run does")
 			dialect := plugin.Dialect(be.Dialect)
 			p := &Plugin{dialect: dialect}
@@ -149,7 +150,7 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 				}
 			}
 
-			if _, _, _, err := p.cleanupExpired(ctx); err != nil {
+			if _, _, _, err := p.cleanupExpired(ctx, baseCtx); err != nil {
 				t.Fatalf("cleanupExpired on %s: %v", be.Name, err)
 			}
 

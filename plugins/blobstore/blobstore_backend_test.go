@@ -517,7 +517,7 @@ func TestCleanupExpiredRemovesExpired(t *testing.T) {
 		expiresAt:   &futureTime,
 	}
 
-	staleRefs, expiredEntries, orphanedBlobs, err := p.cleanupExpired(context.Background())
+	staleRefs, expiredEntries, orphanedBlobs, err := p.cleanupExpired(context.Background(), context.Background())
 	if err != nil {
 		t.Fatalf("cleanupExpired: %v", err)
 	}
@@ -600,7 +600,7 @@ func TestCleanupExpiredKeepsFuture(t *testing.T) {
 		expiresAt:   &futureTime,
 	}
 
-	staleRefs, expiredEntries, orphanedBlobs, err := p.cleanupExpired(context.Background())
+	staleRefs, expiredEntries, orphanedBlobs, err := p.cleanupExpired(context.Background(), context.Background())
 	if err != nil {
 		t.Fatalf("cleanupExpired: %v", err)
 	}
@@ -672,7 +672,7 @@ func TestCleanupExpiredSoftDeleted(t *testing.T) {
 		deletedAt:   &now,
 	}
 
-	_, expiredEntries, _, err := p.cleanupExpired(context.Background())
+	_, expiredEntries, _, err := p.cleanupExpired(context.Background(), context.Background())
 	if err != nil {
 		t.Fatalf("cleanupExpired: %v", err)
 	}
@@ -791,7 +791,7 @@ func TestRunWithDBHandlesCleanup(t *testing.T) {
 	}
 
 	// Run cleanupExpired directly (same function Run's ticker calls)
-	staleRefs, expiredEntries, orphanedBlobs, err := p.cleanupExpired(context.Background())
+	staleRefs, expiredEntries, orphanedBlobs, err := p.cleanupExpired(context.Background(), context.Background())
 	if err != nil {
 		t.Fatalf("cleanupExpired: %v", err)
 	}
@@ -851,7 +851,7 @@ func TestCleanupWithActiveWorkflowRefs(t *testing.T) {
 		logger: slog.Default(),
 	}
 
-	_, _, orphanedBlobs, err := p.cleanupExpired(context.Background())
+	_, _, orphanedBlobs, err := p.cleanupExpired(context.Background(), context.Background())
 	if err != nil {
 		t.Fatalf("cleanupExpired: %v", err)
 	}
@@ -912,7 +912,7 @@ func TestCleanupWithStaleWorkflowRefs(t *testing.T) {
 		logger: slog.Default(),
 	}
 
-	staleRefs, _, orphanedBlobs, err := p.cleanupExpired(context.Background())
+	staleRefs, _, orphanedBlobs, err := p.cleanupExpired(context.Background(), context.Background())
 	if err != nil {
 		t.Fatalf("cleanupExpired: %v", err)
 	}
