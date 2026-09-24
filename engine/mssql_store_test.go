@@ -1180,8 +1180,24 @@ func TestMSSQLStore_ReleaseWorkflow_NoRows(t *testing.T) {
 func TestMSSQLStore_DeliverSignal_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "MERGE workflow_signals"},
-		{match: "SET next_wake_at"},
+		// INSERT INTO workflow_signals, not a MERGE -- see IMPROVEMENT-PLAN
+		// 3.215 and the doc comment on deliverSignalTx in
+		// mssql_signals_promises.go. This match string named the pre-3.215
+		// statement and, being a substring match, silently fell through to
+		// the mock's unmatched default instead of failing -- harmless here
+		// only because deliverSignalTx does not check the INSERT's own
+		// RowsAffected.
+		{match: "INSERT INTO workflow_signals"},
+		// Matched on "UPDATE workflow_instances", not "SET next_wake_at" --
+		// the wake column is set inside a CASE expression following "SET
+		// signal_seq = signal_seq + 1,", so the latter is not actually a
+		// substring of the query text and never matched anything. Harmless
+		// while nothing checks this exec's RowsAffected either (cleat#2207
+		// tried that and reverted it -- see the doc comment on
+		// deliverSignalTx), but still worth matching correctly since a
+		// stale/wrong pattern here is a trap for the next person who adds a
+		// real assertion against this mock.
+		{match: "UPDATE workflow_instances"},
 	})
 	defer db.Close()
 

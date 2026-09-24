@@ -42,7 +42,25 @@ func (s *MSSQLStore) GetWASMLength(ctx context.Context, defName string, defVersi
 
 // ListVersions returns all deployed versions of a workflow.
 func (s *MSSQLStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	// beginTxWithContext, not a plain s.db.QueryContext: this must run under
+	// s.tenantID's own SESSION_CONTEXT, not whatever the connection's pool
+	// happened to bake in at connect time. Those agree for a store obtained
+	// the ordinary way (MSSQLStoreFactory.OpenStore), but not for a store
+	// re-scoped via WithTenant after the fact -- WithTenant only mutates
+	// s.tenantID, a plain query never re-asserts it, so a store built over
+	// one tenant's pool silently kept answering as that tenant even after
+	// being redirected. cleat#2187: startPluginWorkflow re-scopes the
+	// process-wide store to a plugin start's destination tenant before
+	// calling this, and a foreign tenant's own workflow_defs row was
+	// invisible under the wrong ambient context, so "no versions deployed"
+	// masked the correct answer.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list versions: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT version FROM workflow_defs WHERE name = @p1 AND tenant_id = @p2 ORDER BY version DESC
 	`, defName, s.tenantID)
 	if err != nil {
@@ -184,7 +202,27 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 }
 
 // GetWorkflowByID returns a single workflow instance by ID.
+//
+// cleat#2204: this used to read with a plain s.db.QueryRowContext, relying
+// on whatever SESSION_CONTEXT the connection's pool happened to have baked
+// in at connect time rather than asserting s.tenantID itself. That is
+// invisible for a store obtained the normal way (the pool is baked for
+// exactly the tenant the store reports), and silently wrong for one
+// re-scoped via WithTenant after the fact: WithTenant only mutates
+// s.tenantID, so a plain query kept answering as the pool's original
+// tenant. The explicit "AND tenant_id = @p2" below never fired the way it
+// looked like it would either -- the FILTER PREDICATE evaluates against
+// the ambient SESSION_CONTEXT for every row before this query's own WHERE
+// clause is reached, so a mismatched context hid the row regardless of
+// what this statement asked for. beginTxWithContext, matching
+// ClaimWorkflows and (as of cleat#2187) ListVersions.
 func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get workflow: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var wf WorkflowInstance
 	var nextWakeAt, heartbeatAt, completedAt, startedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
@@ -193,7 +231,7 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	var errorCode, errorOp sql.NullString
 	var continuedFrom, parentWorkflowID sql.NullString
 
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
 		       assigned_to, heartbeat_at, next_wake_at, completed_at, started_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
