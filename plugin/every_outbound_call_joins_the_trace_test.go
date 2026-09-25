@@ -106,6 +106,15 @@ var notYetPropagating = map[string]string{
 		"pluginCallContext (engine/plugin_call_context.go:72), which is a workflow host-call " +
 		"path, so plugin.CallContextFromContext returns nil on every HTTP handler and there is " +
 		"no TraceID to propagate. Fixing the sibling fixes this without touching oidc.go.",
+	"plugins/oauthprovider/identity.go:githubVerifiedEmail": "GET /user/emails (cleat#2340), reached ONLY from handleCallback " +
+		"(routes.go:652) -- the same debt as the two entries above it, for the same reason, and it " +
+		"should be paid at the same time by the same mechanism. Checked rather than inherited, " +
+		"because the judgement is the one worth re-deriving: this is a NEW site and the default " +
+		"should be to propagate, not to declare. It cannot. plugin.SetTraceparentFromContext " +
+		"would be a no-op here, not a fix -- the function's own doc says a nil CallContext is an " +
+		"ordinary state, and on this path there is nothing to unwrap, so the line would go green " +
+		"while changing no bytes on the wire. That is a check that stops disagreeing, which is " +
+		"worse than a debt entry that says so.",
 }
 
 // TestEveryOutboundCallJoinsTheTrace fails when an outbound HTTP request is

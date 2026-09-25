@@ -355,9 +355,21 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// A SQL Server PRIMARY KEY is clustered unless told otherwise, and a
 			// clustered index key is capped at 900 bytes. NVARCHAR(255) for both
 			// provider and identity_value plus the other two columns is
-			// 16 + 510 + 64 + 510 = 1100 bytes, which SQL Server refuses at
-			// CREATE TABLE time with "exceeds the maximum key length". 64 and 255
+			// 16 + 510 + 64 + 510 = 1100 bytes, which SQL Server refuses when the
+			// table is created, with "exceeds the maximum key length". 64 and 255
 			// for provider and identity_value give 16 + 128 + 32 + 510 = 686.
+			//
+			// Wording note, and please leave it: the line above used to name
+			// `CREATE TABLE` and then the word `time` in one phrase. cleat#2373 --
+			// check-plugin-table-namespace.py scans comments, so that pair parses
+			// as a DECLARATION of a table called `time`, and tenantquota's comment
+			// carries the same pair, so two plugins appeared to declare one table
+			// and Lint failed on a tree with no collision in it. Nothing was
+			// renamed; this is the same sentence about the same 900-byte cap.
+			//
+			// The note deliberately does not write the pair out. Prose ABOUT the
+			// hazard contains the hazard, and the guard cannot tell the two apart
+			// -- which is the defect, not the fix.
 			//
 			// provider fits in 64 because the value is one of the four entries in
 			// validProviders (routes.go) -- the longest, "github", is six
