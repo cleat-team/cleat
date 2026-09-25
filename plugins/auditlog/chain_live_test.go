@@ -84,7 +84,7 @@ func TestVerifyOfAChainBeingAppendedToReportsNoBreak(t *testing.T) {
 }
 
 func TestVerifyDuringARetentionSweepReportsNoBreak(t *testing.T) {
-	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+	forEachIsolatedChainDialect(t, func(t *testing.T, e *chainEnv) {
 		tenant := uuid.New()
 		sweeper := e.plugin()
 		// Every row is expired as far as the sweeper's clock is concerned, and it removes a
@@ -147,7 +147,7 @@ func TestVerifyDuringARetentionSweepReportsNoBreak(t *testing.T) {
 // provided the verifier is told the retention period. Without that it cannot tell, and the
 // documentation says so; that limit is pinned here too.
 func TestAFloorOverUnexpiredRowsIsReportedWhenTheRetentionIsKnown(t *testing.T) {
-	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+	forEachIsolatedChainDialect(t, func(t *testing.T, e *chainEnv) {
 		p := e.plugin()
 		tenant := uuid.New()
 		e.record(p, tenant, 10)
