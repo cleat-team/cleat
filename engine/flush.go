@@ -247,14 +247,34 @@ func (s *execSession) writeOut(ctx context.Context, m api.Module, ptr uint32, va
 // real content, resolved or rejected, all alike. The four NULL checks stay
 // necessary for AwaitChild and AwaitAllChildren, whose event_type never
 // leaves the IN(...) list and whose immutability genuinely depends on
-// response (respectively) being guaranteed non-empty on completion -- this
-// paragraph only removes AwaitPromise's dependence on that guarantee, which
-// it never had.
+// response being guaranteed non-empty on completion -- this paragraph only
+// removes AwaitPromise's dependence on that guarantee, which it never had.
 //
 // TestAPromiseStyleEventCompletesOnEveryDialect now asserts the stored
 // EventType after completion, and a stray reflush case that resolves with ""
 // then reflushes with different content, on all three dialects -- both
 // regressions this paragraph would otherwise only assert in prose.
+//
+// # AwaitChild's ERRORED completion needed the SAME guarantee, on the other column
+//
+// Extending cleat-review's question to AwaitChild's own error path (not
+// asked directly, but the same shape) surfaced a live gap: an AwaitChild
+// completing write can set Err instead of Response (children.go, when the
+// child failed), and error_msg -- unlike result -- was read with no
+// COALESCE-style guarantee. admin_ops.go's ForceFail validates workflowID,
+// generation, operator and errorCode, but never errorMsg, so an operator can
+// force-fail a child with an empty message; childOutcomeForSettledStatus
+// then returned Error == "" for it, which nullStr stores as SQL NULL --
+// column-identical to AwaitChild's own pending row, on both response AND
+// error. AwaitChild has no event_type escape hatch the way a resolved
+// promise now does (its event_type never leaves the IN(...) list at all,
+// pending or complete), so this was reachable corruption via cleat#1379's
+// exact mechanism, on a path this PR's own review process exists to catch.
+// Fixed at the source, matching how `result` is already COALESCEd:
+// status_vocabulary.go's childOutcomeForSettledStatus now runs errMsg through
+// nonEmptyChildError before returning it, so every GetChildResult
+// implementation (all three dialects share this one function) is covered at
+// once rather than patched per reader of ChildOutcome.Error.
 //
 // # event_type IN (...) is not an optimization, it is the other half of the guard
 //

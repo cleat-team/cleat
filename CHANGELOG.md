@@ -1566,6 +1566,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `event_type` correctly leaves the pending set, the row is immutable
   regardless of what those columns hold.
 
+  `AwaitChild` has the same residual on its error side, with no comparable
+  escape hatch: its `event_type` never transitions between pending and
+  complete, both writes use `EventTypeAwaitChild`. `ForceFail` validates
+  `workflowID`/`generation`/`operator`/`errorCode` but never `errorMsg`, so
+  an operator can force-fail a child with an empty message; that reaches
+  the completing write as `Err == ""`, column-identical on both `response`
+  and `error` to the pending row it completes. A new `nonEmptyChildError`
+  helper substitutes a sentinel message whenever a failed or dead-lettered
+  child's error would otherwise be empty, closing the gap the same way
+  `COALESCE(result, '{}')` already does for a done child's result.
+
 ## [0.2.0] - 2026-08-10
 
 ### UPGRADE NOTES — breaking
