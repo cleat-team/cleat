@@ -371,8 +371,7 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// this branch answers 500. So a caller who has not authenticated can
 		// still read "this (tenant, provider) pair IS configured" off a 302.
 		// That is one-directional and therefore not closed. The residual is
-		// recorded on cleat#2340, which owns the identity half and is where
-		// narrowing it belongs; the log line keeps the operator detail.
+		// recorded on cleat#2368; the log line keeps the operator detail.
 		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
 			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
@@ -538,7 +537,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		//
 		// The uniform TEXT closes the STRING oracle only; the STATUS still
 		// discriminates (500 here, the 200 JSON finishLogin returns on
-		// success). Same residual, recorded on cleat#2340.
+		// success). Same residual, recorded on cleat#2368.
 		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
 			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")

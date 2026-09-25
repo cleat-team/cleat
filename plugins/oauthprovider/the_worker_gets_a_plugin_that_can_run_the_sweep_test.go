@@ -20,9 +20,23 @@ import (
 //
 // cmd/cleat-worker/main.go:1457 calls plugin.Discover(), and main.go:1784
 // then asks `lp.Plugin.(plugin.HasBackground)` of each entry to decide which
-// plugins get a background loop. This test makes the same two calls in the
-// same order, so it is a reproduction of the production path rather than a
-// resemblance to it.
+// plugins get a background loop. This test makes those same two calls in the
+// same order -- and stops there.
+//
+// It is NOT a reproduction of the production path end to end, which an
+// earlier version of this comment claimed. Two conditions sit between the
+// assertion at 1784 and a loop actually running, and this test exercises
+// neither: main.go:1781 skips an entry whose lp.Healthy is false, before the
+// assertion is reached at all, and main.go:1799 appends the plugin to
+// bgPlugins, which main.go:2088 hands to the Worker that starts Run.
+//
+// So deleting the append at 1799 leaves this test green, as it leaves every
+// other test in the package green: nothing here asserts the plugin was
+// COLLECTED, only that the registry handed it over and that the interface is
+// satisfied. Read the assertions as what they are -- "the registry produces an
+// *Plugin, and it satisfies HasBackground" -- and not as "the worker starts
+// its loop". Reaching 1799 needs a worker or a shim for the collection step,
+// which is a change of its own and not part of this PR.
 //
 // The failure it guards is silent by construction: nothing logs, no error
 // surfaces, and TestSweepExpiredSessionsOnlyDeletesAbandonedLogins cannot
