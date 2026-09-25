@@ -326,7 +326,8 @@ var (
 	childBindingOverride          = flag.String("child-binding-override", "", "Override child binding policy: 'latest' to always use latest child versions (for debugging). Also read from CLEAT_CHILD_BINDING_OVERRIDE env var.")
 	dbCredentialProvider          = flag.String("db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
 	dbCredentialPath              = flag.String("db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
-	encryptionKeyFile             = flag.String("encryption-key-file", "", "Path to file containing base64-encoded AES-256-GCM encryption key (32 bytes after decode)")
+	encryptionKeyFile             = flag.String("encryption-key-file", "", "Path to file containing base64-encoded AES-256-GCM encryption key (32 bytes after decode). Every new payload seal uses this key.")
+	encryptionKeyFilePrevious     = flag.String("encryption-key-file-previous", "", "Path to a PREVIOUS base64-encoded AES-256-GCM encryption key file, for a rolling key rotation (cleat#1992). Read-only: a payload sealed under this key still opens, but nothing new is ever sealed with it. Requires --encryption-key-file. There is no admin.workers-style gate for this the way tenant-secret rotation has -- a worker still on the old key alone cannot read a row a worker already on the new key wrote, until it restarts with this flag. See docs/how-to/rotate-payload-encryption-key.md.")
 
 	// ROLE-PER-TENANT ISOLATION. cleat#1307.
 	//
