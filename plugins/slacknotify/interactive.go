@@ -491,6 +491,19 @@ func (p *Plugin) resolveSlackTenant(ctx context.Context, payload slackInteractiv
 	), teamID).Scan(&tenantID); err != nil {
 		return "", false
 	}
+	// Canonicalize before this value is used for anything -- MSSQL's
+	// CAST(... AS CHAR(36)) renders the UUID UPPERCASE where postgres and
+	// mysql return whatever case was written, and this string is exactly
+	// what gets fed into routeMAC on the verify side. Measured on real
+	// MSSQL (cleat-review + coordinator, cleat#2230): a button stamped
+	// under host_functions.go's lowercase-canonicalized tenantID 404'd on
+	// every click here before this line existed, because the two sides
+	// disagreed on case. uuid.Parse accepts either case; .String() always
+	// emits canonical lowercase, so this converges with sendMessage's
+	// canonicalization regardless of which dialect answered.
+	if parsed, parseErr := uuid.Parse(tenantID); parseErr == nil {
+		tenantID = parsed.String()
+	}
 	if userTeamID := slackUserTeamID(payload.User); userTeamID != "" && userTeamID != teamID {
 		var userTenantID string
 		if err := p.db.QueryRow(ctx, plugin.Rebind(
@@ -498,6 +511,15 @@ func (p *Plugin) resolveSlackTenant(ctx context.Context, payload slackInteractiv
 		), userTeamID).Scan(&userTenantID); err != nil {
 			return "", false
 		}
+		if parsed, parseErr := uuid.Parse(userTenantID); parseErr == nil {
+			userTenantID = parsed.String()
+		}
+		// EqualFold stays as defense-in-depth even though both sides are
+		// now canonicalized to the same case: a value that fails to
+		// uuid.Parse (never observed, but not provably impossible against
+		// a hand-edited row) falls through unchanged, and this still
+		// tolerates a case mismatch in that fallback case rather than
+		// refusing a legitimate Slack Connect click over it.
 		if !strings.EqualFold(userTenantID, tenantID) {
 			return "", false
 		}

@@ -421,10 +421,19 @@ func signedInteractiveRequest(body string) *http.Request {
 // Connect's cross-team check -- a click posted through a Slack Connect
 // shared channel carries the CLICKING user's own team_id separately from
 // the channel-owning team.id, and the two must resolve to the SAME tenant
-// or the click refuses. EqualFold, not ==: cleat-review's addendum flagged
-// that tenant_id round-trips through CAST(... AS CHAR(36)), whose casing is
-// dialect-dependent (MSSQL commonly upper-cases), so a same-tenant match by
-// exact string comparison would spuriously refuse on that dialect alone.
+// or the click refuses.
+//
+// resolveSlackTenant canonicalizes every tenant_id it reads via
+// uuid.Parse(...).String() before returning or comparing it (coordinator's
+// fix after real-MSSQL testing on cleat#2230: CAST(tenant_id AS CHAR(36))
+// renders UPPERCASE on that dialect, and a button stamped under
+// host_functions.go's lowercase-canonicalized value 404'd on every click
+// against an uncanonicalized uppercase resolve). So "different case
+// (dialect cast)" below asserts the CANONICAL lowercase form comes back
+// even when the store itself holds uppercase -- not the raw dialect-cast
+// value. EqualFold stays in resolveSlackTenant as defense-in-depth for the
+// (unobserved) case a stored value fails to parse as a UUID at all; it is
+// not what this test is checking for the matching-case paths.
 func TestResolveSlackTenant(t *testing.T) {
 	tenantA := uuid.New().String()
 	tenantB := uuid.New().String()
@@ -466,7 +475,14 @@ func TestResolveSlackTenant(t *testing.T) {
 			name:         "slack connect, same tenant, different case (dialect cast)",
 			teamToTenant: map[string]string{"T1": strings.ToUpper(tenantA), "T-user": tenantA},
 			payload:      `{"team":{"id":"T1"},"user":{"id":"U1","team_id":"T-user"}}`,
-			wantTenant:   strings.ToUpper(tenantA),
+			wantTenant:   tenantA, // canonicalized lowercase, not the store's uppercase
+			wantOK:       true,
+		},
+		{
+			name:         "ordinary resolution canonicalizes an uppercase-cast tenant_id",
+			teamToTenant: map[string]string{"T1": strings.ToUpper(tenantA)},
+			payload:      `{"team":{"id":"T1"}}`,
+			wantTenant:   tenantA,
 			wantOK:       true,
 		},
 		{

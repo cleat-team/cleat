@@ -1,7 +1,12 @@
 package slacknotify
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +42,16 @@ func TestSignRouteParseVerifyRoundTrip(t *testing.T) {
 // binds each field it claims to: tenant, unsigned route, issued-at,
 // block_id, and value. Flipping any ONE must break verification against the
 // values used to sign.
+//
+// "wrong issued_at" uses a FRESH-but-different timestamp (now+1 second), not
+// epoch zero. Epoch zero is also refused by verifyRouteSignature's separate
+// max-age check, so a case built that way passes whether or not the MAC
+// actually binds issuedAtHex at all -- cleat-review's mutation pass found
+// exactly this: deleting issuedAtHex from routeMAC's inputs left this test
+// green, because "wrong issued_at" was never isolated from "old issued_at".
+// A timestamp one second later than the one actually signed is still
+// comfortably inside defaultRouteMaxAge and the clock-skew allowance, so
+// this case can only fail via the MAC, never the age check.
 func TestVerifyRouteSignature_TamperedFieldsRefuse(t *testing.T) {
 	tenantID := uuid.New().String()
 	otherTenantID := uuid.New().String()
@@ -47,6 +62,14 @@ func TestVerifyRouteSignature_TamperedFieldsRefuse(t *testing.T) {
 	if !ok {
 		t.Fatalf("parseSignedRoute(%q) ok=false", signed)
 	}
+	issuedAtSecs, err := strconv.ParseUint(issuedAtHex, 16, 32)
+	if err != nil {
+		t.Fatalf("parsing issuedAtHex %q: %v", issuedAtHex, err)
+	}
+	freshButDifferentIssuedAtHex := fmt.Sprintf("%08x", issuedAtSecs+1)
+	if freshButDifferentIssuedAtHex == issuedAtHex {
+		t.Fatal("test fixture bug: freshButDifferentIssuedAtHex must differ from issuedAtHex")
+	}
 
 	cases := []struct {
 		name                                       string
@@ -54,7 +77,8 @@ func TestVerifyRouteSignature_TamperedFieldsRefuse(t *testing.T) {
 	}{
 		{"wrong tenant", otherTenantID, unsignedRoute, issuedAtHex, "block-1", "yes"},
 		{"wrong route", tenantID, "wf:wf-2:sig:approve", issuedAtHex, "block-1", "yes"},
-		{"wrong issued_at", tenantID, unsignedRoute, "00000000", "block-1", "yes"},
+		{"wrong issued_at (epoch zero -- also caught by the age check alone)", tenantID, unsignedRoute, "00000000", "block-1", "yes"},
+		{"wrong issued_at (fresh, isolates MAC binding from the age check)", tenantID, unsignedRoute, freshButDifferentIssuedAtHex, "block-1", "yes"},
 		{"wrong block_id", tenantID, unsignedRoute, issuedAtHex, "block-2", "yes"},
 		{"wrong value", tenantID, unsignedRoute, issuedAtHex, "block-1", "no"},
 	}
@@ -279,4 +303,241 @@ func TestConfigRouteMaxAge(t *testing.T) {
 			t.Errorf("Config{RouteMaxAgeDays: %d}.routeMaxAge() = %v, want %v", tc.days, got, tc.want)
 		}
 	}
+}
+
+// TestStampBlocksWithRoutes_InjectsBlockIDWhenAbsent is the direct pin for
+// cleat-review + coordinator's real-dialect finding: a block with no
+// author-set block_id got signed with blockID="", but Slack auto-generates
+// its OWN block_id at render time when the field is absent and echoes THAT
+// back on click -- never empty string -- so every such button 404'd on
+// every real click, on all three dialects. The fix injects a block_id at
+// STAMP time so the field is never absent, and this asserts the injected
+// value actually lands on the block object (not just internally
+// remembered), and that the action_id verifies under it.
+func TestStampBlocksWithRoutes_InjectsBlockIDWhenAbsent(t *testing.T) {
+	tenantID := uuid.New().String()
+	raw := json.RawMessage(`{"blocks":[{"type":"actions","elements":[
+		{"type":"button","action_id":"wf:wf-1:sig:approve","value":"yes"}
+	]}]}`)
+
+	stamped, err := stampBlocksWithRoutes(raw, []byte(testSignedRouteKey), tenantID, time.Now())
+	if err != nil {
+		t.Fatalf("stampBlocksWithRoutes: %v", err)
+	}
+
+	var tree map[string]any
+	if err := json.Unmarshal(stamped, &tree); err != nil {
+		t.Fatalf("stamped output is not valid JSON: %v", err)
+	}
+	block := tree["blocks"].([]any)[0].(map[string]any)
+	blockID, _ := block["block_id"].(string)
+	if blockID == "" {
+		t.Fatal("expected stampBlocksWithRoutes to inject a block_id, block still has none")
+	}
+
+	elem := block["elements"].([]any)[0].(map[string]any)
+	signed := elem["action_id"].(string)
+	value := elem["value"].(string)
+	unsigned, issuedAtHex, mac, ok := parseSignedRoute(signed)
+	if !ok {
+		t.Fatalf("parseSignedRoute(%q) ok=false", signed)
+	}
+
+	// The whole point: verification against the block_id ACTUALLY WRITTEN
+	// onto the object (what Slack will echo back) must succeed...
+	if _, ok := verifyRouteSignature([]byte(testSignedRouteKey), nil, tenantID, unsigned, issuedAtHex, blockID, value, mac, defaultRouteMaxAge, time.Now()); !ok {
+		t.Error("action_id did not verify under the block_id stampBlocksWithRoutes injected onto the block")
+	}
+	// ...and verification against an EMPTY block_id -- what the pre-fix code
+	// signed with, and what Slack never actually sends -- must now fail,
+	// demonstrating this is a real behavior change and not a no-op.
+	if _, ok := verifyRouteSignature([]byte(testSignedRouteKey), nil, tenantID, unsigned, issuedAtHex, "", value, mac, defaultRouteMaxAge, time.Now()); ok {
+		t.Error("action_id unexpectedly verified under an empty block_id -- injection did not change what was signed")
+	}
+}
+
+// TestStampBlocksWithRoutes_SiblingButtonsShareInjectedBlockID: two buttons
+// under ONE block with no author-set block_id must converge on the SAME
+// injected value -- not each mint their own -- because block_id lives on
+// the enclosing block object and Slack will echo back whatever ONE value
+// actually ended up there, for either button's click.
+func TestStampBlocksWithRoutes_SiblingButtonsShareInjectedBlockID(t *testing.T) {
+	tenantID := uuid.New().String()
+	raw := json.RawMessage(`{"blocks":[{"type":"actions","elements":[
+		{"type":"button","action_id":"wf:wf-1:sig:approve","value":"yes"},
+		{"type":"button","action_id":"wf:wf-1:sig:reject","value":"no"}
+	]}]}`)
+
+	stamped, err := stampBlocksWithRoutes(raw, []byte(testSignedRouteKey), tenantID, time.Now())
+	if err != nil {
+		t.Fatalf("stampBlocksWithRoutes: %v", err)
+	}
+
+	var tree map[string]any
+	if err := json.Unmarshal(stamped, &tree); err != nil {
+		t.Fatal(err)
+	}
+	block := tree["blocks"].([]any)[0].(map[string]any)
+	blockID, _ := block["block_id"].(string)
+	if blockID == "" {
+		t.Fatal("expected an injected block_id, got none")
+	}
+	elements := block["elements"].([]any)
+
+	for i, wantRoute := range []string{"wf:wf-1:sig:approve", "wf:wf-1:sig:reject"} {
+		elem := elements[i].(map[string]any)
+		signed := elem["action_id"].(string)
+		value := elem["value"].(string)
+		unsigned, issuedAtHex, mac, ok := parseSignedRoute(signed)
+		if !ok || unsigned != wantRoute {
+			t.Fatalf("element %d: parsed (%q, ok=%v), want %q", i, unsigned, ok, wantRoute)
+		}
+		if _, ok := verifyRouteSignature([]byte(testSignedRouteKey), nil, tenantID, unsigned, issuedAtHex, blockID, value, mac, defaultRouteMaxAge, time.Now()); !ok {
+			t.Errorf("element %d did not verify under the shared injected block_id %q", i, blockID)
+		}
+	}
+}
+
+// TestStampNode_RefusesGuestSuppliedSignedShapedActionID is the nit
+// coordinator asked for: an action_id that ALREADY has the structural shape
+// of a signed route (parseSignedRoute succeeds) but was not produced by
+// THIS send carries no valid MAC under any key this deployment holds --
+// stampNode must refuse the whole send rather than pass it through
+// untouched, which is what looksLikeUnsignedRoute's own exclusion would
+// otherwise cause (it is deliberately not "unsigned", so it would just be
+// skipped and shipped as-is).
+func TestStampNode_RefusesGuestSuppliedSignedShapedActionID(t *testing.T) {
+	// Signed under a DIFFERENT key -- exactly what a workflow author pasting
+	// in a stale or forged route would produce: valid shape, no valid MAC
+	// under the deployment's actual key.
+	forged := signRoute([]byte("a-completely-different-key-000000"), "wf:wf-1:sig:approve", uuid.New().String(), "b1", "yes", time.Now())
+	raw := json.RawMessage(`{"blocks":[{"type":"actions","block_id":"b1","elements":[
+		{"type":"button","action_id":"` + forged + `","value":"yes"}
+	]}]}`)
+
+	_, err := stampBlocksWithRoutes(raw, []byte(testSignedRouteKey), uuid.New().String(), time.Now())
+	if err == nil {
+		t.Fatal("expected stampBlocksWithRoutes to refuse a guest-supplied signed-shaped action_id, got nil error")
+	}
+	if !strings.Contains(err.Error(), "already has the shape of a signed route") {
+		t.Errorf("expected the refusal to name the reason, got: %v", err)
+	}
+}
+
+// TestRouteMAC_LengthPrefixedFramingAvoidsFieldBoundaryCollision is
+// cleat-review's exact collision, pinned directly: under the OLD
+// NUL-terminated framing, blockID="a\x00"+value="b" and blockID="a"+
+// value="\x00b" write the identical byte stream, so their MACs would have
+// been equal despite differing at a real click-controlled field boundary.
+// The length-prefixed framing must NOT collide on this pair.
+func TestRouteMAC_LengthPrefixedFramingAvoidsFieldBoundaryCollision(t *testing.T) {
+	key := []byte(testSignedRouteKey)
+	tenantID := "tenant-1"
+	route := "wf:wf-1:sig:go"
+	issuedAtHex := "00000001"
+
+	mac1 := routeMAC(key, tenantID, route, issuedAtHex, "a\x00", "b")
+	mac2 := routeMAC(key, tenantID, route, issuedAtHex, "a", "\x00b")
+	if mac1 == mac2 {
+		t.Fatalf("routeMAC collided across a (blockID, value) field boundary: %q vs %q both produced %q", `"a\x00","b"`, `"a","\x00b"`, mac1)
+	}
+}
+
+// TestStampBlocksWithRoutes_PreservesLargeIntegers pins the UseNumber
+// decode: a JSON integer literal anywhere in Blocks JSON, including well
+// outside anything this plugin reads, must survive the
+// decode-stamp-re-encode round trip byte-for-byte. Plain json.Unmarshal
+// into `any` represents every number as float64, which cannot exactly hold
+// integers past 2^53 -- 9223372036854775807 (2^63-1) would silently become
+// 9223372036854775808 without UseNumber.
+func TestStampBlocksWithRoutes_PreservesLargeIntegers(t *testing.T) {
+	tenantID := uuid.New().String()
+	const bigInt = "9223372036854775807"
+	raw := json.RawMessage(`{"blocks":[{"type":"actions","block_id":"b1","elements":[
+		{"type":"button","action_id":"wf:wf-1:sig:go","value":"yes"}
+	]}],"metadata":{"event_payload":{"amount":` + bigInt + `}}}`)
+
+	stamped, err := stampBlocksWithRoutes(raw, []byte(testSignedRouteKey), tenantID, time.Now())
+	if err != nil {
+		t.Fatalf("stampBlocksWithRoutes: %v", err)
+	}
+	if !strings.Contains(string(stamped), bigInt) {
+		t.Errorf("large integer literal did not survive stamping intact; stamped output: %s", stamped)
+	}
+}
+
+// TestRouteSigningKey pins routeSigningKey's own validation: the pre-existing
+// empty-current-key refusal (cleat-review's mutation pass found this had no
+// test at all), the new 32-byte minimum on the current key, and a
+// too-short previous key being discarded (logged, not refused -- see
+// routeSigningKey's doc comment for why a bad OLD key must not take down
+// routes signed under a still-valid current one).
+func TestRouteSigningKey(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validKey := strings.Repeat("k", routeSigningKeyMinLen)
+	shortKey := strings.Repeat("k", routeSigningKeyMinLen-1)
+
+	t.Run("empty current key refuses", func(t *testing.T) {
+		p := &Plugin{logger: quiet, deploymentSecrets: &fakeInteractiveDeploymentSecrets{routeKey: ""}}
+		if _, _, err := p.routeSigningKey(context.Background()); err == nil {
+			t.Fatal("expected an error for an empty route_signing_key, got nil")
+		}
+	})
+
+	t.Run("short current key refuses", func(t *testing.T) {
+		p := &Plugin{logger: quiet, deploymentSecrets: &fakeInteractiveDeploymentSecrets{routeKey: shortKey}}
+		_, _, err := p.routeSigningKey(context.Background())
+		if err == nil {
+			t.Fatal("expected an error for a route_signing_key under the minimum length, got nil")
+		}
+		if !strings.Contains(err.Error(), "minimum") {
+			t.Errorf("expected the refusal to mention the minimum, got: %v", err)
+		}
+	})
+
+	t.Run("valid current key, no previous", func(t *testing.T) {
+		p := &Plugin{logger: quiet, deploymentSecrets: &fakeInteractiveDeploymentSecrets{routeKey: validKey}}
+		cur, prev, err := p.routeSigningKey(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if string(cur) != validKey {
+			t.Errorf("current key = %q, want %q", cur, validKey)
+		}
+		if len(prev) != 0 {
+			t.Errorf("expected no previous key, got %q", prev)
+		}
+	})
+
+	t.Run("short previous key is discarded, not refused", func(t *testing.T) {
+		p := &Plugin{logger: quiet, deploymentSecrets: &fakeInteractiveDeploymentSecrets{
+			routeKey:         validKey,
+			routeKeyPrevious: shortKey,
+		}}
+		cur, prev, err := p.routeSigningKey(context.Background())
+		if err != nil {
+			t.Fatalf("a short PREVIOUS key must not refuse the call: %v", err)
+		}
+		if string(cur) != validKey {
+			t.Errorf("current key = %q, want %q", cur, validKey)
+		}
+		if len(prev) != 0 {
+			t.Errorf("expected the short previous key to be discarded (empty), got %q", prev)
+		}
+	})
+
+	t.Run("valid previous key is kept", func(t *testing.T) {
+		validPrev := strings.Repeat("p", routeSigningKeyMinLen)
+		p := &Plugin{logger: quiet, deploymentSecrets: &fakeInteractiveDeploymentSecrets{
+			routeKey:         validKey,
+			routeKeyPrevious: validPrev,
+		}}
+		_, prev, err := p.routeSigningKey(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if string(prev) != validPrev {
+			t.Errorf("previous key = %q, want %q", prev, validPrev)
+		}
+	})
 }

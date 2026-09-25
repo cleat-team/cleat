@@ -1,14 +1,18 @@
 package slacknotify
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Signed routes bind a Slack button's action_id to the tenant that posted
@@ -37,6 +41,18 @@ const (
 	// ":" + issued_at + ":" + mac
 	routeTailLen = 1 + routeIssuedAtLen + 1 + routeMACLen
 
+	// routeSigningKeyMinLen is the minimum length, in bytes, accepted for
+	// slacknotify.route_signing_key (and .previous, if set) -- coordinator's
+	// call after cleat-review's mutation pass found that deleting the empty
+	// check on the current key left no test red. A short or empty key makes
+	// the MAC guessable; 32 bytes matches the HMAC-SHA256 block-adjacent key
+	// size convention used elsewhere in this codebase (e.g. slacknotify's
+	// own signing_secret has no enforced minimum, which is the gap this
+	// closes for the NEW secret rather than retrofitting the old one).
+	// Enforced here (routeSigningKey, "at use") and in cleatctl's
+	// set-deployment-secret for this specific name (cmd/cleatctl).
+	routeSigningKeyMinLen = 32
+
 	// slackActionIDMaxLen is Slack's own documented bound on a block
 	// element's action_id. A signed route adds routeTailLen fixed
 	// characters (32) on top of the unsigned "wf:<id>:sig:<name>" a
@@ -60,6 +76,14 @@ const (
 	// defaultRouteMaxAge.
 	routeClockSkewAllowance = 5 * time.Minute
 )
+
+// RouteSigningKeyMinLen exports routeSigningKeyMinLen for
+// cmd/cleatctl/setdeploymentsecret.go, which enforces the same floor at
+// write time -- coordinator's instruction (cleat#2230) that the minimum
+// key length be "enforced at use and in cleatctl". The two live in
+// different binaries; this constant is what keeps them from drifting
+// apart, rather than each carrying its own copy of 32.
+const RouteSigningKeyMinLen = routeSigningKeyMinLen
 
 // looksLikeUnsignedRoute reports whether s is an UNSIGNED wf:<id>:sig:<name>
 // route -- the shape a workflow author writes into their own Blocks JSON,
@@ -93,6 +117,21 @@ func looksLikeUnsignedRoute(s string) bool {
 	return true
 }
 
+// looksLikeAlreadySignedRoute reports whether s structurally parses as a
+// SIGNED route (parseSignedRoute succeeds), independent of whether its MAC
+// verifies against any key we hold. At stamp time (stampNode, before any
+// signing happens in this call) the only way an action_id can already have
+// this shape is if the workflow author wrote it into their own Blocks JSON
+// -- a forged or stale route pasted in deliberately, or, vanishingly
+// unlikely, an accidental collision. Either way it is not something this
+// send is vouching for, so stampNode refuses rather than passing it
+// through unsigned-and-unverifiable (cleat-review + coordinator nit,
+// cleat#2230).
+func looksLikeAlreadySignedRoute(s string) bool {
+	_, _, _, ok := parseSignedRoute(s)
+	return ok
+}
+
 // routeMAC computes the truncated HMAC-SHA256 over every field a signed
 // route binds: which deployment key signed it, which tenant it was minted
 // for, the unsigned route itself (which is exactly "wf:<id>:sig:<name>" and
@@ -100,15 +139,26 @@ func looksLikeUnsignedRoute(s string) bool {
 // when it was minted, and the clicked element's block_id and value --
 // cleat-review's addendum requirement that a route cannot be replayed onto
 // a different button by carrying its action_id to another block_id/value
-// pair. Each field is written null-terminated after a context prefix so
+// pair. Each field is written length-prefixed after a context prefix so
 // that no concatenation of the parts can collide with a different
-// partition of the same bytes.
+// partition of the same bytes -- see the comment inline below for why
+// length-prefixing, not NUL-termination.
 func routeMAC(key []byte, tenantID, unsignedRoute, issuedAtHex, blockID, value string) string {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(routeMACContext))
+	// Length-PREFIXED, not NUL-terminated: cleat-review's mutation pass
+	// found the previous NUL-joined framing ambiguous -- "a\x00" + "b" and
+	// "a" + "\x00b" write the identical byte stream ("a\x00\x00b\x00" ...),
+	// so two different (blockID, value) splits of one payload could hash to
+	// the same MAC input if either field could carry a literal NUL byte
+	// (both come from a real Slack click, which this handler does not
+	// otherwise restrict to be NUL-free). An 8-byte big-endian length
+	// before each field is unambiguous regardless of content.
+	var lenBuf [8]byte
 	for _, part := range []string{tenantID, unsignedRoute, issuedAtHex, blockID, value} {
+		binary.BigEndian.PutUint64(lenBuf[:], uint64(len(part)))
+		mac.Write(lenBuf[:])
 		mac.Write([]byte(part))
-		mac.Write([]byte{0})
 	}
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:routeMACRawBytes])
 }
@@ -199,10 +249,24 @@ func hasUnsignedRoute(raw json.RawMessage) bool {
 		return false
 	}
 	var tree any
-	if err := json.Unmarshal(raw, &tree); err != nil {
+	if err := decodeJSONPreservingNumbers(raw, &tree); err != nil {
 		return false
 	}
 	return findActionIDMatching(tree, looksLikeUnsignedRoute) != ""
+}
+
+// decodeJSONPreservingNumbers decodes raw the way stampBlocksWithRoutes and
+// hasUnsignedRoute need to: a plain json.Unmarshal into `any` represents
+// every JSON number as float64, which cannot exactly represent integers
+// past 2^53 -- so a workflow author's large numeric literal anywhere in
+// Blocks (a snowflake-style id in "value", say) would silently change value
+// across the decode/re-encode round trip stampBlocksWithRoutes performs.
+// UseNumber keeps each number as json.Number (string-backed), so re-marshal
+// reproduces it exactly.
+func decodeJSONPreservingNumbers(raw []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	return dec.Decode(out)
 }
 
 // stampBlocksWithRoutes finds every "action_id" in raw that looks like an
@@ -236,10 +300,10 @@ func stampBlocksWithRoutes(raw json.RawMessage, key []byte, tenantID string, iss
 		return raw, nil
 	}
 	var tree any
-	if err := json.Unmarshal(raw, &tree); err != nil {
+	if err := decodeJSONPreservingNumbers(raw, &tree); err != nil {
 		return nil, fmt.Errorf("slack-notify: blocks is not valid JSON: %w", err)
 	}
-	if err := stampNode(tree, key, tenantID, issuedAt, ""); err != nil {
+	if err := stampNode(tree, key, tenantID, issuedAt, nil); err != nil {
 		return nil, err
 	}
 	out, err := json.Marshal(tree)
@@ -247,7 +311,7 @@ func stampBlocksWithRoutes(raw json.RawMessage, key []byte, tenantID string, iss
 		return nil, fmt.Errorf("slack-notify: re-marshal stamped blocks: %w", err)
 	}
 	var reparsed any
-	if err := json.Unmarshal(out, &reparsed); err != nil {
+	if err := decodeJSONPreservingNumbers(out, &reparsed); err != nil {
 		return nil, fmt.Errorf("slack-notify: re-parse stamped blocks: %w", err)
 	}
 	if survivor := findActionIDMatching(reparsed, looksLikeUnsignedRoute); survivor != "" {
@@ -256,40 +320,105 @@ func stampBlocksWithRoutes(raw json.RawMessage, key []byte, tenantID string, iss
 	return out, nil
 }
 
-// stampNode is stampBlocksWithRoutes' recursion. ancestorBlockID is the
-// nearest enclosing object's "block_id", inherited unless this node has its
-// own. Returns an error, and stops recursing, the moment a stamped
-// action_id would exceed slackActionIDMaxLen -- a hard refusal rather than a
+// stampNode is stampBlocksWithRoutes' recursion. ancestorBlock is the
+// nearest enclosing object -- a live map reference, not a copied block_id
+// string -- so that a block_id INJECTED for one button (see below) is
+// visible, by the same reference, to a sibling button processed afterward
+// under the same block.
+//
+// Returns an error, and stops recursing, the moment a stamped action_id
+// would exceed slackActionIDMaxLen -- a hard refusal rather than a
 // truncation, per the owner's explicit instruction (cleat#2230): a truncated
 // signed route would fail MAC verification on every click, silently.
-func stampNode(node any, key []byte, tenantID string, issuedAt time.Time, ancestorBlockID string) error {
+//
+// BLOCK_ID INJECTION (cleat-review + coordinator, cleat#2230 real-dialect
+// round): a block with no author-set block_id gets one auto-generated by
+// SLACK at render time, and Slack echoes THAT value back on click -- not
+// empty string, which is what got signed here originally. Every button
+// under such a block therefore 404'd on every real click, on all three
+// dialects, because nothing this plugin ever sent matched what came back.
+// The fix is to inject our OWN block_id at stamp time, into the actual
+// object we are about to send, so Slack has no reason to generate one --
+// it only does that when the field is ABSENT, never when it already holds
+// a value. What we sign is then guaranteed to be what Slack echoes.
+func stampNode(node any, key []byte, tenantID string, issuedAt time.Time, ancestorBlock map[string]any) error {
 	switch v := node.(type) {
 	case map[string]any:
-		blockID := ancestorBlockID
-		if bid, ok := v["block_id"].(string); ok && bid != "" {
-			blockID = bid
+		// isElement: this map carries its own "action_id", so it is an
+		// interactive ELEMENT (button, etc.), never the layout block that
+		// encloses one -- Slack's own schema never puts both on the same
+		// object. Excluding it from candidacy is what makes a button not
+		// its own ancestor: a button with no explicit block_id anywhere
+		// above it must inject onto whatever REAL enclosing map is above
+		// it, never onto itself.
+		//
+		// Every OTHER map -- whether or not it happens to carry a
+		// "block_id" key yet -- is a valid injection candidate for
+		// whatever nests beneath it. This is what the earlier version of
+		// this function got wrong: it only registered a map as the
+		// candidate when block_id was ALREADY present, so a block with none
+		// set was invisible to the walk and a button under it fell back to
+		// using ITSELF (a button object, never rendered as a block at all)
+		// as the injection target -- silently landing block_id on the
+		// wrong object and leaving the real block still absent one, which
+		// is exactly the bug this rewrite exists to fix. See
+		// TestStampBlocksWithRoutes_InjectsBlockIDWhenAbsent.
+		_, isElement := v["action_id"]
+		childAncestor := ancestorBlock
+		if !isElement {
+			childAncestor = v
 		}
-		if actionID, ok := v["action_id"].(string); ok && looksLikeUnsignedRoute(actionID) {
-			value, _ := v["value"].(string)
-			signed := signRoute(key, actionID, tenantID, blockID, value, issuedAt)
-			if len(signed) > slackActionIDMaxLen {
-				return fmt.Errorf("slack-notify: signing %q would produce a %d-character action_id, over Slack's %d-character limit -- shorten the workflow id or signal name", actionID, len(signed), slackActionIDMaxLen)
+		if actionID, ok := v["action_id"].(string); ok {
+			switch {
+			case looksLikeUnsignedRoute(actionID):
+				target := ancestorBlock
+				if target == nil {
+					// No enclosing map was ever found (a button with
+					// nothing above it in the tree) -- fall back to this
+					// object itself rather than losing the route entirely.
+					// Not the expected shape for real Slack Blocks JSON.
+					target = v
+				}
+				blockID, _ := target["block_id"].(string)
+				if blockID == "" {
+					blockID = generateBlockID()
+					target["block_id"] = blockID
+				}
+				value, _ := v["value"].(string)
+				signed := signRoute(key, actionID, tenantID, blockID, value, issuedAt)
+				if len(signed) > slackActionIDMaxLen {
+					return fmt.Errorf("slack-notify: signing %q would produce a %d-character action_id, over Slack's %d-character limit -- shorten the workflow id or signal name", actionID, len(signed), slackActionIDMaxLen)
+				}
+				v["action_id"] = signed
+			case looksLikeAlreadySignedRoute(actionID):
+				// A guest-authored workflow's own action_id happens to have
+				// the shape of OUR signed wire format, but was not produced
+				// by this call -- it carries no valid MAC under this key.
+				// The design calls for refusing outright rather than
+				// sending a button whose click can never verify.
+				return fmt.Errorf("slack-notify: action_id %q already has the shape of a signed route but was not signed by this send -- refusing to send an unverifiable button", actionID)
 			}
-			v["action_id"] = signed
 		}
 		for _, child := range v {
-			if err := stampNode(child, key, tenantID, issuedAt, blockID); err != nil {
+			if err := stampNode(child, key, tenantID, issuedAt, childAncestor); err != nil {
 				return err
 			}
 		}
 	case []any:
 		for _, child := range v {
-			if err := stampNode(child, key, tenantID, issuedAt, ancestorBlockID); err != nil {
+			if err := stampNode(child, key, tenantID, issuedAt, ancestorBlock); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// generateBlockID produces a fresh, opaque block_id for a layout block the
+// workflow author left unset. See stampNode's doc comment for why this is
+// injected at stamp time rather than left for Slack to assign.
+func generateBlockID() string {
+	return "cleat_" + uuid.New().String()
 }
 
 // findActionIDMatching walks node the same way stampNode does and returns
@@ -337,8 +466,21 @@ func (p *Plugin) routeSigningKey(ctx context.Context) (current, previous []byte,
 	if cur == "" {
 		return nil, nil, fmt.Errorf("slack-notify: route_signing_key: empty")
 	}
+	if len(cur) < routeSigningKeyMinLen {
+		return nil, nil, fmt.Errorf("slack-notify: route_signing_key: %d bytes, below the %d-byte minimum", len(cur), routeSigningKeyMinLen)
+	}
 	prev, prevErr := p.deploymentSecrets.Get(ctx, "slacknotify.route_signing_key.previous")
 	if prevErr != nil || prev == "" {
+		prev = ""
+	}
+	// A too-short .previous is discarded rather than refused outright: it
+	// only ever weakens the rotation-grace fallback (verifyRouteSignature
+	// simply won't match against it any more usefully than an absent one
+	// would), it never widens what a CURRENT route can be forged with, and
+	// refusing here would turn an operator's mistake on the OLD key into an
+	// outage for every route signed under the still-valid current one.
+	if prev != "" && len(prev) < routeSigningKeyMinLen {
+		p.logger.Warn("slack-notify: route_signing_key.previous is shorter than the minimum -- ignoring it", "len", len(prev), "min", routeSigningKeyMinLen)
 		prev = ""
 	}
 	return []byte(cur), []byte(prev), nil

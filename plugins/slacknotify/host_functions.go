@@ -63,6 +63,21 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("slack-notify: no tenant context")
 	}
+	// Canonicalize to uuid.String()'s form (lowercase, hyphenated) before
+	// this tenant ID is used for anything -- the value that gets bound into
+	// a route's MAC here must match, byte for byte, whatever
+	// resolveSlackTenant produces at click time from CAST(tenant_id AS
+	// CHAR(36)), and MSSQL's CAST renders that string UPPERCASE where
+	// postgres/mysql return whatever case was written. Measured on real
+	// MSSQL (cleat-review + coordinator, cleat#2230): a route signed under
+	// cc.TenantID's incoming case 404'd on every click for exactly this
+	// reason. uuid.Parse tolerates either case on input; .String() always
+	// emits the canonical lowercase form, so both sides converge on it
+	// regardless of which dialect produced their half.
+	tenantID := cc.TenantID
+	if parsed, parseErr := uuid.Parse(tenantID); parseErr == nil {
+		tenantID = parsed.String()
+	}
 
 	var input sendMessageInput
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
@@ -82,7 +97,7 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 			SELECT webhook_url, default_channel
 			FROM slack_config
 			WHERE id = $1 AND tenant_id = $2 AND enabled = true
-		`, p.dialect), input.ConfigID, cc.TenantID).Scan(&webhookURL, &defaultChannel)
+		`, p.dialect), input.ConfigID, tenantID).Scan(&webhookURL, &defaultChannel)
 	if err != nil {
 		return "", fmt.Errorf("slack-notify: config not found or disabled")
 	}
@@ -96,13 +111,14 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 	}
 
 	// Stamp every routable button before it ever reaches Slack (cleat#2230,
-	// "signed routes"). tenantID is cc.TenantID -- the host call context the
-	// engine itself set for this workflow instance -- never anything from
-	// input, because the whole security property is that a workflow cannot
-	// claim to stamp on behalf of a tenant it is not actually running as.
-	// hasUnsignedRoute is a cheap pre-scan so a plain-text message, or one
-	// whose buttons carry no wf:...:sig:... route, costs no deployment-secret
-	// lookup and works even in a deployment that has never configured
+	// "signed routes"). tenantID is the canonicalized form of cc.TenantID --
+	// the host call context the engine itself set for this workflow
+	// instance -- never anything from input, because the whole security
+	// property is that a workflow cannot claim to stamp on behalf of a
+	// tenant it is not actually running as. hasUnsignedRoute is a cheap
+	// pre-scan so a plain-text message, or one whose buttons carry no
+	// wf:...:sig:... route, costs no deployment-secret lookup and works
+	// even in a deployment that has never configured
 	// slacknotify.route_signing_key.
 	blocks := input.Blocks
 	if hasUnsignedRoute(blocks) {
@@ -110,7 +126,7 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 		if keyErr != nil {
 			return "", fmt.Errorf("slack-notify: message contains a routable button but signed routes are not configured: %w", keyErr)
 		}
-		stamped, stampErr := stampBlocksWithRoutes(blocks, routeKey, cc.TenantID, time.Now())
+		stamped, stampErr := stampBlocksWithRoutes(blocks, routeKey, tenantID, time.Now())
 		if stampErr != nil {
 			return "", fmt.Errorf("slack-notify: %w", stampErr)
 		}
