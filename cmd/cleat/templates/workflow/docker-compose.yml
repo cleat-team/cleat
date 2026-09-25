@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   postgres:
     # Deliberately NOT digest-pinned, unlike the twelve sites cleat's own CI and

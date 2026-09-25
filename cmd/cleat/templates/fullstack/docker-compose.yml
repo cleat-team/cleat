@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   postgres:
     # Deliberately NOT digest-pinned, unlike cleat's own CI. This file is
@@ -11,7 +10,8 @@ services:
       POSTGRES_PASSWORD: cleat
       POSTGRES_DB: cleat
     ports:
-      - "5432:5432"
+      # Host ports are overridable (CLEAT_PG_PORT, CLEAT_API_PORT) for the day 5432 or 8080 is taken.
+      - "${CLEAT_PG_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cleat -d cleat"]
       interval: 3s
@@ -23,7 +23,9 @@ services:
   # DDL needs it, and migrations/postgres/005_app_role.sql is the file that
   # creates the lesser role below, so nothing else can run first.
   migrate:
-    image: ghcr.io/cleat-team/cleat-worker:latest
+    # CLEAT_WORKER_IMAGE names a locally built image, for when the published one is not there yet:
+    #   docker build -t cleat-worker:local <a cleat checkout>  &&  CLEAT_WORKER_IMAGE=cleat-worker:local make up
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
     command:
       - "--migrate-only"
       - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
@@ -59,7 +61,9 @@ services:
     restart: "no"
 
   cleat-worker:
-    image: ghcr.io/cleat-team/cleat-worker:latest
+    # CLEAT_WORKER_IMAGE names a locally built image, for when the published one is not there yet:
+    #   docker build -t cleat-worker:local <a cleat checkout>  &&  CLEAT_WORKER_IMAGE=cleat-worker:local make up
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
     # A worker drains for --shutdown-grace (default 20s) after SIGTERM before it cancels its runs
     # (cleat#2285). Docker sends SIGKILL after 10s unless told otherwise, which would cut the drain off.
     stop_grace_period: 60s
@@ -89,7 +93,7 @@ services:
     volumes:
       - ./plugin-config.json:/etc/cleat/plugin-config.json:ro
     ports:
-      - "8080:8080"
+      - "${CLEAT_API_PORT:-8080}:8080"
     depends_on:
       app-role:
         condition: service_completed_successfully

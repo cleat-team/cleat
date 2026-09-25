@@ -1,34 +1,30 @@
-// cleat#1969. `make run` and web/index.html both POST to
-// /api/workflows/my-fullstack-app -- one path segment, no /start -- and with
-// the input unwrapped ({"item":...} instead of {"input":{"item":...}}).
-// Neither reaches the start handler: the router has no case for POST at one
-// path segment, so it falls through to 404, and the input shape was wrong
-// regardless.
+// cleat#2067. A newcomer who runs `cleat init --template fullstack` and follows the README gets a workflow
+// that reaches `done`, and this test is that newcomer.
 //
-// #1949 (the_templates_own_commands_are_run_test.go) extracts and runs every
-// `cleat ...` command a scaffold documents, and explicitly did not cover
-// `run` or the web page -- the Makefile's `run` target is a curl command, not
-// a `cleat` command, so documentedCleatCommands' extractor does not even see
-// it (it filters on fields[0] == "cleat"). That gap is why this bug shipped
-// past a test whose whole point was "only running the documented command
-// does."
+// The earlier version of this test could not see any of six breaks, because it stepped around each: it built
+// the worker from source instead of using the compose file's image, started it with --require-auth=false
+// instead of the compose file's worker command, migrated with --migrate-on-start instead of the compose file's
+// one-shot --migrate-only step and app role, and deployed with CLEAT_DATABASE_URL instead of the Makefile's own
+// --db. It proved the workflow code runs. It did not prove the documented commands do, which is how a template
+// whose worker exited at boot (a superuser connection), whose `make deploy` deployed nothing and exited 0, and
+// whose first run ended `failed` shipped with a green test.
 //
-// "NOT MERELY A 2XX, AND NOT MERELY THAT CURL RAN" is the issue's own
-// standard, because a route/body-shape bug can produce a misleading 2xx: a
-// POST to the wrong route can still be answered by SOME handler (a 404 body
-// is itself valid JSON-looking text under a loose check), and a string
-// search over the Makefile/index.html source for "/start" cannot tell "the
-// text is present" from "the text reaches a real request" -- the same "a
-// text search cannot tell a thing from a sentence about the thing" trap this
-// repo's CLAUDE.md names repeatedly. So this starts a REAL worker against a
-// REAL database, deploys the REAL compiled workflow, runs the scaffold's OWN
-// `make run` target unmodified, and asserts the response carries a run id.
+// This one runs the scaffold's OWN files, unmodified, the way the README says:
 //
-// Built from source (cleat-worker, cleat) rather than docker-compose's
-// published ghcr.io/cleat-team/cleat-worker:latest image the template
-// documents for humans: this test is about a PR's own change reaching the
-// route, which the published image cannot reflect, and a live network image
-// pull is not something to make a PR gate depend on.
+//	make up, make logs, make deploy, make run       (docker compose, the compose file's flags and roles)
+//
+// with exactly two substitutions, both through variables the scaffold documents:
+//
+//   - the worker image. The compose file's default, ghcr.io/cleat-team/cleat-worker:latest, is published by a
+//     release, so a PR cannot pull the one that reflects its own change. The test builds the repository's own
+//     Dockerfile and points CLEAT_WORKER_IMAGE at it. The DEFAULT is asserted separately (below), so renaming
+//     it in the compose file is still seen.
+//   - the two host ports (CLEAT_PG_PORT, CLEAT_API_PORT), so a runner that already has something on 5432 or
+//     8080 does not fail a test about the template.
+//
+// It asserts the state the README says the run reaches, `done` with `status` = `complete`, not merely that curl
+// returned a run id: a route or entry-point bug can produce a 2xx with an id and fail a moment later
+// (cleat#2066).
 package main
 
 import (
@@ -41,10 +37,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("finding a free port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
 
 func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 	if testing.Short() || cleatBinary == "" {
@@ -54,10 +61,13 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 		t.Skip("docker not available")
 	}
 	if _, err := exec.LookPath("make"); err != nil {
-		t.Skip("make not available -- the scaffold's own run target needs it")
+		t.Skip("make not available -- the scaffold's own targets need it")
 	}
 
-	workerBinary := buildWorkerBinaryOnce(t)
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
 
 	root := t.TempDir()
 	if out, err := runCleatIn(t, root, "init", "--template", "fullstack", "my-fullstack-app"); err != nil {
@@ -65,128 +75,129 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 	}
 	proj := filepath.Join(root, "my-fullstack-app")
 
-	if out, err := runCleatIn(t, proj, "build", "-o", "./out", "."); err != nil {
-		t.Fatalf("cleat build: %v\n%s", out, err)
+	// The default image is what a newcomer pulls; the test substitutes it, so pin the default here.
+	compose, err := os.ReadFile(filepath.Join(proj, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	wasmPath := filepath.Join(proj, "out", "submit_order.wasm")
-	if _, err := os.Stat(wasmPath); err != nil {
-		t.Fatalf("build did not produce %s: %v", wasmPath, err)
+	if n := len(regexp.MustCompile(`\$\{CLEAT_WORKER_IMAGE:-ghcr\.io/cleat-team/cleat-worker:latest\}`).FindAll(compose, -1)); n != 2 {
+		t.Fatalf("docker-compose.yml names the published worker image as its default %d times, want 2 (migrate and cleat-worker)", n)
 	}
 
-	dsn, containerName := startSandboxPostgres(t)
+	// The routes the README and the page name must be routes the worker has: `/state` never existed and every
+	// poll of it was a 404 (found re-measuring cleat#2067).
+	for _, f := range []string{"README.md", "web/index.html", "main.go"} {
+		data, err := os.ReadFile(filepath.Join(proj, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "/state") {
+			t.Errorf("%s names a /state route; the worker's published-state route is /api/workflows/{id}/query", f)
+		}
+	}
 
-	// The scaffold's docker-compose.yml migrates the schema in a separate
-	// one-shot `--migrate-only` step (cleat#2117), run as the postgres
-	// superuser, before the serving worker starts as the unprivileged
-	// cleat_app role and only VERIFIES the schema (cleat#2067 break 2: the
-	// serving connection must not be a superuser, or PostgreSQL exempts it
-	// from row-level security). This test starts one binary directly rather
-	// than reproducing that two-step split, so it uses --migrate-on-start
-	// instead -- equivalent for a single process. So it has to start, and
-	// become healthy, BEFORE `cleat deploy` writes a workflow_defs row into
-	// a schema that does not exist yet.
-	//
-	// The scaffold hardcodes localhost:8080 in both the Makefile and
-	// web/index.html -- matching that rather than parameterizing the test
-	// worker's port is what lets `make run` be run completely unmodified.
-	worker := exec.Command(workerBinary,
-		"--db="+dsn,
-		"--api-addr=:8080",
-		"--require-auth=false",
-		"--migrate-on-start",
+	// The scaffold ships its own unit tests, and a project's first `go test` is the second thing a newcomer
+	// runs. One of them once hung on a durable sleep it never advanced the clock for.
+	unit := exec.Command("go", "test", "./...", "-count=1", "-timeout", "120s")
+	unit.Dir = proj
+	if out, err := unit.CombinedOutput(); err != nil {
+		t.Fatalf("the scaffold's own `go test ./...` fails: %v\n%s", err, out)
+	}
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	image := "cleat-template-test-worker:" + suffix
+	if out, err := exec.Command("docker", "build", "-t", image, repoRoot).CombinedOutput(); err != nil {
+		t.Fatalf("docker build of the repository's Dockerfile: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("docker", "rmi", "-f", image).Run() })
+
+	pgPort, apiPort := freeTCPPort(t), freeTCPPort(t)
+	env := append(os.Environ(),
+		"PATH="+filepath.Dir(cleatBinary)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"COMPOSE_PROJECT_NAME=cleat-template-test-"+suffix,
+		"CLEAT_WORKER_IMAGE="+image,
+		fmt.Sprintf("CLEAT_PG_PORT=%d", pgPort),
+		fmt.Sprintf("CLEAT_API_PORT=%d", apiPort),
 	)
-	// migration.NewRunner is given the literal relative path "migrations"
-	// (cmd/cleat-worker/main.go), resolved against the process's CWD -- not
-	// the binary's location. Run it from the repo root, where migrations/
-	// actually lives, rather than this test package's directory.
-	repoRoot, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatalf("resolve repo root: %v", err)
+	runMake := func(target string) (string, error) {
+		cmd := exec.Command("make", target)
+		cmd.Dir = proj
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return string(out), err
 	}
-	if _, statErr := os.Stat(filepath.Join(repoRoot, "migrations", "postgres")); statErr != nil {
-		t.Fatalf("computed repo root %s has no migrations/postgres: %v", repoRoot, statErr)
+	t.Cleanup(func() { runMake("down") }) // `make down` is `docker compose down -v`
+
+	if out, err := runMake("up"); err != nil {
+		t.Fatalf("make up: %v\n%s", err, out)
 	}
-	worker.Dir = repoRoot
-	waitForPortFree(t, 8080)
-	worker.Env = os.Environ()
-	var workerOut strings.Builder
-	worker.Stdout = &workerOut
-	worker.Stderr = &workerOut
-	if err := worker.Start(); err != nil {
-		t.Fatalf("start cleat-worker: %v", err)
-	}
-	t.Cleanup(func() {
-		if worker.Process != nil {
-			worker.Process.Kill()
-			worker.Wait()
-		}
-		exec.Command("docker", "rm", "-f", containerName).Run()
+	base := fmt.Sprintf("http://localhost:%d", apiPort)
+	dumpLogs := func() {
 		if t.Failed() {
-			t.Logf("worker output:\n%s", workerOut.String())
+			out, _ := runMake("logs")
+			t.Logf("make logs:\n%s", out)
 		}
-	})
-
-	waitForHealthz(t, "http://localhost:8080/healthz")
-
-	deployCmd := exec.Command(cleatBinary, "deploy", "--name", "my-fullstack-app", "./out/submit_order.wasm")
-	deployCmd.Dir = proj
-	deployCmd.Env = append(os.Environ(), "CLEAT_DATABASE_URL="+dsn)
-	if out, err := deployCmd.CombinedOutput(); err != nil {
-		t.Fatalf("cleat deploy: %v\n%s", err, out)
 	}
+	t.Cleanup(dumpLogs)
+	waitForHealthz(t, base+"/healthz")
 
-	runCmd := exec.Command("make", "run")
-	runCmd.Dir = proj
-	runCmd.Env = os.Environ() // the target reads CLEAT_API_KEY; --require-auth=false means it is not checked
-	out, err := runCmd.CombinedOutput()
+	// README: "make logs | grep rate-limiter ... You want `rate-limiter: initialized mode=db`", and the API key.
+	logs, err := runMake("logs")
 	if err != nil {
-		t.Fatalf("make run: %v\n%s\n\nworker output:\n%s", err, out, workerOut.String())
+		t.Fatalf("make logs: %v\n%s", err, logs)
+	}
+	if !strings.Contains(logs, "rate-limiter: initialized mode=db") {
+		t.Errorf("make logs does not show `rate-limiter: initialized mode=db`, which the README tells the reader to look for")
+	}
+	keyMatch := regexp.MustCompile(`Key:\s+(cleat_sk_[0-9a-f]+)`).FindStringSubmatch(logs)
+	if keyMatch == nil {
+		t.Fatalf("make logs shows no auto-generated API key, which the README says `make up` prints on first start:\n%s", logs)
+	}
+	env = append(env, "CLEAT_API_KEY="+keyMatch[1])
+
+	if out, err := runMake("deploy"); err != nil {
+		t.Fatalf("make deploy: %v\n%s", err, out)
+	} else if !strings.Contains(out, `Deployed workflow "my-fullstack-app"`) {
+		// `make deploy` used to exit 0 having deployed nothing.
+		t.Fatalf("make deploy exited 0 but did not deploy:\n%s", out)
 	}
 
-	// `curl -fsS` in the Makefile already turns a non-2xx into a non-zero
-	// exit, which the err check above would have caught. What that does NOT
-	// rule out is a 2xx response carrying no id -- exactly what a request
-	// answered by the wrong handler could still produce -- so the id is
-	// parsed and checked directly rather than trusting the exit code alone.
-	//
-	// `make` echoes each recipe line before running it (the run: target has
-	// no leading @), so out is the echoed curl command followed by curl's
-	// own stdout -- not JSON alone. The response is curl's last line.
-	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	jsonLine := lines[len(lines)-1]
-
+	out, err := runMake("run")
+	if err != nil {
+		t.Fatalf("make run: %v\n%s", err, out)
+	}
+	// `make` echoes each recipe line, so the response is curl's last line.
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	var resp struct {
 		ID string `json:"id"`
 	}
-	if jsonErr := json.Unmarshal([]byte(jsonLine), &resp); jsonErr != nil {
-		t.Fatalf("make run's last output line did not parse as JSON: %v\nline: %s\nfull output: %s",
-			jsonErr, jsonLine, out)
-	}
-	if resp.ID == "" {
-		t.Fatalf("make run succeeded but returned no run id -- output: %s", out)
+	if jsonErr := json.Unmarshal([]byte(lines[len(lines)-1]), &resp); jsonErr != nil || resp.ID == "" {
+		t.Fatalf("make run's last line is not a run id (%v):\n%s", jsonErr, out)
 	}
 	t.Logf("started run %s", resp.ID)
 
-	// cleat#2066: a run id alone does not prove the workflow ran. Before that
-	// fix, this exact sequence -- deploy via the CLI, start via the
-	// Makefile's documented body with no __entry_point -- got a 2xx with an
-	// id and then failed a moment later with "cannot determine entry point",
-	// invisible to every assertion above. Poll to a terminal status and check
-	// the failure, if any, is not that one. Not asserting success outright:
-	// this template's first run is DOCUMENTED to fail for an unrelated,
-	// already-tracked reason (cleat#2067 item 5, an egress-refused
-	// http.fetch to a placeholder URL) -- conflating that into this test
-	// would make it fail for a reason cleat#2066 doesn't own and didn't fix.
-	status := pollWorkflowStatus(t, "http://localhost:8080/api/workflows/"+resp.ID)
-	if status.Status == "failed" && strings.Contains(status.Error, "cannot determine entry point") {
-		t.Fatalf("workflow %s failed on entry-point resolution -- cleat#2066 regressed: %s", resp.ID, status.Error)
+	status := pollWorkflowStatus(t, base+"/api/workflows/"+resp.ID, keyMatch[1])
+	if status.Status != "done" {
+		t.Fatalf("run %s ended %q (error: %q), want done: the README says the first run finishes", resp.ID, status.Status, status.Error)
 	}
-	t.Logf("run %s reached terminal status %q (error: %q)", resp.ID, status.Status, status.Error)
+
+	// And what a poller reads (the README names this route): the published state, readable after the run has finished.
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, base+"/api/workflows/"+resp.ID+"/query?key=status", nil)
+	req.Header.Set("Authorization", "Bearer "+keyMatch[1])
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET state: %v", err)
+	}
+	body, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK || !strings.Contains(string(body), "complete") {
+		t.Errorf("GET /query?key=status after the run finished = %d %s, want 200 containing \"complete\"", r.StatusCode, body)
+	}
 }
 
 // pollWorkflowStatus polls a workflow's status endpoint until it reaches a
-// terminal status (done, failed, terminated, dead_lettered) or 20s pass.
-func pollWorkflowStatus(t *testing.T, url string) struct {
+// terminal status (done, failed, terminated, dead_lettered) or 45s pass.
+func pollWorkflowStatus(t *testing.T, url string, bearer ...string) struct {
 	Status string `json:"status"`
 	Error  string `json:"error"`
 } {
@@ -196,10 +207,13 @@ func pollWorkflowStatus(t *testing.T, url string) struct {
 		Error  string `json:"error"`
 	}
 	terminal := map[string]bool{"done": true, "failed": true, "terminated": true, "dead_lettered": true}
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	client := &http.Client{Timeout: 2 * time.Second}
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+		if len(bearer) > 0 {
+			req.Header.Set("Authorization", "Bearer "+bearer[0])
+		}
 		r, err := client.Do(req)
 		if err == nil {
 			body, _ := io.ReadAll(r.Body)
@@ -212,7 +226,7 @@ func pollWorkflowStatus(t *testing.T, url string) struct {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	t.Fatalf("workflow at %s did not reach a terminal status within 20s (last status: %q)", url, resp.Status)
+	t.Fatalf("workflow at %s did not reach a terminal status within 45s (last status: %q)", url, resp.Status)
 	return resp
 }
 

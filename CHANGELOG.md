@@ -537,6 +537,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The fullstack template's documented path reaches a `done` run.** (cleat#2067)
+
+  Re-measured on `develop` on a stock `postgres:16`: of the six breaks in the issue, the superuser worker, the
+  silent `make deploy` and the missing entry point had already been fixed by other changes, and three were not.
+  Fixed here, in `cmd/cleat/templates/fullstack/`:
+  - **The first run ended `failed`.** `SubmitOrder` called `http.fetch` on `https://example.invalid/validate`, which
+    the egress policy refuses, and a comment said the failure dead-letters (it does not: the run ends `failed`; only
+    a durable call that exhausts its retries dead-letters). The workflow now validates its input and waits three
+    durable seconds where your payment call goes, so the first run finishes `done` and `charging` is visible to a
+    poller. The README shows the `DurableCall` that replaces the sleep.
+  - **The README's rate-limiter warning was stale.** `db` mode with no database refuses to start (cleat#1581); it
+    no longer "warns and falls back to `memory`". The README now says what to look for
+    (`rate-limiter: initialized mode=db`).
+  - **The published-state route was wrong.** The README, `web/index.html` and a comment named
+    `GET /api/workflows/{id}/state`, which does not exist (404); it is `/query?key=`. `web/index.html` also cannot call
+    the worker as a file (the worker sends no CORS headers; cleat#2307) and says so.
+  - `docker-compose.yml`: the host ports (`CLEAT_PG_PORT`, `CLEAT_API_PORT`) and the worker image
+    (`CLEAT_WORKER_IMAGE`, for the days before a release has published `ghcr.io/cleat-team/cleat-worker`) can be
+    overridden, and the obsolete `version:` key, which made every `docker compose` command warn, is gone from all
+    three templates.
+
+  Still open: the image is not on ghcr until a release publishes it (cleat#2064 added the step; `v0.2.0` predates it).
+
+  The template's CI test no longer steps around any of this: it builds the repository's Dockerfile and runs the
+  scaffold's own `make up`, `make logs`, `make deploy` and `make run` against its own `docker-compose.yml` (only the
+  image and the host ports substituted), asserts the run ends `done` with `status` = `complete`, and runs the
+  scaffold's own `go test ./...` (whose `SubmitOrder` test now advances the simulated clock; the first draft hung on
+  the durable sleep). Each of the superuser worker, a `make deploy` with no database, the failing placeholder, a
+  missing `--plugin-config` and a `/state` route in the README was reinstated one at a time and fails it.
+
 - **SIGTERM drains before it cancels, and a run cut off by shutdown is released, never failed.** (cleat#2285)
 
   The signal handler cancelled the worker's context at once. Every in-flight durable wait was aborted and the
