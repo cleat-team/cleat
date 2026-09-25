@@ -311,3 +311,36 @@ func RetryThenCompensate(h cleat.HostCalls, input string) (string, error) {
 	}
 	return "ok", nil
 }
+
+// ScheduleInvokeAfterAMarker is cleat#2020's fixture for the
+// DurableScheduleInvoke half of the fix -- the half the backoff-wait
+// acceptance test does not reach, because that one is about the retry loop's
+// own wait and this is about a goroutine the host starts and lets outlive the
+// call that made it.
+//
+// THE MARKER CALL IS WHAT MAKES THE TEST DETERMINISTIC, and it is here rather
+// than in the test because only the guest can place it. The thing under test
+// is a wait: the host's goroutine sits in a select over the delay before
+// dispatching, and a shutdown that reaches that select returns instead of
+// dispatching. To observe that, the test has to cancel the worker while the
+// wait is still pending -- and it can only know the guest got that far by
+// watching something the guest did on the way. By the time the service has
+// seen the marker, DurableScheduleInvoke is at most microseconds behind it;
+// the delay below is seconds. So the test has room to cancel, and the margin
+// between "aborted" and "the delay simply elapsed" is most of the interval,
+// exactly as the 10s backoff is for RetryBacksOffOnHost.
+//
+// 3s rather than 10s: this wait is cancelled from the test, not raced against
+// a human-scale retry budget, and the control case (no shutdown -- the
+// deferred call must still land) has to sit through the whole delay. Long
+// enough to cancel inside reliably, short enough that the control is not the
+// slowest test in the package.
+func ScheduleInvokeAfterAMarker(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableCall("marker", "marker", `{}`); err != nil {
+		return "", err
+	}
+	if err := h.ScheduleInvoke("marker", "deferred", `{}`, 3000); err != nil {
+		return "", err
+	}
+	return `{"status":"scheduled"}`, nil
+}
