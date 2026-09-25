@@ -151,21 +151,30 @@ func TestPluginCredentialFieldsUseTheSecretType(t *testing.T) {
 		// accept back.
 		//
 		// A literal key typed directly into workflow input (as opposed to a
-		// resolved ${secret:...} reference) IS recorded in the clear in event
-		// history -- cleat#1988's own PR (#2023) decided to accept this
+		// resolved ${secret:...} reference) USED TO BE recorded in the clear
+		// in event history -- cleat#1988's own PR (#2023) accepted this
 		// rather than guess at a field's secrecy from its JSON shape, because
 		// this plugin sees only the POST-RESOLUTION string and cannot tell a
-		// resolved secret from a literal. That is a real gap, but converting
-		// this one field's Go type does not close it: event history records
-		// the RAW inputJSON the workflow sent, not a re-marshal of this
-		// struct, so this type has no bearing on what gets stored. The actual
-		// fix needs a plugin-declared secret-only field the ENGINE can
-		// consult before recording a call's raw arguments -- tracked as
-		// cleat#2043.
+		// resolved secret from a literal.
+		//
+		// cleat#2043 closed that gap, but NOT by converting this field's Go
+		// type -- event history records the RAW inputJSON the workflow sent,
+		// not a re-marshal of this struct, so that type has no bearing on
+		// what gets stored, same as before. The fix is
+		// plugin.FuncOptions.SecretOnlyFields: "chat" and "chat_stream" now
+		// declare "api_key" secret-only, and the engine refuses a call whose
+		// raw api_key isn't exactly a ${secret:NAME} reference before the
+		// call is dispatched or recorded (engine/plugins.go,
+		// checkSecretOnlyFields). This allowlist entry stays: that guard
+		// checks something unrelated to #2043's fix (a credential-shaped
+		// field marshaled back OUT toward a caller, and chatRequest still
+		// never is), and this field still can't round-trip through
+		// json.Marshal as plugin.Secret, for the same test-helper reason as
+		// before.
 		"llm.chatRequest.APIKey": {
-			reason: "decode-only in production, never marshaled towards a caller; the real " +
-				"fix (redacting a known-secret field before the engine records raw call " +
-				"arguments) is tracked separately as cleat#2043",
+			reason: "decode-only in production, never marshaled towards a caller; the literal-" +
+				"secret gap this note used to describe was closed by cleat#2043's " +
+				"SecretOnlyFields, which is enforced on the raw JSON, not on this Go type",
 		},
 	}
 

@@ -389,7 +389,7 @@ func TestNewApp_HasHostFunctions(t *testing.T) {
 	}
 
 	// Verify function was registered in the registry.
-	gotFn, policy, ok := app.Registry().Lookup("hf-plugin", "myFunc")
+	gotFn, policy, _, ok := app.Registry().Lookup("hf-plugin", "myFunc")
 	if !ok {
 		t.Fatal("expected function to be registered")
 	}
@@ -660,7 +660,7 @@ func TestAppFuncRegistry_Register(t *testing.T) {
 		t.Error("expected function to be registered")
 	}
 
-	gotFn, policy, ok := pr.Lookup("test-plugin", "myFunc")
+	gotFn, policy, _, ok := pr.Lookup("test-plugin", "myFunc")
 	if !ok {
 		t.Fatal("expected function to be found")
 	}
@@ -693,7 +693,7 @@ func TestAppFuncRegistry_RegisterIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, policy, ok := pr.Lookup("test-plugin", "idemFunc")
+	_, policy, _, ok := pr.Lookup("test-plugin", "idemFunc")
 	if !ok {
 		t.Fatal("expected function to be found")
 	}

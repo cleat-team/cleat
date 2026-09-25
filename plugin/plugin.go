@@ -600,6 +600,30 @@ type FuncOptions struct {
 	// Note what it is not: not purity, and not determinism. The question is
 	// agreement with history.
 	SameValueOnReplay bool
+
+	// SecretOnlyFields names top-level JSON fields (matching the wire tag,
+	// e.g. "api_key") whose RAW, pre-resolution value -- what the workflow
+	// literally wrote, before ${secret:NAME} substitution -- must be exactly
+	// one secret reference when present. A call whose declared field holds
+	// anything else (a literal, two case-variant spellings of the same field,
+	// or malformed input entirely) is refused before the function is invoked
+	// and before anything resembling the field's value is recorded to
+	// event_history. cleat#2043.
+	//
+	// TOP-LEVEL ONLY. A field nested inside the JSON document is not checked;
+	// there is no dot-path support. Extend this if a plugin ever needs one --
+	// none has yet.
+	//
+	// A function declaring this must not also be registered with a policy
+	// where MayReInvokeOnReplay() is true: Register/RegisterStream refuse
+	// that combination. Without the exclusion, a call this check refused
+	// stays refused forever, including on replay of history recorded before
+	// this field existed, where the same call may have genuinely succeeded
+	// with a literal -- re-invoking it live during replay would flip a run
+	// that finished "done" into one that fails on replay, which is a
+	// determinism break in the opposite direction from the leak this field
+	// closes.
+	SecretOnlyFields []string
 }
 
 // FuncRegistry lets plugins register workflow-callable functions.

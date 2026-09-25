@@ -168,7 +168,7 @@ func TestBlobstore_S3(t *testing.T) {
 		WorkflowID: "b10b5106-0000-4000-8000-000000000002",
 	})
 
-	putFn, _, found := reg.Lookup("blobstore", "put")
+	putFn, _, _, found := reg.Lookup("blobstore", "put")
 	if !found {
 		t.Fatal("blobstore/put is not registered")
 	}
@@ -219,7 +219,7 @@ func TestBlobstore_S3(t *testing.T) {
 		_ = admin.RemoveObject(context.Background(), bucket, sha256Hex, minio.RemoveObjectOptions{})
 	}()
 
-	getFn, _, found := reg.Lookup("blobstore", "get")
+	getFn, _, _, found := reg.Lookup("blobstore", "get")
 	if !found {
 		t.Fatal("blobstore/get is not registered")
 	}

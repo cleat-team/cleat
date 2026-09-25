@@ -616,7 +616,7 @@ func (a *hostPluginRegistryAdapter) Register(opts plugin.FuncOptions, fn plugin.
 	// silently, because the registry would then read SameValueOnReplay as
 	// false and simply stop re-invoking, which looks exactly like the fix
 	// working.
-	return a.registry.RegisterWithPolicy(a.pluginName, opts.Name, a.withSecrets(fn), engine.ReplayPolicy{Idempotent: opts.Idempotent, SameValueOnReplay: opts.SameValueOnReplay})
+	return a.registry.RegisterWithPolicy(a.pluginName, opts.Name, a.withSecrets(fn), engine.ReplayPolicy{Idempotent: opts.Idempotent, SameValueOnReplay: opts.SameValueOnReplay}, opts.SecretOnlyFields)
 }
 
 // withSecrets wraps a plugin function so ${secret:name} in its argument is

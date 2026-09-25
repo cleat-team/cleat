@@ -36,7 +36,7 @@ func TestAnIdempotentRegistrationAloneDoesNotReInvokeOnReplay(t *testing.T) {
 		if err := reg.RegisterWithPolicy("test-plugin", "my-func",
 			func(ctx context.Context, input string) (string, error) {
 				return "", errors.New("the live function ran")
-			}, policy); err != nil {
+			}, policy, nil); err != nil {
 			t.Fatalf("register: %v", err)
 		}
 		s.engine.pluginRegistry = reg

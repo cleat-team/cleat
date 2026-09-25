@@ -2289,7 +2289,7 @@ func TestPluginStreamRegistry_Lookup(t *testing.T) {
 	}
 
 	psr.Register("plugin", "func", fn)
-	got, ok := psr.Lookup("plugin", "func")
+	got, _, ok := psr.Lookup("plugin", "func")
 	if !ok {
 		t.Fatal("Lookup should return true for registered function")
 	}
@@ -2298,7 +2298,7 @@ func TestPluginStreamRegistry_Lookup(t *testing.T) {
 	}
 
 	// Lookup nonexistent.
-	_, ok = psr.Lookup("plugin", "missing")
+	_, _, ok = psr.Lookup("plugin", "missing")
 	if ok {
 		t.Error("Lookup should return false for missing function")
 	}
@@ -2331,7 +2331,7 @@ func TestPluginRegistry_Lookup(t *testing.T) {
 
 	pr.Register("plugin", "func", fn)
 
-	f, policy, ok := pr.Lookup("plugin", "func")
+	f, policy, _, ok := pr.Lookup("plugin", "func")
 	if !ok {
 		t.Fatal("Lookup should return ok=true for registered func")
 	}
@@ -2343,7 +2343,7 @@ func TestPluginRegistry_Lookup(t *testing.T) {
 	}
 
 	// Lookup missing.
-	_, _, ok = pr.Lookup("plugin", "missing")
+	_, _, _, ok = pr.Lookup("plugin", "missing")
 	if ok {
 		t.Error("Lookup should return ok=false for missing func")
 	}

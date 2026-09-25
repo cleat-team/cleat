@@ -43,7 +43,7 @@ func TestBothPluginCallPathsCarryTheTenant(t *testing.T) {
 		func(ctx context.Context, inputJSON string) (string, error) {
 			unarySaw, unaryOK = tenantctx.From(ctx)
 			return `{}`, nil
-		}, ReplayPolicy{})
+		}, ReplayPolicy{}, nil)
 
 	s := newTestExecSession()
 	s.engine.pluginRegistry = pr
@@ -125,7 +125,7 @@ func TestAnUnparseableTenantDoesNotFailThePluginCall(t *testing.T) {
 		func(ctx context.Context, inputJSON string) (string, error) {
 			_, sawTenant = tenantctx.From(ctx)
 			return `{}`, nil
-		}, ReplayPolicy{})
+		}, ReplayPolicy{}, nil)
 
 	s := newTestExecSession()
 	s.engine.pluginRegistry = pr
