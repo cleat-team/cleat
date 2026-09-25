@@ -422,7 +422,7 @@ workflow                         host                          external client
     |                              |                                |
     |--- getQueryState("status") ->|                                |
     |<- {"active"} ---------------|                                |
-    |                              |--- GET /api/workflows/{id}/state/status
+    |                              |--- GET /api/workflows/{id}/query?key=status
     |                              |<- {"active"}                  |
 ```
 

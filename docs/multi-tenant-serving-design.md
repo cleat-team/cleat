@@ -142,7 +142,7 @@ removes it.
 
 Reads must come from somewhere else. Two candidates already exist or nearly do:
 
-- **Published query state.** `GET /api/workflows/{id}/state?key=` (`server.go:1671`) reads a
+- **Published query state.** `GET /api/workflows/{id}/query?key=` (`server.go:1909`) reads a
   key a workflow published via `set_query_state`. No guest execution, one indexed read. This is
   the CQRS read side and it is already shipped.
 - **A synchronous non-durable handler tier.** Same wasmtime backend, same module cache, but no
