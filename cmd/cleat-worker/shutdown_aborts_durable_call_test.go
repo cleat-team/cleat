@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +16,14 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/wasm"
 )
+
+// requireShutdownTestDB skips the database-backed shutdown acceptance tests when no PostgreSQL was asked for.
+func requireShutdownTestDB(t *testing.T) {
+	t.Helper()
+	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
+		t.Skip("CLEAT_TEST_POSTGRES not set, skipping the database-backed shutdown acceptance test")
+	}
+}
 
 // TestWorkerShutdownAbortsADurableCallsHostBackoffWait is cleat#2020's
 // acceptance test: a real PostgreSQL, a real wasmtime guest, and a real
@@ -41,9 +50,7 @@ import (
 // engine.WithShutdownSignal(w.ctx.Done()) is what gives the wait a channel
 // that actually does.
 func TestWorkerShutdownAbortsADurableCallsHostBackoffWait(t *testing.T) {
-	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
-		t.Skip("CLEAT_TEST_POSTGRES not set, skipping the database-backed shutdown acceptance test")
-	}
+	requireShutdownTestDB(t)
 	ctx := context.Background()
 
 	db := testutil.SuiteTestDB(t, "cleat_worker")
@@ -131,9 +138,131 @@ func TestWorkerShutdownAbortsADurableCallsHostBackoffWait(t *testing.T) {
 			elapsed, logs.String())
 	}
 
+	// And what the run IS afterwards (cleat#2285). It used to be written FAILED: the aborted wait reached the
+	// guest as a failed call, the guest returned an error, and a terminal status is never reclaimed, so a
+	// deploy lost the run. Released, it is `ready` again with no owner, for another worker to replay.
+	var status string
+	var errMsg sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT status, error_msg FROM workflow_instances WHERE id = $1`, wfID).Scan(&status, &errMsg); err != nil {
+		t.Fatalf("reading the run's status: %v", err)
+	}
+	if status != "ready" {
+		t.Errorf("a run cut off by shutdown is %q (%s), want %q: shutdown must release a run, never fail it (logs:\n%s)",
+			status, errMsg.String, "ready", logs.String())
+	}
+
 	if got := calls.all(); len(got) != 1 {
 		t.Errorf("service received %d call(s), want exactly 1 -- a second attempt means the "+
 			"backoff simply finished before the 5s abort-wait timed out, not that it was "+
 			"aborted: %v", len(got), got)
+	}
+}
+
+// ctxBlindStore is a store whose terminal writes ignore the worker's cancellation. A real one cannot be
+// relied on to refuse: the database driver notices a cancelled context, but only when it is next asked. This
+// is what makes the worker's OWN check decide, instead of a `begin tx: context canceled` deciding for it.
+type ctxBlindStore struct{ engine.WorkflowStore }
+
+func (s ctxBlindStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus, result, errorCode, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	return s.WorkflowStore.FinalizeWorkflowSegment(context.WithoutCancel(ctx), runID, workerID, generation, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
+}
+
+func (s ctxBlindStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+	return s.WorkflowStore.FailWorkflow(context.WithoutCancel(ctx), workflowID, workerID, generation, errorMsg, errorCode, errorOp, queryState)
+}
+
+// TestShutdownDuringABackoffNeverReachesAGuestThatCompensates is cleat#2285's version of the test above with a
+// workflow that compensates on error. Before, the woken backoff came back to the guest as a failed call, and a
+// worker shutting down ran the compensation and finished the run COMPLETED. Now the guest is told to stop:
+// nothing is compensated, and the run is released. Two stores, so that each of the two release checks has to
+// decide once: the real one (a cancelled context refuses the write) and one that ignores cancellation
+// (nothing but the worker's own check stands between the outcome and the database).
+func TestShutdownDuringABackoffNeverReachesAGuestThatCompensates(t *testing.T) {
+	requireShutdownTestDB(t)
+	for _, blind := range []bool{false, true} {
+		name := "real store"
+		if blind {
+			name = "store that ignores cancellation"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			db := testutil.SuiteTestDB(t, "cleat_worker")
+			store := engine.NewPostgresStore(db)
+
+			wasmBytes := buildDeferFixture(t)
+			meta, err := wasm.ReadMetadata(wasmBytes)
+			if err != nil {
+				t.Fatalf("ReadMetadata: %v", err)
+			}
+			defName := fmt.Sprintf("shutdown-compensate-%t-%d", blind, time.Now().UnixNano())
+			if err := store.DeployWorkflowDef(ctx, &engine.WorkflowDef{
+				Name: defName, Version: meta.WorkflowVersion, WASMBytes: wasmBytes,
+				ABIVersion: meta.ABIVersion, MinVersion: meta.MinCompatibleVersion,
+			}); err != nil {
+				t.Fatalf("DeployWorkflowDef: %v", err)
+			}
+			wfID := fmt.Sprintf("shutdown-compensate-%t-%d", blind, time.Now().UnixNano())
+			if _, _, err := store.StartNewRun(ctx, wfID, defName, meta.WorkflowVersion,
+				json.RawMessage(`{"__entry_point":"RetryThenCompensate"}`), "", engine.DefaultTenantUUID, 0); err != nil {
+				t.Fatalf("StartNewRun: %v", err)
+			}
+
+			calls := &recordedCalls{}
+			svc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.add(strings.TrimPrefix(r.URL.Path, "/call/"))
+				w.WriteHeader(http.StatusServiceUnavailable)
+				fmt.Fprint(w, `{"error":"always fails"}`)
+			}))
+			defer svc.Close()
+			oldSvcURL := *benchSvcURL
+			*benchSvcURL = svc.URL
+			defer func() { *benchSvcURL = oldSvcURL }()
+
+			logs := &syncBuffer{}
+			var ws engine.WorkflowStore = store
+			if blind {
+				ws = ctxBlindStore{store}
+			}
+			worker := newRealDeferPhaseWorker(t, db, ws, logs)
+			worker.id = "shutdown-compensate-worker"
+			worker.egress = &engine.EgressGuard{
+				AllowLoopback:  true,
+				TenantOptional: func(context.Context) bool { return true },
+			}
+			claimed := claimOne(t, ctx, store, worker.id, wfID)
+			worker.inflight.Store(wfID, claimed)
+
+			done := make(chan struct{})
+			worker.wg.Add(1)
+			go func() { worker.executeWorkflow(claimed); close(done) }()
+
+			deadline := time.Now().Add(5 * time.Second)
+			for !calls.has("always-fails/op") {
+				if time.Now().After(deadline) {
+					t.Fatalf("the first attempt never reached the service (logs:\n%s)", logs.String())
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			time.Sleep(50 * time.Millisecond) // into the backoff select
+			worker.cancel()
+
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("executeWorkflow did not return within 5s of worker.cancel() (logs:\n%s)", logs.String())
+			}
+
+			if calls.has("always-fails/compensate") {
+				t.Errorf("the guest ran its compensation: a shutdown reached it as a failed call. service saw %v", calls.all())
+			}
+			var status string
+			var errMsg sql.NullString
+			if err := db.QueryRowContext(ctx, `SELECT status, error_msg FROM workflow_instances WHERE id = $1`, wfID).Scan(&status, &errMsg); err != nil {
+				t.Fatalf("reading the run's status: %v", err)
+			}
+			if status != "ready" {
+				t.Errorf("the run is %q (%s), want %q: it must be released for another worker (logs:\n%s)", status, errMsg.String, "ready", logs.String())
+			}
+		})
 	}
 }

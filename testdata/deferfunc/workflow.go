@@ -289,3 +289,25 @@ func RetryBacksOffOnHost(h cleat.HostCalls, input string) (string, error) {
 	}, "always-fails", "op", `{}`)
 	return "", err
 }
+
+// RetryThenCompensate is cleat#2285's fixture: RetryBacksOffOnHost, plus what a saga does when a call fails.
+// If a shutdown that interrupts the backoff reaches the guest as a failed call, this workflow runs its
+// compensation and finishes "compensated" -- COMPLETED, on a fault that never happened -- and the service
+// sees a "compensate" call that nothing justified. The property under test is that it never does.
+func RetryThenCompensate(h cleat.HostCalls, input string) (string, error) {
+	_, err := h.DurableCallWithOptions(cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
+			MaxAttempts:        2,
+			InitialInterval:    10 * time.Second,
+			BackoffCoefficient: 1.0,
+			MaxInterval:        10 * time.Second,
+		},
+	}, "always-fails", "op", `{}`)
+	if err != nil {
+		if _, cerr := h.DurableCall("always-fails", "compensate", `{}`); cerr != nil {
+			return "", cerr
+		}
+		return "compensated", nil
+	}
+	return "ok", nil
+}

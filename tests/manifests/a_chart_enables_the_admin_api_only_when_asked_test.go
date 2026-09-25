@@ -18,11 +18,14 @@ package manifests
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"text/template"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -166,6 +169,75 @@ func TestTheChartAdminAPICheckReportsTheMistakesItExistsFor(t *testing.T) {
 		}
 		if !reported {
 			t.Errorf("%s: no case reported it, so the check cannot fail for it", name)
+		}
+	}
+}
+
+// The pod must live long enough to drain (cleat#2285). SIGTERM makes the worker drain for --shutdown-grace
+// before it cancels its runs, the preStop hook comes first and comes out of the same clock, and the kubelet
+// SIGKILLs the pod when terminationGracePeriodSeconds runs out. Kubernetes' default of 30s is shorter than a
+// 20s drain plus a 5s preStop plus the release writes, so a chart that sets no value, or one that raises the
+// grace without the deadline, kills the worker mid-drain and every run in flight is recovered by the reaper
+// as after a crash. Nothing fails when it is wrong: the pod just terminates.
+
+// drainBudgetProblem reports why the rendered deployment cannot drain, or "" if it can.
+func drainBudgetProblem(out string) string {
+	tg := regexp.MustCompile(`terminationGracePeriodSeconds:\s*(\d+)`).FindStringSubmatch(out)
+	if tg == nil {
+		return "no terminationGracePeriodSeconds is rendered, so the kubelet applies its 30s default"
+	}
+	gr := regexp.MustCompile(`"--shutdown-grace=([0-9a-z.]+)"`).FindStringSubmatch(out)
+	if gr == nil {
+		return "no --shutdown-grace is rendered"
+	}
+	grace, err := time.ParseDuration(gr[1])
+	if err != nil {
+		return "--shutdown-grace is not a duration: " + gr[1]
+	}
+	sleep := 0
+	if m := regexp.MustCompile(`"sleep (\d+)"`).FindStringSubmatch(out); m != nil {
+		sleep, _ = strconv.Atoi(m[1])
+	}
+	deadline, _ := strconv.Atoi(tg[1])
+	const margin = 10 // release writes and process exit
+	if need := int(grace.Seconds()) + sleep + margin; deadline < need {
+		return fmt.Sprintf("terminationGracePeriodSeconds is %d but the drain needs %d (shutdown-grace %s + preStop sleep %ds + %ds margin)",
+			deadline, need, grace, sleep, margin)
+	}
+	return ""
+}
+
+func TestTheChartGivesThePodTimeToDrain(t *testing.T) {
+	src, err := os.ReadFile(deploymentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := string(src)
+
+	for _, set := range []map[string]any{
+		nil,
+		{"adminApi.enabled": true, "auth.adminApiKey": "k"},
+		{"worker.shutdownGrace": "40s", "worker.terminationGracePeriodSeconds": 90},
+	} {
+		if p := drainBudgetProblem(active(renderDeployment(t, orig, set))); p != "" {
+			t.Errorf("[%v] %s", set, p)
+		}
+	}
+
+	// Known-positives: each is a way to ship a chart that cannot drain, and the check must say so.
+	for name, mutated := range map[string]struct {
+		tpl string
+		set map[string]any
+	}{
+		"the deadline left at the Kubernetes default": {strings.Replace(orig, "      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}\n", "", 1), nil},
+		"the grace raised without the deadline":       {orig, map[string]any{"worker.shutdownGrace": "55s"}},
+		"the flag dropped":                            {strings.Replace(orig, `            - "--shutdown-grace={{ .Values.worker.shutdownGrace }}"`+"\n", "", 1), nil},
+	} {
+		if mutated.tpl == orig && mutated.set == nil {
+			t.Fatalf("%s: the mutation did not change the template", name)
+		}
+		if drainBudgetProblem(active(renderDeployment(t, mutated.tpl, mutated.set))) == "" {
+			t.Errorf("%s: the check reported nothing, so it cannot fail for it", name)
 		}
 	}
 }

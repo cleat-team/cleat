@@ -21,8 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/api/admin/drain` must start the worker with `--enable-admin-api`. **Helm:** the chart's `preStop` hook
   used to drain through this route and now only sleeps, because `adminApi.enabled` defaults to `false`;
   set it to `true` (with `auth.adminApiKey` or `auth.existingSecret`) to get the drain call back, knowing what
-  that turns on. Neither setting lets a run in flight finish: see cleat#2285, where a run in flight at
-  SIGTERM is failed rather than reclaimed.
+  that turns on. (Until cleat#2285 was fixed, neither setting let a run in flight finish: SIGTERM failed it.)
 
   **While the flag is on, any authenticated key of any tenant can drain the worker and trigger a retention
   sweep**, because cleat has no operator credential yet (cleat#2169). The worker logs a warning at startup
@@ -520,6 +519,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The fix is to supply a database or to say `mode: "memory"` and mean it.
 
 ### Fixed
+
+- **SIGTERM drains before it cancels, and a run cut off by shutdown is released, never failed.** (cleat#2285)
+
+  The signal handler cancelled the worker's context at once. Every in-flight durable wait was aborted and the
+  run was written FAILED (`finalize workflow: begin tx: context canceled`), a terminal status nothing
+  reclaims, so a rolling deploy lost every run it interrupted. The worker now stops claiming and waits up to
+  `--shutdown-grace` (default 20s; Helm `worker.shutdownGrace`) with heartbeats alive; a run that finishes in
+  time is finalized normally. What is still running when the grace ends is cancelled and **released** for another
+  worker to replay, on every path that ends a run because the worker is going away (the outcome that comes back,
+  a finalize or continue-as-new that could not begin, the defer phase). The guest is told to stop rather than
+  that a call failed, so a workflow that compensates on error does not run its compensation on a fault that
+  never happened.
+
+  **What this does not promise.** A durable call still in flight when the grace ends can run twice: the worker
+  does not abort an HTTP call already on the wire, and another worker may replay the step (cleat#2287). A
+  genuine failure that lands during shutdown is delayed rather than lost: the run is released and fails again,
+  for real, on the worker that picks it up. If your calls run longer than 20s, raise `--shutdown-grace` and the
+  orchestrator's kill deadline with it.
+
+  Also changed: `GET /api/admin/drain` no longer completes the drain or stops the worker (it is read-only), and
+  `POST /api/admin/drain` is a cordon that does not exit the process. The chart sets
+  `terminationGracePeriodSeconds: 60` (was the 30s default), `k8s/deployment.yaml` likewise, and the compose
+  files set `stop_grace_period: 60s` (Docker's 10s default would cut the drain off).
 
 - **`--require-host-match` now boots and serves as the role a deployment runs as (cleat#2258).**
   The boot check counted `tenant_domains`, and every authenticated request looked its Host up in
