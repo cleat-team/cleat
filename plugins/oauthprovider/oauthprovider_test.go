@@ -407,8 +407,27 @@ func TestExtractSessionInvalidToken(t *testing.T) {
 
 // ---- Route handler error path tests (pre-DB) ----
 
+// newPostgresTestPlugin builds the fixture the /login and /callback tests
+// below need: a Plugin whose dialect is explicitly Postgres.
+//
+// The dialect is load-bearing, not decoration. handleLogin and handleCallback
+// both begin with p.pgOnly (plugin.go), which refuses with 501 anything that
+// is not literally plugin.DialectPostgres -- and Dialect's zero value is "",
+// not "postgres" (plugin/migration.go). A fixture written as &Plugin{}
+// therefore never reaches the handler these tests are named for: it is
+// exercising the non-Postgres refusal, and every `got 400` assertion below
+// would read 501. Saying "postgres" here is what makes the test match its
+// name.
+//
+// This is not the reverse of the rule either. The refusal path is real
+// behaviour and deserves its own coverage -- it has it, against real MySQL
+// and SQL Server, in TestARealLoginStoresNoTokensOnAnyDialect.
+func newPostgresTestPlugin() *Plugin {
+	return &Plugin{dialect: plugin.DialectPostgres}
+}
+
 func TestHandleLoginInvalidProvider(t *testing.T) {
-	p := &Plugin{}
+	p := newPostgresTestPlugin()
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 
@@ -421,7 +440,7 @@ func TestHandleLoginInvalidProvider(t *testing.T) {
 }
 
 func TestHandleLoginMissingTenant(t *testing.T) {
-	p := &Plugin{}
+	p := newPostgresTestPlugin()
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 
@@ -434,7 +453,7 @@ func TestHandleLoginMissingTenant(t *testing.T) {
 }
 
 func TestHandleLoginInvalidTenantQuery(t *testing.T) {
-	p := &Plugin{}
+	p := newPostgresTestPlugin()
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 
@@ -447,7 +466,7 @@ func TestHandleLoginInvalidTenantQuery(t *testing.T) {
 }
 
 func TestHandleCallbackInvalidProvider(t *testing.T) {
-	p := &Plugin{}
+	p := newPostgresTestPlugin()
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 
@@ -460,7 +479,7 @@ func TestHandleCallbackInvalidProvider(t *testing.T) {
 }
 
 func TestHandleCallbackMissingCode(t *testing.T) {
-	p := &Plugin{}
+	p := newPostgresTestPlugin()
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 
@@ -473,7 +492,7 @@ func TestHandleCallbackMissingCode(t *testing.T) {
 }
 
 func TestHandleCallbackMissingState(t *testing.T) {
-	p := &Plugin{}
+	p := newPostgresTestPlugin()
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 
@@ -486,7 +505,7 @@ func TestHandleCallbackMissingState(t *testing.T) {
 }
 
 func TestHandleListSessionsUnauthorized(t *testing.T) {
-	p := &Plugin{}
+	p := newPostgresTestPlugin()
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 
@@ -499,7 +518,7 @@ func TestHandleListSessionsUnauthorized(t *testing.T) {
 }
 
 func TestHandleDeleteSessionUnauthorized(t *testing.T) {
-	p := &Plugin{}
+	p := newPostgresTestPlugin()
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 

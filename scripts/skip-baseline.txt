@@ -52,8 +52,11 @@ cmd/cleat	runVetCmd	1
 cmd/cleat-bench	TestHelperProcess	1
 cmd/cleat-gen-plugin	TestHelperProcess	1
 cmd/cleat-worker	TestABlockedStartIsAcceptedAndWaits	1
+cmd/cleat-worker	TestABootedWorkerBindsLoginToTheHost	2
+cmd/cleat-worker	TestABootedWorkerSweepsAnAbandonedLogin	2
 cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow	1
 cmd/cleat-worker	TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun	4
+cmd/cleat-worker	TestAnonymousOAuthLoginIsNotAborted401UnderRequireAuth	2
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
 cmd/cleat-worker	TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP	1
 cmd/cleat-worker	TestHeartbeatBatchFencedIsolatedFromASaturatedExecutionPool	2

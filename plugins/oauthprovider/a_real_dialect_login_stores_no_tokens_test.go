@@ -34,12 +34,21 @@ import (
 // field happened to be left as.
 //
 // Runs the real /login -> real /callback path end to end -- no seeded
-// session row, no bypassed getConfig -- against real Postgres, MySQL and SQL
-// Server, with a real (if fixed-key) plugin.Secrets store, so the client
-// secret lookup that made the pre-fix version return 500 with no
-// --encryption-key-file (cleat-review's BROKEN verdict on 48b4c1f7) is
-// exercised for real rather than assumed fixed by a change to a different
-// file.
+// session row, no bypassed getConfig -- against real Postgres, with a real
+// (if fixed-key) plugin.Secrets store, so the client secret lookup that made
+// the pre-fix version return 500 with no --encryption-key-file
+// (cleat-review's BROKEN verdict on 48b4c1f7) is exercised for real rather
+// than assumed fixed by a change to a different file.
+//
+// Against real MySQL and SQL Server this file asserts a DIFFERENT thing, and
+// says so rather than skipping: cleat#2340 makes OAuth login Postgres-only
+// for this release, so p.pgOnly (plugin.go) is the first statement in both
+// handlers and these two dialects get 501. The leg asserts the refusal and
+// that it refuses cleanly -- no oauth_sessions row left behind -- because
+// "refuse cleanly rather than half-work" is the design decision, and an
+// assertion on it is what makes it one. What it does NOT assert there is the
+// NULL-at-rest property, which is unreachable on those dialects by
+// construction: nothing can write the row. See the branch comment below.
 func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		be := be
@@ -114,6 +123,43 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 			fixtureDB := be.CrossTenantConn(t, ctx,
 				"oauthprovider real-dialect login fixture: seeds the config row a real /login reads")
 			const redirectURL = "http://localhost/oauth/google/callback"
+
+			// cleat#2340: OAuth login is Postgres-only in this release, so on
+			// MySQL and SQL Server both handlers refuse at their first statement
+			// (p.pgOnly, plugin.go). That is designed behaviour and gets an
+			// assertion of its own -- never a t.Skip, which would report a
+			// deliberate decision as an untested gap.
+			//
+			// The second assertion is the one worth having: a refusal that
+			// happened AFTER the row was inserted would pass a status-code check
+			// and still be exactly the "half-work" the design set out to avoid.
+			// Counting the rows is what distinguishes refused-before-writing from
+			// refused-after.
+			if dialect != plugin.DialectPostgres {
+				for _, path := range []string{
+					"/oauth/google/login?tenant_id=" + tenantID.String(),
+					"/oauth/google/callback?code=mock-code&state=mock-state",
+				} {
+					req := httptest.NewRequest("GET", path, nil)
+					rec := httptest.NewRecorder()
+					p.mux.ServeHTTP(rec, req)
+					if rec.Code != http.StatusNotImplemented {
+						t.Errorf("GET %s on %s: want 501 (OAuth login is Postgres-only in this "+
+							"release), got %d: %s", path, be.Name, rec.Code, rec.Body.String())
+					}
+				}
+
+				var rows int
+				if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
+					`SELECT COUNT(*) FROM oauth_sessions`).Scan(&rows); err != nil {
+					t.Fatalf("count oauth_sessions on %s: %v", be.Name, err)
+				}
+				if rows != 0 {
+					t.Errorf("on %s: a refused login left %d oauth_sessions row(s) behind -- the "+
+						"refusal must happen before any state is written, not after", be.Name, rows)
+				}
+				return
+			}
 
 			// oauth_config's primary key is (tenant_id, provider), and
 			// PostgreSQL's PluginTestBackend reuses one long-lived database

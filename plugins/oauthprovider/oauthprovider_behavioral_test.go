@@ -19,6 +19,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
@@ -397,7 +398,15 @@ func setupTestPlugin(t *testing.T, store *fakeDBStore) (*Plugin, http.Handler) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
 
+	// dialect is explicit, not incidental: handleLogin and handleCallback
+	// begin with p.pgOnly (plugin.go), which refuses with 501 anything that
+	// is not literally plugin.DialectPostgres -- and Dialect's zero value is
+	// "", not "postgres" (plugin/migration.go). A fixture left as
+	// &Plugin{...} without this field exercises the refusal path instead of
+	// the handler, and every redirect/validation assertion below reads 501.
+	// These tests are about the Postgres login path, so they say so.
 	p := &Plugin{
+		dialect: plugin.DialectPostgres,
 		db:      &engine.SQLDBAdapter{DB: db},
 		mux:     http.NewServeMux(),
 		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),

@@ -31,6 +31,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/google/uuid"
 )
 
 // ErrNotConfigured is returned by Init when a plugin received no
@@ -234,6 +236,45 @@ type Environment struct {
 	// a plugin must call Get per use rather than cache it from Config. Nil
 	// under the same convention as Secrets/Payloads.
 	DeploymentSecrets DeploymentSecrets
+
+	// HostResolver and RequireHostMatch exist for exactly one caller today --
+	// plugins/oauthprovider's /login, which is exempt from
+	// auth.HostBindingMiddlewareWithMux (cleat#2319) and so would otherwise
+	// have no way to enforce the same binding on the query-param tenant it
+	// resolves itself. cleat#2340.
+	//
+	// HostResolver answers the same question auth.HostBindingMiddlewareWithMux
+	// asks of every non-exempt route: does the request's Host belong to the
+	// tenant a caller is claiming? auth.DomainResolver.TenantForHost is a
+	// CONFIRM given a candidate tenant, not a reverse lookup -- there is no
+	// "which tenant owns this host" query anywhere in this codebase, on
+	// purpose (see auth/host_binding.go). May be nil, the same convention
+	// DB/HTTPTransport already use; RequireHostMatch tells a caller whether
+	// nil here means "host binding is off" or "this plugin has no host to
+	// check against" -- they are different states and only the flag
+	// distinguishes them.
+	//
+	// RequireHostMatch mirrors --require-host-match. It is not implied by
+	// HostResolver being non-nil: the resolver is built unconditionally
+	// (auth.NewTenantStoreForDialect has no failure mode tied to the flag),
+	// so a nil check alone cannot tell "not configured" from "configured but
+	// the operator didn't ask for enforcement."
+	HostResolver     DomainResolver
+	RequireHostMatch bool
+}
+
+// DomainResolver mirrors auth.DomainResolver's single method exactly.
+// Defined here, rather than imported, because plugin cannot import auth:
+// auth's own test files import engine, and engine imports plugin, so
+// plugin importing auth completes a cycle for auth's test build (auth_test
+// -> engine -> plugin -> auth). auth.TenantStore already satisfies this
+// structurally, with no adapter needed -- Go interface satisfaction is by
+// method set, not by declaring type.
+type DomainResolver interface {
+	// TenantForHost returns whether hostname belongs to want, the tenant a
+	// caller is claiming -- a CONFIRM, not a reverse lookup. See
+	// auth.DomainResolver's own doc comment (auth/host_binding.go) for why.
+	TenantForHost(ctx context.Context, hostname string, want uuid.UUID) (found bool, err error)
 }
 
 // StartRequest is everything a plugin must supply to start a workflow.

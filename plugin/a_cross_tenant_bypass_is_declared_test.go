@@ -125,6 +125,10 @@ var crossTenantLedger = map[string]bypassKind{
 	"plugins/blobstore/background.go:(*Plugin).Run":                 kindGlobalSweep,
 	"plugins/eventstore/background.go:(*Plugin).Run":                kindGlobalSweep,
 	"plugins/ratelimiter/background.go:(*Plugin).pruneRateCounters": kindGlobalSweep,
+	// cleat#2340: abandoned OAuth logins, cut off by expires_at with no
+	// tenant dimension -- token_hash IS NULL is what scopes it to
+	// never-completed rows, not tenant_id. See background.go's doc comment.
+	"plugins/oauthprovider/background.go:(*Plugin).sweepExpiredSessions": kindGlobalSweep,
 
 	// One transaction claims and advances every tenant's due rows.
 	"plugins/eventtriggers/background.go:(*Plugin).Run": kindClaimAcrossTenants,

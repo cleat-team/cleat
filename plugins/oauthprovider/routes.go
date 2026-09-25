@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
@@ -291,6 +292,10 @@ func formatProviderURL(template, domain string) string {
 // ---- GET /oauth/{provider}/login ----
 
 func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if p.pgOnly(w) {
+		return
+	}
+
 	provider := r.PathValue("provider")
 	if !validProviders[provider] {
 		p.writeError(w, http.StatusBadRequest, "invalid provider")
@@ -316,6 +321,37 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// cleat#2340: /login is exempt from auth.HostBindingMiddlewareWithMux
+	// (it has to be, cleat#2319 -- an anonymous caller carries no credential
+	// for that middleware to bind a tenant from), so nothing else enforces
+	// Host against the tenant this handler resolves for itself. Without
+	// this, --require-host-match protects every other route but not the one
+	// that starts a login: ?tenant_id=<victim> from an attacker-controlled
+	// host would otherwise mint a credential for a tenant the request's Host
+	// doesn't own. p.hostResolver is built unconditionally by the worker
+	// (see plugin.Environment.HostResolver's doc comment), so nil here only
+	// happens in a test building an Environment by hand -- treated as "can't
+	// check" rather than "check passed", refusing rather than silently
+	// skipping the binding --require-host-match promised.
+	if p.requireHostMatch {
+		if p.hostResolver == nil {
+			p.logger.Error("oauth: --require-host-match is set but no host resolver was provided")
+			p.writeError(w, http.StatusInternalServerError, "host binding is misconfigured")
+			return
+		}
+		host := auth.NormalizeHost(r.Host)
+		bound, err := p.hostResolver.TenantForHost(r.Context(), host, tid)
+		if err != nil {
+			p.logger.Error("oauth: host binding check", "error", err)
+			p.writeError(w, http.StatusInternalServerError, "host binding check failed")
+			return
+		}
+		if !bound {
+			p.writeError(w, http.StatusBadRequest, "tenant_id does not match the requested host")
+			return
+		}
+	}
+
 	cfg, err := p.getConfig(r.Context(), tid, provider)
 	if err != nil {
 		// errors.Is(err, plugin.ErrSecretNotFound) distinguishes "this
@@ -325,9 +361,17 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// response: this handler is UNAUTHENTICATED (handleLogin accepts
 		// ?tenant_id= from anyone), so an operator-actionable message
 		// naming cleat's internal secret scheme and the cleatctl command
-		// that fixes it would hand an anonymous caller both an enumeration
-		// oracle ("this provider IS configured") and detail about cleat's
+		// that fixes it would hand an anonymous caller detail about cleat's
 		// own tooling (cleat-review's item (4) on cleat#2295).
+		//
+		// The uniform TEXT below closes the STRING oracle only, and an
+		// earlier version of this comment claimed more than it delivers. The
+		// STATUS still discriminates: a configured tenant that gets past this
+		// point ends at the redirect this handler closes with (302), while
+		// this branch answers 500. So a caller who has not authenticated can
+		// still read "this (tenant, provider) pair IS configured" off a 302.
+		// That is one-directional and therefore not closed. The residual is
+		// recorded on cleat#2368; the log line keeps the operator detail.
 		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
 			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
@@ -413,6 +457,10 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 // ---- GET /oauth/{provider}/callback ----
 
 func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
+	if p.pgOnly(w) {
+		return
+	}
+
 	provider := r.PathValue("provider")
 	if !validProviders[provider] {
 		p.writeError(w, http.StatusBadRequest, "invalid provider")
@@ -474,12 +522,22 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// provider has no client secret set" (an operator setup step was
 		// skipped) from every other lookup failure, and that distinction is
 		// worth the operator's attention -- but only in the log, not the
-		// response: this handler is UNAUTHENTICATED (handleLogin accepts
-		// ?tenant_id= from anyone), so an operator-actionable message
-		// naming cleat's internal secret scheme and the cleatctl command
-		// that fixes it would hand an anonymous caller both an enumeration
-		// oracle ("this provider IS configured") and detail about cleat's
-		// own tooling (cleat-review's item (4) on cleat#2295).
+		// response, so an operator-actionable message naming cleat's internal
+		// secret scheme and the cleatctl command that fixes it does not hand
+		// a caller detail about cleat's own tooling (cleat-review's item (4)
+		// on cleat#2295).
+		//
+		// This route is unauthenticated because it is EXEMPT from plugin auth,
+		// not because it reads a tenant from the query string -- that
+		// justification sat on both handlers and describes only handleLogin.
+		// Here tid comes from the oauth_sessions row the state parameter
+		// selects (the CROSS-TENANT lookup above), so the caller cannot choose
+		// whose config is read, and any pair this branch could probe,
+		// handleLogin already probes directly.
+		//
+		// The uniform TEXT closes the STRING oracle only; the STATUS still
+		// discriminates (500 here, the 200 JSON finishLogin returns on
+		// success). Same residual, recorded on cleat#2368.
 		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
 			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
