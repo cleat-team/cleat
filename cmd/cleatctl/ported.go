@@ -133,6 +133,30 @@ var portedOn = map[string][]string{
 	// TestSlackWorkspaceStatementsRebindPerDialect pins for quota's own
 	// statements.
 	"slack": {"postgres", "mysql", "mssql"},
+
+	// backup, cleat#2247: all three, from the start. backup_config and
+	// backup_history carry no admin.-qualified SQL (unlike drop-tenant) and
+	// no row-level security to route a connection around, since migration
+	// v4 dropped both tables' tenant_id column and RLS policy on every
+	// dialect. Every statement is $N-shaped and rewritten through
+	// d.rebind, the same convention slack's own entry above states --
+	// except backup history's LIMIT, which is not valid T-SQL and needed
+	// its own MSSQL arm (backupHistoryListSQL/backupHistoryListByConfigSQL
+	// are plugin.Query, not plain strings, for exactly that reason).
+	//
+	// Verified empirically, not by resemblance to slack:
+	// TestBackupCommandWorksOnEveryDialect drives config-create,
+	// config-update, run, history and config-delete against real
+	// PostgreSQL, MySQL and SQL Server containers. It found three real
+	// defects before this entry was written: MySQL's `?` binds by
+	// APPEARANCE rather than by number, so a $N reused for two columns
+	// (created_at/updated_at, then next_run_at/updated_at) silently needed
+	// a second argument; resolveConfigID scanned a *uuid.UUID directly
+	// instead of through plugin.ScanRow, so SQL Server's mixed-endian
+	// UNIQUEIDENTIFIER bytes produced a wrong id the moment one was read
+	// back and reused (cleat#1137); and `backup history`'s LIMIT did not
+	// run on SQL Server AT ALL ("Incorrect syntax near 'LIMIT'").
+	"backup": {"postgres", "mysql", "mssql"},
 }
 
 // requirePortedFor exits with a clear message when cmd has not been written for

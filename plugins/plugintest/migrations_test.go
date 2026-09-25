@@ -67,6 +67,31 @@ func TestMigrationProblemsReportsWhatItShould(t *testing.T) {
 			wantProblem: "has no Down SQL",
 		},
 		{
+			// cleat#2247: a migration can write SQL that genuinely cannot be
+			// undone (a dropped column with no source of truth for a
+			// restored value), distinct from TenantScoped/SweepTables, whose
+			// migrations write no SQL at all. Irreversible is how an author
+			// says so.
+			name: "SQL with no way back, declared Irreversible",
+			migrations: []plugin.Migration{{
+				Version:      8,
+				Up:           "ALTER TABLE t DROP COLUMN c",
+				Irreversible: "dropping c loses data a Down could not reconstruct",
+			}},
+		},
+		{
+			// Its failing twin: Irreversible must be a reason, not a magic
+			// bypass that also swallows the "does nothing at all" case --
+			// this migration writes no SQL and declares no scoping, so it
+			// still needs to be reported even with Irreversible set on it.
+			name: "Irreversible but no SQL and no declaration",
+			migrations: []plugin.Migration{{
+				Version:      9,
+				Irreversible: "not a real reason",
+			}},
+			wantProblem: "so applying it does nothing",
+		},
+		{
 			name:        "version zero",
 			migrations:  []plugin.Migration{{Up: "CREATE TABLE t (id int)", Down: "DROP TABLE t"}},
 			wantProblem: "version must be non-zero",

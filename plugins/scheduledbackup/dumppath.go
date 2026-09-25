@@ -51,9 +51,12 @@ func ValidConfigName(name string) bool {
 	return true
 }
 
-// configNameRule is the message every rejection uses, so an operator who trips
-// it is told the rule rather than that something was "invalid".
-const configNameRule = "name must be 1-128 characters of letters, digits, '.', '_' or '-', and cannot be '.' or '..'"
+// ConfigNameRule is the message every rejection uses, so an operator who trips
+// it is told the rule rather than that something was "invalid". Exported
+// (cleat#2247) for cmd/cleatctl/backup.go, the only caller of ValidConfigName
+// now that backup configuration is operator-only and created/renamed through
+// cleatctl rather than through an HTTP handler in this package.
+const ConfigNameRule = "name must be 1-128 characters of letters, digits, '.', '_' or '-', and cannot be '.' or '..'"
 
 // SafeDumpPath joins filename to dumpDir and refuses anything that escapes it.
 //

@@ -170,6 +170,8 @@ func main() {
 		runResealDeploymentSecrets(ctx, db, d, args[1:])
 	case "slack":
 		runSlack(ctx, db, d, args[1:])
+	case "backup":
+		runBackup(ctx, db, d, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -222,6 +224,13 @@ Commands:
                                   map a Slack workspace to a tenant (operator-only)
   slack list-workspaces          list every Slack workspace -> tenant mapping
   slack unmap-workspace --team <team_id>  remove a mapping
+  backup config-create --name <name> --cron "<expr>" [--retention-days N] [--disabled]
+                                  create a scheduled backup config (operator-only, cleat#2247)
+  backup config-list             list every backup config
+  backup config-update (--id <uuid>|--name <n>) [--cron <e>] [--retention-days N] (--enabled|--disabled)
+  backup config-delete (--id <uuid>|--name <n>)  delete a config (history rows are kept)
+  backup run (--id <uuid>|--name <n>)  request an immediate backup (picked up within 60s)
+  backup history [--id <uuid>|--name <n>] [--limit N]  list backup attempts, newest first
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)

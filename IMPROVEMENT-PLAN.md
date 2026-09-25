@@ -10516,3 +10516,83 @@ Files: `plugin/body.go`, `plugin/body_test.go`, `plugin/plugin_http.go`, `plugin
 `plugins/every_plugin_reads_its_body_through_the_helper_test.go`,
 `plugins/blobstore/{plugin.go,routes.go}`, `plugins/slacknotify/{interactive.go,routes.go,slacknotify_new_test.go}`,
 and the routes.go of every other plugin listed in cleat#2232.
+### 3.343 scheduledbackup becomes operator-only, and the acceptance test it needed found four more defects — ✅ **FIXED 2026-09-24** (cleat#2247)
+
+**cleat#2058's decision 2 was that backup configuration is operator-only, not tenant-facing**: a
+tenant-triggered backup ran an unfiltered `pg_dump` against the deployment-wide DSN, so any
+tenant creating a `backup_config` row dumped every tenant's data on a schedule that tenant chose.
+Migration v4 drops `backup_config.tenant_id`/`backup_history.tenant_id` and their RLS policies on
+every dialect, flips both rows in `admin.plugin_tables` to `tenant_scoped = false`, and the
+tenant-facing HTTP API (`routes.go`) and the never-wired `plugin.HasCommands` CLI mechanism
+(`commands.go`) are deleted outright — `RegisterCommands`'s two commands had no caller anywhere in
+the tree (`grep -rn HasCommands` finds the interface and nothing that type-asserts against it), so
+nothing regresses by removing them. The only surface left is `cmd/cleatctl backup`
+(`cmd/cleatctl/backup.go`): `config-create`/`config-list`/`config-update`/`config-delete`, `run`
+(request-only — it sets `next_run_at = now()` and lets the existing background loop pick the
+config up within 60s, never invoking `pg_dump` itself) and `history`.
+
+**The v4 registry-flip UPDATE is keyed on `schema_name`/`table_name`, not `plugin_name`.**
+`plugin.PluginInfo.Name` for this plugin is `"scheduled-backup"` (a hyphen), not
+`"scheduledbackup"`, and `admin.plugin_tables`' primary key is
+`(plugin_name, schema_name, table_name)` — a WHERE clause naming the wrong `plugin_name` matches
+zero rows, leaves both rows `tenant_scoped = true`, and the next `admin.drop_tenant` for ANY
+tenant (not one with backup rows: the sweep loop reads every `tenant_scoped` row unconditionally)
+fails outright with `column "tenant_id" does not exist`. Caught by cleat-review against an
+earlier draft keyed on `plugin_name`; the shipped migration needs no plugin name at all and cannot
+go stale the same way twice. `TestSchedulerBackupV4RegistryFlipDoesNotBreakLaterDropTenant`
+(`a_v4_migration_leaves_drop_tenant_working_test.go`) reproduces the exact scenario.
+
+**`plugin.Migration` gained an `Irreversible` field**, distinct from `TenantScoped`/`SweepTables`
+(which describe a migration with no SQL to undo in the first place) and from `DialectSpecific`
+(which justifies a missing **Up** arm for one dialect, not a missing Down). v4 writes real SQL on
+every dialect and has no Down: reversing "backups are operator-only" would mean reinstating a
+`tenant_id` column with no source of truth for what value each row should get — a data-recovery
+decision, not a mechanical schema reversal. `plugintest.AssertMigrationsDoSomething`, the shared
+contract 13+ plugins' behavioral tests use, now accepts `Irreversible` as a third way a migration
+can legitimately have no Down, alongside its own self-test in `migrations_test.go`.
+
+**`TestBackupCommandWorksOnEveryDialect` (`cmd/cleatctl/backup_test.go`) drives the whole surface
+against real PostgreSQL, MySQL and SQL Server**, not by resemblance to `slack`'s or `quota`'s own
+"all three, $N rewritten through `d.rebind`" entries in `ported.go` — and it found three real
+defects a PREPARE-only check or a postgres-only test could not have:
+
+- **MySQL's `?` binds by APPEARANCE, not by number** (this file's own rule, arrived at again): `$7`
+  reused for both `created_at` and `updated_at` in `backupConfigCreateSQL`, and `$1` reused for
+  `next_run_at`/`updated_at` in `backupConfigRequestRunSQL`, both bind the same value twice on
+  Postgres/MSSQL and become two separate `?` slots on MySQL — `sql: expected 8 arguments, got 7`.
+  Fixed by giving each occurrence its own number and passing the value twice at the call site.
+- **`resolveConfigID` scanned a `*uuid.UUID` directly instead of through `plugin.ScanRow`**, so SQL
+  Server's mixed-endian `UNIQUEIDENTIFIER` bytes (cleat#1137) produced a DIFFERENT uuid the moment
+  one was read back and reused: `config-create` printed the correct id, and looking it straight back
+  up by `--name` returned an id that then matched no row at all. `google/uuid.UUID`'s own `Scan`
+  accepts the wrong bytes without error, so nothing short of running it against real SQL Server
+  surfaces this — `slack`'s and `quota`'s own tests sidestep the whole class by scanning tenant ids
+  as plain strings.
+- **`backup history`'s `LIMIT $N` is not valid T-SQL at all**: `mssql: Incorrect syntax near
+  'LIMIT'. (102)` — the subcommand could not run on SQL Server, not merely paginate wrong.
+  `backupHistoryListSQL`/`backupHistoryListByConfigSQL` are now `plugin.Query` with a real MSSQL
+  arm (`OFFSET 0 ROWS FETCH NEXT $N ROWS ONLY`).
+
+**A fourth defect was found by the test's own assertions, not by a dialect failure: migration v3's
+`ON DELETE CASCADE` on `backup_history.config_id` outlived the one caller that needed it.** v3
+added the cascade for cleat#2234 so `admin.drop_tenant` (which deletes `backup_config` before
+`backup_history` in its alphabetical sweep) would not fail on a tenant with backup history. Since
+v4 flips both tables to `tenant_scoped = false`, `admin.drop_tenant`'s sweep no longer touches
+either table at all — the cascade's original reason is gone, but the FK itself is not, and
+`cleatctl backup config-delete` (added after v4, cleat#2247) inherited it as an unintended side
+effect: deleting a config to stop it running silently erased every `backup_history` row that
+pointed at it, contradicting the command's own printed message ("its backup_history rows are
+unaffected"). Migration v5 replaces `ON DELETE CASCADE` with `ON DELETE SET NULL` — the history
+row survives with every other column intact, `config_id` nulled — and is fully reversible (a real
+Down restoring v3's cascade on all three dialects), unlike v4.
+
+**Files**: `plugins/scheduledbackup/{migrations,background,plugin,dumppath,cron}.go`,
+`cmd/cleatctl/{backup,main,ported,inline_statements_parse_test}.go`,
+`plugin/{plugin,a_cross_tenant_bypass_is_declared_test}.go`,
+`plugins/plugintest/{migrations,migrations_test}.go`, `docs/how-to/use-deployment-secrets.md`.
+Deleted: `plugins/scheduledbackup/{routes,commands}.go`.
+
+**Not built here, tracked as a follow-up**: a general cross-plugin invariant over
+`admin.plugin_tables` ("every `tenant_scoped` row names a table that still has a `tenant_id`
+column") would catch the registry-flip class for a future plugin the same way this migration's own
+regression test catches it for this one. No issue filed yet.

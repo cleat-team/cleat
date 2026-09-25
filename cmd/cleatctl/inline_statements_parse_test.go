@@ -16,6 +16,8 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/scheduledbackup"
 )
 
 // Every SQL statement written inline in this package must PARSE against a real
@@ -48,6 +50,22 @@ import (
 func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	ctx := context.Background()
+
+	// backup_config and backup_history are PLUGIN tables
+	// (plugins/scheduledbackup/migrations.go), not part of the core schema
+	// testutil.TestDB applies above -- this test must create them itself
+	// rather than pin their statements or rely on another test in this
+	// package happening to run first and leave them behind. The latter is
+	// exactly what this test did until 2026-09-25 (cleat-review, item 4):
+	// backup_test.go sorts before this file, so a full-package run always
+	// saw the tables and a pin looked stale, but `-run
+	// TestEveryInlineStatementParsesOnPostgres` alone -- a normal dev and
+	// bisect workflow -- reached PREPARE against a database that had never
+	// run the plugin's migration at all.
+	lp := &plugin.LoadedPlugin{Plugin: scheduledbackup.New(), Healthy: true}
+	if err := plugin.RunMigrations(ctx, db, plugin.DialectPostgres, nil, []*plugin.LoadedPlugin{lp}); err != nil {
+		t.Fatalf("applying scheduledbackup's migrations: %v", err)
+	}
 
 	stmts := inlineStatements(t)
 	if len(stmts) < 15 {
@@ -153,6 +171,35 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		"UPDATE tenant_quota SET limit_count = $1, window_seconds = $2, enforce = $3, updated_at = $4 WHERE tenant_id = $5 AND resource = $6 AND updated_at = $7": "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
 		"SELECT tenant_id, resource, limit_count, window_seconds, enforce, updated_at FROM tenant_quota WHERE tenant_id = $1 ORDER BY resource":                   "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
 		"SELECT tenant_id, resource, limit_count, window_seconds, enforce, updated_at FROM tenant_quota ORDER BY tenant_id, resource":                             "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
+
+		// cleat#2247. backup.go's runBackupConfigUpdate builds its SET list
+		// from whichever flags were given (--cron, --retention-days,
+		// --enabled/--disabled), the same shape quota.go and queue.go use
+		// for their own partial updates -- so the statement in source is a
+		// template, not SQL. The coverage is not lost: TestBackupCommand
+		// WorksOnEveryDialect drives config-update, fully assembled, against
+		// real PostgreSQL, MySQL and SQL Server, which is what caught this
+		// file's actual MySQL and SQL Server defects (a $N reused across two
+		// columns, a *uuid.UUID scanned without plugin.ScanRow, and LIMIT on
+		// SQL Server) -- a PREPARE against a template could not have found
+		// any of the three.
+		"UPDATE backup_config SET %s WHERE id = $%d": "cmd/cleatctl/backup.go's runBackupConfigUpdate builds its SET clause from whichever flags were given; checked live by TestBackupCommandWorksOnEveryDialect (cleat#2247)",
+
+		// backup_config and backup_history need no pin: this test applies
+		// scheduledbackup's own migrations above, so the ten statements
+		// below genuinely PREPARE against real tables it created itself --
+		// not against another test's leftovers. That was tried first
+		// (cleat-review, 2026-09-24 and 2026-09-25): pinning them, and
+		// deleting the pins on the theory that backup_test.go's migration
+		// always runs first in this package's file order and leaves the
+		// tables behind. Both were rejected -- the first hides a real
+		// regression behind an unpinned surface, and the second makes a
+		// passing `-run TestEveryInlineStatementParsesOnPostgres` alone (a
+		// normal dev and bisect workflow) depend on an unstated file-name
+		// ordering that breaks on a rename or a `-shuffle` run. Migrating
+		// the plugin's own tables here is what tenant_quota's five pins
+		// above are the fallback for when this is too heavy to do; here it
+		// is not.
 	}
 
 	// A template is not checkable as written, and saying so out loud is the
