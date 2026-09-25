@@ -927,7 +927,15 @@ These codes classify runtime errors for retry decisions. They appear in the
 | `ErrTimeout` | `"timeout"` | Execution exceeded its deadline |
 | `ErrAmbiguous` | `"ambiguous"` | Call outcome unknown after crash; caller should check the external service before retrying |
 | `ErrRetriesExhausted` | `"retries_exhausted"` | All retry attempts were exhausted |
+| `ErrResultRejected` | `"result_rejected_by_store"` | The store refused the workflow result as it was written |
 | `ErrOperator` | `"operator"` | An operator force-failed the workflow (`POST /api/admin/instances/:id/force-fail`) without supplying an `error_code`; not derived by the engine |
+
+**This table was missing `ErrResultRejected` until 2026-09-25**, while
+`namedErrorCodes` (`engine/errors.go`) carried it — which matters because that list is what
+restricts an operator-supplied `error_code`, so the doc understated the set an operator may name.
+The authoritative list is that variable, not this table; keep the two in step by hand, since
+`ErrorCode` has no iota range to derive one from the other (`String()`'s default case exists
+precisely because `ErrorCode(99)` is a legal value).
 
 **Force-fail's `error_code` is restricted to this set** (cleat#1977, D5):
 `POST /api/admin/instances/:id/force-fail` with no `error_code` records
