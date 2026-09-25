@@ -107,6 +107,10 @@ CREATE TABLE admin.tenant_api_keys (
     -- cleat#1702: contract retirement spelling; migration 079 removes
     -- revoked_at. This file carries the final column set.
     disabled_at DATETIMEOFFSET   NULL,
+    -- cleat#2352: migration 105's two columns, same reason they are here
+    -- rather than left to apply incrementally.
+    expires_at     DATETIMEOFFSET NULL,
+    oauth_identity NVARCHAR(512)  NULL,
     CONSTRAINT pk_admin_tenant_api_keys PRIMARY KEY (key_id),
     CONSTRAINT fk_admin_api_keys_tenant FOREIGN KEY (tenant_id)
         REFERENCES admin.tenants(tenant_id)

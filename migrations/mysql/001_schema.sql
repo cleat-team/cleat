@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS tenant_api_keys (
     -- cleat#1702: contract retirement spelling; migration 075 removes
     -- revoked_at. This file carries the final column set.
     disabled_at        TIMESTAMP(6),
+    -- cleat#2352: migration 104's two columns, same reason they are here
+    -- rather than left to apply incrementally.
+    expires_at         TIMESTAMP(6),
+    oauth_identity     VARCHAR(512),
     FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id),
     PRIMARY KEY (key_id)
 ) ENGINE=InnoDB;

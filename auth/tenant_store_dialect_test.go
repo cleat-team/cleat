@@ -116,5 +116,42 @@ func TestCreateTenantAndRevokeAPIKeyRefuseNonPostgres(t *testing.T) {
 		if err := s.RevokeAPIKey(t.Context(), [16]byte{}); err == nil {
 			t.Errorf("RevokeAPIKey on %s did not refuse", d)
 		}
+		// cleat#2352: same Postgres-only scope, same reason -- see
+		// RevokeAPIKeyByHash's doc comment.
+		if err := s.RevokeAPIKeyByHash(t.Context(), []byte{0x01}); err == nil {
+			t.Errorf("RevokeAPIKeyByHash on %s did not refuse", d)
+		}
+	}
+}
+
+// TestResolveAPIKeyStmt_ExcludesExpired mirrors
+// TestCreateAPIKeyStatementPerDialect's style: a cheap, DB-less check that
+// cleat#2352's expiry clause is present, uses the right "now" spelling for
+// each dialect, and did not accidentally introduce another dialect's
+// placeholder style. TestExpiredKeyCannotAuthenticate (a_key_expiry_test.go)
+// is what proves the clause actually behaves correctly against a real
+// database; this test exists so a dialect mistake here fails in
+// milliseconds rather than only when a database happens to be configured.
+func TestResolveAPIKeyStmt_ExcludesExpired(t *testing.T) {
+	for _, tc := range []struct {
+		dialect string
+		wantNow string
+		wantOr  string
+	}{
+		{DialectPostgres, "now()", "expires_at IS NULL OR expires_at > now()"},
+		{DialectMySQL, "NOW(6)", "expires_at IS NULL OR expires_at > NOW(6)"},
+		{DialectMSSQL, "SYSUTCDATETIME()", "expires_at IS NULL OR expires_at > SYSUTCDATETIME()"},
+	} {
+		t.Run(tc.dialect, func(t *testing.T) {
+			stmt := resolveAPIKeyStmt(tc.dialect)
+			if !strings.Contains(stmt, tc.wantOr) {
+				t.Errorf("resolveAPIKeyStmt(%q) = %q, missing the expiry clause %q",
+					tc.dialect, stmt, tc.wantOr)
+			}
+			if !strings.Contains(stmt, "disabled_at IS NULL") {
+				t.Errorf("resolveAPIKeyStmt(%q) = %q, lost the existing disabled_at check "+
+					"while gaining the expiry one", tc.dialect, stmt)
+			}
+		})
 	}
 }
