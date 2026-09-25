@@ -106,10 +106,13 @@ func bracketQuote(ident string) string {
 // Rebind rather than a literal, so the tenant id is a bound parameter: this is
 // the one value in this command that comes from the command line.
 func setMSSQLTenantKey(ctx context.Context, conn *sql.Conn, tenantID string) error {
-	stmt := plugin.Rebind(
+	stmt, args, err := plugin.RebindArgs(
 		`EXEC sp_set_session_context @key = N'tenant_id', @value = $1`,
-		plugin.DialectMSSQL)
-	if _, err := conn.ExecContext(ctx, stmt, tenantID); err != nil {
+		plugin.DialectMSSQL, []any{tenantID})
+	if err != nil {
+		return fmt.Errorf("rebind tenant session key: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, stmt, args...); err != nil {
 		return fmt.Errorf("set tenant session key: %w", err)
 	}
 	return nil

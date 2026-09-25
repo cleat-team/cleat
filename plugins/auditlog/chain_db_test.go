@@ -175,7 +175,7 @@ func (e *chainEnv) admin() plugin.PluginDB {
 // nothing is a failure: it would leave the chain untouched and the test green.
 func (e *chainEnv) exec(tenant uuid.UUID, query string, args ...any) int64 {
 	e.t.Helper()
-	n, err := e.admin().Exec(plugin.ForTenant(context.Background(), tenant), plugin.Rebind(query, e.d.dialect), args...)
+	n, err := e.admin().Exec(plugin.ForTenant(context.Background(), tenant), query, args...)
 	if err != nil {
 		e.t.Fatalf("%v\n  %s", err, query)
 	}
@@ -192,7 +192,7 @@ func (e *chainEnv) mustChange(tenant uuid.UUID, query string, args ...any) {
 func (e *chainEnv) scan(tenant uuid.UUID, query string, args []any, dest ...any) {
 	e.t.Helper()
 	if err := plugin.ScanRow(e.admin().QueryRow(plugin.ForTenant(context.Background(), tenant),
-		plugin.Rebind(query, e.d.dialect), args...), dest...); err != nil {
+		query, args...), dest...); err != nil {
 		e.t.Fatalf("%v\n  %s", err, query)
 	}
 }

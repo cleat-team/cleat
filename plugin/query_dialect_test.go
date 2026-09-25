@@ -49,16 +49,21 @@ func TestLimitClause(t *testing.T) {
 // whole class of failures: Rebind leaves a query untouched for a dialect it
 // does not recognise, so a caller that forgets to set its dialect sends
 // PostgreSQL placeholders to MySQL and SQL Server and gets "Unknown column
-// '$1'". That is intended (PostgreSQL is the default form), but it means the
-// dialect field is load-bearing and must never be left at its zero value --
-// see the multi-backend tests in plugins/kvstore and plugins/featureflags.
+// '$1'" (MySQL) or a syntax error (MSSQL). That is intended (PostgreSQL is
+// the default form), but it means the dialect field is load-bearing and must
+// never be left at its zero value -- see the multi-backend tests in
+// plugins/kvstore and plugins/featureflags.
+//
+// Rebind is ALSO the identity for a recognised MySQL dialect now (cleat#2259)
+// -- not only for an unknown one -- so this only exercises the MSSQL rewrite;
+// see TestRebindArgs for MySQL's $N -> ? translation.
 func TestRebind_UnknownDialectPassesThrough(t *testing.T) {
 	const q = `SELECT 1 FROM t WHERE a = $1 AND b = $2`
 	if got := Rebind(q, Dialect("")); got != q {
 		t.Errorf("Rebind with zero dialect = %q, want it unchanged", got)
 	}
-	if got := Rebind(q, DialectMySQL); got != `SELECT 1 FROM t WHERE a = ? AND b = ?` {
-		t.Errorf("MySQL rebind = %q", got)
+	if got := Rebind(q, DialectMySQL); got != q {
+		t.Errorf("MySQL Rebind must be the identity, use RebindArgs for the real rewrite: got %q", got)
 	}
 	if got := Rebind(q, DialectMSSQL); got != `SELECT 1 FROM t WHERE a = @p1 AND b = @p2` {
 		t.Errorf("MSSQL rebind = %q", got)

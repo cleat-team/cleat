@@ -10,9 +10,10 @@ import (
 // SQLDBAdapter wraps *sql.DB and implements plugin.PluginDB with full
 // read-write access. Used when a plugin declares DatabaseAccessReadWrite.
 //
-// Dialect is the backend this adapter talks to. Every statement passing through
-// is put through plugin.Rebind before it reaches the driver, so a plugin writes
-// the primary dialect once and does not have to remember to translate it.
+// Dialect is the backend this adapter talks to. Every statement (and its
+// args) passing through is put through plugin.RebindArgs before it reaches
+// the driver, so a plugin writes the primary dialect once and does not have
+// to remember to translate it.
 //
 // WHY THE TRANSLATION MOVED HERE (cleat#1133). Rebind was opt-in at the call
 // site, and 166 sites called it while 40 did not -- so those 40 sent
@@ -26,7 +27,10 @@ import (
 // Rebind is idempotent (asserted by TestRebindIsIdempotent), which is what
 // makes doing it here safe for the 166 sites that already do it themselves:
 // @pN contains no $N, SYSUTCDATETIME() does not match now(), 1 does not match
-// TRUE.
+// TRUE. RebindArgs's MySQL path is safe for the same reason and a further
+// one (cleat#2259): Rebind is now the identity for MySQL, so a call site
+// that already rebinds before calling this adapter leaves the $N text
+// intact for RebindArgs to see and reorder correctly.
 //
 // This handles the frequent, mechanical differences only -- placeholders,
 // now(), boolean literals. It deliberately does NOT attempt LIMIT/TOP,
@@ -59,14 +63,21 @@ func (a *SQLDBAdapter) Exec(ctx context.Context, query string, args ...any) (int
 	if err != nil {
 		return 0, err
 	}
+	rebound, reboundArgs, err := plugin.RebindArgs(query, a.Dialect, args)
+	if err != nil {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+		return 0, err
+	}
 	if tx == nil {
-		result, err := a.DB.ExecContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+		result, err := a.DB.ExecContext(ctx, rebound, reboundArgs...)
 		if err != nil {
 			return 0, err
 		}
 		return result.RowsAffected()
 	}
-	result, err := tx.ExecContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+	result, err := tx.ExecContext(ctx, rebound, reboundArgs...)
 	if err != nil {
 		_ = tx.Rollback()
 		return 0, err
@@ -87,14 +98,21 @@ func (a *SQLDBAdapter) Query(ctx context.Context, query string, args ...any) (pl
 	if err != nil {
 		return nil, err
 	}
+	rebound, reboundArgs, err := plugin.RebindArgs(query, a.Dialect, args)
+	if err != nil {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+		return nil, err
+	}
 	if tx == nil {
-		rows, err := a.DB.QueryContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+		rows, err := a.DB.QueryContext(ctx, rebound, reboundArgs...)
 		if err != nil {
 			return nil, err
 		}
 		return &sqlRowsWrapper{rows: rows}, nil
 	}
-	rows, err := tx.QueryContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+	rows, err := tx.QueryContext(ctx, rebound, reboundArgs...)
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
@@ -107,11 +125,18 @@ func (a *SQLDBAdapter) QueryRow(ctx context.Context, query string, args ...any) 
 	if err != nil {
 		return &rowScanner{err: err}
 	}
+	rebound, reboundArgs, err := plugin.RebindArgs(query, a.Dialect, args)
+	if err != nil {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+		return &rowScanner{err: err}
+	}
 	if tx == nil {
-		row := a.DB.QueryRowContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+		row := a.DB.QueryRowContext(ctx, rebound, reboundArgs...)
 		return &rowScanner{row: row}
 	}
-	row := tx.QueryRowContext(ctx, plugin.Rebind(query, a.Dialect), args...)
+	row := tx.QueryRowContext(ctx, rebound, reboundArgs...)
 	return &rowScanner{row: row, done: tx.Commit}
 }
 
@@ -127,7 +152,11 @@ type sqlTxAdapter struct {
 var _ plugin.PluginTx = (*sqlTxAdapter)(nil)
 
 func (a *sqlTxAdapter) Exec(ctx context.Context, query string, args ...any) (int64, error) {
-	result, err := a.tx.ExecContext(ctx, plugin.Rebind(query, a.dialect), args...)
+	rebound, reboundArgs, err := plugin.RebindArgs(query, a.dialect, args)
+	if err != nil {
+		return 0, err
+	}
+	result, err := a.tx.ExecContext(ctx, rebound, reboundArgs...)
 	if err != nil {
 		return 0, err
 	}
@@ -135,7 +164,11 @@ func (a *sqlTxAdapter) Exec(ctx context.Context, query string, args ...any) (int
 }
 
 func (a *sqlTxAdapter) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
-	rows, err := a.tx.QueryContext(ctx, plugin.Rebind(query, a.dialect), args...)
+	rebound, reboundArgs, err := plugin.RebindArgs(query, a.dialect, args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := a.tx.QueryContext(ctx, rebound, reboundArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +176,11 @@ func (a *sqlTxAdapter) Query(ctx context.Context, query string, args ...any) (pl
 }
 
 func (a *sqlTxAdapter) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
-	row := a.tx.QueryRowContext(ctx, plugin.Rebind(query, a.dialect), args...)
+	rebound, reboundArgs, err := plugin.RebindArgs(query, a.dialect, args)
+	if err != nil {
+		return &rowScanner{err: err}
+	}
+	row := a.tx.QueryRowContext(ctx, rebound, reboundArgs...)
 	return &rowScanner{row: row}
 }
 

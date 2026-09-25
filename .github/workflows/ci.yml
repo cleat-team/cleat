@@ -415,6 +415,21 @@ jobs:
           scripts/check-plugin-sql-limit-portability.py --self-test
           scripts/check-plugin-sql-limit-portability.py
 
+      # plugin.Rebind is the identity for MySQL now (cleat#2259): the $N -> ?
+      # rewrite happens only inside plugin.RebindArgs. A caller that hands
+      # Rebind's output straight to a raw *sql.DB/*sql.Tx/*sql.Conn sends
+      # literal "$1" text to MySQL -- a syntax error, silent until someone
+      # runs it against MySQL. 19 files needed the fix, 8 of them found only
+      # by re-deriving every call site by receiver type: the first pass
+      # matched "DialectMySQL" appearing near plugin.Rebind( and missed every
+      # site built from a `dialect` loop variable instead. --self-test first,
+      # with exactly that shape as the known-positive, so this guard cannot
+      # repeat the mistake it exists to prevent.
+      - name: No raw plugin.Rebind guard
+        run: |
+          scripts/check-no-raw-rebind.py --self-test
+          scripts/check-no-raw-rebind.py
+
       # Three workstreams append sections to IMPROVEMENT-PLAN.md at once, each
       # picking the next free number against a develop that has already moved.
       # The collision exists only in the merge, and a duplicate heading renders

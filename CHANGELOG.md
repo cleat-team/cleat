@@ -420,6 +420,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MaxBodyFromConfig` against its own `max_blob_size` setting (default 10 MiB);
   `slacknotify`'s `POST /slack/interactive` uses `MaxBody` against its fixed 1 MiB callback size.
 
+- **`plugin.Rebind` no longer rewrites `$N` placeholders to `?` for MySQL. A caller that pairs
+  `Rebind`'s output with a raw `*sql.DB`/`*sql.Tx`/`*sql.Conn` (bypassing `plugin.PluginDB`) must
+  switch to `plugin.RebindArgs`.** (cleat#2259)
+
+  MySQL's `?` placeholder binds by **text occurrence order**, not by the `$N` number that was in
+  the source before rewriting — any statement whose `$N` tokens are not already written in
+  ascending order silently mis-bound its arguments on MySQL, and `Rebind` had no way to reorder
+  them (it returns one string, not a reordered argument list). `Rebind` is now the identity for
+  MySQL; the real `$N` → `?` rewrite, together with the argument reorder MySQL's positional
+  binding needs, happens only inside the new `plugin.RebindArgs(query, dialect, args) (string,
+  []any, error)`.
+
+  **Who is affected:** nobody using `plugin.PluginDB`/`plugin.PluginTx` (`p.db.Exec`,
+  `p.db.QueryRow`, and their transactional equivalents) — those already call `RebindArgs`
+  internally, so an existing `Rebind()` call at one of those ~150 sites is now a redundant no-op
+  for MySQL rather than a rewrite, and does not need to be removed. Only a plugin (in this repo
+  or out of tree) that hands `Rebind`'s output straight to a raw driver handle is affected; it
+  must call `RebindArgs` directly and use the reordered argument list it returns, not the
+  original one.
+
+  `RebindArgs` also fails closed on two shapes no permutation of arguments can make correct: a
+  query mixing a literal `?` with `$N` placeholders, and an argument no `$N` in the query
+  references.
+
 ### Added
 
 - **`/livez`, `/readyz`, database-reachability metrics and alert rules: a database incident now looks different from a worker incident.** (cleat#2007)

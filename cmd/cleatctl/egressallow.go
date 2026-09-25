@@ -157,14 +157,20 @@ var (
 	}
 )
 
-// egressStmt resolves the arm for this dialect and rebinds placeholders.
-// Rebind is idempotent, so the already-? MySQL arm passes through unchanged.
-func egressStmt(q plugin.Query, d dialect) string {
-	return plugin.Rebind(q.For(d.query), d.query)
+// egressStmt resolves the arm for this dialect and rebinds placeholders and
+// args together. The MySQL arm is already hand-written with ? in ascending
+// argument order, so RebindArgs finds no $N to reorder and passes both
+// through unchanged -- the same no-op Rebind alone used to be for it.
+func egressStmt(q plugin.Query, d dialect, args ...any) (string, []any, error) {
+	return plugin.RebindArgs(q.For(d.query), d.query, args)
 }
 
 func egressList(ctx context.Context, db *sql.DB, d dialect, tenant string) ([]string, error) {
-	rows, err := db.QueryContext(ctx, egressStmt(egressListSQL, d), tenant)
+	stmt, stmtArgs, err := egressStmt(egressListSQL, d, tenant)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, stmt, stmtArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -188,12 +194,20 @@ func egressAdd(ctx context.Context, db *sql.DB, d dialect, tenant, host string) 
 	if _, err := egressRemove(ctx, db, d, tenant, host); err != nil {
 		return err
 	}
-	_, err := db.ExecContext(ctx, egressStmt(egressInsertSQL, d), tenant, host)
+	stmt, stmtArgs, err := egressStmt(egressInsertSQL, d, tenant, host)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, stmt, stmtArgs...)
 	return err
 }
 
 func egressRemove(ctx context.Context, db *sql.DB, d dialect, tenant, host string) (int64, error) {
-	res, err := db.ExecContext(ctx, egressStmt(egressDeleteSQL, d), tenant, host)
+	stmt, stmtArgs, err := egressStmt(egressDeleteSQL, d, tenant, host)
+	if err != nil {
+		return 0, err
+	}
+	res, err := db.ExecContext(ctx, stmt, stmtArgs...)
 	if err != nil {
 		return 0, err
 	}

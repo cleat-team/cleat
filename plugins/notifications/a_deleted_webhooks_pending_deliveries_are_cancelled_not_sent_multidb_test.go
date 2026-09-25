@@ -18,6 +18,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent is cleat#2220's own
@@ -103,16 +104,16 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 			pendingID := uuid.New()
 			retryingID := uuid.New()
 			past := time.Now().Add(-1 * time.Hour)
-			if _, err := p.db.Exec(tenantCtx, plugin.Rebind(`
+			if _, err := p.db.Exec(tenantCtx, `
 				INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, created_at)
 				VALUES ($1, $2, 'test.event', '{}', 'pending', 0, $3, $4)
-			`, dialect), pendingID, webhookID, past, past); err != nil {
+			`, pendingID, webhookID, past, past); err != nil {
 				t.Fatalf("seed pending delivery: %v", err)
 			}
-			if _, err := p.db.Exec(tenantCtx, plugin.Rebind(`
+			if _, err := p.db.Exec(tenantCtx, `
 				INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, created_at)
 				VALUES ($1, $2, 'test.event', '{}', 'retrying', 1, $3, $4)
-			`, dialect), retryingID, webhookID, past, past); err != nil {
+			`, retryingID, webhookID, past, past); err != nil {
 				t.Fatalf("seed retrying delivery: %v", err)
 			}
 
@@ -128,8 +129,8 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 			// assertion below would pass for the wrong reason.
 			var statusBefore [2]string
 			for i, id := range []uuid.UUID{pendingID, retryingID} {
-				if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-					`SELECT status FROM webhook_delivery WHERE id = $1`, dialect), id).Scan(&statusBefore[i]); err != nil {
+				if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+					`SELECT status FROM webhook_delivery WHERE id = $1`, id).Scan(&statusBefore[i]); err != nil {
 					t.Fatalf("PRECONDITION: read delivery %s before delete: %v", id, err)
 				}
 			}
@@ -138,8 +139,8 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 			}
 			var enabledBefore bool
 			var deletedAtBefore any
-			if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT enabled, deleted_at FROM webhook_config WHERE id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+				`SELECT enabled, deleted_at FROM webhook_config WHERE id = $1`,
 				webhookID).Scan(&enabledBefore, &deletedAtBefore); err != nil {
 				t.Fatalf("PRECONDITION: read webhook_config before delete: %v", err)
 			}
@@ -160,8 +161,8 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 			// ---- the soft-delete itself, checked directly ----
 			var enabledAfter bool
 			var deletedAtAfter any
-			if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT enabled, deleted_at FROM webhook_config WHERE id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+				`SELECT enabled, deleted_at FROM webhook_config WHERE id = $1`,
 				webhookID).Scan(&enabledAfter, &deletedAtAfter); err != nil {
 				t.Fatalf("read webhook_config after delete: %v", err)
 			}
@@ -175,8 +176,8 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 			// ---- both deliveries cancelled, in the SAME transaction ----
 			for i, id := range []uuid.UUID{pendingID, retryingID} {
 				var status string
-				if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-					`SELECT status FROM webhook_delivery WHERE id = $1`, dialect), id).Scan(&status); err != nil {
+				if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+					`SELECT status FROM webhook_delivery WHERE id = $1`, id).Scan(&status); err != nil {
 					t.Fatalf("read delivery %s after delete: %v", id, err)
 				}
 				if status != "cancelled" {
@@ -250,10 +251,10 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 			// entirely, to exercise queryDueDeliveries' own independent
 			// deleted_at guard rather than merely re-observing the cancellation.)
 			orphanID := uuid.New()
-			if _, err := p.db.Exec(tenantCtx, plugin.Rebind(`
+			if _, err := p.db.Exec(tenantCtx, `
 				INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, created_at)
 				VALUES ($1, $2, 'test.event', '{}', 'pending', 0, $3, $4)
-			`, dialect), orphanID, webhookID, past, past); err != nil {
+			`, orphanID, webhookID, past, past); err != nil {
 				t.Fatalf("seed post-delete pending delivery: %v", err)
 			}
 			// AcrossAllTenants, the same marking Run() applies before calling
@@ -285,8 +286,8 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 			var orphanStatus string
 			var orphanAttempts int
 			var orphanLastAttempt any
-			if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT status, attempt_count, last_attempt_at FROM webhook_delivery WHERE id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+				`SELECT status, attempt_count, last_attempt_at FROM webhook_delivery WHERE id = $1`,
 				orphanID).Scan(&orphanStatus, &orphanAttempts, &orphanLastAttempt); err != nil {
 				t.Fatalf("read orphan delivery after sweep: %v", err)
 			}

@@ -41,6 +41,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
@@ -121,18 +122,18 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 
 			defer func() {
 				bg := context.Background()
-				if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
-					`DELETE FROM workflow_blob_refs WHERE workflow_id IN ($1, $2)`, dialect),
+				if _, err := plugintest.ExecRebound(t, bg, fixtureDB, dialect,
+					`DELETE FROM workflow_blob_refs WHERE workflow_id IN ($1, $2)`,
 					liveRunID, doneRunID); err != nil {
 					t.Errorf("cleanup workflow_blob_refs on %s: %v", be.Name, err)
 				}
-				if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
-					`DELETE FROM workflow_instances WHERE id IN ($1, $2)`, dialect),
+				if _, err := plugintest.ExecRebound(t, bg, fixtureDB, dialect,
+					`DELETE FROM workflow_instances WHERE id IN ($1, $2)`,
 					liveRunID, doneRunID); err != nil {
 					t.Errorf("cleanup workflow_instances on %s: %v", be.Name, err)
 				}
-				if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
-					`DELETE FROM workflow_defs WHERE name = $1`, dialect), defName); err != nil {
+				if _, err := plugintest.ExecRebound(t, bg, fixtureDB, dialect,
+					`DELETE FROM workflow_defs WHERE name = $1`, defName); err != nil {
 					t.Errorf("cleanup workflow_defs on %s: %v", be.Name, err)
 				}
 				// A no-op on MySQL: nothing was inserted into tenants there,
@@ -153,30 +154,30 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 			// workflow_instances_def_fkey / fk_instances_def is a composite
 			// (tenant_id, def_name, def_version) FK since migration 035/038
 			// (workflow_defs_tenant_in_key).
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO workflow_defs (name, version, wasm_bytes, tenant_id) VALUES ($1, $2, $3, $4)`,
-				dialect), defName, 1, []byte{0}, tenant); err != nil {
+				defName, 1, []byte{0}, tenant); err != nil {
 				t.Fatalf("insert workflow_defs on %s: %v", be.Name, err)
 			}
 
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status) VALUES ($1, $2, $3, $4, 'running')`,
-				dialect), liveRunID, defName, 1, tenant); err != nil {
+				liveRunID, defName, 1, tenant); err != nil {
 				t.Fatalf("insert live workflow_instances on %s: %v", be.Name, err)
 			}
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status) VALUES ($1, $2, $3, $4, 'done')`,
-				dialect), doneRunID, defName, 1, tenant); err != nil {
+				doneRunID, defName, 1, tenant); err != nil {
 				t.Fatalf("insert done workflow_instances on %s: %v", be.Name, err)
 			}
 
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
-				`INSERT INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`, dialect),
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+				`INSERT INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`,
 				liveRunID, shaLive); err != nil {
 				t.Fatalf("insert live workflow_blob_refs on %s: %v", be.Name, err)
 			}
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
-				`INSERT INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`, dialect),
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+				`INSERT INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`,
 				doneRunID, shaDone); err != nil {
 				t.Fatalf("insert done workflow_blob_refs on %s: %v", be.Name, err)
 			}
@@ -191,8 +192,8 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 			}
 
 			var liveCount, doneCount int
-			if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT COUNT(*) FROM workflow_blob_refs WHERE workflow_id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
+				`SELECT COUNT(*) FROM workflow_blob_refs WHERE workflow_id = $1`,
 				liveRunID).Scan(&liveCount); err != nil {
 				t.Fatalf("count live ref on %s: %v", be.Name, err)
 			}
@@ -201,8 +202,8 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 					"cleanupExpired deleted the reference of a workflow that is "+
 					"still running (cleat#2125)", be.Name, liveCount)
 			}
-			if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT COUNT(*) FROM workflow_blob_refs WHERE workflow_id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
+				`SELECT COUNT(*) FROM workflow_blob_refs WHERE workflow_id = $1`,
 				doneRunID).Scan(&doneCount); err != nil {
 				t.Fatalf("count done ref on %s: %v", be.Name, err)
 			}

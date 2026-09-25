@@ -18,6 +18,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestASendWebhookRacingAnOpenDeleteTransactionIsBlocked pins
@@ -172,10 +173,10 @@ func runSendWebhookRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 	// SESSION_CONTEXT is BLOCKED outright on SQL Server (migration 103's
 	// BLOCK predicates).
 	seedCtx := plugin.ForTenant(ctx, tenantID)
-	if _, err := p.db.Exec(seedCtx, plugin.Rebind(`
+	if _, err := p.db.Exec(seedCtx, `
 			INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, true, $6, $7)
-		`, dialect), tenantID, webhookID, "https://example.com/race", true, `["test.event"]`, now, now); err != nil {
+		`, tenantID, webhookID, "https://example.com/race", true, `["test.event"]`, now, now); err != nil {
 		t.Fatalf("seed webhook_config: %v", err)
 	}
 
@@ -192,11 +193,11 @@ func runSendWebhookRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 	if err != nil {
 		t.Fatalf("begin delete tx: %v", err)
 	}
-	if _, err := deleteTx.Exec(seedCtx, plugin.Rebind(`
+	if _, err := deleteTx.Exec(seedCtx, `
 			UPDATE webhook_config
 			SET enabled = false, deleted_at = now()
 			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-		`, dialect), webhookID, tenantID); err != nil {
+		`, webhookID, tenantID); err != nil {
 		t.Fatalf("apply soft-delete inside open tx: %v", err)
 	}
 
@@ -243,8 +244,8 @@ func runSendWebhookRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 	}
 
 	var deliveryCount int
-	if err := db.QueryRowContext(ctx, plugin.Rebind(
-		`SELECT count(*) FROM webhook_delivery WHERE webhook_id = $1`, dialect),
+	if err := plugintest.QueryRowRebound(t, ctx, db, dialect,
+		`SELECT count(*) FROM webhook_delivery WHERE webhook_id = $1`,
 		webhookID).Scan(&deliveryCount); err != nil {
 		t.Fatalf("count webhook_delivery: %v", err)
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestSchedulerClaimsADueSchedule_MultiBackend asserts that a schedule whose
@@ -72,8 +73,8 @@ func TestSchedulerClaimsADueSchedule_MultiBackend(t *testing.T) {
 			// 2026-09-10: one run of these tests left 5 rows in task_queue and
 			// 2 in schedules (cleat#1148).
 			defer func() {
-				if _, err := fixtureDB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM schedules WHERE tenant_id = $1`, dialect), tenant); err != nil {
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM schedules WHERE tenant_id = $1`, tenant); err != nil {
 					t.Errorf("cleanup schedules on %s: %v", be.Name, err)
 				}
 			}()
@@ -83,11 +84,11 @@ func TestSchedulerClaimsADueSchedule_MultiBackend(t *testing.T) {
 			// exists to detect.
 			due := time.Now().UTC().Add(-time.Hour)
 			id := uuid.New()
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(`
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect, `
 				INSERT INTO schedules
 					(tenant_id, id, name, cron, workflow_name, input, enabled, next_run_at, created_at, updated_at)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			`, dialect),
+			`,
 				tenant, id, "a-schedule-that-is-due", "* * * * *", "some-workflow",
 				[]byte(`{}`), true, due, due, due); err != nil {
 				t.Fatalf("insert a due schedule on %s: %v", be.Name, err)
@@ -122,8 +123,8 @@ func TestSchedulerClaimsADueSchedule_MultiBackend(t *testing.T) {
 			// update to be attempted and the update must run for the stored
 			// value to move.
 			var after time.Time
-			if err := fixtureDB.QueryRowContext(ctx,
-				plugin.Rebind(`SELECT next_run_at FROM schedules WHERE id = $1`, dialect), id,
+			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
+				`SELECT next_run_at FROM schedules WHERE id = $1`, id,
 			).Scan(&after); err != nil {
 				t.Fatalf("re-read the schedule on %s: %v", be.Name, err)
 			}
@@ -184,8 +185,8 @@ func TestSchedulerAPIWritesAScheduleOnEveryBackend_MultiBackend(t *testing.T) {
 			// 2026-09-10: one run of these tests left 5 rows in task_queue and
 			// 2 in schedules (cleat#1148).
 			defer func() {
-				if _, err := fixtureDB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM schedules WHERE tenant_id = $1`, dialect), tenant); err != nil {
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM schedules WHERE tenant_id = $1`, tenant); err != nil {
 					t.Errorf("cleanup schedules on %s: %v", be.Name, err)
 				}
 				if t.Failed() && logbuf.Len() > 0 {
@@ -230,8 +231,8 @@ func TestSchedulerAPIWritesAScheduleOnEveryBackend_MultiBackend(t *testing.T) {
 			// A 200 from a handler that logs its errors is not evidence the row
 			// changed -- read it back.
 			var name string
-			if err := fixtureDB.QueryRowContext(ctx,
-				plugin.Rebind(`SELECT name FROM schedules WHERE id = $1`, dialect), created.ID,
+			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
+				`SELECT name FROM schedules WHERE id = $1`, created.ID,
 			).Scan(&name); err != nil {
 				t.Fatalf("re-read the created schedule on %s: %v", be.Name, err)
 			}

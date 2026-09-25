@@ -12,6 +12,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestMarkFunctionsDoNotResurrectACancelledDelivery is cleat#2233's own
@@ -55,10 +56,10 @@ func TestMarkFunctionsDoNotResurrectACancelledDelivery(t *testing.T) {
 			now := time.Now()
 
 			webhookID := uuid.New()
-			if _, err := p.db.Exec(seedCtx, plugin.Rebind(`
+			if _, err := p.db.Exec(seedCtx, `
 					INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
 					VALUES ($1, $2, $3, $4, $5, true, $6, $7)
-				`, dialect), tenantID, webhookID, "https://example.com/mark", true, `["test.event"]`, now, now); err != nil {
+				`, tenantID, webhookID, "https://example.com/mark", true, `["test.event"]`, now, now); err != nil {
 				t.Fatalf("seed webhook_config: %v", err)
 			}
 
@@ -79,10 +80,10 @@ func TestMarkFunctionsDoNotResurrectACancelledDelivery(t *testing.T) {
 				// need a repeated arg at that textual position too, and
 				// this passes each arg once. See CLAUDE.md's "MySQL binds
 				// `?` by APPEARANCE".
-				if _, err := p.db.Exec(ctx, plugin.Rebind(`
+				if _, err := p.db.Exec(ctx, `
 						INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, response_body, created_at)
 						VALUES ($1, $2, 'test.event', '{}', 'cancelled', $3, $4, $5, $6)
-					`, dialect), id, webhookID, attemptCount, now, "cancelled-before-"+name, now); err != nil {
+					`, id, webhookID, attemptCount, now, "cancelled-before-"+name, now); err != nil {
 					t.Fatalf("seed cancelled delivery for %s: %v", name, err)
 				}
 				return id
@@ -92,8 +93,8 @@ func TestMarkFunctionsDoNotResurrectACancelledDelivery(t *testing.T) {
 				t.Helper()
 				var status, responseBody string
 				var attemptCount int
-				if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-					`SELECT status, attempt_count, response_body FROM webhook_delivery WHERE id = $1`, dialect),
+				if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+					`SELECT status, attempt_count, response_body FROM webhook_delivery WHERE id = $1`,
 					id).Scan(&status, &attemptCount, &responseBody); err != nil {
 					t.Fatalf("read delivery after %s: %v", name, err)
 				}

@@ -85,6 +85,8 @@ plugins/blobstore/backend.go	func deploymentSecretsCredentialsProvider.IsExpired
 plugins/blobstore/backend.go	func deploymentSecretsCredentialsProvider.Retrieve
 plugins/plugintest/arms.go	func RunEveryArm
 plugins/plugintest/migrations.go	func AssertMigrationsDoSomething
+plugins/plugintest/rebound.go	func ExecRebound
+plugins/plugintest/rebound.go	func QueryRowRebound
 plugins/plugintest/secrets.go	func FakeSecrets.Seed
 plugins/plugintest/secrets.go	func NewFakeSecrets
 wasm/adapter_metadata.go	func AdapterFieldNames

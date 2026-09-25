@@ -103,8 +103,16 @@ func TestRebindStillRewritesOutsideQuotedRegions(t *testing.T) {
 			t.Errorf("in:   %s\n got:  %s\n want: %s", c.in, got, c.want)
 		}
 	}
-	if got := plugin.Rebind(`SELECT * FROM t WHERE id = $1`, plugin.DialectMySQL); got != `SELECT * FROM t WHERE id = ?` {
-		t.Errorf("mysql placeholder: got %s", got)
+	// MySQL's $N -> ? rewrite happens only inside RebindArgs now, alongside
+	// the arg reorder it requires (cleat#2259) -- Rebind alone is the
+	// identity for MySQL, asserted here rather than assumed so a
+	// regression back to rewriting $N without reordering args is caught
+	// where it would be silent otherwise.
+	if got := plugin.Rebind(`SELECT * FROM t WHERE id = $1`, plugin.DialectMySQL); got != `SELECT * FROM t WHERE id = $1` {
+		t.Errorf("mysql: Rebind must be the identity, use RebindArgs for the real rewrite: got %s", got)
+	}
+	if got, args, err := plugin.RebindArgs(`SELECT * FROM t WHERE id = $1`, plugin.DialectMySQL, []any{"id-val"}); err != nil || got != `SELECT * FROM t WHERE id = ?` || len(args) != 1 || args[0] != "id-val" {
+		t.Errorf("mysql placeholder via RebindArgs: got %s, args %#v, err %v", got, args, err)
 	}
 	// MySQL documents TRUE/FALSE as aliases for 1/0, so it needs no boolean
 	// rewrite -- and must not get one, since rewriting is not free of risk.

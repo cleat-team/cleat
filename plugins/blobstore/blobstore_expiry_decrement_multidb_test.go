@@ -34,6 +34,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
@@ -108,13 +109,13 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 			// reason that had nothing to do with the mutation.
 			defer func() {
 				bg := context.Background()
-				if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
-					`DELETE FROM blob_index WHERE tenant_id = $1`, dialect), tenant); err != nil {
+				if _, err := plugintest.ExecRebound(t, bg, fixtureDB, dialect,
+					`DELETE FROM blob_index WHERE tenant_id = $1`, tenant); err != nil {
 					t.Errorf("cleanup blob_index on %s: %v", be.Name, err)
 				}
 				for _, sha := range [][]byte{shaLive, shaOrphan, shaUntouch} {
-					if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
-						`DELETE FROM blob_content WHERE sha256 = $1`, dialect), sha); err != nil {
+					if _, err := plugintest.ExecRebound(t, bg, fixtureDB, dialect,
+						`DELETE FROM blob_content WHERE sha256 = $1`, sha); err != nil {
 						t.Errorf("cleanup blob_content on %s: %v", be.Name, err)
 					}
 				}
@@ -124,9 +125,9 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 				sha []byte
 				ref int
 			}{{shaLive, 3}, {shaOrphan, 1}, {shaUntouch, 2}} {
-				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 					`INSERT INTO blob_content (sha256, size, data, ref_count, storage_backend)
-					 VALUES ($1, 0, $2, $3, 'memory')`, dialect),
+					 VALUES ($1, 0, $2, $3, 'memory')`,
 					c.sha, []byte{}, c.ref); err != nil {
 					t.Fatalf("seed blob_content on %s: %v", be.Name, err)
 				}
@@ -146,9 +147,9 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 				{"untouched-a", shaUntouch, nil, nil},
 				{"untouched-b", shaUntouch, nil, nil},
 			} {
-				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 					`INSERT INTO blob_index (`+quotedKeyColumn(dialect)+`, tenant_id, sha256, size, expires_at, deleted_at)
-					 VALUES ($1, $2, $3, 0, $4, $5)`, dialect),
+					 VALUES ($1, $2, $3, 0, $4, $5)`,
 					ix.key, tenant, ix.sha, ix.expiresAt, ix.deletedAt); err != nil {
 					t.Fatalf("seed blob_index %q on %s: %v", ix.key, be.Name, err)
 				}
@@ -172,8 +173,8 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 				{"a content with nothing expiring", shaUntouch, 2, false},
 			} {
 				var ref int
-				err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
-					`SELECT ref_count FROM blob_content WHERE sha256 = $1`, dialect), want.sha).Scan(&ref)
+				err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
+					`SELECT ref_count FROM blob_content WHERE sha256 = $1`, want.sha).Scan(&ref)
 				switch {
 				case want.gone && err == nil:
 					t.Errorf("on %s, %s still has ref_count %d.\n\n"+
@@ -196,8 +197,8 @@ func TestExpiredIndexEntriesDecrementRefCount_MultiBackend(t *testing.T) {
 			}
 
 			var remaining int
-			if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT COUNT(*) FROM blob_index WHERE tenant_id = $1`, dialect), tenant).Scan(&remaining); err != nil {
+			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
+				`SELECT COUNT(*) FROM blob_index WHERE tenant_id = $1`, tenant).Scan(&remaining); err != nil {
 				t.Fatalf("count blob_index on %s: %v", be.Name, err)
 			}
 			if remaining != 3 {

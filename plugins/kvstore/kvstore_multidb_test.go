@@ -61,7 +61,7 @@ func TestKVStoreBehavioral_MultiBackend(t *testing.T) {
 			// Initialise the plugin with the real database connection.
 			//
 			// p.dialect is load-bearing and was previously left unset. The
-			// plugin builds its SQL with plugin.Rebind(query, p.dialect), and
+			// plugin builds its SQL with query, and
 			// Rebind passes a query through unchanged for a dialect it does
 			// not recognise -- so with the zero value the plugin sent
 			// PostgreSQL $1 placeholders to MySQL and SQL Server. Every
@@ -134,7 +134,7 @@ func cleanupKVStore(t *testing.T, p *Plugin) {
 	// would have RAISED here, which is why this was only ever wrong on SQL
 	// Server.
 	_, err := p.db.Exec(plugin.ForTenant(context.Background(), testTenantID),
-		plugin.Rebind(`DELETE FROM kv_store WHERE tenant_id = $1`, p.dialect), testTenantID)
+		`DELETE FROM kv_store WHERE tenant_id = $1`, testTenantID)
 	if err != nil {
 		// Not a log: every scenario below counts rows, so a cleanup that did
 		// not happen silently invalidates the assertions that follow it.

@@ -240,9 +240,13 @@ func quotaConnFor(ctx context.Context, db *sql.DB, d dialect, tenantID string) (
 }
 
 func readQuota(ctx context.Context, exec quotaExecer, d dialect, tenantID, resource string) (quotaRow, error) {
-	row := exec.QueryRowContext(ctx, d.rebind(quotaReadSQL), tenantID, resource)
+	stmt, stmtArgs, err := d.rebindArgs(quotaReadSQL, tenantID, resource)
+	if err != nil {
+		return quotaRow{}, fmt.Errorf("reading quota for tenant %s resource %s: %w", tenantID, resource, err)
+	}
+	row := exec.QueryRowContext(ctx, stmt, stmtArgs...)
 	var q quotaRow
-	err := row.Scan(&q.limitCount, &q.windowSeconds, &q.enforce, &q.updatedAt)
+	err = row.Scan(&q.limitCount, &q.windowSeconds, &q.enforce, &q.updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return quotaRow{}, nil
 	}
@@ -271,8 +275,11 @@ func readQuota(ctx context.Context, exec quotaExecer, d dialect, tenantID, resou
 func writeQuota(ctx context.Context, exec quotaExecer, d dialect, tenantID, resource string, current quotaRow, next quotaRow) error {
 	now := time.Now().UTC()
 	if !current.existed {
-		_, err := exec.ExecContext(ctx, d.rebind(quotaInsertSQL), tenantID, resource, next.limitCount, next.windowSeconds, next.enforce, now, now)
+		stmt, stmtArgs, err := d.rebindArgs(quotaInsertSQL, tenantID, resource, next.limitCount, next.windowSeconds, next.enforce, now, now)
 		if err != nil {
+			return fmt.Errorf("writing quota: %w", err)
+		}
+		if _, err := exec.ExecContext(ctx, stmt, stmtArgs...); err != nil {
 			if isQuotaDuplicateKey(err) {
 				return ErrQuotaConflict
 			}
@@ -281,7 +288,11 @@ func writeQuota(ctx context.Context, exec quotaExecer, d dialect, tenantID, reso
 		return nil
 	}
 
-	res, err := exec.ExecContext(ctx, d.rebind(quotaUpdateSQL), next.limitCount, next.windowSeconds, next.enforce, now, tenantID, resource, current.updatedAt)
+	stmt, stmtArgs, err := d.rebindArgs(quotaUpdateSQL, next.limitCount, next.windowSeconds, next.enforce, now, tenantID, resource, current.updatedAt)
+	if err != nil {
+		return fmt.Errorf("writing quota: %w", err)
+	}
+	res, err := exec.ExecContext(ctx, stmt, stmtArgs...)
 	if err != nil {
 		return fmt.Errorf("writing quota: %w", err)
 	}
@@ -541,9 +552,18 @@ func runListQuota(ctx context.Context, db *sql.DB, d dialect, args []string) {
 			return
 		}
 		defer closeExec()
-		rows, err = exec.QueryContext(ctx, d.rebind(quotaListTenantSQL), tenantID)
+		var stmt string
+		var stmtArgs []any
+		stmt, stmtArgs, err = d.rebindArgs(quotaListTenantSQL, tenantID)
+		if err == nil {
+			rows, err = exec.QueryContext(ctx, stmt, stmtArgs...)
+		}
 	} else {
-		rows, err = db.QueryContext(ctx, d.rebind(quotaListAllSQL))
+		var stmt string
+		stmt, _, err = d.rebindArgs(quotaListAllSQL)
+		if err == nil {
+			rows, err = db.QueryContext(ctx, stmt)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "listing quotas: %v\n", err)

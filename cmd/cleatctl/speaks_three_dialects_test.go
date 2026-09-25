@@ -222,8 +222,12 @@ func TestEveryDialectArmBindsItsOwnPlaceholders(t *testing.T) {
 //
 // The statements here are written in the PostgreSQL $N form and rewritten at
 // the call site. This asserts the rewrite reaches all three forms, so that a
-// statement routed through d.rebind is genuinely portable rather than portable
-// only where $N happens to be accepted.
+// statement routed through d.rebindArgs is genuinely portable rather than
+// portable only where $N happens to be accepted.
+//
+// Drives rebindArgs, not rebind: MySQL's $N -> ? rewrite only happens
+// alongside the arg reorder now (cleat#2259), so a bare rebind call would
+// see $1 unchanged here and this test would wrongly report MySQL broken.
 func TestRebindRewritesEveryPlaceholderInThisPackage(t *testing.T) {
 	const q = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2"
 	for _, tc := range []struct {
@@ -236,12 +240,15 @@ func TestRebindRewritesEveryPlaceholderInThisPackage(t *testing.T) {
 		{dialectMySQL, "?", "$1", "mysql takes positional ?"},
 		{dialectMSSQL, "@p1", "$1", "sqlserver takes @pN"},
 	} {
-		got := tc.d.rebind(q)
+		got, _, err := tc.d.rebindArgs(q, "schema-val", "table-val")
+		if err != nil {
+			t.Fatalf("%s: rebindArgs: %v", tc.d.name, err)
+		}
 		if !strings.Contains(got, tc.want) {
-			t.Errorf("%s: rebind produced %q, expected it to contain %q (%s)", tc.d.name, got, tc.want, tc.comment)
+			t.Errorf("%s: rebindArgs produced %q, expected it to contain %q (%s)", tc.d.name, got, tc.want, tc.comment)
 		}
 		if tc.absent != "" && strings.Contains(got, tc.absent) {
-			t.Errorf("%s: rebind left %q in %q", tc.d.name, tc.absent, got)
+			t.Errorf("%s: rebindArgs left %q in %q", tc.d.name, tc.absent, got)
 		}
 	}
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 func TestPollPendingDispatchesOnEveryDialect(t *testing.T) {
@@ -64,17 +65,17 @@ func TestPollPendingDispatchesOnEveryDialect(t *testing.T) {
 			tenant = seedTenant(t, fixtureDB, baseCtx, be.Dialect, dialect, tenant)
 
 			defer func() {
-				if _, err := fixtureDB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant); err != nil {
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM task_queue WHERE tenant_id = $1`, tenant); err != nil {
 					t.Errorf("cleanup task_queue on %s: %v", be.Name, err)
 				}
 				cleanupTenant(t, fixtureDB, be.Dialect, tenant)
 			}()
 
-			if _, err := fixtureDB.ExecContext(baseCtx, plugin.Rebind(`
+			if _, err := plugintest.ExecRebound(t, baseCtx, fixtureDB, dialect, `
 				INSERT INTO task_queue (tenant_id, queue_name, job_id, payload, status, def_name, input)
 				VALUES ($1, $2, $3, $4, 'pending', $5, $6)
-			`, dialect), tenant, "poll-test", job,
+			`, tenant, "poll-test", job,
 				plugin.JSONColumn{Raw: json.RawMessage(`{}`)}, defName,
 				plugin.JSONColumn{Raw: json.RawMessage(wantInput)}); err != nil {
 				t.Fatalf("insert pending job on %s: %v", be.Name, err)
@@ -145,9 +146,9 @@ func TestPollPendingDispatchesOnEveryDialect(t *testing.T) {
 			}
 
 			var status string
-			if err := fixtureDB.QueryRowContext(baseCtx, plugin.Rebind(
+			if err := plugintest.QueryRowRebound(t, baseCtx, fixtureDB, dialect,
 				`SELECT status FROM task_queue WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3`,
-				dialect), tenant, "poll-test", job).Scan(&status); err != nil {
+				tenant, "poll-test", job).Scan(&status); err != nil {
 				t.Fatalf("read back on %s: %v", be.Name, err)
 			}
 			if status != "dispatched" {
