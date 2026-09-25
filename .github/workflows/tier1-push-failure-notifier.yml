@@ -271,5 +271,27 @@ jobs:
 
       - name: Quiet on green
         if: steps.resolve.outputs.relevant == 'false'
+        # Values come through `env:`, never spliced into the script text via
+        # `${{ }}` -- this step runs for every non-matching Tier 1 Gate run,
+        # which includes every `pull_request` run, and cleat-team/cleat is
+        # public: HEAD_BRANCH on such a run is a fork PR's branch name,
+        # attacker-chosen, and `${{ steps.resolve.outputs.head_branch }}`
+        # spliced directly into `run:` would make it part of the shell
+        # script text itself rather than data -- a classic Actions script-
+        # injection hole (`git check-ref-format --branch` accepts branch
+        # names containing `$(...)`). `workflow_run` jobs execute in the
+        # base repo's context regardless of which fork triggered the
+        # upstream run, so this would run attacker-controlled shell on a
+        # trusted runner with this job's `actions:read`/`issues:write`
+        # token. Quoting `"$HEAD_BRANCH"` here is not enough on its own --
+        # the vulnerability is the YAML-level substitution happening BEFORE
+        # the shell ever parses the line, not the shell's own quoting -- so
+        # the value must never appear inside `${{ }}` in a `run:` block at
+        # all. Found in review before this workflow ever ran (cleat#2150).
+        env:
+          RUN_ID: ${{ steps.resolve.outputs.run_id }}
+          EVENT: ${{ steps.resolve.outputs.event }}
+          HEAD_BRANCH: ${{ steps.resolve.outputs.head_branch }}
+          CONCLUSION: ${{ steps.resolve.outputs.conclusion }}
         run: |
-          echo "run ${{ steps.resolve.outputs.run_id }}: event=${{ steps.resolve.outputs.event }} branch=${{ steps.resolve.outputs.head_branch }} conclusion=${{ steps.resolve.outputs.conclusion }} -- not a red develop push run, nothing to report"
+          echo "run $RUN_ID: event=$EVENT branch=$HEAD_BRANCH conclusion=$CONCLUSION -- not a red develop push run, nothing to report"
