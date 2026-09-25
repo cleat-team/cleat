@@ -39,11 +39,12 @@ type fakeSession struct {
 	CreatedAt    time.Time
 	ExpiresAt    driver.Value // nil or time.Time
 
-	// SessionTokenAtRest/AccessTokenAtRest/RefreshTokenAtRest hold exactly
-	// what finishLogin wrote for columns 1, 4 and 5 of the UPDATE -- base64
-	// of a plugintest.FakePayloads-sealed value from cleat#1992 onward, not
-	// plaintext. Captured so a test can assert the at-rest form differs from
-	// the plaintext the provider returned, the same way a real DB row would.
+	// SessionTokenAtRest/AccessTokenAtRest/RefreshTokenAtRest mirror the
+	// session_token/access_token/refresh_token columns finishLogin writes.
+	// As of cleat#2295/#2296 finishLogin always writes NULL to all three
+	// (nothing reads them back, and an earlier version that sealed them via
+	// plugin.Payloads broke every login on a deployment with no
+	// --encryption-key-file set) -- these stay nil after every real login.
 	SessionTokenAtRest driver.Value
 	AccessTokenAtRest  driver.Value
 	RefreshTokenAtRest driver.Value
@@ -397,11 +398,10 @@ func setupTestPlugin(t *testing.T, store *fakeDBStore) (*Plugin, http.Handler) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:       &engine.SQLDBAdapter{DB: db},
-		mux:      http.NewServeMux(),
-		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		secrets:  store.secrets,
-		payloads: plugintest.NewFakePayloads(),
+		db:      &engine.SQLDBAdapter{DB: db},
+		mux:     http.NewServeMux(),
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: store.secrets,
 	}
 
 	if err := p.RegisterRoutes(p.mux); err != nil {
@@ -908,8 +908,26 @@ func (c *fakeConn) execInsertSession(args []driver.NamedValue) (driver.Result, e
 	return &fakeResult{rowsAffected: 1}, nil
 }
 
+// execUpdateSession backs finishLogin's UPDATE. It supports two argument
+// shapes so a regression back to binding session_token/access_token/
+// refresh_token is actually VISIBLE to a test, rather than tripping an
+// unrelated id-parse error: the current shape (4 named args -- token_hash,
+// user_email, expires_at, id; session_token/access_token/refresh_token are
+// SQL-literal NULL, no bound argument) and the pre-cleat#2295 shape (7 named
+// args, with the three bound as parameters 1, 4 and 5). A literal NULL in
+// the query text binds no argument at all, so "4 args arrived" IS the
+// signal that production wrote NULL -- it is not merely inferred.
 func (c *fakeConn) execUpdateSession(args []driver.NamedValue) (driver.Result, error) {
-	idStr, err := argString(args, 7)
+	var idPos int
+	switch len(args) {
+	case 4:
+		idPos = 4
+	case 7:
+		idPos = 7
+	default:
+		return nil, fmt.Errorf("execUpdateSession: unexpected arg count %d", len(args))
+	}
+	idStr, err := argString(args, idPos)
 	if err != nil {
 		return nil, err
 	}
@@ -923,23 +941,43 @@ func (c *fakeConn) execUpdateSession(args []driver.NamedValue) (driver.Result, e
 		return &fakeResult{rowsAffected: 0}, nil
 	}
 
-	if sessionToken, err := argString(args, 1); err == nil {
-		s.SessionTokenAtRest = sessionToken
-	}
-	if tokenHash, err := argString(args, 2); err == nil {
-		s.TokenHash = tokenHash
-	}
-	if userEmail, err := argAny(args, 3); err == nil {
-		s.UserEmail = userEmail
-	}
-	if accessToken, err := argString(args, 4); err == nil {
-		s.AccessTokenAtRest = accessToken
-	}
-	if refreshToken, err := argString(args, 5); err == nil {
-		s.RefreshTokenAtRest = refreshToken
-	}
-	if expiresAt, err := argAny(args, 6); err == nil {
-		s.ExpiresAt = expiresAt
+	if idPos == 7 {
+		// The shape finishLogin used before cleat#2295/#2296: session_token,
+		// access_token and refresh_token are bound as real parameters, so
+		// whatever the caller passed lands at rest exactly like a real DB
+		// row would show it -- this is what lets a falsification of the fix
+		// actually be CAUGHT by the "at rest" assertions, not just error out.
+		if sessionToken, err := argString(args, 1); err == nil {
+			s.SessionTokenAtRest = sessionToken
+		}
+		if tokenHash, err := argString(args, 2); err == nil {
+			s.TokenHash = tokenHash
+		}
+		if userEmail, err := argAny(args, 3); err == nil {
+			s.UserEmail = userEmail
+		}
+		if accessToken, err := argString(args, 4); err == nil {
+			s.AccessTokenAtRest = accessToken
+		}
+		if refreshToken, err := argString(args, 5); err == nil {
+			s.RefreshTokenAtRest = refreshToken
+		}
+		if expiresAt, err := argAny(args, 6); err == nil {
+			s.ExpiresAt = expiresAt
+		}
+	} else {
+		if tokenHash, err := argString(args, 1); err == nil {
+			s.TokenHash = tokenHash
+		}
+		if userEmail, err := argAny(args, 2); err == nil {
+			s.UserEmail = userEmail
+		}
+		if expiresAt, err := argAny(args, 3); err == nil {
+			s.ExpiresAt = expiresAt
+		}
+		s.SessionTokenAtRest = nil
+		s.AccessTokenAtRest = nil
+		s.RefreshTokenAtRest = nil
 	}
 	s.State = nil
 	s.CodeVerifier = nil

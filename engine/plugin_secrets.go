@@ -134,7 +134,11 @@ func (s *pluginSecrets) Get(ctx context.Context, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return s.store.GetSecret(ctx, tid.String(), name)
+	value, err := s.store.GetSecret(ctx, tid.String(), name)
+	if errors.Is(err, ErrSecretNotFound) {
+		return "", plugin.ErrSecretNotFound
+	}
+	return value, err
 }
 
 func (s *pluginSecrets) Put(ctx context.Context, name, value string) error {
@@ -184,7 +188,11 @@ func (s *pluginTenantSecrets) Get(ctx context.Context, name string) (string, err
 	if err := checkNotCrossTenant(ctx, "Secrets.ForTenant"); err != nil {
 		return "", err
 	}
-	return s.store.GetSecret(s.ctx(ctx), s.tenantID.String(), name)
+	value, err := s.store.GetSecret(s.ctx(ctx), s.tenantID.String(), name)
+	if errors.Is(err, ErrSecretNotFound) {
+		return "", plugin.ErrSecretNotFound
+	}
+	return value, err
 }
 
 func (s *pluginTenantSecrets) Put(ctx context.Context, name, value string) error {

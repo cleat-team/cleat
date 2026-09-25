@@ -1,14 +1,12 @@
 package oauthprovider
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
 
@@ -102,12 +100,25 @@ func TestMissingClientSecretRefusesLogin(t *testing.T) {
 	}
 }
 
-// TestSessionAccessRefreshTokensAreSealedAtRest proves finishLogin's three
-// Payloads.Seal calls actually change what lands in the database, and that
-// the sealed form is tenant-bound -- not merely that Seal was CALLED (a
-// call that discarded the result and stored plaintext anyway would still
-// "call Seal"). cleat#1992.
-func TestSessionAccessRefreshTokensAreSealedAtRest(t *testing.T) {
+// TestSessionAccessRefreshTokensAreNotPersisted proves finishLogin stores
+// NONE of session_token/access_token/refresh_token -- not plaintext, not
+// sealed. cleat#2295/#2296.
+//
+// An earlier version of this change sealed the three via plugin.Payloads
+// (cleat#1992). cleat-review found that broke every login on a deployment
+// with no --encryption-key-file set, which was every deployment shipped so
+// far: a nil Payloads makes Seal fail closed, so finishLogin returned 500
+// after the caller had already completed the IdP round trip. Since nothing
+// reads these three back (session lookup is by token_hash, not
+// session_token; access_token/refresh_token have no read path at all), the
+// owner's fix was to stop storing them, not to fix the seal.
+//
+// setupTestPlugin no longer wires ANY plugin.Payloads into the Plugin under
+// test -- so if finishLogin (or anything else in this package) called
+// p.payloads again, every test in this file would nil-pointer-panic, not
+// just this one. That is the regression guard cleat-review asked for: a
+// real callback path exercised with no encryption key configured at all.
+func TestSessionAccessRefreshTokensAreNotPersisted(t *testing.T) {
 	store := newFakeDBStore()
 	p, handler := setupTestPlugin(t, store)
 
@@ -137,13 +148,13 @@ func TestSessionAccessRefreshTokensAreSealedAtRest(t *testing.T) {
 	store.mu.Lock()
 	store.sessions[sessionID] = &fakeSession{
 		ID: sessionID, TenantID: testTenantID, Provider: "google",
-		State: "seal-at-rest-state", CodeVerifier: "verifier",
+		State: "not-persisted-state", CodeVerifier: "verifier",
 		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
 	store.mu.Unlock()
 	store.AddOAuthConfig(testTenantID, "google", "cid", "cs", "http://localhost/cb", "", true)
 
-	req := httptest.NewRequest("GET", "/oauth/google/callback?code=x&state=seal-at-rest-state", nil)
+	req := httptest.NewRequest("GET", "/oauth/google/callback?code=x&state=not-persisted-state", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -155,6 +166,9 @@ func TestSessionAccessRefreshTokensAreSealedAtRest(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &callbackResp); err != nil {
 		t.Fatalf("decode callback response: %v", err)
 	}
+	if callbackResp.SessionToken == "" {
+		t.Fatal("callback response carries no session_token -- the caller has no way to authenticate")
+	}
 
 	store.mu.RLock()
 	s, ok := store.sessions[sessionID]
@@ -163,60 +177,19 @@ func TestSessionAccessRefreshTokensAreSealedAtRest(t *testing.T) {
 		t.Fatalf("session %s vanished after finishLogin", sessionID)
 	}
 
-	atRestAccess, ok := s.AccessTokenAtRest.(string)
-	if !ok {
-		t.Fatalf("AccessTokenAtRest = %#v, want a string", s.AccessTokenAtRest)
+	if s.AccessTokenAtRest != nil {
+		t.Errorf("access_token at rest = %#v, want nil -- it must not be stored in any form", s.AccessTokenAtRest)
 	}
-	atRestRefresh, ok := s.RefreshTokenAtRest.(string)
-	if !ok {
-		t.Fatalf("RefreshTokenAtRest = %#v, want a string", s.RefreshTokenAtRest)
+	if s.RefreshTokenAtRest != nil {
+		t.Errorf("refresh_token at rest = %#v, want nil -- it must not be stored in any form", s.RefreshTokenAtRest)
 	}
-	atRestSession, ok := s.SessionTokenAtRest.(string)
-	if !ok {
-		t.Fatalf("SessionTokenAtRest = %#v, want a string", s.SessionTokenAtRest)
+	if s.SessionTokenAtRest != nil {
+		t.Errorf("session_token at rest = %#v, want nil -- it must not be stored in any form", s.SessionTokenAtRest)
 	}
 
-	// The plaintext must not appear at rest, in any of the three columns --
-	// this is the known-negative half: a Seal call that silently no-ops
-	// (returns its input unchanged) would pass every other assertion in this
-	// test file but fail here.
-	if atRestAccess == plainAccessToken {
-		t.Error("access_token stored identical to the plaintext the provider returned -- not sealed")
-	}
-	if atRestRefresh == plainRefreshToken {
-		t.Error("refresh_token stored identical to the plaintext the provider returned -- not sealed")
-	}
-	if atRestSession == callbackResp.SessionToken {
-		t.Error("session_token stored identical to the plaintext returned to the caller -- not sealed")
-	}
-	if _, err := base64.StdEncoding.DecodeString(atRestAccess); err != nil {
-		t.Errorf("access_token at rest is not valid base64: %v", err)
-	}
-
-	// Opened under the SAME tenant, the sealed value must recover the exact
-	// plaintext (known-positive).
-	openCtx := plugin.ForTenant(t.Context(), testTenantID)
-	sealedAccess, err := base64.StdEncoding.DecodeString(atRestAccess)
-	if err != nil {
-		t.Fatalf("decode sealed access token: %v", err)
-	}
-	opened, err := p.payloads.Open(openCtx, sealedAccess)
-	if err != nil {
-		t.Fatalf("Open access token under its own tenant: %v", err)
-	}
-	if string(opened) != plainAccessToken {
-		t.Errorf("Open recovered %q, want %q", opened, plainAccessToken)
-	}
-
-	// Opened under a DIFFERENT tenant, it must refuse -- the same binding
-	// property engine.PayloadEncryption's real SealForPlugin/OpenForPlugin
-	// provide via AEAD, faked here via plugintest.FakePayloads' tenant
-	// prefix. A Seal that did not bind to the tenant at all (e.g. stored the
-	// plaintext with a fixed, tenant-independent transform) would let this
-	// succeed.
-	wrongTenant := uuid.MustParse("00000000-0000-0000-0000-0000000000ff")
-	wrongCtx := plugin.ForTenant(t.Context(), wrongTenant)
-	if _, err := p.payloads.Open(wrongCtx, sealedAccess); err == nil {
-		t.Error("Open succeeded under a different tenant than the value was sealed for")
+	// token_hash IS how a session is looked up (middleware/extractSession),
+	// so it must still be set even though session_token itself is not.
+	if _, ok := s.TokenHash.(string); !ok {
+		t.Errorf("token_hash = %#v, want a string -- session lookup depends on it", s.TokenHash)
 	}
 }

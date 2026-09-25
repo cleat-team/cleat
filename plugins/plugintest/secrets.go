@@ -58,11 +58,11 @@ func (s *FakeSecrets) setLocked(tenantID, name, value string) {
 
 func (s *FakeSecrets) getLocked(tenantID, name string) (string, error) {
 	if s.retired[tenantID][name] {
-		return "", fmt.Errorf("plugintest.FakeSecrets: %s/%s: %w", tenantID, name, ErrFakeSecretNotFound)
+		return "", fmt.Errorf("plugintest.FakeSecrets: %s/%s: %w", tenantID, name, plugin.ErrSecretNotFound)
 	}
 	v, ok := s.values[tenantID][name]
 	if !ok {
-		return "", fmt.Errorf("plugintest.FakeSecrets: %s/%s: %w", tenantID, name, ErrFakeSecretNotFound)
+		return "", fmt.Errorf("plugintest.FakeSecrets: %s/%s: %w", tenantID, name, plugin.ErrSecretNotFound)
 	}
 	return v, nil
 }
@@ -80,12 +80,6 @@ func (s *FakeSecrets) retireLocked(tenantID, name string) (int64, error) {
 	s.retired[tenantID][name] = true
 	return 1, nil
 }
-
-// ErrFakeSecretNotFound is FakeSecrets' analogue of engine.ErrSecretNotFound
-// -- a plugin cannot import engine (see plugin.Secrets' own doc comment), and
-// a test importing plugintest should not need to import engine just to
-// recognise this fake's not-found error.
-var ErrFakeSecretNotFound = fmt.Errorf("fake secret not found")
 
 // tenantIDFromContext resolves the same value production code does:
 // auth.WithTenantID / the real auth.Middleware and auth.TenantIDFromContext

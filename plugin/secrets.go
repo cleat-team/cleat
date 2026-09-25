@@ -1,6 +1,21 @@
 package plugin
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrSecretNotFound is returned by Secrets.Get (and TenantSecrets.Get, its
+// ForTenant equivalent) for a name the tenant has not set. engine.SecretStore
+// returns its own engine.ErrSecretNotFound for the same condition; plugin
+// code cannot import engine (see this file's own doc comment above), so
+// engine's adapter (engine/plugin_secrets.go) translates it to this sentinel
+// at the boundary. A caller distinguishes "no such secret" from "the lookup
+// failed" with errors.Is(err, plugin.ErrSecretNotFound), not string
+// matching or a bare err != nil (cleat#2295, cleat-review's item (4):
+// oauthprovider's getConfig previously could not make this distinction at
+// all and returned the same "oauth config not found" for both).
+var ErrSecretNotFound = errors.New("plugin: secret not found")
 
 // Secrets gives a plugin access to its own tenant's secrets (cleat#1992).
 // engine.SecretStore is the implementation; this interface exists so plugin
@@ -37,10 +52,10 @@ import "context"
 // review: an argument is visible at the call site that misuses it, a re-mark
 // is visible at whatever earlier call built the ctx being passed down.
 //
-// Get returns ErrSecretNotFound (via the underlying store) for a name this
-// tenant has not set. Put stores or replaces one secret; Retire disables one
-// without removing the row (see engine.SecretStore.RetireSecret's own doc
-// comment for why).
+// Get returns ErrSecretNotFound (this package's, translated from the
+// underlying store's own) for a name this tenant has not set. Put stores or
+// replaces one secret; Retire disables one without removing the row (see
+// engine.SecretStore.RetireSecret's own doc comment for why).
 type Secrets interface {
 	Get(ctx context.Context, name string) (string, error)
 	Put(ctx context.Context, name, value string) error

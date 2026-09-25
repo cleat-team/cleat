@@ -232,15 +232,14 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// column that needs to survive the DROP.
 			//
 			// oauth_sessions.session_token/access_token/refresh_token are
-			// NOT touched by this migration. They move to plugin.Payloads
-			// instead of plugin.Secrets (high-churn, one per session, minted
-			// on every login rather than operator-set), which seals VALUES
-			// rather than moving them to a different store -- so those
-			// columns keep their existing TEXT/NVARCHAR(MAX)/VARCHAR(255)
-			// types and hold base64(sealed) instead of plaintext from this
-			// version onward. See finishLogin's own comment in routes.go for
-			// the rotation caveat this implies for refresh_token
-			// specifically.
+			// NOT touched by this migration and their columns are unchanged.
+			// An earlier version of this change sealed them via
+			// plugin.Payloads; that broke every login on a deployment with
+			// no --encryption-key-file set (a nil Payloads fails closed),
+			// which was every deployment shipped so far (cleat-review,
+			// cleat#2295/#2296). Since nothing reads these three back, the
+			// fix is to stop storing them at all -- finishLogin (routes.go)
+			// writes NULL to all three on every login.
 			Version: 5,
 			Up: `
 				ALTER TABLE oauth_config DROP COLUMN IF EXISTS client_secret;

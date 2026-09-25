@@ -20,18 +20,31 @@ Provider configuration is per tenant, in `oauth_config`. For `oidc` the issuer
 URL is the new part; everything else is what you already supply for a named
 provider.
 
+The client secret does not live in `oauth_config` -- it is a tenant secret,
+sealed the same way every other per-tenant credential is (cleat#1992). Set it
+with `cleatctl`, then insert the rest of the row:
+
+```
+cleatctl set-secret 00000000-0000-0000-0000-000000000001 \
+  --name oauthprovider.client_secret.oidc
+# reads the value from stdin, or pass --from-file <path>
+```
+
 ```sql
-INSERT INTO oauth_config (tenant_id, provider, client_id, client_secret, redirect_url, issuer, enabled)
+INSERT INTO oauth_config (tenant_id, provider, client_id, redirect_url, issuer, enabled)
 VALUES (
   '00000000-0000-0000-0000-000000000001',
   'oidc',
   'cleat',
-  'the-client-secret',
   'https://cleat.example.com/oauth/oidc/callback',
   'https://idp.example.com/realms/acme',
   true
 );
 ```
+
+A row with no matching secret is not silently treated as unconfigured: login
+and callback both fail closed, with a message naming the `set-secret` command
+that fixes it.
 
 `issuer` is the **issuer URL**, not the discovery URL. cleat appends
 `/.well-known/openid-configuration` to it and reads `authorization_endpoint`,

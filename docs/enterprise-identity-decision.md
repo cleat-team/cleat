@@ -81,8 +81,10 @@ one.
 Small, because the difficult part already exists.
 
 **Already built:** `oauth_config` is per-tenant — `PRIMARY KEY (tenant_id, provider)` carrying
-`client_id`, `client_secret`, `redirect_url` and `domain`. In B2B that per-tenant credential model
-is the genuinely hard multi-tenant requirement. Sessions, revocation, the login and callback routes,
+`client_id`, `redirect_url` and `domain`; the client secret is a tenant secret, sealed via
+`plugin.Secrets` rather than a plaintext column on this table (cleat#1992, cleat#2295). In B2B that
+per-tenant credential model is the genuinely hard multi-tenant requirement. Sessions, revocation,
+the login and callback routes,
 and the middleware injecting `SessionInfo{TenantID, SessionID, UserEmail}` are all present. Okta is
 already effectively generic-per-tenant, its endpoints `%s`-templated against the tenant's own
 domain.
