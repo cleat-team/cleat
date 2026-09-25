@@ -399,6 +399,18 @@ func (p *Plugin) markBackupFailed(ctx context.Context, historyID uuid.UUID, errC
 // the backup finished, which could clobber a manual "run now" trigger
 // (cleatctl backup-run) issued while that backup was still in flight -- see
 // executeScheduledBackup's doc comment.
+//
+// On PostgreSQL, this runs inside a SAVEPOINT (cleat#2291, caught by
+// cleat-review re-reviewing the "skip that config" fix): unlike MySQL and
+// SQL Server, where an isolated statement error leaves the surrounding
+// transaction usable, PostgreSQL marks the WHOLE transaction aborted on any
+// statement error -- confirmed directly with `SELECT 1/0` between two
+// UPDATEs in one transaction on all three dialects, only Postgres refused
+// the second UPDATE and the COMMIT. Without the savepoint, runDueBackups'
+// per-config `continue` on error does nothing on Postgres: every later
+// config's Exec in the same poll fails the same way and the final Commit
+// fails too, so a single bad config silently takes every OTHER due config
+// down with it for that poll -- not the isolated skip the caller wants.
 func (p *Plugin) updateNextRunTx(ctx context.Context, tx plugin.PluginTx, configID uuid.UUID, cronExpr string) error {
 	now := time.Now()
 	next := nextRun(cronExpr, now)
@@ -407,10 +419,26 @@ func (p *Plugin) updateNextRunTx(ctx context.Context, tx plugin.PluginTx, config
 		nextRunAt = &next
 	}
 
+	if p.dialect == plugin.DialectPostgres {
+		if _, err := tx.Exec(ctx, "SAVEPOINT update_next_run_tx"); err != nil {
+			return fmt.Errorf("savepoint: %w", err)
+		}
+	}
+
 	_, err := tx.Exec(ctx, plugin.Rebind(`
 		UPDATE backup_config
 		SET last_run_at = $1, next_run_at = $2, updated_at = now()
 		WHERE id = $3
 	`, p.dialect), now, nextRunAt, configID)
+
+	if err != nil && p.dialect == plugin.DialectPostgres {
+		// Not optional (see engine/db.go's own use of this same pattern):
+		// without it, the transaction stays aborted and every subsequent
+		// statement on it -- including other configs' updates and the final
+		// Commit -- fails too.
+		if _, rerr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT update_next_run_tx"); rerr != nil {
+			p.logger.Error("scheduledbackup: rollback to savepoint", "config_id", configID, "error", rerr)
+		}
+	}
 	return err
 }

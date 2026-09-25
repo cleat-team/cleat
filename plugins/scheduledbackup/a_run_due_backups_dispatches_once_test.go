@@ -162,6 +162,117 @@ func TestRunDueBackupsConcurrentWorkersProduceOneDispatch(t *testing.T) {
 	}
 }
 
+// TestRunDueBackupsOneConfigsUpdateFailureDoesNotAbortItsSiblingsOnPostgres
+// is cleat#2291's second round: cleat-review re-reviewing the "skip that
+// config" fix pointed out that on PostgreSQL, ANY statement error inside a
+// transaction marks the WHOLE transaction aborted -- every later statement,
+// including other configs' UPDATEs and the final Commit, fails too, unless
+// the failing statement runs under its own SAVEPOINT. Confirmed directly
+// with `psql`: a `SELECT 1/0` between two UPDATEs in one transaction leaves
+// the second UPDATE and the COMMIT both erroring "current transaction is
+// aborted", and even the FIRST (successful) UPDATE never persists, because
+// COMMIT itself fails. Repeating the same script against MySQL and SQL
+// Server showed neither has this behavior: an isolated statement error on
+// those two leaves the transaction usable, and a later COMMIT still
+// succeeds for what did commit -- so this test is PostgreSQL-only, the same
+// scope as TestRunDueBackupsConcurrentWorkersProduceOneDispatch above it.
+//
+// Without updateNextRunTx's SAVEPOINT, runDueBackups' per-config `continue`
+// on error does nothing on Postgres: this test's non-failing config would
+// also fail to advance and dispatch, because it shares the failing
+// config's transaction and that transaction can no longer commit anything.
+// The trigger below injects a failure for ONE marked config only, so this
+// specifically distinguishes "skip that config" (what the fix claims) from
+// "abort the whole poll" (what it silently degraded to before the
+// savepoint).
+func TestRunDueBackupsOneConfigsUpdateFailureDoesNotAbortItsSiblingsOnPostgres(t *testing.T) {
+	db := testutil.TestDB(t, testutil.DialectPostgres)
+	ctx := context.Background()
+	dialect := plugin.Dialect(string(testutil.DialectPostgres))
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+
+	seedPlugin := &Plugin{dialect: dialect, logger: quiet}
+	if err := plugin.RunMigrations(ctx, db, dialect, nil,
+		[]*plugin.LoadedPlugin{{Plugin: seedPlugin, Healthy: true}}); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	failingID := uuid.New()
+	healthyID := uuid.New()
+	past := time.Now().Add(-time.Hour)
+	mustInsertDueConfig(t, db, dialect, failingID, "cleat-2291-savepoint-failing", past)
+	mustInsertDueConfig(t, db, dialect, healthyID, "cleat-2291-savepoint-healthy", past)
+
+	// A trigger, not a bad value in the row itself: the point is a
+	// statement-level error from an otherwise-valid UPDATE, which is what
+	// updateNextRunTx actually issues -- not a constraint this test could
+	// trip by seeding bad data.
+	// DROP TRIGGER IF EXISTS: testutil.TestDB can hand back a database this
+	// process (or an earlier run of this same binary) already installed the
+	// trigger on -- CREATE TRIGGER alone is not idempotent the way CREATE OR
+	// REPLACE FUNCTION is.
+	if _, err := db.ExecContext(ctx, `
+		DROP TRIGGER IF EXISTS cleat_2291_fail_marked_config ON backup_config;
+		CREATE OR REPLACE FUNCTION cleat_2291_fail_marked_config() RETURNS trigger AS $$
+		BEGIN
+			IF NEW.id = '`+failingID.String()+`' THEN
+				RAISE EXCEPTION 'cleat#2291 test: injected failure for %', NEW.id;
+			END IF;
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;
+		CREATE TRIGGER cleat_2291_fail_marked_config
+			BEFORE UPDATE ON backup_config
+			FOR EACH ROW EXECUTE FUNCTION cleat_2291_fail_marked_config();
+	`); err != nil {
+		t.Fatalf("installing failure trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DROP TRIGGER IF EXISTS cleat_2291_fail_marked_config ON backup_config`); err != nil {
+			t.Logf("cleanup: dropping failure trigger: %v", err)
+		}
+	})
+
+	p := &Plugin{dialect: dialect, logger: quiet}
+	p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
+	p.deploymentSecrets = &fakeBackupDeploymentSecrets{dsn: testBackupDSN}
+	p.config.DumpDir = t.TempDir()
+
+	p.runDueBackups(ctx)
+	waitForBgBackups(t, p)
+
+	if got := countBackupHistory(t, db, dialect, healthyID); got != 1 {
+		t.Errorf("healthy sibling config: %d backup_history rows, want exactly 1 -- "+
+			"the failing config's aborted UPDATE should not have taken this one's advance-and-commit down with it", got)
+	}
+	if got := countBackupHistory(t, db, dialect, failingID); got != 0 {
+		t.Errorf("failing config: %d backup_history rows, want 0 -- it should never have dispatched", got)
+	}
+
+	var healthyNextRunAt sql.NullTime
+	if err := db.QueryRowContext(ctx, `SELECT next_run_at FROM backup_config WHERE id = $1`, healthyID).
+		Scan(&healthyNextRunAt); err != nil {
+		t.Fatalf("reading healthy config's next_run_at: %v", err)
+	}
+	if !healthyNextRunAt.Valid || !healthyNextRunAt.Time.After(past) {
+		t.Errorf("healthy sibling config: next_run_at = %v, want advanced past %v -- "+
+			"its own UPDATE succeeded and should have been part of a transaction that actually committed", healthyNextRunAt, past)
+	}
+
+	var failingNextRunAt sql.NullTime
+	if err := db.QueryRowContext(ctx, `SELECT next_run_at FROM backup_config WHERE id = $1`, failingID).
+		Scan(&failingNextRunAt); err != nil {
+		t.Fatalf("reading failing config's next_run_at: %v", err)
+	}
+	if !failingNextRunAt.Valid || !failingNextRunAt.Time.Equal(past) {
+		t.Errorf("failing config: next_run_at = %v, want unchanged at %v -- its UPDATE was rolled back to the savepoint",
+			failingNextRunAt, past)
+	}
+}
+
 // mustInsertDueConfig inserts one enabled backup_config row, due at dueAt,
 // with the same column list cmd/cleatctl's own backupConfigCreateSQL uses
 // (no tenant_id: dropped by v4, cleat#2247).
