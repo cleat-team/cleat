@@ -108,8 +108,11 @@ api:
 # Secret for it) or store it in your own Secret and set existingSecret +
 # existingSecretKey instead.
 auth:
-  # -- An API key with permission to call /api/admin/drain. Ignored if
-  # existingSecret is set.
+  # -- An API key for the preStop drain hook. Setting it (or existingSecret) also passes
+  # --enable-admin-api to the worker, because /api/admin/drain answers 404 without it (cleat#2267).
+  # While that flag is on, ANY authenticated key of ANY tenant can drain a worker and trigger a
+  # retention sweep, until cleat has an operator credential (cleat#2169); see
+  # docs/operations/admin-api.md. Ignored if existingSecret is set.
   adminApiKey: ""
   # -- Name of an existing Secret containing the admin API key. When set,
   # the chart will not create its own auth Secret.

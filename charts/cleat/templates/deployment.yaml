@@ -36,6 +36,12 @@ spec:
             - "--reclaim-timeout={{ .Values.worker.reclaimTimeout }}"
             - "--flush-retry-window={{ .Values.worker.flushRetryWindow }}"
             - "--poll={{ .Values.worker.pollInterval }}"
+            {{- if or .Values.auth.existingSecret .Values.auth.adminApiKey }}
+            # The preStop hook below drains through /api/admin/drain, which answers 404 unless this is set
+            # (cleat#2267). Only when a key is configured, since without one the hook could not authenticate.
+            # While it is on, any authenticated key of any tenant can drain a worker: docs/operations/admin-api.md.
+            - "--enable-admin-api"
+            {{- end }}
           env:
             - name: DATABASE_URL
               valueFrom:

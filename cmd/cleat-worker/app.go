@@ -32,8 +32,13 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	mux.HandleFunc("/healthz", api.handleHealthz)
 	mux.HandleFunc("/api/admin/health", api.handleAdminHealth)
 	mux.HandleFunc("/metrics", handleMetrics)
-	mux.HandleFunc("/api/admin/drain", api.handleDrain)
-	mux.HandleFunc("/api/admin/retention/sweep", api.handleRetentionSweep)
+	// Every /api/admin/ route is registered through adminAPIOnly: they are gated on --enable-admin-api,
+	// which is off by default, and answer 404 while it is off (cleat#2267). See docs/operations/admin-api.md
+	// for which of them are worker-level and which tenant-scoped, and
+	// TestEveryAdminRouteIsAbsentUntilTheAdminAPIIsEnabled, which reads this file for the registrations and
+	// fails on one that is not gated.
+	mux.HandleFunc("/api/admin/drain", api.adminAPIOnly(api.handleDrain))
+	mux.HandleFunc("/api/admin/retention/sweep", api.adminAPIOnly(api.handleRetentionSweep))
 	// Schedule routes before workflow routes so /api/schedules is not caught
 	// by /api/workflows/.
 	mux.HandleFunc("/api/schedules/", api.handleSchedules)
@@ -59,10 +64,8 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// Instance inspection endpoints (always on behind auth).
 	mux.HandleFunc("/api/instances/", api.handleInstancesRoutes)
 
-	// Admin API endpoints. Destructive operations are additionally gated
-	// behind --enable-admin-api at request time in handleAdminRoutes (see
-	// api_admin.go), so the route itself can always be registered.
-	mux.HandleFunc("/api/admin/instances/", api.handleAdminRoutes)
+	// Admin API endpoints: tenant-scoped (callerOwnsTarget, in api_admin.go), and gated like the rest.
+	mux.HandleFunc("/api/admin/instances/", api.adminAPIOnly(api.handleAdminRoutes))
 
 	// Plugin discovery, when the binary loaded plugins.
 	if api.plugins != nil {
@@ -74,6 +77,25 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 		mux.Handle("/", apiAware404(api.spa))
 	}
 	return mux
+}
+
+// adminAPIOnly gates a route that is not part of the ordinary tenant API on --enable-admin-api, which is
+// off by default. While it is off the route does not exist: the answer is the 404 an unregistered /api/
+// path gets, so a caller cannot tell a gated route from a missing one.
+//
+// It exists because worker-level routes (drain, the health detail) accept ANY tenant's API key. cleat has
+// no operator identity yet (cleat#2169), so "who may drain a worker" cannot be answered per caller, and
+// the decision is made per deployment instead: the operator turns the routes on, and while they are on any
+// authenticated key can call them. The gate is checked per request, not at registration, so a test can
+// flip the flag.
+func (s *apiServer) adminAPIOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !*enableAdminAPI {
+			s.writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		next(w, r)
+	}
 }
 
 // apiAware404 wraps the SPA handler so that an unmatched path under /api/ is a
@@ -354,4 +376,22 @@ func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"id": id, "status": "retried"})
+}
+
+// adminAPIExposure is the startup warning for --enable-admin-api, or "" when there is nothing to say. The
+// flag is a deployment decision that widens who can act on the worker, and until cleat has an operator
+// credential (cleat#2169) it widens it to every authenticated key, so it is said in the log where the
+// operator who set it will see it.
+func adminAPIExposure(enabled, requireAuth bool) string {
+	switch {
+	case !enabled:
+		return ""
+	case !requireAuth:
+		return "--enable-admin-api is set with --require-auth=false: EVERYONE who can reach this port can drain the worker and run " +
+			"the admin operations, with no credential at all"
+	default:
+		return "--enable-admin-api is set: any authenticated API key of any tenant can drain this worker and trigger a retention " +
+			"sweep (the tenant-scoped admin operations stay limited to the caller's own workflows). cleat has no operator " +
+			"credential yet (cleat#2169); see docs/operations/admin-api.md"
+	}
 }

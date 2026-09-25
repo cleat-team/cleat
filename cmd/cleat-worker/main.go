@@ -2172,6 +2172,10 @@ func main() {
 			handler = mux
 		}
 
+		if msg := adminAPIExposure(*enableAdminAPI, *requireAuth); msg != "" {
+			logger.WarnContext(context.Background(), msg, "worker_id", workerID)
+		}
+
 		// Wrap with auth middleware if --require-auth is true.
 		if *requireAuth {
 			// S6: these plugin endpoints are meant to be called by

@@ -547,7 +547,7 @@ var (
 		"A pool with no traffic drains to nothing: every one is built with a 5-minute "+
 		"ConnMaxLifetime, so this is a ceiling for a tenant EXECUTING work, not a resting cost.")
 	logLevel       = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-	enableAdminAPI = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
+	enableAdminAPI = flag.Bool("enable-admin-api", false, "Enable the /api/admin/* routes: drain, retention sweep, force-complete, force-fail, re-replay and step resolve. Off by default, and while off every one answers 404. force-complete, force-fail, re-replay and resolve act on the CALLER's tenant only. drain and the retention sweep act on the WORKER, and while this flag is on ANY authenticated API key of ANY tenant can call them, because cleat has no operator credential yet (cleat#2169). See docs/operations/admin-api.md.")
 	verifyBackend  = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
 	listPlugins    = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
 )
