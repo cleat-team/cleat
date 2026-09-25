@@ -185,15 +185,25 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 			continue
 		}
 		due = append(due, b)
-
-		// Advance next_run_at under the transaction lock so other
-		// workers skip this config even if this worker crashes
-		// before completing the backup.
-		p.updateNextRunTx(ctx, tx, b.id, b.cronExpr)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		p.logger.Error("scheduledbackup: rows iteration error", "error", err)
+	}
+
+	// updateNextRunTx runs a second statement on the same transaction, which
+	// must happen after rows is closed (cleat#2291): a statement issued while
+	// the due-backups result set is still open fails outright on MySQL
+	// ("driver: bad connection", so the commit below never dispatches
+	// anything) and on PostgreSQL leaves next_run_at unadvanced (the pq
+	// driver refuses a second query on the same connection while one is
+	// already in flight, so the config stays due and a second worker can
+	// dispatch it again).
+	for _, b := range due {
+		// Advance next_run_at under the transaction lock so other
+		// workers skip this config even if this worker crashes
+		// before completing the backup.
+		p.updateNextRunTx(ctx, tx, b.id, b.cronExpr)
 	}
 
 	if err := tx.Commit(); err != nil {
