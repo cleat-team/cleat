@@ -63,7 +63,4 @@ packages/cleat-as/test_runner	func (*WASMTestEnv).durableJSONParse
 packages/cleat-as/test_runner	func (*WASMTestEnv).durableJSONStringify
 plugins/blobstore	var jsonbContains
 plugins/kafkaconnect	field mux
-plugins/slacknotify	func buildScopedPayload
-plugins/slacknotify	func slackObjectID
-plugins/slacknotify	type scopedInteractionPayload
 wasm	const outBufSize
