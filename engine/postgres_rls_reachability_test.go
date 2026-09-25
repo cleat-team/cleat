@@ -267,8 +267,10 @@ var statementsWithoutATenantByDesign = map[string]string{
 	// rather than guessed, per this map's own instruction two lines up: a
 	// stale line number here is indistinguishable from "the gate moved or
 	// went away" until someone re-reads it, which is exactly what this guard
-	// forced, twice now, when the key stopped matching.
-	"flush.go:581": "the UNTENANTED path of Engine.flushEvent, guarded by `if e.tenantID != \"\"` " +
+	// forced, three times now, when the key stopped matching (453 -> 539 ->
+	// 581 -> 601, each from a doc-comment addition above this call, not a
+	// behavior change).
+	"flush.go:601": "the UNTENANTED path of Engine.flushEvent, guarded by `if e.tenantID != \"\"` " +
 		"immediately above it -- the tenanted branch opens a transaction, calls " +
 		"setRLSOnFlushTx and returns, so this line runs only when there is no tenant to set. " +
 		"Not reached by a worker: cmd/cleat-worker/setup.go:2260 always passes " +
